@@ -98,15 +98,6 @@ pub const NativeContext = struct {
         return self.vm.callByName(name, args);
     }
 
-    // native result contract: an owned string result is a transferred
-    // reference, objects and arrays are borrowed. a native handing back a
-    // string it does not own (a registry entry, a container element) must
-    // add the reference the caller will consume
-    pub fn returnShared(self: *NativeContext, value: Value) void {
-        _ = self;
-        if (value == .string) value.string.retain();
-    }
-
     pub fn callMethod(self: *NativeContext, obj: *PhpObject, method: []const u8, args: []const Value) RuntimeError!Value {
         return self.vm.callMethod(obj, method, args);
     }
@@ -231,7 +222,8 @@ pub const NativeContext = struct {
     }
 };
 
-const NativeFn = *const fn (*NativeContext, []const Value) RuntimeError!Value;
+pub const NativeResult = @import("native_result.zig").NativeResult;
+const NativeFn = *const fn (*NativeContext, []const Value) RuntimeError!NativeResult;
 
 pub const CaptureEntry = struct {
     closure_name: []const u8,
@@ -7793,7 +7785,7 @@ pub const VM = struct {
 
                             const saved_fc = self.frame_count;
                             var ctx = self.makeContext(null);
-                            _ = self.invokeNative(native, &ctx, args_buf[0..ac], cn) catch {
+                            const ctor_result = self.invokeNative(native, &ctx, args_buf[0..ac], cn) catch {
                                 // clean up temp frame if throwBuiltinException didn't already unwind past it
                                 if (self.frame_count >= saved_fc) {
                                     self.frame_count -= 1;
@@ -7820,6 +7812,7 @@ pub const VM = struct {
                                 }
                                 return error.RuntimeError;
                             };
+                            if (ctor_result == .string) ctor_result.string.release();
 
                             self.frame_count -= 1;
                             self.deinitFrameSlot(self.frame_count);
@@ -8006,7 +7999,7 @@ pub const VM = struct {
                             self.retainFrameObjects(self.frame_count - 1);
                             if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                             var ctx = self.makeContext(null);
-                            _ = self.invokeNative(native, &ctx, args_buf[0..ac], cn) catch {
+                            const ctor_result = self.invokeNative(native, &ctx, args_buf[0..ac], cn) catch {
                                 self.frame_count -= 1;
                                 self.deinitFrameSlot(self.frame_count);
                                 if (self.pending_exception) |exc| {
@@ -8031,6 +8024,7 @@ pub const VM = struct {
                                 }
                                 return error.RuntimeError;
                             };
+                            if (ctor_result == .string) ctor_result.string.release();
                             self.frame_count -= 1;
                             self.deinitFrameSlot(self.frame_count);
                         } else if (self.functions.get(cn)) |func| {
@@ -11860,7 +11854,14 @@ pub const VM = struct {
             }
             var ctx = self.makeContext(null);
             const result = self.invokeNative(native, &ctx, &.{}, null) catch return "Object";
-            if (result == .string) return result.string.bytes();
+            if (result == .string) {
+                const owner = result.string.owner orelse return result.string.bytes();
+                defer result.string.release();
+                if (owner.refcount > 1) return result.string.bytes();
+                const copy = self.allocator.dupe(u8, result.string.bytes()) catch return "Object";
+                self.strings.append(self.allocator, copy) catch return "Object";
+                return copy;
+            }
             var buf = std.ArrayListUnmanaged(u8){};
             result.format(&buf, self.allocator) catch return "Object";
             const s = buf.toOwnedSlice(self.allocator) catch return "Object";
@@ -16109,15 +16110,7 @@ pub const VM = struct {
             };
         }
         const result = try native(ctx, native_args);
-        if (result == .string and result.string.owner != null) {
-            for (native_args) |arg| {
-                if (arg == .string and arg.string.owner == result.string.owner) {
-                    result.string.retain();
-                    break;
-                }
-            }
-        }
-        return result;
+        return result.value;
     }
 
     pub fn bindClosures(self: *VM, vars: *std.StringHashMapUnmanaged(Value), ref_slots: ?*std.StringHashMapUnmanaged(*Value), name: []const u8) !void {

@@ -1,3 +1,4 @@
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
@@ -461,7 +462,7 @@ fn curlHeaderCallback(data: [*]u8, size: usize, nmemb: usize, userdata: *anyopaq
     return total;
 }
 
-fn fetchUrl(ctx: *NativeContext, url: []const u8) RuntimeError!Value {
+fn fetchUrl(ctx: *NativeContext, url: []const u8) RuntimeError!NativeResult {
     if (ctx.vm.last_http_response_headers) |previous| ctx.vm.arrayRelease(previous);
     ctx.vm.last_http_response_headers = null;
 
@@ -471,11 +472,11 @@ fn fetchUrl(ctx: *NativeContext, url: []const u8) RuntimeError!Value {
         curl_global_init_done = true;
     }
 
-    const handle = c_curl.curl_easy_init() orelse return .{ .bool = false };
+    const handle = c_curl.curl_easy_init() orelse return NativeResult.scalar(.{ .bool = false });
     defer c_curl.curl_easy_cleanup(handle);
 
     var url_buf: [8192]u8 = undefined;
-    if (url.len >= url_buf.len) return .{ .bool = false };
+    if (url.len >= url_buf.len) return NativeResult.scalar(.{ .bool = false });
     @memcpy(url_buf[0..url.len], url);
     url_buf[url.len] = 0;
 
@@ -489,7 +490,7 @@ fn fetchUrl(ctx: *NativeContext, url: []const u8) RuntimeError!Value {
     };
     defer wd.buffer.deinit(wd.allocator);
 
-    const headers_arr = ctx.createArray() catch return .{ .bool = false };
+    const headers_arr = ctx.createArray() catch return NativeResult.scalar(.{ .bool = false });
     @import("../runtime/vm.zig").VM.arrayRetain(headers_arr);
     defer ctx.vm.arrayRelease(headers_arr);
     var hd = CurlHeaderData{
@@ -507,19 +508,21 @@ fn fetchUrl(ctx: *NativeContext, url: []const u8) RuntimeError!Value {
         @import("../runtime/vm.zig").VM.arrayRetain(headers_arr);
         ctx.vm.last_http_response_headers = headers_arr;
     }
-    if (result != c_curl.CURLE_OK) return .{ .bool = false };
+    if (result != c_curl.CURLE_OK) return NativeResult.scalar(.{ .bool = false });
 
-    return .{ .string = Value.String.borrowed(try ctx.createString(wd.buffer.items)) };
+    const body = try wd.buffer.toOwnedSlice(wd.allocator);
+    errdefer wd.allocator.free(body);
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, body));
 }
 
-fn native_file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     var path = args[0].string.bytes();
     if (std.mem.startsWith(u8, path, "file://")) path = path[7..];
     if (userWrapperFor(ctx.vm, path)) |class_name| {
-        const opened = (try dispatchUserOpen(ctx, class_name, path, "rb")) orelse return Value{ .bool = false };
+        const opened = (try dispatchUserOpen(ctx, class_name, path, "rb")) orelse return NativeResult.scalar(.{ .bool = false });
         const fh = opened.object;
-        const wrapper = fileHandleWrapper(fh) orelse return .{ .bool = false };
+        const wrapper = fileHandleWrapper(fh) orelse return NativeResult.scalar(.{ .bool = false });
         var buf = std.ArrayListUnmanaged(u8){};
         defer buf.deinit(ctx.allocator);
         while (true) {
@@ -531,50 +534,45 @@ fn native_file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
             _ = try ctx.callMethod(wrapper, "stream_close", &.{});
         }
         const owned = try buf.toOwnedSlice(ctx.allocator);
-        try ctx.strings.append(ctx.allocator, owned);
-        return .{ .string = Value.String.borrowed(owned) };
+        return NativeResult.takeString(try Value.String.adopt(ctx.allocator, owned));
     }
     if (extractScheme(path)) |s| {
-        if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return .{ .bool = false };
+        if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return NativeResult.scalar(.{ .bool = false });
     }
     if (std.mem.eql(u8, path, "php://input")) {
-        const body_val = ctx.vm.request_vars.get("__raw_body") orelse return .{ .string = Value.String.borrowed("") };
-        if (body_val == .string) return body_val;
-        return .{ .string = Value.String.borrowed("") };
+        const body_val = ctx.vm.request_vars.get("__raw_body") orelse return NativeResult.literal("");
+        if (body_val == .string) return NativeResult.share(body_val);
+        return NativeResult.literal("");
     }
     if (std.mem.eql(u8, path, "php://stdin")) {
         const stdin = std.fs.File{ .handle = 0 };
-        const data = stdin.readToEndAlloc(ctx.allocator, 1024 * 1024 * 64) catch return Value{ .bool = false };
-        try ctx.strings.append(ctx.allocator, data);
-        return .{ .string = Value.String.borrowed(data) };
+        const data = stdin.readToEndAlloc(ctx.allocator, 1024 * 1024 * 64) catch return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.takeString(try Value.String.adopt(ctx.allocator, data));
     }
     if (std.mem.eql(u8, path, "php://stdout") or std.mem.eql(u8, path, "php://output") or std.mem.eql(u8, path, "php://stderr")) {
-        return .{ .string = Value.String.borrowed("") };
+        return NativeResult.literal("");
     }
     if (std.mem.startsWith(u8, path, "data:")) {
-        const payload = (parseDataUri(ctx.allocator, path) catch return Value{ .bool = false }) orelse return Value{ .bool = false };
-        try ctx.strings.append(ctx.allocator, payload);
-        return .{ .string = Value.String.borrowed(payload) };
+        const payload = (parseDataUri(ctx.allocator, path) catch return NativeResult.scalar(.{ .bool = false })) orelse return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.takeString(try Value.String.adopt(ctx.allocator, payload));
     }
     if (std.mem.startsWith(u8, path, "phar://")) {
-        const r = resolvePharPathWithCtx(path, ctx) orelse return .{ .bool = false };
-        const payload = (readPharEntry(ctx.allocator, r.archive_path, r.internal_path) catch return Value{ .bool = false }) orelse return Value{ .bool = false };
-        try ctx.strings.append(ctx.allocator, payload);
-        return .{ .string = Value.String.borrowed(payload) };
+        const r = resolvePharPathWithCtx(path, ctx) orelse return NativeResult.scalar(.{ .bool = false });
+        const payload = (readPharEntry(ctx.allocator, r.archive_path, r.internal_path) catch return NativeResult.scalar(.{ .bool = false })) orelse return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.takeString(try Value.String.adopt(ctx.allocator, payload));
     }
     if (std.mem.startsWith(u8, path, ZLIB_PREFIX)) {
-        const decoded = readZlibFile(ctx.allocator, path) catch return Value{ .bool = false };
-        try ctx.strings.append(ctx.allocator, decoded);
-        return .{ .string = Value.String.borrowed(decoded) };
+        const decoded = readZlibFile(ctx.allocator, path) catch return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.takeString(try Value.String.adopt(ctx.allocator, decoded));
     }
     if (path.len > 7 and (std.mem.startsWith(u8, path, "http://") or std.mem.startsWith(u8, path, "https://"))) {
         return fetchUrl(ctx, path);
     }
-    const content = std.fs.cwd().readFileAlloc(ctx.allocator, path, 1024 * 1024 * 64) catch return Value{ .bool = false };
-    try ctx.strings.append(ctx.allocator, content);
+    const content = std.fs.cwd().readFileAlloc(ctx.allocator, path, 1024 * 1024 * 64) catch return NativeResult.scalar(.{ .bool = false });
 
     // optional offset (4th arg) and length (5th arg)
     if (args.len >= 4 and args[3] != .null) {
+        defer ctx.allocator.free(content);
         const total_i: i64 = @intCast(content.len);
         var offset = Value.toInt(args[3]);
         if (offset < 0) offset = @max(0, total_i + offset);
@@ -582,18 +580,20 @@ fn native_file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
         const ustart: usize = @intCast(offset);
         const have_len = args.len >= 5 and args[4] != .null;
         const length: i64 = if (have_len) Value.toInt(args[4]) else total_i - offset;
-        if (length < 0) return .{ .bool = false };
+        if (length < 0) return NativeResult.scalar(.{ .bool = false });
         const finish = @min(content.len, ustart + @as(usize, @intCast(length)));
-        const slice = try ctx.allocator.dupe(u8, content[ustart..finish]);
-        try ctx.strings.append(ctx.allocator, slice);
-        return .{ .string = Value.String.borrowed(slice) };
+        return try NativeResult.copyString(ctx.allocator, content[ustart..finish]);
     }
 
-    return .{ .string = Value.String.borrowed(content) };
+    const owned = Value.String.adopt(ctx.allocator, content) catch |err| {
+        ctx.allocator.free(content);
+        return err;
+    };
+    return NativeResult.takeString(owned);
 }
 
-fn native_file_put_contents(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string) return .{ .bool = false };
+fn native_file_put_contents(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
     const data = if (args[1] == .string) args[1].string.bytes() else if (args[1] == .array) blk: {
         // PHP writes an array argument as its elements concatenated, like
@@ -613,21 +613,21 @@ fn native_file_put_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
         break :blk s;
     };
     if (userWrapperFor(ctx.vm, path)) |class_name| {
-        const opened = (try dispatchUserOpen(ctx, class_name, path, "wb")) orelse return Value{ .bool = false };
-        const wrapper = fileHandleWrapper(opened.object) orelse return .{ .bool = false };
+        const opened = (try dispatchUserOpen(ctx, class_name, path, "wb")) orelse return NativeResult.scalar(.{ .bool = false });
+        const wrapper = fileHandleWrapper(opened.object) orelse return NativeResult.scalar(.{ .bool = false });
         const written = try ctx.callMethod(wrapper, "stream_write", &[_]Value{.{ .string = Value.String.borrowed(data) }});
         if (ctx.vm.hasMethod(wrapper.class_name, "stream_close")) {
             _ = try ctx.callMethod(wrapper, "stream_close", &.{});
         }
-        if (written != .int) return .{ .bool = false };
-        return .{ .int = written.int };
+        if (written != .int) return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.scalar(.{ .int = written.int });
     }
     if (extractScheme(path)) |s| {
-        if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return .{ .bool = false };
+        if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return NativeResult.scalar(.{ .bool = false });
     }
     if (std.mem.eql(u8, path, "php://stdout") or std.mem.eql(u8, path, "php://output")) {
         try ctx.vm.output.appendSlice(ctx.allocator, data);
-        return .{ .int = @intCast(data.len) };
+        return NativeResult.scalar(.{ .int = @intCast(data.len) });
     }
     if (std.mem.eql(u8, path, "php://stderr")) {
         if (ctx.vm.output.items.len > 0) {
@@ -636,112 +636,112 @@ fn native_file_put_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
             ctx.vm.output.clearRetainingCapacity();
         }
         const stderr = std.fs.File{ .handle = 2 };
-        const n = stderr.write(data) catch return Value{ .bool = false };
-        return .{ .int = @intCast(n) };
+        const n = stderr.write(data) catch return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.scalar(.{ .int = @intCast(n) });
     }
     if (std.mem.startsWith(u8, path, ZLIB_PREFIX)) {
-        writeZlibFile(ctx.allocator, path, data) catch return Value{ .bool = false };
-        return .{ .int = @intCast(data.len) };
+        writeZlibFile(ctx.allocator, path, data) catch return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.scalar(.{ .int = @intCast(data.len) });
     }
     const flags: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
     const append = (flags & 8) != 0; // FILE_APPEND = 8
     if (append) {
         const file = std.fs.cwd().openFile(path, .{ .mode = .write_only }) catch {
-            std.fs.cwd().writeFile(.{ .sub_path = path, .data = data }) catch return Value{ .bool = false };
-            return .{ .int = @intCast(data.len) };
+            std.fs.cwd().writeFile(.{ .sub_path = path, .data = data }) catch return NativeResult.scalar(.{ .bool = false });
+            return NativeResult.scalar(.{ .int = @intCast(data.len) });
         };
         defer file.close();
-        file.seekFromEnd(0) catch return Value{ .bool = false };
-        _ = file.write(data) catch return Value{ .bool = false };
+        file.seekFromEnd(0) catch return NativeResult.scalar(.{ .bool = false });
+        _ = file.write(data) catch return NativeResult.scalar(.{ .bool = false });
     } else {
-        std.fs.cwd().writeFile(.{ .sub_path = path, .data = data }) catch return Value{ .bool = false };
+        std.fs.cwd().writeFile(.{ .sub_path = path, .data = data }) catch return NativeResult.scalar(.{ .bool = false });
     }
-    return .{ .int = @intCast(data.len) };
+    return NativeResult.scalar(.{ .int = @intCast(data.len) });
 }
 
-fn native_file_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_file_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
     if (userWrapperFor(ctx.vm, path)) |class_name| {
         const arr = try dispatchUserStat(ctx, class_name, path, 0);
-        return .{ .bool = arr != null };
+        return NativeResult.scalar(.{ .bool = arr != null });
     }
     if (extractScheme(path)) |s| {
-        if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return .{ .bool = false };
+        if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return NativeResult.scalar(.{ .bool = false });
     }
     if (std.mem.startsWith(u8, path, "phar://")) {
-        const r = resolvePharPathWithCtx(path, ctx) orelse return .{ .bool = false };
-        if (r.internal_path.len == 0) return .{ .bool = true }; // archive itself
-        var loaded = loadPhar(ctx.allocator, r.archive_path) catch return Value{ .bool = false };
+        const r = resolvePharPathWithCtx(path, ctx) orelse return NativeResult.scalar(.{ .bool = false });
+        if (r.internal_path.len == 0) return NativeResult.scalar(.{ .bool = true }); // archive itself
+        var loaded = loadPhar(ctx.allocator, r.archive_path) catch return NativeResult.scalar(Value{ .bool = false });
         defer freePhar(ctx.allocator, &loaded);
-        const normalized = normalizePharInternalPath(ctx.allocator, r.internal_path) catch return .{ .bool = false };
+        const normalized = normalizePharInternalPath(ctx.allocator, r.internal_path) catch return NativeResult.scalar(.{ .bool = false });
         defer ctx.allocator.free(normalized);
-        if (loaded.parsed.lookup(normalized) != null) return .{ .bool = true };
-        return .{ .bool = loaded.parsed.isDir(normalized) };
+        if (loaded.parsed.lookup(normalized) != null) return NativeResult.scalar(.{ .bool = true });
+        return NativeResult.scalar(.{ .bool = loaded.parsed.isDir(normalized) });
     }
     if (std.mem.startsWith(u8, path, ZLIB_PREFIX)) {
-        std.fs.cwd().access(path[ZLIB_PREFIX.len..], .{}) catch return Value{ .bool = false };
-        return .{ .bool = true };
+        std.fs.cwd().access(path[ZLIB_PREFIX.len..], .{}) catch return NativeResult.scalar(Value{ .bool = false });
+        return NativeResult.scalar(.{ .bool = true });
     }
-    std.fs.cwd().access(path, .{}) catch return Value{ .bool = false };
-    return .{ .bool = true };
+    std.fs.cwd().access(path, .{}) catch return NativeResult.scalar(Value{ .bool = false });
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_is_file(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
-    const path = if (args[0] == .string) args[0].string.bytes() else if (args[0] == .object and ctx.vm.hasMethod(args[0].object.class_name, "__toString")) try ctx.vm.objectToString(args[0].object) else return .{ .bool = false };
+fn native_is_file(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
+    const path = if (args[0] == .string) args[0].string.bytes() else if (args[0] == .object and ctx.vm.hasMethod(args[0].object.class_name, "__toString")) try ctx.vm.objectToString(args[0].object) else return NativeResult.scalar(.{ .bool = false });
     if (userWrapperFor(ctx.vm, path)) |class_name| {
-        const arr = (try dispatchUserStat(ctx, class_name, path, 0)) orelse return .{ .bool = false };
+        const arr = (try dispatchUserStat(ctx, class_name, path, 0)) orelse return NativeResult.scalar(.{ .bool = false });
         const mode_v = arr.get(.{ .string = Value.String.borrowed("mode") });
-        if (mode_v != .int) return .{ .bool = false };
-        return .{ .bool = (mode_v.int & 0o170000) == 0o100000 };
+        if (mode_v != .int) return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.scalar(.{ .bool = (mode_v.int & 0o170000) == 0o100000 });
     }
     if (extractScheme(path)) |s| {
-        if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return .{ .bool = false };
+        if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return NativeResult.scalar(.{ .bool = false });
     }
     if (std.mem.startsWith(u8, path, "phar://")) {
-        const r = resolvePharPathWithCtx(path, ctx) orelse return .{ .bool = false };
-        if (r.internal_path.len == 0) return .{ .bool = true };
-        var loaded = loadPhar(ctx.allocator, r.archive_path) catch return Value{ .bool = false };
+        const r = resolvePharPathWithCtx(path, ctx) orelse return NativeResult.scalar(.{ .bool = false });
+        if (r.internal_path.len == 0) return NativeResult.scalar(.{ .bool = true });
+        var loaded = loadPhar(ctx.allocator, r.archive_path) catch return NativeResult.scalar(Value{ .bool = false });
         defer freePhar(ctx.allocator, &loaded);
-        const normalized = normalizePharInternalPath(ctx.allocator, r.internal_path) catch return .{ .bool = false };
+        const normalized = normalizePharInternalPath(ctx.allocator, r.internal_path) catch return NativeResult.scalar(.{ .bool = false });
         defer ctx.allocator.free(normalized);
-        return .{ .bool = loaded.parsed.lookup(normalized) != null };
+        return NativeResult.scalar(.{ .bool = loaded.parsed.lookup(normalized) != null });
     }
     if (std.mem.startsWith(u8, path, ZLIB_PREFIX)) {
-        const stat = std.fs.cwd().statFile(path[ZLIB_PREFIX.len..]) catch return Value{ .bool = false };
-        return .{ .bool = stat.kind == .file };
+        const stat = std.fs.cwd().statFile(path[ZLIB_PREFIX.len..]) catch return NativeResult.scalar(Value{ .bool = false });
+        return NativeResult.scalar(.{ .bool = stat.kind == .file });
     }
-    const stat = std.fs.cwd().statFile(path) catch return Value{ .bool = false };
-    return .{ .bool = stat.kind == .file };
+    const stat = std.fs.cwd().statFile(path) catch return NativeResult.scalar(Value{ .bool = false });
+    return NativeResult.scalar(.{ .bool = stat.kind == .file });
 }
 
-fn native_is_dir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
-    const path = if (args[0] == .string) args[0].string.bytes() else if (args[0] == .object and ctx.vm.hasMethod(args[0].object.class_name, "__toString")) try ctx.vm.objectToString(args[0].object) else return .{ .bool = false };
+fn native_is_dir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
+    const path = if (args[0] == .string) args[0].string.bytes() else if (args[0] == .object and ctx.vm.hasMethod(args[0].object.class_name, "__toString")) try ctx.vm.objectToString(args[0].object) else return NativeResult.scalar(.{ .bool = false });
     if (userWrapperFor(ctx.vm, path)) |class_name| {
-        const arr = (try dispatchUserStat(ctx, class_name, path, 0)) orelse return .{ .bool = false };
+        const arr = (try dispatchUserStat(ctx, class_name, path, 0)) orelse return NativeResult.scalar(.{ .bool = false });
         const mode_v = arr.get(.{ .string = Value.String.borrowed("mode") });
-        if (mode_v != .int) return .{ .bool = false };
-        return .{ .bool = (mode_v.int & 0o170000) == 0o040000 };
+        if (mode_v != .int) return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.scalar(.{ .bool = (mode_v.int & 0o170000) == 0o040000 });
     }
     if (extractScheme(path)) |s| {
-        if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return .{ .bool = false };
+        if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return NativeResult.scalar(.{ .bool = false });
     }
     if (std.mem.startsWith(u8, path, "phar://")) {
-        const r = resolvePharPathWithCtx(path, ctx) orelse return .{ .bool = false };
-        if (r.internal_path.len == 0) return .{ .bool = false }; // the archive is a file, not a dir
-        var loaded = loadPhar(ctx.allocator, r.archive_path) catch return Value{ .bool = false };
+        const r = resolvePharPathWithCtx(path, ctx) orelse return NativeResult.scalar(.{ .bool = false });
+        if (r.internal_path.len == 0) return NativeResult.scalar(.{ .bool = false }); // the archive is a file, not a dir
+        var loaded = loadPhar(ctx.allocator, r.archive_path) catch return NativeResult.scalar(Value{ .bool = false });
         defer freePhar(ctx.allocator, &loaded);
-        return .{ .bool = loaded.parsed.isDir(r.internal_path) };
+        return NativeResult.scalar(.{ .bool = loaded.parsed.isDir(r.internal_path) });
     }
-    var dir = std.fs.cwd().openDir(path, .{}) catch return Value{ .bool = false };
+    var dir = std.fs.cwd().openDir(path, .{}) catch return NativeResult.scalar(Value{ .bool = false });
     dir.close();
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_basename(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .string = Value.String.borrowed("") };
+fn native_basename(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.literal("");
     var path = args[0].string.bytes();
     const suffix = if (args.len >= 2 and args[1] == .string) args[1].string.bytes() else "";
     // PHP strips trailing slashes before extracting the last segment
@@ -753,15 +753,15 @@ fn native_basename(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     if (suffix.len > 0 and name.len > suffix.len and std.mem.endsWith(u8, name, suffix)) {
         name = name[0 .. name.len - suffix.len];
     }
-    return .{ .string = Value.String.borrowed(try ctx.createString(name)) };
+    return NativeResult.copyString(ctx.allocator, name);
 }
 
-fn native_dirname(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .string = Value.String.borrowed("") };
+fn native_dirname(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.literal("");
     var path = args[0].string.bytes();
-    if (path.len == 0) return .{ .string = Value.String.borrowed("") };
+    if (path.len == 0) return NativeResult.literal("");
     var levels: i64 = if (args.len >= 2) Value.toInt(args[1]) else 1;
-    if (levels <= 0) return .{ .string = Value.String.borrowed(try ctx.createString(path)) };
+    if (levels <= 0) return NativeResult.copyString(ctx.allocator, path);
     while (levels > 0) : (levels -= 1) {
         while (path.len > 1 and path[path.len - 1] == '/') path = path[0 .. path.len - 1];
         if (std.mem.lastIndexOf(u8, path, "/")) |pos| {
@@ -775,11 +775,11 @@ fn native_dirname(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             break;
         }
     }
-    return .{ .string = Value.String.borrowed(try ctx.createString(path)) };
+    return NativeResult.copyString(ctx.allocator, path);
 }
 
-fn native_pathinfo(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .null;
+fn native_pathinfo(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.null);
     // PHP strips trailing slashes from the input before splitting (so
     // pathinfo("/a/b/") yields dirname=/a, basename=b, matching basename())
     var path = args[0].string.bytes();
@@ -798,11 +798,11 @@ fn native_pathinfo(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     if (args.len >= 2 and args[1] == .int) {
         const flag = args[1].int;
         return switch (flag) {
-            1 => .{ .string = Value.String.borrowed(try ctx.createString(dir)) },
-            2 => .{ .string = Value.String.borrowed(try ctx.createString(base)) },
-            4 => .{ .string = Value.String.borrowed(try ctx.createString(ext)) },
-            8 => .{ .string = Value.String.borrowed(try ctx.createString(filename)) },
-            else => .null,
+            1 => try NativeResult.copyString(ctx.allocator, dir),
+            2 => try NativeResult.copyString(ctx.allocator, base),
+            4 => try NativeResult.copyString(ctx.allocator, ext),
+            8 => try NativeResult.copyString(ctx.allocator, filename),
+            else => NativeResult.scalar(.null),
         };
     }
 
@@ -813,75 +813,75 @@ fn native_pathinfo(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
         try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("extension") }, .{ .string = Value.String.borrowed(try ctx.createString(ext)) });
     }
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("filename") }, .{ .string = Value.String.borrowed(try ctx.createString(filename)) });
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn native_realpath(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_realpath(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const resolved = std.fs.cwd().realpath(args[0].string.bytes(), &buf) catch return Value{ .bool = false };
-    return .{ .string = Value.String.borrowed(try ctx.createString(resolved)) };
+    const resolved = std.fs.cwd().realpath(args[0].string.bytes(), &buf) catch return NativeResult.scalar(Value{ .bool = false });
+    return NativeResult.copyString(ctx.allocator, resolved);
 }
 
 // directory operations
 
-fn native_mkdir(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_mkdir(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
     const recursive = args.len >= 3 and args[2].isTruthy();
     if (recursive) {
-        std.fs.cwd().makePath(path) catch return Value{ .bool = false };
+        std.fs.cwd().makePath(path) catch return NativeResult.scalar(Value{ .bool = false });
     } else {
-        std.fs.cwd().makeDir(path) catch return Value{ .bool = false };
+        std.fs.cwd().makeDir(path) catch return NativeResult.scalar(Value{ .bool = false });
     }
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_rmdir(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    std.fs.cwd().deleteDir(args[0].string.bytes()) catch return Value{ .bool = false };
-    return .{ .bool = true };
+fn native_rmdir(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    std.fs.cwd().deleteDir(args[0].string.bytes()) catch return NativeResult.scalar(Value{ .bool = false });
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_unlink(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_unlink(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
     if (userWrapperFor(ctx.vm, path)) |class_name| {
-        if (!ctx.vm.hasMethod(class_name, "unlink")) return .{ .bool = false };
+        if (!ctx.vm.hasMethod(class_name, "unlink")) return NativeResult.scalar(.{ .bool = false });
         const wrapper = try ctx.createObject(class_name);
         if (ctx.vm.hasMethod(class_name, "__construct")) {
             _ = try ctx.callMethod(wrapper, "__construct", &.{});
         }
-        const result = try ctx.callMethod(wrapper, "unlink", &[_]Value{.{ .string = Value.String.borrowed(path) }});
-        return .{ .bool = result.isTruthy() };
+        const result = try ctx.callMethod(wrapper, "unlink", &[_]Value{args[0]});
+        return NativeResult.scalar(.{ .bool = result.isTruthy() });
     }
     if (extractScheme(path)) |s| {
-        if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return .{ .bool = false };
+        if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return NativeResult.scalar(.{ .bool = false });
     }
-    std.fs.cwd().deleteFile(path) catch return Value{ .bool = false };
-    return .{ .bool = true };
+    std.fs.cwd().deleteFile(path) catch return NativeResult.scalar(Value{ .bool = false });
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_copy(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[1] != .string) return .{ .bool = false };
-    const source = if (args[0] == .string) args[0].string.bytes() else if (args[0] == .object and ctx.vm.hasMethod(args[0].object.class_name, "__toString")) try ctx.vm.objectToString(args[0].object) else return .{ .bool = false };
-    std.fs.cwd().copyFile(source, std.fs.cwd(), args[1].string.bytes(), .{}) catch return Value{ .bool = false };
-    return .{ .bool = true };
+fn native_copy(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
+    const source = if (args[0] == .string) args[0].string.bytes() else if (args[0] == .object and ctx.vm.hasMethod(args[0].object.class_name, "__toString")) try ctx.vm.objectToString(args[0].object) else return NativeResult.scalar(.{ .bool = false });
+    std.fs.cwd().copyFile(source, std.fs.cwd(), args[1].string.bytes(), .{}) catch return NativeResult.scalar(Value{ .bool = false });
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_rename(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
-    std.fs.cwd().rename(args[0].string.bytes(), args[1].string.bytes()) catch return Value{ .bool = false };
-    return .{ .bool = true };
+fn native_rename(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
+    std.fs.cwd().rename(args[0].string.bytes(), args[1].string.bytes()) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = true });
 }
 
 // directory listing
 
-fn native_scandir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_scandir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     // SCANDIR_SORT_ASCENDING=0, _DESCENDING=1, _NONE=2
     const order: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
-    var dir = std.fs.cwd().openDir(args[0].string.bytes(), .{ .iterate = true }) catch return Value{ .bool = false };
+    var dir = std.fs.cwd().openDir(args[0].string.bytes(), .{ .iterate = true }) catch return NativeResult.scalar(.{ .bool = false });
     defer dir.close();
 
     var names = std.ArrayListUnmanaged([]const u8){};
@@ -911,49 +911,49 @@ fn native_scandir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     var result = try ctx.createArray();
     for (names.items) |n| try result.append(ctx.allocator, .{ .string = Value.String.borrowed(n) });
-    return .{ .array = result };
+    return NativeResult.borrowed(.{ .array = result });
 }
 
 // dir($path) returns a Directory object with path, handle, and read/rewind/
 // close methods that delegate to the underlying DirectoryHandle. PHP's
 // 'Directory' is a thin OO wrapper around opendir/readdir/rewinddir/closedir
-fn native_dir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const handle = try native_opendir(ctx, args);
-    if (handle != .object) return .{ .bool = false };
+fn native_dir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const handle = (try native_opendir(ctx, args)).value;
+    if (handle != .object) return NativeResult.scalar(.{ .bool = false });
     const obj = try ctx.createObject("Directory");
     try obj.set(ctx.allocator, "path", .{ .string = args[0].string });
     try obj.set(ctx.allocator, "handle", handle);
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn directoryRead(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this = ctx.vm.currentFrame().vars.get("$this") orelse return .{ .bool = false };
-    if (this != .object) return .{ .bool = false };
+fn directoryRead(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.scalar(.{ .bool = false });
+    if (this != .object) return NativeResult.scalar(.{ .bool = false });
     const h = this.object.get("handle");
-    if (h != .object) return .{ .bool = false };
+    if (h != .object) return NativeResult.scalar(.{ .bool = false });
     return native_readdir(ctx, &.{h});
 }
 
-fn directoryRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this = ctx.vm.currentFrame().vars.get("$this") orelse return .null;
-    if (this != .object) return .null;
+fn directoryRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.scalar(.null);
+    if (this != .object) return NativeResult.scalar(.null);
     const h = this.object.get("handle");
-    if (h != .object) return .null;
+    if (h != .object) return NativeResult.scalar(.null);
     return native_rewinddir(ctx, &.{h});
 }
 
-fn directoryClose(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this = ctx.vm.currentFrame().vars.get("$this") orelse return .null;
-    if (this != .object) return .null;
+fn directoryClose(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.scalar(.null);
+    if (this != .object) return NativeResult.scalar(.null);
     const h = this.object.get("handle");
-    if (h != .object) return .null;
+    if (h != .object) return NativeResult.scalar(.null);
     return native_closedir(ctx, &.{h});
 }
 
-fn native_opendir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    var dir = std.fs.cwd().openDir(args[0].string.bytes(), .{ .iterate = true }) catch return Value{ .bool = false };
+fn native_opendir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    var dir = std.fs.cwd().openDir(args[0].string.bytes(), .{ .iterate = true }) catch return NativeResult.scalar(.{ .bool = false });
     defer dir.close();
     const names_arr = try ctx.allocator.create(PhpArray);
     names_arr.* = .{};
@@ -971,45 +971,45 @@ fn native_opendir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     try obj.set(ctx.allocator, "__pos", .{ .int = 0 });
     try obj.set(ctx.allocator, "__open", .{ .bool = true });
     try ctx.vm.objects.append(ctx.allocator, obj);
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn native_readdir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+fn native_readdir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
     const obj = args[0].object;
     const open = obj.get("__open");
-    if (open != .bool or !open.bool) return .{ .bool = false };
+    if (open != .bool or !open.bool) return NativeResult.scalar(.{ .bool = false });
     const dir_entries = obj.get("__entries");
-    if (dir_entries != .array) return .{ .bool = false };
+    if (dir_entries != .array) return NativeResult.scalar(.{ .bool = false });
     const pos = Value.toInt(obj.get("__pos"));
-    if (pos < 0 or pos >= dir_entries.array.length()) return .{ .bool = false };
+    if (pos < 0 or pos >= dir_entries.array.length()) return NativeResult.scalar(.{ .bool = false });
     const entry = dir_entries.array.entries.items[@intCast(pos)].value;
     try obj.set(ctx.allocator, "__pos", .{ .int = pos + 1 });
-    return entry;
+    return NativeResult.share(entry);
 }
 
-fn native_closedir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .object) return .null;
+fn native_closedir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.null);
     const obj = args[0].object;
     try obj.set(ctx.allocator, "__open", .{ .bool = false });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn native_rewinddir(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .object) return .null;
+fn native_rewinddir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.null);
     const obj = args[0].object;
     try obj.set(ctx.allocator, "__pos", .{ .int = 0 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn native_fnmatch(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+fn native_fnmatch(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     const flags: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
-    return .{ .bool = globMatchFlags(args[0].string.bytes(), args[1].string.bytes(), flags) };
+    return NativeResult.scalar(.{ .bool = globMatchFlags(args[0].string.bytes(), args[1].string.bytes(), flags) });
 }
 
-fn native_glob(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_glob(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const pattern = args[0].string.bytes();
     const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
     const GLOB_BRACE: i64 = 128;
@@ -1031,7 +1031,7 @@ fn native_glob(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                     try globAppend(ctx, result, expanded, flags);
                 }
                 if ((flags & GLOB_NOSORT) == 0) sortArrayValues(result);
-                return .{ .array = result };
+                return NativeResult.borrowed(.{ .array = result });
             }
         }
     }
@@ -1045,7 +1045,7 @@ fn native_glob(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try result.append(ctx.allocator, .{ .string = Value.String.borrowed(try ctx.createString(pattern)) });
     }
     _ = GLOB_ONLYDIR;
-    return .{ .array = result };
+    return NativeResult.borrowed(.{ .array = result });
 }
 
 fn globAppend(ctx: *NativeContext, result: *PhpArray, pattern: []const u8, flags: i64) !void {
@@ -1175,78 +1175,78 @@ fn globMatchFlags(pattern: []const u8, name: []const u8, flags: i64) bool {
 
 // file info
 
-fn native_is_readable(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_is_readable(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     if (std.mem.startsWith(u8, args[0].string.bytes(), "phar://")) return native_is_file(ctx, args);
-    std.fs.cwd().access(args[0].string.bytes(), .{ .mode = .read_only }) catch return Value{ .bool = false };
-    return .{ .bool = true };
+    std.fs.cwd().access(args[0].string.bytes(), .{ .mode = .read_only }) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_is_writable(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_is_writable(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
-    std.posix.access(path, std.posix.W_OK) catch return Value{ .bool = false };
-    return .{ .bool = true };
+    std.posix.access(path, std.posix.W_OK) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_is_executable(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_is_executable(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
-    std.posix.access(path, std.posix.X_OK) catch return Value{ .bool = false };
-    return .{ .bool = true };
+    std.posix.access(path, std.posix.X_OK) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_filesize(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const stat = std.fs.cwd().statFile(args[0].string.bytes()) catch return Value{ .bool = false };
-    return .{ .int = @intCast(stat.size) };
+fn native_filesize(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const stat = std.fs.cwd().statFile(args[0].string.bytes()) catch return NativeResult.scalar(Value{ .bool = false });
+    return NativeResult.scalar(.{ .int = @intCast(stat.size) });
 }
 
-fn native_filemtime(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const stat = std.fs.cwd().statFile(args[0].string.bytes()) catch return Value{ .bool = false };
-    return .{ .int = @intCast(@divFloor(stat.mtime, 1_000_000_000)) };
+fn native_filemtime(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const stat = std.fs.cwd().statFile(args[0].string.bytes()) catch return NativeResult.scalar(Value{ .bool = false });
+    return NativeResult.scalar(.{ .int = @intCast(@divFloor(stat.mtime, 1_000_000_000)) });
 }
 
-fn native_fileatime(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const stat = std.fs.cwd().statFile(args[0].string.bytes()) catch return Value{ .bool = false };
-    return .{ .int = @intCast(@divFloor(stat.atime, 1_000_000_000)) };
+fn native_fileatime(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const stat = std.fs.cwd().statFile(args[0].string.bytes()) catch return NativeResult.scalar(Value{ .bool = false });
+    return NativeResult.scalar(.{ .int = @intCast(@divFloor(stat.atime, 1_000_000_000)) });
 }
 
-fn native_filectime(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const stat = std.fs.cwd().statFile(args[0].string.bytes()) catch return Value{ .bool = false };
-    return .{ .int = @intCast(@divFloor(stat.ctime, 1_000_000_000)) };
+fn native_filectime(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const stat = std.fs.cwd().statFile(args[0].string.bytes()) catch return NativeResult.scalar(Value{ .bool = false });
+    return NativeResult.scalar(.{ .int = @intCast(@divFloor(stat.ctime, 1_000_000_000)) });
 }
 
-fn native_fileinode(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const stat = std.fs.cwd().statFile(args[0].string.bytes()) catch return Value{ .bool = false };
-    return .{ .int = @intCast(stat.inode) };
+fn native_fileinode(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const stat = std.fs.cwd().statFile(args[0].string.bytes()) catch return NativeResult.scalar(Value{ .bool = false });
+    return NativeResult.scalar(.{ .int = @intCast(stat.inode) });
 }
 
-fn native_filetype(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_filetype(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const stat = std.fs.cwd().statFile(args[0].string.bytes()) catch {
         // might be a directory
-        var dir = std.fs.cwd().openDir(args[0].string.bytes(), .{}) catch return Value{ .bool = false };
+        var dir = std.fs.cwd().openDir(args[0].string.bytes(), .{}) catch return NativeResult.scalar(.{ .bool = false });
         dir.close();
-        return .{ .string = Value.String.borrowed("dir") };
+        return NativeResult.literal("dir");
     };
-    return .{ .string = Value.String.borrowed(switch (stat.kind) {
+    return try NativeResult.copyString(ctx.allocator, switch (stat.kind) {
         .file => "file",
         .directory => "dir",
         .sym_link => "link",
         else => "unknown",
-    }) };
+    });
 }
 
 // read file into array of lines
 
-fn native_file(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const content = std.fs.cwd().readFileAlloc(ctx.allocator, args[0].string.bytes(), 1024 * 1024 * 64) catch return Value{ .bool = false };
+fn native_file(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const content = std.fs.cwd().readFileAlloc(ctx.allocator, args[0].string.bytes(), 1024 * 1024 * 64) catch return NativeResult.scalar(.{ .bool = false });
     try ctx.strings.append(ctx.allocator, content);
 
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
@@ -1276,24 +1276,24 @@ fn native_file(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             try result.append(ctx.allocator, .{ .string = Value.String.borrowed(line) });
         }
     }
-    return .{ .array = result };
+    return NativeResult.borrowed(.{ .array = result });
 }
 
-fn native_readfile(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const content = std.fs.cwd().readFileAlloc(ctx.allocator, args[0].string.bytes(), 1024 * 1024 * 64) catch return Value{ .bool = false };
+fn native_readfile(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const content = std.fs.cwd().readFileAlloc(ctx.allocator, args[0].string.bytes(), 1024 * 1024 * 64) catch return NativeResult.scalar(.{ .bool = false });
     defer ctx.allocator.free(content);
     try ctx.vm.output.appendSlice(ctx.allocator, content);
-    return .{ .int = @intCast(content.len) };
+    return NativeResult.scalar(.{ .int = @intCast(content.len) });
 }
 
 // file handle operations (fopen/fclose/fread/fwrite/fgets/feof/fseek/ftell)
 
-fn native_gzopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_gzopen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     // gzopen($path, $mode) opens a gzipped file with transparent compression.
     // route through fopen with the compress.zlib stream wrapper so a single
     // backend handles read/write, seek, eof, etc
-    if (args.len < 2 or args[0] != .string) return .{ .bool = false };
+    if (args.len < 2 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
     if (std.mem.startsWith(u8, path, "compress.zlib://")) {
         return native_fopen(ctx, args);
@@ -1307,45 +1307,46 @@ fn native_gzopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return native_fopen(ctx, new_args[0..i]);
 }
 
-fn native_gzfile(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn appendOwnedString(ctx: *NativeContext, arr: *PhpArray, bytes: []const u8) !void {
+    const s = try Value.String.create(ctx.allocator, bytes);
+    defer s.release();
+    try arr.append(ctx.allocator, .{ .string = s });
+}
+
+fn native_gzfile(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     // gzfile($path) reads the whole gzipped file and returns an array of lines
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
     const wrapped = try std.fmt.allocPrint(ctx.allocator, "compress.zlib://{s}", .{path});
-    try ctx.strings.append(ctx.allocator, wrapped);
+    defer ctx.allocator.free(wrapped);
     var fgc_args = [_]Value{.{ .string = Value.String.borrowed(wrapped) }};
-    const contents_val = try native_file_get_contents(ctx, &fgc_args);
-    if (contents_val != .string) return .{ .bool = false };
+    const contents_val = (try native_file_get_contents(ctx, &fgc_args)).value;
+    if (contents_val != .string) return NativeResult.scalar(.{ .bool = false });
+    defer contents_val.string.release();
     const arr = try ctx.createArray();
     const contents = contents_val.string.bytes();
     var start: usize = 0;
     var pos: usize = 0;
     while (pos < contents.len) : (pos += 1) {
         if (contents[pos] == '\n') {
-            const slice = try ctx.allocator.dupe(u8, contents[start .. pos + 1]);
-            try ctx.strings.append(ctx.allocator, slice);
-            try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(slice) });
+            try appendOwnedString(ctx, arr, contents[start .. pos + 1]);
             start = pos + 1;
         }
     }
-    if (start < contents.len) {
-        const slice = try ctx.allocator.dupe(u8, contents[start..]);
-        try ctx.strings.append(ctx.allocator, slice);
-        try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(slice) });
-    }
-    return .{ .array = arr };
+    if (start < contents.len) try appendOwnedString(ctx, arr, contents[start..]);
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[1] != .string) return .{ .bool = false };
-    const path = if (args[0] == .string) args[0].string.bytes() else if (args[0] == .object and ctx.vm.hasMethod(args[0].object.class_name, "__toString")) try ctx.vm.objectToString(args[0].object) else return .{ .bool = false };
+fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
+    const path = if (args[0] == .string) args[0].string.bytes() else if (args[0] == .object and ctx.vm.hasMethod(args[0].object.class_name, "__toString")) try ctx.vm.objectToString(args[0].object) else return NativeResult.scalar(.{ .bool = false });
     const mode = args[1].string.bytes();
 
     if (userWrapperFor(ctx.vm, path)) |class_name| {
-        return (try dispatchUserOpen(ctx, class_name, path, mode)) orelse Value{ .bool = false };
+        return NativeResult.borrowed((try dispatchUserOpen(ctx, class_name, path, mode)) orelse Value{ .bool = false });
     }
     if (extractScheme(path)) |s| {
-        if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return .{ .bool = false };
+        if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return NativeResult.scalar(.{ .bool = false });
     }
 
     if (std.mem.eql(u8, path, "php://stdout") or std.mem.eql(u8, path, "php://output")) {
@@ -1353,21 +1354,21 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try obj.set(ctx.allocator, "__fd", .{ .int = 1 });
         try obj.set(ctx.allocator, "__open", .{ .bool = true });
         try obj.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed("w") });
-        return .{ .object = obj };
+        return NativeResult.borrowed(.{ .object = obj });
     }
     if (std.mem.eql(u8, path, "php://stderr")) {
         const obj = try ctx.createObject("FileHandle");
         try obj.set(ctx.allocator, "__fd", .{ .int = 2 });
         try obj.set(ctx.allocator, "__open", .{ .bool = true });
         try obj.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed("w") });
-        return .{ .object = obj };
+        return NativeResult.borrowed(.{ .object = obj });
     }
     if (std.mem.eql(u8, path, "php://stdin")) {
         const obj = try ctx.createObject("FileHandle");
         try obj.set(ctx.allocator, "__fd", .{ .int = 0 });
         try obj.set(ctx.allocator, "__open", .{ .bool = true });
         try obj.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed("r") });
-        return .{ .object = obj };
+        return NativeResult.borrowed(.{ .object = obj });
     }
     if (std.mem.eql(u8, path, "php://input")) {
         const body_val = ctx.vm.request_vars.get("__raw_body");
@@ -1377,28 +1378,28 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try obj.set(ctx.allocator, "__pos", .{ .int = 0 });
         try obj.set(ctx.allocator, "__open", .{ .bool = true });
         try obj.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed("r") });
-        return .{ .object = obj };
+        return NativeResult.borrowed(.{ .object = obj });
     }
     if (std.mem.startsWith(u8, path, "data:")) {
-        const payload = (parseDataUri(ctx.allocator, path) catch return Value{ .bool = false }) orelse return Value{ .bool = false };
+        const payload = (parseDataUri(ctx.allocator, path) catch return NativeResult.scalar(.{ .bool = false })) orelse return NativeResult.scalar(.{ .bool = false });
         try ctx.strings.append(ctx.allocator, payload);
         const obj = try ctx.createObject("FileHandle");
         try obj.set(ctx.allocator, "__buffer", .{ .string = Value.String.borrowed(payload) });
         try obj.set(ctx.allocator, "__pos", .{ .int = 0 });
         try obj.set(ctx.allocator, "__open", .{ .bool = true });
         try obj.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed("r") });
-        return .{ .object = obj };
+        return NativeResult.borrowed(.{ .object = obj });
     }
     if (std.mem.startsWith(u8, path, "phar://")) {
-        const r = resolvePharPathWithCtx(path, ctx) orelse return .{ .bool = false };
-        const payload = (readPharEntry(ctx.allocator, r.archive_path, r.internal_path) catch return Value{ .bool = false }) orelse return Value{ .bool = false };
+        const r = resolvePharPathWithCtx(path, ctx) orelse return NativeResult.scalar(.{ .bool = false });
+        const payload = (readPharEntry(ctx.allocator, r.archive_path, r.internal_path) catch return NativeResult.scalar(.{ .bool = false })) orelse return NativeResult.scalar(.{ .bool = false });
         try ctx.strings.append(ctx.allocator, payload);
         const obj = try ctx.createObject("FileHandle");
         try obj.set(ctx.allocator, "__buffer", .{ .string = Value.String.borrowed(payload) });
         try obj.set(ctx.allocator, "__pos", .{ .int = 0 });
         try obj.set(ctx.allocator, "__open", .{ .bool = true });
         try obj.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed("r") });
-        return .{ .object = obj };
+        return NativeResult.borrowed(.{ .object = obj });
     }
     if (std.mem.startsWith(u8, path, ZLIB_PREFIX)) {
         const is_write = mode.len >= 1 and (mode[0] == 'w' or mode[0] == 'a' or mode[0] == 'x');
@@ -1413,28 +1414,28 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         } else {
             const decoded = readZlibFile(ctx.allocator, path) catch {
                 obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
-                return .{ .bool = false };
+                return NativeResult.scalar(.{ .bool = false });
             };
             try ctx.strings.append(ctx.allocator, decoded);
             try obj.set(ctx.allocator, "__buffer", .{ .string = Value.String.borrowed(decoded) });
             try obj.set(ctx.allocator, "__pos", .{ .int = 0 });
         }
-        return .{ .object = obj };
+        return NativeResult.borrowed(.{ .object = obj });
     }
 
     const is_memory_stream = std.mem.startsWith(u8, path, "php://temp") or std.mem.startsWith(u8, path, "php://memory");
     const file = if (is_memory_stream) blk: {
-        const tmp = std.fmt.allocPrint(ctx.allocator, "/tmp/zphp_{d}", .{@as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp()))))}) catch return Value{ .bool = false };
+        const tmp = std.fmt.allocPrint(ctx.allocator, "/tmp/zphp_{d}", .{@as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp()))))}) catch return NativeResult.scalar(.{ .bool = false });
         defer ctx.allocator.free(tmp);
-        const f = std.fs.cwd().createFile(tmp, .{ .read = true, .truncate = true }) catch return Value{ .bool = false };
+        const f = std.fs.cwd().createFile(tmp, .{ .read = true, .truncate = true }) catch return NativeResult.scalar(.{ .bool = false });
         std.fs.cwd().deleteFile(tmp) catch {};
         break :blk f;
     } else openWithMode(path, mode) catch |err| {
         const reason = openErrorReason(err);
-        const msg = std.fmt.allocPrint(ctx.allocator, "fopen({s}): Failed to open stream: {s}", .{ path, reason }) catch return Value{ .bool = false };
+        const msg = std.fmt.allocPrint(ctx.allocator, "fopen({s}): Failed to open stream: {s}", .{ path, reason }) catch return NativeResult.scalar(.{ .bool = false });
         ctx.vm.strings.append(ctx.allocator, msg) catch {};
         ctx.vm.emitWarning(msg);
-        return Value{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     };
 
     const obj = try ctx.createObject("FileHandle");
@@ -1443,7 +1444,7 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     try obj.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed(mode) });
     try obj.set(ctx.allocator, "__path", .{ .string = Value.String.borrowed(try ctx.createString(path)) });
     if (is_memory_stream) try obj.set(ctx.allocator, "__peek_eof", .{ .bool = true });
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
 fn openErrorReason(err: anyerror) []const u8 {
@@ -1492,10 +1493,10 @@ fn openWithMode(path: []const u8, mode: []const u8) !std.fs.File {
     };
 }
 
-fn native_fclose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+fn native_fclose(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
     const obj = args[0].object;
-    if (!std.mem.eql(u8, obj.class_name, "FileHandle")) return .{ .bool = false };
+    if (!std.mem.eql(u8, obj.class_name, "FileHandle")) return NativeResult.scalar(.{ .bool = false });
     const open = obj.get("__open");
     if (open != .bool or !open.bool) {
         try ctx.vm.setPendingException("TypeError", "fclose(): Argument #1 ($stream) must be an open stream resource");
@@ -1506,7 +1507,7 @@ fn native_fclose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             _ = try ctx.callMethod(wrapper, "stream_close", &.{});
         }
         obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
-        return .{ .bool = true };
+        return NativeResult.scalar(.{ .bool = true });
     }
     // closing a proc_open pipe: close our fd and detach it from the live child so
     // proc_close's wait() (cleanupStreams) won't double-close the same fd. closing
@@ -1525,7 +1526,7 @@ fn native_fclose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
         obj.set(ctx.allocator, "__fd", .{ .int = -1 }) catch {};
         obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
-        return .{ .bool = true };
+        return NativeResult.scalar(.{ .bool = true });
     }
     const popen_cmd = obj.get("__popen_cmd");
     if (popen_cmd == .string) {
@@ -1537,7 +1538,7 @@ fn native_fclose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         } else |_| {}
         obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
         obj.properties.put(std.heap.page_allocator, "__popen_cmd", .null) catch {};
-        return .{ .bool = true };
+        return NativeResult.scalar(.{ .bool = true });
     }
     if (isZlibWriting(obj)) {
         const path_v = obj.get("__zlib_path");
@@ -1545,18 +1546,18 @@ fn native_fclose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (path_v == .string and buf_v == .string) {
             writeZlibFile(ctx.allocator, path_v.string.bytes(), buf_v.string.bytes()) catch {
                 obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
-                return .{ .bool = false };
+                return NativeResult.scalar(.{ .bool = false });
             };
         }
         obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
-        return .{ .bool = true };
+        return NativeResult.scalar(.{ .bool = true });
     }
     if (getFileHandle(obj)) |file| {
         // never close stdin/stdout/stderr - they're shared with the host process
         if (file.handle > 2) file.close();
     }
     obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
 fn isZlibWriting(obj: *PhpObject) bool {
@@ -1564,8 +1565,8 @@ fn isZlibWriting(obj: *PhpObject) bool {
     return v == .bool and v.bool;
 }
 
-fn native_fpassthru(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .object) return .{ .int = 0 };
+fn native_fpassthru(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.{ .int = 0 });
     var total: i64 = 0;
     const chunk: i64 = 4096;
     while (true) {
@@ -1575,11 +1576,11 @@ fn native_fpassthru(ctx: *NativeContext, args: []const Value) RuntimeError!Value
         total += @intCast(result.string.bytes().len);
         if (result.string.bytes().len < @as(usize, @intCast(chunk))) break;
     }
-    return .{ .int = total };
+    return NativeResult.scalar(.{ .int = total });
 }
 
-fn native_fread(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .object or args[1] != .int) return .{ .bool = false };
+fn native_fread(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .object or args[1] != .int) return NativeResult.scalar(.{ .bool = false });
     const obj = args[0].object;
     if (std.mem.eql(u8, obj.class_name, "FileHandle")) {
         const open = obj.get("__open");
@@ -1595,31 +1596,30 @@ fn native_fread(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const length: usize = @intCast(args[1].int);
     if (fileHandleWrapper(obj)) |wrapper| {
         const result = try ctx.callMethod(wrapper, "stream_read", &[_]Value{.{ .int = @intCast(length) }});
-        if (result == .string) return result;
-        return .{ .string = Value.String.borrowed("") };
+        if (result == .string) return NativeResult.share(result);
+        return NativeResult.literal("");
     }
     if (getBufferBacking(obj)) |buffer| {
         const pos = getBufferPos(obj);
-        if (pos >= buffer.len) return .{ .string = Value.String.borrowed("") };
+        if (pos >= buffer.len) return NativeResult.literal("");
         const end = @min(pos + length, buffer.len);
         const slice = try ctx.allocator.dupe(u8, buffer[pos..end]);
-        try ctx.strings.append(ctx.allocator, slice);
         setBufferPos(obj, end);
-        return .{ .string = Value.String.borrowed(slice) };
+        return NativeResult.takeString(try Value.String.adopt(ctx.allocator, slice));
     }
-    const file = getFileHandle(obj) orelse return Value{ .bool = false };
+    const file = getFileHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
 
     const buf = try ctx.allocator.alloc(u8, length);
     const n = file.read(buf) catch |err| {
         ctx.allocator.free(buf);
         // non-blocking stream with nothing buffered yet reads as "" in php, not a hard failure
-        if (err == error.WouldBlock) return .{ .string = Value.String.borrowed("") };
-        return .{ .bool = false };
+        if (err == error.WouldBlock) return NativeResult.literal("");
+        return NativeResult.scalar(.{ .bool = false });
     };
     if (n == 0) {
         ctx.allocator.free(buf);
         try obj.set(ctx.allocator, "__eof", .{ .bool = true });
-        return .{ .string = Value.String.borrowed("") };
+        return NativeResult.literal("");
     }
     if (n < length) try obj.set(ctx.allocator, "__eof", .{ .bool = true });
     // shrink to actual read size
@@ -1627,15 +1627,13 @@ fn native_fread(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const exact = try ctx.allocator.alloc(u8, n);
         @memcpy(exact, buf[0..n]);
         ctx.allocator.free(buf);
-        try ctx.strings.append(ctx.allocator, exact);
-        return .{ .string = Value.String.borrowed(exact) };
+        return NativeResult.takeString(try Value.String.adopt(ctx.allocator, exact));
     }
-    try ctx.strings.append(ctx.allocator, buf);
-    return .{ .string = Value.String.borrowed(buf) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, buf));
 }
 
-fn native_fwrite(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .object or args[1] != .string) return .{ .bool = false };
+fn native_fwrite(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .object or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     const obj = args[0].object;
     if (std.mem.eql(u8, obj.class_name, "FileHandle")) {
         const open = obj.get("__open");
@@ -1651,8 +1649,8 @@ fn native_fwrite(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
     if (fileHandleWrapper(obj)) |wrapper| {
         const result = try ctx.callMethod(wrapper, "stream_write", &[_]Value{.{ .string = Value.String.borrowed(data) }});
-        if (result == .int) return result;
-        return .{ .int = 0 };
+        if (result == .int) return NativeResult.scalar(result);
+        return NativeResult.scalar(.{ .int = 0 });
     }
     if (isZlibWriting(obj) or obj.get("__popen_cmd") == .string) {
         const cur = obj.get("__buffer");
@@ -1662,9 +1660,9 @@ fn native_fwrite(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         @memcpy(combined[cur_str.len..], data);
         try ctx.strings.append(ctx.allocator, combined);
         try obj.set(ctx.allocator, "__buffer", .{ .string = Value.String.borrowed(combined) });
-        return .{ .int = @intCast(data.len) };
+        return NativeResult.scalar(.{ .int = @intCast(data.len) });
     }
-    const file = getFileHandle(obj) orelse return Value{ .bool = false };
+    const file = getFileHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
     // 'a' / 'a+' modes: writes always append, regardless of where the read cursor is
     const mode_v = obj.get("__mode");
     if (mode_v == .string and mode_v.string.bytes().len > 0 and mode_v.string.bytes()[0] == 'a') {
@@ -1675,7 +1673,7 @@ fn native_fwrite(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     // this call lands before our stderr write
     if (file.handle == 1) {
         try ctx.vm.output.appendSlice(ctx.allocator, data);
-        return .{ .int = @intCast(data.len) };
+        return NativeResult.scalar(.{ .int = @intCast(data.len) });
     }
     if (file.handle == 2) {
         if (ctx.vm.output.items.len > 0) {
@@ -1684,18 +1682,18 @@ fn native_fwrite(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             ctx.vm.output.clearRetainingCapacity();
         }
     }
-    const written = file.write(data) catch return Value{ .bool = false };
-    return .{ .int = @intCast(written) };
+    const written = file.write(data) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .int = @intCast(written) });
 }
 
-fn native_fgets(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+fn native_fgets(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
     const obj = args[0].object;
     // PHP: fgets($f, length) reads up to length-1 bytes
     const max_len: usize = if (args.len >= 2 and args[1] == .int) @intCast(@max(args[1].int - 1, 1)) else 1024;
     if (getBufferBacking(obj)) |buffer| {
         const pos = getBufferPos(obj);
-        if (pos >= buffer.len) return .{ .bool = false };
+        if (pos >= buffer.len) return NativeResult.scalar(.{ .bool = false });
         var end = pos;
         while (end < buffer.len and end - pos < max_len) {
             const c = buffer[end];
@@ -1703,11 +1701,10 @@ fn native_fgets(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             if (c == '\n') break;
         }
         const slice = try ctx.allocator.dupe(u8, buffer[pos..end]);
-        try ctx.strings.append(ctx.allocator, slice);
         setBufferPos(obj, end);
-        return .{ .string = Value.String.borrowed(slice) };
+        return NativeResult.takeString(try Value.String.adopt(ctx.allocator, slice));
     }
-    const file = getFileHandle(obj) orelse return Value{ .bool = false };
+    const file = getFileHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
 
     var buf = std.ArrayListUnmanaged(u8){};
     var byte: [1]u8 = undefined;
@@ -1722,16 +1719,15 @@ fn native_fgets(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (byte[0] == '\n') break;
     }
     if (hit_eof) try obj.set(ctx.allocator, "__eof", .{ .bool = true });
-    if (buf.items.len == 0) return .{ .bool = false };
+    if (buf.items.len == 0) return NativeResult.scalar(.{ .bool = false });
     const result = try buf.toOwnedSlice(ctx.allocator);
-    try ctx.strings.append(ctx.allocator, result);
-    return .{ .string = Value.String.borrowed(result) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, result));
 }
 
-fn native_stream_get_line(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_stream_get_line(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     // stream_get_line(handle, length[, ending]) - reads up to length bytes,
     // stopping when `ending` is encountered (consumed but not returned) or EOF
-    if (args.len < 2 or args[0] != .object) return .{ .bool = false };
+    if (args.len < 2 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
     const obj = args[0].object;
     const max_len: usize = @intCast(@max(Value.toInt(args[1]), 0));
     const ending = if (args.len >= 3 and args[2] == .string) args[2].string.bytes() else "";
@@ -1739,7 +1735,7 @@ fn native_stream_get_line(ctx: *NativeContext, args: []const Value) RuntimeError
 
     if (getBufferBacking(obj)) |buffer| {
         const pos = getBufferPos(obj);
-        if (pos >= buffer.len) return .{ .bool = false };
+        if (pos >= buffer.len) return NativeResult.scalar(.{ .bool = false });
         var end = pos;
         var hit_delim_at: ?usize = null;
         while (end < buffer.len and end - pos < cap) {
@@ -1751,12 +1747,11 @@ fn native_stream_get_line(ctx: *NativeContext, args: []const Value) RuntimeError
         }
         const out_end = hit_delim_at orelse end;
         const slice = try ctx.allocator.dupe(u8, buffer[pos..out_end]);
-        try ctx.strings.append(ctx.allocator, slice);
         const new_pos = if (hit_delim_at) |d| d + ending.len else end;
         setBufferPos(obj, new_pos);
-        return .{ .string = Value.String.borrowed(slice) };
+        return NativeResult.takeString(try Value.String.adopt(ctx.allocator, slice));
     }
-    const file = getFileHandle(obj) orelse return Value{ .bool = false };
+    const file = getFileHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
 
     var buf = std.ArrayListUnmanaged(u8){};
     var byte: [1]u8 = undefined;
@@ -1782,29 +1777,27 @@ fn native_stream_get_line(ctx: *NativeContext, args: []const Value) RuntimeError
             try buf.append(ctx.allocator, byte[0]);
         }
     }
-    if (buf.items.len == 0 and matched == 0) return .{ .bool = false };
+    if (buf.items.len == 0 and matched == 0) return NativeResult.scalar(.{ .bool = false });
     const result = try buf.toOwnedSlice(ctx.allocator);
-    try ctx.strings.append(ctx.allocator, result);
-    return .{ .string = Value.String.borrowed(result) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, result));
 }
 
-fn native_fgetc(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+fn native_fgetc(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
     const obj = args[0].object;
-    const file = getFileHandle(obj) orelse return Value{ .bool = false };
+    const file = getFileHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
     var byte: [1]u8 = undefined;
-    const n = file.read(&byte) catch return Value{ .bool = false };
+    const n = file.read(&byte) catch return NativeResult.scalar(.{ .bool = false });
     if (n == 0) {
         try obj.set(ctx.allocator, "__eof", .{ .bool = true });
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     }
     const result = try ctx.allocator.dupe(u8, byte[0..1]);
-    try ctx.strings.append(ctx.allocator, result);
-    return .{ .string = Value.String.borrowed(result) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, result));
 }
 
-fn native_feof(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .object) return .{ .bool = true };
+fn native_feof(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.{ .bool = true });
     const obj = args[0].object;
     if (std.mem.eql(u8, obj.class_name, "FileHandle")) {
         const open = obj.get("__open");
@@ -1814,30 +1807,30 @@ fn native_feof(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
     }
     if (fileHandleWrapper(obj)) |wrapper| {
-        if (!ctx.vm.hasMethod(wrapper.class_name, "stream_eof")) return .{ .bool = false };
+        if (!ctx.vm.hasMethod(wrapper.class_name, "stream_eof")) return NativeResult.scalar(.{ .bool = false });
         const result = try ctx.callMethod(wrapper, "stream_eof", &.{});
-        return .{ .bool = result.isTruthy() };
+        return NativeResult.scalar(.{ .bool = result.isTruthy() });
     }
     if (getBufferBacking(obj)) |buffer| {
-        return .{ .bool = getBufferPos(obj) >= buffer.len };
+        return NativeResult.scalar(.{ .bool = getBufferPos(obj) >= buffer.len });
     }
-    const file = getFileHandle(obj) orelse return Value{ .bool = true };
+    const file = getFileHandle(obj) orelse return NativeResult.scalar(.{ .bool = true });
     // memory/temp streams use peek-ahead semantics (PHP behavior for those streams)
     const peek_eof = obj.get("__peek_eof");
     if (peek_eof == .bool and peek_eof.bool) {
         var byte: [1]u8 = undefined;
-        const n = file.read(&byte) catch return Value{ .bool = true };
-        if (n == 0) return .{ .bool = true };
+        const n = file.read(&byte) catch return NativeResult.scalar(.{ .bool = true });
+        if (n == 0) return NativeResult.scalar(.{ .bool = true });
         file.seekBy(-1) catch {};
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     }
     // PHP file semantics: feof becomes true only after a read attempt returned 0
     const eof = obj.get("__eof");
-    return .{ .bool = eof == .bool and eof.bool };
+    return NativeResult.scalar(.{ .bool = eof == .bool and eof.bool });
 }
 
-fn native_fseek(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .object or args[1] != .int) return .{ .int = -1 };
+fn native_fseek(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .object or args[1] != .int) return NativeResult.scalar(.{ .int = -1 });
     const obj = args[0].object;
     const offset = args[1].int;
     const whence: u2 = if (args.len >= 3 and args[2] == .int) blk: {
@@ -1848,79 +1841,79 @@ fn native_fseek(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         };
     } else 0;
     if (fileHandleWrapper(obj)) |wrapper| {
-        if (!ctx.vm.hasMethod(wrapper.class_name, "stream_seek")) return .{ .int = -1 };
+        if (!ctx.vm.hasMethod(wrapper.class_name, "stream_seek")) return NativeResult.scalar(.{ .int = -1 });
         const result = try ctx.callMethod(wrapper, "stream_seek", &[_]Value{ .{ .int = offset }, .{ .int = whence } });
-        return .{ .int = if (result.isTruthy()) 0 else -1 };
+        return NativeResult.scalar(.{ .int = if (result.isTruthy()) 0 else -1 });
     }
     if (getBufferBacking(obj)) |buffer| {
         const new_pos: i64 = switch (whence) {
             0 => offset,
             1 => @as(i64, @intCast(getBufferPos(obj))) + offset,
             2 => @as(i64, @intCast(buffer.len)) + offset,
-            else => return .{ .int = -1 },
+            else => return NativeResult.scalar(.{ .int = -1 }),
         };
-        if (new_pos < 0) return .{ .int = -1 };
+        if (new_pos < 0) return NativeResult.scalar(.{ .int = -1 });
         setBufferPos(obj, @intCast(new_pos));
-        return .{ .int = 0 };
+        return NativeResult.scalar(.{ .int = 0 });
     }
-    const file = getFileHandle(obj) orelse return Value{ .int = -1 };
+    const file = getFileHandle(obj) orelse return NativeResult.scalar(.{ .int = -1 });
     switch (whence) {
-        0 => file.seekTo(@intCast(offset)) catch return Value{ .int = -1 },
-        1 => file.seekBy(offset) catch return Value{ .int = -1 },
-        2 => file.seekFromEnd(offset) catch return Value{ .int = -1 },
-        else => return .{ .int = -1 },
+        0 => file.seekTo(@intCast(offset)) catch return NativeResult.scalar(.{ .int = -1 }),
+        1 => file.seekBy(offset) catch return NativeResult.scalar(.{ .int = -1 }),
+        2 => file.seekFromEnd(offset) catch return NativeResult.scalar(.{ .int = -1 }),
+        else => return NativeResult.scalar(.{ .int = -1 }),
     }
     try obj.set(ctx.allocator, "__eof", .{ .bool = false });
-    return .{ .int = 0 };
+    return NativeResult.scalar(.{ .int = 0 });
 }
 
-fn native_ftell(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+fn native_ftell(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
     const obj = args[0].object;
     if (fileHandleWrapper(obj)) |wrapper| {
-        if (!ctx.vm.hasMethod(wrapper.class_name, "stream_tell")) return .{ .bool = false };
+        if (!ctx.vm.hasMethod(wrapper.class_name, "stream_tell")) return NativeResult.scalar(.{ .bool = false });
         const result = try ctx.callMethod(wrapper, "stream_tell", &.{});
-        if (result == .int) return result;
-        return .{ .bool = false };
+        if (result == .int) return NativeResult.share(result);
+        return NativeResult.scalar(.{ .bool = false });
     }
     if (getBufferBacking(obj) != null) {
-        return .{ .int = @intCast(getBufferPos(obj)) };
+        return NativeResult.scalar(.{ .int = @intCast(getBufferPos(obj)) });
     }
-    const file = getFileHandle(obj) orelse return Value{ .bool = false };
-    const pos = file.getPos() catch return Value{ .bool = false };
-    return .{ .int = @intCast(pos) };
+    const file = getFileHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    const pos = file.getPos() catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .int = @intCast(pos) });
 }
 
-fn native_rewind(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+fn native_rewind(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
     const obj = args[0].object;
     if (fileHandleWrapper(obj)) |wrapper| {
-        if (!ctx.vm.hasMethod(wrapper.class_name, "stream_seek")) return .{ .bool = false };
+        if (!ctx.vm.hasMethod(wrapper.class_name, "stream_seek")) return NativeResult.scalar(.{ .bool = false });
         const result = try ctx.callMethod(wrapper, "stream_seek", &[_]Value{ .{ .int = 0 }, .{ .int = 0 } });
-        return .{ .bool = result.isTruthy() };
+        return NativeResult.scalar(.{ .bool = result.isTruthy() });
     }
     if (getBufferBacking(obj) != null) {
         setBufferPos(obj, 0);
-        return .{ .bool = true };
+        return NativeResult.scalar(.{ .bool = true });
     }
-    const file = getFileHandle(obj) orelse return Value{ .bool = false };
-    file.seekTo(0) catch return Value{ .bool = false };
+    const file = getFileHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    file.seekTo(0) catch return NativeResult.scalar(.{ .bool = false });
     try obj.set(ctx.allocator, "__eof", .{ .bool = false });
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_fflush(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+fn native_fflush(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
     // zig files are unbuffered at our level, this is a no-op
-    _ = getFileHandle(args[0].object) orelse return Value{ .bool = false };
-    return .{ .bool = true };
+    _ = getFileHandle(args[0].object) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_ftruncate(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .object or args[1] != .int) return .{ .bool = false };
-    const file = getFileHandle(args[0].object) orelse return Value{ .bool = false };
+fn native_ftruncate(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .object or args[1] != .int) return NativeResult.scalar(.{ .bool = false });
+    const file = getFileHandle(args[0].object) orelse return NativeResult.scalar(.{ .bool = false });
     const size: u64 = @intCast(@max(args[1].int, 0));
-    file.setEndPos(size) catch return Value{ .bool = false };
+    file.setEndPos(size) catch return NativeResult.scalar(.{ .bool = false });
     // for php://memory / php://temp, snap the cursor to the new end rather than
     // leaving it past EOF where subsequent writes would create null-padded holes
     const path = args[0].object.get("__path");
@@ -1928,12 +1921,12 @@ fn native_ftruncate(_: *NativeContext, args: []const Value) RuntimeError!Value {
         const cur = file.getPos() catch 0;
         if (cur > size) file.seekTo(size) catch {};
     }
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_flock(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .object or args[1] != .int) return .{ .bool = false };
-    const file = getFileHandle(args[0].object) orelse return Value{ .bool = false };
+fn native_flock(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .object or args[1] != .int) return NativeResult.scalar(.{ .bool = false });
+    const file = getFileHandle(args[0].object) orelse return NativeResult.scalar(.{ .bool = false });
     // PHP renumbers the lock op constants: LOCK_SH=1, LOCK_EX=2, LOCK_UN=3,
     // LOCK_NB=4. translate to the OS values (LOCK_SH=1, LOCK_EX=2, LOCK_NB=4,
     // LOCK_UN=8) before handing to flock(2)
@@ -1946,12 +1939,12 @@ fn native_flock(_: *NativeContext, args: []const Value) RuntimeError!Value {
         3 => 8, // LOCK_UN
         else => 0,
     };
-    std.posix.flock(file.handle, os_base | non_block) catch return Value{ .bool = false };
-    return .{ .bool = true };
+    std.posix.flock(file.handle, os_base | non_block) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
     const obj = args[0].object;
     const mode_val = obj.get("__mode");
     const mode = if (mode_val == .string) mode_val.string.bytes() else "r";
@@ -1993,7 +1986,7 @@ fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!V
     try result.set(ctx.allocator, .{ .string = Value.String.borrowed("unread_bytes") }, .{ .int = 0 });
     try result.set(ctx.allocator, .{ .string = Value.String.borrowed("seekable") }, .{ .bool = true });
     try result.set(ctx.allocator, .{ .string = Value.String.borrowed("uri") }, .{ .string = Value.String.borrowed(uri) });
-    return .{ .array = result };
+    return NativeResult.borrowed(.{ .array = result });
 }
 
 const builtin_wrappers = [_][]const u8{ "https", "php", "file", "data", "http", "phar", "compress.zlib" };
@@ -2054,46 +2047,40 @@ fn zlibEncodeWindow(a: Allocator, input: []const u8, window_bits: c_int) ![]u8 {
     return try a.realloc(out, stream.total_out);
 }
 
-fn native_gzcompress(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const out = zlibEncodeWindow(ctx.allocator, args[0].string.bytes(), 15) catch return .{ .bool = false };
-    try ctx.vm.strings.append(ctx.allocator, out);
-    return .{ .string = Value.String.borrowed(out) };
+fn native_gzcompress(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const out = zlibEncodeWindow(ctx.allocator, args[0].string.bytes(), 15) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
 }
 
-fn native_gzuncompress(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const out = zlibDecodeWindow(ctx.allocator, args[0].string.bytes(), 15) catch return .{ .bool = false };
-    try ctx.vm.strings.append(ctx.allocator, out);
-    return .{ .string = Value.String.borrowed(out) };
+fn native_gzuncompress(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const out = zlibDecodeWindow(ctx.allocator, args[0].string.bytes(), 15) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
 }
 
-fn native_gzdeflate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const out = zlibEncodeWindow(ctx.allocator, args[0].string.bytes(), -15) catch return .{ .bool = false };
-    try ctx.vm.strings.append(ctx.allocator, out);
-    return .{ .string = Value.String.borrowed(out) };
+fn native_gzdeflate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const out = zlibEncodeWindow(ctx.allocator, args[0].string.bytes(), -15) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
 }
 
-fn native_gzinflate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const out = zlibDecodeWindow(ctx.allocator, args[0].string.bytes(), -15) catch return .{ .bool = false };
-    try ctx.vm.strings.append(ctx.allocator, out);
-    return .{ .string = Value.String.borrowed(out) };
+fn native_gzinflate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const out = zlibDecodeWindow(ctx.allocator, args[0].string.bytes(), -15) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
 }
 
-fn native_gzencode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const out = zlibEncodeWindow(ctx.allocator, args[0].string.bytes(), 15 + 16) catch return .{ .bool = false };
-    try ctx.vm.strings.append(ctx.allocator, out);
-    return .{ .string = Value.String.borrowed(out) };
+fn native_gzencode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const out = zlibEncodeWindow(ctx.allocator, args[0].string.bytes(), 15 + 16) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
 }
 
-fn native_gzdecode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const out = zlibDecodeWindow(ctx.allocator, args[0].string.bytes(), 15 + 32) catch return .{ .bool = false };
-    try ctx.vm.strings.append(ctx.allocator, out);
-    return .{ .string = Value.String.borrowed(out) };
+fn native_gzdecode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const out = zlibDecodeWindow(ctx.allocator, args[0].string.bytes(), 15 + 32) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
 }
 
 fn gzipDecode(a: Allocator, input: []const u8) ![]u8 {
@@ -2245,7 +2232,7 @@ fn dispatchUserStat(ctx: *NativeContext, class_name: []const u8, path: []const u
     return result.array;
 }
 
-fn stream_get_wrappers(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn stream_get_wrappers(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const result = try ctx.createArray();
     for (builtin_wrappers) |w| {
         if (ctx.vm.stream_wrappers_unregistered.contains(w)) continue;
@@ -2253,94 +2240,94 @@ fn stream_get_wrappers(ctx: *NativeContext, _: []const Value) RuntimeError!Value
     }
     var it = ctx.vm.stream_wrappers_user.keyIterator();
     while (it.next()) |k| try result.append(ctx.allocator, .{ .string = Value.String.borrowed(k.*) });
-    return .{ .array = result };
+    return NativeResult.borrowed(.{ .array = result });
 }
 
-fn stream_wrapper_register(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+fn stream_wrapper_register(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     const protocol = args[0].string.bytes();
     const class_name = args[1].string.bytes();
-    if (protocol.len == 0) return .{ .bool = false };
+    if (protocol.len == 0) return NativeResult.scalar(.{ .bool = false });
     // already registered (builtin still active or user wrapper present)
     const builtin_active = isBuiltinWrapper(protocol) and !ctx.vm.stream_wrappers_unregistered.contains(protocol);
-    if (builtin_active or ctx.vm.stream_wrappers_user.contains(protocol)) return .{ .bool = false };
+    if (builtin_active or ctx.vm.stream_wrappers_user.contains(protocol)) return NativeResult.scalar(.{ .bool = false });
     if (!ctx.vm.classes.contains(class_name)) {
-        ctx.vm.tryAutoload(class_name) catch return Value{ .bool = false };
-        if (!ctx.vm.classes.contains(class_name)) return .{ .bool = false };
+        ctx.vm.tryAutoload(class_name) catch return NativeResult.scalar(.{ .bool = false });
+        if (!ctx.vm.classes.contains(class_name)) return NativeResult.scalar(.{ .bool = false });
     }
     const proto_owned = try ctx.createString(protocol);
     const class_owned = try ctx.createString(class_name);
     try ctx.vm.stream_wrappers_user.put(ctx.allocator, proto_owned, class_owned);
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn stream_wrapper_unregister(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn stream_wrapper_unregister(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const protocol = args[0].string.bytes();
-    if (ctx.vm.stream_wrappers_user.fetchRemove(protocol) != null) return .{ .bool = true };
-    if (!isBuiltinWrapper(protocol)) return .{ .bool = false };
-    if (ctx.vm.stream_wrappers_unregistered.contains(protocol)) return .{ .bool = false };
+    if (ctx.vm.stream_wrappers_user.fetchRemove(protocol) != null) return NativeResult.scalar(.{ .bool = true });
+    if (!isBuiltinWrapper(protocol)) return NativeResult.scalar(.{ .bool = false });
+    if (ctx.vm.stream_wrappers_unregistered.contains(protocol)) return NativeResult.scalar(.{ .bool = false });
     const proto_owned = try ctx.createString(protocol);
     try ctx.vm.stream_wrappers_unregistered.put(ctx.allocator, proto_owned, {});
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn stream_wrapper_restore(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn stream_wrapper_restore(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const protocol = args[0].string.bytes();
-    if (!isBuiltinWrapper(protocol)) return .{ .bool = false };
-    if (!ctx.vm.stream_wrappers_unregistered.contains(protocol)) return .{ .bool = true };
+    if (!isBuiltinWrapper(protocol)) return NativeResult.scalar(.{ .bool = false });
+    if (!ctx.vm.stream_wrappers_unregistered.contains(protocol)) return NativeResult.scalar(.{ .bool = true });
     _ = ctx.vm.stream_wrappers_unregistered.remove(protocol);
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_noop_true(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = true };
+fn native_noop_true(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_stream_filter_register(_: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_stream_filter_register(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // accept the registration silently; user-defined filters aren't dispatched
     // through our stream layer, but returning true lets feature-detection
     // codepaths in libraries proceed
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_stream_filter_append(_: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_stream_filter_append(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // return a stub resource-like value so the caller can later pass it to
     // stream_filter_remove without erroring
-    return .{ .int = 1 };
+    return NativeResult.scalar(.{ .int = 1 });
 }
 
-fn native_stream_get_filters(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_stream_get_filters(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
     const names = [_][]const u8{ "string.rot13", "string.toupper", "string.tolower", "convert.base64-encode", "convert.base64-decode", "zlib.deflate", "zlib.inflate" };
     for (names) |n| try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(n) });
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn native_stream_get_transports(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_stream_get_transports(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
     const names = [_][]const u8{ "tcp", "udp", "unix", "udg", "ssl", "tls", "tlsv1.2", "tlsv1.3" };
     for (names) |n| try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(n) });
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn stream_copy_to_stream(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .object or args[1] != .object) return .{ .bool = false };
+fn stream_copy_to_stream(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .object or args[1] != .object) return NativeResult.scalar(.{ .bool = false });
     const length: i64 = if (args.len >= 3 and args[2] != .null) Value.toInt(args[2]) else -1;
     const offset: i64 = if (args.len >= 4 and args[3] != .null) Value.toInt(args[3]) else 0;
 
     var src_args: [3]Value = .{ args[0], .{ .int = if (length < 0) -1 else length }, .{ .int = offset } };
-    const data_v = try stream_get_contents(ctx, src_args[0..3]);
-    const data: []const u8 = if (data_v == .string) data_v.string.bytes() else return Value{ .bool = false };
+    const data_v = (try stream_get_contents(ctx, src_args[0..3])).value;
+    if (data_v != .string) return NativeResult.scalar(.{ .bool = false });
+    defer data_v.string.release();
 
-    var write_args: [2]Value = .{ args[1], .{ .string = Value.String.borrowed(data) } };
-    const written = try native_fwrite(ctx, write_args[0..2]);
-    return written;
+    var write_args: [2]Value = .{ args[1], data_v };
+    return native_fwrite(ctx, write_args[0..2]);
 }
 
-fn stream_get_contents(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+fn stream_get_contents(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
     const obj = args[0].object;
     // length: -1 (or null) means read until EOF; non-negative means cap
     const length: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else -1;
@@ -2350,40 +2337,38 @@ fn stream_get_contents(ctx: *NativeContext, args: []const Value) RuntimeError!Va
     if (getBufferBacking(obj)) |buffer| {
         if (offset >= 0) setBufferPos(obj, @intCast(offset));
         const pos = getBufferPos(obj);
-        if (pos >= buffer.len) return .{ .string = Value.String.borrowed("") };
+        if (pos >= buffer.len) return NativeResult.literal("");
         const remaining = buffer[pos..];
         const take = if (length >= 0) @min(@as(usize, @intCast(length)), remaining.len) else remaining.len;
         setBufferPos(obj, pos + take);
-        return .{ .string = Value.String.borrowed(try ctx.createString(remaining[0..take])) };
+        return try NativeResult.copyString(ctx.allocator, remaining[0..take]);
     }
-    const file = getFileHandle(obj) orelse return Value{ .bool = false };
+    const file = getFileHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
     if (offset >= 0) {
-        file.seekTo(@intCast(offset)) catch return Value{ .bool = false };
+        file.seekTo(@intCast(offset)) catch return NativeResult.scalar(.{ .bool = false });
     }
     if (length >= 0) {
         const cap: usize = @intCast(length);
-        const buf = ctx.allocator.alloc(u8, cap) catch return Value{ .bool = false };
+        const buf = ctx.allocator.alloc(u8, cap) catch return NativeResult.scalar(.{ .bool = false });
         const n = file.read(buf) catch {
             ctx.allocator.free(buf);
-            return Value{ .bool = false };
+            return NativeResult.scalar(.{ .bool = false });
         };
         if (n < cap) {
-            const result = try ctx.createString(buf[0..n]);
+            const result = try Value.String.create(ctx.allocator, buf[0..n]);
             ctx.allocator.free(buf);
-            return .{ .string = Value.String.borrowed(result) };
+            return NativeResult.takeString(result);
         }
-        try ctx.strings.append(ctx.allocator, buf);
-        return .{ .string = Value.String.borrowed(buf) };
+        return NativeResult.takeString(try Value.String.adopt(ctx.allocator, buf));
     }
-    const buf = file.readToEndAlloc(ctx.allocator, 10 * 1024 * 1024) catch return Value{ .bool = false };
-    try ctx.strings.append(ctx.allocator, buf);
-    return .{ .string = Value.String.borrowed(buf) };
+    const buf = file.readToEndAlloc(ctx.allocator, 10 * 1024 * 1024) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, buf));
 }
 
-fn native_fstat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
-    const file = getFileHandle(args[0].object) orelse return Value{ .bool = false };
-    const stat = std.posix.fstat(file.handle) catch return Value{ .bool = false };
+fn native_fstat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
+    const file = getFileHandle(args[0].object) orelse return NativeResult.scalar(.{ .bool = false });
+    const stat = std.posix.fstat(file.handle) catch return NativeResult.scalar(.{ .bool = false });
     const result = try ctx.createArray();
     const mode: i64 = @intCast(stat.mode);
     const size: i64 = @intCast(stat.size);
@@ -2391,13 +2376,13 @@ fn native_fstat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     try result.set(ctx.allocator, .{ .string = Value.String.borrowed("size") }, .{ .int = size });
     try result.set(ctx.allocator, .{ .int = 2 }, .{ .int = mode });
     try result.set(ctx.allocator, .{ .int = 7 }, .{ .int = size });
-    return .{ .array = result };
+    return NativeResult.borrowed(.{ .array = result });
 }
 
-fn native_fgetcsv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+fn native_fgetcsv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
     const obj = args[0].object;
-    const file = getFileHandle(obj) orelse return Value{ .bool = false };
+    const file = getFileHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const delimiter: u8 = if (args.len >= 3 and args[2] == .string and args[2].string.bytes().len > 0) args[2].string.bytes()[0] else ',';
     const enclosure: u8 = if (args.len >= 4 and args[3] == .string and args[3].string.bytes().len > 0) args[3].string.bytes()[0] else '"';
 
@@ -2437,7 +2422,7 @@ fn native_fgetcsv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             break;
         }
     }
-    if (!got_any) return .{ .bool = false };
+    if (!got_any) return NativeResult.scalar(.{ .bool = false });
 
     const line_owned = try line.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, line_owned);
@@ -2449,7 +2434,7 @@ fn native_fgetcsv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return parseCsvRecord(ctx, raw, delimiter, enclosure);
 }
 
-fn parseCsvRecord(ctx: *NativeContext, raw: []const u8, delimiter: u8, enclosure: u8) !Value {
+fn parseCsvRecord(ctx: *NativeContext, raw: []const u8, delimiter: u8, enclosure: u8) !NativeResult {
     var result = try ctx.createArray();
     var field = std.ArrayListUnmanaged(u8){};
     var in_quotes = false;
@@ -2486,12 +2471,12 @@ fn parseCsvRecord(ctx: *NativeContext, raw: []const u8, delimiter: u8, enclosure
     const s = try field.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, s);
     try result.append(ctx.allocator, .{ .string = Value.String.borrowed(s) });
-    return .{ .array = result };
+    return NativeResult.borrowed(.{ .array = result });
 }
 
-fn native_fputcsv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .object or args[1] != .array) return .{ .bool = false };
-    const file = getFileHandle(args[0].object) orelse return Value{ .bool = false };
+fn native_fputcsv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .object or args[1] != .array) return NativeResult.scalar(.{ .bool = false });
+    const file = getFileHandle(args[0].object) orelse return NativeResult.scalar(.{ .bool = false });
     const arr = args[1].array;
     const delimiter: u8 = if (args.len >= 3 and args[2] == .string and args[2].string.bytes().len > 0) args[2].string.bytes()[0] else ',';
     const enclosure: u8 = if (args.len >= 4 and args[3] == .string and args[3].string.bytes().len > 0) args[3].string.bytes()[0] else '"';
@@ -2526,14 +2511,14 @@ fn native_fputcsv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
     try buf.append(ctx.allocator, '\n');
 
-    const written = file.write(buf.items) catch return Value{ .bool = false };
+    const written = file.write(buf.items) catch return NativeResult.scalar(.{ .bool = false });
     const owned = try buf.toOwnedSlice(ctx.allocator);
     try ctx.strings.append(ctx.allocator, owned);
-    return .{ .int = @intCast(written) };
+    return NativeResult.scalar(.{ .int = @intCast(written) });
 }
 
-fn native_touch(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_touch(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
 
     // create the file if it doesn't already exist, then fall through to the
@@ -2541,11 +2526,11 @@ fn native_touch(_: *NativeContext, args: []const Value) RuntimeError!Value {
     // regardless of whether the file pre-existed
     const created = std.fs.cwd().createFile(path, .{ .exclusive = true }) catch |err| switch (err) {
         error.PathAlreadyExists => null,
-        else => return .{ .bool = false },
+        else => return NativeResult.scalar(.{ .bool = false }),
     };
     if (created) |c| c.close();
 
-    const f = std.fs.cwd().openFile(path, .{ .mode = .write_only }) catch return Value{ .bool = false };
+    const f = std.fs.cwd().openFile(path, .{ .mode = .write_only }) catch return NativeResult.scalar(.{ .bool = false });
     defer f.close();
     const now: i128 = std.time.nanoTimestamp();
     const mtime: i128 = if (args.len >= 2 and args[1] != .null)
@@ -2556,59 +2541,59 @@ fn native_touch(_: *NativeContext, args: []const Value) RuntimeError!Value {
         @as(i128, Value.toInt(args[2])) * 1_000_000_000
     else
         mtime;
-    f.updateTimes(atime, mtime) catch return Value{ .bool = true };
-    return .{ .bool = true };
+    f.updateTimes(atime, mtime) catch return NativeResult.scalar(.{ .bool = true });
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_chmod(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string) return .{ .bool = false };
+fn native_chmod(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
     const mode_val = Value.toInt(args[1]);
-    if (mode_val < 0) return .{ .bool = false };
+    if (mode_val < 0) return NativeResult.scalar(.{ .bool = false });
     const mode: std.posix.mode_t = @intCast(mode_val);
 
     const file = std.fs.cwd().openFile(path, .{ .mode = .read_write }) catch
-        return Value{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     defer file.close();
-    file.chmod(mode) catch return Value{ .bool = false };
-    return .{ .bool = true };
+    file.chmod(mode) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = true });
 }
 
 // chown / chgrp: accept either a numeric uid/gid or a name and pass to the
 // posix chown(2) syscall. silently degrade to false on failure (most failures
 // are EPERM when not root)
-fn native_chown(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string) return .{ .bool = false };
+fn native_chown(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
     var path_z: [std.fs.max_path_bytes:0]u8 = undefined;
-    if (path.len >= path_z.len) return .{ .bool = false };
+    if (path.len >= path_z.len) return NativeResult.scalar(.{ .bool = false });
     @memcpy(path_z[0..path.len], path);
     path_z[path.len] = 0;
     const uid: std.c.uid_t = if (args[1] == .int) @intCast(args[1].int) else blk: {
-        if (args[1] != .string) return .{ .bool = false };
+        if (args[1] != .string) return NativeResult.scalar(.{ .bool = false });
         const name_z = try dupZ(ctx, args[1].string.bytes());
-        const pw = std.c.getpwnam(name_z.ptr) orelse return .{ .bool = false };
+        const pw = std.c.getpwnam(name_z.ptr) orelse return NativeResult.scalar(.{ .bool = false });
         break :blk pw.uid;
     };
-    if (chown_extern(@ptrCast(&path_z), uid, std.math.maxInt(std.c.gid_t)) != 0) return .{ .bool = false };
-    return .{ .bool = true };
+    if (chown_extern(@ptrCast(&path_z), uid, std.math.maxInt(std.c.gid_t)) != 0) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_chgrp(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string) return .{ .bool = false };
+fn native_chgrp(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
     var path_z: [std.fs.max_path_bytes:0]u8 = undefined;
-    if (path.len >= path_z.len) return .{ .bool = false };
+    if (path.len >= path_z.len) return NativeResult.scalar(.{ .bool = false });
     @memcpy(path_z[0..path.len], path);
     path_z[path.len] = 0;
     const gid: std.c.gid_t = if (args[1] == .int) @intCast(args[1].int) else blk: {
-        if (args[1] != .string) return .{ .bool = false };
+        if (args[1] != .string) return NativeResult.scalar(.{ .bool = false });
         const name_z = try dupZ(ctx, args[1].string.bytes());
-        const gr = std.c.getgrnam(name_z.ptr) orelse return .{ .bool = false };
+        const gr = std.c.getgrnam(name_z.ptr) orelse return NativeResult.scalar(.{ .bool = false });
         break :blk gr.gid;
     };
-    if (chown_extern(@ptrCast(&path_z), std.math.maxInt(std.c.uid_t), gid) != 0) return .{ .bool = false };
-    return .{ .bool = true };
+    if (chown_extern(@ptrCast(&path_z), std.math.maxInt(std.c.uid_t), gid) != 0) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = true });
 }
 
 extern "c" fn chown(path: [*:0]const u8, owner: std.c.uid_t, group: std.c.gid_t) c_int;
@@ -2624,162 +2609,162 @@ fn dupZ(ctx: *NativeContext, s: []const u8) ![:0]u8 {
     return z[0..s.len :0];
 }
 
-fn native_stat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_stat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
     var pbuf: [std.fs.max_path_bytes:0]u8 = undefined;
-    if (path.len >= pbuf.len) return .{ .bool = false };
+    if (path.len >= pbuf.len) return NativeResult.scalar(.{ .bool = false });
     @memcpy(pbuf[0..path.len], path);
     pbuf[path.len] = 0;
     var st: std.c.Stat = undefined;
-    if (std.c.stat(&pbuf, &st) != 0) return .{ .bool = false };
-    return .{ .array = try buildStatArray(ctx, &st) };
+    if (std.c.stat(&pbuf, &st) != 0) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.borrowed(.{ .array = try buildStatArray(ctx, &st) });
 }
 
-fn native_chdir(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_chdir(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
-    var dir = std.fs.cwd().openDir(path, .{}) catch return Value{ .bool = false };
+    var dir = std.fs.cwd().openDir(path, .{}) catch return NativeResult.scalar(.{ .bool = false });
     defer dir.close();
-    std.posix.fchdir(dir.fd) catch return Value{ .bool = false };
-    return .{ .bool = true };
+    std.posix.fchdir(dir.fd) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_stream_is_local(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const scheme = extractScheme(args[0].string.bytes()) orelse return .{ .bool = true };
-    return .{ .bool = std.mem.eql(u8, scheme, "file") or std.mem.eql(u8, scheme, "phar") };
+fn native_stream_is_local(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const scheme = extractScheme(args[0].string.bytes()) orelse return NativeResult.scalar(.{ .bool = true });
+    return NativeResult.scalar(.{ .bool = std.mem.eql(u8, scheme, "file") or std.mem.eql(u8, scheme, "phar") });
 }
 
-fn native_stream_resolve_include_path(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_stream_resolve_include_path(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
-    std.fs.cwd().access(path, .{}) catch return .{ .bool = false };
-    return .{ .string = Value.String.borrowed(path) };
+    std.fs.cwd().access(path, .{}) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.shareString(args[0].string);
 }
 
-fn native_stream_isatty(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+fn native_stream_isatty(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
     const obj = args[0].object;
-    if (!std.mem.eql(u8, obj.class_name, "FileHandle")) return .{ .bool = false };
+    if (!std.mem.eql(u8, obj.class_name, "FileHandle")) return NativeResult.scalar(.{ .bool = false });
     const fd_val = obj.get("__fd");
-    if (fd_val != .int) return .{ .bool = false };
+    if (fd_val != .int) return NativeResult.scalar(.{ .bool = false });
     const fd: std.posix.fd_t = @intCast(fd_val.int);
-    return .{ .bool = std.posix.isatty(fd) };
+    return NativeResult.scalar(.{ .bool = std.posix.isatty(fd) });
 }
 
-fn native_clearstatcache(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .null;
+fn native_clearstatcache(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.null);
 }
 
-fn native_stream_supports_lock(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_stream_supports_lock(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     // local file streams (FileHandle backed by an fd from open()) support
     // flock; in-memory streams (php://memory, php://temp), HTTP/curl-backed
     // streams, and other non-fd wrappers do not. detect by inspecting the
     // path: anything starting with 'php://', 'http://', 'https://', 'data:',
     // 'ftp://' is a non-fd stream
-    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
     const obj = args[0].object;
-    if (!std.mem.eql(u8, obj.class_name, "FileHandle")) return .{ .bool = false };
+    if (!std.mem.eql(u8, obj.class_name, "FileHandle")) return NativeResult.scalar(.{ .bool = false });
     const path_v = obj.get("__path");
-    if (path_v != .string) return .{ .bool = true };
+    if (path_v != .string) return NativeResult.scalar(.{ .bool = true });
     const p = path_v.string.bytes();
     if (std.mem.startsWith(u8, p, "php://") or
         std.mem.startsWith(u8, p, "http://") or
         std.mem.startsWith(u8, p, "https://") or
         std.mem.startsWith(u8, p, "ftp://") or
-        std.mem.startsWith(u8, p, "data:")) return .{ .bool = false };
-    return .{ .bool = true };
+        std.mem.startsWith(u8, p, "data:")) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_stream_set_chunk_size(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .int = 8192 };
+fn native_stream_set_chunk_size(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .int = 8192 });
 }
 
-fn native_stream_set_buffer(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .int = 0 };
+fn native_stream_set_buffer(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .int = 0 });
 }
 
-fn native_umask(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_umask(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len > 0 and args[0] == .int) {
         const old = std.c.umask(@intCast(args[0].int));
-        return .{ .int = @intCast(old) };
+        return NativeResult.scalar(.{ .int = @intCast(old) });
     }
     const current = std.c.umask(0o022);
     _ = std.c.umask(current);
-    return .{ .int = @intCast(current) };
+    return NativeResult.scalar(.{ .int = @intCast(current) });
 }
 
-fn native_fileperms(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const stat = std.fs.cwd().statFile(args[0].string.bytes()) catch return Value{ .bool = false };
-    return .{ .int = @intCast(stat.mode) };
+fn native_fileperms(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const stat = std.fs.cwd().statFile(args[0].string.bytes()) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .int = @intCast(stat.mode) });
 }
 
 extern "c" fn lstat(noalias path: [*:0]const u8, noalias buf: *std.c.Stat) c_int;
 
-fn native_fileowner(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_fileowner(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
     var pbuf: [std.fs.max_path_bytes:0]u8 = undefined;
-    if (path.len >= pbuf.len) return .{ .bool = false };
+    if (path.len >= pbuf.len) return NativeResult.scalar(.{ .bool = false });
     @memcpy(pbuf[0..path.len], path);
     pbuf[path.len] = 0;
     var st: std.c.Stat = undefined;
-    if (std.c.stat(&pbuf, &st) != 0) return .{ .bool = false };
-    return .{ .int = @intCast(st.uid) };
+    if (std.c.stat(&pbuf, &st) != 0) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .int = @intCast(st.uid) });
 }
 
-fn native_filegroup(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_filegroup(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
     var pbuf: [std.fs.max_path_bytes:0]u8 = undefined;
-    if (path.len >= pbuf.len) return .{ .bool = false };
+    if (path.len >= pbuf.len) return NativeResult.scalar(.{ .bool = false });
     @memcpy(pbuf[0..path.len], path);
     pbuf[path.len] = 0;
     var st: std.c.Stat = undefined;
-    if (std.c.stat(&pbuf, &st) != 0) return .{ .bool = false };
-    return .{ .int = @intCast(st.gid) };
+    if (std.c.stat(&pbuf, &st) != 0) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .int = @intCast(st.gid) });
 }
 
-fn native_is_link(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_is_link(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
     var pbuf: [std.fs.max_path_bytes:0]u8 = undefined;
-    if (path.len >= pbuf.len) return .{ .bool = false };
+    if (path.len >= pbuf.len) return NativeResult.scalar(.{ .bool = false });
     @memcpy(pbuf[0..path.len], path);
     pbuf[path.len] = 0;
     var st: std.c.Stat = undefined;
-    if (lstat(&pbuf, &st) != 0) return .{ .bool = false };
-    return .{ .bool = (st.mode & 0o170000) == 0o120000 };
+    if (lstat(&pbuf, &st) != 0) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = (st.mode & 0o170000) == 0o120000 });
 }
 
-fn native_symlink(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+fn native_symlink(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     var t: [std.fs.max_path_bytes:0]u8 = undefined;
     var l: [std.fs.max_path_bytes:0]u8 = undefined;
     const target = args[0].string.bytes();
     const linkpath = args[1].string.bytes();
-    if (target.len >= t.len or linkpath.len >= l.len) return .{ .bool = false };
+    if (target.len >= t.len or linkpath.len >= l.len) return NativeResult.scalar(.{ .bool = false });
     @memcpy(t[0..target.len], target);
     t[target.len] = 0;
     @memcpy(l[0..linkpath.len], linkpath);
     l[linkpath.len] = 0;
-    return .{ .bool = std.c.symlink(&t, &l) == 0 };
+    return NativeResult.scalar(.{ .bool = std.c.symlink(&t, &l) == 0 });
 }
 
-fn native_link(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+fn native_link(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     var t: [std.fs.max_path_bytes:0]u8 = undefined;
     var l: [std.fs.max_path_bytes:0]u8 = undefined;
     const target = args[0].string.bytes();
     const linkpath = args[1].string.bytes();
-    if (target.len >= t.len or linkpath.len >= l.len) return .{ .bool = false };
+    if (target.len >= t.len or linkpath.len >= l.len) return NativeResult.scalar(.{ .bool = false });
     @memcpy(t[0..target.len], target);
     t[target.len] = 0;
     @memcpy(l[0..linkpath.len], linkpath);
     l[linkpath.len] = 0;
-    return .{ .bool = std.c.link(&t, &l) == 0 };
+    return NativeResult.scalar(.{ .bool = std.c.link(&t, &l) == 0 });
 }
 
 fn buildStatArray(ctx: *NativeContext, st: *const std.c.Stat) !*PhpArray {
@@ -2812,37 +2797,35 @@ fn buildStatArray(ctx: *NativeContext, st: *const std.c.Stat) !*PhpArray {
     return arr;
 }
 
-fn native_lstat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_lstat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
     var pbuf: [std.fs.max_path_bytes:0]u8 = undefined;
-    if (path.len >= pbuf.len) return .{ .bool = false };
+    if (path.len >= pbuf.len) return NativeResult.scalar(.{ .bool = false });
     @memcpy(pbuf[0..path.len], path);
     pbuf[path.len] = 0;
     var st: std.c.Stat = undefined;
-    if (lstat(&pbuf, &st) != 0) return .{ .bool = false };
-    return .{ .array = try buildStatArray(ctx, &st) };
+    if (lstat(&pbuf, &st) != 0) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.borrowed(.{ .array = try buildStatArray(ctx, &st) });
 }
 
-fn native_readlink(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_readlink(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const target = std.fs.cwd().readLink(args[0].string.bytes(), &buf) catch return Value{ .bool = false };
-    const result = ctx.vm.allocator.dupe(u8, target) catch return .{ .bool = false };
-    try ctx.vm.strings.append(ctx.vm.allocator, result);
-    return .{ .string = Value.String.borrowed(result) };
+    const target = std.fs.cwd().readLink(args[0].string.bytes(), &buf) catch return NativeResult.scalar(.{ .bool = false });
+    return try NativeResult.copyString(ctx.allocator, target);
 }
 
-fn native_tmpfile(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_tmpfile(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const dir = std.posix.getenv("TMPDIR") orelse "/tmp";
-    const path = std.fmt.allocPrint(ctx.vm.allocator, "{s}/zphp_tmpfile_{d}_{d}", .{ dir, std.time.nanoTimestamp(), std.crypto.random.int(u32) }) catch return .{ .bool = false };
+    const path = std.fmt.allocPrint(ctx.vm.allocator, "{s}/zphp_tmpfile_{d}_{d}", .{ dir, std.time.nanoTimestamp(), std.crypto.random.int(u32) }) catch return NativeResult.scalar(.{ .bool = false });
     try ctx.vm.strings.append(ctx.vm.allocator, path);
     var open_args: [2]Value = .{ .{ .string = Value.String.borrowed(path) }, .{ .string = Value.String.borrowed("w+b") } };
     const handle = try native_fopen(ctx, open_args[0..2]);
     return handle;
 }
 
-fn native_tempnam(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_tempnam(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const dir = if (args.len > 0 and args[0] == .string) args[0].string.bytes() else "/tmp";
     const prefix = if (args.len > 1 and args[1] == .string) args[1].string.bytes() else "tmp";
     var rng = std.Random.DefaultPrng.init(@intCast(std.time.nanoTimestamp() & 0x7fff_ffff_ffff_ffff));
@@ -2855,13 +2838,12 @@ fn native_tempnam(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const candidate = std.fmt.allocPrint(ctx.vm.allocator, "{s}/{s}{s}", .{ dir, prefix, &buf }) catch continue;
         if (std.fs.cwd().createFile(candidate, .{ .exclusive = true, .mode = 0o600 })) |file| {
             file.close();
-            try ctx.vm.strings.append(ctx.vm.allocator, candidate);
-            return .{ .string = Value.String.borrowed(candidate) };
+            return NativeResult.takeString(try Value.String.adopt(ctx.vm.allocator, candidate));
         } else |_| {
             ctx.vm.allocator.free(candidate);
         }
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
 const StdioBehavior = enum { capture, inherit };
@@ -2942,27 +2924,27 @@ fn makePopenWriteHandle(ctx: *NativeContext, command: []const u8) !*PhpObject {
     return obj;
 }
 
-fn native_popen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+fn native_popen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     const cmd = args[0].string.bytes();
     const mode = args[1].string.bytes();
     if (mode.len > 0 and (mode[0] == 'r')) {
-        const result = runShellCapture(ctx.allocator, cmd, null) catch return .{ .bool = false };
+        const result = runShellCapture(ctx.allocator, cmd, null) catch return NativeResult.scalar(.{ .bool = false });
         ctx.allocator.free(result.stderr);
         try ctx.vm.strings.append(ctx.allocator, result.stdout);
         const obj = try makeReadBufferHandle(ctx, result.stdout);
         try obj.set(ctx.allocator, "__popen_exit", .{ .int = result.exit });
-        return .{ .object = obj };
+        return NativeResult.borrowed(.{ .object = obj });
     }
     if (mode.len > 0 and (mode[0] == 'w')) {
         const obj = try makePopenWriteHandle(ctx, cmd);
-        return .{ .object = obj };
+        return NativeResult.borrowed(.{ .object = obj });
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_pclose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .object) return .{ .int = -1 };
+fn native_pclose(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.{ .int = -1 });
     const obj = args[0].object;
     const cmd_v = obj.get("__popen_cmd");
     if (cmd_v == .string) {
@@ -2973,17 +2955,17 @@ fn native_pclose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         flushVmOutputForInheritedChild(ctx.vm, .inherit, .inherit);
         const result = runShellWith(ctx.allocator, cmd_v.string.bytes(), stdin_data, .inherit, .inherit) catch {
             obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
-            return .{ .int = -1 };
+            return NativeResult.scalar(.{ .int = -1 });
         };
         ctx.allocator.free(result.stdout);
         ctx.allocator.free(result.stderr);
         obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
-        return .{ .int = result.exit };
+        return NativeResult.scalar(.{ .int = result.exit });
     }
     const exit_v = obj.get("__popen_exit");
     obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
-    if (exit_v == .int) return .{ .int = exit_v.int };
-    return .{ .int = 0 };
+    if (exit_v == .int) return NativeResult.scalar(.{ .int = exit_v.int });
+    return NativeResult.scalar(.{ .int = 0 });
 }
 
 const FdDesc = union(enum) {
@@ -3141,8 +3123,8 @@ fn forkExecDesc(allocator: std.mem.Allocator, cmd: []const u8, specs: []const Pr
     return .{ .pid = pid, .pipe_fds = pipes };
 }
 
-fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 3 or args[0] != .string) return .{ .bool = false };
+fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 3 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const cmd = args[0].string.bytes();
 
     const proc = try ctx.createObject("ProcessResource");
@@ -3217,7 +3199,7 @@ fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Value
         try proc.set(ctx.allocator, "__reaped", .{ .bool = true });
         try proc.set(ctx.allocator, "__running", .{ .bool = false });
         try proc.set(ctx.allocator, "__exit", .{ .int = -1 });
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     };
     try ctx.vm.registerProcChild(proc, spawned.pid, spawned.pipe_fds);
     try proc.set(ctx.allocator, "__pid", .{ .int = @intCast(spawned.pid) });
@@ -3255,7 +3237,7 @@ fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     }
 
     ctx.setCallerVar(2, args.len, .{ .array = pipes });
-    return .{ .object = proc };
+    return NativeResult.borrowed(.{ .object = proc });
 }
 
 const PosixW = std.posix.W;
@@ -3277,13 +3259,13 @@ fn cacheProcTerm(ctx: *NativeContext, proc: *PhpObject, status: u32) void {
     }
 }
 
-fn native_proc_close(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .object) return .{ .int = -1 };
+fn native_proc_close(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.{ .int = -1 });
     const obj = args[0].object;
     const pc = ctx.vm.lookupProcChild(obj) orelse {
         // already finalized (or spawn failed) - return the cached exit
         const cached = obj.get("__exit");
-        return .{ .int = if (cached == .int) cached.int else 0 };
+        return NativeResult.scalar(.{ .int = if (cached == .int) cached.int else 0 });
     };
     // close stdin first so the child sees EOF and can finish
     for (pc.pipe_fds.items) |*pipe| if (pipe.role == 0 and pipe.fd != -1) {
@@ -3304,11 +3286,11 @@ fn native_proc_close(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
     pc.pipe_fds.deinit(ctx.allocator);
     ctx.vm.removeProcChild(obj);
     const exit = obj.get("__exit");
-    return .{ .int = if (exit == .int) exit.int else 0 };
+    return NativeResult.scalar(.{ .int = if (exit == .int) exit.int else 0 });
 }
 
-fn native_proc_get_status(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+fn native_proc_get_status(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
     const obj = args[0].object;
     // non-blocking liveness poll. if the child has exited, reap the zombie (mark
     // .reaped so proc_close/reap won't wait again -> ECHILD) and cache the exit,
@@ -3343,39 +3325,39 @@ fn native_proc_get_status(ctx: *NativeContext, args: []const Value) RuntimeError
     try result.set(ctx.allocator, .{ .string = Value.String.borrowed("exitcode") }, if (!running and exit == .int) exit else .{ .int = -1 });
     try result.set(ctx.allocator, .{ .string = Value.String.borrowed("termsig") }, if (termsig == .int) termsig else .{ .int = 0 });
     try result.set(ctx.allocator, .{ .string = Value.String.borrowed("stopsig") }, .{ .int = 0 });
-    return .{ .array = result };
+    return NativeResult.borrowed(.{ .array = result });
 }
 
-fn native_proc_terminate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+fn native_proc_terminate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
     const sig: u8 = if (args.len >= 2 and args[1] == .int) @intCast(args[1].int) else std.posix.SIG.TERM;
     if (ctx.vm.lookupProcChild(args[0].object)) |pc| {
-        std.posix.kill(pc.pid, sig) catch return .{ .bool = false };
+        std.posix.kill(pc.pid, sig) catch return NativeResult.scalar(.{ .bool = false });
     }
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_stream_set_blocking(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .object) return .{ .bool = false };
-    const file = getFileHandle(args[0].object) orelse return .{ .bool = false };
+fn native_stream_set_blocking(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
+    const file = getFileHandle(args[0].object) orelse return NativeResult.scalar(.{ .bool = false });
     const enable = args[1].isTruthy();
     const O_NONBLOCK: u32 = if (@import("builtin").os.tag == .linux) 0x800 else 0x4;
-    const flags = std.posix.fcntl(file.handle, 3, 0) catch return .{ .bool = false };
+    const flags = std.posix.fcntl(file.handle, 3, 0) catch return NativeResult.scalar(.{ .bool = false });
     const new_flags = if (enable) flags & ~@as(usize, O_NONBLOCK) else flags | O_NONBLOCK;
-    _ = std.posix.fcntl(file.handle, 4, new_flags) catch return .{ .bool = false };
-    return .{ .bool = true };
+    _ = std.posix.fcntl(file.handle, 4, new_flags) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_stream_set_timeout(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = true };
+fn native_stream_set_timeout(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_stream_set_read_buffer(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .int = 0 };
+fn native_stream_set_read_buffer(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .int = 0 });
 }
 
-fn native_stream_set_write_buffer(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .int = 0 };
+fn native_stream_set_write_buffer(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .int = 0 });
 }
 
 const MimeEntry = struct { ext: []const u8, mime: []const u8 };
@@ -3465,86 +3447,86 @@ fn detectMimeFromBytes(data: []const u8) ?[]const u8 {
     return null;
 }
 
-fn native_mime_content_type(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_mime_content_type(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
     const file = std.fs.cwd().openFile(path, .{}) catch {
-        return .{ .string = Value.String.borrowed(try ctx.createString(mimeFromExt(path))) };
+        return try NativeResult.copyString(ctx.allocator, mimeFromExt(path));
     };
     defer file.close();
     var buf: [16]u8 = undefined;
-    const n = file.read(&buf) catch return .{ .string = Value.String.borrowed(try ctx.createString(mimeFromExt(path))) };
-    if (detectMimeFromBytes(buf[0..n])) |m| return .{ .string = Value.String.borrowed(try ctx.createString(m)) };
-    return .{ .string = Value.String.borrowed(try ctx.createString(mimeFromExt(path))) };
+    const n = file.read(&buf) catch return try NativeResult.copyString(ctx.allocator, mimeFromExt(path));
+    if (detectMimeFromBytes(buf[0..n])) |m| return try NativeResult.copyString(ctx.allocator, m);
+    return try NativeResult.copyString(ctx.allocator, mimeFromExt(path));
 }
 
 extern fn zphp_disk_space(path: [*:0]const u8, free_bytes: *u64, total_bytes: *u64) c_int;
 
-fn native_disk_free_space(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_disk_free_space(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path_z = try ctx.allocator.allocSentinel(u8, args[0].string.bytes().len, 0);
     defer ctx.allocator.free(path_z);
     @memcpy(path_z[0..args[0].string.bytes().len], args[0].string.bytes());
     var free_bytes: u64 = 0;
     var total_bytes: u64 = 0;
-    if (zphp_disk_space(path_z, &free_bytes, &total_bytes) != 0) return .{ .bool = false };
-    return .{ .float = @floatFromInt(free_bytes) };
+    if (zphp_disk_space(path_z, &free_bytes, &total_bytes) != 0) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .float = @floatFromInt(free_bytes) });
 }
 
-fn native_disk_total_space(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_disk_total_space(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path_z = try ctx.allocator.allocSentinel(u8, args[0].string.bytes().len, 0);
     defer ctx.allocator.free(path_z);
     @memcpy(path_z[0..args[0].string.bytes().len], args[0].string.bytes());
     var free_bytes: u64 = 0;
     var total_bytes: u64 = 0;
-    if (zphp_disk_space(path_z, &free_bytes, &total_bytes) != 0) return .{ .bool = false };
-    return .{ .float = @floatFromInt(total_bytes) };
+    if (zphp_disk_space(path_z, &free_bytes, &total_bytes) != 0) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .float = @floatFromInt(total_bytes) });
 }
 
-fn native_linkinfo(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .int = -1 };
-    const stat = std.fs.cwd().statFile(args[0].string.bytes()) catch return .{ .int = -1 };
-    return .{ .int = @intCast(stat.inode) };
+fn native_linkinfo(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .int = -1 });
+    const stat = std.fs.cwd().statFile(args[0].string.bytes()) catch return NativeResult.scalar(.{ .int = -1 });
+    return NativeResult.scalar(.{ .int = @intCast(stat.inode) });
 }
 
-fn native_finfo_open(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_finfo_open(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = try ctx.allocator.create(PhpObject);
     obj.* = .{ .class_name = "finfo" };
     try ctx.vm.objects.append(ctx.allocator, obj);
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn native_finfo_file(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[1] != .string) return .{ .bool = false };
+fn native_finfo_file(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     return native_mime_content_type(ctx, &.{args[1]});
 }
 
-fn native_finfo_buffer(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[1] != .string) return .{ .bool = false };
-    if (detectMimeFromBytes(args[1].string.bytes())) |m| return .{ .string = Value.String.borrowed(try ctx.createString(m)) };
-    return .{ .string = Value.String.borrowed("application/octet-stream") };
+fn native_finfo_buffer(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
+    if (detectMimeFromBytes(args[1].string.bytes())) |m| return try NativeResult.copyString(ctx.allocator, m);
+    return NativeResult.literal("application/octet-stream");
 }
 
-fn native_finfo_close(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = true };
+fn native_finfo_close(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn finfoConstruct(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .null;
+fn finfoConstruct(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.null);
 }
 
-fn finfoFile(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+fn finfoFile(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     return native_mime_content_type(ctx, args[0..1]);
 }
 
-fn finfoBuffer(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
-    if (detectMimeFromBytes(args[0].string.bytes())) |m| return .{ .string = Value.String.borrowed(try ctx.createString(m)) };
-    return .{ .string = Value.String.borrowed("application/octet-stream") };
+fn finfoBuffer(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    if (detectMimeFromBytes(args[0].string.bytes())) |m| return try NativeResult.copyString(ctx.allocator, m);
+    return NativeResult.literal("application/octet-stream");
 }
 
-fn finfoNoop(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = true };
+fn finfoNoop(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = true });
 }

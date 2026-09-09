@@ -1,3 +1,4 @@
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
@@ -140,9 +141,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ErrorException::getSeverity", errorExceptionGetSeverity);
 }
 
-fn errorExceptionConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return .null;
-    if (this_val != .object) return .null;
+fn errorExceptionConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.scalar(.null);
+    if (this_val != .object) return NativeResult.scalar(.null);
     const obj = this_val.object;
     if (args.len >= 1) try obj.set(ctx.allocator, "message", args[0]);
     if (args.len >= 2) try obj.set(ctx.allocator, "code", args[1]);
@@ -150,19 +151,19 @@ fn errorExceptionConstruct(ctx: *NativeContext, args: []const Value) RuntimeErro
     if (args.len >= 4) try obj.set(ctx.allocator, "file", args[3]);
     if (args.len >= 5) try obj.set(ctx.allocator, "line", args[4]);
     if (args.len >= 6) try obj.set(ctx.allocator, "previous", args[5]);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn errorExceptionGetSeverity(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return .{ .int = 0 };
-    if (this_val != .object) return .{ .int = 0 };
+fn errorExceptionGetSeverity(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.scalar(.{ .int = 0 });
+    if (this_val != .object) return NativeResult.scalar(.{ .int = 0 });
     const sev = this_val.object.get("severity");
-    return if (sev == .int) sev else .{ .int = 0 };
+    return NativeResult.scalar(if (sev == .int) sev else .{ .int = 0 });
 }
 
-fn exceptionConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return .null;
-    if (this_val != .object) return .null;
+fn exceptionConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.scalar(.null);
+    if (this_val != .object) return NativeResult.scalar(.null);
     const obj = this_val.object;
     if (args.len >= 1) try obj.set(ctx.allocator, "message", args[0]);
     if (args.len >= 2) try obj.set(ctx.allocator, "code", args[1]);
@@ -181,7 +182,7 @@ fn exceptionConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Val
         }
     }
     try buildAndAttachTrace(ctx, obj);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 // read a still-live frame's bound parameter value by name, checking the
@@ -248,17 +249,16 @@ fn buildAndAttachTrace(ctx: *NativeContext, obj: *@import("../runtime/value.zig"
     try obj.setForScope(ctx.vm.allocator, "trace", .{ .array = arr }, ctx.vm.exceptionTraceScope(obj));
 }
 
-fn exceptionGetMessage(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return .null;
-    if (this_val != .object) return .null;
+fn exceptionGetMessage(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.scalar(.null);
+    if (this_val != .object) return NativeResult.scalar(.null);
     const message = this_val.object.get("message");
-    if (message == .string) message.string.retain();
-    return message;
+    return if (message == .string) NativeResult.shareString(message.string) else NativeResult.borrowed(message);
 }
 
-fn exceptionToString(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return .{ .string = Value.String.borrowed("") };
-    if (this_val != .object) return .{ .string = Value.String.borrowed("") };
+fn exceptionToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.literal("");
+    if (this_val != .object) return NativeResult.literal("");
     const obj = this_val.object;
     const msg = obj.get("message");
     const msg_str = if (msg == .string) msg.string.bytes() else "";
@@ -267,52 +267,52 @@ fn exceptionToString(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const line = obj.get("line");
     const line_int = if (line == .int) line.int else 0;
     const s = try std.fmt.allocPrint(ctx.allocator, "{s}: {s} in {s}:{d}\nStack trace:\n#0 {{main}}", .{ obj.class_name, msg_str, file_str, line_int });
-    try ctx.vm.strings.append(ctx.allocator, s);
-    return .{ .string = Value.String.borrowed(s) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, s));
 }
 
-fn exceptionGetCode(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return .null;
-    if (this_val != .object) return .null;
-    return this_val.object.get("code");
+fn exceptionGetCode(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.scalar(.null);
+    if (this_val != .object) return NativeResult.scalar(.null);
+    const value = this_val.object.get("code");
+    return if (value == .string) NativeResult.shareString(value.string) else NativeResult.borrowed(value);
 }
 
-fn exceptionGetPrevious(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return .null;
-    if (this_val != .object) return .null;
-    return this_val.object.get("previous");
+fn exceptionGetPrevious(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.scalar(.null);
+    if (this_val != .object) return NativeResult.scalar(.null);
+    return NativeResult.borrowed(this_val.object.get("previous"));
 }
 
-fn exceptionGetFile(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return .null;
-    if (this_val != .object) return .null;
+fn exceptionGetFile(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.scalar(.null);
+    if (this_val != .object) return NativeResult.scalar(.null);
     const v = this_val.object.get("file");
-    return if (v == .string) v else .{ .string = Value.String.borrowed("") };
+    return if (v == .string) NativeResult.shareString(v.string) else NativeResult.literal("");
 }
 
-fn exceptionGetLine(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return .null;
-    if (this_val != .object) return .null;
+fn exceptionGetLine(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.scalar(.null);
+    if (this_val != .object) return NativeResult.scalar(.null);
     const v = this_val.object.get("line");
-    return if (v == .int) v else .{ .int = 0 };
+    return NativeResult.scalar(if (v == .int) v else .{ .int = 0 });
 }
 
-fn exceptionGetTrace(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn exceptionGetTrace(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const PhpArray = @import("../runtime/value.zig").PhpArray;
     const this_val = ctx.vm.currentFrame().vars.get("$this") orelse {
         const arr = try ctx.vm.allocator.create(PhpArray);
         arr.* = .{};
         try ctx.vm.arrays.append(ctx.vm.allocator, arr);
-        return .{ .array = arr };
+        return NativeResult.borrowed(.{ .array = arr });
     };
     if (this_val == .object) {
         const t = this_val.object.getForScope("trace", ctx.vm.exceptionTraceScope(this_val.object));
-        if (t == .array) return t;
+        if (t == .array) return NativeResult.borrowed(t);
     }
     const arr = try ctx.vm.allocator.create(PhpArray);
     arr.* = .{};
     try ctx.vm.arrays.append(ctx.vm.allocator, arr);
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
 // render a single call argument the way PHP's exception trace does: quoted
@@ -344,9 +344,9 @@ fn formatTraceArg(buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, v:
     }
 }
 
-fn exceptionGetTraceAsString(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return .{ .string = Value.String.borrowed("") };
-    if (this_val != .object) return .{ .string = Value.String.borrowed("") };
+fn exceptionGetTraceAsString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.literal("");
+    if (this_val != .object) return NativeResult.literal("");
     const t = this_val.object.getForScope("trace", ctx.vm.exceptionTraceScope(this_val.object));
     var buf: std.ArrayListUnmanaged(u8) = .{};
     defer buf.deinit(ctx.allocator);
@@ -386,7 +386,5 @@ fn exceptionGetTraceAsString(ctx: *NativeContext, _: []const Value) RuntimeError
     } else {
         try buf.appendSlice(ctx.allocator, "#0 {main}");
     }
-    const owned = try ctx.allocator.dupe(u8, buf.items);
-    try ctx.vm.strings.append(ctx.allocator, owned);
-    return .{ .string = Value.String.borrowed(owned) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, try buf.toOwnedSlice(ctx.allocator)));
 }

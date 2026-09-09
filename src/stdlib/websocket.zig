@@ -7,6 +7,7 @@ const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
 const ws = @import("../websocket.zig");
 const tls = @import("../tls.zig");
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
@@ -48,22 +49,22 @@ fn getWriter(obj: *PhpObject) ?WsWriter {
     return .{ .fd = @intCast(fd_val.int), .ssl = ssl_ptr };
 }
 
-fn wsSend(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn wsSend(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const closed = obj.get("__ws_closed");
-    if (closed == .bool and closed.bool) return .null;
-    var writer = getWriter(obj) orelse return .null;
-    if (args.len < 1 or args[0] != .string) return .null;
-    ws.writeFrame(&writer, .text, args[0].string.bytes()) catch return .null;
-    return .null;
+    if (closed == .bool and closed.bool) return NativeResult.scalar(.null);
+    var writer = getWriter(obj) orelse return NativeResult.scalar(.null);
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
+    ws.writeFrame(&writer, .text, args[0].string.bytes()) catch return NativeResult.scalar(.null);
+    return NativeResult.scalar(.null);
 }
 
-fn wsClose(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn wsClose(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const closed = obj.get("__ws_closed");
-    if (closed == .bool and closed.bool) return .null;
-    var writer = getWriter(obj) orelse return .null;
+    if (closed == .bool and closed.bool) return NativeResult.scalar(.null);
+    var writer = getWriter(obj) orelse return NativeResult.scalar(.null);
     ws.writeCloseFrame(&writer, 1000) catch {};
     try obj.set(ctx.allocator, "__ws_closed", .{ .bool = true });
-    return .null;
+    return NativeResult.scalar(.null);
 }

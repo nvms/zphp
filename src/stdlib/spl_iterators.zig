@@ -4,6 +4,7 @@ const PhpArray = @import("../runtime/value.zig").PhpArray;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
 const vm_mod = @import("../runtime/vm.zig");
 const VM = vm_mod.VM;
+const NativeResult = vm_mod.NativeResult;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
 
@@ -461,12 +462,6 @@ fn getThis(ctx: *NativeContext) ?*PhpObject {
     return v.object;
 }
 
-fn createString(ctx: *NativeContext, s: []const u8) ![]const u8 {
-    const copy = try ctx.allocator.dupe(u8, s);
-    try ctx.vm.strings.append(ctx.allocator, copy);
-    return copy;
-}
-
 fn objGetStr(obj: *PhpObject, key: []const u8) []const u8 {
     const v = obj.get(key);
     if (v == .string) return v.string.bytes();
@@ -480,10 +475,10 @@ fn objGetInt(obj: *PhpObject, key: []const u8) i64 {
 }
 
 fn createFileInfoObj(ctx: *NativeContext, pathname: []const u8) !*PhpObject {
-    const obj = try ctx.allocator.create(PhpObject);
-    obj.* = .{ .class_name = "SplFileInfo" };
-    try ctx.vm.objects.append(ctx.allocator, obj);
-    try obj.set(ctx.allocator, "__pathname", .{ .string = Value.String.borrowed(try createString(ctx, pathname)) });
+    const obj = try ctx.createObject("SplFileInfo");
+    const path = try Value.String.create(ctx.allocator, pathname);
+    defer path.release();
+    try obj.set(ctx.allocator, "__pathname", .{ .string = path });
     return obj;
 }
 
@@ -517,30 +512,30 @@ fn statPath(path: []const u8) ?std.fs.File.Stat {
 // SplFileInfo
 // ==========================================
 
-fn fiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1 or args[0] != .string) return .null;
-    try obj.set(ctx.allocator, "__pathname", .{ .string = Value.String.borrowed(try createString(ctx, args[0].string.bytes())) });
-    return .null;
+fn fiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
+    try obj.set(ctx.allocator, "__pathname", args[0]);
+    return NativeResult.scalar(.null);
 }
 
-fn fiGetFilename(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn fiGetFilename(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const path = objGetStr(obj, "__pathname");
-    return .{ .string = Value.String.borrowed(try createString(ctx, basename(path))) };
+    return NativeResult.copyString(ctx.allocator, basename(path));
 }
 
-fn fiGetExtension(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn fiGetExtension(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const name = basename(objGetStr(obj, "__pathname"));
     if (std.mem.lastIndexOfScalar(u8, name, '.')) |idx| {
-        return .{ .string = Value.String.borrowed(try createString(ctx, name[idx + 1 ..])) };
+        return NativeResult.copyString(ctx.allocator, name[idx + 1 ..]);
     }
-    return .{ .string = Value.String.borrowed("") };
+    return NativeResult.literal("");
 }
 
-fn fiGetBasename(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn fiGetBasename(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     var name = basename(objGetStr(obj, "__pathname"));
     if (args.len >= 1 and args[0] == .string) {
         const suffix = args[0].string.bytes();
@@ -548,132 +543,126 @@ fn fiGetBasename(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             name = name[0 .. name.len - suffix.len];
         }
     }
-    return .{ .string = Value.String.borrowed(try createString(ctx, name)) };
+    return NativeResult.copyString(ctx.allocator, name);
 }
 
-fn fiGetPathname(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    return .{ .string = Value.String.borrowed(objGetStr(obj, "__pathname")) };
+fn fiGetPathname(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(obj.get("__pathname"));
 }
 
-fn fiGetPath(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    return .{ .string = Value.String.borrowed(try createString(ctx, dirname(objGetStr(obj, "__pathname")))) };
+fn fiGetPath(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.copyString(ctx.allocator, dirname(objGetStr(obj, "__pathname")));
 }
 
-fn fiGetRealPath(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn fiGetRealPath(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const path = objGetStr(obj, "__pathname");
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const real = std.fs.cwd().realpath(path, &buf) catch return .{ .bool = false };
-    return .{ .string = Value.String.borrowed(try createString(ctx, real)) };
+    const real = std.fs.cwd().realpath(path, &buf) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.copyString(ctx.allocator, real);
 }
 
-fn fiGetSize(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const stat = statPath(objGetStr(obj, "__pathname")) orelse return .{ .int = 0 };
-    return .{ .int = @intCast(stat.size) };
+fn fiGetSize(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const stat = statPath(objGetStr(obj, "__pathname")) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = @intCast(stat.size) });
 }
 
-fn fiIsDir(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn fiIsDir(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const path = objGetStr(obj, "__pathname");
-    const stat = statPath(path) orelse return .{ .bool = false };
-    return .{ .bool = stat.kind == .directory };
+    const stat = statPath(path) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = stat.kind == .directory });
 }
 
-fn fiIsFile(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn fiIsFile(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const path = objGetStr(obj, "__pathname");
-    const stat = statPath(path) orelse return .{ .bool = false };
-    return .{ .bool = stat.kind == .file };
+    const stat = statPath(path) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = stat.kind == .file });
 }
 
-fn fiIsLink(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn fiIsLink(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const path = objGetStr(obj, "__pathname");
-    const stat = statPath(path) orelse return .{ .bool = false };
-    return .{ .bool = stat.kind == .sym_link };
+    const stat = statPath(path) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = stat.kind == .sym_link });
 }
 
-fn fiIsReadable(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = true };
+fn fiIsReadable(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn fiIsWritable(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = true };
+fn fiIsWritable(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn fiGetMTime(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    const stat = statPath(objGetStr(obj, "__pathname")) orelse return .{ .int = 0 };
-    return .{ .int = @intCast(@divTrunc(stat.mtime, std.time.ns_per_s)) };
+fn fiGetMTime(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    const stat = statPath(objGetStr(obj, "__pathname")) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = @intCast(@divTrunc(stat.mtime, std.time.ns_per_s)) });
 }
 
-fn fiGetCTime(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    const stat = statPath(objGetStr(obj, "__pathname")) orelse return .{ .int = 0 };
-    return .{ .int = @intCast(@divTrunc(stat.ctime, std.time.ns_per_s)) };
+fn fiGetCTime(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    const stat = statPath(objGetStr(obj, "__pathname")) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = @intCast(@divTrunc(stat.ctime, std.time.ns_per_s)) });
 }
 
-fn fiGetATime(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    const stat = statPath(objGetStr(obj, "__pathname")) orelse return .{ .int = 0 };
-    return .{ .int = @intCast(@divTrunc(stat.atime, std.time.ns_per_s)) };
+fn fiGetATime(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    const stat = statPath(objGetStr(obj, "__pathname")) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = @intCast(@divTrunc(stat.atime, std.time.ns_per_s)) });
 }
 
-fn fiGetType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .string = Value.String.borrowed("unknown") };
-    const stat = statPath(objGetStr(obj, "__pathname")) orelse return .{ .string = Value.String.borrowed("unknown") };
-    return .{ .string = Value.String.borrowed(switch (stat.kind) {
-        .directory => "dir",
-        .file => "file",
-        .sym_link => "link",
-        else => "unknown",
-    }) };
+fn fiGetType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.literal("unknown");
+    const stat = statPath(objGetStr(obj, "__pathname")) orelse return NativeResult.literal("unknown");
+    return switch (stat.kind) {
+        .directory => NativeResult.literal("dir"),
+        .file => NativeResult.literal("file"),
+        .sym_link => NativeResult.literal("link"),
+        else => NativeResult.literal("unknown"),
+    };
 }
 
-fn fiToString(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .string = Value.String.borrowed("") };
-    return .{ .string = Value.String.borrowed(objGetStr(obj, "__pathname")) };
+fn fiToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.literal("");
+    return NativeResult.share(obj.get("__pathname"));
 }
 
-fn fiOpenFile(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const this = getThis(ctx) orelse return .null;
+fn fiOpenFile(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const path = objGetStr(this, "__pathname");
     const mode: Value = if (args.len >= 1 and args[0] == .string) args[0] else .{ .string = Value.String.borrowed("r") };
-    const class_name = try createString(ctx, "SplFileObject");
-    const obj = try ctx.vm.allocator.create(@import("../runtime/value.zig").PhpObject);
-    obj.* = .{ .class_name = class_name };
-    try ctx.vm.objects.append(ctx.vm.allocator, obj);
-    try ctx.vm.initObjectProperties(obj, class_name);
+    const obj = try ctx.createObject("SplFileObject");
     _ = try ctx.vm.callMethod(obj, "__construct", &.{ .{ .string = Value.String.borrowed(path) }, mode });
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
 // ==========================================
 // DirectoryIterator
 // ==========================================
 
-fn diConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1 or args[0] != .string) return .null;
+fn diConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
     const path = args[0].string.bytes();
-    try obj.set(ctx.allocator, "__di_path", .{ .string = Value.String.borrowed(try createString(ctx, path)) });
+    try obj.set(ctx.allocator, "__di_path", args[0]);
     try obj.set(ctx.allocator, "__di_idx", .{ .int = 0 });
 
     const entries = try loadDirectoryEntries(ctx, path, 0);
     try obj.set(ctx.allocator, "__di_entries", .{ .array = entries });
     try syncCurrentEntry(ctx, obj);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 const SKIP_DOTS: i64 = 0x1000;
 
 fn loadDirectoryEntries(ctx: *NativeContext, path: []const u8, flags: i64) RuntimeError!*PhpArray {
-    const arr = try ctx.allocator.create(PhpArray);
-    arr.* = .{};
-    try ctx.vm.arrays.append(ctx.allocator, arr);
+    const arr = try ctx.createArray();
 
     var dir = std.fs.cwd().openDir(path, .{ .iterate = true }) catch return arr;
     defer dir.close();
@@ -682,12 +671,11 @@ fn loadDirectoryEntries(ctx: *NativeContext, path: []const u8, flags: i64) Runti
     if (!skip_dots) {
         inline for (.{ ".", ".." }) |dot_name| {
             const dot_full = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ path, dot_name });
-            try ctx.vm.strings.append(ctx.allocator, dot_full);
-            const dot_entry = try ctx.allocator.create(PhpArray);
-            dot_entry.* = .{};
-            try ctx.vm.arrays.append(ctx.allocator, dot_entry);
+            const dot_full_owned = try Value.String.adopt(ctx.allocator, dot_full);
+            defer dot_full_owned.release();
+            const dot_entry = try ctx.createArray();
             try dot_entry.set(ctx.allocator, .{ .string = Value.String.borrowed("name") }, .{ .string = Value.String.borrowed(dot_name) });
-            try dot_entry.set(ctx.allocator, .{ .string = Value.String.borrowed("path") }, .{ .string = Value.String.borrowed(dot_full) });
+            try dot_entry.set(ctx.allocator, .{ .string = Value.String.borrowed("path") }, .{ .string = dot_full_owned });
             try dot_entry.set(ctx.allocator, .{ .string = Value.String.borrowed("is_dir") }, .{ .bool = true });
             try arr.append(ctx.allocator, .{ .array = dot_entry });
         }
@@ -698,14 +686,15 @@ fn loadDirectoryEntries(ctx: *NativeContext, path: []const u8, flags: i64) Runti
         if (skip_dots and (std.mem.eql(u8, entry.name, ".") or std.mem.eql(u8, entry.name, ".."))) continue;
 
         const full = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ path, entry.name });
-        try ctx.vm.strings.append(ctx.allocator, full);
+        const full_owned = try Value.String.adopt(ctx.allocator, full);
+        defer full_owned.release();
 
         const is_dir: bool = entry.kind == .directory;
-        const entry_arr = try ctx.allocator.create(PhpArray);
-        entry_arr.* = .{};
-        try ctx.vm.arrays.append(ctx.allocator, entry_arr);
-        try entry_arr.set(ctx.allocator, .{ .string = Value.String.borrowed("name") }, .{ .string = Value.String.borrowed(try createString(ctx, entry.name)) });
-        try entry_arr.set(ctx.allocator, .{ .string = Value.String.borrowed("path") }, .{ .string = Value.String.borrowed(full) });
+        const entry_arr = try ctx.createArray();
+        const name = try Value.String.create(ctx.allocator, entry.name);
+        defer name.release();
+        try entry_arr.set(ctx.allocator, .{ .string = Value.String.borrowed("name") }, .{ .string = name });
+        try entry_arr.set(ctx.allocator, .{ .string = Value.String.borrowed("path") }, .{ .string = full_owned });
         try entry_arr.set(ctx.allocator, .{ .string = Value.String.borrowed("is_dir") }, .{ .bool = is_dir });
 
         try arr.append(ctx.allocator, .{ .array = entry_arr });
@@ -721,92 +710,92 @@ fn syncCurrentEntry(ctx: *NativeContext, obj: *PhpObject) !void {
     if (entry != .array) return;
     const path_val = entry.array.get(.{ .string = Value.String.borrowed("path") });
     if (path_val == .string) {
-        try obj.set(ctx.allocator, "__pathname", .{ .string = path_val.string });
+        try obj.set(ctx.allocator, "__pathname", path_val);
     }
 }
 
-fn fsiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1 or args[0] != .string) return .null;
+fn fsiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
     const path = args[0].string.bytes();
-    try obj.set(ctx.allocator, "__di_path", .{ .string = Value.String.borrowed(try createString(ctx, path)) });
+    try obj.set(ctx.allocator, "__di_path", args[0]);
     try obj.set(ctx.allocator, "__di_idx", .{ .int = 0 });
     // FilesystemIterator skips dots by default
     const entries = try loadDirectoryEntries(ctx, path, SKIP_DOTS);
     try obj.set(ctx.allocator, "__di_entries", .{ .array = entries });
     try syncCurrentEntry(ctx, obj);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn diRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn diRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__di_idx", .{ .int = 0 });
     try syncCurrentEntry(ctx, obj);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn diCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn diCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // PHP's DirectoryIterator::current() returns the iterator itself
     // so methods like isDot(), getFilename(), getPathname() work on $entry
-    const obj = getThis(ctx) orelse return .null;
-    const entries = if (obj.get("__di_entries") == .array) obj.get("__di_entries").array else return .null;
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const entries = if (obj.get("__di_entries") == .array) obj.get("__di_entries").array else return NativeResult.scalar(.null);
     const idx: usize = @intCast(@max(0, objGetInt(obj, "__di_idx")));
-    if (idx >= entries.length()) return .{ .bool = false };
-    return .{ .object = obj };
+    if (idx >= entries.length()) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn diKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    return .{ .int = objGetInt(obj, "__di_idx") };
+fn diKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.scalar(.{ .int = objGetInt(obj, "__di_idx") });
 }
 
-fn diNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn diNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const idx = objGetInt(obj, "__di_idx");
     try obj.set(ctx.allocator, "__di_idx", .{ .int = idx + 1 });
     try syncCurrentEntry(ctx, obj);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn diValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const entries = if (obj.get("__di_entries") == .array) obj.get("__di_entries").array else return .{ .bool = false };
+fn diValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const entries = if (obj.get("__di_entries") == .array) obj.get("__di_entries").array else return NativeResult.scalar(.{ .bool = false });
     const idx: usize = @intCast(@max(0, objGetInt(obj, "__di_idx")));
-    return .{ .bool = idx < entries.length() };
+    return NativeResult.scalar(.{ .bool = idx < entries.length() });
 }
 
-fn diIsDot(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const entries = if (obj.get("__di_entries") == .array) obj.get("__di_entries").array else return .{ .bool = false };
+fn diIsDot(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const entries = if (obj.get("__di_entries") == .array) obj.get("__di_entries").array else return NativeResult.scalar(.{ .bool = false });
     const idx: usize = @intCast(@max(0, objGetInt(obj, "__di_idx")));
-    if (idx >= entries.length()) return .{ .bool = false };
+    if (idx >= entries.length()) return NativeResult.scalar(.{ .bool = false });
     const entry = entries.get(.{ .int = @intCast(idx) });
-    if (entry != .array) return .{ .bool = false };
+    if (entry != .array) return NativeResult.scalar(.{ .bool = false });
     const name = entry.array.get(.{ .string = Value.String.borrowed("name") });
-    if (name != .string) return .{ .bool = false };
-    return .{ .bool = std.mem.eql(u8, name.string.bytes(), ".") or std.mem.eql(u8, name.string.bytes(), "..") };
+    if (name != .string) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = std.mem.eql(u8, name.string.bytes(), ".") or std.mem.eql(u8, name.string.bytes(), "..") });
 }
 
 // ==========================================
 // RecursiveDirectoryIterator
 // ==========================================
 
-fn rdiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1 or args[0] != .string) return .null;
+fn rdiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
     const path = args[0].string.bytes();
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
 
-    try obj.set(ctx.allocator, "__di_path", .{ .string = Value.String.borrowed(try createString(ctx, path)) });
+    try obj.set(ctx.allocator, "__di_path", args[0]);
     try obj.set(ctx.allocator, "__di_flags", .{ .int = flags });
     try obj.set(ctx.allocator, "__di_idx", .{ .int = 0 });
-    try obj.set(ctx.allocator, "__pathname", .{ .string = Value.String.borrowed(try createString(ctx, path)) });
-    try obj.set(ctx.allocator, "__rdi_root", .{ .string = Value.String.borrowed(try createString(ctx, path)) });
+    try obj.set(ctx.allocator, "__pathname", args[0]);
+    try obj.set(ctx.allocator, "__rdi_root", args[0]);
 
     const entries = try loadDirectoryEntries(ctx, path, flags);
     try obj.set(ctx.allocator, "__di_entries", .{ .array = entries });
     try syncCurrentEntry(ctx, obj);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 fn rdiGetCurrentEntry(obj: *PhpObject) ?*PhpArray {
@@ -818,18 +807,18 @@ fn rdiGetCurrentEntry(obj: *PhpObject) ?*PhpArray {
     return entry.array;
 }
 
-fn rdiHasChildren(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const entry = rdiGetCurrentEntry(obj) orelse return .{ .bool = false };
+fn rdiHasChildren(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const entry = rdiGetCurrentEntry(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const is_dir = entry.get(.{ .string = Value.String.borrowed("is_dir") });
-    return .{ .bool = is_dir == .bool and is_dir.bool };
+    return NativeResult.scalar(.{ .bool = is_dir == .bool and is_dir.bool });
 }
 
-fn rdiGetChildren(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const entry = rdiGetCurrentEntry(obj) orelse return .null;
+fn rdiGetChildren(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const entry = rdiGetCurrentEntry(obj) orelse return NativeResult.scalar(.null);
     const path_val = entry.get(.{ .string = Value.String.borrowed("path") });
-    if (path_val != .string) return .null;
+    if (path_val != .string) return NativeResult.scalar(.null);
     const flags = objGetInt(obj, "__di_flags");
 
     const child = try ctx.createObject(obj.class_name);
@@ -847,63 +836,64 @@ fn rdiGetChildren(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     try child.set(ctx.allocator, "__di_entries", .{ .array = entries });
     try syncCurrentEntry(ctx, child);
 
-    return .{ .object = child };
+    return NativeResult.borrowed(.{ .object = child });
 }
 
-fn rdiGetSubPath(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .string = Value.String.borrowed("") };
+fn rdiGetSubPath(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.literal("");
     // subpath is relative path from root to current directory
     const path = objGetStr(obj, "__di_path");
     const root = objGetStr(obj, "__rdi_root");
     if (root.len > 0 and std.mem.startsWith(u8, path, root)) {
         var sub = path[root.len..];
         if (sub.len > 0 and sub[0] == '/') sub = sub[1..];
-        return .{ .string = Value.String.borrowed(try createString(ctx, sub)) };
+        return NativeResult.copyString(ctx.allocator, sub);
     }
-    return .{ .string = Value.String.borrowed("") };
+    return NativeResult.literal("");
 }
 
-fn rdiGetSubPathname(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .string = Value.String.borrowed("") };
-    const entry = rdiGetCurrentEntry(obj) orelse return .{ .string = Value.String.borrowed("") };
+fn rdiGetSubPathname(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.literal("");
+    const entry = rdiGetCurrentEntry(obj) orelse return NativeResult.literal("");
     const name = entry.get(.{ .string = Value.String.borrowed("name") });
-    const sub_path = try rdiGetSubPath(ctx, &.{});
+    const sub_result = try rdiGetSubPath(ctx, &.{});
+    const sub_path = sub_result.value;
+    defer if (sub_path == .string) sub_path.string.release();
     if (sub_path != .string or sub_path.string.bytes().len == 0) {
-        if (name == .string) return .{ .string = name.string };
-        return .{ .string = Value.String.borrowed("") };
+        if (name == .string) return NativeResult.shareString(name.string);
+        return NativeResult.literal("");
     }
-    if (name != .string) return sub_path;
+    if (name != .string) return NativeResult.share(sub_path);
     const result = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ sub_path.string.bytes(), name.string.bytes() });
-    try ctx.vm.strings.append(ctx.allocator, result);
-    return .{ .string = Value.String.borrowed(result) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, result));
 }
 
-fn rdiRewind(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn rdiRewind(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return diRewind(ctx, args);
 }
 
-fn rdiCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const entry = rdiGetCurrentEntry(obj) orelse return .{ .bool = false };
+fn rdiCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const entry = rdiGetCurrentEntry(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const path_val = entry.get(.{ .string = Value.String.borrowed("path") });
-    if (path_val != .string) return .null;
+    if (path_val != .string) return NativeResult.scalar(.null);
     const fi = try createFileInfoObj(ctx, path_val.string.bytes());
-    return .{ .object = fi };
+    return NativeResult.borrowed(.{ .object = fi });
 }
 
-fn rdiKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .string = Value.String.borrowed("") };
-    const entry = rdiGetCurrentEntry(obj) orelse return .{ .string = Value.String.borrowed("") };
+fn rdiKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.literal("");
+    const entry = rdiGetCurrentEntry(obj) orelse return NativeResult.literal("");
     const path_val = entry.get(.{ .string = Value.String.borrowed("path") });
-    if (path_val != .string) return .{ .string = Value.String.borrowed("") };
-    return path_val;
+    if (path_val != .string) return NativeResult.literal("");
+    return NativeResult.share(path_val);
 }
 
-fn rdiNext(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn rdiNext(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return diNext(ctx, args);
 }
 
-fn rdiValid(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn rdiValid(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return diValid(ctx, args);
 }
 
@@ -932,51 +922,49 @@ fn gwGenerator(this: *PhpObject) ?*@import("../runtime/value.zig").Generator {
     return v.generator;
 }
 
-fn gwRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this = getThis(ctx) orelse return .null;
-    const gen = gwGenerator(this) orelse return .null;
+fn gwRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const gen = gwGenerator(this) orelse return NativeResult.scalar(.null);
     if (gen.state == .created) try ctx.vm.resumeGenerator(gen, .null);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn gwCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this = getThis(ctx) orelse return .null;
-    const gen = gwGenerator(this) orelse return .null;
+fn gwCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const gen = gwGenerator(this) orelse return NativeResult.scalar(.null);
     if (gen.state == .created) try ctx.vm.resumeGenerator(gen, .null);
-    ctx.returnShared(gen.current_value);
-    return gen.current_value;
+    return NativeResult.share(gen.current_value);
 }
 
-fn gwKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this = getThis(ctx) orelse return .null;
-    const gen = gwGenerator(this) orelse return .null;
+fn gwKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const gen = gwGenerator(this) orelse return NativeResult.scalar(.null);
     if (gen.state == .created) try ctx.vm.resumeGenerator(gen, .null);
-    ctx.returnShared(gen.current_key);
-    return gen.current_key;
+    return NativeResult.share(gen.current_key);
 }
 
-fn gwNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this = getThis(ctx) orelse return .null;
-    const gen = gwGenerator(this) orelse return .null;
+fn gwNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const gen = gwGenerator(this) orelse return NativeResult.scalar(.null);
     if (gen.state == .created) try ctx.vm.resumeGenerator(gen, .null);
     try ctx.vm.resumeGenerator(gen, .null);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn gwValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this = getThis(ctx) orelse return .{ .bool = false };
-    const gen = gwGenerator(this) orelse return .{ .bool = false };
+fn gwValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const gen = gwGenerator(this) orelse return NativeResult.scalar(.{ .bool = false });
     if (gen.state == .created) try ctx.vm.resumeGenerator(gen, .null);
-    return .{ .bool = gen.state != .completed };
+    return NativeResult.scalar(.{ .bool = gen.state != .completed });
 }
 
-fn filterConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1) return .null;
+fn filterConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
     const inner = try wrapAsIterator(ctx, args[0]);
-    if (inner != .object) return .null;
+    if (inner != .object) return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__fi_inner", inner);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 fn filterGetInnerIterator(obj: *PhpObject) ?*PhpObject {
@@ -985,13 +973,13 @@ fn filterGetInnerIterator(obj: *PhpObject) ?*PhpObject {
     return null;
 }
 
-fn filterRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const inner = filterGetInnerIterator(obj) orelse return .null;
+fn filterRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const inner = filterGetInnerIterator(obj) orelse return NativeResult.scalar(.null);
     _ = try ctx.vm.callMethod(inner, "rewind", &.{});
     // advance to first accepted element
     try filterAdvanceToAccepted(ctx, obj, inner);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 fn filterAdvanceToAccepted(ctx: *NativeContext, obj: *PhpObject, inner: *PhpObject) !void {
@@ -1004,52 +992,52 @@ fn filterAdvanceToAccepted(ctx: *NativeContext, obj: *PhpObject, inner: *PhpObje
     }
 }
 
-fn filterCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const inner = filterGetInnerIterator(obj) orelse return .null;
-    return ctx.vm.callMethod(inner, "current", &.{});
+fn filterCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const inner = filterGetInnerIterator(obj) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(try ctx.vm.callMethod(inner, "current", &.{}));
 }
 
-fn filterKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const inner = filterGetInnerIterator(obj) orelse return .null;
-    return ctx.vm.callMethod(inner, "key", &.{});
+fn filterKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const inner = filterGetInnerIterator(obj) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(try ctx.vm.callMethod(inner, "key", &.{}));
 }
 
-fn filterNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const inner = filterGetInnerIterator(obj) orelse return .null;
+fn filterNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const inner = filterGetInnerIterator(obj) orelse return NativeResult.scalar(.null);
     _ = try ctx.vm.callMethod(inner, "next", &.{});
     try filterAdvanceToAccepted(ctx, obj, inner);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn filterValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const inner = filterGetInnerIterator(obj) orelse return .{ .bool = false };
-    return ctx.vm.callMethod(inner, "valid", &.{});
+fn filterValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const inner = filterGetInnerIterator(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.share(try ctx.vm.callMethod(inner, "valid", &.{}));
 }
 
-fn filterGetInner(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const inner = filterGetInnerIterator(obj) orelse return .null;
-    return .{ .object = inner };
+fn filterGetInner(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const inner = filterGetInnerIterator(obj) orelse return NativeResult.scalar(.null);
+    return NativeResult.borrowed(.{ .object = inner });
 }
 
-fn filterGetFilename(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const inner = filterGetInnerIterator(obj) orelse return .null;
-    if (ctx.vm.hasMethod(inner.class_name, "getFilename")) return ctx.vm.callMethod(inner, "getFilename", &.{});
+fn filterGetFilename(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const inner = filterGetInnerIterator(obj) orelse return NativeResult.scalar(.null);
+    if (ctx.vm.hasMethod(inner.class_name, "getFilename")) return NativeResult.share(try ctx.vm.callMethod(inner, "getFilename", &.{}));
     const current = try ctx.vm.callMethod(inner, "current", &.{});
-    return if (current == .object) ctx.vm.callMethod(current.object, "getFilename", &.{}) else .null;
+    return if (current == .object) NativeResult.share(try ctx.vm.callMethod(current.object, "getFilename", &.{})) else NativeResult.scalar(.null);
 }
 
-fn filterIsDir(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const inner = filterGetInnerIterator(obj) orelse return .{ .bool = false };
-    if (ctx.vm.hasMethod(inner.class_name, "isDir")) return ctx.vm.callMethod(inner, "isDir", &.{});
+fn filterIsDir(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const inner = filterGetInnerIterator(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    if (ctx.vm.hasMethod(inner.class_name, "isDir")) return NativeResult.share(try ctx.vm.callMethod(inner, "isDir", &.{}));
     const current = try ctx.vm.callMethod(inner, "current", &.{});
-    return if (current == .object) ctx.vm.callMethod(current.object, "isDir", &.{}) else .{ .bool = false };
+    return if (current == .object) NativeResult.share(try ctx.vm.callMethod(current.object, "isDir", &.{})) else NativeResult.scalar(.{ .bool = false });
 }
 
 // ==========================================
@@ -1059,25 +1047,23 @@ fn filterIsDir(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 // stores a stack of iterators to flatten recursive iteration
 // mode: 0=LEAVES_ONLY, 1=SELF_FIRST, 2=CHILD_FIRST
 
-fn riiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1) return .null;
+fn riiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
     const inner = try wrapAsIterator(ctx, args[0]);
-    if (inner != .object) return .null;
+    if (inner != .object) return NativeResult.scalar(.null);
     const mode: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
 
     try obj.set(ctx.allocator, "__rii_mode", .{ .int = mode });
     try obj.set(ctx.allocator, "__rii_depth", .{ .int = 0 });
 
     // store iterator stack as an array of objects
-    const stack = try ctx.allocator.create(PhpArray);
-    stack.* = .{};
-    try ctx.vm.arrays.append(ctx.allocator, stack);
+    const stack = try ctx.createArray();
     try stack.append(ctx.allocator, inner);
     try obj.set(ctx.allocator, "__rii_stack", .{ .array = stack });
     try obj.set(ctx.allocator, "__rii_valid", .{ .bool = false });
 
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 fn riiGetStack(obj: *PhpObject) ?*PhpArray {
@@ -1094,19 +1080,19 @@ fn riiCurrentIterator(obj: *PhpObject) ?*PhpObject {
     return null;
 }
 
-fn riiRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const stack = riiGetStack(obj) orelse return .null;
+fn riiRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const stack = riiGetStack(obj) orelse return NativeResult.scalar(.null);
 
     // reset stack to just the root iterator
-    if (stack.length() == 0) return .null;
+    if (stack.length() == 0) return NativeResult.scalar(.null);
     const root = stack.get(.{ .int = 0 });
     stack.entries.items.len = 0;
     stack.next_int_key = 0;
     try stack.append(ctx.allocator, root);
     try obj.set(ctx.allocator, "__rii_depth", .{ .int = 0 });
 
-    if (root != .object) return .null;
+    if (root != .object) return NativeResult.scalar(.null);
     _ = try ctx.vm.callMethod(root.object, "rewind", &.{});
 
     const valid = try ctx.vm.callMethod(root.object, "valid", &.{});
@@ -1122,7 +1108,7 @@ fn riiRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
             try riiDescend(ctx, obj);
         }
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 fn riiDescend(ctx: *NativeContext, obj: *PhpObject) !void {
@@ -1167,22 +1153,22 @@ fn riiDescend(ctx: *NativeContext, obj: *PhpObject) !void {
     }
 }
 
-fn riiCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const iter_obj = riiCurrentIterator(obj) orelse return .null;
-    return ctx.vm.callMethod(iter_obj, "current", &.{});
+fn riiCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const iter_obj = riiCurrentIterator(obj) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(try ctx.vm.callMethod(iter_obj, "current", &.{}));
 }
 
-fn riiKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const iter_obj = riiCurrentIterator(obj) orelse return .null;
-    return ctx.vm.callMethod(iter_obj, "key", &.{});
+fn riiKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const iter_obj = riiCurrentIterator(obj) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(try ctx.vm.callMethod(iter_obj, "key", &.{}));
 }
 
-fn riiNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn riiNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     try riiAdvance(ctx, obj);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 fn riiAdvance(ctx: *NativeContext, obj: *PhpObject) !void {
@@ -1249,52 +1235,52 @@ fn riiAdvanceFlat(ctx: *NativeContext, obj: *PhpObject, stack: *PhpArray) !void 
     try obj.set(ctx.allocator, "__rii_valid", .{ .bool = false });
 }
 
-fn riiValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    return obj.get("__rii_valid");
+fn riiValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.share(obj.get("__rii_valid"));
 }
 
-fn riiSetMaxDepth(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn riiSetMaxDepth(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const v: i64 = if (args.len >= 1) Value.toInt(args[0]) else -1;
     try obj.set(ctx.allocator, "__rii_max_depth", .{ .int = v });
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn riiGetMaxDepth(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn riiGetMaxDepth(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const v = obj.get("__rii_max_depth");
-    if (v == .int and v.int < 0) return .{ .bool = false };
-    if (v == .null) return .{ .bool = false };
-    return v;
+    if (v == .int and v.int < 0) return NativeResult.scalar(.{ .bool = false });
+    if (v == .null) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(v);
 }
 
-fn riiGetDepth(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    return .{ .int = objGetInt(obj, "__rii_depth") };
+fn riiGetDepth(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = objGetInt(obj, "__rii_depth") });
 }
 
-fn riiGetInner(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const iter_obj = riiCurrentIterator(obj) orelse return .null;
-    return .{ .object = iter_obj };
+fn riiGetInner(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const iter_obj = riiCurrentIterator(obj) orelse return NativeResult.scalar(.null);
+    return NativeResult.borrowed(.{ .object = iter_obj });
 }
 
-fn riiGetSubIterator(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const stack = riiGetStack(obj) orelse return .null;
+fn riiGetSubIterator(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const stack = riiGetStack(obj) orelse return NativeResult.scalar(.null);
     const depth: usize = if (args.len >= 1) @intCast(@max(0, Value.toInt(args[0]))) else @intCast(@max(0, objGetInt(obj, "__rii_depth")));
-    if (depth >= stack.length()) return .null;
-    return stack.get(.{ .int = @intCast(depth) });
+    if (depth >= stack.length()) return NativeResult.scalar(.null);
+    return NativeResult.borrowed(stack.get(.{ .int = @intCast(depth) }));
 }
 
 // ==========================================
 // IteratorIterator
 // ==========================================
 
-fn iiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1) return .null;
+fn iiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
     var inner = try wrapAsIterator(ctx, args[0]);
     // unwrap IteratorAggregate chains (PHP follows getIterator until it reaches
     // a real Iterator; depth-limit guards against runaway recursion)
@@ -1304,9 +1290,9 @@ fn iiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (!ctx.vm.isInstanceOf(inner.object.class_name, "IteratorAggregate")) break;
         inner = try ctx.vm.callMethod(inner.object, "getIterator", &.{});
     }
-    if (inner != .object) return .null;
+    if (inner != .object) return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__ii_inner", inner);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 fn iiGetInnerObj(obj: *PhpObject) ?*PhpObject {
@@ -1315,81 +1301,81 @@ fn iiGetInnerObj(obj: *PhpObject) ?*PhpObject {
     return null;
 }
 
-fn iiRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const inner = iiGetInnerObj(obj) orelse return .null;
+fn iiRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const inner = iiGetInnerObj(obj) orelse return NativeResult.scalar(.null);
     _ = try ctx.vm.callMethod(inner, "rewind", &.{});
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn iiValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const inner = iiGetInnerObj(obj) orelse return .{ .bool = false };
-    return ctx.vm.callMethod(inner, "valid", &.{});
+fn iiValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const inner = iiGetInnerObj(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.share(try ctx.vm.callMethod(inner, "valid", &.{}));
 }
 
-fn iiCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const inner = iiGetInnerObj(obj) orelse return .null;
-    return ctx.vm.callMethod(inner, "current", &.{});
+fn iiCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const inner = iiGetInnerObj(obj) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(try ctx.vm.callMethod(inner, "current", &.{}));
 }
 
-fn iiKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const inner = iiGetInnerObj(obj) orelse return .null;
-    return ctx.vm.callMethod(inner, "key", &.{});
+fn iiKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const inner = iiGetInnerObj(obj) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(try ctx.vm.callMethod(inner, "key", &.{}));
 }
 
-fn iiNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const inner = iiGetInnerObj(obj) orelse return .null;
+fn iiNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const inner = iiGetInnerObj(obj) orelse return NativeResult.scalar(.null);
     _ = try ctx.vm.callMethod(inner, "next", &.{});
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn iiGetInner(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const inner = iiGetInnerObj(obj) orelse return .null;
-    return .{ .object = inner };
+fn iiGetInner(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const inner = iiGetInnerObj(obj) orelse return NativeResult.scalar(.null);
+    return NativeResult.borrowed(.{ .object = inner });
 }
 
 // ==========================================
 // EmptyIterator
 // ==========================================
 
-fn emptyNoop(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .null;
+fn emptyNoop(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.null);
 }
 
-fn emptyValid(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = false };
+fn emptyValid(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn emptyCurrent(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .null;
+fn emptyCurrent(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.null);
 }
 
 // ==========================================
 // LimitIterator
 // ==========================================
 
-fn limitConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1) return .null;
+fn limitConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
     const inner = try wrapAsIterator(ctx, args[0]);
-    if (inner != .object) return .null;
+    if (inner != .object) return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__ii_inner", inner);
     const offset: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
     const count: i64 = if (args.len >= 3) Value.toInt(args[2]) else -1;
     try obj.set(ctx.allocator, "__li_offset", .{ .int = offset });
     try obj.set(ctx.allocator, "__li_count", .{ .int = count });
     try obj.set(ctx.allocator, "__li_pos", .{ .int = 0 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn limitRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const inner = iiGetInnerObj(obj) orelse return .null;
+fn limitRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const inner = iiGetInnerObj(obj) orelse return NativeResult.scalar(.null);
     _ = try ctx.vm.callMethod(inner, "rewind", &.{});
     const offset = objGetInt(obj, "__li_offset");
     var i: i64 = 0;
@@ -1399,40 +1385,40 @@ fn limitRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         _ = try ctx.vm.callMethod(inner, "next", &.{});
     }
     try obj.set(ctx.allocator, "__li_pos", .{ .int = offset });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn limitValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const inner = iiGetInnerObj(obj) orelse return .{ .bool = false };
+fn limitValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const inner = iiGetInnerObj(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const count = objGetInt(obj, "__li_count");
     const offset = objGetInt(obj, "__li_offset");
     const pos = objGetInt(obj, "__li_pos");
-    if (count >= 0 and (pos - offset) >= count) return .{ .bool = false };
-    return ctx.vm.callMethod(inner, "valid", &.{});
+    if (count >= 0 and (pos - offset) >= count) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.share(try ctx.vm.callMethod(inner, "valid", &.{}));
 }
 
-fn limitNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const inner = iiGetInnerObj(obj) orelse return .null;
+fn limitNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const inner = iiGetInnerObj(obj) orelse return NativeResult.scalar(.null);
     _ = try ctx.vm.callMethod(inner, "next", &.{});
     try obj.set(ctx.allocator, "__li_pos", .{ .int = objGetInt(obj, "__li_pos") + 1 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn limitGetPosition(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    return .{ .int = objGetInt(obj, "__li_pos") };
+fn limitGetPosition(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = objGetInt(obj, "__li_pos") });
 }
 
-fn limitSeek(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1) return .null;
+fn limitSeek(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
     const target = Value.toInt(args[0]);
     const offset = objGetInt(obj, "__li_offset");
     const count = objGetInt(obj, "__li_count");
-    if (target < offset or (count >= 0 and target >= offset + count)) return .null;
-    const inner = iiGetInnerObj(obj) orelse return .null;
+    if (target < offset or (count >= 0 and target >= offset + count)) return NativeResult.scalar(.null);
+    const inner = iiGetInnerObj(obj) orelse return NativeResult.scalar(.null);
     const cur = objGetInt(obj, "__li_pos");
     if (target < cur) {
         _ = try limitRewind(ctx, &.{});
@@ -1443,36 +1429,34 @@ fn limitSeek(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         _ = try ctx.vm.callMethod(inner, "next", &.{});
         try obj.set(ctx.allocator, "__li_pos", .{ .int = objGetInt(obj, "__li_pos") + 1 });
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 // ==========================================
 // InfiniteIterator
 // ==========================================
 
-fn infiniteNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const inner = iiGetInnerObj(obj) orelse return .null;
+fn infiniteNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const inner = iiGetInnerObj(obj) orelse return NativeResult.scalar(.null);
     _ = try ctx.vm.callMethod(inner, "next", &.{});
     const valid = try ctx.vm.callMethod(inner, "valid", &.{});
     if (!valid.isTruthy()) {
         _ = try ctx.vm.callMethod(inner, "rewind", &.{});
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 // ==========================================
 // AppendIterator
 // ==========================================
 
-fn appConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = try ctx.allocator.create(PhpArray);
-    arr.* = .{};
-    try ctx.vm.arrays.append(ctx.allocator, arr);
+fn appConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = try ctx.createArray();
     try obj.set(ctx.allocator, "__app_iters", .{ .array = arr });
     try obj.set(ctx.allocator, "__app_idx", .{ .int = 0 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 fn appGetIters(obj: *PhpObject) ?*PhpArray {
@@ -1481,18 +1465,18 @@ fn appGetIters(obj: *PhpObject) ?*PhpArray {
     return null;
 }
 
-fn appAppend(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1) return .null;
+fn appAppend(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
     const inner = try wrapAsIterator(ctx, args[0]);
-    if (inner != .object) return .null;
-    const iters = appGetIters(obj) orelse return .null;
+    if (inner != .object) return NativeResult.scalar(.null);
+    const iters = appGetIters(obj) orelse return NativeResult.scalar(.null);
     try iters.append(ctx.allocator, inner);
     // if this is the first iterator and we haven't started, rewind it
     if (iters.length() == 1) {
         _ = try ctx.vm.callMethod(inner.object, "rewind", &.{});
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 fn appCurrentIter(obj: *PhpObject) ?*PhpObject {
@@ -1504,24 +1488,24 @@ fn appCurrentIter(obj: *PhpObject) ?*PhpObject {
     return null;
 }
 
-fn appRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn appRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__app_idx", .{ .int = 0 });
-    const iter = appCurrentIter(obj) orelse return .null;
+    const iter = appCurrentIter(obj) orelse return NativeResult.scalar(.null);
     _ = try ctx.vm.callMethod(iter, "rewind", &.{});
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn appValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const iters = appGetIters(obj) orelse return .{ .bool = false };
+fn appValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const iters = appGetIters(obj) orelse return NativeResult.scalar(.{ .bool = false });
     while (true) {
         const idx = objGetInt(obj, "__app_idx");
-        if (idx < 0 or idx >= iters.length()) return .{ .bool = false };
+        if (idx < 0 or idx >= iters.length()) return NativeResult.scalar(.{ .bool = false });
         const v = iters.get(.{ .int = idx });
-        if (v != .object) return .{ .bool = false };
+        if (v != .object) return NativeResult.scalar(.{ .bool = false });
         const valid = try ctx.vm.callMethod(v.object, "valid", &.{});
-        if (valid.isTruthy()) return .{ .bool = true };
+        if (valid.isTruthy()) return NativeResult.scalar(.{ .bool = true });
         try obj.set(ctx.allocator, "__app_idx", .{ .int = idx + 1 });
         if (idx + 1 < iters.length()) {
             const nxt = iters.get(.{ .int = idx + 1 });
@@ -1532,90 +1516,90 @@ fn appValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     }
 }
 
-fn appCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const iter = appCurrentIter(obj) orelse return .null;
-    return ctx.vm.callMethod(iter, "current", &.{});
+fn appCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const iter = appCurrentIter(obj) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(try ctx.vm.callMethod(iter, "current", &.{}));
 }
 
-fn appKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const iter = appCurrentIter(obj) orelse return .null;
-    return ctx.vm.callMethod(iter, "key", &.{});
+fn appKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const iter = appCurrentIter(obj) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(try ctx.vm.callMethod(iter, "key", &.{}));
 }
 
-fn appNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const iter = appCurrentIter(obj) orelse return .null;
+fn appNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const iter = appCurrentIter(obj) orelse return NativeResult.scalar(.null);
     _ = try ctx.vm.callMethod(iter, "next", &.{});
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn appGetInner(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const iter = appCurrentIter(obj) orelse return .null;
-    return .{ .object = iter };
+fn appGetInner(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const iter = appCurrentIter(obj) orelse return NativeResult.scalar(.null);
+    return NativeResult.borrowed(.{ .object = iter });
 }
 
-fn appGetIndex(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    return .{ .int = objGetInt(obj, "__app_idx") };
+fn appGetIndex(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = objGetInt(obj, "__app_idx") });
 }
 
-fn appGetArrayIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const iters = appGetIters(obj) orelse return .null;
-    return .{ .array = iters };
+fn appGetArrayIterator(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const iters = appGetIters(obj) orelse return NativeResult.scalar(.null);
+    return NativeResult.borrowed(.{ .array = iters });
 }
 
 // ==========================================
 // CallbackFilterIterator
 // ==========================================
 
-fn cbfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1) return .null;
+fn cbfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
     const inner = try wrapAsIterator(ctx, args[0]);
-    if (inner != .object) return .null;
+    if (inner != .object) return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__fi_inner", inner);
     if (args.len >= 2) try obj.set(ctx.allocator, "__cb_fn", args[1]);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn cbfAccept(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn cbfAccept(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const cb = obj.get("__cb_fn");
-    if (cb == .null) return .{ .bool = false };
+    if (cb == .null) return NativeResult.scalar(.{ .bool = false });
     const inner_v = obj.get("__fi_inner");
-    if (inner_v != .object) return .{ .bool = false };
+    if (inner_v != .object) return NativeResult.scalar(.{ .bool = false });
     const cur = try ctx.vm.callMethod(inner_v.object, "current", &.{});
     const key = try ctx.vm.callMethod(inner_v.object, "key", &.{});
     const result = try ctx.invokeCallable(cb, &.{ cur, key, inner_v });
-    return .{ .bool = result.isTruthy() };
+    return NativeResult.scalar(.{ .bool = result.isTruthy() });
 }
 
 // ==========================================
 // RegexIterator
 // ==========================================
 
-fn rxConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1) return .null;
+fn rxConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
     const inner = try wrapAsIterator(ctx, args[0]);
-    if (inner != .object) return .null;
-    if (args.len < 2 or args[1] != .string) return .null;
+    if (inner != .object) return NativeResult.scalar(.null);
+    if (args.len < 2 or args[1] != .string) return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__fi_inner", inner);
-    try obj.set(ctx.allocator, "__rx_regex", .{ .string = Value.String.borrowed(try createString(ctx, args[1].string.bytes())) });
+    try obj.set(ctx.allocator, "__rx_regex", args[1]);
     const mode: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
     const flags: i64 = if (args.len >= 4) Value.toInt(args[3]) else 0;
     const preg_flags: i64 = if (args.len >= 5) Value.toInt(args[4]) else 0;
     try obj.set(ctx.allocator, "__rx_mode", .{ .int = mode });
     try obj.set(ctx.allocator, "__rx_flags", .{ .int = flags });
     try obj.set(ctx.allocator, "__rx_preg_flags", .{ .int = preg_flags });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn rxSubjectFromInner(ctx: *NativeContext, obj: *PhpObject) RuntimeError!?[]const u8 {
+fn rxSubjectFromInner(ctx: *NativeContext, obj: *PhpObject) RuntimeError!?Value.String {
     const inner_v = obj.get("__fi_inner");
     if (inner_v != .object) return null;
     const flags = objGetInt(obj, "__rx_flags");
@@ -1623,131 +1607,128 @@ fn rxSubjectFromInner(ctx: *NativeContext, obj: *PhpObject) RuntimeError!?[]cons
         try ctx.vm.callMethod(inner_v.object, "key", &.{})
     else
         try ctx.vm.callMethod(inner_v.object, "current", &.{});
-    if (subject_val == .string) return subject_val.string.bytes();
+    if (subject_val == .string) {
+        subject_val.string.retain();
+        return subject_val.string;
+    }
     if (subject_val == .int or subject_val == .float or subject_val == .bool) {
         var buf: std.ArrayListUnmanaged(u8) = .{};
+        defer buf.deinit(ctx.allocator);
         try subject_val.format(&buf, ctx.allocator);
-        const s = try ctx.allocator.dupe(u8, buf.items);
-        buf.deinit(ctx.allocator);
-        try ctx.vm.strings.append(ctx.allocator, s);
-        return s;
+        return try Value.String.adopt(ctx.allocator, try buf.toOwnedSlice(ctx.allocator));
     }
     return null;
 }
 
-fn rxAccept(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn rxAccept(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const regex = objGetStr(obj, "__rx_regex");
-    if (regex.len == 0) return .{ .bool = false };
+    if (regex.len == 0) return NativeResult.scalar(.{ .bool = false });
     // arrays pass through so recursive variants can descend into them
     const inner_v = obj.get("__fi_inner");
     if (inner_v == .object) {
         const flags_check = objGetInt(obj, "__rx_flags");
         if ((flags_check & 1) == 0) {
             const cur_check = try ctx.vm.callMethod(inner_v.object, "current", &.{});
-            if (cur_check == .array) return .{ .bool = true };
+            if (cur_check == .array) return NativeResult.scalar(.{ .bool = true });
         }
     }
-    const subject = (try rxSubjectFromInner(ctx, obj)) orelse return .{ .bool = false };
+    const subject = (try rxSubjectFromInner(ctx, obj)) orelse return NativeResult.scalar(.{ .bool = false });
+    defer subject.release();
     const flags = objGetInt(obj, "__rx_flags");
     const invert = (flags & 2) != 0;
 
-    const matches_arr = try ctx.allocator.create(PhpArray);
-    matches_arr.* = .{};
-    try ctx.vm.arrays.append(ctx.allocator, matches_arr);
-    const result = try ctx.vm.callByName("preg_match", &.{ .{ .string = Value.String.borrowed(regex) }, .{ .string = Value.String.borrowed(subject) }, .{ .array = matches_arr } });
+    const matches_arr = try ctx.createArray();
+    const result = try ctx.vm.callByName("preg_match", &.{ .{ .string = Value.String.borrowed(regex) }, .{ .string = subject }, .{ .array = matches_arr } });
     const matched = result == .int and result.int == 1;
     try obj.set(ctx.allocator, "__rx_match", .{ .array = matches_arr });
-    return .{ .bool = if (invert) !matched else matched };
+    return NativeResult.scalar(.{ .bool = if (invert) !matched else matched });
 }
 
-fn rxCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn rxCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const inner_v = obj.get("__fi_inner");
-    if (inner_v != .object) return .null;
+    if (inner_v != .object) return NativeResult.scalar(.null);
     const mode = objGetInt(obj, "__rx_mode");
     if (mode == 0) {
-        return ctx.vm.callMethod(inner_v.object, "current", &.{});
+        return NativeResult.share(try ctx.vm.callMethod(inner_v.object, "current", &.{}));
     }
     if (mode == 1) {
         const m = obj.get("__rx_match");
-        if (m == .array) return m;
-        return .null;
+        if (m == .array) return NativeResult.borrowed(m);
+        return NativeResult.scalar(.null);
     }
     if (mode == 2 or mode == 3) {
-        const subject = (try rxSubjectFromInner(ctx, obj)) orelse return .null;
+        const subject = (try rxSubjectFromInner(ctx, obj)) orelse return NativeResult.scalar(.null);
+        defer subject.release();
         const regex = objGetStr(obj, "__rx_regex");
         if (mode == 3) {
-            return ctx.vm.callByName("preg_split", &.{ .{ .string = Value.String.borrowed(regex) }, .{ .string = Value.String.borrowed(subject) } });
+            return NativeResult.share(try ctx.vm.callByName("preg_split", &.{ .{ .string = Value.String.borrowed(regex) }, .{ .string = subject } }));
         } else {
-            const out_arr = try ctx.allocator.create(PhpArray);
-            out_arr.* = .{};
-            try ctx.vm.arrays.append(ctx.allocator, out_arr);
-            _ = try ctx.vm.callByName("preg_match_all", &.{ .{ .string = Value.String.borrowed(regex) }, .{ .string = Value.String.borrowed(subject) }, .{ .array = out_arr } });
-            return .{ .array = out_arr };
+            const out_arr = try ctx.createArray();
+            _ = try ctx.vm.callByName("preg_match_all", &.{ .{ .string = Value.String.borrowed(regex) }, .{ .string = subject }, .{ .array = out_arr } });
+            return NativeResult.borrowed(.{ .array = out_arr });
         }
     }
-    return ctx.vm.callMethod(inner_v.object, "current", &.{});
+    return NativeResult.share(try ctx.vm.callMethod(inner_v.object, "current", &.{}));
 }
 
-fn rxGetRegex(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .string = Value.String.borrowed("") };
-    return .{ .string = Value.String.borrowed(objGetStr(obj, "__rx_regex")) };
+fn rxGetRegex(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.literal("");
+    return NativeResult.share(obj.get("__rx_regex"));
 }
 
-fn rxGetMode(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    return .{ .int = objGetInt(obj, "__rx_mode") };
+fn rxGetMode(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = objGetInt(obj, "__rx_mode") });
 }
 
-fn rxSetMode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1) return .null;
+fn rxSetMode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__rx_mode", .{ .int = Value.toInt(args[0]) });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn rxGetFlags(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    return .{ .int = objGetInt(obj, "__rx_flags") };
+fn rxGetFlags(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = objGetInt(obj, "__rx_flags") });
 }
 
-fn rxSetFlags(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1) return .null;
+fn rxSetFlags(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__rx_flags", .{ .int = Value.toInt(args[0]) });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn rxGetPregFlags(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    return .{ .int = objGetInt(obj, "__rx_preg_flags") };
+fn rxGetPregFlags(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = objGetInt(obj, "__rx_preg_flags") });
 }
 
-fn rxSetPregFlags(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1) return .null;
+fn rxSetPregFlags(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__rx_preg_flags", .{ .int = Value.toInt(args[0]) });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 // ==========================================
 // CachingIterator
 // ==========================================
 
-fn ciConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1) return .null;
+fn ciConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
     const inner = try wrapAsIterator(ctx, args[0]);
-    if (inner != .object) return .null;
+    if (inner != .object) return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__ii_inner", inner);
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 1;
     try obj.set(ctx.allocator, "__ci_flags", .{ .int = flags });
-    const cache = try ctx.allocator.create(PhpArray);
-    cache.* = .{};
-    try ctx.vm.arrays.append(ctx.allocator, cache);
+    const cache = try ctx.createArray();
     try obj.set(ctx.allocator, "__ci_cache", .{ .array = cache });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 fn ciCacheCurrent(ctx: *NativeContext, obj: *PhpObject, inner: *PhpObject) !void {
@@ -1769,146 +1750,140 @@ fn ciCacheCurrent(ctx: *NativeContext, obj: *PhpObject, inner: *PhpObject) !void
     }
 }
 
-fn ciRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const inner = iiGetInnerObj(obj) orelse return .null;
+fn ciRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const inner = iiGetInnerObj(obj) orelse return NativeResult.scalar(.null);
     _ = try ctx.vm.callMethod(inner, "rewind", &.{});
     try ciCacheCurrent(ctx, obj, inner);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn ciValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn ciValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const v = obj.get("__ci_valid");
-    if (v == .bool) return v;
-    return .{ .bool = false };
+    if (v == .bool) return NativeResult.scalar(v);
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn ciCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    return obj.get("__ci_current");
+fn ciCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(obj.get("__ci_current"));
 }
 
-fn ciKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    return obj.get("__ci_key");
+fn ciKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(obj.get("__ci_key"));
 }
 
-fn ciNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const inner = iiGetInnerObj(obj) orelse return .null;
+fn ciNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const inner = iiGetInnerObj(obj) orelse return NativeResult.scalar(.null);
     try ciCacheCurrent(ctx, obj, inner);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn ciHasNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const inner = iiGetInnerObj(obj) orelse return .{ .bool = false };
-    return ctx.vm.callMethod(inner, "valid", &.{});
+fn ciHasNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const inner = iiGetInnerObj(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.share(try ctx.vm.callMethod(inner, "valid", &.{}));
 }
 
-fn ciToString(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .string = Value.String.borrowed("") };
+fn ciToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.literal("");
     const flags = objGetInt(obj, "__ci_flags");
     const target = if ((flags & 4) != 0) obj.get("__ci_key") else if ((flags & 16) != 0) blk: {
         const inner = iiGetInnerObj(obj) orelse break :blk obj.get("__ci_current");
         break :blk try ctx.vm.callMethod(inner, "current", &.{});
     } else obj.get("__ci_current");
-    if (target == .string) return .{ .string = target.string };
+    if (target == .string) return NativeResult.shareString(target.string);
     var buf: std.ArrayListUnmanaged(u8) = .{};
+    defer buf.deinit(ctx.allocator);
     try target.format(&buf, ctx.allocator);
-    const s = try ctx.allocator.dupe(u8, buf.items);
-    buf.deinit(ctx.allocator);
-    try ctx.vm.strings.append(ctx.allocator, s);
-    return .{ .string = Value.String.borrowed(s) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, try buf.toOwnedSlice(ctx.allocator)));
 }
 
-fn ciGetCache(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    return obj.get("__ci_cache");
+fn ciGetCache(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(obj.get("__ci_cache"));
 }
 
-fn ciGetFlags(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    return .{ .int = objGetInt(obj, "__ci_flags") };
+fn ciGetFlags(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = objGetInt(obj, "__ci_flags") });
 }
 
-fn ciSetFlags(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1) return .null;
+fn ciSetFlags(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__ci_flags", .{ .int = Value.toInt(args[0]) });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 // ==========================================
 // MultipleIterator
 // ==========================================
 
-fn miConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn miConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const flags: i64 = if (args.len >= 1) Value.toInt(args[0]) else 1;
     try obj.set(ctx.allocator, "__mi_flags", .{ .int = flags });
-    const iters = try ctx.allocator.create(PhpArray);
-    iters.* = .{};
-    try ctx.vm.arrays.append(ctx.allocator, iters);
-    const keys = try ctx.allocator.create(PhpArray);
-    keys.* = .{};
-    try ctx.vm.arrays.append(ctx.allocator, keys);
+    const iters = try ctx.createArray();
+    const keys = try ctx.createArray();
     try obj.set(ctx.allocator, "__mi_iters", .{ .array = iters });
     try obj.set(ctx.allocator, "__mi_keys", .{ .array = keys });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn miAttach(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1) return .null;
-    if (args[0] != .object and args[0] != .generator) return .null;
+fn miAttach(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
+    if (args[0] != .object and args[0] != .generator) return NativeResult.scalar(.null);
     const iters_v = obj.get("__mi_iters");
     const keys_v = obj.get("__mi_keys");
-    if (iters_v != .array or keys_v != .array) return .null;
+    if (iters_v != .array or keys_v != .array) return NativeResult.scalar(.null);
     try iters_v.array.append(ctx.allocator, args[0]);
     if (args.len >= 2 and (args[1] == .string or args[1] == .int)) {
         try keys_v.array.append(ctx.allocator, args[1]);
     } else {
         try keys_v.array.append(ctx.allocator, .null);
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn miDetach(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1 or args[0] != .object) return .null;
+fn miDetach(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1 or args[0] != .object) return NativeResult.scalar(.null);
     const iters_v = obj.get("__mi_iters");
     const keys_v = obj.get("__mi_keys");
-    if (iters_v != .array or keys_v != .array) return .null;
+    if (iters_v != .array or keys_v != .array) return NativeResult.scalar(.null);
     var i: usize = 0;
     while (i < iters_v.array.entries.items.len) : (i += 1) {
         const e = iters_v.array.entries.items[i];
         if (e.value == .object and e.value.object == args[0].object) {
             _ = iters_v.array.entries.orderedRemove(i);
             if (i < keys_v.array.entries.items.len) _ = keys_v.array.entries.orderedRemove(i);
-            return .null;
+            return NativeResult.scalar(.null);
         }
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn miContains(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    if (args.len < 1 or args[0] != .object) return .{ .bool = false };
+fn miContains(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len < 1 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
     const iters_v = obj.get("__mi_iters");
-    if (iters_v != .array) return .{ .bool = false };
+    if (iters_v != .array) return NativeResult.scalar(.{ .bool = false });
     for (iters_v.array.entries.items) |e| {
-        if (e.value == .object and e.value.object == args[0].object) return .{ .bool = true };
+        if (e.value == .object and e.value.object == args[0].object) return NativeResult.scalar(.{ .bool = true });
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn miCountIterators(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
+fn miCountIterators(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
     const iters_v = obj.get("__mi_iters");
-    if (iters_v != .array) return .{ .int = 0 };
-    return .{ .int = iters_v.array.length() };
+    if (iters_v != .array) return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = iters_v.array.length() });
 }
 
 fn miCallValid(ctx: *NativeContext, v: Value) !bool {
@@ -1951,18 +1926,18 @@ fn miCallRewind(ctx: *NativeContext, v: Value) !void {
     }
 }
 
-fn miRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn miRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const iters_v = obj.get("__mi_iters");
-    if (iters_v != .array) return .null;
+    if (iters_v != .array) return NativeResult.scalar(.null);
     for (iters_v.array.entries.items) |e| try miCallRewind(ctx, e.value);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn miValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn miValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const iters_v = obj.get("__mi_iters");
-    if (iters_v != .array or iters_v.array.length() == 0) return .{ .bool = false };
+    if (iters_v != .array or iters_v.array.length() == 0) return NativeResult.scalar(.{ .bool = false });
     const flags = objGetInt(obj, "__mi_flags");
     const need_all = (flags & 1) != 0;
     var any: bool = false;
@@ -1970,19 +1945,17 @@ fn miValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     for (iters_v.array.entries.items) |e| {
         if (try miCallValid(ctx, e.value)) any = true else all = false;
     }
-    return .{ .bool = if (need_all) all else any };
+    return NativeResult.scalar(.{ .bool = if (need_all) all else any });
 }
 
-fn miCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn miCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const iters_v = obj.get("__mi_iters");
     const keys_v = obj.get("__mi_keys");
-    if (iters_v != .array) return .null;
+    if (iters_v != .array) return NativeResult.scalar(.null);
     const flags = objGetInt(obj, "__mi_flags");
     const assoc = (flags & 2) != 0;
-    const result = try ctx.allocator.create(PhpArray);
-    result.* = .{};
-    try ctx.vm.arrays.append(ctx.allocator, result);
+    const result = try ctx.createArray();
     var idx: i64 = 0;
     for (iters_v.array.entries.items, 0..) |e, i| {
         var v: Value = .null;
@@ -1995,19 +1968,17 @@ fn miCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
             idx += 1;
         }
     }
-    return .{ .array = result };
+    return NativeResult.borrowed(.{ .array = result });
 }
 
-fn miKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn miKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const iters_v = obj.get("__mi_iters");
     const keys_v = obj.get("__mi_keys");
-    if (iters_v != .array) return .null;
+    if (iters_v != .array) return NativeResult.scalar(.null);
     const flags = objGetInt(obj, "__mi_flags");
     const assoc = (flags & 2) != 0;
-    const result = try ctx.allocator.create(PhpArray);
-    result.* = .{};
-    try ctx.vm.arrays.append(ctx.allocator, result);
+    const result = try ctx.createArray();
     var idx: i64 = 0;
     for (iters_v.array.entries.items, 0..) |e, i| {
         var v: Value = .null;
@@ -2020,75 +1991,75 @@ fn miKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
             idx += 1;
         }
     }
-    return .{ .array = result };
+    return NativeResult.borrowed(.{ .array = result });
 }
 
-fn miNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn miNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const iters_v = obj.get("__mi_iters");
-    if (iters_v != .array) return .null;
+    if (iters_v != .array) return NativeResult.scalar(.null);
     for (iters_v.array.entries.items) |e| try miCallNext(ctx, e.value);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn miGetFlags(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    return .{ .int = objGetInt(obj, "__mi_flags") };
+fn miGetFlags(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = objGetInt(obj, "__mi_flags") });
 }
 
-fn miSetFlags(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1) return .null;
+fn miSetFlags(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__mi_flags", .{ .int = Value.toInt(args[0]) });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 // ==========================================
 // RecursiveFilterIterator / RecursiveCallbackFilterIterator / RecursiveRegexIterator
 // ==========================================
 
-fn rfiHasChildren(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn rfiHasChildren(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const inner_v = obj.get("__fi_inner");
-    if (inner_v != .object) return .{ .bool = false };
-    return ctx.vm.callMethod(inner_v.object, "hasChildren", &.{});
+    if (inner_v != .object) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.share(try ctx.vm.callMethod(inner_v.object, "hasChildren", &.{}));
 }
 
-fn rfiGetChildren(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn rfiGetChildren(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const inner_v = obj.get("__fi_inner");
-    if (inner_v != .object) return .null;
+    if (inner_v != .object) return NativeResult.scalar(.null);
     const child_inner = try ctx.vm.callMethod(inner_v.object, "getChildren", &.{});
-    if (child_inner != .object) return .null;
+    if (child_inner != .object) return NativeResult.scalar(.null);
     const new_obj = try ctx.allocator.create(PhpObject);
     new_obj.* = .{ .class_name = obj.class_name };
     try ctx.vm.objects.append(ctx.allocator, new_obj);
     ctx.vm.initObjectProperties(new_obj, obj.class_name) catch {};
     try new_obj.set(ctx.allocator, "__fi_inner", child_inner);
-    return .{ .object = new_obj };
+    return NativeResult.borrowed(.{ .object = new_obj });
 }
 
-fn rcbfGetChildren(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn rcbfGetChildren(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const inner_v = obj.get("__fi_inner");
-    if (inner_v != .object) return .null;
+    if (inner_v != .object) return NativeResult.scalar(.null);
     const child_inner = try ctx.vm.callMethod(inner_v.object, "getChildren", &.{});
-    if (child_inner != .object) return .null;
+    if (child_inner != .object) return NativeResult.scalar(.null);
     const new_obj = try ctx.allocator.create(PhpObject);
     new_obj.* = .{ .class_name = obj.class_name };
     try ctx.vm.objects.append(ctx.allocator, new_obj);
     ctx.vm.initObjectProperties(new_obj, obj.class_name) catch {};
     try new_obj.set(ctx.allocator, "__fi_inner", child_inner);
     try new_obj.set(ctx.allocator, "__cb_fn", obj.get("__cb_fn"));
-    return .{ .object = new_obj };
+    return NativeResult.borrowed(.{ .object = new_obj });
 }
 
-fn rrxGetChildren(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn rrxGetChildren(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const inner_v = obj.get("__fi_inner");
-    if (inner_v != .object) return .null;
+    if (inner_v != .object) return NativeResult.scalar(.null);
     const child_inner = try ctx.vm.callMethod(inner_v.object, "getChildren", &.{});
-    if (child_inner != .object) return .null;
+    if (child_inner != .object) return NativeResult.scalar(.null);
     const new_obj = try ctx.allocator.create(PhpObject);
     new_obj.* = .{ .class_name = obj.class_name };
     try ctx.vm.objects.append(ctx.allocator, new_obj);
@@ -2098,99 +2069,99 @@ fn rrxGetChildren(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     try new_obj.set(ctx.allocator, "__rx_mode", obj.get("__rx_mode"));
     try new_obj.set(ctx.allocator, "__rx_flags", obj.get("__rx_flags"));
     try new_obj.set(ctx.allocator, "__rx_preg_flags", obj.get("__rx_preg_flags"));
-    return .{ .object = new_obj };
+    return NativeResult.borrowed(.{ .object = new_obj });
 }
 
 // ==========================================
 // RecursiveArrayIterator
 // ==========================================
 
-fn raiHasChildren(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn raiHasChildren(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const cur = try ctx.vm.callMethod(obj, "current", &.{});
-    return .{ .bool = cur == .array };
+    return NativeResult.scalar(.{ .bool = cur == .array });
 }
 
-fn raiGetChildren(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn raiGetChildren(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const cur = try ctx.vm.callMethod(obj, "current", &.{});
-    if (cur != .array) return .null;
+    if (cur != .array) return NativeResult.scalar(.null);
     const new_obj = try ctx.allocator.create(PhpObject);
     new_obj.* = .{ .class_name = "RecursiveArrayIterator" };
     try ctx.vm.objects.append(ctx.allocator, new_obj);
     ctx.vm.initObjectProperties(new_obj, "RecursiveArrayIterator") catch {};
     _ = try ctx.vm.callMethod(new_obj, "__construct", &.{cur});
-    return .{ .object = new_obj };
+    return NativeResult.borrowed(.{ .object = new_obj });
 }
 
 // ==========================================
 // RecursiveTreeIterator
 // ==========================================
 
-fn rtiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1) return .null;
+fn rtiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1) return NativeResult.scalar(.null);
     // RecursiveTreeIterator default mode is SELF_FIRST; we only forward iterator + mode
     return riiConstruct(ctx, &.{ args[0], .{ .int = 1 } });
 }
 
-fn rtiCurrent(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const prefix = try rtiGetPrefix(ctx, args);
-    const entry = try rtiGetEntry(ctx, args);
-    const postfix = try rtiGetPostfix(ctx, args);
+fn rtiCurrent(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const prefix = (try rtiGetPrefix(ctx, args)).value;
+    defer if (prefix == .string) prefix.string.release();
+    const entry = (try rtiGetEntry(ctx, args)).value;
+    defer if (entry == .string) entry.string.release();
+    const postfix = (try rtiGetPostfix(ctx, args)).value;
+    defer if (postfix == .string) postfix.string.release();
     var buf: std.ArrayListUnmanaged(u8) = .{};
+    defer buf.deinit(ctx.allocator);
     if (prefix == .string) try buf.appendSlice(ctx.allocator, prefix.string.bytes());
     if (entry == .string) try buf.appendSlice(ctx.allocator, entry.string.bytes());
     if (postfix == .string) try buf.appendSlice(ctx.allocator, postfix.string.bytes());
-    const s = try ctx.allocator.dupe(u8, buf.items);
-    buf.deinit(ctx.allocator);
-    try ctx.vm.strings.append(ctx.allocator, s);
+    const s = try Value.String.adopt(ctx.allocator, try buf.toOwnedSlice(ctx.allocator));
     _ = obj;
-    return .{ .string = Value.String.borrowed(s) };
+    return NativeResult.takeString(s);
 }
 
-fn rtiGetPrefix(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .string = Value.String.borrowed("") };
+fn rtiGetPrefix(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.literal("");
     const depth_v = try ctx.vm.callMethod(obj, "getDepth", &.{});
     const depth: i64 = if (depth_v == .int) depth_v.int else 0;
     var buf: std.ArrayListUnmanaged(u8) = .{};
+    defer buf.deinit(ctx.allocator);
     var i: i64 = 0;
     while (i < depth) : (i += 1) {
         try buf.appendSlice(ctx.allocator, "| ");
     }
     try buf.appendSlice(ctx.allocator, "|-");
-    const s = try ctx.allocator.dupe(u8, buf.items);
-    buf.deinit(ctx.allocator);
-    try ctx.vm.strings.append(ctx.allocator, s);
-    return .{ .string = Value.String.borrowed(s) };
+    const s = try Value.String.adopt(ctx.allocator, try buf.toOwnedSlice(ctx.allocator));
+    return NativeResult.takeString(s);
 }
 
-fn rtiGetEntry(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .string = Value.String.borrowed("") };
+fn rtiGetEntry(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.literal("");
     // delegate to inner current
-    const inner = riiCurrentIterator(obj) orelse return .{ .string = Value.String.borrowed("") };
+    const inner = riiCurrentIterator(obj) orelse return NativeResult.literal("");
     const cur = try ctx.vm.callMethod(inner, "current", &.{});
-    if (cur == .string) return cur;
+    if (cur == .string) return NativeResult.share(cur);
     var buf: std.ArrayListUnmanaged(u8) = .{};
+    defer buf.deinit(ctx.allocator);
     try cur.format(&buf, ctx.allocator);
-    const s = try ctx.allocator.dupe(u8, buf.items);
-    buf.deinit(ctx.allocator);
-    try ctx.vm.strings.append(ctx.allocator, s);
-    return .{ .string = Value.String.borrowed(s) };
+    const s = try Value.String.adopt(ctx.allocator, try buf.toOwnedSlice(ctx.allocator));
+    return NativeResult.takeString(s);
 }
 
-fn rtiGetPostfix(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .string = Value.String.borrowed("") };
+fn rtiGetPostfix(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.literal("");
 }
 
 // ==========================================
 // GlobIterator
 // ==========================================
 
-fn giConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1 or args[0] != .string) return .null;
-    try obj.set(ctx.allocator, "__gi_pattern", .{ .string = Value.String.borrowed(try createString(ctx, args[0].string.bytes())) });
+fn giConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
+    try obj.set(ctx.allocator, "__gi_pattern", args[0]);
     const result = try ctx.vm.callByName("glob", &.{args[0]});
     if (result == .array) {
         try obj.set(ctx.allocator, "__gi_results", result);
@@ -2201,11 +2172,11 @@ fn giConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try obj.set(ctx.allocator, "__gi_results", .{ .array = empty });
     }
     try obj.set(ctx.allocator, "__gi_pos", .{ .int = 0 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn giRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn giRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__gi_pos", .{ .int = 0 });
     const results = obj.get("__gi_results");
     if (results == .array and results.array.length() > 0) {
@@ -2214,43 +2185,43 @@ fn giRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
             try obj.set(ctx.allocator, "__pathname", path);
         }
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn giValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn giValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const results = obj.get("__gi_results");
-    if (results != .array) return .{ .bool = false };
+    if (results != .array) return NativeResult.scalar(.{ .bool = false });
     const pos = objGetInt(obj, "__gi_pos");
-    return .{ .bool = pos < results.array.length() };
+    return NativeResult.scalar(.{ .bool = pos < results.array.length() });
 }
 
-fn giCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn giCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const results = obj.get("__gi_results");
-    if (results != .array) return .null;
+    if (results != .array) return NativeResult.scalar(.null);
     const pos = objGetInt(obj, "__gi_pos");
-    if (pos < 0 or pos >= results.array.length()) return .null;
+    if (pos < 0 or pos >= results.array.length()) return NativeResult.scalar(.null);
     const path = results.array.get(.{ .int = pos });
-    if (path != .string) return .null;
+    if (path != .string) return NativeResult.scalar(.null);
     const fi = try createFileInfoObj(ctx, path.string.bytes());
     fi.class_name = "GlobIterator";
-    return .{ .object = fi };
+    return NativeResult.borrowed(.{ .object = fi });
 }
 
-fn giKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
+fn giKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
     const results = obj.get("__gi_results");
-    if (results != .array) return .{ .int = 0 };
+    if (results != .array) return NativeResult.scalar(.{ .int = 0 });
     const pos = objGetInt(obj, "__gi_pos");
-    if (pos < 0 or pos >= results.array.length()) return .{ .int = 0 };
+    if (pos < 0 or pos >= results.array.length()) return NativeResult.scalar(.{ .int = 0 });
     const path = results.array.get(.{ .int = pos });
-    if (path == .string) return path;
-    return .{ .int = pos };
+    if (path == .string) return NativeResult.share(path);
+    return NativeResult.scalar(.{ .int = pos });
 }
 
-fn giNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn giNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const pos = objGetInt(obj, "__gi_pos");
     try obj.set(ctx.allocator, "__gi_pos", .{ .int = pos + 1 });
     const results = obj.get("__gi_results");
@@ -2260,12 +2231,12 @@ fn giNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
             try obj.set(ctx.allocator, "__pathname", path);
         }
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn giCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
+fn giCount(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
     const results = obj.get("__gi_results");
-    if (results != .array) return .{ .int = 0 };
-    return .{ .int = results.array.length() };
+    if (results != .array) return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = results.array.length() });
 }

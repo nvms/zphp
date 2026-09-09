@@ -4,6 +4,7 @@ const PhpArray = @import("../runtime/value.zig").PhpArray;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
 const vm_mod = @import("../runtime/vm.zig");
 const VM = vm_mod.VM;
+const NativeResult = vm_mod.NativeResult;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
 
@@ -645,60 +646,60 @@ fn wmiCursorObj(this: *PhpObject) ?*PhpObject {
     return v.object;
 }
 
-fn wmiCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this = getThis(ctx) orelse return .null;
-    const target = wmiCursorObj(this) orelse return .null;
+fn wmiCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const target = wmiCursorObj(this) orelse return NativeResult.scalar(.null);
     const info_v = this.get("__info");
-    if (info_v != .array) return .null;
-    return retainReturned(info_v.array.get(.{ .int = sosObjKey(target) }));
+    if (info_v != .array) return NativeResult.scalar(.null);
+    return NativeResult.share(info_v.array.get(.{ .int = sosObjKey(target) }));
 }
 
-fn wmiKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this = getThis(ctx) orelse return .null;
-    const target = wmiCursorObj(this) orelse return .null;
-    return .{ .object = target };
+fn wmiKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const target = wmiCursorObj(this) orelse return NativeResult.scalar(.null);
+    return NativeResult.borrowed(.{ .object = target });
 }
 
-fn wmiNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this = getThis(ctx) orelse return .null;
+fn wmiNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const cur = Value.toInt(this.get("__cursor"));
     try this.set(ctx.allocator, "__cursor", .{ .int = cur + 1 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn wmiRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this = getThis(ctx) orelse return .null;
+fn wmiRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     try this.set(ctx.allocator, "__cursor", .{ .int = 0 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn wmiValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this = getThis(ctx) orelse return .{ .bool = false };
+fn wmiValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const objs_v = this.get("__objs");
-    if (objs_v != .array) return .{ .bool = false };
+    if (objs_v != .array) return NativeResult.scalar(.{ .bool = false });
     const cursor = Value.toInt(this.get("__cursor"));
-    return .{ .bool = cursor >= 0 and cursor < @as(i64, @intCast(objs_v.array.entries.items.len)) };
+    return NativeResult.scalar(.{ .bool = cursor >= 0 and cursor < @as(i64, @intCast(objs_v.array.entries.items.len)) });
 }
 
 // =========================================================
 // WeakReference
 // =========================================================
 
-fn weakRefCreate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .object) return .null;
+fn weakRefCreate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .object) return NativeResult.scalar(.null);
     const ref = try ctx.vm.allocator.create(PhpObject);
     ref.* = .{ .class_name = "WeakReference" };
     try ctx.vm.objects.append(ctx.vm.allocator, ref);
     try ref.set(ctx.vm.allocator, "__target", args[0]);
-    return .{ .object = ref };
+    return NativeResult.borrowed(.{ .object = ref });
 }
 
-fn weakRefGet(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this = getThis(ctx) orelse return .null;
-    return retainReturned(this.get("__target"));
+fn weakRefGet(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(this.get("__target"));
 }
 
-fn weakRefConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn weakRefConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     try ctx.vm.setPendingException("Error", "Cannot directly construct WeakReference, use WeakReference::create() instead");
     return error.RuntimeError;
 }
@@ -707,8 +708,8 @@ fn weakRefConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
 // WeakMap
 // =========================================================
 
-fn weakMapGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn weakMapGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const keys_v = obj.get("__keys");
     const data_v = obj.get("__data");
     const iter = try ctx.vm.allocator.create(PhpObject);
@@ -717,7 +718,7 @@ fn weakMapGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value 
     if (keys_v == .array) try iter.set(ctx.allocator, "__objs", keys_v);
     if (data_v == .array) try iter.set(ctx.allocator, "__info", data_v);
     try iter.set(ctx.allocator, "__cursor", .{ .int = 0 });
-    return .{ .object = iter };
+    return NativeResult.borrowed(.{ .object = iter });
 }
 
 fn getThis(ctx: *NativeContext) ?*PhpObject {
@@ -743,68 +744,68 @@ fn ensureData(ctx: *NativeContext, obj: *PhpObject) !*PhpArray {
 
 // --- SplStack ---
 
-fn stackConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn stackConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     _ = try ensureData(ctx, obj);
     try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
     try obj.set(ctx.allocator, "__it_mode", .{ .int = DLL_IT_MODE_LIFO | DLL_IT_MODE_KEEP | 4 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn stackPush(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn stackPush(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = try ensureData(ctx, obj);
     if (args.len >= 1) try arr.append(ctx.allocator, args[0]);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn stackPop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn stackPop(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     if (arr.entries.items.len == 0) {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
         return error.RuntimeError;
     }
     const last = arr.entries.items[arr.entries.items.len - 1].value;
     arr.entries.items.len -= 1;
-    return last;
+    return if (last == .string and last.string.owner != null) NativeResult.takeString(last.string) else NativeResult.share(last);
 }
 
-fn stackTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn stackTop(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     if (arr.entries.items.len == 0) {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
         return error.RuntimeError;
     }
-    return retainReturned(arr.entries.items[arr.entries.items.len - 1].value);
+    return NativeResult.share(arr.entries.items[arr.entries.items.len - 1].value);
 }
 
-fn stackBottom(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn stackBottom(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     if (arr.entries.items.len == 0) {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
         return error.RuntimeError;
     }
-    return retainReturned(arr.entries.items[0].value);
+    return NativeResult.share(arr.entries.items[0].value);
 }
 
-fn stackCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    const arr = getData(obj) orelse return .{ .int = 0 };
-    return .{ .int = arr.length() };
+fn stackCount(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = arr.length() });
 }
 
-fn stackIsEmpty(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = true };
-    const arr = getData(obj) orelse return .{ .bool = true };
-    return .{ .bool = arr.entries.items.len == 0 };
+fn stackIsEmpty(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = true });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = true });
+    return NativeResult.scalar(.{ .bool = arr.entries.items.len == 0 });
 }
 
-fn stackShift(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn stackShift(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     if (arr.entries.items.len == 0) {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
         return error.RuntimeError;
@@ -812,70 +813,69 @@ fn stackShift(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const first = arr.entries.items[0].value;
     std.mem.copyForwards(PhpArray.Entry, arr.entries.items[0 .. arr.entries.items.len - 1], arr.entries.items[1..arr.entries.items.len]);
     arr.entries.items.len -= 1;
-    return first;
+    return if (first == .string and first.string.owner != null) NativeResult.takeString(first.string) else NativeResult.share(first);
 }
 
-fn stackUnshift(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn stackUnshift(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = try ensureData(ctx, obj);
-    if (args.len == 0) return .null;
+    if (args.len == 0) return NativeResult.scalar(.null);
     try arr.entries.insert(ctx.allocator, 0, .{ .key = .{ .int = 0 }, .value = args[0] });
-    return .null;
+    VM.retainValue(args[0]);
+    return NativeResult.scalar(.null);
 }
 
 // iterator: SplStack iterates in LIFO order (top to bottom)
-fn stackRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn stackRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = getData(obj) orelse {
         try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
-        return .null;
+        return NativeResult.scalar(.null);
     };
     // cursor starts at end (top of stack)
     try obj.set(ctx.allocator, "__cursor", .{ .int = @as(i64, @intCast(arr.entries.items.len)) - 1 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn stackCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn stackCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     const cursor = Value.toInt(obj.get("__cursor"));
-    if (cursor < 0 or cursor >= arr.length()) return .{ .bool = false };
-    return retainReturned(arr.entries.items[@intCast(cursor)].value);
+    if (cursor < 0 or cursor >= arr.length()) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.share(arr.entries.items[@intCast(cursor)].value);
 }
 
-fn stackKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn stackKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     const cursor = Value.toInt(obj.get("__cursor"));
     const len = arr.length();
-    if (cursor < 0 or cursor >= len) return .null;
+    if (cursor < 0 or cursor >= len) return NativeResult.scalar(.null);
     // key is the underlying array index (the cursor itself). PHP's LIFO
     // iteration starts with the top element's original push position (len-1)
     // and counts down to 0 as the cursor decreases
-    return .{ .int = cursor };
+    return NativeResult.scalar(.{ .int = cursor });
 }
 
-fn stackNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn stackNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const cursor = Value.toInt(obj.get("__cursor"));
     try obj.set(ctx.allocator, "__cursor", .{ .int = cursor - 1 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn stackValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const arr = getData(obj) orelse return .{ .bool = false };
+fn stackValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const cursor = Value.toInt(obj.get("__cursor"));
-    return .{ .bool = cursor >= 0 and cursor < arr.length() };
+    return NativeResult.scalar(.{ .bool = cursor >= 0 and cursor < arr.length() });
 }
 
-fn stackToArray(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn stackToArray(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = getData(obj) orelse {
-        const empty = try ctx.allocator.create(PhpArray);
-        empty.* = .{};
-        try ctx.vm.arrays.append(ctx.allocator, empty);
-        return .{ .array = empty };
+        const empty = try ctx.createArray();
+        return NativeResult.borrowed(.{ .array = empty });
     };
     // return a copy in LIFO order
     const copy = try ctx.allocator.create(PhpArray);
@@ -888,19 +888,19 @@ fn stackToArray(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         try copy.set(ctx.allocator, .{ .int = key }, arr.entries.items[i].value);
         key += 1;
     }
-    return .{ .array = copy };
+    return NativeResult.borrowed(.{ .array = copy });
 }
 
 // --- ArrayObject ---
 
-fn aoSerializeState(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn aoSerializeState(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (obj.get("__data") == .null) _ = try ensureData(ctx, obj);
     return @import("serialize.zig").splArrayState(ctx, obj);
 }
 
-fn aoUnserializeState(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn aoUnserializeState(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len == 0 or args[0] != .array) {
         try ctx.vm.setPendingException("TypeError", "__unserialize(): Argument #1 ($data) must be of type array");
         return error.RuntimeError;
@@ -908,14 +908,14 @@ fn aoUnserializeState(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     return @import("serialize.zig").restoreSplArrayState(ctx, obj, args[0]);
 }
 
-fn aoSerialize(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn aoSerialize(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (obj.get("__data") == .null) _ = try ensureData(ctx, obj);
     return @import("serialize.zig").serializeSplArray(ctx, obj);
 }
 
-fn aoUnserialize(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn aoUnserialize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len == 0 or args[0] != .string) {
         try ctx.vm.setPendingException("TypeError", "unserialize(): Argument #1 ($data) must be of type string");
         return error.RuntimeError;
@@ -923,8 +923,8 @@ fn aoUnserialize(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return @import("serialize.zig").unserializeSplArray(ctx, obj, args[0].string.bytes());
 }
 
-fn aoConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn aoConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len >= 1 and (args[0] == .array or args[0] == .object)) {
         try obj.set(ctx.allocator, "__data", args[0]);
     } else {
@@ -935,113 +935,113 @@ fn aoConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len >= 3 and args[2] == .string) {
         try obj.set(ctx.allocator, "__iter_class", args[2]);
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn aoMagicGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len == 0) return .null;
+fn aoMagicGet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len == 0) return NativeResult.scalar(.null);
     const flags = obj.get("__flags");
     const has_props = flags == .int and (flags.int & 2) != 0; // ArrayObject::ARRAY_AS_PROPS
-    if (!has_props) return .null;
-    const arr = getData(obj) orelse return .null;
-    return retainReturned(arr.get(args[0].toArrayKey()));
+    if (!has_props) return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(arr.get(args[0].toArrayKey()));
 }
 
-fn aoMagicSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 2) return .null;
+fn aoMagicSet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 2) return NativeResult.scalar(.null);
     const flags = obj.get("__flags");
     const has_props = flags == .int and (flags.int & 2) != 0;
     if (!has_props) {
         try obj.set(ctx.allocator, args[0].string.bytes(), args[1]);
-        return .null;
+        return NativeResult.scalar(.null);
     }
     const arr = try ensureData(ctx, obj);
     try arr.set(ctx.allocator, args[0].toArrayKey(), args[1]);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn aoMagicIsset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    if (args.len == 0) return .{ .bool = false };
+fn aoMagicIsset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     const flags = obj.get("__flags");
     const has_props = flags == .int and (flags.int & 2) != 0;
-    if (!has_props) return .{ .bool = false };
-    const arr = getData(obj) orelse return .{ .bool = false };
+    if (!has_props) return NativeResult.scalar(.{ .bool = false });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const v = arr.get(args[0].toArrayKey());
-    return .{ .bool = v != .null };
+    return NativeResult.scalar(.{ .bool = v != .null });
 }
 
-fn aoMagicUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len == 0) return .null;
+fn aoMagicUnset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len == 0) return NativeResult.scalar(.null);
     const flags = obj.get("__flags");
     const has_props = flags == .int and (flags.int & 2) != 0;
-    if (!has_props) return .null;
-    const arr = getData(obj) orelse return .null;
+    if (!has_props) return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     const key = args[0].toArrayKey();
     ctx.vm.arrayRemoveOwned(arr, key);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn aoOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn aoOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len > 0 and obj.get("__data") == .object and args[0] == .string)
-        return retainReturned(obj.get("__data").object.get(args[0].string.bytes()));
-    const arr = getData(obj) orelse return .null;
-    if (args.len == 0) return .null;
-    return retainReturned(arr.get(args[0].toArrayKey()));
+        return NativeResult.share(obj.get("__data").object.get(args[0].string.bytes()));
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
+    if (args.len == 0) return NativeResult.scalar(.null);
+    return NativeResult.share(arr.get(args[0].toArrayKey()));
 }
 
-fn aoOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn aoOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = try ensureData(ctx, obj);
-    if (args.len < 2) return .null;
+    if (args.len < 2) return NativeResult.scalar(.null);
     if (args[0] == .null) {
         try arr.append(ctx.allocator, args[1]);
     } else {
         detachSplReference(ctx, arr, args[0].toArrayKey());
         try arr.set(ctx.allocator, args[0].toArrayKey(), args[1]);
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn aoOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const arr = getData(obj) orelse return .{ .bool = false };
-    if (args.len == 0) return .{ .bool = false };
+fn aoOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     const key = args[0].toArrayKey();
     for (arr.entries.items) |entry| {
-        if (entry.key.eql(key)) return .{ .bool = true };
+        if (entry.key.eql(key)) return NativeResult.scalar(.{ .bool = true });
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn aoOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
-    if (args.len == 0) return .null;
+fn aoOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
+    if (args.len == 0) return NativeResult.scalar(.null);
     const key = args[0].toArrayKey();
     ctx.vm.arrayRemoveOwned(arr, key);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn aoCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    const arr = getData(obj) orelse return .{ .int = 0 };
-    return .{ .int = arr.length() };
+fn aoCount(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = arr.length() });
 }
 
-fn aoAppend(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn aoAppend(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = try ensureData(ctx, obj);
     if (args.len >= 1) try arr.append(ctx.allocator, args[0]);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn aoGetArrayCopy(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn aoGetArrayCopy(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (obj.get("__data") == .object) {
         const storage = obj.get("__data").object;
         const copy = try ctx.createArray();
@@ -1052,148 +1052,143 @@ fn aoGetArrayCopy(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         }
         var it = storage.properties.iterator();
         while (it.next()) |entry| try copy.set(ctx.allocator, .{ .string = Value.String.borrowed(entry.key_ptr.*) }, entry.value_ptr.*);
-        return .{ .array = copy };
+        return NativeResult.borrowed(.{ .array = copy });
     }
     const arr = getData(obj) orelse {
-        const empty = try ctx.allocator.create(PhpArray);
-        empty.* = .{};
-        try ctx.vm.arrays.append(ctx.allocator, empty);
-        return .{ .array = empty };
+        const empty = try ctx.createArray();
+        return NativeResult.borrowed(.{ .array = empty });
     };
     // independent deep snapshot: ArrayObject mutates its internal array in place,
     // and under COW a shallow copy would share nested arrays with it (a later
     // $ao[k][..]=v would leak into this copy). a deep clone isolates the snapshot,
     // matching PHP's copy-on-write independence
-    return .{ .array = try ctx.vm.cloneArray(arr) };
+    return NativeResult.borrowed(.{ .array = try ctx.vm.cloneArray(arr) });
 }
 
-fn aoKsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const arr = getData(obj) orelse return .{ .bool = false };
+fn aoKsort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const flags: i64 = if (args.len >= 1) Value.toInt(args[0]) else 0;
     arrays_mod.sortKeysWithFlags(arr, flags, false);
     arr.rebuildStringIndexAssumeCapacity();
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn aoKrsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const arr = getData(obj) orelse return .{ .bool = false };
+fn aoKrsort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const flags: i64 = if (args.len >= 1) Value.toInt(args[0]) else 0;
     arrays_mod.sortKeysWithFlags(arr, flags, true);
     arr.rebuildStringIndexAssumeCapacity();
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn aoAsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const arr = getData(obj) orelse return .{ .bool = false };
+fn aoAsort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const flags: i64 = if (args.len >= 1) Value.toInt(args[0]) else 0;
     arrays_mod.sortWithFlags(arr, flags, false);
     arr.rebuildStringIndexAssumeCapacity();
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn aoArsort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const arr = getData(obj) orelse return .{ .bool = false };
+fn aoArsort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const flags: i64 = if (args.len >= 1) Value.toInt(args[0]) else 0;
     arrays_mod.sortWithFlags(arr, flags, true);
     arr.rebuildStringIndexAssumeCapacity();
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn aoUasort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const arr = getData(obj) orelse return .{ .bool = false };
-    if (args.len < 1) return .{ .bool = false };
+fn aoUasort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
     try arrays_mod.mergeSort(PhpArray.Entry, arr.entries.items, ctx, args[0], .value);
     arr.rebuildStringIndexAssumeCapacity();
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn aoUksort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const arr = getData(obj) orelse return .{ .bool = false };
-    if (args.len < 1) return .{ .bool = false };
+fn aoUksort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
     try arrays_mod.mergeSort(PhpArray.Entry, arr.entries.items, ctx, args[0], .key);
     arr.rebuildStringIndexAssumeCapacity();
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn aoNatsort(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const arr = getData(obj) orelse return .{ .bool = false };
+fn aoNatsort(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
     arrays_mod.sortWithFlags(arr, 6, false); // SORT_NATURAL
     arr.rebuildStringIndexAssumeCapacity();
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn aoNatcasesort(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const arr = getData(obj) orelse return .{ .bool = false };
+fn aoNatcasesort(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
     arrays_mod.sortWithFlags(arr, 6 | 8, false); // SORT_NATURAL | SORT_FLAG_CASE
     arr.rebuildStringIndexAssumeCapacity();
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn aoExchangeArray(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    if (args.len < 1 or args[0] != .array) return .{ .bool = false };
+fn aoExchangeArray(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len < 1 or args[0] != .array) return NativeResult.scalar(.{ .bool = false });
     const old = getData(obj);
     const old_copy = try ctx.createArray();
     if (old) |o| {
         for (o.entries.items) |e| try old_copy.set(ctx.allocator, e.key, e.value);
     }
     try obj.set(ctx.allocator, "__data", .{ .array = args[0].array });
-    return .{ .array = old_copy };
+    return NativeResult.borrowed(.{ .array = old_copy });
 }
 
-fn aoSetIteratorClass(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn aoSetIteratorClass(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len >= 1 and args[0] == .string) {
         try obj.set(ctx.allocator, "__iter_class", .{ .string = args[0].string });
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn aoGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn aoGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     const ic = obj.get("__iter_class");
     const cls_name = if (ic == .string and ic.string.bytes().len > 0) ic.string.bytes() else "ArrayIterator";
-    const it = try ctx.allocator.create(PhpObject);
-    it.* = .{ .class_name = cls_name };
-    try ctx.vm.objects.append(ctx.allocator, it);
-    try ctx.vm.initObjectProperties(it, cls_name);
+    const it = try ctx.createObject(cls_name);
     try it.set(ctx.allocator, "__data", .{ .array = arr });
     try it.set(ctx.allocator, "__cursor", .{ .int = 0 });
     try it.set(ctx.allocator, "__flags", .{ .int = 0 });
-    return .{ .object = it };
+    return NativeResult.borrowed(.{ .object = it });
 }
 
-fn aoGetIteratorClass(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .string = Value.String.borrowed("ArrayIterator") };
+fn aoGetIteratorClass(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.literal("ArrayIterator");
     const ic = obj.get("__iter_class");
-    if (ic == .string and ic.string.bytes().len > 0) return ic;
-    return .{ .string = Value.String.borrowed("ArrayIterator") };
+    if (ic == .string and ic.string.bytes().len > 0) return NativeResult.shareString(ic.string);
+    return NativeResult.literal("ArrayIterator");
 }
 
-fn aoSetFlags(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn aoSetFlags(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len >= 1) try obj.set(ctx.allocator, "__flags", .{ .int = Value.toInt(args[0]) });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn aoGetFlags(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    return .{ .int = Value.toInt(obj.get("__flags")) };
+fn aoGetFlags(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = Value.toInt(obj.get("__flags")) });
 }
 
 // --- ArrayIterator ---
 
-fn aiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn aiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len >= 1 and (args[0] == .array or args[0] == .object)) {
         try obj.set(ctx.allocator, "__data", args[0]);
     } else {
@@ -1201,112 +1196,111 @@ fn aiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
     try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
     try obj.set(ctx.allocator, "__flags", .{ .int = if (args.len >= 2) args[1].toInt() else 0 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn aiRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn aiRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn aiCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .{ .bool = false };
+fn aiCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const cursor: usize = @intCast(@max(Value.toInt(obj.get("__cursor")), 0));
-    if (cursor >= arr.entries.items.len) return .{ .bool = false };
-    return retainReturned(arr.entries.items[cursor].value);
+    if (cursor >= arr.entries.items.len) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.share(arr.entries.items[cursor].value);
 }
 
-fn aiKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn aiKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     const cursor: usize = @intCast(@max(Value.toInt(obj.get("__cursor")), 0));
-    if (cursor >= arr.entries.items.len) return .null;
+    if (cursor >= arr.entries.items.len) return NativeResult.scalar(.null);
     const key = arr.entries.items[cursor].key;
-    if (key == .string) key.string.retain();
     return switch (key) {
-        .int => |i| .{ .int = i },
-        .string => |s| .{ .string = s },
+        .int => |i| NativeResult.scalar(.{ .int = i }),
+        .string => |value| NativeResult.shareString(value),
     };
 }
 
-fn aiNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn aiNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const cursor = Value.toInt(obj.get("__cursor"));
     try obj.set(ctx.allocator, "__cursor", .{ .int = cursor + 1 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn aiValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const arr = getData(obj) orelse return .{ .bool = false };
+fn aiValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const cursor = Value.toInt(obj.get("__cursor"));
-    return .{ .bool = cursor >= 0 and cursor < arr.length() };
+    return NativeResult.scalar(.{ .bool = cursor >= 0 and cursor < arr.length() });
 }
 
-fn aiSeek(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn aiSeek(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     const pos = if (args.len >= 1) Value.toInt(args[0]) else 0;
     if (pos < 0 or pos >= arr.length()) {
         try ctx.vm.setPendingException("OutOfBoundsException", "Seek position is out of range");
         return error.RuntimeError;
     }
     try obj.set(ctx.allocator, "__cursor", .{ .int = pos });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn aiCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    const arr = getData(obj) orelse return .{ .int = 0 };
-    return .{ .int = arr.length() };
+fn aiCount(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = arr.length() });
 }
 
-fn aiOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn aiOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len > 0 and obj.get("__data") == .object and args[0] == .string)
-        return retainReturned(obj.get("__data").object.get(args[0].string.bytes()));
-    const arr = getData(obj) orelse return .null;
-    if (args.len == 0) return .null;
-    return retainReturned(arr.get(args[0].toArrayKey()));
+        return NativeResult.share(obj.get("__data").object.get(args[0].string.bytes()));
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
+    if (args.len == 0) return NativeResult.scalar(.null);
+    return NativeResult.share(arr.get(args[0].toArrayKey()));
 }
 
-fn aiOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn aiOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = try ensureData(ctx, obj);
-    if (args.len < 2) return .null;
+    if (args.len < 2) return NativeResult.scalar(.null);
     if (args[0] == .null) {
         try arr.append(ctx.allocator, args[1]);
     } else {
         detachSplReference(ctx, arr, args[0].toArrayKey());
         try arr.set(ctx.allocator, args[0].toArrayKey(), args[1]);
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn aiOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const arr = getData(obj) orelse return .{ .bool = false };
-    if (args.len == 0) return .{ .bool = false };
+fn aiOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     const key = args[0].toArrayKey();
     for (arr.entries.items) |entry| {
-        if (entry.key.eql(key)) return .{ .bool = true };
+        if (entry.key.eql(key)) return NativeResult.scalar(.{ .bool = true });
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn aiOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
-    if (args.len == 0) return .null;
+fn aiOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
+    if (args.len == 0) return NativeResult.scalar(.null);
     const key = args[0].toArrayKey();
     ctx.vm.arrayRemoveOwned(arr, key);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn aiGetArrayCopy(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn aiGetArrayCopy(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (obj.get("__data") == .object) {
         const storage = obj.get("__data").object;
         const copy = try ctx.createArray();
@@ -1317,35 +1311,33 @@ fn aiGetArrayCopy(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         }
         var it = storage.properties.iterator();
         while (it.next()) |entry| try copy.set(ctx.allocator, .{ .string = Value.String.borrowed(entry.key_ptr.*) }, entry.value_ptr.*);
-        return .{ .array = copy };
+        return NativeResult.borrowed(.{ .array = copy });
     }
     const arr = getData(obj) orelse {
-        const empty = try ctx.allocator.create(PhpArray);
-        empty.* = .{};
-        try ctx.vm.arrays.append(ctx.allocator, empty);
-        return .{ .array = empty };
+        const empty = try ctx.createArray();
+        return NativeResult.borrowed(.{ .array = empty });
     };
     // independent deep snapshot (see aoGetArrayCopy) - avoids nested-array COW
     // sharing with the iterator's mutable internal array
-    return .{ .array = try ctx.vm.cloneArray(arr) };
+    return NativeResult.borrowed(.{ .array = try ctx.vm.cloneArray(arr) });
 }
 
-fn aiAppend(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn aiAppend(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = try ensureData(ctx, obj);
     if (args.len >= 1) try arr.append(ctx.allocator, args[0]);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn aiGetFlags(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    return .{ .int = Value.toInt(obj.get("__flags")) };
+fn aiGetFlags(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = Value.toInt(obj.get("__flags")) });
 }
 
-fn aiSetFlags(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn aiSetFlags(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len >= 1) try obj.set(ctx.allocator, "__flags", .{ .int = Value.toInt(args[0]) });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 // --- WeakMap ---
@@ -1355,50 +1347,49 @@ fn wmObjKey(arg: Value) ?i64 {
     return null;
 }
 
-fn wmConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn wmConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     _ = try ensureData(ctx, obj);
     // __keys parallel-tracks the object references in insertion order so that
     // iteration can yield real object keys (the int-keyed __data only has pointers)
     if (obj.get("__keys") != .array) {
-        const keys = try ctx.allocator.create(PhpArray);
-        keys.* = .{ .weak = true };
-        try ctx.vm.arrays.append(ctx.allocator, keys);
+        const keys = try ctx.createArray();
+        keys.weak = true;
         try obj.set(ctx.allocator, "__keys", .{ .array = keys });
     }
     // register for weak-key cleanup on object destruct
     try ctx.vm.weakmaps.append(ctx.allocator, obj);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn wmOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const arr = getData(obj) orelse return .{ .bool = false };
-    if (args.len == 0) return .{ .bool = false };
-    const key = wmObjKey(args[0]) orelse return .{ .bool = false };
+fn wmOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
+    const key = wmObjKey(args[0]) orelse return NativeResult.scalar(.{ .bool = false });
     const k = PhpArray.Key{ .int = key };
-    return .{ .bool = arr.get(k) != .null };
+    return NativeResult.scalar(.{ .bool = arr.get(k) != .null });
 }
 
-fn wmOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
-    if (args.len == 0) return .null;
-    const key = wmObjKey(args[0]) orelse return .null;
-    return retainReturned(arr.get(.{ .int = key }));
+fn wmOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
+    if (args.len == 0) return NativeResult.scalar(.null);
+    const key = wmObjKey(args[0]) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(arr.get(.{ .int = key }));
 }
 
-fn wmOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn wmOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = try ensureData(ctx, obj);
-    if (args.len < 2) return .null;
+    if (args.len < 2) return NativeResult.scalar(.null);
     if (args[0] != .object) {
         try ctx.vm.setPendingException("TypeError", "WeakMap key must be an object");
         return error.RuntimeError;
     }
-    const key = wmObjKey(args[0]) orelse return .null;
+    const key = wmObjKey(args[0]) orelse return NativeResult.scalar(.null);
     const is_new = arr.get(.{ .int = key }) == .null;
-    try arr.set(ctx.allocator, .{ .int = key }, args[1]);
+    try ctx.vm.arraySetOwned(arr, .{ .int = key }, args[1]);
     if (is_new and args[0] == .object) {
         const keys_v = obj.get("__keys");
         // __keys is a weak array: appending takes no reference, and the
@@ -1406,14 +1397,14 @@ fn wmOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         // when the key object becomes unreachable
         if (keys_v == .array) try keys_v.array.append(ctx.allocator, args[0]);
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn wmOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
-    if (args.len == 0) return .null;
-    const key = wmObjKey(args[0]) orelse return .null;
+fn wmOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
+    if (args.len == 0) return NativeResult.scalar(.null);
+    const key = wmObjKey(args[0]) orelse return NativeResult.scalar(.null);
     ctx.vm.arrayRemoveOwned(arr, .{ .int = key });
     if (args[0] == .object) {
         const keys_v = obj.get("__keys");
@@ -1427,13 +1418,13 @@ fn wmOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             }
         }
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn wmCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    const arr = getData(obj) orelse return .{ .int = 0 };
-    return .{ .int = @intCast(arr.entries.items.len) };
+fn wmCount(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = @intCast(arr.entries.items.len) });
 }
 
 // --- SplPriorityQueue ---
@@ -1443,12 +1434,12 @@ const EXTR_DATA: i64 = 1;
 const EXTR_PRIORITY: i64 = 2;
 const EXTR_BOTH: i64 = 3;
 
-fn pqConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn pqConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     _ = try ensureData(ctx, obj);
     try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
     try obj.set(ctx.allocator, "__flags", .{ .int = EXTR_DATA });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 // SplPriorityQueue stores pairs as a binary max-heap. element at index i has
@@ -1512,10 +1503,10 @@ fn pqSiftDown(ctx: *NativeContext, obj: *PhpObject, arr: *PhpArray, start: usize
     }
 }
 
-fn pqInsert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn pqInsert(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = try ensureData(ctx, obj);
-    if (args.len < 2) return .null;
+    if (args.len < 2) return NativeResult.scalar(.null);
     const pair = try ctx.allocator.create(PhpArray);
     pair.* = .{};
     try ctx.vm.arrays.append(ctx.allocator, pair);
@@ -1525,11 +1516,11 @@ fn pqInsert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const new_idx = arr.entries.items.len;
     try arr.entries.append(ctx.allocator, .{ .key = .{ .int = @intCast(new_idx) }, .value = .{ .array = pair } });
     try pqSiftUp(ctx, obj, arr, new_idx);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn pqExtractValue(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
-    const arr = getData(obj) orelse return .null;
+fn pqExtractValue(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeResult {
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     if (arr.entries.items.len == 0) {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
         return error.RuntimeError;
@@ -1544,30 +1535,28 @@ fn pqExtractValue(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
     return pqFormatEntry(ctx, obj, top);
 }
 
-fn pqFormatEntry(ctx: *NativeContext, obj: *PhpObject, entry: Value) Value {
+fn pqFormatEntry(ctx: *NativeContext, obj: *PhpObject, entry: Value) RuntimeError!NativeResult {
     const flags = Value.toInt(obj.get("__flags"));
-    if (entry != .array) return entry;
+    if (entry != .array) return NativeResult.share(entry);
     const pair = entry.array;
-    if (flags == EXTR_PRIORITY) return retainReturned(pair.get(.{ .int = 1 }));
+    if (flags == EXTR_PRIORITY) return NativeResult.share(pair.get(.{ .int = 1 }));
     if (flags == EXTR_BOTH) {
-        const result = ctx.allocator.create(PhpArray) catch return entry;
-        result.* = .{};
-        ctx.vm.arrays.append(ctx.allocator, result) catch return entry;
-        result.set(ctx.allocator, .{ .string = Value.String.borrowed("data") }, pair.get(.{ .int = 0 })) catch return entry;
-        result.set(ctx.allocator, .{ .string = Value.String.borrowed("priority") }, pair.get(.{ .int = 1 })) catch return entry;
-        return .{ .array = result };
+        const result = try ctx.createArray();
+        try result.set(ctx.allocator, .{ .string = Value.String.borrowed("data") }, pair.get(.{ .int = 0 }));
+        try result.set(ctx.allocator, .{ .string = Value.String.borrowed("priority") }, pair.get(.{ .int = 1 }));
+        return NativeResult.borrowed(.{ .array = result });
     }
-    return retainReturned(pair.get(.{ .int = 0 }));
+    return NativeResult.share(pair.get(.{ .int = 0 }));
 }
 
-fn pqExtract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn pqExtract(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     return pqExtractValue(ctx, obj);
 }
 
-fn pqTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn pqTop(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     if (arr.entries.items.len == 0) {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
         return error.RuntimeError;
@@ -1575,70 +1564,71 @@ fn pqTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return pqFormatEntry(ctx, obj, arr.entries.items[0].value);
 }
 
-fn pqCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    const arr = getData(obj) orelse return .{ .int = 0 };
-    return .{ .int = @intCast(arr.entries.items.len) };
+fn pqCount(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = @intCast(arr.entries.items.len) });
 }
 
-fn pqIsEmpty(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = true };
-    const arr = getData(obj) orelse return .{ .bool = true };
-    return .{ .bool = arr.entries.items.len == 0 };
+fn pqIsEmpty(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = true });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = true });
+    return NativeResult.scalar(.{ .bool = arr.entries.items.len == 0 });
 }
 
-fn pqSetExtractFlags(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn pqSetExtractFlags(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len >= 1) try obj.set(ctx.allocator, "__flags", .{ .int = Value.toInt(args[0]) });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 // pq iteration is destructive: current = top, next = extract, key = remaining-1
-fn pqCurrent(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn pqCurrent(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return pqTop(ctx, args);
 }
 
-fn pqKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn pqKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     if (arr.entries.items.len == 0) {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
         return error.RuntimeError;
     }
-    return .{ .int = @intCast(arr.entries.items.len - 1) };
+    return NativeResult.scalar(.{ .int = @intCast(arr.entries.items.len - 1) });
 }
 
-fn pqNext(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    _ = try pqExtract(ctx, args);
-    return .null;
+fn pqNext(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const discarded = try pqExtract(ctx, args);
+    if (discarded.value == .string) discarded.value.string.release();
+    return NativeResult.scalar(.null);
 }
 
-fn pqRewind(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .null;
+fn pqRewind(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.null);
 }
 
-fn pqValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const arr = getData(obj) orelse return .{ .bool = false };
-    return .{ .bool = arr.entries.items.len > 0 };
+fn pqValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = arr.entries.items.len > 0 });
 }
 
 // --- SplMinHeap / SplMaxHeap ---
 // stored as flat array in __data, heap-ordered
 
-fn heapConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn heapConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     _ = try ensureData(ctx, obj);
     try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn heapInsert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn heapInsert(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = try ensureData(ctx, obj);
-    if (args.len == 0) return .null;
+    if (args.len == 0) return NativeResult.scalar(.null);
     try arr.append(ctx.allocator, args[0]);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 fn findMinIdx(arr: *PhpArray) ?usize {
@@ -1659,11 +1649,11 @@ fn findMaxIdx(arr: *PhpArray) ?usize {
     return best;
 }
 
-fn heapRemoveAt(arr: *PhpArray, idx: usize) Value {
+fn heapRemoveAt(arr: *PhpArray, idx: usize) NativeResult {
     const val = arr.entries.items[idx].value;
     std.mem.copyForwards(PhpArray.Entry, arr.entries.items[idx .. arr.entries.items.len - 1], arr.entries.items[idx + 1 .. arr.entries.items.len]);
     arr.entries.items.len -= 1;
-    return val;
+    return if (val == .string and val.string.owner != null) NativeResult.takeString(val.string) else NativeResult.share(val);
 }
 
 fn findUserBestIdx(ctx: *NativeContext, obj: *PhpObject, arr: *PhpArray) !?usize {
@@ -1677,23 +1667,23 @@ fn findUserBestIdx(ctx: *NativeContext, obj: *PhpObject, arr: *PhpArray) !?usize
     return best;
 }
 
-fn userHeapExtract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
-    const idx = (findUserBestIdx(ctx, obj, arr) catch return .null) orelse return .null;
+fn userHeapExtract(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
+    const idx = (findUserBestIdx(ctx, obj, arr) catch return NativeResult.scalar(.null)) orelse return NativeResult.scalar(.null);
     return heapRemoveAt(arr, idx);
 }
 
-fn userHeapTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
-    const idx = (findUserBestIdx(ctx, obj, arr) catch return .null) orelse return .null;
-    return retainReturned(arr.entries.items[idx].value);
+fn userHeapTop(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
+    const idx = (findUserBestIdx(ctx, obj, arr) catch return NativeResult.scalar(.null)) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(arr.entries.items[idx].value);
 }
 
-fn minHeapExtract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn minHeapExtract(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     const idx = findMinIdx(arr) orelse {
         try ctx.vm.setPendingException("RuntimeException", "Can't extract from an empty heap");
         return error.RuntimeError;
@@ -1701,19 +1691,19 @@ fn minHeapExtract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return heapRemoveAt(arr, idx);
 }
 
-fn minHeapTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn minHeapTop(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     const idx = findMinIdx(arr) orelse {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty heap");
         return error.RuntimeError;
     };
-    return retainReturned(arr.entries.items[idx].value);
+    return NativeResult.share(arr.entries.items[idx].value);
 }
 
-fn maxHeapExtract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn maxHeapExtract(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     const idx = findMaxIdx(arr) orelse {
         try ctx.vm.setPendingException("RuntimeException", "Can't extract from an empty heap");
         return error.RuntimeError;
@@ -1721,69 +1711,69 @@ fn maxHeapExtract(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return heapRemoveAt(arr, idx);
 }
 
-fn maxHeapTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn maxHeapTop(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     const idx = findMaxIdx(arr) orelse {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty heap");
         return error.RuntimeError;
     };
-    return retainReturned(arr.entries.items[idx].value);
+    return NativeResult.share(arr.entries.items[idx].value);
 }
 
-fn heapCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    const arr = getData(obj) orelse return .{ .int = 0 };
-    return .{ .int = @intCast(arr.entries.items.len) };
+fn heapCount(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = @intCast(arr.entries.items.len) });
 }
 
-fn heapIsEmpty(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = true };
-    const arr = getData(obj) orelse return .{ .bool = true };
-    return .{ .bool = arr.entries.items.len == 0 };
+fn heapIsEmpty(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = true });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = true });
+    return NativeResult.scalar(.{ .bool = arr.entries.items.len == 0 });
 }
 
-fn heapCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .{ .bool = false };
+fn heapCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const cursor: usize = @intCast(@max(Value.toInt(obj.get("__cursor")), 0));
-    if (cursor >= arr.entries.items.len) return .{ .bool = false };
-    return retainReturned(arr.entries.items[cursor].value);
+    if (cursor >= arr.entries.items.len) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.share(arr.entries.items[cursor].value);
 }
 
-fn heapKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn heapKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     if (arr.entries.items.len == 0) {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
         return error.RuntimeError;
     }
-    return .{ .int = @intCast(arr.entries.items.len - 1) };
+    return NativeResult.scalar(.{ .int = @intCast(arr.entries.items.len - 1) });
 }
 
-fn heapNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn heapNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const cursor = Value.toInt(obj.get("__cursor"));
     try obj.set(ctx.allocator, "__cursor", .{ .int = cursor + 1 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn heapRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn heapRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn heapValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const arr = getData(obj) orelse return .{ .bool = false };
-    return .{ .bool = arr.entries.items.len > 0 };
+fn heapValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = arr.entries.items.len > 0 });
 }
 
 // --- SplFixedArray ---
 
-fn faConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn faConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = try ensureData(ctx, obj);
     const raw_size: i64 = if (args.len >= 1) Value.toInt(args[0]) else 0;
     if (raw_size < 0) {
@@ -1797,18 +1787,18 @@ fn faConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
     try obj.set(ctx.allocator, "__size", .{ .int = @intCast(size) });
     try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn faGetSize(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    return .{ .int = Value.toInt(obj.get("__size")) };
+fn faGetSize(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = Value.toInt(obj.get("__size")) });
 }
 
-fn faSetSize(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn faSetSize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = try ensureData(ctx, obj);
-    if (args.len == 0) return .null;
+    if (args.len == 0) return NativeResult.scalar(.null);
     const new_size: usize = @intCast(@max(Value.toInt(args[0]), 0));
     const cur_len = arr.entries.items.len;
     if (new_size > cur_len) {
@@ -1821,39 +1811,35 @@ fn faSetSize(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         arr.entries.items.len = new_size;
     }
     try obj.set(ctx.allocator, "__size", .{ .int = @intCast(new_size) });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn faCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    return .{ .int = Value.toInt(obj.get("__size")) };
+fn faCount(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = Value.toInt(obj.get("__size")) });
 }
 
-fn faToArray(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn faToArray(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = getData(obj) orelse {
-        const empty = try ctx.allocator.create(PhpArray);
-        empty.* = .{};
-        try ctx.vm.arrays.append(ctx.allocator, empty);
-        return .{ .array = empty };
+        const empty = try ctx.createArray();
+        return NativeResult.borrowed(.{ .array = empty });
     };
-    const copy = try ctx.allocator.create(PhpArray);
-    copy.* = .{};
-    try ctx.vm.arrays.append(ctx.allocator, copy);
+    const copy = try ctx.createArray();
     for (arr.entries.items, 0..) |entry, i| {
         try copy.set(ctx.allocator, .{ .int = @intCast(i) }, entry.value);
     }
-    return .{ .array = copy };
+    return NativeResult.borrowed(.{ .array = copy });
 }
 
-fn faFromArray(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn faFromArray(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .array) {
         const obj = try ctx.createObject("SplFixedArray");
         const arr = try ensureData(ctx, obj);
         try obj.set(ctx.allocator, "__size", .{ .int = 0 });
         try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
         _ = arr;
-        return .{ .object = obj };
+        return NativeResult.borrowed(.{ .object = obj });
     }
     const src = args[0].array;
     // PHP default: preserveKeys = true (sparse keys produce padded array)
@@ -1891,7 +1877,7 @@ fn faFromArray(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
     try obj.set(ctx.allocator, "__size", .{ .int = @intCast(size) });
     try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
 fn faRejectNonIntKey(ctx: *NativeContext, key: Value) !bool {
@@ -1916,23 +1902,23 @@ fn faRejectNonIntKey(ctx: *NativeContext, key: Value) !bool {
     return true;
 }
 
-fn faOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
-    if (args.len == 0) return .null;
+fn faOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
+    if (args.len == 0) return NativeResult.scalar(.null);
     if (try faRejectNonIntKey(ctx, args[0])) return error.RuntimeError;
     const raw = Value.toInt(args[0]);
     if (raw < 0 or @as(usize, @intCast(raw)) >= arr.entries.items.len) {
         try ctx.vm.setPendingException("OutOfBoundsException", "Index invalid or out of range");
         return error.RuntimeError;
     }
-    return retainReturned(arr.entries.items[@intCast(raw)].value);
+    return NativeResult.share(arr.entries.items[@intCast(raw)].value);
 }
 
-fn faOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
-    if (args.len < 2) return .null;
+fn faOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
+    if (args.len < 2) return NativeResult.scalar(.null);
     if (try faRejectNonIntKey(ctx, args[0])) return error.RuntimeError;
     const raw = Value.toInt(args[0]);
     if (raw < 0 or @as(usize, @intCast(raw)) >= arr.entries.items.len) {
@@ -1944,86 +1930,86 @@ fn faOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     VM.retainValue(args[1]);
     arr.entries.items[idx].value = args[1];
     ctx.vm.releaseValue(old);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn faOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const arr = getData(obj) orelse return .{ .bool = false };
-    if (args.len == 0) return .{ .bool = false };
+fn faOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     const idx: usize = @intCast(@max(Value.toInt(args[0]), 0));
-    if (idx >= arr.entries.items.len) return .{ .bool = false };
-    return .{ .bool = arr.entries.items[idx].value != .null };
+    if (idx >= arr.entries.items.len) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = arr.entries.items[idx].value != .null });
 }
 
-fn faOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
-    if (args.len == 0) return .null;
+fn faOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
+    if (args.len == 0) return NativeResult.scalar(.null);
     const idx: usize = @intCast(@max(Value.toInt(args[0]), 0));
-    if (idx >= arr.entries.items.len) return .null;
+    if (idx >= arr.entries.items.len) return NativeResult.scalar(.null);
     const old = arr.entries.items[idx].value;
     arr.entries.items[idx].value = .null;
     ctx.vm.releaseValue(old);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn faCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .{ .bool = false };
+fn faCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const cursor: usize = @intCast(@max(Value.toInt(obj.get("__cursor")), 0));
-    if (cursor >= arr.entries.items.len) return .{ .bool = false };
-    return retainReturned(arr.entries.items[cursor].value);
+    if (cursor >= arr.entries.items.len) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.share(arr.entries.items[cursor].value);
 }
 
-fn faKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn faKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     const cursor = Value.toInt(obj.get("__cursor"));
-    if (cursor < 0 or cursor >= @as(i64, @intCast(arr.entries.items.len))) return .null;
-    return .{ .int = cursor };
+    if (cursor < 0 or cursor >= @as(i64, @intCast(arr.entries.items.len))) return NativeResult.scalar(.null);
+    return NativeResult.scalar(.{ .int = cursor });
 }
 
-fn faNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn faNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const cursor = Value.toInt(obj.get("__cursor"));
     try obj.set(ctx.allocator, "__cursor", .{ .int = cursor + 1 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn faRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn faRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn faValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const arr = getData(obj) orelse return .{ .bool = false };
+fn faValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const cursor = Value.toInt(obj.get("__cursor"));
-    return .{ .bool = cursor >= 0 and cursor < @as(i64, @intCast(arr.entries.items.len)) };
+    return NativeResult.scalar(.{ .bool = cursor >= 0 and cursor < @as(i64, @intCast(arr.entries.items.len)) });
 }
 
 // --- SplQueue ---
 
-fn sqConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn sqConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     _ = try ensureData(ctx, obj);
     try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
     try obj.set(ctx.allocator, "__it_mode", .{ .int = DLL_IT_MODE_FIFO | DLL_IT_MODE_KEEP | 4 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn sqEnqueue(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn sqEnqueue(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = try ensureData(ctx, obj);
     if (args.len >= 1) try arr.append(ctx.allocator, args[0]);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn sqDequeue(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn sqDequeue(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     if (arr.entries.items.len == 0) {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
         return error.RuntimeError;
@@ -2031,75 +2017,75 @@ fn sqDequeue(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const first = arr.entries.items[0].value;
     std.mem.copyForwards(PhpArray.Entry, arr.entries.items[0 .. arr.entries.items.len - 1], arr.entries.items[1..arr.entries.items.len]);
     arr.entries.items.len -= 1;
-    return first;
+    return if (first == .string and first.string.owner != null) NativeResult.takeString(first.string) else NativeResult.share(first);
 }
 
-fn sqBottom(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn sqBottom(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     if (arr.entries.items.len == 0) {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
         return error.RuntimeError;
     }
-    return retainReturned(arr.entries.items[0].value);
+    return NativeResult.share(arr.entries.items[0].value);
 }
 
-fn sqTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn sqTop(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     if (arr.entries.items.len == 0) {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
         return error.RuntimeError;
     }
-    return retainReturned(arr.entries.items[arr.entries.items.len - 1].value);
+    return NativeResult.share(arr.entries.items[arr.entries.items.len - 1].value);
 }
 
-fn sqCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    const arr = getData(obj) orelse return .{ .int = 0 };
-    return .{ .int = @intCast(arr.entries.items.len) };
+fn sqCount(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = @intCast(arr.entries.items.len) });
 }
 
-fn sqIsEmpty(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = true };
-    const arr = getData(obj) orelse return .{ .bool = true };
-    return .{ .bool = arr.entries.items.len == 0 };
+fn sqIsEmpty(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = true });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = true });
+    return NativeResult.scalar(.{ .bool = arr.entries.items.len == 0 });
 }
 
-fn sqCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .{ .bool = false };
+fn sqCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const cursor: usize = @intCast(@max(Value.toInt(obj.get("__cursor")), 0));
-    if (cursor >= arr.entries.items.len) return .{ .bool = false };
-    return retainReturned(arr.entries.items[cursor].value);
+    if (cursor >= arr.entries.items.len) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.share(arr.entries.items[cursor].value);
 }
 
-fn sqKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn sqKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     const cursor = Value.toInt(obj.get("__cursor"));
-    if (cursor < 0 or cursor >= @as(i64, @intCast(arr.entries.items.len))) return .null;
-    return .{ .int = cursor };
+    if (cursor < 0 or cursor >= @as(i64, @intCast(arr.entries.items.len))) return NativeResult.scalar(.null);
+    return NativeResult.scalar(.{ .int = cursor });
 }
 
-fn sqNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn sqNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const cursor = Value.toInt(obj.get("__cursor"));
     try obj.set(ctx.allocator, "__cursor", .{ .int = cursor + 1 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn sqRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn sqRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn sqValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const arr = getData(obj) orelse return .{ .bool = false };
+fn sqValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const cursor = Value.toInt(obj.get("__cursor"));
-    return .{ .bool = cursor >= 0 and cursor < @as(i64, @intCast(arr.entries.items.len)) };
+    return NativeResult.scalar(.{ .bool = cursor >= 0 and cursor < @as(i64, @intCast(arr.entries.items.len)) });
 }
 
 // --- SplDoublyLinkedList ---
@@ -2109,48 +2095,49 @@ const DLL_IT_MODE_FIFO: i64 = 0;
 const DLL_IT_MODE_DELETE: i64 = 1;
 const DLL_IT_MODE_KEEP: i64 = 0;
 
-fn dllConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn dllConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     _ = try ensureData(ctx, obj);
     try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
     try obj.set(ctx.allocator, "__it_mode", .{ .int = DLL_IT_MODE_FIFO | DLL_IT_MODE_KEEP });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn dllPush(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn dllPush(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = try ensureData(ctx, obj);
     if (args.len >= 1) try arr.append(ctx.allocator, args[0]);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn dllPop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn dllPop(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     if (arr.entries.items.len == 0) {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
         return error.RuntimeError;
     }
     const last = arr.entries.items[arr.entries.items.len - 1].value;
     arr.entries.items.len -= 1;
-    return last;
+    return if (last == .string and last.string.owner != null) NativeResult.takeString(last.string) else NativeResult.share(last);
 }
 
-fn dllUnshift(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn dllUnshift(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = try ensureData(ctx, obj);
-    if (args.len == 0) return .null;
+    if (args.len == 0) return NativeResult.scalar(.null);
     try arr.entries.insert(ctx.allocator, 0, .{ .key = .{ .int = 0 }, .value = args[0] });
+    VM.retainValue(args[0]);
     for (arr.entries.items, 0..) |*entry, i| {
         entry.key = .{ .int = @intCast(i) };
     }
     arr.next_int_key = @intCast(arr.entries.items.len);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn dllShift(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn dllShift(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     if (arr.entries.items.len == 0) {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
         return error.RuntimeError;
@@ -2158,98 +2145,103 @@ fn dllShift(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const first = arr.entries.items[0].value;
     std.mem.copyForwards(PhpArray.Entry, arr.entries.items[0 .. arr.entries.items.len - 1], arr.entries.items[1..arr.entries.items.len]);
     arr.entries.items.len -= 1;
-    return first;
+    return if (first == .string and first.string.owner != null) NativeResult.takeString(first.string) else NativeResult.share(first);
 }
 
-fn dllTop(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn dllTop(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     if (arr.entries.items.len == 0) {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
         return error.RuntimeError;
     }
-    return retainReturned(arr.entries.items[arr.entries.items.len - 1].value);
+    return NativeResult.share(arr.entries.items[arr.entries.items.len - 1].value);
 }
 
-fn dllBottom(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
+fn dllBottom(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     if (arr.entries.items.len == 0) {
         try ctx.vm.setPendingException("RuntimeException", "Can't peek at an empty datastructure");
         return error.RuntimeError;
     }
-    return retainReturned(arr.entries.items[0].value);
+    return NativeResult.share(arr.entries.items[0].value);
 }
 
-fn dllCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    const arr = getData(obj) orelse return .{ .int = 0 };
-    return .{ .int = arr.length() };
+fn dllCount(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = arr.length() });
 }
 
-fn dllIsEmpty(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = true };
-    const arr = getData(obj) orelse return .{ .bool = true };
-    return .{ .bool = arr.entries.items.len == 0 };
+fn dllIsEmpty(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = true });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = true });
+    return NativeResult.scalar(.{ .bool = arr.entries.items.len == 0 });
 }
 
-fn dllSetIteratorMode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn dllSetIteratorMode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len >= 1 and args[0] == .int) {
         try obj.set(ctx.allocator, "__it_mode", args[0]);
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn dllGetIteratorMode(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    return obj.get("__it_mode");
+fn dllGetIteratorMode(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.share(obj.get("__it_mode"));
 }
 
-fn dllRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn dllRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const mode = Value.toInt(obj.get("__it_mode"));
     const is_lifo = (mode & DLL_IT_MODE_LIFO) != 0;
     if (is_lifo) {
         const arr = getData(obj) orelse {
             try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
-            return .null;
+            return NativeResult.scalar(.null);
         };
         try obj.set(ctx.allocator, "__cursor", .{ .int = @as(i64, @intCast(arr.entries.items.len)) - 1 });
     } else {
         try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn dllCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const arr = getData(obj) orelse return .{ .bool = false };
+fn dllCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const cursor = Value.toInt(obj.get("__cursor"));
-    if (cursor < 0 or cursor >= @as(i64, @intCast(arr.entries.items.len))) return .{ .bool = false };
-    return retainReturned(arr.entries.items[@intCast(cursor)].value);
+    if (cursor < 0 or cursor >= @as(i64, @intCast(arr.entries.items.len))) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.share(arr.entries.items[@intCast(cursor)].value);
 }
 
-fn dllKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    return obj.get("__cursor");
+fn dllKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.scalar(obj.get("__cursor"));
 }
 
-fn dllNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn dllNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const mode = Value.toInt(obj.get("__it_mode"));
     const is_lifo = (mode & DLL_IT_MODE_LIFO) != 0;
     const is_delete = (mode & DLL_IT_MODE_DELETE) != 0;
     if (is_delete) {
         if (getData(obj)) |arr| {
             if (is_lifo) {
-                if (arr.entries.items.len > 0) _ = arr.entries.pop();
+                if (arr.entries.pop()) |removed| {
+                    if (removed.key == .string) removed.key.string.release();
+                    ctx.vm.releaseValue(removed.value);
+                }
                 try obj.set(ctx.allocator, "__cursor", .{ .int = @as(i64, @intCast(arr.entries.items.len)) - 1 });
             } else if (arr.entries.items.len > 0) {
-                _ = arr.entries.orderedRemove(0);
+                const removed = arr.entries.orderedRemove(0);
+                if (removed.key == .string) removed.key.string.release();
+                ctx.vm.releaseValue(removed.value);
             }
         }
-        return .null;
+        return NativeResult.scalar(.null);
     }
     const cursor = Value.toInt(obj.get("__cursor"));
     if (is_lifo) {
@@ -2257,11 +2249,11 @@ fn dllNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     } else {
         try obj.set(ctx.allocator, "__cursor", .{ .int = cursor + 1 });
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn dllPrev(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn dllPrev(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const mode = Value.toInt(obj.get("__it_mode"));
     const is_lifo = (mode & DLL_IT_MODE_LIFO) != 0;
     const cursor = Value.toInt(obj.get("__cursor"));
@@ -2270,134 +2262,139 @@ fn dllPrev(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     } else {
         try obj.set(ctx.allocator, "__cursor", .{ .int = cursor - 1 });
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn dllValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const arr = getData(obj) orelse return .{ .bool = false };
+fn dllValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const cursor = Value.toInt(obj.get("__cursor"));
-    return .{ .bool = cursor >= 0 and cursor < @as(i64, @intCast(arr.entries.items.len)) };
+    return NativeResult.scalar(.{ .bool = cursor >= 0 and cursor < @as(i64, @intCast(arr.entries.items.len)) });
 }
 
-fn stackOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
-    if (args.len == 0) return .null;
+fn stackOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
+    if (args.len == 0) return NativeResult.scalar(.null);
     const n: i64 = @intCast(arr.entries.items.len);
     const idx = Value.toInt(args[0]);
     if (idx < 0 or idx >= n) {
         try ctx.vm.setPendingException("OutOfRangeException", "Offset invalid or out of range");
         return error.RuntimeError;
     }
-    return retainReturned(arr.entries.items[@intCast(n - 1 - idx)].value);
+    return NativeResult.share(arr.entries.items[@intCast(n - 1 - idx)].value);
 }
 
-fn stackOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn stackOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = try ensureData(ctx, obj);
-    if (args.len < 2) return .null;
+    if (args.len < 2) return NativeResult.scalar(.null);
     if (args[0] == .null) {
         try arr.append(ctx.allocator, args[1]);
-        return .null;
+        return NativeResult.scalar(.null);
     }
     const n: i64 = @intCast(arr.entries.items.len);
     const idx = Value.toInt(args[0]);
     if (idx >= 0 and idx < n) {
-        try arr.set(ctx.allocator, arr.entries.items[@intCast(n - 1 - idx)].key, args[1]);
+        try ctx.vm.arraySetOwned(arr, arr.entries.items[@intCast(n - 1 - idx)].key, args[1]);
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn stackOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const arr = getData(obj) orelse return .{ .bool = false };
-    if (args.len == 0) return .{ .bool = false };
+fn stackOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     const idx = Value.toInt(args[0]);
-    return .{ .bool = idx >= 0 and idx < @as(i64, @intCast(arr.entries.items.len)) };
+    return NativeResult.scalar(.{ .bool = idx >= 0 and idx < @as(i64, @intCast(arr.entries.items.len)) });
 }
 
-fn stackOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
-    if (args.len == 0) return .null;
+fn stackOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
+    if (args.len == 0) return NativeResult.scalar(.null);
     const n: i64 = @intCast(arr.entries.items.len);
     const idx = Value.toInt(args[0]);
     if (idx >= 0 and idx < n) {
-        _ = arr.entries.orderedRemove(@intCast(n - 1 - idx));
+        const removed = arr.entries.orderedRemove(@intCast(n - 1 - idx));
+        if (removed.key == .string) removed.key.string.release();
+        ctx.vm.releaseValue(removed.value);
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn dllOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
-    if (args.len == 0) return .null;
+fn dllOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
+    if (args.len == 0) return NativeResult.scalar(.null);
     const idx = Value.toInt(args[0]);
     if (idx < 0 or idx >= @as(i64, @intCast(arr.entries.items.len))) {
         try ctx.vm.setPendingException("OutOfRangeException", "Offset invalid or out of range");
         return error.RuntimeError;
     }
-    return retainReturned(arr.entries.items[@intCast(idx)].value);
+    return NativeResult.share(arr.entries.items[@intCast(idx)].value);
 }
 
-fn dllOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn dllOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = try ensureData(ctx, obj);
-    if (args.len < 2) return .null;
+    if (args.len < 2) return NativeResult.scalar(.null);
     if (args[0] == .null) {
         try arr.append(ctx.allocator, args[1]);
     } else {
         const idx = Value.toInt(args[0]);
         if (idx >= 0 and idx < @as(i64, @intCast(arr.entries.items.len))) {
-            try arr.set(ctx.allocator, arr.entries.items[@intCast(idx)].key, args[1]);
+            try ctx.vm.arraySetOwned(arr, arr.entries.items[@intCast(idx)].key, args[1]);
         }
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn dllOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const arr = getData(obj) orelse return .{ .bool = false };
-    if (args.len == 0) return .{ .bool = false };
+fn dllOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     const idx = Value.toInt(args[0]);
-    return .{ .bool = idx >= 0 and idx < @as(i64, @intCast(arr.entries.items.len)) };
+    return NativeResult.scalar(.{ .bool = idx >= 0 and idx < @as(i64, @intCast(arr.entries.items.len)) });
 }
 
-fn dllOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = getData(obj) orelse return .null;
-    if (args.len == 0) return .null;
+fn dllOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = getData(obj) orelse return NativeResult.scalar(.null);
+    if (args.len == 0) return NativeResult.scalar(.null);
     const idx = Value.toInt(args[0]);
     if (idx >= 0 and idx < @as(i64, @intCast(arr.entries.items.len))) {
-        _ = arr.entries.orderedRemove(@intCast(idx));
+        const removed = arr.entries.orderedRemove(@intCast(idx));
+        if (removed.key == .string) removed.key.string.release();
+        ctx.vm.releaseValue(removed.value);
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn dllAdd(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn dllAdd(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = try ensureData(ctx, obj);
-    if (args.len < 2) return .null;
+    if (args.len < 2) return NativeResult.scalar(.null);
     const idx = Value.toInt(args[0]);
-    if (idx < 0) return .null;
+    if (idx < 0) return NativeResult.scalar(.null);
     const uidx: usize = @intCast(idx);
-    if (uidx > arr.entries.items.len) return .null;
+    if (uidx > arr.entries.items.len) return NativeResult.scalar(.null);
     try arr.entries.insert(ctx.allocator, uidx, .{ .key = .{ .int = idx }, .value = args[1] });
-    return .null;
+    VM.retainValue(args[1]);
+    return NativeResult.scalar(.null);
 }
 
-fn dllToArray(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn dllToArray(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = getData(obj) orelse {
         const new_arr = try ctx.createArray();
-        return .{ .array = new_arr };
+        return NativeResult.borrowed(.{ .array = new_arr });
     };
     const result = try ctx.createArray();
     for (arr.entries.items, 0..) |entry, i| {
         try result.set(ctx.allocator, .{ .int = @intCast(i) }, entry.value);
     }
-    return .{ .array = result };
+    return NativeResult.borrowed(.{ .array = result });
 }
 
 // --- SplObjectStorage ---
@@ -2414,9 +2411,7 @@ fn sosHashKey(ctx: *NativeContext, sos: *PhpObject, target: *PhpObject) !PhpArra
             if (!std.mem.eql(u8, r, "SplObjectStorage::getHash")) {
                 const result = try ctx.vm.callMethod(sos, "getHash", &.{.{ .object = target }});
                 if (result == .string) {
-                    const owned = try ctx.allocator.dupe(u8, result.string.bytes());
-                    try ctx.vm.strings.append(ctx.allocator, owned);
-                    return .{ .string = Value.String.borrowed(owned) };
+                    return .{ .string = try Value.String.create(ctx.allocator, result.string.bytes()) };
                 }
             }
         }
@@ -2444,21 +2439,17 @@ fn sosLookupKey(objs: *PhpArray, key: PhpArray.Key, target: *PhpObject) ?PhpArra
     return null;
 }
 
-fn sosConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn sosConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     _ = try ensureData(ctx, obj);
     try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
     // __info stores associated data keyed by object pointer as string
-    const info_arr = try ctx.allocator.create(PhpArray);
-    info_arr.* = .{};
-    try ctx.vm.arrays.append(ctx.allocator, info_arr);
+    const info_arr = try ctx.createArray();
     try obj.set(ctx.allocator, "__info", .{ .array = info_arr });
     // __objs stores object references in insertion order for iteration
-    const objs_arr = try ctx.allocator.create(PhpArray);
-    objs_arr.* = .{};
-    try ctx.vm.arrays.append(ctx.allocator, objs_arr);
+    const objs_arr = try ctx.createArray();
     try obj.set(ctx.allocator, "__objs", .{ .array = objs_arr });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 fn sosGetObjs(obj: *PhpObject) ?*PhpArray {
@@ -2475,132 +2466,147 @@ fn sosGetInfo(obj: *PhpObject) ?*PhpArray {
 
 fn sosFindIndex(ctx: *NativeContext, sos: *PhpObject, objs: *PhpArray, target: *PhpObject) !?usize {
     const key = try sosHashKey(ctx, sos, target);
+    defer if (key == .string) key.string.release();
     return sosFindIndexByKey(objs, key);
 }
 
-fn sosAttach(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len == 0 or args[0] != .object) return .null;
+fn sosAttach(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.null);
     const target = args[0].object;
     const data = if (args.len >= 2) args[1] else Value.null;
-    const objs = sosGetObjs(obj) orelse return .null;
-    const info = sosGetInfo(obj) orelse return .null;
+    const objs = sosGetObjs(obj) orelse return NativeResult.scalar(.null);
+    const info = sosGetInfo(obj) orelse return NativeResult.scalar(.null);
     const key = try sosHashKey(ctx, obj, target);
+    defer if (key == .string) key.string.release();
 
-    try objs.set(ctx.allocator, key, .{ .object = target });
-    try info.set(ctx.allocator, key, data);
-    return .null;
+    try ctx.vm.arraySetOwned(objs, key, .{ .object = target });
+    try ctx.vm.arraySetOwned(info, key, data);
+    return NativeResult.scalar(.null);
 }
 
-fn sosDetach(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len == 0 or args[0] != .object) return .null;
+fn sosDetach(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.null);
     const target = args[0].object;
-    const objs = sosGetObjs(obj) orelse return .null;
-    const info = sosGetInfo(obj) orelse return .null;
+    const objs = sosGetObjs(obj) orelse return NativeResult.scalar(.null);
+    const info = sosGetInfo(obj) orelse return NativeResult.scalar(.null);
     const key = try sosHashKey(ctx, obj, target);
+    defer if (key == .string) key.string.release();
 
     const lookup = sosLookupKey(objs, key, target);
     if (lookup) |real_key| {
         const idx = sosFindIndexByKey(objs, real_key).?;
-        _ = objs.entries.orderedRemove(idx);
+        const removed = objs.entries.orderedRemove(idx);
+        defer {
+            if (removed.key == .string) removed.key.string.release();
+            ctx.vm.releaseValue(removed.value);
+        }
         if (real_key == .string) _ = objs.string_index.remove(real_key.string.bytes());
         ctx.vm.arrayRemoveOwned(info, real_key);
         if (real_key == .string) {
             objs.rebuildStringIndexAssumeCapacity();
         }
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn sosContains(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
-    const objs = sosGetObjs(obj) orelse return .{ .bool = false };
+fn sosContains(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
+    const objs = sosGetObjs(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const key = try sosHashKey(ctx, obj, args[0].object);
-    return .{ .bool = sosLookupKey(objs, key, args[0].object) != null };
+    defer if (key == .string) key.string.release();
+    return NativeResult.scalar(.{ .bool = sosLookupKey(objs, key, args[0].object) != null });
 }
 
-fn sosCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    const objs = sosGetObjs(obj) orelse return .{ .int = 0 };
-    return .{ .int = @intCast(objs.entries.items.len) };
+fn sosCount(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    const objs = sosGetObjs(obj) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = @intCast(objs.entries.items.len) });
 }
 
-fn sosGetInfoMethod(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const objs = sosGetObjs(obj) orelse return .null;
-    const info = sosGetInfo(obj) orelse return .null;
+fn sosGetInfoMethod(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const objs = sosGetObjs(obj) orelse return NativeResult.scalar(.null);
+    const info = sosGetInfo(obj) orelse return NativeResult.scalar(.null);
     const cursor = Value.toInt(obj.get("__cursor"));
-    if (cursor < 0 or cursor >= @as(i64, @intCast(objs.entries.items.len))) return .null;
-    return retainReturned(info.get(objs.entries.items[@intCast(cursor)].key));
+    if (cursor < 0 or cursor >= @as(i64, @intCast(objs.entries.items.len))) return NativeResult.scalar(.null);
+    return NativeResult.share(info.get(objs.entries.items[@intCast(cursor)].key));
 }
 
-fn sosSetInfoMethod(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len == 0) return .null;
-    const objs = sosGetObjs(obj) orelse return .null;
-    const info = sosGetInfo(obj) orelse return .null;
+fn sosSetInfoMethod(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len == 0) return NativeResult.scalar(.null);
+    const objs = sosGetObjs(obj) orelse return NativeResult.scalar(.null);
+    const info = sosGetInfo(obj) orelse return NativeResult.scalar(.null);
     const cursor = Value.toInt(obj.get("__cursor"));
-    if (cursor < 0 or cursor >= @as(i64, @intCast(objs.entries.items.len))) return .null;
-    try info.set(ctx.allocator, objs.entries.items[@intCast(cursor)].key, args[0]);
-    return .null;
+    if (cursor < 0 or cursor >= @as(i64, @intCast(objs.entries.items.len))) return NativeResult.scalar(.null);
+    try ctx.vm.arraySetOwned(info, objs.entries.items[@intCast(cursor)].key, args[0]);
+    return NativeResult.scalar(.null);
 }
 
-fn sosGetHash(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .object) return .null;
+fn sosGetHash(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.null);
     const ptr: usize = @intFromPtr(args[0].object);
-    const hash = std.fmt.allocPrint(ctx.allocator, "{x:0>32}", .{ptr}) catch return .null;
-    ctx.vm.strings.append(ctx.allocator, hash) catch {};
-    return .{ .string = Value.String.borrowed(hash) };
+    const hash = try std.fmt.allocPrint(ctx.allocator, "{x:0>32}", .{ptr});
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, hash));
 }
 
-fn sosRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn sosRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn sosCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const objs = sosGetObjs(obj) orelse return .{ .bool = false };
+fn sosCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const objs = sosGetObjs(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const cursor = Value.toInt(obj.get("__cursor"));
-    if (cursor < 0 or cursor >= @as(i64, @intCast(objs.entries.items.len))) return .{ .bool = false };
-    return objs.entries.items[@intCast(cursor)].value;
+    if (cursor < 0 or cursor >= @as(i64, @intCast(objs.entries.items.len))) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.borrowed(objs.entries.items[@intCast(cursor)].value);
 }
 
-fn sosKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    return obj.get("__cursor");
+fn sosKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.scalar(obj.get("__cursor"));
 }
 
-fn sosNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn sosNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const cursor = Value.toInt(obj.get("__cursor"));
     try obj.set(ctx.allocator, "__cursor", .{ .int = cursor + 1 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn sosValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const objs = sosGetObjs(obj) orelse return .{ .bool = false };
+fn sosValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const objs = sosGetObjs(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const cursor = Value.toInt(obj.get("__cursor"));
-    return .{ .bool = cursor >= 0 and cursor < @as(i64, @intCast(objs.entries.items.len)) };
+    return NativeResult.scalar(.{ .bool = cursor >= 0 and cursor < @as(i64, @intCast(objs.entries.items.len)) });
 }
 
-fn sosRemoveAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len == 0 or args[0] != .object) return .null;
+fn sosRemoveAll(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.null);
     const other_this = args[0].object;
-    const other_objs = sosGetObjs(other_this) orelse return .null;
-    const objs = sosGetObjs(obj) orelse return .null;
-    const info = sosGetInfo(obj) orelse return .null;
+    const other_objs = sosGetObjs(other_this) orelse return NativeResult.scalar(.null);
+    const objs = sosGetObjs(obj) orelse return NativeResult.scalar(.null);
+    const info = sosGetInfo(obj) orelse return NativeResult.scalar(.null);
 
-    for (other_objs.entries.items) |o_entry| {
+    const snapshot = try ctx.vm.cloneArray(other_objs);
+    VM.arrayRetain(snapshot);
+    defer ctx.vm.arrayRelease(snapshot);
+    for (snapshot.entries.items) |o_entry| {
         if (o_entry.value != .object) continue;
         const key = try sosHashKey(ctx, obj, o_entry.value.object);
+        defer if (key == .string) key.string.release();
         if (sosFindIndexByKey(objs, key)) |idx| {
-            _ = objs.entries.orderedRemove(idx);
+            const removed = objs.entries.orderedRemove(idx);
+            defer {
+                if (removed.key == .string) removed.key.string.release();
+                ctx.vm.releaseValue(removed.value);
+            }
             if (key == .string) {
                 _ = objs.string_index.remove(key.string.bytes());
                 objs.rebuildStringIndexAssumeCapacity();
@@ -2608,16 +2614,16 @@ fn sosRemoveAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             ctx.vm.arrayRemoveOwned(info, key);
         }
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn sosRemoveAllExcept(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len == 0 or args[0] != .object) return .null;
+fn sosRemoveAllExcept(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.null);
     const other_this = args[0].object;
-    const other_objs = sosGetObjs(other_this) orelse return .null;
-    const objs = sosGetObjs(obj) orelse return .null;
-    const info = sosGetInfo(obj) orelse return .null;
+    const other_objs = sosGetObjs(other_this) orelse return NativeResult.scalar(.null);
+    const objs = sosGetObjs(obj) orelse return NativeResult.scalar(.null);
+    const info = sosGetInfo(obj) orelse return NativeResult.scalar(.null);
 
     var i: usize = 0;
     while (i < objs.entries.items.len) {
@@ -2631,6 +2637,7 @@ fn sosRemoveAllExcept(ctx: *NativeContext, args: []const Value) RuntimeError!Val
         for (other_objs.entries.items) |o_entry| {
             if (o_entry.value != .object) continue;
             const other_key = try sosHashKey(ctx, obj, o_entry.value.object);
+            defer if (other_key == .string) other_key.string.release();
             if (entry.key.eql(other_key)) {
                 found = true;
                 break;
@@ -2638,7 +2645,11 @@ fn sosRemoveAllExcept(ctx: *NativeContext, args: []const Value) RuntimeError!Val
         }
         if (!found) {
             const key = entry.key;
-            _ = objs.entries.orderedRemove(i);
+            const removed = objs.entries.orderedRemove(i);
+            defer {
+                if (removed.key == .string) removed.key.string.release();
+                ctx.vm.releaseValue(removed.value);
+            }
             if (key == .string) {
                 _ = objs.string_index.remove(key.string.bytes());
             }
@@ -2648,64 +2659,66 @@ fn sosRemoveAllExcept(ctx: *NativeContext, args: []const Value) RuntimeError!Val
         }
     }
     objs.rebuildStringIndexAssumeCapacity();
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn sosAddAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len == 0 or args[0] != .object) return .null;
+fn sosAddAll(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.null);
     const other_this = args[0].object;
-    const other_objs = sosGetObjs(other_this) orelse return .null;
-    const other_info = sosGetInfo(other_this) orelse return .null;
-    const objs = sosGetObjs(obj) orelse return .null;
-    const info = sosGetInfo(obj) orelse return .null;
+    const other_objs = sosGetObjs(other_this) orelse return NativeResult.scalar(.null);
+    const other_info = sosGetInfo(other_this) orelse return NativeResult.scalar(.null);
+    const objs = sosGetObjs(obj) orelse return NativeResult.scalar(.null);
+    const info = sosGetInfo(obj) orelse return NativeResult.scalar(.null);
 
     for (other_objs.entries.items) |entry| {
         if (entry.value == .object) {
             const target = entry.value.object;
             const self_key = try sosHashKey(ctx, obj, target);
-            try objs.set(ctx.allocator, self_key, .{ .object = target });
+            defer if (self_key == .string) self_key.string.release();
+            try ctx.vm.arraySetOwned(objs, self_key, .{ .object = target });
             const data = other_info.get(entry.key);
-            try info.set(ctx.allocator, self_key, data);
+            try ctx.vm.arraySetOwned(info, self_key, data);
         }
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn sosOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len == 0) return .null;
+fn sosOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len == 0) return NativeResult.scalar(.null);
     if (!try sosRequireObjectKey(ctx, "offsetGet", args[0])) return error.RuntimeError;
     const info = sosGetInfo(obj) orelse {
         try ctx.vm.setPendingException("UnexpectedValueException", "Object not found");
         return error.RuntimeError;
     };
-    const objs = sosGetObjs(obj) orelse return .null;
+    const objs = sosGetObjs(obj) orelse return NativeResult.scalar(.null);
     const key = try sosHashKey(ctx, obj, args[0].object);
+    defer if (key == .string) key.string.release();
     const real_key = sosLookupKey(objs, key, args[0].object) orelse {
         try ctx.vm.setPendingException("UnexpectedValueException", "Object not found");
         return error.RuntimeError;
     };
-    return retainReturned(info.get(real_key));
+    return NativeResult.share(info.get(real_key));
 }
 
-fn sosOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn sosOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     // offsetSet($obj, $data) is equivalent to attach($obj, $data) but the
     // offset* variant uses a TypeError-throwing key check (attach is now
     // deprecated and tolerant of non-objects)
-    if (args.len == 0) return .null;
+    if (args.len == 0) return NativeResult.scalar(.null);
     if (!try sosRequireObjectKey(ctx, "offsetSet", args[0])) return error.RuntimeError;
     return sosAttach(ctx, args);
 }
 
-fn sosOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
+fn sosOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     if (!try sosRequireObjectKey(ctx, "offsetExists", args[0])) return error.RuntimeError;
     return sosContains(ctx, args);
 }
 
-fn sosOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .null;
+fn sosOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.null);
     if (!try sosRequireObjectKey(ctx, "offsetUnset", args[0])) return error.RuntimeError;
     return sosDetach(ctx, args);
 }

@@ -1,3 +1,4 @@
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
@@ -79,10 +80,10 @@ fn requireNumeric(ctx: *NativeContext, v: Value, comptime fn_name: []const u8, c
     return true;
 }
 
-fn native_abs(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .int = 0 };
+fn native_abs(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .int = 0 });
     if (try requireNumeric(ctx, args[0], "abs", "int|float")) return error.RuntimeError;
-    return switch (args[0]) {
+    return NativeResult.scalar(switch (args[0]) {
         .int => |i| if (i == std.math.minInt(i64))
             .{ .float = -@as(f64, @floatFromInt(i)) }
         else
@@ -101,21 +102,21 @@ fn native_abs(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             if (i == std.math.minInt(i64)) break :blk Value{ .float = -@as(f64, @floatFromInt(i)) };
             break :blk Value{ .int = if (i < 0) -i else i };
         },
-    };
+    });
 }
 
-fn native_floor(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 0.0 };
-    return .{ .float = @floor(Value.toFloat(args[0])) };
+fn native_floor(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .float = 0.0 });
+    return NativeResult.scalar(.{ .float = @floor(Value.toFloat(args[0])) });
 }
 
-fn native_ceil(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 0.0 };
-    return .{ .float = @ceil(Value.toFloat(args[0])) };
+fn native_ceil(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .float = 0.0 });
+    return NativeResult.scalar(.{ .float = @ceil(Value.toFloat(args[0])) });
 }
 
-fn native_round(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 0.0 };
+fn native_round(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .float = 0.0 });
     const v = Value.toFloat(args[0]);
     const precision: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
     // PHP 8.4 accepts a RoundingMode enum case for the mode arg; map case
@@ -136,7 +137,7 @@ fn native_round(_: *NativeContext, args: []const Value) RuntimeError!Value {
     const factor = std.math.pow(f64, 10.0, @floatFromInt(precision));
     const scaled = v * factor;
     const rounded = roundWithMode(scaled, mode);
-    return .{ .float = rounded / factor };
+    return NativeResult.scalar(.{ .float = rounded / factor });
 }
 
 fn roundWithMode(v: f64, mode: i64) f64 {
@@ -171,8 +172,8 @@ fn roundWithMode(v: f64, mode: i64) f64 {
     return out * sign;
 }
 
-fn native_min(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .null;
+fn native_min(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.null);
     if (args.len == 1 and args[0] == .array) {
         const arr = args[0].array;
         if (arr.entries.items.len == 0) {
@@ -183,17 +184,17 @@ fn native_min(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         for (arr.entries.items[1..]) |e| {
             if (Value.lessThan(e.value, result)) result = e.value;
         }
-        return result;
+        return NativeResult.share(result);
     }
     var result = args[0];
     for (args[1..]) |a| {
         if (Value.lessThan(a, result)) result = a;
     }
-    return result;
+    return NativeResult.share(result);
 }
 
-fn native_max(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .null;
+fn native_max(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.null);
     if (args.len == 1 and args[0] == .array) {
         const arr = args[0].array;
         if (arr.entries.items.len == 0) {
@@ -204,34 +205,34 @@ fn native_max(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         for (arr.entries.items[1..]) |e| {
             if (Value.lessThan(result, e.value)) result = e.value;
         }
-        return result;
+        return NativeResult.share(result);
     }
     var result = args[0];
     for (args[1..]) |a| {
         if (Value.lessThan(result, a)) result = a;
     }
-    return result;
+    return NativeResult.share(result);
 }
 
-fn native_lcg_value(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .float = std.crypto.random.float(f64) };
+fn native_lcg_value(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .float = std.crypto.random.float(f64) });
 }
 
-fn native_srand_noop(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_srand_noop(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const seed: u32 = if (args.len >= 1) blk: {
         const v = Value.toInt(args[0]);
         break :blk @as(u32, @truncate(@as(u64, @bitCast(v))));
     } else @truncate(@as(u64, @intCast(std.time.timestamp())));
     ctx.vm.mt19937.seed(seed);
     ctx.vm.rng_seeded = true;
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn native_getrandmax(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .int = 2147483647 };
+fn native_getrandmax(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .int = 2147483647 });
 }
 
-fn native_rand(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_rand(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (!ctx.vm.rng_seeded) {
         var entropy: [4]u8 = undefined;
         std.crypto.random.bytes(&entropy);
@@ -242,80 +243,80 @@ fn native_rand(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const lo: i64 = if (args.len >= 1) Value.toInt(args[0]) else 0;
     const hi: i64 = if (args.len >= 2) Value.toInt(args[1]) else 2147483647;
     // mt_rand() with no args returns a 31-bit value
-    if (args.len < 2) return .{ .int = ctx.vm.mt19937.next31() };
+    if (args.len < 2) return NativeResult.scalar(.{ .int = ctx.vm.mt19937.next31() });
     // PHP 8+: mt_rand throws ValueError if max < min. rand silently swaps
     // (a historical alias quirk preserved for back-compat). distinguish by
     // the calling-name in ctx.call_name
     if (lo > hi) {
         const fn_name: []const u8 = if (ctx.call_name) |c| c else "mt_rand";
         if (std.mem.eql(u8, fn_name, "rand")) {
-            return .{ .int = ctx.vm.mt19937.nextRange(hi, lo) };
+            return NativeResult.scalar(.{ .int = ctx.vm.mt19937.nextRange(hi, lo) });
         }
         const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Argument #2 ($max) must be greater than or equal to argument #1 ($min)", .{fn_name});
         try ctx.vm.strings.append(ctx.allocator, msg);
         try ctx.vm.setPendingException("ValueError", msg);
         return error.RuntimeError;
     }
-    if (lo == hi) return .{ .int = lo };
-    return .{ .int = ctx.vm.mt19937.nextRange(lo, hi) };
+    if (lo == hi) return NativeResult.scalar(.{ .int = lo });
+    return NativeResult.scalar(.{ .int = ctx.vm.mt19937.nextRange(lo, hi) });
 }
 
-fn native_pow(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2) return .{ .int = 0 };
-    return Value.power(args[0], args[1]);
+fn native_pow(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2) return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(Value.power(args[0], args[1]));
 }
 
-fn native_sqrt(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 0.0 };
+fn native_sqrt(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .float = 0.0 });
     if (try requireNumeric(ctx, args[0], "sqrt", "float")) return error.RuntimeError;
-    return .{ .float = @sqrt(Value.toFloat(args[0])) };
+    return NativeResult.scalar(.{ .float = @sqrt(Value.toFloat(args[0])) });
 }
 
-fn native_log(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 0.0 };
+fn native_log(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .float = 0.0 });
     const v = Value.toFloat(args[0]);
     if (args.len >= 2) {
         const base = Value.toFloat(args[1]);
-        return .{ .float = @log(v) / @log(base) };
+        return NativeResult.scalar(.{ .float = @log(v) / @log(base) });
     }
-    return .{ .float = @log(v) };
+    return NativeResult.scalar(.{ .float = @log(v) });
 }
 
-fn native_log10(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 0.0 };
-    return .{ .float = std.math.log10(Value.toFloat(args[0])) };
+fn native_log10(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .float = 0.0 });
+    return NativeResult.scalar(.{ .float = std.math.log10(Value.toFloat(args[0])) });
 }
 
-fn native_log1p(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 0.0 };
-    return .{ .float = std.math.log1p(Value.toFloat(args[0])) };
+fn native_log1p(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .float = 0.0 });
+    return NativeResult.scalar(.{ .float = std.math.log1p(Value.toFloat(args[0])) });
 }
 
-fn native_expm1(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 0.0 };
+fn native_expm1(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .float = 0.0 });
     const x = Value.toFloat(args[0]);
-    return .{ .float = @exp(x) - 1.0 };
+    return NativeResult.scalar(.{ .float = @exp(x) - 1.0 });
 }
 
-fn native_exp(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 1.0 };
-    return .{ .float = @exp(Value.toFloat(args[0])) };
+fn native_exp(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .float = 1.0 });
+    return NativeResult.scalar(.{ .float = @exp(Value.toFloat(args[0])) });
 }
 
-fn native_pi(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .float = std.math.pi };
+fn native_pi(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .float = std.math.pi });
 }
 
-fn native_fmod(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2) return .{ .float = 0.0 };
+fn native_fmod(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2) return NativeResult.scalar(.{ .float = 0.0 });
     const x = Value.toFloat(args[0]);
     const y = Value.toFloat(args[1]);
-    if (y == 0.0) return .{ .float = std.math.nan(f64) };
-    return .{ .float = @rem(x, y) };
+    if (y == 0.0) return NativeResult.scalar(.{ .float = std.math.nan(f64) });
+    return NativeResult.scalar(.{ .float = @rem(x, y) });
 }
 
-fn native_intdiv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2) return .{ .int = 0 };
+fn native_intdiv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2) return NativeResult.scalar(.{ .int = 0 });
     const a = Value.toInt(args[0]);
     const b = Value.toInt(args[1]);
     if (b == 0) {
@@ -326,16 +327,16 @@ fn native_intdiv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try ctx.vm.setPendingException("ArithmeticError", "Division of PHP_INT_MIN by -1 is not an integer");
         return error.RuntimeError;
     }
-    return .{ .int = @divTrunc(a, b) };
+    return NativeResult.scalar(.{ .int = @divTrunc(a, b) });
 }
 
-fn native_base_convert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 3) return .{ .string = Value.String.borrowed("0") };
-    var num_str = if (args[0] == .string) args[0].string.bytes() else return Value{ .string = Value.String.borrowed("0") };
+fn native_base_convert(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 3) return NativeResult.literal("0");
+    var num_str = if (args[0] == .string) args[0].string.bytes() else return NativeResult.literal("0");
     const from_base: u8 = @intCast(@max(2, @min(36, Value.toInt(args[1]))));
     const to_base: u8 = @intCast(@max(2, @min(36, Value.toInt(args[2]))));
     if (num_str.len > 0 and (num_str[0] == '-' or num_str[0] == '+')) num_str = num_str[1..];
-    const val = std.fmt.parseInt(u64, num_str, from_base) catch return Value{ .string = Value.String.borrowed("0") };
+    const val = std.fmt.parseInt(u64, num_str, from_base) catch return NativeResult.literal("0");
     const digits = "0123456789abcdefghijklmnopqrstuvwxyz";
     var buf: [65]u8 = undefined;
     var pos: usize = buf.len;
@@ -350,7 +351,7 @@ fn native_base_convert(ctx: *NativeContext, args: []const Value) RuntimeError!Va
             v /= to_base;
         }
     }
-    return .{ .string = Value.String.borrowed(try ctx.createString(buf[pos..])) };
+    return NativeResult.copyString(ctx.allocator, buf[pos..]);
 }
 
 // parses digits in `base`, returning int if it fits in i64 and float on
@@ -390,173 +391,173 @@ fn baseDecimal(s: []const u8, base: u8) Value {
     return .{ .int = @intCast(int_val) };
 }
 
-fn native_bindec(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .int = 0 };
-    const s = if (args[0] == .string) args[0].string.bytes() else return Value{ .int = 0 };
-    return baseDecimal(s, 2);
+fn native_bindec(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .int = 0 });
+    const s = if (args[0] == .string) args[0].string.bytes() else return NativeResult.scalar(Value{ .int = 0 });
+    return NativeResult.scalar(baseDecimal(s, 2));
 }
 
-fn native_octdec(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .int = 0 };
-    const s = if (args[0] == .string) args[0].string.bytes() else return Value{ .int = 0 };
-    return baseDecimal(s, 8);
+fn native_octdec(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .int = 0 });
+    const s = if (args[0] == .string) args[0].string.bytes() else return NativeResult.scalar(Value{ .int = 0 });
+    return NativeResult.scalar(baseDecimal(s, 8));
 }
 
-fn native_hexdec(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .int = 0 };
-    const s = if (args[0] == .string) args[0].string.bytes() else return Value{ .int = 0 };
-    return baseDecimal(s, 16);
+fn native_hexdec(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .int = 0 });
+    const s = if (args[0] == .string) args[0].string.bytes() else return NativeResult.scalar(Value{ .int = 0 });
+    return NativeResult.scalar(baseDecimal(s, 16));
 }
 
-fn native_decbin(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .string = Value.String.borrowed("0") };
+fn native_decbin(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.literal("0");
     const val = Value.toInt(args[0]);
     var buf: [65]u8 = undefined;
-    const s = std.fmt.bufPrint(&buf, "{b}", .{@as(u64, @bitCast(val))}) catch return Value{ .string = Value.String.borrowed("0") };
-    return .{ .string = Value.String.borrowed(try ctx.createString(s)) };
+    const s = std.fmt.bufPrint(&buf, "{b}", .{@as(u64, @bitCast(val))}) catch return NativeResult.literal("0");
+    return NativeResult.copyString(ctx.allocator, s);
 }
 
-fn native_decoct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .string = Value.String.borrowed("0") };
+fn native_decoct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.literal("0");
     const val = Value.toInt(args[0]);
     var buf: [32]u8 = undefined;
-    const s = std.fmt.bufPrint(&buf, "{o}", .{@as(u64, @bitCast(val))}) catch return Value{ .string = Value.String.borrowed("0") };
-    return .{ .string = Value.String.borrowed(try ctx.createString(s)) };
+    const s = std.fmt.bufPrint(&buf, "{o}", .{@as(u64, @bitCast(val))}) catch return NativeResult.literal("0");
+    return NativeResult.copyString(ctx.allocator, s);
 }
 
-fn native_dechex(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .string = Value.String.borrowed("0") };
+fn native_dechex(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.literal("0");
     const val = Value.toInt(args[0]);
     var buf: [17]u8 = undefined;
-    const s = std.fmt.bufPrint(&buf, "{x}", .{@as(u64, @bitCast(val))}) catch return Value{ .string = Value.String.borrowed("0") };
-    return .{ .string = Value.String.borrowed(try ctx.createString(s)) };
+    const s = std.fmt.bufPrint(&buf, "{x}", .{@as(u64, @bitCast(val))}) catch return NativeResult.literal("0");
+    return NativeResult.copyString(ctx.allocator, s);
 }
 
-fn native_sin(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 0.0 };
-    return .{ .float = @sin(Value.toFloat(args[0])) };
+fn native_sin(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .float = 0.0 });
+    return NativeResult.scalar(.{ .float = @sin(Value.toFloat(args[0])) });
 }
 
-fn native_cos(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 0.0 };
-    return .{ .float = @cos(Value.toFloat(args[0])) };
+fn native_cos(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .float = 0.0 });
+    return NativeResult.scalar(.{ .float = @cos(Value.toFloat(args[0])) });
 }
 
-fn native_tan(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 0.0 };
-    return .{ .float = @tan(Value.toFloat(args[0])) };
+fn native_tan(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .float = 0.0 });
+    return NativeResult.scalar(.{ .float = @tan(Value.toFloat(args[0])) });
 }
 
-fn native_asin(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 0.0 };
-    return .{ .float = std.math.asin(Value.toFloat(args[0])) };
+fn native_asin(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .float = 0.0 });
+    return NativeResult.scalar(.{ .float = std.math.asin(Value.toFloat(args[0])) });
 }
 
-fn native_acos(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 0.0 };
-    return .{ .float = std.math.acos(Value.toFloat(args[0])) };
+fn native_acos(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .float = 0.0 });
+    return NativeResult.scalar(.{ .float = std.math.acos(Value.toFloat(args[0])) });
 }
 
-fn native_atan(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 0.0 };
-    return .{ .float = std.math.atan(Value.toFloat(args[0])) };
+fn native_atan(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .float = 0.0 });
+    return NativeResult.scalar(.{ .float = std.math.atan(Value.toFloat(args[0])) });
 }
 
-fn native_atan2(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2) return .{ .float = 0.0 };
-    return .{ .float = std.math.atan2(Value.toFloat(args[0]), Value.toFloat(args[1])) };
+fn native_atan2(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2) return NativeResult.scalar(.{ .float = 0.0 });
+    return NativeResult.scalar(.{ .float = std.math.atan2(Value.toFloat(args[0]), Value.toFloat(args[1])) });
 }
 
-fn native_sinh(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 0.0 };
+fn native_sinh(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .float = 0.0 });
     const x = Value.toFloat(args[0]);
-    return .{ .float = (@exp(x) - @exp(-x)) / 2.0 };
+    return NativeResult.scalar(.{ .float = (@exp(x) - @exp(-x)) / 2.0 });
 }
 
-fn native_cosh(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 0.0 };
+fn native_cosh(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .float = 0.0 });
     const x = Value.toFloat(args[0]);
-    return .{ .float = (@exp(x) + @exp(-x)) / 2.0 };
+    return NativeResult.scalar(.{ .float = (@exp(x) + @exp(-x)) / 2.0 });
 }
 
-fn native_tanh(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 0.0 };
+fn native_tanh(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .float = 0.0 });
     const x = Value.toFloat(args[0]);
     const ex = @exp(x);
     const enx = @exp(-x);
-    return .{ .float = (ex - enx) / (ex + enx) };
+    return NativeResult.scalar(.{ .float = (ex - enx) / (ex + enx) });
 }
 
-fn native_asinh(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 0.0 };
+fn native_asinh(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .float = 0.0 });
     const x = Value.toFloat(args[0]);
-    return .{ .float = @log(x + @sqrt(x * x + 1.0)) };
+    return NativeResult.scalar(.{ .float = @log(x + @sqrt(x * x + 1.0)) });
 }
 
-fn native_acosh(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 0.0 };
+fn native_acosh(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .float = 0.0 });
     const x = Value.toFloat(args[0]);
-    if (x < 1.0) return .{ .float = std.math.nan(f64) };
-    return .{ .float = @log(x + @sqrt(x * x - 1.0)) };
+    if (x < 1.0) return NativeResult.scalar(.{ .float = std.math.nan(f64) });
+    return NativeResult.scalar(.{ .float = @log(x + @sqrt(x * x - 1.0)) });
 }
 
-fn native_atanh(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 0.0 };
+fn native_atanh(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .float = 0.0 });
     const x = Value.toFloat(args[0]);
-    if (x <= -1.0 or x >= 1.0) return .{ .float = if (x == 1.0) std.math.inf(f64) else if (x == -1.0) -std.math.inf(f64) else std.math.nan(f64) };
-    return .{ .float = 0.5 * @log((1.0 + x) / (1.0 - x)) };
+    if (x <= -1.0 or x >= 1.0) return NativeResult.scalar(.{ .float = if (x == 1.0) std.math.inf(f64) else if (x == -1.0) -std.math.inf(f64) else std.math.nan(f64) });
+    return NativeResult.scalar(.{ .float = 0.5 * @log((1.0 + x) / (1.0 - x)) });
 }
 
-fn native_deg2rad(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 0.0 };
-    return .{ .float = Value.toFloat(args[0]) * (std.math.pi / 180.0) };
+fn native_deg2rad(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .float = 0.0 });
+    return NativeResult.scalar(.{ .float = Value.toFloat(args[0]) * (std.math.pi / 180.0) });
 }
 
-fn native_rad2deg(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 0.0 };
-    return .{ .float = Value.toFloat(args[0]) * (180.0 / std.math.pi) };
+fn native_rad2deg(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .float = 0.0 });
+    return NativeResult.scalar(.{ .float = Value.toFloat(args[0]) * (180.0 / std.math.pi) });
 }
 
-fn native_hypot(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2) return .{ .float = 0.0 };
+fn native_hypot(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2) return NativeResult.scalar(.{ .float = 0.0 });
     const x = Value.toFloat(args[0]);
     const y = Value.toFloat(args[1]);
-    return .{ .float = @sqrt(x * x + y * y) };
+    return NativeResult.scalar(.{ .float = @sqrt(x * x + y * y) });
 }
 
-fn native_is_finite(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = true };
-    return .{ .bool = switch (args[0]) {
+fn native_is_finite(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = true });
+    return NativeResult.scalar(.{ .bool = switch (args[0]) {
         .float => |f| !std.math.isNan(f) and !std.math.isInf(f),
         .int => true,
         else => true,
-    } };
+    } });
 }
 
-fn native_is_infinite(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
-    return .{ .bool = switch (args[0]) {
+fn native_is_infinite(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = switch (args[0]) {
         .float => |f| std.math.isInf(f),
         else => false,
-    } };
+    } });
 }
 
-fn native_is_nan(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
-    return .{ .bool = switch (args[0]) {
+fn native_is_nan(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = switch (args[0]) {
         .float => |f| std.math.isNan(f),
         else => false,
-    } };
+    } });
 }
 
-fn native_fpow(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2) return .{ .float = 0.0 };
-    return .{ .float = std.math.pow(f64, Value.toFloat(args[0]), Value.toFloat(args[1])) };
+fn native_fpow(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2) return NativeResult.scalar(.{ .float = 0.0 });
+    return NativeResult.scalar(.{ .float = std.math.pow(f64, Value.toFloat(args[0]), Value.toFloat(args[1])) });
 }
 
-fn native_fdiv(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2) return .{ .float = 0.0 };
+fn native_fdiv(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2) return NativeResult.scalar(.{ .float = 0.0 });
     const num = Value.toFloat(args[0]);
     const den = Value.toFloat(args[1]);
-    return .{ .float = num / den };
+    return NativeResult.scalar(.{ .float = num / den });
 }

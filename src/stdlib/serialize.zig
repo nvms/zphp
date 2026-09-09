@@ -1,3 +1,4 @@
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
@@ -145,8 +146,8 @@ fn formatPhpFloat(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, f: f64
     }
 }
 
-fn native_serialize(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .string = Value.String.borrowed("") };
+fn native_serialize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.literal("");
     if (args[0] == .string and std.mem.startsWith(u8, args[0].string.bytes(), "__closure_")) {
         try ctx.vm.setPendingException("Exception", "Serialization of 'Closure' is not allowed");
         return error.RuntimeError;
@@ -168,17 +169,14 @@ fn native_serialize(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     return try serializeToString(ctx, args[0]);
 }
 
-// Public entrypoint for other stdlib modules that need to serialize PHP values
-// (e.g. session storage). Owns allocation via ctx.strings.
-pub fn serializeToString(ctx: *NativeContext, val: Value) RuntimeError!Value {
+pub fn serializeToString(ctx: *NativeContext, val: Value) RuntimeError!NativeResult {
     var buf = std.ArrayListUnmanaged(u8){};
     errdefer buf.deinit(ctx.allocator);
     var sctx = SerCtx{};
     defer sctx.deinit(ctx.allocator);
     try serializeValue(ctx, &buf, &sctx, val);
     const result = try buf.toOwnedSlice(ctx.allocator);
-    try ctx.strings.append(ctx.allocator, result);
-    return .{ .string = Value.String.borrowed(result) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, result));
 }
 
 pub fn unserializeFromString(ctx: *NativeContext, s: []const u8) ?Value {
@@ -515,11 +513,11 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
     }
 }
 
-fn native_unserialize(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return Value{ .bool = false };
+fn native_unserialize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const s = args[0].string.bytes();
     // PHP returns false silently for empty input - no warning
-    if (s.len == 0) return Value{ .bool = false };
+    if (s.len == 0) return NativeResult.scalar(.{ .bool = false });
     var uctx = UnserCtx{};
     defer uctx.deinit(ctx.allocator);
     var name_storage: std.ArrayListUnmanaged([]const u8) = .{};
@@ -546,16 +544,16 @@ fn native_unserialize(ctx: *NativeContext, args: []const Value) RuntimeError!Val
         // message that names the option + ini setting; generic parse errors
         // get 'Error at offset N of M bytes'
         if (uctx.depth_exceeded) {
-            const msg = std.fmt.allocPrint(ctx.allocator, "unserialize(): Maximum depth of {d} exceeded. The depth limit can be changed using the max_depth unserialize() option or the unserialize_max_depth ini setting", .{uctx.max_depth}) catch return Value{ .bool = false };
+            const msg = std.fmt.allocPrint(ctx.allocator, "unserialize(): Maximum depth of {d} exceeded. The depth limit can be changed using the max_depth unserialize() option or the unserialize_max_depth ini setting", .{uctx.max_depth}) catch return NativeResult.scalar(.{ .bool = false });
             ctx.vm.strings.append(ctx.allocator, msg) catch {};
             ctx.vm.emitWarning(msg);
         }
-        const msg2 = std.fmt.allocPrint(ctx.allocator, "unserialize(): Error at offset {d} of {d} bytes", .{ uctx.err_pos, s.len }) catch return Value{ .bool = false };
+        const msg2 = std.fmt.allocPrint(ctx.allocator, "unserialize(): Error at offset {d} of {d} bytes", .{ uctx.err_pos, s.len }) catch return NativeResult.scalar(.{ .bool = false });
         ctx.vm.strings.append(ctx.allocator, msg2) catch {};
         ctx.vm.emitWarning(msg2);
-        return Value{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     };
-    return result.value;
+    return NativeResult.share(result.value);
 }
 
 const ParseResult = struct {
@@ -879,7 +877,7 @@ fn parseString(s: []const u8, pos: usize) !StringResult {
 
 // SPL's legacy Serializable stream has one reference table spanning flags,
 // storage, and members (the separators themselves consume no reference IDs).
-pub fn serializeSplArray(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
+pub fn serializeSplArray(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeResult {
     var buf: std.ArrayListUnmanaged(u8) = .{};
     errdefer buf.deinit(ctx.allocator);
     var refs: SerCtx = .{};
@@ -895,8 +893,7 @@ pub fn serializeSplArray(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Valu
     const members = try splMembers(ctx, obj);
     try serializeValue(ctx, &buf, &refs, .{ .array = members });
     const result = try buf.toOwnedSlice(ctx.allocator);
-    try ctx.strings.append(ctx.allocator, result);
-    return .{ .string = Value.String.borrowed(result) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, result));
 }
 
 fn splInternal(name: []const u8) bool {
@@ -929,8 +926,8 @@ fn splMembers(ctx: *NativeContext, obj: *PhpObject) !*PhpArray {
     return members;
 }
 
-pub fn unserializeSplArray(ctx: *NativeContext, obj: *PhpObject, s: []const u8) RuntimeError!Value {
-    if (s.len == 0) return .null; // PHP treats an empty payload as a no-op.
+pub fn unserializeSplArray(ctx: *NativeContext, obj: *PhpObject, s: []const u8) RuntimeError!NativeResult {
+    if (s.len == 0) return NativeResult.scalar(.null); // PHP treats an empty payload as a no-op.
     var refs: UnserCtx = .{};
     defer refs.deinit(ctx.allocator);
     var pos: usize = 0;
@@ -942,7 +939,7 @@ pub fn unserializeSplArray(ctx: *NativeContext, obj: *PhpObject, s: []const u8) 
         try ctx.vm.setPendingException("UnexpectedValueException", msg);
         return error.RuntimeError;
     };
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 fn parseSplArray(ctx: *NativeContext, obj: *PhpObject, refs: *UnserCtx, s: []const u8, pos: *usize) !void {
@@ -978,7 +975,7 @@ fn parseSplArray(ctx: *NativeContext, obj: *PhpObject, refs: *UnserCtx, s: []con
     // Trailing bytes are intentionally ignored, as in PHP 8.5.
 }
 
-pub fn splArrayState(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
+pub fn splArrayState(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeResult {
     const state = try ctx.createArray();
     try state.append(ctx.allocator, obj.get("__flags"));
     const data = obj.get("__data");
@@ -986,10 +983,10 @@ pub fn splArrayState(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
     try state.append(ctx.allocator, if (data == .array) .{ .array = try splStorageSnapshot(ctx, data.array) } else data);
     try state.append(ctx.allocator, .{ .array = try splMembers(ctx, obj) });
     try state.append(ctx.allocator, obj.get("__iter_class"));
-    return .{ .array = state };
+    return NativeResult.borrowed(.{ .array = state });
 }
 
-pub fn restoreSplArrayState(ctx: *NativeContext, obj: *PhpObject, state: Value) RuntimeError!Value {
+pub fn restoreSplArrayState(ctx: *NativeContext, obj: *PhpObject, state: Value) RuntimeError!NativeResult {
     if (state != .array) return error.RuntimeError;
     const flags = state.array.get(.{ .int = 0 });
     const storage = state.array.get(.{ .int = 1 });
@@ -1019,7 +1016,7 @@ pub fn restoreSplArrayState(ctx: *NativeContext, obj: *PhpObject, state: Value) 
             if (!splInternal(name)) try obj.set(ctx.allocator, name, entry.value);
         }
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 // Decode R: aliases into the same owning cells/registry used by VM array

@@ -11,6 +11,7 @@ const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
 const vm_mod = @import("../runtime/vm.zig");
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const VM = vm_mod.VM;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
@@ -111,7 +112,7 @@ fn setErrorState(ctx: *NativeContext, obj: *PhpObject, conn: ?*mysql.MYSQL) !voi
 
 // ---------- procedural API ----------
 
-fn mysqliInit(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn mysqliInit(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = try ctx.createObject("mysqli");
     if (mysql.mysql_init(null)) |c| {
         try obj.set(ctx.allocator, "__conn", .{ .int = @intCast(@intFromPtr(c)) });
@@ -121,7 +122,7 @@ fn mysqliInit(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     try obj.set(ctx.allocator, "error", .{ .string = Value.String.borrowed("") });
     try obj.set(ctx.allocator, "errno", .{ .int = 0 });
     try obj.set(ctx.allocator, "__connected", .{ .bool = false });
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
 // shared connect path used by mysqli_connect and mysqli::__construct
@@ -180,7 +181,7 @@ fn argOptInt(args: []const Value, idx: usize, default: i64) i64 {
     };
 }
 
-fn mysqliConnect(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn mysqliConnect(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = try ctx.createObject("mysqli");
     try obj.set(ctx.allocator, "error", .{ .string = Value.String.borrowed("") });
     try obj.set(ctx.allocator, "errno", .{ .int = 0 });
@@ -194,14 +195,14 @@ fn mysqliConnect(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const socket = argOptString(args, 5);
 
     const ok = try doConnect(ctx, obj, host, user, pass, db, port, socket);
-    if (!ok) return .{ .bool = false };
-    return .{ .object = obj };
+    if (!ok) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn mysqliRealConnect(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn mysqliRealConnect(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     // procedural variant takes the link as arg 0; the method form puts the
     // link in $this. linkObj resolves both
-    const link = linkObj(ctx, args, 0) orelse return .{ .bool = false };
+    const link = linkObj(ctx, args, 0) orelse return NativeResult.scalar(.{ .bool = false });
     const offset: usize = if (args.len > 0 and args[0] == .object) 1 else 0;
     const host = argOptString(args, offset + 0);
     const user = argOptString(args, offset + 1);
@@ -209,11 +210,11 @@ fn mysqliRealConnect(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
     const db = argOptString(args, offset + 3);
     const port: u32 = @intCast(argOptInt(args, offset + 4, 3306));
     const socket = argOptString(args, offset + 5);
-    return .{ .bool = try doConnect(ctx, link, host, user, pass, db, port, socket) };
+    return NativeResult.scalar(.{ .bool = try doConnect(ctx, link, host, user, pass, db, port, socket) });
 }
 
-fn mysqliClose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const link = linkObj(ctx, args, 0) orelse return .{ .bool = false };
+fn mysqliClose(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const link = linkObj(ctx, args, 0) orelse return NativeResult.scalar(.{ .bool = false });
     if (getConn(link)) |c| {
         // mysql_close is safe to call on a handle returned by mysql_init even
         // when never connected — releases the allocated handle either way
@@ -221,21 +222,21 @@ fn mysqliClose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try link.set(ctx.allocator, "__conn", .{ .int = 0 });
         try link.set(ctx.allocator, "__connected", .{ .bool = false });
     }
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn mysqliQuery(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const link = linkObj(ctx, args, 0) orelse return .{ .bool = false };
-    const conn = getConn(link) orelse return .{ .bool = false };
-    if (!isConnected(link)) return .{ .bool = false };
+fn mysqliQuery(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const link = linkObj(ctx, args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const conn = getConn(link) orelse return NativeResult.scalar(.{ .bool = false });
+    if (!isConnected(link)) return NativeResult.scalar(.{ .bool = false });
     // determine which arg holds the SQL
     const sql_arg: Value = if (args.len > 0 and args[0] == .object) (if (args.len > 1) args[1] else .null) else if (args.len > 0) args[0] else .null;
-    if (sql_arg != .string) return .{ .bool = false };
+    if (sql_arg != .string) return NativeResult.scalar(.{ .bool = false });
     const sql = sql_arg.string.bytes();
     if (mysql.mysql_real_query(conn, sql.ptr, @intCast(sql.len)) != 0) {
         try setErrorState(ctx, link, conn);
         try reportFailure(ctx, conn, "mysqli_query", false);
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     }
     try setErrorState(ctx, link, conn);
     // expose state PHP makes available as object properties on the mysqli link.
@@ -250,7 +251,7 @@ fn mysqliQuery(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (res_opt == null and mysql.mysql_errno(conn) != 0) {
         try setErrorState(ctx, link, conn);
         try reportFailure(ctx, conn, "mysqli_query", false);
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     }
     // Use the installed client header rather than guessing MYSQL's ABI layout.
     if (reportMode(ctx) & 4 != 0) {
@@ -271,7 +272,7 @@ fn mysqliQuery(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             ctx.vm.emitWarning(message);
         }
     }
-    const res = res_opt orelse return .{ .bool = true };
+    const res = res_opt orelse return NativeResult.scalar(.{ .bool = true });
 
     const result_obj = try ctx.createObject("mysqli_result");
     try result_obj.set(ctx.allocator, "__res", .{ .int = @intCast(@intFromPtr(res)) });
@@ -281,7 +282,7 @@ fn mysqliQuery(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     // mysqli_result exposes the column count as `field_count` in PHP. keep
     // both spellings populated so user code that reaches for either works
     try result_obj.set(ctx.allocator, "field_count", .{ .int = nf });
-    return .{ .object = result_obj };
+    return NativeResult.borrowed(.{ .object = result_obj });
 }
 
 // row fetch shared between fetch_array / fetch_assoc / fetch_row
@@ -319,26 +320,26 @@ fn fetchRow(ctx: *NativeContext, result_obj: *PhpObject, flags: u8) !Value {
     return .{ .array = arr };
 }
 
-fn mysqliFetchAssoc(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const result_obj = linkObj(ctx, args, 0) orelse return .null;
-    return try fetchRow(ctx, result_obj, 1);
+fn mysqliFetchAssoc(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const result_obj = linkObj(ctx, args, 0) orelse return NativeResult.scalar(.null);
+    return NativeResult.borrowed(try fetchRow(ctx, result_obj, 1));
 }
 
-fn mysqliFetchArray(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const result_obj = linkObj(ctx, args, 0) orelse return .null;
+fn mysqliFetchArray(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const result_obj = linkObj(ctx, args, 0) orelse return NativeResult.scalar(.null);
     // procedural form has optional mode at args[1]; method form at args[0]
     const mode_arg: i64 = if (args.len > 0 and args[0] == .object) argOptInt(args, 1, 3) else argOptInt(args, 0, 3);
     const flags: u8 = @intCast(@as(u64, @bitCast(mode_arg)) & 3);
-    return try fetchRow(ctx, result_obj, if (flags == 0) 3 else flags);
+    return NativeResult.borrowed(try fetchRow(ctx, result_obj, if (flags == 0) 3 else flags));
 }
 
-fn mysqliFetchRow(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const result_obj = linkObj(ctx, args, 0) orelse return .null;
-    return try fetchRow(ctx, result_obj, 2);
+fn mysqliFetchRow(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const result_obj = linkObj(ctx, args, 0) orelse return NativeResult.scalar(.null);
+    return NativeResult.borrowed(try fetchRow(ctx, result_obj, 2));
 }
 
-fn mysqliFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const result_obj = linkObj(ctx, args, 0) orelse return .{ .array = try ctx.createArray() };
+fn mysqliFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const result_obj = linkObj(ctx, args, 0) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const mode_arg: i64 = if (args.len > 0 and args[0] == .object) argOptInt(args, 1, 2) else argOptInt(args, 0, 2);
     const flags: u8 = @intCast(@as(u64, @bitCast(mode_arg)) & 3);
     const eff: u8 = if (flags == 0) 2 else flags;
@@ -348,53 +349,53 @@ fn mysqliFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (row == .null) break;
         try out.append(ctx.allocator, row);
     }
-    return .{ .array = out };
+    return NativeResult.borrowed(.{ .array = out });
 }
 
-fn mysqliNumRows(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const result_obj = linkObj(ctx, args, 0) orelse return .{ .int = 0 };
+fn mysqliNumRows(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const result_obj = linkObj(ctx, args, 0) orelse return NativeResult.scalar(.{ .int = 0 });
     const v = result_obj.get("num_rows");
-    return if (v == .int) v else .{ .int = 0 };
+    return if (v == .int) NativeResult.share(v) else NativeResult.scalar(.{ .int = 0 });
 }
 
-fn mysqliAffectedRows(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const link = linkObj(ctx, args, 0) orelse return .{ .int = 0 };
-    const c = getConn(link) orelse return .{ .int = 0 };
-    if (!isConnected(link)) return .{ .int = 0 };
+fn mysqliAffectedRows(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const link = linkObj(ctx, args, 0) orelse return NativeResult.scalar(.{ .int = 0 });
+    const c = getConn(link) orelse return NativeResult.scalar(.{ .int = 0 });
+    if (!isConnected(link)) return NativeResult.scalar(.{ .int = 0 });
     const raw = mysql.mysql_affected_rows(c);
-    return .{ .int = if (raw == std.math.maxInt(u64)) -1 else @intCast(raw) };
+    return NativeResult.scalar(.{ .int = if (raw == std.math.maxInt(u64)) -1 else @intCast(raw) });
 }
 
-fn mysqliInsertId(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const link = linkObj(ctx, args, 0) orelse return .{ .int = 0 };
-    const c = getConn(link) orelse return .{ .int = 0 };
-    if (!isConnected(link)) return .{ .int = 0 };
-    return .{ .int = @intCast(mysql.mysql_insert_id(c)) };
+fn mysqliInsertId(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const link = linkObj(ctx, args, 0) orelse return NativeResult.scalar(.{ .int = 0 });
+    const c = getConn(link) orelse return NativeResult.scalar(.{ .int = 0 });
+    if (!isConnected(link)) return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = @intCast(mysql.mysql_insert_id(c)) });
 }
 
-fn mysqliError(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const link = linkObj(ctx, args, 0) orelse return .{ .string = Value.String.borrowed("") };
-    return link.get("error");
+fn mysqliError(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const link = linkObj(ctx, args, 0) orelse return NativeResult.literal("");
+    return NativeResult.share(link.get("error"));
 }
 
-fn mysqliErrno(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const link = linkObj(ctx, args, 0) orelse return .{ .int = 0 };
-    return link.get("errno");
+fn mysqliErrno(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const link = linkObj(ctx, args, 0) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.share(link.get("errno"));
 }
 
-fn mysqliConnectError(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn mysqliConnectError(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     _ = ctx;
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn mysqliConnectErrno(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .int = 0 };
+fn mysqliConnectErrno(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .int = 0 });
 }
 
-fn mysqliRealEscapeString(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const link = linkObj(ctx, args, 0) orelse return .{ .string = Value.String.borrowed("") };
+fn mysqliRealEscapeString(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const link = linkObj(ctx, args, 0) orelse return NativeResult.literal("");
     const str_arg: Value = if (args.len > 0 and args[0] == .object) (if (args.len > 1) args[1] else .null) else if (args.len > 0) args[0] else .null;
-    if (str_arg != .string) return .{ .string = Value.String.borrowed("") };
+    if (str_arg != .string) return NativeResult.literal("");
     const conn = getConn(link) orelse return try fallbackEscape(ctx, str_arg.string.bytes());
     if (!isConnected(link)) return try fallbackEscape(ctx, str_arg.string.bytes());
     const src = str_arg.string.bytes();
@@ -403,11 +404,10 @@ fn mysqliRealEscapeString(ctx: *NativeContext, args: []const Value) RuntimeError
     const out = buf[0..@intCast(written)];
     const owned = try ctx.allocator.dupe(u8, out);
     ctx.allocator.free(buf);
-    try ctx.vm.strings.append(ctx.allocator, owned);
-    return .{ .string = Value.String.borrowed(owned) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, owned));
 }
 
-fn fallbackEscape(ctx: *NativeContext, src: []const u8) !Value {
+fn fallbackEscape(ctx: *NativeContext, src: []const u8) RuntimeError!NativeResult {
     var buf = std.ArrayListUnmanaged(u8){};
     defer buf.deinit(ctx.allocator);
     for (src) |c| {
@@ -425,59 +425,53 @@ fn fallbackEscape(ctx: *NativeContext, src: []const u8) !Value {
             else => try buf.append(ctx.allocator, c),
         }
     }
-    const owned = try ctx.allocator.dupe(u8, buf.items);
-    try ctx.vm.strings.append(ctx.allocator, owned);
-    return .{ .string = Value.String.borrowed(owned) };
+    return try NativeResult.copyString(ctx.allocator, buf.items);
 }
 
-fn mysqliSelectDb(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const link = linkObj(ctx, args, 0) orelse return .{ .bool = false };
-    const conn = getConn(link) orelse return .{ .bool = false };
-    if (!isConnected(link)) return .{ .bool = false };
+fn mysqliSelectDb(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const link = linkObj(ctx, args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const conn = getConn(link) orelse return NativeResult.scalar(.{ .bool = false });
+    if (!isConnected(link)) return NativeResult.scalar(.{ .bool = false });
     const db_arg: Value = if (args.len > 0 and args[0] == .object) (if (args.len > 1) args[1] else .null) else if (args.len > 0) args[0] else .null;
-    if (db_arg != .string) return .{ .bool = false };
+    if (db_arg != .string) return NativeResult.scalar(.{ .bool = false });
     const db_z = try dupZ(ctx, db_arg.string.bytes());
     const rc = mysql.mysql_select_db(conn, db_z.ptr);
     if (rc != 0) {
         try setErrorState(ctx, link, conn);
         try reportFailure(ctx, conn, "mysqli_select_db", false);
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     }
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn mysqliSetCharset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const link = linkObj(ctx, args, 0) orelse return .{ .bool = false };
-    const conn = getConn(link) orelse return .{ .bool = false };
-    if (!isConnected(link)) return .{ .bool = false };
+fn mysqliSetCharset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const link = linkObj(ctx, args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const conn = getConn(link) orelse return NativeResult.scalar(.{ .bool = false });
+    if (!isConnected(link)) return NativeResult.scalar(.{ .bool = false });
     const cs_arg: Value = if (args.len > 0 and args[0] == .object) (if (args.len > 1) args[1] else .null) else if (args.len > 0) args[0] else .null;
-    if (cs_arg != .string) return .{ .bool = false };
+    if (cs_arg != .string) return NativeResult.scalar(.{ .bool = false });
     const cs_z = try dupZ(ctx, cs_arg.string.bytes());
     // mysql_set_charset was removed in libmysqlclient 8.x. mysql_options
     // with MYSQL_SET_CHARSET_NAME is the supported equivalent; it accepts a
     // C string pointer (cast through anyopaque)
-    return .{ .bool = mysql.mysql_options(conn, mysql.MYSQL_SET_CHARSET_NAME, @ptrCast(cs_z.ptr)) == 0 };
+    return NativeResult.scalar(.{ .bool = mysql.mysql_options(conn, mysql.MYSQL_SET_CHARSET_NAME, @ptrCast(cs_z.ptr)) == 0 });
 }
 
-fn mysqliCharacterSetName(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const link = linkObj(ctx, args, 0) orelse return .{ .string = Value.String.borrowed("") };
-    const conn = getConn(link) orelse return .{ .string = Value.String.borrowed("") };
-    if (!isConnected(link)) return .{ .string = Value.String.borrowed("") };
+fn mysqliCharacterSetName(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const link = linkObj(ctx, args, 0) orelse return NativeResult.literal("");
+    const conn = getConn(link) orelse return NativeResult.literal("");
+    if (!isConnected(link)) return NativeResult.literal("");
     const name = std.mem.span(mysql.mysql_character_set_name(conn));
-    const owned = try ctx.allocator.dupe(u8, name);
-    try ctx.vm.strings.append(ctx.allocator, owned);
-    return .{ .string = Value.String.borrowed(owned) };
+    return try NativeResult.copyString(ctx.allocator, name);
 }
 
-fn mysqliGetClientInfo(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn mysqliGetClientInfo(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const info = std.mem.span(mysql.mysql_get_client_info());
-    const owned = try ctx.allocator.dupe(u8, info);
-    try ctx.vm.strings.append(ctx.allocator, owned);
-    return .{ .string = Value.String.borrowed(owned) };
+    return try NativeResult.copyString(ctx.allocator, info);
 }
 
-fn mysqliGetClientVersion(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .int = @intCast(mysql.mysql_get_client_version()) };
+fn mysqliGetClientVersion(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .int = @intCast(mysql.mysql_get_client_version()) });
 }
 
 fn isConnected(link: *PhpObject) bool {
@@ -485,105 +479,101 @@ fn isConnected(link: *PhpObject) bool {
     return v == .bool and v.bool;
 }
 
-fn mysqliGetServerInfo(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const link = linkObj(ctx, args, 0) orelse return .{ .string = Value.String.borrowed("") };
-    const conn = getConn(link) orelse return .{ .string = Value.String.borrowed("") };
-    if (!isConnected(link)) return .{ .string = Value.String.borrowed("") };
+fn mysqliGetServerInfo(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const link = linkObj(ctx, args, 0) orelse return NativeResult.literal("");
+    const conn = getConn(link) orelse return NativeResult.literal("");
+    if (!isConnected(link)) return NativeResult.literal("");
     const info = std.mem.span(mysql.mysql_get_server_info(conn));
-    const owned = try ctx.allocator.dupe(u8, info);
-    try ctx.vm.strings.append(ctx.allocator, owned);
-    return .{ .string = Value.String.borrowed(owned) };
+    return try NativeResult.copyString(ctx.allocator, info);
 }
 
-fn mysqliGetServerVersion(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const link = linkObj(ctx, args, 0) orelse return .{ .int = 0 };
-    const conn = getConn(link) orelse return .{ .int = 0 };
-    if (!isConnected(link)) return .{ .int = 0 };
-    return .{ .int = @intCast(mysql.mysql_get_server_version(conn)) };
+fn mysqliGetServerVersion(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const link = linkObj(ctx, args, 0) orelse return NativeResult.scalar(.{ .int = 0 });
+    const conn = getConn(link) orelse return NativeResult.scalar(.{ .int = 0 });
+    if (!isConnected(link)) return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = @intCast(mysql.mysql_get_server_version(conn)) });
 }
 
-fn mysqliGetHostInfo(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const link = linkObj(ctx, args, 0) orelse return .{ .string = Value.String.borrowed("") };
-    const conn = getConn(link) orelse return .{ .string = Value.String.borrowed("") };
-    if (!isConnected(link)) return .{ .string = Value.String.borrowed("") };
+fn mysqliGetHostInfo(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const link = linkObj(ctx, args, 0) orelse return NativeResult.literal("");
+    const conn = getConn(link) orelse return NativeResult.literal("");
+    if (!isConnected(link)) return NativeResult.literal("");
     const info = std.mem.span(mysql.mysql_get_host_info(conn));
-    const owned = try ctx.allocator.dupe(u8, info);
-    try ctx.vm.strings.append(ctx.allocator, owned);
-    return .{ .string = Value.String.borrowed(owned) };
+    return try NativeResult.copyString(ctx.allocator, info);
 }
 
-fn mysqliThreadId(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const link = linkObj(ctx, args, 0) orelse return .{ .int = 0 };
-    const conn = getConn(link) orelse return .{ .int = 0 };
-    if (!isConnected(link)) return .{ .int = 0 };
-    return .{ .int = @intCast(mysql.mysql_thread_id(conn)) };
+fn mysqliThreadId(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const link = linkObj(ctx, args, 0) orelse return NativeResult.scalar(.{ .int = 0 });
+    const conn = getConn(link) orelse return NativeResult.scalar(.{ .int = 0 });
+    if (!isConnected(link)) return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = @intCast(mysql.mysql_thread_id(conn)) });
 }
 
-fn mysqliPing(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const link = linkObj(ctx, args, 0) orelse return .{ .bool = false };
-    const conn = getConn(link) orelse return .{ .bool = false };
-    if (!isConnected(link)) return .{ .bool = false };
+fn mysqliPing(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const link = linkObj(ctx, args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const conn = getConn(link) orelse return NativeResult.scalar(.{ .bool = false });
+    if (!isConnected(link)) return NativeResult.scalar(.{ .bool = false });
     const ok = mysql.mysql_ping(conn) == 0;
     try setErrorState(ctx, link, conn);
     if (!ok) try reportFailure(ctx, conn, "mysqli_ping", false);
-    return .{ .bool = ok };
+    return NativeResult.scalar(.{ .bool = ok });
 }
 
-fn mysqliAutocommit(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const link = linkObj(ctx, args, 0) orelse return .{ .bool = false };
-    const conn = getConn(link) orelse return .{ .bool = false };
-    if (!isConnected(link)) return .{ .bool = false };
+fn mysqliAutocommit(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const link = linkObj(ctx, args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const conn = getConn(link) orelse return NativeResult.scalar(.{ .bool = false });
+    if (!isConnected(link)) return NativeResult.scalar(.{ .bool = false });
     const mode_arg: Value = if (args.len > 0 and args[0] == .object) (if (args.len > 1) args[1] else .{ .bool = true }) else if (args.len > 0) args[0] else .{ .bool = true };
     const mode: u8 = if (mode_arg.isTruthy()) 1 else 0;
     const ok = mysql.mysql_autocommit(conn, mode) == 0;
     try setErrorState(ctx, link, conn);
     if (!ok) try reportFailure(ctx, conn, "mysqli_autocommit", false);
-    return .{ .bool = ok };
+    return NativeResult.scalar(.{ .bool = ok });
 }
 
-fn mysqliCommit(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const link = linkObj(ctx, args, 0) orelse return .{ .bool = false };
-    const conn = getConn(link) orelse return .{ .bool = false };
-    if (!isConnected(link)) return .{ .bool = false };
+fn mysqliCommit(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const link = linkObj(ctx, args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const conn = getConn(link) orelse return NativeResult.scalar(.{ .bool = false });
+    if (!isConnected(link)) return NativeResult.scalar(.{ .bool = false });
     const ok = mysql.mysql_commit(conn) == 0;
     try setErrorState(ctx, link, conn);
     if (!ok) try reportFailure(ctx, conn, "mysqli_commit", false);
-    return .{ .bool = ok };
+    return NativeResult.scalar(.{ .bool = ok });
 }
 
-fn mysqliRollback(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const link = linkObj(ctx, args, 0) orelse return .{ .bool = false };
-    const conn = getConn(link) orelse return .{ .bool = false };
-    if (!isConnected(link)) return .{ .bool = false };
+fn mysqliRollback(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const link = linkObj(ctx, args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const conn = getConn(link) orelse return NativeResult.scalar(.{ .bool = false });
+    if (!isConnected(link)) return NativeResult.scalar(.{ .bool = false });
     const ok = mysql.mysql_rollback(conn) == 0;
     try setErrorState(ctx, link, conn);
     if (!ok) try reportFailure(ctx, conn, "mysqli_rollback", false);
-    return .{ .bool = ok };
+    return NativeResult.scalar(.{ .bool = ok });
 }
 
-fn mysqliFreeResult(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const result_obj = linkObj(ctx, args, 0) orelse return .null;
+fn mysqliFreeResult(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const result_obj = linkObj(ctx, args, 0) orelse return NativeResult.scalar(.null);
     if (getRes(result_obj)) |r| {
         mysql.mysql_free_result(r);
         try result_obj.set(ctx.allocator, "__res", .{ .int = 0 });
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn mysqliFieldCount(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn mysqliFieldCount(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     // proc form: mysqli_field_count(link). method form: $result->field_count
-    const obj = linkObj(ctx, args, 0) orelse return .{ .int = 0 };
+    const obj = linkObj(ctx, args, 0) orelse return NativeResult.scalar(.{ .int = 0 });
     if (std.mem.eql(u8, obj.class_name, "mysqli_result")) {
         const v = obj.get("num_fields");
-        return if (v == .int) v else .{ .int = 0 };
+        return if (v == .int) NativeResult.share(v) else NativeResult.scalar(.{ .int = 0 });
     }
-    return .{ .int = 0 };
+    return NativeResult.scalar(.{ .int = 0 });
 }
 
-fn mysqliNumFields(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = linkObj(ctx, args, 0) orelse return .{ .int = 0 };
+fn mysqliNumFields(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = linkObj(ctx, args, 0) orelse return NativeResult.scalar(.{ .int = 0 });
     const v = obj.get("num_fields");
-    return if (v == .int) v else .{ .int = 0 };
+    return if (v == .int) NativeResult.share(v) else NativeResult.scalar(.{ .int = 0 });
 }
 
 // State belongs to the VM's class registry, not a process-global variable:
@@ -592,14 +582,14 @@ fn reportMode(ctx: *NativeContext) i64 {
     return ctx.vm.classes.get("mysqli_driver").?.static_props.get("__report_mode").?.int;
 }
 
-fn mysqliReport(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn mysqliReport(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len != 1) return reportArgumentError(ctx, "ArgumentCountError", "mysqli_report() expects exactly 1 argument");
     if (args[0] == .array or args[0] == .object) return reportArgumentError(ctx, "TypeError", "mysqli_report(): Argument #1 ($flags) must be of type int");
     try ctx.vm.classes.getPtr("mysqli_driver").?.static_props.put(ctx.allocator, "__report_mode", .{ .int = args[0].toInt() });
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn reportArgumentError(ctx: *NativeContext, class: []const u8, msg: []const u8) RuntimeError!Value {
+fn reportArgumentError(ctx: *NativeContext, class: []const u8, msg: []const u8) RuntimeError!NativeResult {
     const obj = try ctx.createObject(class);
     try obj.set(ctx.allocator, "message", .{ .string = Value.String.borrowed(msg) });
     try obj.set(ctx.allocator, "code", .{ .int = 0 });
@@ -607,19 +597,19 @@ fn reportArgumentError(ctx: *NativeContext, class: []const u8, msg: []const u8) 
     return error.RuntimeError;
 }
 
-fn driverGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len > 0 and args[0] == .string and std.mem.eql(u8, args[0].string.bytes(), "report_mode")) return .{ .int = reportMode(ctx) };
-    return .null;
+fn driverGet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len > 0 and args[0] == .string and std.mem.eql(u8, args[0].string.bytes(), "report_mode")) return NativeResult.scalar(.{ .int = reportMode(ctx) });
+    return NativeResult.scalar(.null);
 }
 
-fn driverSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn driverSet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len > 1 and args[0] == .string and std.mem.eql(u8, args[0].string.bytes(), "report_mode")) _ = try mysqliReport(ctx, args[1..2]);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn exceptionSqlState(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = linkObj(ctx, args, 0) orelse return .null;
-    return obj.get("sqlstate");
+fn exceptionSqlState(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = linkObj(ctx, args, 0) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(obj.get("sqlstate"));
 }
 
 fn reportFailure(ctx: *NativeContext, conn: *mysql.MYSQL, operation: []const u8, connection: bool) RuntimeError!void {
@@ -644,19 +634,19 @@ fn reportFailure(ctx: *NativeContext, conn: *mysql.MYSQL, operation: []const u8,
 
 // ---------- class constructor ----------
 
-fn mysqliConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const v = ctx.vm.currentFrame().vars.get("$this") orelse return .null;
-    if (v != .object) return .null;
+fn mysqliConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const v = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.scalar(.null);
+    if (v != .object) return NativeResult.scalar(.null);
     const obj = v.object;
     try obj.set(ctx.allocator, "error", .{ .string = Value.String.borrowed("") });
     try obj.set(ctx.allocator, "errno", .{ .int = 0 });
     try obj.set(ctx.allocator, "__connected", .{ .bool = false });
 
-    const c = mysql.mysql_init(null) orelse return .null;
+    const c = mysql.mysql_init(null) orelse return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__conn", .{ .int = @intCast(@intFromPtr(c)) });
 
     // when called with no args, leave the handle uninitialized (mirrors mysqli_init)
-    if (args.len == 0) return .null;
+    if (args.len == 0) return NativeResult.scalar(.null);
 
     const host = argOptString(args, 0);
     const user = argOptString(args, 1);
@@ -665,7 +655,7 @@ fn mysqliConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     const port: u32 = @intCast(argOptInt(args, 4, 3306));
     const socket = argOptString(args, 5);
     _ = try doConnect(ctx, obj, host, user, pass, db, port, socket);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 // ---------- registration ----------

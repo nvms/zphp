@@ -3,6 +3,7 @@ const Value = @import("../runtime/value.zig").Value;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
 const vm_mod = @import("../runtime/vm.zig");
 const VM = vm_mod.VM;
+const NativeResult = vm_mod.NativeResult;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
 const Allocator = std.mem.Allocator;
@@ -73,7 +74,7 @@ fn parseBc(allocator: Allocator, s: []const u8) !BcNum {
     return n;
 }
 
-fn formatBc(allocator: Allocator, n: BcNum, target_scale: usize) ![]const u8 {
+fn formatBc(allocator: Allocator, n: BcNum, target_scale: usize) ![]u8 {
     var out = std.ArrayListUnmanaged(u8){};
     errdefer out.deinit(allocator);
 
@@ -476,15 +477,9 @@ fn argToString(args: []const Value, idx: usize) ?[]const u8 {
     };
 }
 
-fn returnStr(ctx: *NativeContext, s: []const u8) !Value {
-    const owned = try ctx.allocator.dupe(u8, s);
-    try ctx.strings.append(ctx.allocator, owned);
-    return .{ .string = Value.String.borrowed(owned) };
-}
-
-fn bcAdd(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const sa = argToString(args, 0) orelse return .null;
-    const sb = argToString(args, 1) orelse return .null;
+fn bcAdd(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const sa = argToString(args, 0) orelse return NativeResult.scalar(.null);
+    const sb = argToString(args, 1) orelse return NativeResult.scalar(.null);
     const scale = resolveScale(args, 2);
     var a = try parseBc(ctx.allocator, sa);
     defer a.deinit(ctx.allocator);
@@ -493,13 +488,13 @@ fn bcAdd(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     var r = try bcAddInternal(ctx.allocator, a, b);
     defer r.deinit(ctx.allocator);
     const out = try formatBc(ctx.allocator, r, scale);
-    defer ctx.allocator.free(out);
-    return try returnStr(ctx, out);
+
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
 }
 
-fn bcSub(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const sa = argToString(args, 0) orelse return .null;
-    const sb = argToString(args, 1) orelse return .null;
+fn bcSub(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const sa = argToString(args, 0) orelse return NativeResult.scalar(.null);
+    const sb = argToString(args, 1) orelse return NativeResult.scalar(.null);
     const scale = resolveScale(args, 2);
     var a = try parseBc(ctx.allocator, sa);
     defer a.deinit(ctx.allocator);
@@ -508,13 +503,13 @@ fn bcSub(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     var r = try bcSubInternal(ctx.allocator, a, b);
     defer r.deinit(ctx.allocator);
     const out = try formatBc(ctx.allocator, r, scale);
-    defer ctx.allocator.free(out);
-    return try returnStr(ctx, out);
+
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
 }
 
-fn bcMul(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const sa = argToString(args, 0) orelse return .null;
-    const sb = argToString(args, 1) orelse return .null;
+fn bcMul(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const sa = argToString(args, 0) orelse return NativeResult.scalar(.null);
+    const sb = argToString(args, 1) orelse return NativeResult.scalar(.null);
     const scale = resolveScale(args, 2);
     var a = try parseBc(ctx.allocator, sa);
     defer a.deinit(ctx.allocator);
@@ -523,13 +518,13 @@ fn bcMul(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     var r = try bcMulInternal(ctx.allocator, a, b);
     defer r.deinit(ctx.allocator);
     const out = try formatBc(ctx.allocator, r, scale);
-    defer ctx.allocator.free(out);
-    return try returnStr(ctx, out);
+
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
 }
 
-fn bcDiv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const sa = argToString(args, 0) orelse return .null;
-    const sb = argToString(args, 1) orelse return .null;
+fn bcDiv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const sa = argToString(args, 0) orelse return NativeResult.scalar(.null);
+    const sb = argToString(args, 1) orelse return NativeResult.scalar(.null);
     const scale = resolveScale(args, 2);
     var a = try parseBc(ctx.allocator, sa);
     defer a.deinit(ctx.allocator);
@@ -543,15 +538,15 @@ fn bcDiv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (r_opt) |*r| {
         defer r.deinit(ctx.allocator);
         const out = try formatBc(ctx.allocator, r.*, scale);
-        defer ctx.allocator.free(out);
-        return try returnStr(ctx, out);
+
+        return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn bcMod(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const sa = argToString(args, 0) orelse return .null;
-    const sb = argToString(args, 1) orelse return .null;
+fn bcMod(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const sa = argToString(args, 0) orelse return NativeResult.scalar(.null);
+    const sb = argToString(args, 1) orelse return NativeResult.scalar(.null);
     const scale = resolveScale(args, 2);
     var a = try parseBc(ctx.allocator, sa);
     defer a.deinit(ctx.allocator);
@@ -559,24 +554,24 @@ fn bcMod(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     defer b.deinit(ctx.allocator);
     if (b.isZero()) {
         try ctx.vm.setPendingException("DivisionByZeroError", "Modulo by zero");
-        return .null;
+        return NativeResult.scalar(.null);
     }
     // mod = a - (a / b truncated to scale=0) * b. then format to target scale
     var q_opt = try bcDivInternal(ctx.allocator, a, b, 0);
-    if (q_opt == null) return .null;
+    if (q_opt == null) return NativeResult.scalar(.null);
     defer q_opt.?.deinit(ctx.allocator);
     var qb = try bcMulInternal(ctx.allocator, q_opt.?, b);
     defer qb.deinit(ctx.allocator);
     var r = try bcSubInternal(ctx.allocator, a, qb);
     defer r.deinit(ctx.allocator);
     const out = try formatBc(ctx.allocator, r, scale);
-    defer ctx.allocator.free(out);
-    return try returnStr(ctx, out);
+
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
 }
 
-fn bcDivmod(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const sa = argToString(args, 0) orelse return .null;
-    const sb = argToString(args, 1) orelse return .null;
+fn bcDivmod(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const sa = argToString(args, 0) orelse return NativeResult.scalar(.null);
+    const sb = argToString(args, 1) orelse return NativeResult.scalar(.null);
     const scale = resolveScale(args, 2);
     var a = try parseBc(ctx.allocator, sa);
     defer a.deinit(ctx.allocator);
@@ -584,10 +579,10 @@ fn bcDivmod(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     defer b.deinit(ctx.allocator);
     if (b.isZero()) {
         try ctx.vm.setPendingException("DivisionByZeroError", "Division by zero");
-        return .null;
+        return NativeResult.scalar(.null);
     }
     var q_opt = try bcDivInternal(ctx.allocator, a, b, 0);
-    if (q_opt == null) return .null;
+    if (q_opt == null) return NativeResult.scalar(.null);
     const q = q_opt.?;
     defer @constCast(&q).deinit(ctx.allocator);
     var qb = try bcMulInternal(ctx.allocator, q, b);
@@ -597,32 +592,27 @@ fn bcDivmod(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     _ = &q_opt;
 
     const q_str = try formatBc(ctx.allocator, q, 0);
-    defer ctx.allocator.free(q_str);
+    const q_owned = try Value.String.adopt(ctx.allocator, q_str);
+    defer q_owned.release();
     const r_str = try formatBc(ctx.allocator, r, scale);
-    defer ctx.allocator.free(r_str);
+    const r_owned = try Value.String.adopt(ctx.allocator, r_str);
+    defer r_owned.release();
 
-    const q_owned = try ctx.allocator.dupe(u8, q_str);
-    try ctx.vm.strings.append(ctx.allocator, q_owned);
-    const r_owned = try ctx.allocator.dupe(u8, r_str);
-    try ctx.vm.strings.append(ctx.allocator, r_owned);
-
-    const arr = try ctx.allocator.create(@import("../runtime/value.zig").PhpArray);
-    arr.* = .{};
-    try ctx.vm.arrays.append(ctx.allocator, arr);
-    try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(q_owned) });
-    try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(r_owned) });
-    return .{ .array = arr };
+    const arr = try ctx.createArray();
+    try arr.append(ctx.allocator, .{ .string = q_owned });
+    try arr.append(ctx.allocator, .{ .string = r_owned });
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn bcPow(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const sa = argToString(args, 0) orelse return .null;
-    const sb = argToString(args, 1) orelse return .null;
+fn bcPow(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const sa = argToString(args, 0) orelse return NativeResult.scalar(.null);
+    const sb = argToString(args, 1) orelse return NativeResult.scalar(.null);
     const scale = resolveScale(args, 2);
     var a = try parseBc(ctx.allocator, sa);
     defer a.deinit(ctx.allocator);
     // exponent must be a non-negative integer (PHP allows negative but truncates)
     const exp_str = sb;
-    var exp: i64 = std.fmt.parseInt(i64, std.mem.trim(u8, exp_str, " \t"), 10) catch return .null;
+    var exp: i64 = std.fmt.parseInt(i64, std.mem.trim(u8, exp_str, " \t"), 10) catch return NativeResult.scalar(.null);
     var negative_exp = false;
     if (exp < 0) {
         negative_exp = true;
@@ -657,28 +647,28 @@ fn bcPow(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         defer one.deinit(ctx.allocator);
         var inv = (try bcDivInternal(ctx.allocator, one, r, scale)) orelse {
             r.deinit(ctx.allocator);
-            return .null;
+            return NativeResult.scalar(.null);
         };
         defer inv.deinit(ctx.allocator);
         r.deinit(ctx.allocator);
         const out = try formatBc(ctx.allocator, inv, scale);
-        defer ctx.allocator.free(out);
-        return try returnStr(ctx, out);
+
+        return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
     }
 
     defer r.deinit(ctx.allocator);
     const out = try formatBc(ctx.allocator, r, scale);
-    defer ctx.allocator.free(out);
-    return try returnStr(ctx, out);
+
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
 }
 
 // modular exponentiation: base^exp mod mod. arbitrary precision via the same
 // BcNum primitives bcpow uses, but exp is also a BcNum so it can be larger
 // than i64. PHP truncates fractional bits of all three args.
-fn bcPowmod(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const sa = argToString(args, 0) orelse return .null;
-    const sb = argToString(args, 1) orelse return .null;
-    const sm = argToString(args, 2) orelse return .null;
+fn bcPowmod(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const sa = argToString(args, 0) orelse return NativeResult.scalar(.null);
+    const sb = argToString(args, 1) orelse return NativeResult.scalar(.null);
+    const sm = argToString(args, 2) orelse return NativeResult.scalar(.null);
     const scale = resolveScale(args, 3);
 
     // truncate fractional parts (PHP semantics for bcpowmod)
@@ -697,11 +687,11 @@ fn bcPowmod(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     if (mod.isZero()) {
         try ctx.vm.setPendingException("DivisionByZeroError", "Modulo by zero");
-        return .null;
+        return NativeResult.scalar(.null);
     }
     if (exp.sign < 0) {
         try ctx.vm.setPendingException("ValueError", "bcpowmod(): Argument #2 ($exponent) must be greater than or equal to 0");
-        return .null;
+        return NativeResult.scalar(.null);
     }
 
     // result = 1
@@ -710,7 +700,7 @@ fn bcPowmod(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     // base = base mod mod (so subsequent multiplies stay bounded)
     {
-        var q = (try bcDivInternal(ctx.allocator, base, mod, 0)) orelse return .null;
+        var q = (try bcDivInternal(ctx.allocator, base, mod, 0)) orelse return NativeResult.scalar(.null);
         defer q.deinit(ctx.allocator);
         var qm = try bcMulInternal(ctx.allocator, q, mod);
         defer qm.deinit(ctx.allocator);
@@ -730,7 +720,7 @@ fn bcPowmod(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const odd = blk: {
             // a BcNum that's all zeros isn't reached (loop exits). check ones digit
             // by computing exp mod 2
-            var q2 = (try bcDivInternal(ctx.allocator, exp, two, 0)) orelse return .null;
+            var q2 = (try bcDivInternal(ctx.allocator, exp, two, 0)) orelse return NativeResult.scalar(.null);
             defer q2.deinit(ctx.allocator);
             var qm2 = try bcMulInternal(ctx.allocator, q2, two);
             defer qm2.deinit(ctx.allocator);
@@ -742,7 +732,7 @@ fn bcPowmod(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (odd) {
             var rb = try bcMulInternal(ctx.allocator, result, base);
             defer rb.deinit(ctx.allocator);
-            var q = (try bcDivInternal(ctx.allocator, rb, mod, 0)) orelse return .null;
+            var q = (try bcDivInternal(ctx.allocator, rb, mod, 0)) orelse return NativeResult.scalar(.null);
             defer q.deinit(ctx.allocator);
             var qm = try bcMulInternal(ctx.allocator, q, mod);
             defer qm.deinit(ctx.allocator);
@@ -753,7 +743,7 @@ fn bcPowmod(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
         // exp = exp / 2
         {
-            const new_exp = (try bcDivInternal(ctx.allocator, exp, two, 0)) orelse return .null;
+            const new_exp = (try bcDivInternal(ctx.allocator, exp, two, 0)) orelse return NativeResult.scalar(.null);
             exp.deinit(ctx.allocator);
             exp = new_exp;
         }
@@ -763,7 +753,7 @@ fn bcPowmod(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         {
             var bb = try bcMulInternal(ctx.allocator, base, base);
             defer bb.deinit(ctx.allocator);
-            var q = (try bcDivInternal(ctx.allocator, bb, mod, 0)) orelse return .null;
+            var q = (try bcDivInternal(ctx.allocator, bb, mod, 0)) orelse return NativeResult.scalar(.null);
             defer q.deinit(ctx.allocator);
             var qm = try bcMulInternal(ctx.allocator, q, mod);
             defer qm.deinit(ctx.allocator);
@@ -774,21 +764,21 @@ fn bcPowmod(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
 
     const out = try formatBc(ctx.allocator, result, scale);
-    defer ctx.allocator.free(out);
+
     result.deinit(ctx.allocator);
-    return try returnStr(ctx, out);
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
 }
 
-fn bcSqrt(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const sa = argToString(args, 0) orelse return .null;
+fn bcSqrt(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const sa = argToString(args, 0) orelse return NativeResult.scalar(.null);
     const scale = resolveScale(args, 1);
     var a = try parseBc(ctx.allocator, sa);
     defer a.deinit(ctx.allocator);
-    if (a.sign < 0) return .null;
+    if (a.sign < 0) return NativeResult.scalar(.null);
     if (a.isZero()) {
         const z = try makeZeroString(ctx.allocator, scale);
-        defer ctx.allocator.free(z);
-        return try returnStr(ctx, z);
+
+        return NativeResult.takeString(try Value.String.adopt(ctx.allocator, z));
     }
 
     // newton's method on the full-precision string. work with scale+2 internal precision
@@ -799,13 +789,13 @@ fn bcSqrt(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     var iters: usize = 0;
     while (iters < 200) : (iters += 1) {
         // x_next = (x + a/x) / 2
-        var ax = (try bcDivInternal(ctx.allocator, a, x, work_scale)) orelse return .null;
+        var ax = (try bcDivInternal(ctx.allocator, a, x, work_scale)) orelse return NativeResult.scalar(.null);
         defer ax.deinit(ctx.allocator);
         var sum = try bcAddInternal(ctx.allocator, x, ax);
         defer sum.deinit(ctx.allocator);
         var two = try parseBc(ctx.allocator, "2");
         defer two.deinit(ctx.allocator);
-        const next = (try bcDivInternal(ctx.allocator, sum, two, work_scale)) orelse return .null;
+        const next = (try bcDivInternal(ctx.allocator, sum, two, work_scale)) orelse return NativeResult.scalar(.null);
         // check convergence: if |next - x| < 10^-work_scale
         var diff = try bcSubInternal(ctx.allocator, next, x);
         defer diff.deinit(ctx.allocator);
@@ -815,11 +805,11 @@ fn bcSqrt(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (converged) break;
     }
     const out = try formatBc(ctx.allocator, x, scale);
-    defer ctx.allocator.free(out);
-    return try returnStr(ctx, out);
+
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
 }
 
-fn makeZeroString(allocator: Allocator, scale: usize) ![]const u8 {
+fn makeZeroString(allocator: Allocator, scale: usize) ![]u8 {
     var out = std.ArrayListUnmanaged(u8){};
     errdefer out.deinit(allocator);
     try out.append(allocator, '0');
@@ -831,9 +821,9 @@ fn makeZeroString(allocator: Allocator, scale: usize) ![]const u8 {
     return try out.toOwnedSlice(allocator);
 }
 
-fn bcComp(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const sa = argToString(args, 0) orelse return .null;
-    const sb = argToString(args, 1) orelse return .null;
+fn bcComp(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const sa = argToString(args, 0) orelse return NativeResult.scalar(.null);
+    const sb = argToString(args, 1) orelse return NativeResult.scalar(.null);
     const scale = resolveScale(args, 2);
     var a = try parseBc(ctx.allocator, sa);
     defer a.deinit(ctx.allocator);
@@ -852,16 +842,16 @@ fn bcComp(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try tb.digits.resize(ctx.allocator, tb.digits.items.len - (tb.scale - scale));
         tb.scale = scale;
     }
-    return .{ .int = @intCast(cmpFull(ta, tb)) };
+    return NativeResult.scalar(.{ .int = @intCast(cmpFull(ta, tb)) });
 }
 
-fn bcScale(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn bcScale(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const prev = currentScale();
     if (args.len > 0 and args[0] == .int and args[0].int >= 0) {
         setScale(@intCast(args[0].int));
-        return .{ .int = @intCast(prev) };
+        return NativeResult.scalar(.{ .int = @intCast(prev) });
     }
-    return .{ .int = @intCast(prev) };
+    return NativeResult.scalar(.{ .int = @intCast(prev) });
 }
 
 // ---------------- ceil / floor / round (PHP 8.4) ----------------
@@ -934,8 +924,8 @@ fn signedResult(allocator: Allocator, neg: bool, digits: []const u8) ![]u8 {
     return try allocator.dupe(u8, body);
 }
 
-fn bcCeil(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const s = argToString(args, 0) orelse return .null;
+fn bcCeil(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const s = argToString(args, 0) orelse return NativeResult.scalar(.null);
     const p = splitNumber(s);
     const has_frac = fracNonZero(p.frac_part);
     var result: []u8 = undefined;
@@ -949,12 +939,12 @@ fn bcCeil(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         defer ctx.allocator.free(inc);
         result = try signedResult(ctx.allocator, false, inc);
     }
-    defer ctx.allocator.free(result);
-    return try returnStr(ctx, result);
+
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, result));
 }
 
-fn bcFloor(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const s = argToString(args, 0) orelse return .null;
+fn bcFloor(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const s = argToString(args, 0) orelse return NativeResult.scalar(.null);
     const p = splitNumber(s);
     const has_frac = fracNonZero(p.frac_part);
     var result: []u8 = undefined;
@@ -967,12 +957,12 @@ fn bcFloor(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         defer ctx.allocator.free(inc);
         result = try signedResult(ctx.allocator, true, inc);
     }
-    defer ctx.allocator.free(result);
-    return try returnStr(ctx, result);
+
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, result));
 }
 
-fn bcRound(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const s = argToString(args, 0) orelse return .null;
+fn bcRound(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const s = argToString(args, 0) orelse return NativeResult.scalar(.null);
     const precision: i64 = if (args.len > 1 and args[1] == .int) args[1].int else 0;
     const p = splitNumber(s);
 
@@ -1047,8 +1037,8 @@ fn bcRound(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
 
     const out = try signedResult(ctx.allocator, p.neg, result_buf.items);
-    defer ctx.allocator.free(out);
-    return try returnStr(ctx, out);
+
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
 }
 
 // ---------------- registration ----------------

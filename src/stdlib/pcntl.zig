@@ -1,3 +1,4 @@
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
 const posix = std.posix;
 const Value = @import("../runtime/value.zig").Value;
@@ -54,7 +55,7 @@ fn cHandler(sig: c_int) callconv(.c) void {
     if (idx < MAX_SIG) _ = pending_signals[idx].fetchAdd(1, .seq_cst);
 }
 
-fn native_pcntl_fork(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_pcntl_fork(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // flush any buffered output BEFORE fork so the parent's stdout isn't
     // re-emitted by every child when they exit
     if (ctx.vm.output.items.len > 0) {
@@ -64,12 +65,12 @@ fn native_pcntl_fork(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     const pid = std.c.fork();
     if (pid < 0) {
         last_errno = std.c._errno().*;
-        return .{ .int = -1 };
+        return NativeResult.scalar(.{ .int = -1 });
     }
-    return .{ .int = @intCast(pid) };
+    return NativeResult.scalar(.{ .int = @intCast(pid) });
 }
 
-fn native_pcntl_wait(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_pcntl_wait(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     var status: c_int = 0;
     const options: c_int = if (args.len > 1 and args[1] == .int) @intCast(args[1].int) else 0;
     const rc = std.c.waitpid(-1, &status, options);
@@ -77,11 +78,11 @@ fn native_pcntl_wait(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
         ctx.setCallerVar(0, args.len, .{ .int = @intCast(status) });
     }
     if (rc < 0) last_errno = std.c._errno().*;
-    return .{ .int = @intCast(rc) };
+    return NativeResult.scalar(.{ .int = @intCast(rc) });
 }
 
-fn native_pcntl_waitpid(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .int) return .{ .int = -1 };
+fn native_pcntl_waitpid(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .int) return NativeResult.scalar(.{ .int = -1 });
     var status: c_int = 0;
     const options: c_int = if (args.len > 2 and args[2] == .int) @intCast(args[2].int) else 0;
     const rc = std.c.waitpid(@intCast(args[0].int), &status, options);
@@ -89,11 +90,11 @@ fn native_pcntl_waitpid(ctx: *NativeContext, args: []const Value) RuntimeError!V
         ctx.setCallerVar(1, args.len, .{ .int = @intCast(status) });
     }
     if (rc < 0) last_errno = std.c._errno().*;
-    return .{ .int = @intCast(rc) };
+    return NativeResult.scalar(.{ .int = @intCast(rc) });
 }
 
-fn native_pcntl_exec(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+fn native_pcntl_exec(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path_z = try ctx.allocator.dupeZ(u8, args[0].string.bytes());
     defer ctx.allocator.free(path_z);
 
@@ -142,13 +143,13 @@ fn native_pcntl_exec(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
 
     const rc = execve(path_z, argv.items.ptr, envp.items.ptr);
     last_errno = std.c._errno().*;
-    return .{ .bool = rc == 0 };
+    return NativeResult.scalar(.{ .bool = rc == 0 });
 }
 
-fn native_pcntl_alarm(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .int) return .{ .int = 0 };
+fn native_pcntl_alarm(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .int) return NativeResult.scalar(.{ .int = 0 });
     const prev = alarm(@intCast(args[0].int));
-    return .{ .int = @intCast(prev) };
+    return NativeResult.scalar(.{ .int = @intCast(prev) });
 }
 
 pub fn releaseHandlers(vm: *VM) void {
@@ -158,10 +159,10 @@ pub fn releaseHandlers(vm: *VM) void {
     }
 }
 
-fn native_pcntl_signal(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .int) return .{ .bool = false };
+fn native_pcntl_signal(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .int) return NativeResult.scalar(.{ .bool = false });
     const sig: usize = @intCast(args[0].int);
-    if (sig == 0 or sig >= MAX_SIG) return .{ .bool = false };
+    if (sig == 0 or sig >= MAX_SIG) return NativeResult.scalar(.{ .bool = false });
 
     // SIG_DFL (0), SIG_IGN (1) are the only special int values PHP uses
     if (args[1] == .int and (args[1].int == 0 or args[1].int == 1)) {
@@ -178,7 +179,7 @@ fn native_pcntl_signal(ctx: *NativeContext, args: []const Value) RuntimeError!Va
         posix.sigaction(@intCast(sig), &sa, null);
         ctx.vm.releaseValue(signal_handlers[sig]);
         signal_handlers[sig] = .null;
-        return .{ .bool = true };
+        return NativeResult.scalar(.{ .bool = true });
     }
 
     // the handler table owns its callables
@@ -192,24 +193,26 @@ fn native_pcntl_signal(ctx: *NativeContext, args: []const Value) RuntimeError!Va
         .flags = 0,
     };
     posix.sigaction(@intCast(sig), &sa, null);
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_pcntl_signal_get_handler(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .int) return .{ .int = 0 };
+fn native_pcntl_signal_get_handler(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .int) return NativeResult.scalar(.{ .int = 0 });
     const sig: usize = @intCast(args[0].int);
-    if (sig >= MAX_SIG) return .{ .int = 0 };
-    if (signal_handlers[sig] == .null) return .{ .int = 0 }; // SIG_DFL
-    return signal_handlers[sig];
+    if (sig >= MAX_SIG) return NativeResult.scalar(.{ .int = 0 });
+    if (signal_handlers[sig] == .null) return NativeResult.scalar(.{ .int = 0 }); // SIG_DFL
+    return NativeResult.share(signal_handlers[sig]);
 }
 
-fn native_pcntl_signal_dispatch(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_pcntl_signal_dispatch(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     var i: usize = 1;
     while (i < MAX_SIG) : (i += 1) {
         const pending = pending_signals[i].swap(0, .seq_cst);
         if (pending == 0) continue;
         const cb = signal_handlers[i];
         if (cb == .null) continue;
+        if (cb == .string) cb.string.retain();
+        defer if (cb == .string) cb.string.release();
         const sig_val = Value{ .int = @intCast(i) };
         const sigi_val = Value{ .int = @intCast(i) };
         const info_arr = try ctx.createArray();
@@ -217,13 +220,13 @@ fn native_pcntl_signal_dispatch(ctx: *NativeContext, _: []const Value) RuntimeEr
         const argv = [_]Value{ sig_val, .{ .array = info_arr } };
         _ = ctx.invokeCallable(cb, &argv) catch continue;
     }
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_pcntl_async_signals(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_pcntl_async_signals(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const prev = async_enabled;
     if (args.len > 0 and args[0] == .bool) async_enabled = args[0].bool;
-    return .{ .bool = prev };
+    return NativeResult.scalar(.{ .bool = prev });
 }
 
 inline fn wifexited(st: c_int) bool {
@@ -251,37 +254,35 @@ fn intArg(args: []const Value) c_int {
     return @intCast(args[0].int);
 }
 
-fn native_pcntl_wifexited(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return .{ .bool = wifexited(intArg(args)) };
+fn native_pcntl_wifexited(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = wifexited(intArg(args)) });
 }
-fn native_pcntl_wexitstatus(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return .{ .int = @intCast(wexitstatus(intArg(args))) };
+fn native_pcntl_wexitstatus(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .int = @intCast(wexitstatus(intArg(args))) });
 }
-fn native_pcntl_wifsignaled(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return .{ .bool = wifsignaled(intArg(args)) };
+fn native_pcntl_wifsignaled(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = wifsignaled(intArg(args)) });
 }
-fn native_pcntl_wtermsig(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return .{ .int = @intCast(wtermsig(intArg(args))) };
+fn native_pcntl_wtermsig(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .int = @intCast(wtermsig(intArg(args))) });
 }
-fn native_pcntl_wifstopped(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return .{ .bool = wifstopped(intArg(args)) };
+fn native_pcntl_wifstopped(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = wifstopped(intArg(args)) });
 }
-fn native_pcntl_wstopsig(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return .{ .int = @intCast(wstopsig(intArg(args))) };
-}
-
-fn native_pcntl_get_last_error(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .int = @intCast(last_errno) };
+fn native_pcntl_wstopsig(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .int = @intCast(wstopsig(intArg(args))) });
 }
 
-fn native_pcntl_strerror(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .int) return .{ .string = Value.String.borrowed("") };
-    const s = strerror(@intCast(args[0].int)) orelse return .{ .string = Value.String.borrowed("") };
+fn native_pcntl_get_last_error(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .int = @intCast(last_errno) });
+}
+
+fn native_pcntl_strerror(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .int) return NativeResult.literal("");
+    const s = strerror(@intCast(args[0].int)) orelse return NativeResult.literal("");
     var i: usize = 0;
     while (s[i] != 0) : (i += 1) {}
-    const owned = try ctx.allocator.dupe(u8, s[0..i]);
-    try ctx.strings.append(ctx.allocator, owned);
-    return .{ .string = Value.String.borrowed(owned) };
+    return NativeResult.copyString(ctx.allocator, s[0..i]);
 }
 
 fn maskFailure() Value {
@@ -289,33 +290,33 @@ fn maskFailure() Value {
     return .{ .bool = false };
 }
 
-fn native_pcntl_sigprocmask(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_pcntl_sigprocmask(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2 or args[0] != .int or args[1] != .array) {
         last_errno = @intFromEnum(posix.E.INVAL);
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     }
     const how = std.math.cast(c_int, args[0].int) orelse {
         last_errno = @intFromEnum(posix.E.INVAL);
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     };
     // Use libc's sigset_t and helpers: Darwin's set is a scalar, Linux's
     // is an array, and the libc ABI need not match the kernel syscall ABI.
     var set: std.c.sigset_t = undefined;
-    if (std.c.sigemptyset(&set) != 0) return maskFailure();
+    if (std.c.sigemptyset(&set) != 0) return NativeResult.scalar(maskFailure());
     for (args[1].array.entries.items) |entry| {
         const sig = std.math.cast(c_int, entry.value.toInt()) orelse {
             last_errno = @intFromEnum(posix.E.INVAL);
-            return .{ .bool = false };
+            return NativeResult.scalar(.{ .bool = false });
         };
         // Darwin's libc helpers do not reject every out-of-range signal.
         if (sig <= 0 or sig >= std.c.NSIG) {
             last_errno = @intFromEnum(posix.E.INVAL);
-            return .{ .bool = false };
+            return NativeResult.scalar(.{ .bool = false });
         }
-        if (std.c.sigaddset(&set, sig) != 0) return maskFailure();
+        if (std.c.sigaddset(&set, sig) != 0) return NativeResult.scalar(maskFailure());
     }
     var old: std.c.sigset_t = undefined;
-    if (std.c.sigprocmask(how, &set, &old) != 0) return maskFailure();
+    if (std.c.sigprocmask(how, &set, &old) != 0) return NativeResult.scalar(maskFailure());
     if (args.len > 2) {
         const result = try ctx.createArray();
         var sig: c_int = 1;
@@ -325,7 +326,7 @@ fn native_pcntl_sigprocmask(ctx: *NativeContext, args: []const Value) RuntimeErr
         }
         ctx.setCallerVar(2, args.len, .{ .array = result });
     }
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
 pub fn isAsyncEnabled() bool {

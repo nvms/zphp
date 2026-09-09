@@ -5,6 +5,7 @@ const PhpObject = @import("../runtime/value.zig").PhpObject;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 const pdo = @import("pdo.zig");
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 
 const mysql = struct {
     const MYSQL = opaque {};
@@ -68,7 +69,7 @@ fn parseDsnParams(rest: []const u8) struct { host: ?[]const u8, port: u16, dbnam
     return .{ .host = host, .port = port, .dbname = dbname, .unix_socket = unix_socket };
 }
 
-pub fn connect(ctx: *NativeContext, obj: *PhpObject, rest: []const u8, args: []const Value) RuntimeError!Value {
+pub fn connect(ctx: *NativeContext, obj: *PhpObject, rest: []const u8, args: []const Value) RuntimeError!NativeResult {
     const params = parseDsnParams(rest);
     const user = if (args.len >= 2 and args[1] == .string) args[1].string.bytes() else null;
     const pass = if (args.len >= 3 and args[2] == .string) args[2].string.bytes() else null;
@@ -88,20 +89,20 @@ pub fn connect(ctx: *NativeContext, obj: *PhpObject, rest: []const u8, args: []c
     }
 
     try obj.set(ctx.allocator, "__db_ptr", .{ .int = @intCast(@intFromPtr(conn)) });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-pub fn exec(ctx: *NativeContext, obj: *PhpObject, sql: []const u8) RuntimeError!Value {
+pub fn exec(ctx: *NativeContext, obj: *PhpObject, sql: []const u8) RuntimeError!NativeResult {
     const conn = getConn(obj) orelse return pdo.throwPdo(ctx, "Database not connected");
     if (mysql.mysql_real_query(conn, sql.ptr, @intCast(sql.len)) != 0) {
         return pdo.throwPdo(ctx, std.mem.span(mysql.mysql_error(conn)));
     }
     // consume result if any (for non-SELECT)
     if (mysql.mysql_store_result(conn)) |res| mysql.mysql_free_result(res);
-    return .{ .int = @intCast(mysql.mysql_affected_rows(conn)) };
+    return NativeResult.scalar(.{ .int = @intCast(mysql.mysql_affected_rows(conn)) });
 }
 
-pub fn query(ctx: *NativeContext, obj: *PhpObject, sql: []const u8) RuntimeError!Value {
+pub fn query(ctx: *NativeContext, obj: *PhpObject, sql: []const u8) RuntimeError!NativeResult {
     const conn = getConn(obj) orelse return pdo.throwPdo(ctx, "Database not connected");
     if (mysql.mysql_real_query(conn, sql.ptr, @intCast(sql.len)) != 0) {
         return pdo.throwPdo(ctx, std.mem.span(mysql.mysql_error(conn)));
@@ -115,10 +116,10 @@ pub fn query(ctx: *NativeContext, obj: *PhpObject, sql: []const u8) RuntimeError
     try stmt_obj.set(ctx.allocator, "__current_row", .{ .int = 0 });
     try stmt_obj.set(ctx.allocator, "__has_row", .{ .bool = true });
     try stmt_obj.set(ctx.allocator, "__stepped", .{ .bool = true });
-    return .{ .object = stmt_obj };
+    return NativeResult.borrowed(.{ .object = stmt_obj });
 }
 
-pub fn prepare(ctx: *NativeContext, obj: *PhpObject, sql: []const u8) RuntimeError!Value {
+pub fn prepare(ctx: *NativeContext, obj: *PhpObject, sql: []const u8) RuntimeError!NativeResult {
     const conn = getConn(obj) orelse return pdo.throwPdo(ctx, "Database not connected");
 
     // rewrite named params to positional ? and build param map
@@ -167,13 +168,13 @@ pub fn prepare(ctx: *NativeContext, obj: *PhpObject, sql: []const u8) RuntimeErr
     }
     param_names.deinit(ctx.allocator);
 
-    return .{ .object = stmt_obj };
+    return NativeResult.borrowed(.{ .object = stmt_obj });
 }
 
-pub fn stmtExecute(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!Value {
-    const conn = getConn(obj) orelse return .{ .bool = false };
+pub fn stmtExecute(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!NativeResult {
+    const conn = getConn(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const sql_val = obj.get("__sql");
-    if (sql_val != .string) return .{ .bool = false };
+    if (sql_val != .string) return NativeResult.scalar(.{ .bool = false });
     var sql = sql_val.string.bytes();
 
     // if params provided, escape and interpolate
@@ -203,7 +204,7 @@ pub fn stmtExecute(ctx: *NativeContext, obj: *PhpObject, args: []const Value) Ru
     try obj.set(ctx.allocator, "__stepped", .{ .bool = true });
     try obj.set(ctx.allocator, "__row_count", .{ .int = @intCast(mysql.mysql_affected_rows(conn)) });
 
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
 fn interpolateParams(ctx: *NativeContext, conn: *mysql.MYSQL, sql: []const u8, params: *PhpArray, param_map: ?*PhpArray) ![]const u8 {
@@ -284,10 +285,10 @@ fn valueToSqlString(ctx: *NativeContext, conn: *mysql.MYSQL, val: Value) ![]cons
     }
 }
 
-pub fn stmtFetch(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!Value {
-    const res = getRes(obj) orelse return .{ .bool = false };
-    const row_ptrs = mysql.mysql_fetch_row(res) orelse return .{ .bool = false };
-    const lengths = mysql.mysql_fetch_lengths(res) orelse return .{ .bool = false };
+pub fn stmtFetch(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!NativeResult {
+    const res = getRes(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    const row_ptrs = mysql.mysql_fetch_row(res) orelse return NativeResult.scalar(.{ .bool = false });
+    const lengths = mysql.mysql_fetch_lengths(res) orelse return NativeResult.scalar(.{ .bool = false });
     const num_fields = mysql.mysql_num_fields(res);
 
     const mode: i64 = if (args.len >= 1 and args[0] == .int) args[0].int else 4;
@@ -323,86 +324,86 @@ pub fn stmtFetch(ctx: *NativeContext, obj: *PhpObject, args: []const Value) Runt
 
     const cur = obj.get("__current_row");
     if (cur == .int) try obj.set(ctx.allocator, "__current_row", .{ .int = cur.int + 1 });
-    return .{ .array = row };
+    return NativeResult.borrowed(.{ .array = row });
 }
 
-pub fn stmtFetchAll(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!Value {
+pub fn stmtFetchAll(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!NativeResult {
     var result = try ctx.createArray();
     while (true) {
-        const row = try stmtFetch(ctx, obj, args);
+        const row = (try stmtFetch(ctx, obj, args)).value;
         if (row == .bool and !row.bool) break;
         try result.append(ctx.allocator, row);
     }
-    return .{ .array = result };
+    return NativeResult.borrowed(.{ .array = result });
 }
 
-pub fn stmtFetchColumn(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!Value {
-    const res = getRes(obj) orelse return .{ .bool = false };
+pub fn stmtFetchColumn(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!NativeResult {
+    const res = getRes(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const col_idx: usize = if (args.len >= 1 and args[0] == .int) @intCast(args[0].int) else 0;
-    const row_ptrs = mysql.mysql_fetch_row(res) orelse return .{ .bool = false };
-    const lengths = mysql.mysql_fetch_lengths(res) orelse return .{ .bool = false };
+    const row_ptrs = mysql.mysql_fetch_row(res) orelse return NativeResult.scalar(.{ .bool = false });
+    const lengths = mysql.mysql_fetch_lengths(res) orelse return NativeResult.scalar(.{ .bool = false });
     const num_fields = mysql.mysql_num_fields(res);
-    if (col_idx >= num_fields) return .{ .bool = false };
+    if (col_idx >= num_fields) return NativeResult.scalar(.{ .bool = false });
 
     if (row_ptrs[col_idx]) |ptr| {
         const len = lengths[col_idx];
-        return .{ .string = Value.String.borrowed(try ctx.createString(ptr[0..len])) };
+        return try NativeResult.copyString(ctx.allocator, ptr[0..len]);
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-pub fn stmtColumnCount(obj: *PhpObject) RuntimeError!Value {
-    const res = getRes(obj) orelse return .{ .int = 0 };
-    return .{ .int = @intCast(mysql.mysql_num_fields(res)) };
+pub fn stmtColumnCount(obj: *PhpObject) RuntimeError!NativeResult {
+    const res = getRes(obj) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = @intCast(mysql.mysql_num_fields(res)) });
 }
 
-pub fn stmtCloseCursor(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
+pub fn stmtCloseCursor(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeResult {
     if (getRes(obj)) |res| {
         mysql.mysql_free_result(res);
         try obj.set(ctx.allocator, "__res_ptr", .{ .int = 0 });
     }
     try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-pub fn lastInsertId(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
-    const conn = getConn(obj) orelse return .{ .string = Value.String.borrowed("0") };
+pub fn lastInsertId(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeResult {
+    const conn = getConn(obj) orelse return NativeResult.literal("0");
     const id = mysql.mysql_insert_id(conn);
     var buf: [32]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, "{d}", .{id}) catch "0";
-    return .{ .string = Value.String.borrowed(try ctx.createString(s)) };
+    return try NativeResult.copyString(ctx.allocator, s);
 }
 
-pub fn beginTransaction(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
-    const conn = getConn(obj) orelse return .{ .bool = false };
+pub fn beginTransaction(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeResult {
+    const conn = getConn(obj) orelse return NativeResult.scalar(.{ .bool = false });
     _ = ctx;
-    return .{ .bool = mysql.mysql_autocommit(conn, 0) == 0 };
+    return NativeResult.scalar(.{ .bool = mysql.mysql_autocommit(conn, 0) == 0 });
 }
 
-pub fn commit(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
-    const conn = getConn(obj) orelse return .{ .bool = false };
+pub fn commit(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeResult {
+    const conn = getConn(obj) orelse return NativeResult.scalar(.{ .bool = false });
     _ = ctx;
     const ok = mysql.mysql_commit(conn) == 0;
     _ = mysql.mysql_autocommit(conn, 1);
-    return .{ .bool = ok };
+    return NativeResult.scalar(.{ .bool = ok });
 }
 
-pub fn rollBack(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
-    const conn = getConn(obj) orelse return .{ .bool = false };
+pub fn rollBack(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeResult {
+    const conn = getConn(obj) orelse return NativeResult.scalar(.{ .bool = false });
     _ = ctx;
     const ok = mysql.mysql_rollback(conn) == 0;
     _ = mysql.mysql_autocommit(conn, 1);
-    return .{ .bool = ok };
+    return NativeResult.scalar(.{ .bool = ok });
 }
 
-pub fn errorInfo(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
-    const conn = getConn(obj) orelse return .null;
+pub fn errorInfo(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeResult {
+    const conn = getConn(obj) orelse return NativeResult.scalar(.null);
     var arr = try ctx.createArray();
     const msg = std.mem.span(mysql.mysql_error(conn));
     try arr.append(ctx.allocator, .{ .string = Value.String.borrowed("00000") });
     try arr.append(ctx.allocator, .null);
     try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(try ctx.createString(msg)) });
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
 pub fn cleanupStatement(obj: *PhpObject) void {

@@ -2,6 +2,7 @@ const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
 const vm_mod = @import("../runtime/vm.zig");
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const VM = vm_mod.VM;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
@@ -57,27 +58,27 @@ pub fn cleanupObject(obj: *PhpObject) void {
 
 // ---------------- methods ----------------
 
-fn xwOpenMemory(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn xwOpenMemory(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // if called statically, create object. if instance method, set up on $this
     const obj = getThis(ctx) orelse blk: {
         const o = try ctx.createObject("XMLWriter");
         break :blk o;
     };
     closeExisting(obj);
-    const buf = c.xmlBufferCreate() orelse return .{ .bool = false };
+    const buf = c.xmlBufferCreate() orelse return NativeResult.scalar(.{ .bool = false });
     const writer = c.xmlNewTextWriterMemory(buf, 0);
     if (writer == null) {
         c.xmlBufferFree(buf);
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     }
     try obj.set(ctx.allocator, "__buffer", .{ .int = @intCast(@intFromPtr(buf)) });
     try obj.set(ctx.allocator, "__writer", .{ .int = @intCast(@intFromPtr(writer)) });
-    if (getThis(ctx) == null) return .{ .object = obj };
-    return .{ .bool = true };
+    if (getThis(ctx) == null) return NativeResult.borrowed(.{ .object = obj });
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn xwOpenURI(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+fn xwOpenURI(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const obj = getThis(ctx) orelse blk: {
         const o = try ctx.createObject("XMLWriter");
         break :blk o;
@@ -86,90 +87,90 @@ fn xwOpenURI(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const path_z = try dupZ(ctx, args[0].string.bytes());
     defer ctx.allocator.free(path_z);
     const writer = c.xmlNewTextWriterFilename(path_z.ptr, 0);
-    if (writer == null) return .{ .bool = false };
+    if (writer == null) return NativeResult.scalar(.{ .bool = false });
     try obj.set(ctx.allocator, "__writer", .{ .int = @intCast(@intFromPtr(writer)) });
-    if (getThis(ctx) == null) return .{ .object = obj };
-    return .{ .bool = true };
+    if (getThis(ctx) == null) return NativeResult.borrowed(.{ .object = obj });
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn xwToMemory(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn xwToMemory(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = try ctx.createObject("XMLWriter");
-    const buf = c.xmlBufferCreate() orelse return .{ .bool = false };
+    const buf = c.xmlBufferCreate() orelse return NativeResult.scalar(.{ .bool = false });
     const writer = c.xmlNewTextWriterMemory(buf, 0);
     if (writer == null) {
         c.xmlBufferFree(buf);
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     }
     try obj.set(ctx.allocator, "__buffer", .{ .int = @intCast(@intFromPtr(buf)) });
     try obj.set(ctx.allocator, "__writer", .{ .int = @intCast(@intFromPtr(writer)) });
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn xwToUri(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+fn xwToUri(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const obj = try ctx.createObject("XMLWriter");
     const path_z = try dupZ(ctx, args[0].string.bytes());
     defer ctx.allocator.free(path_z);
     const writer = c.xmlNewTextWriterFilename(path_z.ptr, 0);
-    if (writer == null) return .{ .bool = false };
+    if (writer == null) return NativeResult.scalar(.{ .bool = false });
     try obj.set(ctx.allocator, "__writer", .{ .int = @intCast(@intFromPtr(writer)) });
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn xwOutputMemory(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .string = try dupString(ctx, "") };
-    const writer = getWriter(obj) orelse return .{ .string = try dupString(ctx, "") };
+fn xwOutputMemory(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return try NativeResult.copyString(ctx.allocator, "");
+    const writer = getWriter(obj) orelse return try NativeResult.copyString(ctx.allocator, "");
     var flush = true;
     if (args.len > 0 and args[0] == .bool) flush = args[0].bool;
     if (flush) _ = c.xmlTextWriterFlush(writer);
-    const buf = getBuffer(obj) orelse return .{ .string = try dupString(ctx, "") };
+    const buf = getBuffer(obj) orelse return try NativeResult.copyString(ctx.allocator, "");
     const content = c.xmlBufferContent(buf);
-    if (content == null) return .{ .string = try dupString(ctx, "") };
+    if (content == null) return try NativeResult.copyString(ctx.allocator, "");
     const slice = content[0..cstrLen(content)];
-    const out = try dupString(ctx, slice);
+    const out = try NativeResult.copyString(ctx.allocator, slice);
     if (flush) c.xmlBufferEmpty(buf);
-    return .{ .string = out };
+    return out;
 }
 
-fn xwFlush(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    const writer = getWriter(obj) orelse return .{ .int = 0 };
+fn xwFlush(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    const writer = getWriter(obj) orelse return NativeResult.scalar(.{ .int = 0 });
     var empty = true;
     if (args.len > 0 and args[0] == .bool) empty = args[0].bool;
     const rc = c.xmlTextWriterFlush(writer);
     // for memory writers, PHP returns the buffer contents string when emptying
     if (getBuffer(obj)) |buf| {
         const content = c.xmlBufferContent(buf);
-        if (content == null) return .{ .string = try dupString(ctx, "") };
+        if (content == null) return try NativeResult.copyString(ctx.allocator, "");
         const slice = content[0..cstrLen(content)];
-        const out = try dupString(ctx, slice);
+        const out = try NativeResult.copyString(ctx.allocator, slice);
         if (empty) c.xmlBufferEmpty(buf);
-        return .{ .string = out };
+        return out;
     }
-    return .{ .int = @intCast(rc) };
+    return NativeResult.scalar(.{ .int = @intCast(rc) });
 }
 
-fn xwSetIndent(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .bool) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const writer = getWriter(obj) orelse return .{ .bool = false };
+fn xwSetIndent(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .bool) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const writer = getWriter(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const rc = c.xmlTextWriterSetIndent(writer, if (args[0].bool) 1 else 0);
-    return .{ .bool = rc >= 0 };
+    return NativeResult.scalar(.{ .bool = rc >= 0 });
 }
 
-fn xwSetIndentString(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const writer = getWriter(obj) orelse return .{ .bool = false };
+fn xwSetIndentString(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const writer = getWriter(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const s_z = try dupZ(ctx, args[0].string.bytes());
     defer ctx.allocator.free(s_z);
     const rc = c.xmlTextWriterSetIndentString(writer, @ptrCast(s_z.ptr));
-    return .{ .bool = rc >= 0 };
+    return NativeResult.scalar(.{ .bool = rc >= 0 });
 }
 
-fn xwStartDocument(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const writer = getWriter(obj) orelse return .{ .bool = false };
+fn xwStartDocument(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const writer = getWriter(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const ver_z: ?[:0]u8 = if (args.len > 0 and args[0] == .string) try dupZ(ctx, args[0].string.bytes()) else null;
     defer if (ver_z) |z| ctx.allocator.free(z);
     const enc_z: ?[:0]u8 = if (args.len > 1 and args[1] == .string and args[1].string.bytes().len > 0) try dupZ(ctx, args[1].string.bytes()) else null;
@@ -180,35 +181,35 @@ fn xwStartDocument(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     const enc_ptr: [*c]const u8 = if (enc_z) |z| @ptrCast(z.ptr) else null;
     const sta_ptr: [*c]const u8 = if (sta_z) |z| @ptrCast(z.ptr) else null;
     const rc = c.xmlTextWriterStartDocument(writer, ver_ptr, enc_ptr, sta_ptr);
-    return .{ .bool = rc >= 0 };
+    return NativeResult.scalar(.{ .bool = rc >= 0 });
 }
 
-fn xwEndDocument(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const writer = getWriter(obj) orelse return .{ .bool = false };
-    return .{ .bool = c.xmlTextWriterEndDocument(writer) >= 0 };
+fn xwEndDocument(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const writer = getWriter(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = c.xmlTextWriterEndDocument(writer) >= 0 });
 }
 
-fn xwStartElement(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const writer = getWriter(obj) orelse return .{ .bool = false };
+fn xwStartElement(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const writer = getWriter(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const z = try dupZ(ctx, args[0].string.bytes());
     defer ctx.allocator.free(z);
-    return .{ .bool = c.xmlTextWriterStartElement(writer, @ptrCast(z.ptr)) >= 0 };
+    return NativeResult.scalar(.{ .bool = c.xmlTextWriterStartElement(writer, @ptrCast(z.ptr)) >= 0 });
 }
 
-fn xwStartElementNS(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 3) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const writer = getWriter(obj) orelse return .{ .bool = false };
+fn xwStartElementNS(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 3) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const writer = getWriter(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const prefix_z: ?[:0]u8 = if (args[0] == .string and args[0].string.bytes().len > 0)
         try dupZ(ctx, args[0].string.bytes())
     else
         null;
     defer if (prefix_z) |z| ctx.allocator.free(z);
     const prefix_ptr: [*c]const u8 = if (prefix_z) |z| @ptrCast(z.ptr) else null;
-    if (args[1] != .string) return .{ .bool = false };
+    if (args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     const name_z = try dupZ(ctx, args[1].string.bytes());
     defer ctx.allocator.free(name_z);
     const ns_z: ?[:0]u8 = if (args[2] == .string and args[2].string.bytes().len > 0)
@@ -217,55 +218,55 @@ fn xwStartElementNS(ctx: *NativeContext, args: []const Value) RuntimeError!Value
         null;
     defer if (ns_z) |z| ctx.allocator.free(z);
     const ns_ptr: [*c]const u8 = if (ns_z) |z| @ptrCast(z.ptr) else null;
-    return .{ .bool = c.xmlTextWriterStartElementNS(writer, prefix_ptr, @ptrCast(name_z.ptr), ns_ptr) >= 0 };
+    return NativeResult.scalar(.{ .bool = c.xmlTextWriterStartElementNS(writer, prefix_ptr, @ptrCast(name_z.ptr), ns_ptr) >= 0 });
 }
 
-fn xwEndElement(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const writer = getWriter(obj) orelse return .{ .bool = false };
-    return .{ .bool = c.xmlTextWriterEndElement(writer) >= 0 };
+fn xwEndElement(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const writer = getWriter(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = c.xmlTextWriterEndElement(writer) >= 0 });
 }
 
-fn xwFullEndElement(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const writer = getWriter(obj) orelse return .{ .bool = false };
-    return .{ .bool = c.xmlTextWriterFullEndElement(writer) >= 0 };
+fn xwFullEndElement(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const writer = getWriter(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = c.xmlTextWriterFullEndElement(writer) >= 0 });
 }
 
-fn xwWriteElement(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const writer = getWriter(obj) orelse return .{ .bool = false };
+fn xwWriteElement(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const writer = getWriter(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const name_z = try dupZ(ctx, args[0].string.bytes());
     defer ctx.allocator.free(name_z);
     const content_z: ?[:0]u8 = if (args.len > 1 and args[1] == .string) try dupZ(ctx, args[1].string.bytes()) else null;
     defer if (content_z) |z| ctx.allocator.free(z);
     const content_ptr: [*c]const u8 = if (content_z) |z| @ptrCast(z.ptr) else null;
-    return .{ .bool = c.xmlTextWriterWriteElement(writer, @ptrCast(name_z.ptr), content_ptr) >= 0 };
+    return NativeResult.scalar(.{ .bool = c.xmlTextWriterWriteElement(writer, @ptrCast(name_z.ptr), content_ptr) >= 0 });
 }
 
-fn xwWriteAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const writer = getWriter(obj) orelse return .{ .bool = false };
+fn xwWriteAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const writer = getWriter(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const name_z = try dupZ(ctx, args[0].string.bytes());
     defer ctx.allocator.free(name_z);
     const val_z = try dupZ(ctx, args[1].string.bytes());
     defer ctx.allocator.free(val_z);
-    return .{ .bool = c.xmlTextWriterWriteAttribute(writer, @ptrCast(name_z.ptr), @ptrCast(val_z.ptr)) >= 0 };
+    return NativeResult.scalar(.{ .bool = c.xmlTextWriterWriteAttribute(writer, @ptrCast(name_z.ptr), @ptrCast(val_z.ptr)) >= 0 });
 }
 
-fn xwWriteAttributeNS(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 4) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const writer = getWriter(obj) orelse return .{ .bool = false };
+fn xwWriteAttributeNS(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 4) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const writer = getWriter(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const prefix_z: ?[:0]u8 = if (args[0] == .string and args[0].string.bytes().len > 0)
         try dupZ(ctx, args[0].string.bytes())
     else
         null;
     defer if (prefix_z) |z| ctx.allocator.free(z);
     const prefix_ptr: [*c]const u8 = if (prefix_z) |z| @ptrCast(z.ptr) else null;
-    if (args[1] != .string or args[3] != .string) return .{ .bool = false };
+    if (args[1] != .string or args[3] != .string) return NativeResult.scalar(.{ .bool = false });
     const name_z = try dupZ(ctx, args[1].string.bytes());
     defer ctx.allocator.free(name_z);
     const ns_z: ?[:0]u8 = if (args[2] == .string and args[2].string.bytes().len > 0)
@@ -276,93 +277,93 @@ fn xwWriteAttributeNS(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     const ns_ptr: [*c]const u8 = if (ns_z) |z| @ptrCast(z.ptr) else null;
     const val_z = try dupZ(ctx, args[3].string.bytes());
     defer ctx.allocator.free(val_z);
-    return .{ .bool = c.xmlTextWriterWriteAttributeNS(writer, prefix_ptr, @ptrCast(name_z.ptr), ns_ptr, @ptrCast(val_z.ptr)) >= 0 };
+    return NativeResult.scalar(.{ .bool = c.xmlTextWriterWriteAttributeNS(writer, prefix_ptr, @ptrCast(name_z.ptr), ns_ptr, @ptrCast(val_z.ptr)) >= 0 });
 }
 
-fn xwStartAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const writer = getWriter(obj) orelse return .{ .bool = false };
+fn xwStartAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const writer = getWriter(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const z = try dupZ(ctx, args[0].string.bytes());
     defer ctx.allocator.free(z);
-    return .{ .bool = c.xmlTextWriterStartAttribute(writer, @ptrCast(z.ptr)) >= 0 };
+    return NativeResult.scalar(.{ .bool = c.xmlTextWriterStartAttribute(writer, @ptrCast(z.ptr)) >= 0 });
 }
 
-fn xwEndAttribute(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const writer = getWriter(obj) orelse return .{ .bool = false };
-    return .{ .bool = c.xmlTextWriterEndAttribute(writer) >= 0 };
+fn xwEndAttribute(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const writer = getWriter(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = c.xmlTextWriterEndAttribute(writer) >= 0 });
 }
 
-fn xwText(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const writer = getWriter(obj) orelse return .{ .bool = false };
+fn xwText(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const writer = getWriter(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const z = try dupZ(ctx, args[0].string.bytes());
     defer ctx.allocator.free(z);
-    return .{ .bool = c.xmlTextWriterWriteString(writer, @ptrCast(z.ptr)) >= 0 };
+    return NativeResult.scalar(.{ .bool = c.xmlTextWriterWriteString(writer, @ptrCast(z.ptr)) >= 0 });
 }
 
-fn xwWriteRaw(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const writer = getWriter(obj) orelse return .{ .bool = false };
+fn xwWriteRaw(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const writer = getWriter(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const z = try dupZ(ctx, args[0].string.bytes());
     defer ctx.allocator.free(z);
-    return .{ .bool = c.xmlTextWriterWriteRaw(writer, @ptrCast(z.ptr)) >= 0 };
+    return NativeResult.scalar(.{ .bool = c.xmlTextWriterWriteRaw(writer, @ptrCast(z.ptr)) >= 0 });
 }
 
-fn xwWriteCData(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const writer = getWriter(obj) orelse return .{ .bool = false };
+fn xwWriteCData(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const writer = getWriter(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const z = try dupZ(ctx, args[0].string.bytes());
     defer ctx.allocator.free(z);
-    return .{ .bool = c.xmlTextWriterWriteCDATA(writer, @ptrCast(z.ptr)) >= 0 };
+    return NativeResult.scalar(.{ .bool = c.xmlTextWriterWriteCDATA(writer, @ptrCast(z.ptr)) >= 0 });
 }
 
-fn xwStartCdata(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const writer = getWriter(obj) orelse return .{ .bool = false };
-    return .{ .bool = c.xmlTextWriterStartCDATA(writer) >= 0 };
+fn xwStartCdata(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const writer = getWriter(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = c.xmlTextWriterStartCDATA(writer) >= 0 });
 }
 
-fn xwEndCdata(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const writer = getWriter(obj) orelse return .{ .bool = false };
-    return .{ .bool = c.xmlTextWriterEndCDATA(writer) >= 0 };
+fn xwEndCdata(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const writer = getWriter(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = c.xmlTextWriterEndCDATA(writer) >= 0 });
 }
 
-fn xwWriteComment(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const writer = getWriter(obj) orelse return .{ .bool = false };
+fn xwWriteComment(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const writer = getWriter(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const z = try dupZ(ctx, args[0].string.bytes());
     defer ctx.allocator.free(z);
-    return .{ .bool = c.xmlTextWriterWriteComment(writer, @ptrCast(z.ptr)) >= 0 };
+    return NativeResult.scalar(.{ .bool = c.xmlTextWriterWriteComment(writer, @ptrCast(z.ptr)) >= 0 });
 }
 
-fn xwStartComment(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const writer = getWriter(obj) orelse return .{ .bool = false };
-    return .{ .bool = c.xmlTextWriterStartComment(writer) >= 0 };
+fn xwStartComment(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const writer = getWriter(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = c.xmlTextWriterStartComment(writer) >= 0 });
 }
 
-fn xwEndComment(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const writer = getWriter(obj) orelse return .{ .bool = false };
-    return .{ .bool = c.xmlTextWriterEndComment(writer) >= 0 };
+fn xwEndComment(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const writer = getWriter(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = c.xmlTextWriterEndComment(writer) >= 0 });
 }
 
-fn xwWritePi(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const writer = getWriter(obj) orelse return .{ .bool = false };
+fn xwWritePi(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const writer = getWriter(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const t_z = try dupZ(ctx, args[0].string.bytes());
     defer ctx.allocator.free(t_z);
     const c_z = try dupZ(ctx, args[1].string.bytes());
     defer ctx.allocator.free(c_z);
-    return .{ .bool = c.xmlTextWriterWritePI(writer, @ptrCast(t_z.ptr), @ptrCast(c_z.ptr)) >= 0 };
+    return NativeResult.scalar(.{ .bool = c.xmlTextWriterWritePI(writer, @ptrCast(t_z.ptr), @ptrCast(c_z.ptr)) >= 0 });
 }
 
 // ---------------- registration ----------------
@@ -460,87 +461,87 @@ fn forwardOnObj(ctx: *NativeContext, args: []const Value, comptime instance_fn: 
 // for the procedural wrappers we directly invoke the instance fn by hand-rolling
 // the dispatch: copy the relevant args and present them with $this set. simplest
 // path: call the instance method through callMethod which sets up the frame
-fn procCall(ctx: *NativeContext, args: []const Value, comptime method: []const u8) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .object) return .{ .bool = false };
-    return ctx.callMethod(args[0].object, method, args[1..]);
+fn procCall(ctx: *NativeContext, args: []const Value, comptime method: []const u8) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.share(try ctx.callMethod(args[0].object, method, args[1..]));
 }
 
-fn procOpenMemory(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn procOpenMemory(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     return xwToMemory(ctx, &.{});
 }
-fn procOpenURI(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procOpenURI(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return xwToUri(ctx, args);
 }
-fn procOutputMemory(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procOutputMemory(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return procCall(ctx, args, "outputMemory");
 }
-fn procFlush(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procFlush(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return procCall(ctx, args, "flush");
 }
-fn procSetIndent(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procSetIndent(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return procCall(ctx, args, "setIndent");
 }
-fn procSetIndentString(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procSetIndentString(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return procCall(ctx, args, "setIndentString");
 }
-fn procStartDocument(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procStartDocument(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return procCall(ctx, args, "startDocument");
 }
-fn procEndDocument(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procEndDocument(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return procCall(ctx, args, "endDocument");
 }
-fn procStartElement(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procStartElement(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return procCall(ctx, args, "startElement");
 }
-fn procStartElementNS(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procStartElementNS(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return procCall(ctx, args, "startElementNS");
 }
-fn procEndElement(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procEndElement(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return procCall(ctx, args, "endElement");
 }
-fn procFullEndElement(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procFullEndElement(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return procCall(ctx, args, "fullEndElement");
 }
-fn procWriteElement(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procWriteElement(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return procCall(ctx, args, "writeElement");
 }
-fn procWriteAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procWriteAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return procCall(ctx, args, "writeAttribute");
 }
-fn procWriteAttributeNS(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procWriteAttributeNS(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return procCall(ctx, args, "writeAttributeNS");
 }
-fn procStartAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procStartAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return procCall(ctx, args, "startAttribute");
 }
-fn procEndAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procEndAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return procCall(ctx, args, "endAttribute");
 }
-fn procText(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procText(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return procCall(ctx, args, "text");
 }
-fn procWriteRaw(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procWriteRaw(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return procCall(ctx, args, "writeRaw");
 }
-fn procWriteCData(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procWriteCData(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return procCall(ctx, args, "writeCData");
 }
-fn procStartCdata(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procStartCdata(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return procCall(ctx, args, "startCdata");
 }
-fn procEndCdata(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procEndCdata(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return procCall(ctx, args, "endCdata");
 }
-fn procWriteComment(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procWriteComment(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return procCall(ctx, args, "writeComment");
 }
-fn procStartComment(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procStartComment(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return procCall(ctx, args, "startComment");
 }
-fn procEndComment(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procEndComment(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return procCall(ctx, args, "endComment");
 }
-fn procWritePi(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn procWritePi(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return procCall(ctx, args, "writePi");
 }
 

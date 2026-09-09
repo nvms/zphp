@@ -1,3 +1,4 @@
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
@@ -12,23 +13,25 @@ pub const entries = .{
     .{ "assert_contains", assertContains },
 };
 
-fn failAssertion(ctx: *NativeContext, msg: []const u8) RuntimeError!Value {
-    if (try ctx.vm.throwBuiltinException("AssertionError", msg)) return .null;
-    ctx.vm.error_msg = msg;
+fn failAssertion(ctx: *NativeContext, msg: []const u8) RuntimeError!NativeResult {
+    if (try ctx.vm.throwBuiltinException("AssertionError", msg)) return NativeResult.scalar(.null);
+    ctx.vm.error_msg = try ctx.createString(msg);
     return error.RuntimeError;
 }
 
-fn assertEq(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn assertEq(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2) return failAssertion(ctx, "assert_eq requires 2 arguments");
-    if (Value.identical(args[0], args[1])) return .null;
+    if (Value.identical(args[0], args[1])) return NativeResult.scalar(.null);
 
     // build error message
     var buf1 = std.ArrayListUnmanaged(u8){};
+    defer buf1.deinit(ctx.allocator);
     try args[0].format(&buf1, ctx.allocator);
     const s1 = try buf1.toOwnedSlice(ctx.allocator);
     defer ctx.allocator.free(s1);
 
     var buf2 = std.ArrayListUnmanaged(u8){};
+    defer buf2.deinit(ctx.allocator);
     try args[1].format(&buf2, ctx.allocator);
     const s2 = try buf2.toOwnedSlice(ctx.allocator);
     defer ctx.allocator.free(s2);
@@ -44,42 +47,42 @@ fn assertEq(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return failAssertion(ctx, msg);
 }
 
-fn assertTrue(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn assertTrue(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return failAssertion(ctx, "assert_true requires 1 argument");
-    if (args[0].isTruthy()) return .null;
+    if (args[0].isTruthy()) return NativeResult.scalar(.null);
     const msg = if (args.len >= 2 and args[1] == .string) args[1].string.bytes() else "expected true, got false";
     return failAssertion(ctx, msg);
 }
 
-fn assertFalse(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn assertFalse(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return failAssertion(ctx, "assert_false requires 1 argument");
-    if (!args[0].isTruthy()) return .null;
+    if (!args[0].isTruthy()) return NativeResult.scalar(.null);
     const msg = if (args.len >= 2 and args[1] == .string) args[1].string.bytes() else "expected false, got true";
     return failAssertion(ctx, msg);
 }
 
-fn assertNull(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn assertNull(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return failAssertion(ctx, "assert_null requires 1 argument");
-    if (args[0] == .null) return .null;
+    if (args[0] == .null) return NativeResult.scalar(.null);
     const msg = if (args.len >= 2 and args[1] == .string) args[1].string.bytes() else "expected null";
     return failAssertion(ctx, msg);
 }
 
-fn assertNotNull(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn assertNotNull(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return failAssertion(ctx, "assert_not_null requires 1 argument");
-    if (args[0] != .null) return .null;
+    if (args[0] != .null) return NativeResult.scalar(.null);
     const msg = if (args.len >= 2 and args[1] == .string) args[1].string.bytes() else "expected non-null";
     return failAssertion(ctx, msg);
 }
 
-fn assertContains(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn assertContains(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2) return failAssertion(ctx, "assert_contains requires 2 arguments");
     if (args[0] == .string and args[1] == .string) {
-        if (std.mem.indexOf(u8, args[0].string.bytes(), args[1].string.bytes()) != null) return .null;
+        if (std.mem.indexOf(u8, args[0].string.bytes(), args[1].string.bytes()) != null) return NativeResult.scalar(.null);
     }
     if (args[0] == .array and args.len >= 2) {
         for (args[0].array.entries.items) |entry| {
-            if (Value.identical(entry.value, args[1])) return .null;
+            if (Value.identical(entry.value, args[1])) return NativeResult.scalar(.null);
         }
     }
     const msg = if (args.len >= 3 and args[2] == .string) args[2].string.bytes() else "value not found in haystack";

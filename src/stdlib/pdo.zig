@@ -3,6 +3,7 @@ const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
 const vm_mod = @import("../runtime/vm.zig");
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const VM = vm_mod.VM;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
@@ -238,7 +239,7 @@ fn pdoSqlMsg(ctx: *NativeContext, db: *sqlite.Db, raw: []const u8) ![]const u8 {
     return m;
 }
 
-pub fn throwPdo(ctx: *NativeContext, msg: []const u8) RuntimeError!Value {
+pub fn throwPdo(ctx: *NativeContext, msg: []const u8) RuntimeError!NativeResult {
     if (ctx.vm.pending_exception != null) return error.RuntimeError;
     // honor ATTR_ERRMODE: silent (0) returns false, warning (1) returns false,
     // exception (2) throws PDOException. default in PHP 8 is exception, but for
@@ -251,7 +252,7 @@ pub fn throwPdo(ctx: *NativeContext, msg: []const u8) RuntimeError!Value {
             try obj.set(ctx.allocator, "__error_message", .{ .string = Value.String.borrowed(owned) });
             const mode = obj.get("__errmode");
             const m: i64 = if (mode == .int) mode.int else 2;
-            if (m != 2) return .{ .bool = false };
+            if (m != 2) return NativeResult.scalar(.{ .bool = false });
         }
     }
     _ = try ctx.vm.throwBuiltinException("PDOException", msg);
@@ -475,45 +476,45 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "PDOStatement::valid", stmtIterValid);
 }
 
-fn stmtIterRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn stmtIterRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__iter_key", .{ .int = 0 });
     // fetch the first row
-    const row = try stmtFetch(ctx, &.{});
+    const row = (try stmtFetch(ctx, &.{})).value;
     try obj.set(ctx.allocator, "__iter_current", row);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn stmtIterCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    return retainReturned(obj.get("__iter_current"));
+fn stmtIterCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(obj.get("__iter_current"));
 }
 
-fn stmtIterKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    return retainReturned(obj.get("__iter_key"));
+fn stmtIterKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.share(obj.get("__iter_key"));
 }
 
-fn stmtIterNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn stmtIterNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const cur_key = Value.toInt(obj.get("__iter_key"));
     try obj.set(ctx.allocator, "__iter_key", .{ .int = cur_key + 1 });
-    const row = try stmtFetch(ctx, &.{});
+    const row = (try stmtFetch(ctx, &.{})).value;
     try obj.set(ctx.allocator, "__iter_current", row);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn stmtIterValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn stmtIterValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const cur = obj.get("__iter_current");
     // FETCH_CLASS / FETCH_OBJ produce objects; FETCH_ASSOC etc produce arrays.
     // either type is a valid row - only null/false means no more rows
-    return .{ .bool = cur == .array or cur == .object };
+    return NativeResult.scalar(.{ .bool = cur == .array or cur == .object });
 }
 
-fn stmtFetchObject(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const row = try stmtFetch(ctx, &.{.{ .int = 2 }}); // FETCH_ASSOC
-    if (row != .array) return .{ .bool = false };
+fn stmtFetchObject(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const row = (try stmtFetch(ctx, &.{.{ .int = 2 }})).value; // FETCH_ASSOC
+    if (row != .array) return NativeResult.scalar(.{ .bool = false });
     var class_name: []const u8 = "stdClass";
     if (args.len >= 1 and args[0] == .string) class_name = args[0].string.bytes();
     const obj = try ctx.vm.allocator.create(PhpObject);
@@ -525,7 +526,7 @@ fn stmtFetchObject(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     for (row.array.entries.items) |entry| {
         if (entry.key == .string) try obj.set(ctx.allocator, entry.key.string.bytes(), entry.value);
     }
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
 fn cleanupStatement(obj: *PhpObject) bool {
@@ -600,7 +601,7 @@ fn getDriver(obj: *PhpObject) []const u8 {
     return "sqlite";
 }
 
-fn pdoConnect(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn pdoConnect(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = try ctx.createObject("PDO");
     const prev_this = ctx.vm.currentFrame().vars.get("$this");
     try ctx.vm.currentFrame().vars.put(ctx.vm.allocator, "$this", .{ .object = obj });
@@ -612,17 +613,17 @@ fn pdoConnect(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
     }
     _ = try pdoConstruct(ctx, args);
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
 // PDO\Sqlite::createFunction(string $name, callable $callback, int $numArgs = -1)
 // registers a PHP callable as a SQLite scalar function. wires the trampoline
 // so SQLite actually invokes the PHP code on every call.
-fn pdoSqliteCreateFunction(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2) return .{ .bool = false };
-    if (args[0] != .string) return .{ .bool = false };
-    const this = getThis(ctx) orelse return .{ .bool = false };
-    const db = getDbPtr(this) orelse return .{ .bool = false };
+fn pdoSqliteCreateFunction(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2) return NativeResult.scalar(.{ .bool = false });
+    if (args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const db = getDbPtr(this) orelse return NativeResult.scalar(.{ .bool = false });
     const name = args[0].string.bytes();
     const num_args: c_int = if (args.len >= 3 and args[2] == .int) @intCast(args[2].int) else -1;
 
@@ -649,8 +650,8 @@ fn pdoSqliteCreateFunction(ctx: *NativeContext, args: []const Value) RuntimeErro
         null,
         sqliteFuncDestroy,
     );
-    if (rc != 0) return .{ .bool = false };
-    return .{ .bool = true };
+    if (rc != 0) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = true });
 }
 
 // SQLite owns registrations; each aggregate group owns an independent PHP
@@ -770,8 +771,8 @@ fn aggregateFinal(ctx: *sqlite.Context) callconv(.c) void {
     }
 }
 
-fn pdoSqliteCreateAggregate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 3 or args[0] != .string) return .{ .bool = false };
+fn pdoSqliteCreateAggregate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 3 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     for (args[1..3], 2..) |callback, position| {
         const valid = try ctx.callFunction("is_callable", &.{callback});
         if (!valid.isTruthy()) {
@@ -781,10 +782,10 @@ fn pdoSqliteCreateAggregate(ctx: *NativeContext, args: []const Value) RuntimeErr
             return error.RuntimeError;
         }
     }
-    const this = getThis(ctx) orelse return .{ .bool = false };
-    const db = getDbPtr(this) orelse return .{ .bool = false };
+    const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const db = getDbPtr(this) orelse return NativeResult.scalar(.{ .bool = false });
     const count = if (args.len > 3) args[3].toInt() else -1;
-    const num_args = std.math.cast(c_int, count) orelse return .{ .bool = false };
+    const num_args = std.math.cast(c_int, count) orelse return NativeResult.scalar(.{ .bool = false });
     const name = try ctx.allocator.dupeZ(u8, args[0].string.bytes());
     defer ctx.allocator.free(name);
     const reg = try ctx.allocator.create(UserSqlAggregate);
@@ -793,14 +794,14 @@ fn pdoSqliteCreateAggregate(ctx: *NativeContext, args: []const Value) RuntimeErr
     VM.retainValue(reg.final);
     // v2 invokes the destructor even when registration fails.
     const rc = sqlite.sqlite3_create_function_v2(db, name, num_args, sqlite.UTF8, reg, null, aggregateStep, aggregateFinal, aggregateDestroy);
-    return .{ .bool = rc == sqlite.OK };
+    return NativeResult.scalar(.{ .bool = rc == sqlite.OK });
 }
 
-fn pdoSqliteCreateCollation(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2) return .{ .bool = false };
-    if (args[0] != .string) return .{ .bool = false };
-    const this = getThis(ctx) orelse return .{ .bool = false };
-    const db = getDbPtr(this) orelse return .{ .bool = false };
+fn pdoSqliteCreateCollation(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2) return NativeResult.scalar(.{ .bool = false });
+    if (args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const db = getDbPtr(this) orelse return NativeResult.scalar(.{ .bool = false });
     const name = args[0].string.bytes();
 
     const state = try ctx.vm.allocator.create(UserSqlFn);
@@ -815,13 +816,13 @@ fn pdoSqliteCreateCollation(ctx: *NativeContext, args: []const Value) RuntimeErr
     const rc = sqlite.sqlite3_create_collation_v2(db, @ptrCast(name_buf.ptr), sqlite.UTF8, @ptrCast(state), sqliteCollationTrampoline, sqliteFuncDestroy);
     if (rc != 0) {
         sqliteFuncDestroy(state);
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     }
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn pdoConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn pdoConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len < 1 or args[0] != .string) return throwPdo(ctx, "PDO::__construct() expects a DSN string");
 
     const dsn = args[0].string.bytes();
@@ -838,7 +839,7 @@ fn pdoConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (rc != sqlite.OK or db == null) return throwPdo(ctx, "Failed to open database");
         try obj.set(ctx.allocator, "__db_ptr", .{ .int = @intCast(@intFromPtr(db.?)) });
         try applyOptionsArray(ctx, obj, args);
-        return .null;
+        return NativeResult.scalar(.null);
     }
 
     if (std.mem.eql(u8, driver, "mysql")) {
@@ -869,8 +870,8 @@ fn applyOptionsArray(ctx: *NativeContext, obj: *PhpObject, args: []const Value) 
     }
 }
 
-fn pdoExec(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn pdoExec(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len < 1 or args[0] != .string) return throwPdo(ctx, "PDO::exec() expects a SQL string");
     const drv = getDriver(obj);
     if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.exec(ctx, obj, args[0].string.bytes());
@@ -884,14 +885,14 @@ fn pdoExec(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (rc != sqlite.OK) {
         const raw = if (errmsg) |e| std.mem.span(e) else "SQL execution error";
         const result = try throwPdo(ctx, try pdoSqlMsg(ctx, db, raw));
-        if (result == .bool and !result.bool) return .{ .bool = false };
+        if (result.value == .bool and !result.value.bool) return NativeResult.scalar(.{ .bool = false });
         return result;
     }
-    return .{ .int = sqlite.sqlite3_changes(db) };
+    return NativeResult.scalar(.{ .int = sqlite.sqlite3_changes(db) });
 }
 
-fn pdoQuery(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn pdoQuery(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len < 1 or args[0] != .string) return throwPdo(ctx, "PDO::query() expects a SQL string");
     const drv = getDriver(obj);
     if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.query(ctx, obj, args[0].string.bytes());
@@ -917,11 +918,11 @@ fn pdoQuery(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     try stmt_obj.set(ctx.allocator, "__has_row", .{ .bool = step_rc == sqlite.ROW });
     try stmt_obj.set(ctx.allocator, "__stepped", .{ .bool = true });
 
-    return .{ .object = stmt_obj };
+    return NativeResult.borrowed(.{ .object = stmt_obj });
 }
 
-fn pdoPrepare(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn pdoPrepare(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len < 1 or args[0] != .string) return throwPdo(ctx, "PDO::prepare() expects a SQL string");
     const drv = getDriver(obj);
     if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.prepare(ctx, obj, args[0].string.bytes());
@@ -943,23 +944,23 @@ fn pdoPrepare(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     try stmt_obj.set(ctx.allocator, "__has_row", .{ .bool = false });
     try stmt_obj.set(ctx.allocator, "__stepped", .{ .bool = false });
 
-    return .{ .object = stmt_obj };
+    return NativeResult.borrowed(.{ .object = stmt_obj });
 }
 
-fn pdoLastInsertId(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn pdoLastInsertId(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const drv = getDriver(obj);
     if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.lastInsertId(ctx, obj);
     if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.lastInsertId(ctx, obj);
-    const db = getDbPtr(obj) orelse return .{ .string = Value.String.borrowed("0") };
+    const db = getDbPtr(obj) orelse return NativeResult.literal("0");
     const id = sqlite.sqlite3_last_insert_rowid(db);
     var buf: [32]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, "{d}", .{id}) catch "0";
-    return .{ .string = Value.String.borrowed(try ctx.createString(s)) };
+    return try NativeResult.copyString(ctx.allocator, s);
 }
 
-fn pdoBeginTransaction(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn pdoBeginTransaction(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const in_tx = obj.get("__in_transaction");
     if (in_tx == .bool and in_tx.bool) {
         try ctx.vm.setPendingException("PDOException", "There is already an active transaction");
@@ -968,40 +969,40 @@ fn pdoBeginTransaction(ctx: *NativeContext, _: []const Value) RuntimeError!Value
     const drv = getDriver(obj);
     if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.beginTransaction(ctx, obj);
     if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.beginTransaction(ctx, obj);
-    const db = getDbPtr(obj) orelse return .{ .bool = false };
+    const db = getDbPtr(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const rc = sqlite.sqlite3_exec(db, "BEGIN", null, null, null);
     if (rc == sqlite.OK) try obj.set(ctx.allocator, "__in_transaction", .{ .bool = true });
-    return .{ .bool = rc == sqlite.OK };
+    return NativeResult.scalar(.{ .bool = rc == sqlite.OK });
 }
 
-fn pdoCommit(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn pdoCommit(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const drv = getDriver(obj);
     if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.commit(ctx, obj);
     if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.commit(ctx, obj);
-    const db = getDbPtr(obj) orelse return .{ .bool = false };
+    const db = getDbPtr(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const rc = sqlite.sqlite3_exec(db, "COMMIT", null, null, null);
     if (rc == sqlite.OK) try obj.set(ctx.allocator, "__in_transaction", .{ .bool = false });
-    return .{ .bool = rc == sqlite.OK };
+    return NativeResult.scalar(.{ .bool = rc == sqlite.OK });
 }
 
-fn pdoRollBack(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn pdoRollBack(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const drv = getDriver(obj);
     if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.rollBack(ctx, obj);
     if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.rollBack(ctx, obj);
-    const db = getDbPtr(obj) orelse return .{ .bool = false };
+    const db = getDbPtr(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const rc = sqlite.sqlite3_exec(db, "ROLLBACK", null, null, null);
     if (rc == sqlite.OK) try obj.set(ctx.allocator, "__in_transaction", .{ .bool = false });
-    return .{ .bool = rc == sqlite.OK };
+    return NativeResult.scalar(.{ .bool = rc == sqlite.OK });
 }
 
-fn pdoErrorInfo(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn pdoErrorInfo(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const drv = getDriver(obj);
     if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.errorInfo(ctx, obj);
     if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.errorInfo(ctx, obj);
-    const db = getDbPtr(obj) orelse return .null;
+    const db = getDbPtr(obj) orelse return NativeResult.scalar(.null);
     var arr = try ctx.createArray();
     const msg = std.mem.span(sqlite.sqlite3_errmsg(db));
     const has_err = !std.mem.eql(u8, msg, "not an error") and msg.len > 0;
@@ -1013,13 +1014,13 @@ fn pdoErrorInfo(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         try arr.append(ctx.allocator, .null);
         try arr.append(ctx.allocator, .null);
     }
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn pdoSetAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    if (args.len < 2) return .{ .bool = false };
-    const attr = if (args[0] == .int) args[0].int else return .{ .bool = false };
+fn pdoSetAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len < 2) return NativeResult.scalar(.{ .bool = false });
+    const attr = if (args[0] == .int) args[0].int else return NativeResult.scalar(.{ .bool = false });
     if (attr == 19) {
         try obj.set(ctx.allocator, "__default_fetch_mode", args[1]);
     } else if (attr == 3) {
@@ -1028,50 +1029,50 @@ fn pdoSetAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     // general attribute storage so subsequent getAttribute() reads return the
     // last value set even for attributes that don't influence native behavior
     var key_buf: [32]u8 = undefined;
-    const key = std.fmt.bufPrint(&key_buf, "__attr_{d}", .{attr}) catch return .{ .bool = true };
+    const key = std.fmt.bufPrint(&key_buf, "__attr_{d}", .{attr}) catch return NativeResult.scalar(.{ .bool = true });
     const owned_key = try ctx.allocator.dupe(u8, key);
     try ctx.vm.strings.append(ctx.allocator, owned_key);
     try obj.set(ctx.allocator, owned_key, args[1]);
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn pdoGetAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1 or args[0] != .int) return .null;
+fn pdoGetAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1 or args[0] != .int) return NativeResult.scalar(.null);
     const attr = args[0].int;
     if (attr == 19) {
         const mode = obj.get("__default_fetch_mode");
-        if (mode == .int) return mode;
-        return .{ .int = 4 };
+        if (mode == .int) return NativeResult.share(mode);
+        return NativeResult.scalar(.{ .int = 4 });
     }
     if (attr == 3) {
         const m = obj.get("__errmode");
-        if (m == .int) return m;
-        return .{ .int = 2 };
+        if (m == .int) return NativeResult.share(m);
+        return NativeResult.scalar(.{ .int = 2 });
     }
-    if (attr == 16) return .{ .string = Value.String.borrowed(getDriver(obj)) };
+    if (attr == 16) return try NativeResult.copyString(ctx.allocator, getDriver(obj));
     // ATTR_SERVER_VERSION / ATTR_CLIENT_VERSION just need to return a string;
     // most callers only test is_string. zphp links sqlite at build time so a
     // generic placeholder is fine
     if (attr == 4 or attr == 5) {
-        return .{ .string = Value.String.borrowed("0") };
+        return NativeResult.literal("0");
     }
     // fall back to the generic attribute store populated by setAttribute
     var key_buf: [32]u8 = undefined;
-    const key = std.fmt.bufPrint(&key_buf, "__attr_{d}", .{attr}) catch return .null;
+    const key = std.fmt.bufPrint(&key_buf, "__attr_{d}", .{attr}) catch return NativeResult.scalar(.null);
     const stored = obj.get(key);
-    if (stored != .null) return stored;
-    return .null;
+    if (stored != .null) return NativeResult.share(stored);
+    return NativeResult.scalar(.null);
 }
 
 // PDOStatement methods
 
-fn stmtExecute(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn stmtExecute(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const drv = getDriver(obj);
     if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.stmtExecute(ctx, obj, args);
     if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.stmtExecute(ctx, obj, args);
-    const stmt = getStmtPtr(obj) orelse return .{ .bool = false };
+    const stmt = getStmtPtr(obj) orelse return NativeResult.scalar(.{ .bool = false });
 
     _ = sqlite.sqlite3_reset(stmt);
 
@@ -1091,7 +1092,7 @@ fn stmtExecute(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             const msg = std.mem.span(sqlite.sqlite3_errmsg(db));
             return throwPdo(ctx, try pdoSqlMsg(ctx, db, msg));
         }
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     }
 
     // store affected rows
@@ -1101,15 +1102,15 @@ fn stmtExecute(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try obj.set(ctx.allocator, "__row_count", .{ .int = sqlite.sqlite3_changes(db) });
     }
 
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn stmtFetch(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn stmtFetch(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const drv = getDriver(obj);
     if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.stmtFetch(ctx, obj, args);
     if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.stmtFetch(ctx, obj, args);
-    const stmt = getStmtPtr(obj) orelse return .{ .bool = false };
+    const stmt = getStmtPtr(obj) orelse return NativeResult.scalar(.{ .bool = false });
 
     const has_row = obj.get("__has_row");
     const stepped = obj.get("__stepped");
@@ -1119,9 +1120,9 @@ fn stmtFetch(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const rc = try stepSqlite(ctx, stmt);
         try obj.set(ctx.allocator, "__has_row", .{ .bool = rc == sqlite.ROW });
         try obj.set(ctx.allocator, "__stepped", .{ .bool = true });
-        if (rc != sqlite.ROW) return .{ .bool = false };
+        if (rc != sqlite.ROW) return NativeResult.scalar(.{ .bool = false });
     } else if (has_row != .bool or !has_row.bool) {
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     }
 
     const mode: i64 = if (args.len >= 1 and args[0] == .int) args[0].int else getDefaultFetchMode(obj);
@@ -1130,7 +1131,7 @@ fn stmtFetch(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const row = try fetchRowAsObject(ctx, stmt);
         const next_rc = try stepSqlite(ctx, stmt);
         try obj.set(ctx.allocator, "__has_row", .{ .bool = next_rc == sqlite.ROW });
-        return row;
+        return NativeResult.borrowed(row);
     }
 
     if (mode == 8) {
@@ -1144,7 +1145,7 @@ fn stmtFetch(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
         const next_rc = try stepSqlite(ctx, stmt);
         try obj.set(ctx.allocator, "__has_row", .{ .bool = next_rc == sqlite.ROW });
-        return inst;
+        return NativeResult.borrowed(inst);
     }
 
     if (mode == 9) {
@@ -1152,7 +1153,7 @@ fn stmtFetch(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (target_v == .object) try populateObjectFromRow(ctx, target_v.object, stmt);
         const next_rc = try stepSqlite(ctx, stmt);
         try obj.set(ctx.allocator, "__has_row", .{ .bool = next_rc == sqlite.ROW });
-        return target_v;
+        return NativeResult.share(target_v);
     }
 
     const row = try fetchRow(ctx, stmt, mode);
@@ -1161,15 +1162,15 @@ fn stmtFetch(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const next_rc = try stepSqlite(ctx, stmt);
     try obj.set(ctx.allocator, "__has_row", .{ .bool = next_rc == sqlite.ROW });
 
-    return .{ .array = row };
+    return NativeResult.borrowed(.{ .array = row });
 }
 
-fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const drv = getDriver(obj);
     if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.stmtFetchAll(ctx, obj, args);
     if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.stmtFetchAll(ctx, obj, args);
-    const stmt = getStmtPtr(obj) orelse return .{ .bool = false };
+    const stmt = getStmtPtr(obj) orelse return NativeResult.scalar(.{ .bool = false });
 
     const mode: i64 = if (args.len >= 1 and args[0] == .int) args[0].int else getDefaultFetchMode(obj);
     const FETCH_GROUP_FLAG: i64 = 65536;
@@ -1194,6 +1195,7 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             first = false;
             // first column is the group/unique key
             const key_v = try columnToValue(ctx, stmt, 0);
+            defer if (key_v == .string) key_v.string.release();
             const ak: PhpArray.Key = switch (key_v) {
                 .string => |s| .{ .string = s },
                 .int => |n| .{ .int = n },
@@ -1203,6 +1205,7 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             // for FETCH_COLUMN the per-row value is the next column scalar;
             // for FETCH_NUM/ASSOC/BOTH the per-row value is a row array
             var row_value: Value = .null;
+            defer if (row_value == .string) row_value.string.release();
             if (row_mode == 7) {
                 const col_count_c = sqlite.sqlite3_column_count(stmt);
                 row_value = if (col_count_c > 1) try columnToValue(ctx, stmt, 1) else .null;
@@ -1212,11 +1215,13 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 var i: c_int = 1;
                 while (i < col_count) : (i += 1) {
                     const v = try columnToValue(ctx, stmt, i);
+                    defer if (v == .string) v.string.release();
                     if (row_mode == 3 or row_mode == 4) try inner.append(ctx.allocator, v);
                     if (row_mode == 2 or row_mode == 4) {
                         if (sqlite.sqlite3_column_name(stmt, i)) |np| {
-                            const name = try ctx.createString(std.mem.span(np));
-                            try inner.set(ctx.allocator, .{ .string = Value.String.borrowed(name) }, v);
+                            const name = try Value.String.create(ctx.allocator, std.mem.span(np));
+                            defer name.release();
+                            try inner.set(ctx.allocator, .{ .string = name }, v);
                         }
                     }
                 }
@@ -1240,13 +1245,13 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             }
         }
         try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
-        return .{ .array = result };
+        return NativeResult.borrowed(.{ .array = result });
     }
 
     if (mode == 5) {
         try fetchAllAsObjects(ctx, stmt, result, obj);
         try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
-        return .{ .array = result };
+        return NativeResult.borrowed(.{ .array = result });
     }
 
     const has_row_pre = obj.get("__has_row");
@@ -1277,7 +1282,7 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             rc = try stepSqlite(ctx, stmt);
         }
         try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
-        return .{ .array = result };
+        return NativeResult.borrowed(.{ .array = result });
     }
 
     // FETCH_INTO (9): populate the previously-set fetch-into target
@@ -1285,7 +1290,7 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const target_v = obj.get("__fetch_into");
         if (target_v != .object) {
             try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
-            return .{ .array = result };
+            return NativeResult.borrowed(.{ .array = result });
         }
         const target = target_v.object;
         if (start_with_row) {
@@ -1299,13 +1304,13 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             rc = try stepSqlite(ctx, stmt);
         }
         try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
-        return .{ .array = result };
+        return NativeResult.borrowed(.{ .array = result });
     }
 
     // FETCH_FUNC (10): pass each row's columns as args to a callable, collect
     // the return value as the row in the result array
     if (mode == 10) {
-        if (args.len < 2) return .{ .bool = false };
+        if (args.len < 2) return NativeResult.scalar(.{ .bool = false });
         const callable = args[1];
         const col_count = sqlite.sqlite3_column_count(stmt);
         if (start_with_row) {
@@ -1313,6 +1318,7 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             defer ctx.allocator.free(call_args);
             var i: c_int = 0;
             while (i < col_count) : (i += 1) call_args[@intCast(i)] = try columnToValue(ctx, stmt, i);
+            defer for (call_args) |a| if (a == .string) a.string.release();
             const r = try ctx.invokeCallable(callable, call_args);
             try result.append(ctx.allocator, r);
         }
@@ -1322,19 +1328,22 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             defer ctx.allocator.free(call_args);
             var i: c_int = 0;
             while (i < col_count) : (i += 1) call_args[@intCast(i)] = try columnToValue(ctx, stmt, i);
+            defer for (call_args) |a| if (a == .string) a.string.release();
             const r = try ctx.invokeCallable(callable, call_args);
             try result.append(ctx.allocator, r);
             rc = try stepSqlite(ctx, stmt);
         }
         try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
-        return .{ .array = result };
+        return NativeResult.borrowed(.{ .array = result });
     }
 
     // FETCH_KEY_PAIR (12): col 0 = key, col 1 = value
     if (mode == 12) {
         if (start_with_row) {
             const key_v = try columnToValue(ctx, stmt, 0);
+            defer if (key_v == .string) key_v.string.release();
             const val_v = try columnToValue(ctx, stmt, 1);
+            defer if (val_v == .string) val_v.string.release();
             const ak: PhpArray.Key = switch (key_v) {
                 .string => |s| .{ .string = s },
                 .int => |n| .{ .int = n },
@@ -1345,7 +1354,9 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         var rc = try stepSqlite(ctx, stmt);
         while (rc == sqlite.ROW) {
             const key_v = try columnToValue(ctx, stmt, 0);
+            defer if (key_v == .string) key_v.string.release();
             const val_v = try columnToValue(ctx, stmt, 1);
+            defer if (val_v == .string) val_v.string.release();
             const ak: PhpArray.Key = switch (key_v) {
                 .string => |s| .{ .string = s },
                 .int => |n| .{ .int = n },
@@ -1355,7 +1366,7 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             rc = try stepSqlite(ctx, stmt);
         }
         try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
-        return .{ .array = result };
+        return NativeResult.borrowed(.{ .array = result });
     }
 
     // FETCH_COLUMN (7): single column from each row, default col 0
@@ -1363,16 +1374,18 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const col_idx: c_int = if (args.len >= 2 and args[1] == .int) @intCast(args[1].int) else 0;
         if (start_with_row) {
             const val_v = try columnToValue(ctx, stmt, col_idx);
+            defer if (val_v == .string) val_v.string.release();
             try result.append(ctx.allocator, val_v);
         }
         var rc = try stepSqlite(ctx, stmt);
         while (rc == sqlite.ROW) {
             const val_v = try columnToValue(ctx, stmt, col_idx);
+            defer if (val_v == .string) val_v.string.release();
             try result.append(ctx.allocator, val_v);
             rc = try stepSqlite(ctx, stmt);
         }
         try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
-        return .{ .array = result };
+        return NativeResult.borrowed(.{ .array = result });
     }
 
     const has_row = obj.get("__has_row");
@@ -1399,15 +1412,15 @@ fn stmtFetchAll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
 
     try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
-    return .{ .array = result };
+    return NativeResult.borrowed(.{ .array = result });
 }
 
-fn stmtFetchColumn(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn stmtFetchColumn(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const drv = getDriver(obj);
     if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.stmtFetchColumn(ctx, obj, args);
     if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.stmtFetchColumn(ctx, obj, args);
-    const stmt = getStmtPtr(obj) orelse return .{ .bool = false };
+    const stmt = getStmtPtr(obj) orelse return NativeResult.scalar(.{ .bool = false });
 
     const col: c_int = if (args.len >= 1 and args[0] == .int) @intCast(args[0].int) else 0;
 
@@ -1416,9 +1429,9 @@ fn stmtFetchColumn(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
 
     if (stepped != .bool or !stepped.bool) {
         const rc = try stepSqlite(ctx, stmt);
-        if (rc != sqlite.ROW) return .{ .bool = false };
+        if (rc != sqlite.ROW) return NativeResult.scalar(.{ .bool = false });
     } else if (has_row != .bool or !has_row.bool) {
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     }
 
     const val = try columnToValue(ctx, stmt, col);
@@ -1427,48 +1440,49 @@ fn stmtFetchColumn(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     try obj.set(ctx.allocator, "__has_row", .{ .bool = next_rc == sqlite.ROW });
     try obj.set(ctx.allocator, "__stepped", .{ .bool = true });
 
-    return val;
+    if (val == .string) return NativeResult.takeString(val.string);
+    return NativeResult.scalar(val);
 }
 
-fn stmtRowCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn stmtRowCount(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     _ = getDriver(obj);
     // for SELECT statements, sqlite doesn't track row count
     const stmt = getStmtPtr(obj);
     if (stmt) |s| {
-        if (sqlite.sqlite3_stmt_readonly(s) != 0) return .{ .int = 0 };
+        if (sqlite.sqlite3_stmt_readonly(s) != 0) return NativeResult.scalar(.{ .int = 0 });
     }
     const rc = obj.get("__row_count");
-    if (rc == .int) return rc;
-    return .{ .int = 0 };
+    if (rc == .int) return NativeResult.share(rc);
+    return NativeResult.scalar(.{ .int = 0 });
 }
 
-fn stmtColumnCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn stmtColumnCount(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const drv = getDriver(obj);
     if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.stmtColumnCount(obj);
     if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.stmtColumnCount(obj);
     // PHP returns 0 before execute
     const stepped = obj.get("__stepped");
-    if (stepped != .bool or !stepped.bool) return .{ .int = 0 };
-    const stmt = getStmtPtr(obj) orelse return .{ .int = 0 };
-    return .{ .int = sqlite.sqlite3_column_count(stmt) };
+    if (stepped != .bool or !stepped.bool) return NativeResult.scalar(.{ .int = 0 });
+    const stmt = getStmtPtr(obj) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = sqlite.sqlite3_column_count(stmt) });
 }
 
-fn stmtCloseCursor(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn stmtCloseCursor(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const drv = getDriver(obj);
     if (std.mem.eql(u8, drv, "mysql")) return pdo_mysql.stmtCloseCursor(ctx, obj);
     if (std.mem.eql(u8, drv, "pgsql")) return pdo_pgsql.stmtCloseCursor(ctx, obj);
-    const stmt = getStmtPtr(obj) orelse return .{ .bool = true };
+    const stmt = getStmtPtr(obj) orelse return NativeResult.scalar(.{ .bool = true });
     _ = sqlite.sqlite3_reset(stmt);
     try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
     try obj.set(ctx.allocator, "__stepped", .{ .bool = false });
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn stmtSetFetchMode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn stmtSetFetchMode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const mode: Value = if (args.len >= 1) args[0] else .{ .int = 4 };
     try obj.set(ctx.allocator, "__fetch_mode", mode);
     if (mode == .int and mode.int == 9 and args.len >= 2 and args[1] == .object) {
@@ -1478,7 +1492,7 @@ fn stmtSetFetchMode(ctx: *NativeContext, args: []const Value) RuntimeError!Value
         try obj.set(ctx.allocator, "__fetch_class", args[1]);
         if (args.len >= 3 and args[2] == .array) try obj.set(ctx.allocator, "__fetch_class_args", args[2]);
     }
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
 fn invokeCtorWithArgs(ctx: *NativeContext, inst_val: Value, class_name: []const u8, ctor_args: ?*PhpArray) !void {
@@ -1505,80 +1519,81 @@ fn populateObjectFromRow(ctx: *NativeContext, obj: *PhpObject, stmt: *sqlite.Stm
             const name = std.mem.span(name_ptr);
             const owned = try ctx.createString(name);
             const val = try columnToValue(ctx, stmt, i);
+            defer if (val == .string) val.string.release();
             try obj.set(ctx.allocator, owned, val);
         }
     }
 }
 
-fn pdoQuote(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1) return .{ .bool = false };
+fn pdoQuote(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
     var s_buf: [4096]u8 = undefined;
     const v = args[0];
     var input: []const u8 = "";
     var fallback: [32]u8 = undefined;
     switch (v) {
         .string => |s| input = s.bytes(),
-        .int => |n| input = std.fmt.bufPrint(&fallback, "{d}", .{n}) catch return .{ .bool = false },
-        .float => |f| input = std.fmt.bufPrint(&fallback, "{d}", .{f}) catch return .{ .bool = false },
+        .int => |n| input = std.fmt.bufPrint(&fallback, "{d}", .{n}) catch return NativeResult.scalar(.{ .bool = false }),
+        .float => |f| input = std.fmt.bufPrint(&fallback, "{d}", .{f}) catch return NativeResult.scalar(.{ .bool = false }),
         .bool => |b| input = if (b) "1" else "",
         .null => input = "",
-        else => return .{ .bool = false },
+        else => return NativeResult.scalar(.{ .bool = false }),
     }
     // single-quote and double internal quotes per SQL standard
     var w: usize = 0;
-    if (w + 1 >= s_buf.len) return .{ .bool = false };
+    if (w + 1 >= s_buf.len) return NativeResult.scalar(.{ .bool = false });
     s_buf[w] = '\'';
     w += 1;
     for (input) |c| {
         if (c == '\'') {
-            if (w + 2 >= s_buf.len) return .{ .bool = false };
+            if (w + 2 >= s_buf.len) return NativeResult.scalar(.{ .bool = false });
             s_buf[w] = '\'';
             w += 1;
             s_buf[w] = '\'';
             w += 1;
         } else {
-            if (w + 1 >= s_buf.len) return .{ .bool = false };
+            if (w + 1 >= s_buf.len) return NativeResult.scalar(.{ .bool = false });
             s_buf[w] = c;
             w += 1;
         }
     }
-    if (w + 1 >= s_buf.len) return .{ .bool = false };
+    if (w + 1 >= s_buf.len) return NativeResult.scalar(.{ .bool = false });
     s_buf[w] = '\'';
     w += 1;
-    const result = try ctx.createString(s_buf[0..w]);
-    return .{ .string = Value.String.borrowed(result) };
+    const result = try Value.String.create(ctx.allocator, s_buf[0..w]);
+    return NativeResult.takeString(result);
 }
 
-fn pdoInTransaction(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn pdoInTransaction(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const t = obj.get("__in_transaction");
-    return .{ .bool = t == .bool and t.bool };
+    return NativeResult.scalar(.{ .bool = t == .bool and t.bool });
 }
 
-fn pdoGetAvailableDrivers(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn pdoGetAvailableDrivers(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
     try arr.append(ctx.allocator, .{ .string = Value.String.borrowed("sqlite") });
     try arr.append(ctx.allocator, .{ .string = Value.String.borrowed("mysql") });
     try arr.append(ctx.allocator, .{ .string = Value.String.borrowed("pgsql") });
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn pdoErrorCode(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn pdoErrorCode(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const code = obj.get("__error_code");
-    if (code == .string) return code;
-    return .{ .string = Value.String.borrowed("00000") };
+    if (code == .string) return NativeResult.share(code);
+    return NativeResult.literal("00000");
 }
 
-fn stmtErrorCode(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn stmtErrorCode(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const code = obj.get("__error_code");
-    if (code == .string) return code;
-    return .{ .string = Value.String.borrowed("00000") };
+    if (code == .string) return NativeResult.share(code);
+    return NativeResult.literal("00000");
 }
 
-fn stmtErrorInfo(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn stmtErrorInfo(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = try ctx.createArray();
     const code = obj.get("__error_code");
     try arr.append(ctx.allocator, if (code == .string) code else .{ .string = Value.String.borrowed("00000") });
@@ -1586,36 +1601,36 @@ fn stmtErrorInfo(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     try arr.append(ctx.allocator, if (driver_code == .int) driver_code else .null);
     const msg = obj.get("__error_message");
     try arr.append(ctx.allocator, if (msg == .string) msg else .null);
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn stmtDebugDumpParams(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .null;
+fn stmtDebugDumpParams(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.null);
 }
 
-fn stmtGetColumnMeta(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    if (args.len < 1 or args[0] != .int) return .{ .bool = false };
-    const stmt = getStmtPtr(obj) orelse return .{ .bool = false };
+fn stmtGetColumnMeta(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len < 1 or args[0] != .int) return NativeResult.scalar(.{ .bool = false });
+    const stmt = getStmtPtr(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const col: c_int = @intCast(args[0].int);
     const arr = try ctx.createArray();
     if (sqlite.sqlite3_column_name(stmt, col)) |np| {
         const n = std.mem.span(np);
         try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("name") }, .{ .string = Value.String.borrowed(try ctx.createString(n)) });
     }
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn stmtNextRowset(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = false };
+fn stmtNextRowset(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn stmtBindValue(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    if (args.len < 2) return .{ .bool = false };
+fn stmtBindValue(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len < 2) return NativeResult.scalar(.{ .bool = false });
     const drv = getDriver(obj);
-    if (std.mem.eql(u8, drv, "mysql") or std.mem.eql(u8, drv, "pgsql")) return .{ .bool = true };
-    const stmt = getStmtPtr(obj) orelse return .{ .bool = false };
+    if (std.mem.eql(u8, drv, "mysql") or std.mem.eql(u8, drv, "pgsql")) return NativeResult.scalar(.{ .bool = true });
+    const stmt = getStmtPtr(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const param = args[0];
     const val = args[1];
     const idx: c_int = if (param == .int) @intCast(param.int) else blk: {
@@ -1634,7 +1649,7 @@ fn stmtBindValue(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
         break :blk sqlite.sqlite3_bind_parameter_index(stmt, @ptrCast(buf.ptr));
     };
-    if (idx == 0) return .{ .bool = false };
+    if (idx == 0) return NativeResult.scalar(.{ .bool = false });
     const rc = switch (val) {
         .int => sqlite.sqlite3_bind_int64(stmt, idx, val.int),
         .float => sqlite.sqlite3_bind_double(stmt, idx, val.float),
@@ -1643,7 +1658,7 @@ fn stmtBindValue(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         .bool => sqlite.sqlite3_bind_int64(stmt, idx, if (val.bool) 1 else 0),
         else => sqlite.sqlite3_bind_null(stmt, idx),
     };
-    return .{ .bool = rc == sqlite.OK };
+    return NativeResult.scalar(.{ .bool = rc == sqlite.OK });
 }
 
 fn getDefaultFetchMode(obj: *PhpObject) i64 {
@@ -1668,6 +1683,7 @@ fn fetchRowAsObject(ctx: *NativeContext, stmt: *sqlite.Stmt) !Value {
     var i: c_int = 0;
     while (i < col_count) : (i += 1) {
         const val = try columnToValue(ctx, stmt, i);
+        defer if (val == .string) val.string.release();
         if (sqlite.sqlite3_column_name(stmt, i)) |name_ptr| {
             const name = std.mem.span(name_ptr);
             try obj.set(ctx.allocator, try ctx.createString(name), val);
@@ -1688,6 +1704,7 @@ fn fetchRowAsClass(ctx: *NativeContext, stmt: *sqlite.Stmt, class_name: []const 
             const name = std.mem.span(name_ptr);
             const owned = try ctx.createString(name);
             const val = try columnToValue(ctx, stmt, i);
+            defer if (val == .string) val.string.release();
             try obj.set(ctx.allocator, owned, val);
         }
     }
@@ -1725,26 +1742,30 @@ fn fetchRow(ctx: *NativeContext, stmt: *sqlite.Stmt, mode: i64) !*PhpArray {
     var i: c_int = 0;
     while (i < col_count) : (i += 1) {
         const val = try columnToValue(ctx, stmt, i);
+        defer if (val == .string) val.string.release();
         // FETCH_BOTH places named key before numeric per column to match php
         if (mode == 4) {
             if (sqlite.sqlite3_column_name(stmt, i)) |name_ptr| {
-                const name = std.mem.span(name_ptr);
-                try row.set(ctx.allocator, .{ .string = Value.String.borrowed(try ctx.createString(name)) }, val);
+                const key = try Value.String.create(ctx.allocator, std.mem.span(name_ptr));
+                defer key.release();
+                try row.set(ctx.allocator, .{ .string = key }, val);
             }
             try row.append(ctx.allocator, val);
         } else if (mode == 3) {
             try row.append(ctx.allocator, val);
         } else if (mode == 2) {
             if (sqlite.sqlite3_column_name(stmt, i)) |name_ptr| {
-                const name = std.mem.span(name_ptr);
-                try row.set(ctx.allocator, .{ .string = Value.String.borrowed(try ctx.createString(name)) }, val);
+                const key = try Value.String.create(ctx.allocator, std.mem.span(name_ptr));
+                defer key.release();
+                try row.set(ctx.allocator, .{ .string = key }, val);
             }
         } else if (mode == 11) {
             // FETCH_NAMED: same as FETCH_ASSOC, but duplicate column names
             // collapse into an array of values rather than overwriting
             if (sqlite.sqlite3_column_name(stmt, i)) |name_ptr| {
-                const name = std.mem.span(name_ptr);
-                const key = PhpArray.Key{ .string = Value.String.borrowed(try ctx.createString(name)) };
+                const key_s = try Value.String.create(ctx.allocator, std.mem.span(name_ptr));
+                defer key_s.release();
+                const key = PhpArray.Key{ .string = key_s };
                 const existing = row.get(key);
                 if (existing == .null) {
                     try row.set(ctx.allocator, key, val);
@@ -1769,10 +1790,9 @@ fn columnToValue(ctx: *NativeContext, stmt: *sqlite.Stmt, col: c_int) !Value {
         sqlite.INTEGER => .{ .int = sqlite.sqlite3_column_int64(stmt, col) },
         sqlite.FLOAT => .{ .float = sqlite.sqlite3_column_double(stmt, col) },
         sqlite.TEXT, sqlite.BLOB => blk: {
-            const text = sqlite.sqlite3_column_text(stmt, col) orelse break :blk Value{ .string = Value.String.borrowed("") };
+            const text = sqlite.sqlite3_column_text(stmt, col) orelse break :blk Value{ .string = try Value.String.create(ctx.allocator, "") };
             const len: usize = @intCast(sqlite.sqlite3_column_bytes(stmt, col));
-            const s = try ctx.createString(text[0..len]);
-            break :blk Value{ .string = Value.String.borrowed(s) };
+            break :blk Value{ .string = try Value.String.create(ctx.allocator, text[0..len]) };
         },
         else => .null,
     };

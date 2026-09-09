@@ -1,3 +1,4 @@
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
@@ -20,7 +21,7 @@ pub const entries = .{
     .{ "var_export", var_export },
 };
 
-fn var_dump(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn var_dump(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     visited_ptrs.deinit(ctx.allocator);
     visited_ptrs = .{};
     defer {
@@ -28,7 +29,7 @@ fn var_dump(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         visited_ptrs = .{};
     }
     for (args) |arg| try varDumpValue(ctx, arg, 0);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
@@ -251,8 +252,8 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
     }
 }
 
-fn print_r(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .null;
+fn print_r(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.null);
     const return_str = args.len >= 2 and args[1].isTruthy();
     visited_ptrs.deinit(ctx.allocator);
     visited_ptrs = .{};
@@ -262,13 +263,13 @@ fn print_r(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
     if (return_str) {
         var buf = std.ArrayListUnmanaged(u8){};
+        defer buf.deinit(ctx.allocator);
         try printRValueImpl(ctx.allocator, &buf, args[0], 0, ctx.vm);
         const s = try buf.toOwnedSlice(ctx.allocator);
-        try ctx.strings.append(ctx.allocator, s);
-        return .{ .string = Value.String.borrowed(s) };
+        return NativeResult.takeString(try Value.String.adopt(ctx.allocator, s));
     }
     try printRValueImpl(ctx.allocator, &ctx.vm.output, args[0], 0, ctx.vm);
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
 fn printRValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Value, depth: usize) !void {
@@ -450,8 +451,8 @@ fn printRValueImpl(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: 
     }
 }
 
-fn var_export(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .null;
+fn var_export(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.null);
     const return_str = args.len >= 2 and args[1].isTruthy();
     visited_ptrs.deinit(ctx.allocator);
     visited_ptrs = .{};
@@ -460,15 +461,14 @@ fn var_export(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         visited_ptrs = .{};
     }
     var buf = std.ArrayListUnmanaged(u8){};
+    defer buf.deinit(ctx.allocator);
     try varExportValue(ctx.allocator, &buf, args[0], 0, ctx);
     if (return_str) {
         const s = try buf.toOwnedSlice(ctx.allocator);
-        try ctx.strings.append(ctx.allocator, s);
-        return .{ .string = Value.String.borrowed(s) };
+        return NativeResult.takeString(try Value.String.adopt(ctx.allocator, s));
     }
     try ctx.vm.output.appendSlice(ctx.allocator, buf.items);
-    buf.deinit(ctx.allocator);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 fn varExportString(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), s: []const u8) !void {

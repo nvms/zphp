@@ -3,6 +3,7 @@ const Value = @import("../runtime/value.zig").Value;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const vm_mod = @import("../runtime/vm.zig");
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const VM = vm_mod.VM;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
@@ -244,8 +245,8 @@ fn parseWsdl(ctx: *NativeContext, obj: *PhpObject, source: []const u8) RuntimeEr
     try obj.set(ctx.allocator, "__types", .{ .array = types });
 }
 
-fn soapClientConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn soapClientConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
 
     const wsdl = if (args.len > 0) args[0] else .null;
     const opts: ?*PhpArray = if (args.len > 1 and args[1] == .array) args[1].array else null;
@@ -276,7 +277,7 @@ fn soapClientConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Va
     if (wsdl != .null and wsdl != .string) {
         // PHP throws SoapFault here. we accept null only for non-WSDL.
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 fn xmlEscape(allocator: Allocator, s: []const u8) ![]u8 {
@@ -480,7 +481,7 @@ fn extractBetween(haystack: []const u8, open: []const u8, close: []const u8) ?[]
 
 // best-effort SOAP response parser: returns innermost text content from the
 // response body, or an array of named children if the response has structure.
-fn parseSoapResponse(ctx: *NativeContext, xml: []const u8) RuntimeError!Value {
+fn parseSoapResponse(ctx: *NativeContext, xml: []const u8) RuntimeError!NativeResult {
     // find <SOAP-ENV:Body> or <soap:Body> or any *:Body
     var body_start: ?usize = null;
     var body_end: ?usize = null;
@@ -504,9 +505,7 @@ fn parseSoapResponse(ctx: *NativeContext, xml: []const u8) RuntimeError!Value {
     }
 
     if (body_start == null) {
-        const owned = try ctx.allocator.dupe(u8, xml);
-        try ctx.strings.append(ctx.allocator, owned);
-        return .{ .string = Value.String.borrowed(owned) };
+        return try NativeResult.copyString(ctx.allocator, xml);
     }
 
     const body = xml[body_start.?..(body_end orelse xml.len)];
@@ -520,7 +519,7 @@ fn parseSoapResponse(ctx: *NativeContext, xml: []const u8) RuntimeError!Value {
         try ctx.strings.append(ctx.allocator, owned_code);
         try ctx.strings.append(ctx.allocator, owned_str);
         try ctx.vm.setPendingException("SoapFault", owned_str);
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     }
 
     // first element inside Body is the response method; its children are the result fields
@@ -528,20 +527,18 @@ fn parseSoapResponse(ctx: *NativeContext, xml: []const u8) RuntimeError!Value {
     var p: usize = 0;
     while (p < body.len and std.ascii.isWhitespace(body[p])) p += 1;
     if (p >= body.len or body[p] != '<') {
-        const owned = try ctx.allocator.dupe(u8, body);
-        try ctx.strings.append(ctx.allocator, owned);
-        return .{ .string = Value.String.borrowed(owned) };
+        return try NativeResult.copyString(ctx.allocator, body);
     }
     // skip past response element tag
-    const tag_close = std.mem.indexOfScalarPos(u8, body, p, '>') orelse return .null;
+    const tag_close = std.mem.indexOfScalarPos(u8, body, p, '>') orelse return NativeResult.scalar(.null);
     const inner_start = tag_close + 1;
     // find matching close - approximate by looking for </tag>
     var tag_name_end = p + 1;
     while (tag_name_end < tag_close and body[tag_name_end] != ' ' and body[tag_name_end] != '>') tag_name_end += 1;
     const tag_name = body[p + 1 .. tag_name_end];
     var close_buf: [256]u8 = undefined;
-    const close_tag = std.fmt.bufPrint(&close_buf, "</{s}>", .{tag_name}) catch return .null;
-    const inner_end = std.mem.indexOfPos(u8, body, inner_start, close_tag) orelse return .null;
+    const close_tag = std.fmt.bufPrint(&close_buf, "</{s}>", .{tag_name}) catch return NativeResult.scalar(.null);
+    const inner_end = std.mem.indexOfPos(u8, body, inner_start, close_tag) orelse return NativeResult.scalar(.null);
     const inner = body[inner_start..inner_end];
 
     // parse first child of inner (the result) - many SOAP responses are <Foo><return>value</return></Foo>
@@ -551,33 +548,29 @@ fn parseSoapResponse(ctx: *NativeContext, xml: []const u8) RuntimeError!Value {
         // no children - return inner trimmed text
         var end = inner.len;
         while (end > 0 and std.ascii.isWhitespace(inner[end - 1])) end -= 1;
-        const owned = try ctx.allocator.dupe(u8, inner[rp..end]);
-        try ctx.strings.append(ctx.allocator, owned);
-        return .{ .string = Value.String.borrowed(owned) };
+        return try NativeResult.copyString(ctx.allocator, inner[rp..end]);
     }
-    const child_close = std.mem.indexOfScalarPos(u8, inner, rp, '>') orelse return .null;
+    const child_close = std.mem.indexOfScalarPos(u8, inner, rp, '>') orelse return NativeResult.scalar(.null);
     var child_name_end = rp + 1;
     while (child_name_end < child_close and inner[child_name_end] != ' ' and inner[child_name_end] != '>') child_name_end += 1;
     const child_name = inner[rp + 1 .. child_name_end];
     var ccbuf: [256]u8 = undefined;
-    const child_close_tag = std.fmt.bufPrint(&ccbuf, "</{s}>", .{child_name}) catch return .null;
+    const child_close_tag = std.fmt.bufPrint(&ccbuf, "</{s}>", .{child_name}) catch return NativeResult.scalar(.null);
     const child_inner_start = child_close + 1;
-    const child_inner_end = std.mem.indexOfPos(u8, inner, child_inner_start, child_close_tag) orelse return .null;
+    const child_inner_end = std.mem.indexOfPos(u8, inner, child_inner_start, child_close_tag) orelse return NativeResult.scalar(.null);
     const text = inner[child_inner_start..child_inner_end];
 
     // try to coerce numeric
     if (text.len > 0) {
-        if (std.fmt.parseInt(i64, text, 10)) |n| return .{ .int = n } else |_| {}
-        if (std.fmt.parseFloat(f64, text)) |f| return .{ .float = f } else |_| {}
+        if (std.fmt.parseInt(i64, text, 10)) |n| return NativeResult.scalar(.{ .int = n }) else |_| {}
+        if (std.fmt.parseFloat(f64, text)) |f| return NativeResult.scalar(.{ .float = f }) else |_| {}
     }
-    const owned = try ctx.allocator.dupe(u8, text);
-    try ctx.strings.append(ctx.allocator, owned);
-    return .{ .string = Value.String.borrowed(owned) };
+    return try NativeResult.copyString(ctx.allocator, text);
 }
 
-fn soapClientCall(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 2 or args[0] != .string or args[1] != .array) return .null;
+fn soapClientCall(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 2 or args[0] != .string or args[1] != .array) return NativeResult.scalar(.null);
     const method = args[0].string.bytes();
     const args_arr = args[1].array;
 
@@ -585,19 +578,19 @@ fn soapClientCall(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const uri_v = obj.get("__uri");
     if (loc_v != .string or uri_v != .string) {
         try ctx.vm.setPendingException("SoapFault", "SoapClient requires location and uri options for non-WSDL calls");
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     }
     const location = loc_v.string.bytes();
     const uri = uri_v.string.bytes();
 
     const envelope = buildEnvelope(ctx, obj, method, uri, args_arr) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return .null,
+        else => return NativeResult.scalar(.null),
     };
     defer ctx.allocator.free(envelope);
 
     var action_buf: [512]u8 = undefined;
-    const action = std.fmt.bufPrint(&action_buf, "{s}#{s}", .{ uri, method }) catch return .null;
+    const action = std.fmt.bufPrint(&action_buf, "{s}#{s}", .{ uri, method }) catch return NativeResult.scalar(.null);
 
     const env_owned = try ctx.allocator.dupe(u8, envelope);
     try ctx.strings.append(ctx.allocator, env_owned);
@@ -605,7 +598,7 @@ fn soapClientCall(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     const resp = httpPostSoap(ctx.allocator, location, action, envelope) catch {
         try ctx.vm.setPendingException("SoapFault", "SOAP HTTP request failed");
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     };
     defer ctx.allocator.free(resp.body);
     defer ctx.allocator.free(resp.headers);
@@ -620,73 +613,73 @@ fn soapClientCall(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     return try parseSoapResponse(ctx, resp.body);
 }
 
-fn soapClientMagicCall(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn soapClientMagicCall(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     // signature: __call($name, $arguments) - delegate to __soapCall
     return try soapClientCall(ctx, args);
 }
 
-fn soapClientGetLastRequest(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const o = getThis(ctx) orelse return .null;
-    return o.get("__last_request");
+fn soapClientGetLastRequest(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const o = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(o.get("__last_request"));
 }
-fn soapClientGetLastResponse(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const o = getThis(ctx) orelse return .null;
-    return o.get("__last_response");
+fn soapClientGetLastResponse(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const o = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(o.get("__last_response"));
 }
-fn soapClientGetLastRequestHeaders(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const o = getThis(ctx) orelse return .null;
-    return o.get("__last_request_headers");
+fn soapClientGetLastRequestHeaders(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const o = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(o.get("__last_request_headers"));
 }
-fn soapClientGetLastResponseHeaders(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const o = getThis(ctx) orelse return .null;
-    return o.get("__last_response_headers");
+fn soapClientGetLastResponseHeaders(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const o = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(o.get("__last_response_headers"));
 }
-fn soapClientSetLocation(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const o = getThis(ctx) orelse return .null;
-    if (args.len < 1) return .null;
+fn soapClientSetLocation(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const o = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
     const prev = o.get("__location");
     try o.set(ctx.allocator, "__location", args[0]);
-    return if (o.get("__wsdl") == .string) .null else prev;
+    return if (o.get("__wsdl") == .string) NativeResult.scalar(.null) else NativeResult.share(prev);
 }
-fn soapClientSetSoapHeaders(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const o = getThis(ctx) orelse return .{ .bool = false };
-    if (args.len < 1) return .{ .bool = false };
+fn soapClientSetSoapHeaders(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const o = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
     try o.set(ctx.allocator, "__headers", args[0]);
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
-fn soapClientGetFunctions(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const o = getThis(ctx) orelse return .null;
-    return o.get("__functions");
+fn soapClientGetFunctions(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const o = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(o.get("__functions"));
 }
-fn soapClientGetTypes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const o = getThis(ctx) orelse return .null;
-    return o.get("__types");
+fn soapClientGetTypes(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const o = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(o.get("__types"));
 }
-fn soapClientSetCookie(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const o = getThis(ctx) orelse return .null;
-    if (args.len < 1) return .null;
+fn soapClientSetCookie(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const o = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
     const cookies_v = o.get("__cookies");
-    if (cookies_v != .array) return .null;
-    if (args[0] != .string) return .null;
+    if (cookies_v != .array) return NativeResult.scalar(.null);
+    if (args[0] != .string) return NativeResult.scalar(.null);
     // PHP stores each cookie as a 3-element array: [value, autodelete, path].
     // a single arg deletes the cookie - matches PHP's __setCookie(name) semantic
     if (args.len == 1) {
         try cookies_v.array.set(ctx.allocator, .{ .string = Value.String.borrowed(args[0].string.bytes()) }, .null);
-        return .null;
+        return NativeResult.scalar(.null);
     }
     const inner = try ctx.createArray();
     try inner.set(ctx.allocator, .{ .int = 0 }, args[1]);
     try cookies_v.array.set(ctx.allocator, .{ .string = Value.String.borrowed(args[0].string.bytes()) }, .{ .array = inner });
-    return .null;
+    return NativeResult.scalar(.null);
 }
-fn soapClientGetCookies(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const o = getThis(ctx) orelse return .null;
-    return o.get("__cookies");
+fn soapClientGetCookies(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const o = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(o.get("__cookies"));
 }
 
 // SoapServer stubs - functional outline. real-world server use is rare from PHP scripts
-fn soapServerConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn soapServerConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const wsdl = if (args.len > 0) args[0] else .null;
     try obj.set(ctx.allocator, "__wsdl", wsdl);
     try obj.set(ctx.allocator, "__functions", .{ .array = try ctx.createArray() });
@@ -700,13 +693,13 @@ fn soapServerConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Va
         if (u == .string) uri = u;
     }
     try obj.set(ctx.allocator, "__uri", uri);
-    return .null;
+    return NativeResult.scalar(.null);
 }
-fn soapServerAddFunction(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    if (args.len < 1) return .{ .bool = false };
+fn soapServerAddFunction(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
     const fns_v = obj.get("__functions");
-    if (fns_v != .array) return .{ .bool = false };
+    if (fns_v != .array) return NativeResult.scalar(.{ .bool = false });
     if (args[0] == .string) {
         try fns_v.array.set(ctx.allocator, .{ .int = fns_v.array.next_int_key }, args[0]);
     } else if (args[0] == .array) {
@@ -714,19 +707,19 @@ fn soapServerAddFunction(ctx: *NativeContext, args: []const Value) RuntimeError!
             try fns_v.array.set(ctx.allocator, .{ .int = fns_v.array.next_int_key }, e.value);
         }
     }
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
-fn soapServerSetObject(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    if (args.len < 1) return .{ .bool = false };
+fn soapServerSetObject(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
     try obj.set(ctx.allocator, "__object", args[0]);
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
-fn soapServerSetClass(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    if (args.len < 1) return .{ .bool = false };
+fn soapServerSetClass(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
     try obj.set(ctx.allocator, "__class", args[0]);
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 fn xmlUnescape(allocator: Allocator, s: []const u8) ![]u8 {
     var out = std.ArrayListUnmanaged(u8){};
@@ -913,8 +906,8 @@ fn dispatchSoap(ctx: *NativeContext, server: *PhpObject, method: []const u8, arg
     return .null;
 }
 
-fn soapServerHandle(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn soapServerHandle(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     // request XML: explicit arg, else the raw HTTP body (php://input)
     var req: []const u8 = "";
     if (args.len > 0 and args[0] == .string) {
@@ -922,14 +915,14 @@ fn soapServerHandle(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     } else if (ctx.vm.request_vars.get("__raw_body")) |body_val| {
         if (body_val == .string) req = body_val.string.bytes();
     }
-    if (req.len == 0) return .null;
+    if (req.len == 0) return NativeResult.scalar(.null);
 
     // locate the SOAP Body open tag's end ("...Body>"); the close tag
     // "</...Body>" appears later, so the first match is the open
-    const body_open = std.mem.indexOf(u8, req, "Body>") orelse return .null;
+    const body_open = std.mem.indexOf(u8, req, "Body>") orelse return NativeResult.scalar(.null);
     var p = body_open + "Body>".len;
     while (p < req.len and (req[p] == ' ' or req[p] == '\n' or req[p] == '\r' or req[p] == '\t')) : (p += 1) {}
-    if (p >= req.len or req[p] != '<') return .null;
+    if (p >= req.len or req[p] != '<') return NativeResult.scalar(.null);
 
     // method element start tag (full name keeps the ns prefix for the close)
     const mtag_start = p + 1;
@@ -1019,56 +1012,56 @@ fn soapServerHandle(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     try out.appendSlice(ctx.allocator, method);
     try out.appendSlice(ctx.allocator, "Response></SOAP-ENV:Body></SOAP-ENV:Envelope>\n");
     try ctx.vm.output.appendSlice(ctx.allocator, out.items);
-    return .null;
+    return NativeResult.scalar(.null);
 }
-fn soapServerFault(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .null;
+fn soapServerFault(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.null);
 }
-fn soapServerAddSoapHeader(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    if (args.len == 0 or args[0] != .object) return .{ .bool = false };
+fn soapServerAddSoapHeader(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
     const headers = obj.get("__response_headers");
-    if (headers != .array) return .{ .bool = false };
+    if (headers != .array) return NativeResult.scalar(.{ .bool = false });
     try headers.array.set(ctx.allocator, .{ .int = headers.array.next_int_key }, args[0]);
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
-fn soapServerGetFunctions(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    return obj.get("__functions");
+fn soapServerGetFunctions(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(obj.get("__functions"));
 }
-fn soapServerSetPersistence(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .null;
+fn soapServerSetPersistence(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.null);
 }
 
-fn soapHeaderConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn soapHeaderConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len > 0) try obj.set(ctx.allocator, "namespace", args[0]);
     if (args.len > 1) try obj.set(ctx.allocator, "name", args[1]);
     if (args.len > 2) try obj.set(ctx.allocator, "data", args[2]);
     if (args.len > 3) try obj.set(ctx.allocator, "mustUnderstand", args[3]);
     if (args.len > 4) try obj.set(ctx.allocator, "actor", args[4]);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn soapVarConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn soapVarConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len > 0) try obj.set(ctx.allocator, "enc_value", args[0]);
     if (args.len > 1) try obj.set(ctx.allocator, "enc_type", args[1]);
     if (args.len > 2) try obj.set(ctx.allocator, "enc_stype", args[2]);
     if (args.len > 3) try obj.set(ctx.allocator, "enc_ns", args[3]);
     if (args.len > 4) try obj.set(ctx.allocator, "enc_name", args[4]);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn soapParamConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn soapParamConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len > 0) try obj.set(ctx.allocator, "param_data", args[0]);
     if (args.len > 1) try obj.set(ctx.allocator, "param_name", args[1]);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn soapFaultConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn soapFaultConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len > 0) try obj.set(ctx.allocator, "faultcode", args[0]);
     if (args.len > 1) {
         try obj.set(ctx.allocator, "faultstring", args[1]);
@@ -1077,18 +1070,17 @@ fn soapFaultConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     if (args.len > 2) try obj.set(ctx.allocator, "faultactor", args[2]);
     if (args.len > 3) try obj.set(ctx.allocator, "detail", args[3]);
     if (args.len > 4) try obj.set(ctx.allocator, "faultname", args[4]);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn soapFaultToString(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .string = Value.String.borrowed("") };
+fn soapFaultToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.literal("");
     const code = obj.get("faultcode");
     const str = obj.get("faultstring");
     const code_s = if (code == .string) code.string.bytes() else "Server";
     const str_s = if (str == .string) str.string.bytes() else "SOAP fault";
     const out = try std.fmt.allocPrint(ctx.allocator, "SoapFault: {s} ({s})", .{ str_s, code_s });
-    try ctx.strings.append(ctx.allocator, out);
-    return .{ .string = Value.String.borrowed(out) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
 }
 
 test {}

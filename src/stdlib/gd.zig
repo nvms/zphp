@@ -2,6 +2,7 @@ const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
 const vm_mod = @import("../runtime/vm.zig");
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const VM = vm_mod.VM;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
@@ -28,11 +29,11 @@ fn getImg(obj: *const PhpObject) ?*c.gdImageStruct {
     return @ptrFromInt(@as(usize, @intCast(v.int)));
 }
 
-fn wrapImg(ctx: *NativeContext, im: ?*c.gdImageStruct) !Value {
-    if (im == null) return .{ .bool = false };
+fn wrapImg(ctx: *NativeContext, im: ?*c.gdImageStruct) RuntimeError!NativeResult {
+    if (im == null) return NativeResult.scalar(.{ .bool = false });
     const obj = try ctx.createObject("GdImage");
     try obj.set(ctx.allocator, "__gd_ptr", .{ .int = @intCast(@intFromPtr(im.?)) });
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
 fn dupZ(ctx: *NativeContext, s: []const u8) ![:0]u8 {
@@ -78,60 +79,60 @@ fn argImg(args: []const Value, idx: usize) ?*c.gdImageStruct {
 
 // ---------------- create / destroy ----------------
 
-fn imgCreate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const w = argInt(args, 0) orelse return .{ .bool = false };
-    const h = argInt(args, 1) orelse return .{ .bool = false };
+fn imgCreate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const w = argInt(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const h = argInt(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
     const im = c.gdImageCreate(@intCast(w), @intCast(h));
     return wrapImg(ctx, im);
 }
 
-fn imgCreateTrueColor(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const w = argInt(args, 0) orelse return .{ .bool = false };
-    const h = argInt(args, 1) orelse return .{ .bool = false };
+fn imgCreateTrueColor(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const w = argInt(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const h = argInt(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
     const im = c.gdImageCreateTrueColor(@intCast(w), @intCast(h));
     return wrapImg(ctx, im);
 }
 
-fn imgDestroy(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn imgDestroy(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     _ = ctx;
-    const im = argImg(args, 0) orelse return .{ .bool = false };
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
     c.gdImageDestroy(im);
     if (args[0] == .object) {
         // zero the pointer so later operations no-op
         args[0].object.set(std.heap.page_allocator, "__gd_ptr", .{ .int = 0 }) catch {};
     }
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn imgCreateFromPng(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+fn imgCreateFromPng(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path_z = try dupZ(ctx, args[0].string.bytes());
-    const f = c.fopen(path_z.ptr, "rb") orelse return .{ .bool = false };
+    const f = c.fopen(path_z.ptr, "rb") orelse return NativeResult.scalar(.{ .bool = false });
     defer _ = c.fclose(f);
     const im = c.gdImageCreateFromPng(f);
     return wrapImg(ctx, im);
 }
 
-fn imgCreateFromJpeg(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+fn imgCreateFromJpeg(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path_z = try dupZ(ctx, args[0].string.bytes());
-    const f = c.fopen(path_z.ptr, "rb") orelse return .{ .bool = false };
+    const f = c.fopen(path_z.ptr, "rb") orelse return NativeResult.scalar(.{ .bool = false });
     defer _ = c.fclose(f);
     const im = c.gdImageCreateFromJpeg(f);
     return wrapImg(ctx, im);
 }
 
-fn imgCreateFromGif(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+fn imgCreateFromGif(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path_z = try dupZ(ctx, args[0].string.bytes());
-    const f = c.fopen(path_z.ptr, "rb") orelse return .{ .bool = false };
+    const f = c.fopen(path_z.ptr, "rb") orelse return NativeResult.scalar(.{ .bool = false });
     defer _ = c.fclose(f);
     const im = c.gdImageCreateFromGif(f);
     return wrapImg(ctx, im);
 }
 
-fn imgCreateFromString(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+fn imgCreateFromString(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const data = args[0].string.bytes();
     // try PNG first, then JPEG, then GIF (sniffed from header)
     if (data.len >= 8 and data[0] == 0x89 and data[1] == 'P' and data[2] == 'N' and data[3] == 'G') {
@@ -146,22 +147,22 @@ fn imgCreateFromString(ctx: *NativeContext, args: []const Value) RuntimeError!Va
         const im = c.gdImageCreateFromGifPtr(@intCast(data.len), @ptrCast(@constCast(data.ptr)));
         return wrapImg(ctx, im);
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
 // ---------------- output ----------------
 
-fn writeImageTo(ctx: *NativeContext, im: *c.gdImageStruct, args: []const Value, kind: enum { png, jpeg, gif }, quality: c_int) !Value {
+fn writeImageTo(ctx: *NativeContext, im: *c.gdImageStruct, args: []const Value, kind: enum { png, jpeg, gif }, quality: c_int) RuntimeError!NativeResult {
     if (args.len > 1 and args[1] == .string) {
         const path_z = try dupZ(ctx, args[1].string.bytes());
-        const f = c.fopen(path_z.ptr, "wb") orelse return .{ .bool = false };
+        const f = c.fopen(path_z.ptr, "wb") orelse return NativeResult.scalar(.{ .bool = false });
         defer _ = c.fclose(f);
         switch (kind) {
             .png => c.gdImagePng(im, f),
             .jpeg => c.gdImageJpeg(im, f, quality),
             .gif => c.gdImageGif(im, f),
         }
-        return .{ .bool = true };
+        return NativeResult.scalar(.{ .bool = true });
     }
     var size: c_int = 0;
     const buf = switch (kind) {
@@ -169,7 +170,7 @@ fn writeImageTo(ctx: *NativeContext, im: *c.gdImageStruct, args: []const Value, 
         .jpeg => c.gdImageJpegPtr(im, &size, quality),
         .gif => c.gdImageGifPtr(im, &size),
     };
-    if (buf == null) return .{ .bool = false };
+    if (buf == null) return NativeResult.scalar(.{ .bool = false });
     defer c.gdFree(buf);
     // when filename is null, PHP writes to the script's output channel - which
     // goes through ob_start buffers, not directly to stdout. append to vm.output
@@ -177,70 +178,70 @@ fn writeImageTo(ctx: *NativeContext, im: *c.gdImageStruct, args: []const Value, 
     const slice_ptr: [*]const u8 = @ptrCast(buf);
     const usize_sz: usize = @intCast(size);
     try ctx.vm.output.appendSlice(ctx.allocator, slice_ptr[0..usize_sz]);
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn imgPng(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const im = argImg(args, 0) orelse return .{ .bool = false };
+fn imgPng(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
     return writeImageTo(ctx, im, args, .png, 0);
 }
 
-fn imgJpeg(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const im = argImg(args, 0) orelse return .{ .bool = false };
+fn imgJpeg(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
     const q: c_int = if (args.len > 2 and args[2] == .int) @intCast(args[2].int) else 75;
     return writeImageTo(ctx, im, args, .jpeg, q);
 }
 
-fn imgGif(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const im = argImg(args, 0) orelse return .{ .bool = false };
+fn imgGif(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
     return writeImageTo(ctx, im, args, .gif, 0);
 }
 
 // ---------------- colors ----------------
 
-fn imgColorAllocate(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const im = argImg(args, 0) orelse return .{ .bool = false };
-    const r = argInt(args, 1) orelse return .{ .bool = false };
-    const g = argInt(args, 2) orelse return .{ .bool = false };
-    const b = argInt(args, 3) orelse return .{ .bool = false };
-    return .{ .int = @intCast(c.gdImageColorAllocate(im, @intCast(r), @intCast(g), @intCast(b))) };
+fn imgColorAllocate(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const r = argInt(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
+    const g = argInt(args, 2) orelse return NativeResult.scalar(.{ .bool = false });
+    const b = argInt(args, 3) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .int = @intCast(c.gdImageColorAllocate(im, @intCast(r), @intCast(g), @intCast(b))) });
 }
 
-fn imgColorAllocateAlpha(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const im = argImg(args, 0) orelse return .{ .bool = false };
-    const r = argInt(args, 1) orelse return .{ .bool = false };
-    const g = argInt(args, 2) orelse return .{ .bool = false };
-    const b = argInt(args, 3) orelse return .{ .bool = false };
-    const al = argInt(args, 4) orelse return .{ .bool = false };
-    return .{ .int = @intCast(c.gdImageColorAllocateAlpha(im, @intCast(r), @intCast(g), @intCast(b), @intCast(al))) };
+fn imgColorAllocateAlpha(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const r = argInt(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
+    const g = argInt(args, 2) orelse return NativeResult.scalar(.{ .bool = false });
+    const b = argInt(args, 3) orelse return NativeResult.scalar(.{ .bool = false });
+    const al = argInt(args, 4) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .int = @intCast(c.gdImageColorAllocateAlpha(im, @intCast(r), @intCast(g), @intCast(b), @intCast(al))) });
 }
 
-fn imgColorAt(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const im = argImg(args, 0) orelse return .{ .bool = false };
-    const x = argInt(args, 1) orelse return .{ .bool = false };
-    const y = argInt(args, 2) orelse return .{ .bool = false };
-    return .{ .int = @intCast(c.gdImageGetPixel(im, @intCast(x), @intCast(y))) };
+fn imgColorAt(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const x = argInt(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
+    const y = argInt(args, 2) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .int = @intCast(c.gdImageGetPixel(im, @intCast(x), @intCast(y))) });
 }
 
-fn imgRotate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const im = argImg(args, 0) orelse return .{ .bool = false };
-    const angle = argFloat(args, 1) orelse return .{ .bool = false };
+fn imgRotate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const angle = argFloat(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
     const bg_color = argInt(args, 2) orelse 0;
     const out = c.gdImageRotateInterpolated(im, @floatCast(angle), @intCast(bg_color));
     return wrapImg(ctx, out);
 }
 
-fn imgColorTransparent(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const im = argImg(args, 0) orelse return .{ .int = -1 };
+fn imgColorTransparent(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .int = -1 });
     if (args.len >= 2 and args[1] == .int) {
         c.gdImageColorTransparent(im, @intCast(args[1].int));
     }
-    return .{ .int = @intCast(im.*.transparent) };
+    return NativeResult.scalar(.{ .int = @intCast(im.*.transparent) });
 }
 
-fn imgColorsForIndex(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const im = argImg(args, 0) orelse return .{ .bool = false };
-    const idx = argInt(args, 1) orelse return .{ .bool = false };
+fn imgColorsForIndex(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const idx = argInt(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
     var r: c_int = 0;
     var g: c_int = 0;
     var b: c_int = 0;
@@ -253,7 +254,7 @@ fn imgColorsForIndex(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
         alpha = (ci >> 24) & 0x7f;
     } else {
         const ci: usize = @intCast(idx);
-        if (ci >= im.*.colorsTotal) return .{ .bool = false };
+        if (ci >= im.*.colorsTotal) return NativeResult.scalar(.{ .bool = false });
         r = im.*.red[ci];
         g = im.*.green[ci];
         b = im.*.blue[ci];
@@ -264,106 +265,106 @@ fn imgColorsForIndex(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("green") }, .{ .int = g });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("blue") }, .{ .int = b });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("alpha") }, .{ .int = alpha });
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
 // ---------------- drawing ----------------
 
-fn imgSetPixel(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const im = argImg(args, 0) orelse return .{ .bool = false };
-    const x = argInt(args, 1) orelse return .{ .bool = false };
-    const y = argInt(args, 2) orelse return .{ .bool = false };
-    const col = argInt(args, 3) orelse return .{ .bool = false };
+fn imgSetPixel(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const x = argInt(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
+    const y = argInt(args, 2) orelse return NativeResult.scalar(.{ .bool = false });
+    const col = argInt(args, 3) orelse return NativeResult.scalar(.{ .bool = false });
     c.gdImageSetPixel(im, @intCast(x), @intCast(y), @intCast(col));
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn imgLine(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const im = argImg(args, 0) orelse return .{ .bool = false };
-    const x1 = argInt(args, 1) orelse return .{ .bool = false };
-    const y1 = argInt(args, 2) orelse return .{ .bool = false };
-    const x2 = argInt(args, 3) orelse return .{ .bool = false };
-    const y2 = argInt(args, 4) orelse return .{ .bool = false };
-    const col = argInt(args, 5) orelse return .{ .bool = false };
+fn imgLine(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const x1 = argInt(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
+    const y1 = argInt(args, 2) orelse return NativeResult.scalar(.{ .bool = false });
+    const x2 = argInt(args, 3) orelse return NativeResult.scalar(.{ .bool = false });
+    const y2 = argInt(args, 4) orelse return NativeResult.scalar(.{ .bool = false });
+    const col = argInt(args, 5) orelse return NativeResult.scalar(.{ .bool = false });
     c.gdImageLine(im, @intCast(x1), @intCast(y1), @intCast(x2), @intCast(y2), @intCast(col));
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn imgRectangle(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const im = argImg(args, 0) orelse return .{ .bool = false };
-    const x1 = argInt(args, 1) orelse return .{ .bool = false };
-    const y1 = argInt(args, 2) orelse return .{ .bool = false };
-    const x2 = argInt(args, 3) orelse return .{ .bool = false };
-    const y2 = argInt(args, 4) orelse return .{ .bool = false };
-    const col = argInt(args, 5) orelse return .{ .bool = false };
+fn imgRectangle(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const x1 = argInt(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
+    const y1 = argInt(args, 2) orelse return NativeResult.scalar(.{ .bool = false });
+    const x2 = argInt(args, 3) orelse return NativeResult.scalar(.{ .bool = false });
+    const y2 = argInt(args, 4) orelse return NativeResult.scalar(.{ .bool = false });
+    const col = argInt(args, 5) orelse return NativeResult.scalar(.{ .bool = false });
     c.gdImageRectangle(im, @intCast(x1), @intCast(y1), @intCast(x2), @intCast(y2), @intCast(col));
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn imgFilledRectangle(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const im = argImg(args, 0) orelse return .{ .bool = false };
-    const x1 = argInt(args, 1) orelse return .{ .bool = false };
-    const y1 = argInt(args, 2) orelse return .{ .bool = false };
-    const x2 = argInt(args, 3) orelse return .{ .bool = false };
-    const y2 = argInt(args, 4) orelse return .{ .bool = false };
-    const col = argInt(args, 5) orelse return .{ .bool = false };
+fn imgFilledRectangle(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const x1 = argInt(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
+    const y1 = argInt(args, 2) orelse return NativeResult.scalar(.{ .bool = false });
+    const x2 = argInt(args, 3) orelse return NativeResult.scalar(.{ .bool = false });
+    const y2 = argInt(args, 4) orelse return NativeResult.scalar(.{ .bool = false });
+    const col = argInt(args, 5) orelse return NativeResult.scalar(.{ .bool = false });
     c.gdImageFilledRectangle(im, @intCast(x1), @intCast(y1), @intCast(x2), @intCast(y2), @intCast(col));
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn imgEllipse(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const im = argImg(args, 0) orelse return .{ .bool = false };
-    const cx = argInt(args, 1) orelse return .{ .bool = false };
-    const cy = argInt(args, 2) orelse return .{ .bool = false };
-    const w = argInt(args, 3) orelse return .{ .bool = false };
-    const h = argInt(args, 4) orelse return .{ .bool = false };
-    const col = argInt(args, 5) orelse return .{ .bool = false };
+fn imgEllipse(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const cx = argInt(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
+    const cy = argInt(args, 2) orelse return NativeResult.scalar(.{ .bool = false });
+    const w = argInt(args, 3) orelse return NativeResult.scalar(.{ .bool = false });
+    const h = argInt(args, 4) orelse return NativeResult.scalar(.{ .bool = false });
+    const col = argInt(args, 5) orelse return NativeResult.scalar(.{ .bool = false });
     c.gdImageEllipse(im, @intCast(cx), @intCast(cy), @intCast(w), @intCast(h), @intCast(col));
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn imgFilledEllipse(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const im = argImg(args, 0) orelse return .{ .bool = false };
-    const cx = argInt(args, 1) orelse return .{ .bool = false };
-    const cy = argInt(args, 2) orelse return .{ .bool = false };
-    const w = argInt(args, 3) orelse return .{ .bool = false };
-    const h = argInt(args, 4) orelse return .{ .bool = false };
-    const col = argInt(args, 5) orelse return .{ .bool = false };
+fn imgFilledEllipse(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const cx = argInt(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
+    const cy = argInt(args, 2) orelse return NativeResult.scalar(.{ .bool = false });
+    const w = argInt(args, 3) orelse return NativeResult.scalar(.{ .bool = false });
+    const h = argInt(args, 4) orelse return NativeResult.scalar(.{ .bool = false });
+    const col = argInt(args, 5) orelse return NativeResult.scalar(.{ .bool = false });
     c.gdImageFilledEllipse(im, @intCast(cx), @intCast(cy), @intCast(w), @intCast(h), @intCast(col));
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn imgArc(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const im = argImg(args, 0) orelse return .{ .bool = false };
-    const cx = argInt(args, 1) orelse return .{ .bool = false };
-    const cy = argInt(args, 2) orelse return .{ .bool = false };
-    const w = argInt(args, 3) orelse return .{ .bool = false };
-    const h = argInt(args, 4) orelse return .{ .bool = false };
-    const s = argInt(args, 5) orelse return .{ .bool = false };
-    const e = argInt(args, 6) orelse return .{ .bool = false };
-    const col = argInt(args, 7) orelse return .{ .bool = false };
+fn imgArc(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const cx = argInt(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
+    const cy = argInt(args, 2) orelse return NativeResult.scalar(.{ .bool = false });
+    const w = argInt(args, 3) orelse return NativeResult.scalar(.{ .bool = false });
+    const h = argInt(args, 4) orelse return NativeResult.scalar(.{ .bool = false });
+    const s = argInt(args, 5) orelse return NativeResult.scalar(.{ .bool = false });
+    const e = argInt(args, 6) orelse return NativeResult.scalar(.{ .bool = false });
+    const col = argInt(args, 7) orelse return NativeResult.scalar(.{ .bool = false });
     c.gdImageArc(im, @intCast(cx), @intCast(cy), @intCast(w), @intCast(h), @intCast(s), @intCast(e), @intCast(col));
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn imgFill(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const im = argImg(args, 0) orelse return .{ .bool = false };
-    const x = argInt(args, 1) orelse return .{ .bool = false };
-    const y = argInt(args, 2) orelse return .{ .bool = false };
-    const col = argInt(args, 3) orelse return .{ .bool = false };
+fn imgFill(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const x = argInt(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
+    const y = argInt(args, 2) orelse return NativeResult.scalar(.{ .bool = false });
+    const col = argInt(args, 3) orelse return NativeResult.scalar(.{ .bool = false });
     c.gdImageFill(im, @intCast(x), @intCast(y), @intCast(col));
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
 // ---------------- text ----------------
 
-fn imgString(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const im = argImg(args, 0) orelse return .{ .bool = false };
-    const font = argInt(args, 1) orelse return .{ .bool = false };
-    const x = argInt(args, 2) orelse return .{ .bool = false };
-    const y = argInt(args, 3) orelse return .{ .bool = false };
-    if (args.len < 5 or args[4] != .string) return .{ .bool = false };
-    const col = argInt(args, 5) orelse return .{ .bool = false };
+fn imgString(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const font = argInt(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
+    const x = argInt(args, 2) orelse return NativeResult.scalar(.{ .bool = false });
+    const y = argInt(args, 3) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len < 5 or args[4] != .string) return NativeResult.scalar(.{ .bool = false });
+    const col = argInt(args, 5) orelse return NativeResult.scalar(.{ .bool = false });
 
     const text_z = try dupZ(ctx, args[4].string.bytes());
     const gd_font = switch (font) {
@@ -374,86 +375,86 @@ fn imgString(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         else => c.gdFontGetTiny(),
     };
     c.gdImageString(im, gd_font, @intCast(x), @intCast(y), @ptrCast(@constCast(text_z.ptr)), @intCast(col));
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn imgTtfText(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 8) return .{ .bool = false };
-    const im = argImg(args, 0) orelse return .{ .bool = false };
+fn imgTtfText(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 8) return NativeResult.scalar(.{ .bool = false });
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
     const size: f64 = switch (args[1]) {
         .int => |i| @floatFromInt(i),
         .float => |f| f,
-        else => return .{ .bool = false },
+        else => return NativeResult.scalar(.{ .bool = false }),
     };
     const angle: f64 = switch (args[2]) {
         .int => |i| @floatFromInt(i),
         .float => |f| f,
-        else => return .{ .bool = false },
+        else => return NativeResult.scalar(.{ .bool = false }),
     };
-    const x = argInt(args, 3) orelse return .{ .bool = false };
-    const y = argInt(args, 4) orelse return .{ .bool = false };
-    const col = argInt(args, 5) orelse return .{ .bool = false };
-    if (args[6] != .string or args[7] != .string) return .{ .bool = false };
+    const x = argInt(args, 3) orelse return NativeResult.scalar(.{ .bool = false });
+    const y = argInt(args, 4) orelse return NativeResult.scalar(.{ .bool = false });
+    const col = argInt(args, 5) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args[6] != .string or args[7] != .string) return NativeResult.scalar(.{ .bool = false });
     const font_z = try dupZ(ctx, args[6].string.bytes());
     const text_z = try dupZ(ctx, args[7].string.bytes());
 
     var brect: [8]c_int = .{0} ** 8;
     const err = c.gdImageStringFT(im, &brect, @intCast(col), font_z.ptr, size, angle, @intCast(x), @intCast(y), text_z.ptr);
-    if (err != null) return .{ .bool = false };
+    if (err != null) return NativeResult.scalar(.{ .bool = false });
     // return the bounding box as a PHP array (8 ints)
     const arr = try ctx.createArray();
     for (brect, 0..) |v, i| try arr.set(ctx.allocator, .{ .int = @intCast(i) }, .{ .int = @intCast(v) });
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
 // ---------------- copy ----------------
 
-fn imgCopy(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const dst = argImg(args, 0) orelse return .{ .bool = false };
-    const src = argImg(args, 1) orelse return .{ .bool = false };
-    const dx = argInt(args, 2) orelse return .{ .bool = false };
-    const dy = argInt(args, 3) orelse return .{ .bool = false };
-    const sx = argInt(args, 4) orelse return .{ .bool = false };
-    const sy = argInt(args, 5) orelse return .{ .bool = false };
-    const w = argInt(args, 6) orelse return .{ .bool = false };
-    const h = argInt(args, 7) orelse return .{ .bool = false };
+fn imgCopy(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const dst = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const src = argImg(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
+    const dx = argInt(args, 2) orelse return NativeResult.scalar(.{ .bool = false });
+    const dy = argInt(args, 3) orelse return NativeResult.scalar(.{ .bool = false });
+    const sx = argInt(args, 4) orelse return NativeResult.scalar(.{ .bool = false });
+    const sy = argInt(args, 5) orelse return NativeResult.scalar(.{ .bool = false });
+    const w = argInt(args, 6) orelse return NativeResult.scalar(.{ .bool = false });
+    const h = argInt(args, 7) orelse return NativeResult.scalar(.{ .bool = false });
     c.gdImageCopy(dst, src, @intCast(dx), @intCast(dy), @intCast(sx), @intCast(sy), @intCast(w), @intCast(h));
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn imgCopyResampled(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const dst = argImg(args, 0) orelse return .{ .bool = false };
-    const src = argImg(args, 1) orelse return .{ .bool = false };
-    const dx = argInt(args, 2) orelse return .{ .bool = false };
-    const dy = argInt(args, 3) orelse return .{ .bool = false };
-    const sx = argInt(args, 4) orelse return .{ .bool = false };
-    const sy = argInt(args, 5) orelse return .{ .bool = false };
-    const dw = argInt(args, 6) orelse return .{ .bool = false };
-    const dh = argInt(args, 7) orelse return .{ .bool = false };
-    const sw = argInt(args, 8) orelse return .{ .bool = false };
-    const sh = argInt(args, 9) orelse return .{ .bool = false };
+fn imgCopyResampled(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const dst = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const src = argImg(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
+    const dx = argInt(args, 2) orelse return NativeResult.scalar(.{ .bool = false });
+    const dy = argInt(args, 3) orelse return NativeResult.scalar(.{ .bool = false });
+    const sx = argInt(args, 4) orelse return NativeResult.scalar(.{ .bool = false });
+    const sy = argInt(args, 5) orelse return NativeResult.scalar(.{ .bool = false });
+    const dw = argInt(args, 6) orelse return NativeResult.scalar(.{ .bool = false });
+    const dh = argInt(args, 7) orelse return NativeResult.scalar(.{ .bool = false });
+    const sw = argInt(args, 8) orelse return NativeResult.scalar(.{ .bool = false });
+    const sh = argInt(args, 9) orelse return NativeResult.scalar(.{ .bool = false });
     c.gdImageCopyResampled(dst, src, @intCast(dx), @intCast(dy), @intCast(sx), @intCast(sy), @intCast(dw), @intCast(dh), @intCast(sw), @intCast(sh));
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn imgCopyResized(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const dst = argImg(args, 0) orelse return .{ .bool = false };
-    const src = argImg(args, 1) orelse return .{ .bool = false };
-    const dx = argInt(args, 2) orelse return .{ .bool = false };
-    const dy = argInt(args, 3) orelse return .{ .bool = false };
-    const sx = argInt(args, 4) orelse return .{ .bool = false };
-    const sy = argInt(args, 5) orelse return .{ .bool = false };
-    const dw = argInt(args, 6) orelse return .{ .bool = false };
-    const dh = argInt(args, 7) orelse return .{ .bool = false };
-    const sw = argInt(args, 8) orelse return .{ .bool = false };
-    const sh = argInt(args, 9) orelse return .{ .bool = false };
+fn imgCopyResized(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const dst = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const src = argImg(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
+    const dx = argInt(args, 2) orelse return NativeResult.scalar(.{ .bool = false });
+    const dy = argInt(args, 3) orelse return NativeResult.scalar(.{ .bool = false });
+    const sx = argInt(args, 4) orelse return NativeResult.scalar(.{ .bool = false });
+    const sy = argInt(args, 5) orelse return NativeResult.scalar(.{ .bool = false });
+    const dw = argInt(args, 6) orelse return NativeResult.scalar(.{ .bool = false });
+    const dh = argInt(args, 7) orelse return NativeResult.scalar(.{ .bool = false });
+    const sw = argInt(args, 8) orelse return NativeResult.scalar(.{ .bool = false });
+    const sh = argInt(args, 9) orelse return NativeResult.scalar(.{ .bool = false });
     c.gdImageCopyResized(dst, src, @intCast(dx), @intCast(dy), @intCast(sx), @intCast(sy), @intCast(dw), @intCast(dh), @intCast(sw), @intCast(sh));
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn imgScale(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const src = argImg(args, 0) orelse return .{ .bool = false };
-    const new_w = argInt(args, 1) orelse return .{ .bool = false };
+fn imgScale(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const src = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const new_w = argInt(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
     var new_h = argInt(args, 2) orelse -1;
     if (new_h <= 0) {
         // preserve aspect ratio when height is -1 or unspecified
@@ -463,14 +464,14 @@ fn imgScale(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         new_h = @intFromFloat(@round(nw_f * sh_f / sw_f));
         if (new_h < 1) new_h = 1;
     }
-    const dst = c.gdImageCreateTrueColor(@intCast(new_w), @intCast(new_h)) orelse return .{ .bool = false };
+    const dst = c.gdImageCreateTrueColor(@intCast(new_w), @intCast(new_h)) orelse return NativeResult.scalar(.{ .bool = false });
     c.gdImageCopyResampled(dst, src, 0, 0, 0, 0, @intCast(new_w), @intCast(new_h), src.sx, src.sy);
     return wrapImg(ctx, dst);
 }
 
-fn imgFilter(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const im = argImg(args, 0) orelse return .{ .bool = false };
-    const kind = argInt(args, 1) orelse return .{ .bool = false };
+fn imgFilter(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const kind = argInt(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
     // PHP's IMG_FILTER_* constants:
     // 0 NEGATE, 1 GRAYSCALE, 2 BRIGHTNESS, 3 CONTRAST, 4 COLORIZE,
     // 5 EDGEDETECT, 6 EMBOSS, 7 GAUSSIAN_BLUR, 8 SELECTIVE_BLUR,
@@ -496,14 +497,14 @@ fn imgFilter(_: *NativeContext, args: []const Value) RuntimeError!Value {
         },
         5 => c.gdImageEdgeDetectQuick(im),
         7 => c.gdImageGaussianBlur(im),
-        else => return .{ .bool = false },
+        else => return NativeResult.scalar(.{ .bool = false }),
     };
-    return .{ .bool = ok != 0 or kind == 1 or kind == 0 or kind == 5 or kind == 7 };
+    return NativeResult.scalar(.{ .bool = ok != 0 or kind == 1 or kind == 0 or kind == 5 or kind == 7 });
 }
 
-fn imgCrop(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const src = argImg(args, 0) orelse return .{ .bool = false };
-    if (args.len < 2 or args[1] != .array) return .{ .bool = false };
+fn imgCrop(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const src = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len < 2 or args[1] != .array) return NativeResult.scalar(.{ .bool = false });
     const rect = args[1].array;
     const x = blk: {
         const v = rect.get(.{ .string = Value.String.borrowed("x") });
@@ -521,58 +522,58 @@ fn imgCrop(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const v = rect.get(.{ .string = Value.String.borrowed("height") });
         break :blk if (v == .int) v.int else 0;
     };
-    if (w <= 0 or h <= 0) return .{ .bool = false };
-    const dst = c.gdImageCreateTrueColor(@intCast(w), @intCast(h)) orelse return .{ .bool = false };
+    if (w <= 0 or h <= 0) return NativeResult.scalar(.{ .bool = false });
+    const dst = c.gdImageCreateTrueColor(@intCast(w), @intCast(h)) orelse return NativeResult.scalar(.{ .bool = false });
     c.gdImageCopy(dst, src, 0, 0, @intCast(x), @intCast(y), @intCast(w), @intCast(h));
     return wrapImg(ctx, dst);
 }
 
 // ---------------- dimensions ----------------
 
-fn imgSx(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const im = argImg(args, 0) orelse return .{ .bool = false };
-    return .{ .int = @intCast(im.sx) };
+fn imgSx(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .int = @intCast(im.sx) });
 }
 
-fn imgSy(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const im = argImg(args, 0) orelse return .{ .bool = false };
-    return .{ .int = @intCast(im.sy) };
+fn imgSy(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .int = @intCast(im.sy) });
 }
 
 // ---------------- alpha / interlace ----------------
 
-fn imgAlphaBlending(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const im = argImg(args, 0) orelse return .{ .bool = false };
-    const on = argInt(args, 1) orelse return .{ .bool = false };
+fn imgAlphaBlending(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const on = argInt(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
     c.gdImageAlphaBlending(im, @intCast(on));
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn imgSaveAlpha(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const im = argImg(args, 0) orelse return .{ .bool = false };
-    const on = argInt(args, 1) orelse return .{ .bool = false };
+fn imgSaveAlpha(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const on = argInt(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
     c.gdImageSaveAlpha(im, @intCast(on));
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn imgInterlace(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const im = argImg(args, 0) orelse return .{ .bool = false };
-    const on = argInt(args, 1) orelse return .{ .bool = false };
+fn imgInterlace(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
+    const on = argInt(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
     c.gdImageInterlace(im, @intCast(on));
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
 // ---------------- info ----------------
 
-fn imgGetSize(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+fn imgGetSize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path_z = try dupZ(ctx, args[0].string.bytes());
     // sniff via fopen + gd helpers (minimal: just open file and check magic, then return dims via libgd)
-    const f = c.fopen(path_z.ptr, "rb") orelse return .{ .bool = false };
+    const f = c.fopen(path_z.ptr, "rb") orelse return NativeResult.scalar(.{ .bool = false });
     defer _ = c.fclose(f);
     var header: [12]u8 = undefined;
     const read = c.fread(&header, 1, header.len, f);
-    if (read < 4) return .{ .bool = false };
+    if (read < 4) return NativeResult.scalar(.{ .bool = false });
     _ = c.fseek(f, 0, c.SEEK_SET);
 
     var im: ?*c.gdImageStruct = null;
@@ -591,9 +592,9 @@ fn imgGetSize(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         im = c.gdImageCreateFromGif(f);
         mime = "image/gif";
         typ = 1;
-    } else return .{ .bool = false };
+    } else return NativeResult.scalar(.{ .bool = false });
 
-    if (im == null) return .{ .bool = false };
+    if (im == null) return NativeResult.scalar(.{ .bool = false });
     defer c.gdImageDestroy(im);
 
     const arr = try ctx.createArray();
@@ -603,39 +604,37 @@ fn imgGetSize(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     try arr.set(ctx.allocator, .{ .int = 3 }, .{ .string = Value.String.borrowed(try dupString(ctx, "")) });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(try dupString(ctx, "mime")) }, .{ .string = Value.String.borrowed(try dupString(ctx, mime)) });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(try dupString(ctx, "bits")) }, .{ .int = 8 });
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
 // PHP IMAGETYPE_* constants -> mime/extension mappings
-fn imageTypeToMimeType(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .string = Value.String.borrowed("application/octet-stream") };
+fn imageTypeToMimeType(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.literal("application/octet-stream");
     const t = Value.toInt(args[0]);
-    return .{
-        .string = Value.String.borrowed(switch (t) {
-            1 => "image/gif",
-            2 => "image/jpeg",
-            3 => "image/png",
-            4 => "application/x-shockwave-flash",
-            5 => "image/psd",
-            6 => "image/bmp",
-            7, 8 => "image/tiff",
-            9 => "application/octet-stream", // JPC
-            10 => "image/jp2",
-            11, 12 => "application/octet-stream",
-            13 => "application/x-shockwave-flash",
-            14 => "image/iff",
-            15 => "image/vnd.wap.wbmp",
-            16 => "image/xbm",
-            17 => "image/x-icon",
-            18 => "image/webp",
-            19 => "image/avif",
-            else => "application/octet-stream",
-        }),
-    };
+    return try NativeResult.copyString(ctx.allocator, switch (t) {
+        1 => "image/gif",
+        2 => "image/jpeg",
+        3 => "image/png",
+        4 => "application/x-shockwave-flash",
+        5 => "image/psd",
+        6 => "image/bmp",
+        7, 8 => "image/tiff",
+        9 => "application/octet-stream", // JPC
+        10 => "image/jp2",
+        11, 12 => "application/octet-stream",
+        13 => "application/x-shockwave-flash",
+        14 => "image/iff",
+        15 => "image/vnd.wap.wbmp",
+        16 => "image/xbm",
+        17 => "image/x-icon",
+        18 => "image/webp",
+        19 => "image/avif",
+        else => "application/octet-stream",
+    });
 }
 
-fn imageTypeToExtension(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
+fn imageTypeToExtension(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     const t = Value.toInt(args[0]);
     const include_dot = args.len < 2 or args[1].isTruthy();
     const ext: []const u8 = switch (t) {
@@ -652,15 +651,14 @@ fn imageTypeToExtension(ctx: *NativeContext, args: []const Value) RuntimeError!V
         17 => "ico",
         18 => "webp",
         19 => "avif",
-        else => return .{ .bool = false },
+        else => return NativeResult.scalar(.{ .bool = false }),
     };
-    if (!include_dot) return .{ .string = Value.String.borrowed(try ctx.createString(ext)) };
+    if (!include_dot) return try NativeResult.copyString(ctx.allocator, ext);
     const out = try std.fmt.allocPrint(ctx.allocator, ".{s}", .{ext});
-    try ctx.strings.append(ctx.allocator, out);
-    return .{ .string = Value.String.borrowed(out) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
 }
 
-fn gdInfo(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn gdInfo(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("GD Version") }, .{ .string = Value.String.borrowed("bundled (2.x compatible)") });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("FreeType Support") }, .{ .bool = false });
@@ -676,7 +674,7 @@ fn gdInfo(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("AVIF Support") }, .{ .bool = false });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("TGA Read Support") }, .{ .bool = false });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("JIS-mapped Japanese Font Support") }, .{ .bool = false });
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
 // ---------------- registration ----------------

@@ -3,6 +3,7 @@ const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
 const vm_mod = @import("../runtime/vm.zig");
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const VM = vm_mod.VM;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
@@ -263,58 +264,58 @@ fn isSequentialList(arr: *const PhpArray) bool {
 
 // ---------------- top-level functions ----------------
 
-fn sxmlLoadString(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+fn sxmlLoadString(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const src = args[0].string.bytes();
     var opts: c_int = 0;
     if (args.len > 2 and args[2] == .int) opts = @intCast(args[2].int);
-    const doc = c.xmlReadMemory(src.ptr, @intCast(src.len), null, null, opts) orelse return .{ .bool = false };
+    const doc = c.xmlReadMemory(src.ptr, @intCast(src.len), null, null, opts) orelse return NativeResult.scalar(.{ .bool = false });
     const root = c.xmlDocGetRootElement(doc) orelse {
         c.xmlFreeDoc(doc);
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     };
     const wrapper = try buildRootWrapper(ctx, doc, root);
     try wrapper.set(ctx.allocator, "__owns_doc", .{ .bool = true });
-    return .{ .object = wrapper };
+    return NativeResult.borrowed(.{ .object = wrapper });
 }
 
-fn sxmlLoadFile(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+fn sxmlLoadFile(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path_z = try dupZ(ctx, args[0].string.bytes());
     var opts: c_int = 0;
     if (args.len > 2 and args[2] == .int) opts = @intCast(args[2].int);
-    const doc = c.xmlReadFile(path_z.ptr, null, opts) orelse return .{ .bool = false };
+    const doc = c.xmlReadFile(path_z.ptr, null, opts) orelse return NativeResult.scalar(.{ .bool = false });
     const root = c.xmlDocGetRootElement(doc) orelse {
         c.xmlFreeDoc(doc);
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     };
     const wrapper = try buildRootWrapper(ctx, doc, root);
     try wrapper.set(ctx.allocator, "__owns_doc", .{ .bool = true });
-    return .{ .object = wrapper };
+    return NativeResult.borrowed(.{ .object = wrapper });
 }
 
-fn sxmlImportDom(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .object) return .null;
+fn sxmlImportDom(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .object) return NativeResult.scalar(.null);
     const dom_obj = args[0].object;
     // DOM objects store xmlNodePtr in "__node" via dom.zig - reuse that
     const node_v = dom_obj.get("__node");
-    if (node_v != .int or node_v.int == 0) return .null;
+    if (node_v != .int or node_v.int == 0) return NativeResult.scalar(.null);
     const node: *c.xmlNode = @ptrFromInt(@as(usize, @intCast(node_v.int)));
     // for a DOMDocument, descend to root; for any node, use it
     const target: *c.xmlNode = if (node.type == c.XML_DOCUMENT_NODE or node.type == c.XML_HTML_DOCUMENT_NODE)
-        c.xmlDocGetRootElement(@ptrCast(node)) orelse return .null
+        c.xmlDocGetRootElement(@ptrCast(node)) orelse return NativeResult.scalar(.null)
     else
         node;
-    const doc = target.doc orelse return .null;
+    const doc = target.doc orelse return NativeResult.scalar(.null);
     const wrapper = try buildWrapper(ctx, doc, target);
-    return .{ .object = wrapper };
+    return NativeResult.borrowed(.{ .object = wrapper });
 }
 
 // ---------------- SimpleXMLElement::__construct ----------------
 
-fn sxmlConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .null;
-    const obj = getThis(ctx) orelse return .null;
+fn sxmlConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const src = args[0].string.bytes();
     var opts: c_int = 0;
     if (args.len > 1 and args[1] == .int) opts = @intCast(args[1].int);
@@ -325,42 +326,42 @@ fn sxmlConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const path_z = try dupZ(ctx, src);
         break :blk c.xmlReadFile(path_z.ptr, null, opts);
     } else c.xmlReadMemory(src.ptr, @intCast(src.len), null, null, opts);
-    if (doc == null) return .null;
+    if (doc == null) return NativeResult.scalar(.null);
 
     const root = c.xmlDocGetRootElement(doc) orelse {
         c.xmlFreeDoc(doc);
-        return .null;
+        return NativeResult.scalar(.null);
     };
     try obj.set(ctx.allocator, "__node", .{ .int = @intCast(@intFromPtr(root)) });
     try obj.set(ctx.allocator, "__doc", .{ .int = @intCast(@intFromPtr(doc)) });
     try obj.set(ctx.allocator, "__owns_doc", .{ .bool = true });
     try obj.set(ctx.allocator, "__is_attr", .{ .bool = false });
     try obj.set(ctx.allocator, "__iter_children", .{ .bool = true });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 // ---------------- methods ----------------
 
-fn sxmlGetName(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn sxmlGetName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (obj.get("__is_attr") == .bool and obj.get("__is_attr").bool) {
         const an = obj.get("__attr_name");
-        if (an == .string) return an;
+        if (an == .string) return NativeResult.share(an);
     }
-    const node = getNodePtr(obj) orelse return .null;
-    if (node.name == null) return .null;
-    return .{ .string = Value.String.borrowed(try dupString(ctx, node.name[0..cstrLen(node.name)])) };
+    const node = getNodePtr(obj) orelse return NativeResult.scalar(.null);
+    if (node.name == null) return NativeResult.scalar(.null);
+    return try NativeResult.copyString(ctx.allocator, node.name[0..cstrLen(node.name)]);
 }
 
-fn sxmlAsXML(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const node = getNodePtr(obj) orelse return .{ .bool = false };
-    const doc = getDocPtr(obj) orelse return .{ .bool = false };
+fn sxmlAsXML(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const node = getNodePtr(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    const doc = getDocPtr(obj) orelse return NativeResult.scalar(.{ .bool = false });
 
     if (args.len > 0 and args[0] == .string) {
         const path_z = try dupZ(ctx, args[0].string.bytes());
         const written = c.xmlSaveFormatFile(path_z.ptr, doc, 0);
-        return .{ .bool = written >= 0 };
+        return NativeResult.scalar(.{ .bool = written >= 0 });
     }
 
     // is this the root element? PHP returns full doc XML; otherwise just node fragment
@@ -369,33 +370,33 @@ fn sxmlAsXML(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         var out: [*c]u8 = null;
         var size: c_int = 0;
         c.xmlDocDumpFormatMemoryEnc(doc, &out, &size, doc.*.encoding, 0);
-        if (out == null) return .{ .bool = false };
+        if (out == null) return NativeResult.scalar(.{ .bool = false });
         defer c.xmlFree.?(out);
-        return .{ .string = Value.String.borrowed(try dupString(ctx, out[0..@intCast(size)])) };
+        return try NativeResult.copyString(ctx.allocator, out[0..@intCast(size)]);
     }
 
     const buf = c.xmlBufferCreate();
     defer c.xmlBufferFree(buf);
     _ = c.xmlNodeDump(buf, doc, node, 0, 0);
     const content = c.xmlBufferContent(buf);
-    if (content == null) return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
-    return .{ .string = Value.String.borrowed(try dupString(ctx, content[0..cstrLen(content)])) };
+    if (content == null) return try NativeResult.copyString(ctx.allocator, "");
+    return try NativeResult.copyString(ctx.allocator, content[0..cstrLen(content)]);
 }
 
-fn sxmlSaveXML(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn sxmlSaveXML(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return sxmlAsXML(ctx, args);
 }
 
-fn sxmlCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    const node = getNodePtr(obj) orelse return .{ .int = 0 };
+fn sxmlCount(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    const node = getNodePtr(obj) orelse return NativeResult.scalar(.{ .int = 0 });
     // count matches iteration: children-mode counts child elements; sibling-mode
     // counts same-named siblings of $this; attr-view counts attributes
     if (obj.get("__attr_view") == .bool and obj.get("__attr_view").bool) {
         var count: i64 = 0;
         var attr = node.properties;
         while (attr != null) : (attr = attr.*.next) count += 1;
-        return .{ .int = count };
+        return NativeResult.scalar(.{ .int = count });
     }
     if (obj.get("__iter_children") == .bool and obj.get("__iter_children").bool) {
         const ns_v = obj.get("__ns");
@@ -407,9 +408,9 @@ fn sxmlCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
             if (ns_filter) |ns| if (!nodeInNs(child, ns)) continue;
             count += 1;
         }
-        return .{ .int = count };
+        return NativeResult.scalar(.{ .int = count });
     }
-    if (node.name == null) return .{ .int = 0 };
+    if (node.name == null) return NativeResult.scalar(.{ .int = 0 });
     const self_name = node.name[0..cstrLen(node.name)];
     var count: i64 = 0;
     var ch: ?*c.xmlNode = node;
@@ -419,13 +420,13 @@ fn sxmlCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         if (cn.name == null) continue;
         if (std.mem.eql(u8, cn.name[0..cstrLen(cn.name)], self_name)) count += 1;
     }
-    return .{ .int = count };
+    return NativeResult.scalar(.{ .int = count });
 }
 
-fn sxmlChildren(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const node = getNodePtr(obj) orelse return .null;
-    const doc = getDocPtr(obj) orelse return .null;
+fn sxmlChildren(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const node = getNodePtr(obj) orelse return NativeResult.scalar(.null);
+    const doc = getDocPtr(obj) orelse return NativeResult.scalar(.null);
     // ->children() must yield the node's CHILDREN, not iterate same-named
     // siblings of the node itself - that's the default sibling-mode wrapper
     const wrapper = try buildWrapperMode(ctx, doc, node, .children);
@@ -450,13 +451,13 @@ fn sxmlChildren(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const owned = try ctx.allocator.dupe(u8, resolved_ns);
     try ctx.strings.append(ctx.allocator, owned);
     try wrapper.set(ctx.allocator, "__ns", .{ .string = Value.String.borrowed(owned) });
-    return .{ .object = wrapper };
+    return NativeResult.borrowed(.{ .object = wrapper });
 }
 
-fn sxmlAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const node = getNodePtr(obj) orelse return .null;
-    const doc = getDocPtr(obj) orelse return .null;
+fn sxmlAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const node = getNodePtr(obj) orelse return NativeResult.scalar(.null);
+    const doc = getDocPtr(obj) orelse return NativeResult.scalar(.null);
     const wrapper = try ctx.createObject("SimpleXMLElement");
     try wrapper.set(ctx.allocator, "__node", .{ .int = @intCast(@intFromPtr(node)) });
     try wrapper.set(ctx.allocator, "__doc", .{ .int = @intCast(@intFromPtr(doc)) });
@@ -481,7 +482,7 @@ fn sxmlAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const owned = try ctx.allocator.dupe(u8, resolved_ns);
     try ctx.strings.append(ctx.allocator, owned);
     try wrapper.set(ctx.allocator, "__ns", .{ .string = Value.String.borrowed(owned) });
-    return .{ .object = wrapper };
+    return NativeResult.borrowed(.{ .object = wrapper });
 }
 
 // walks all element nodes from the given root, registering each declared
@@ -502,13 +503,13 @@ fn autoRegisterNamespaces(ctx: *NativeContext, xctx: *c.xmlXPathContext, node: *
     }
 }
 
-fn sxmlXpath(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const node = getNodePtr(obj) orelse return .{ .bool = false };
-    const doc = getDocPtr(obj) orelse return .{ .bool = false };
+fn sxmlXpath(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const node = getNodePtr(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    const doc = getDocPtr(obj) orelse return NativeResult.scalar(.{ .bool = false });
 
-    const xctx = c.xmlXPathNewContext(doc) orelse return .{ .bool = false };
+    const xctx = c.xmlXPathNewContext(doc) orelse return NativeResult.scalar(.{ .bool = false });
     defer c.xmlXPathFreeContext(xctx);
     xctx.*.node = node;
 
@@ -531,7 +532,7 @@ fn sxmlXpath(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     const expr_z = try dupZ(ctx, args[0].string.bytes());
     const result = c.xmlXPathEvalExpression(@ptrCast(expr_z.ptr), xctx);
-    if (result == null) return .{ .bool = false };
+    if (result == null) return NativeResult.scalar(.{ .bool = false });
     defer c.xmlXPathFreeObject(result);
 
     const arr = try ctx.createArray();
@@ -545,12 +546,12 @@ fn sxmlXpath(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             try arr.set(ctx.allocator, .{ .int = @intCast(i) }, .{ .object = wrapper });
         }
     }
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn sxmlRegisterXPathNamespace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn sxmlRegisterXPathNamespace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     var ns_map = obj.get("__namespaces");
     if (ns_map != .array) {
         const arr = try ctx.createArray();
@@ -560,14 +561,14 @@ fn sxmlRegisterXPathNamespace(ctx: *NativeContext, args: []const Value) RuntimeE
     const key = try dupString(ctx, args[0].string.bytes());
     const val = try dupString(ctx, args[1].string.bytes());
     try ns_map.array.set(ctx.allocator, .{ .string = Value.String.borrowed(key) }, .{ .string = Value.String.borrowed(val) });
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn sxmlAddChild(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .null;
-    const obj = getThis(ctx) orelse return .null;
-    const node = getNodePtr(obj) orelse return .null;
-    const doc = getDocPtr(obj) orelse return .null;
+fn sxmlAddChild(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const node = getNodePtr(obj) orelse return NativeResult.scalar(.null);
+    const doc = getDocPtr(obj) orelse return NativeResult.scalar(.null);
     const content_z: ?[:0]u8 = if (args.len > 1 and args[1] == .string) try dupZ(ctx, args[1].string.bytes()) else null;
     const ns_str: ?[]const u8 = if (args.len > 2 and args[2] == .string and args[2].string.bytes().len > 0) args[2].string.bytes() else null;
 
@@ -597,7 +598,7 @@ fn sxmlAddChild(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     }
     const content_ptr: [*c]const u8 = if (content_z) |cz| @ptrCast(cz.ptr) else null;
     const child_raw = c.xmlNewTextChild(node, ns_ptr, @ptrCast(local_z.ptr), content_ptr);
-    if (child_raw == null) return .null;
+    if (child_raw == null) return NativeResult.scalar(.null);
     const child: *c.xmlNode = @ptrCast(child_raw);
     // attach the namespace to the child itself so it serializes as
     // <prefix:local xmlns:prefix="..."> when the prefix wasn't already in scope
@@ -606,27 +607,27 @@ fn sxmlAddChild(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         child.nsDef = np;
     };
     const wrapper = try buildWrapper(ctx, doc, child);
-    return .{ .object = wrapper };
+    return NativeResult.borrowed(.{ .object = wrapper });
 }
 
-fn sxmlAddAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .null;
-    const obj = getThis(ctx) orelse return .null;
-    const node = getNodePtr(obj) orelse return .null;
+fn sxmlAddAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.null);
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const node = getNodePtr(obj) orelse return NativeResult.scalar(.null);
     const name_z = try dupZ(ctx, args[0].string.bytes());
     const val_z = try dupZ(ctx, args[1].string.bytes());
     _ = c.xmlNewProp(node, @ptrCast(name_z.ptr), @ptrCast(val_z.ptr));
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn sxmlGetNamespaces(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const node = getNodePtr(obj) orelse return .null;
+fn sxmlGetNamespaces(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const node = getNodePtr(obj) orelse return NativeResult.scalar(.null);
     var recursive: bool = false;
     if (args.len > 0 and args[0] == .bool) recursive = args[0].bool;
     const arr = try ctx.createArray();
     try collectNamespaces(ctx, node, arr, recursive);
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
 fn collectNamespaces(ctx: *NativeContext, node: *c.xmlNode, arr: *PhpArray, recursive: bool) !void {
@@ -647,28 +648,28 @@ fn collectNamespaces(ctx: *NativeContext, node: *c.xmlNode, arr: *PhpArray, recu
     }
 }
 
-fn sxmlGetDocNamespaces(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn sxmlGetDocNamespaces(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return sxmlGetNamespaces(ctx, args);
 }
 
-fn sxmlToString(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
+fn sxmlToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return try NativeResult.copyString(ctx.allocator, "");
     // attribute pseudo-element: return the attribute's value
     if (obj.get("__is_attr") == .bool and obj.get("__is_attr").bool) {
-        const owner = getNodePtr(obj) orelse return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
+        const owner = getNodePtr(obj) orelse return try NativeResult.copyString(ctx.allocator, "");
         const an = obj.get("__attr_name");
-        if (an != .string) return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
+        if (an != .string) return try NativeResult.copyString(ctx.allocator, "");
         const an_z = try dupZ(ctx, an.string.bytes());
         const ns_v = obj.get("__attr_ns");
         const v: [*c]u8 = if (ns_v == .string and ns_v.string.bytes().len > 0) blk: {
             const ns_z = try dupZ(ctx, ns_v.string.bytes());
             break :blk c.xmlGetNsProp(owner, @ptrCast(an_z.ptr), @ptrCast(ns_z.ptr));
         } else c.xmlGetProp(owner, @ptrCast(an_z.ptr));
-        if (v == null) return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
+        if (v == null) return try NativeResult.copyString(ctx.allocator, "");
         defer c.xmlFree.?(v);
-        return .{ .string = Value.String.borrowed(try dupString(ctx, v[0..cstrLen(v)])) };
+        return try NativeResult.copyString(ctx.allocator, v[0..cstrLen(v)]);
     }
-    const node = getNodePtr(obj) orelse return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
+    const node = getNodePtr(obj) orelse return try NativeResult.copyString(ctx.allocator, "");
     // SimpleXML's __toString returns the direct text content of the element
     // (concatenation of immediate text children, not recursive)
     var out = std.ArrayList(u8){};
@@ -682,7 +683,7 @@ fn sxmlToString(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
             }
         }
     }
-    return .{ .string = Value.String.borrowed(try dupString(ctx, out.items)) };
+    return try NativeResult.copyString(ctx.allocator, out.items);
 }
 
 // ---------------- magic __get / __set / iteration / offset ----------------
@@ -695,11 +696,11 @@ fn nodeInNs(n: *c.xmlNode, ns: []const u8) bool {
     return ns.len == 0;
 }
 
-fn sxmlIsset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn sxmlIsset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const name = args[0].string.bytes();
-    const node = getNodePtr(obj) orelse return .{ .bool = false };
+    const node = getNodePtr(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const ns_v = obj.get("__ns");
     const ns_filter: ?[]const u8 = if (ns_v == .string) ns_v.string.bytes() else null;
     var ch = node.children;
@@ -707,17 +708,17 @@ fn sxmlIsset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (ch.*.type != c.XML_ELEMENT_NODE) continue;
         if (!nameMatches(ch, name)) continue;
         if (ns_filter) |ns| if (!nodeInNs(ch, ns)) continue;
-        return .{ .bool = true };
+        return NativeResult.scalar(.{ .bool = true });
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn sxmlGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .null;
-    const obj = getThis(ctx) orelse return .null;
+fn sxmlGet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const name = args[0].string.bytes();
-    const node = getNodePtr(obj) orelse return .null;
-    const doc = getDocPtr(obj) orelse return .null;
+    const node = getNodePtr(obj) orelse return NativeResult.scalar(.null);
+    const doc = getDocPtr(obj) orelse return NativeResult.scalar(.null);
 
     // honor namespace filter set by children($ns) / attributes($ns)
     const ns_v = obj.get("__ns");
@@ -731,7 +732,7 @@ fn sxmlGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             const owned = try dupString(ctx, ns);
             try wrap.set(ctx.allocator, "__attr_ns", .{ .string = Value.String.borrowed(owned) });
         }
-        return .{ .object = wrap };
+        return NativeResult.borrowed(.{ .object = wrap });
     }
 
     var ch = node.children;
@@ -746,22 +747,22 @@ fn sxmlGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             try ctx.strings.append(ctx.allocator, owned);
             try wrapper.set(ctx.allocator, "__ns", .{ .string = Value.String.borrowed(owned) });
         }
-        return .{ .object = wrapper };
+        return NativeResult.borrowed(.{ .object = wrapper });
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn sxmlOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1) return .null;
-    const obj = getThis(ctx) orelse return .null;
-    const node = getNodePtr(obj) orelse return .null;
-    const doc = getDocPtr(obj) orelse return .null;
+fn sxmlOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1) return NativeResult.scalar(.null);
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const node = getNodePtr(obj) orelse return NativeResult.scalar(.null);
+    const doc = getDocPtr(obj) orelse return NativeResult.scalar(.null);
 
     // numeric offset: walk same-named siblings starting from $this
     if (args[0] == .int) {
         const idx = args[0].int;
-        if (idx < 0) return .null;
-        if (node.name == null) return .null;
+        if (idx < 0) return NativeResult.scalar(.null);
+        if (node.name == null) return NativeResult.scalar(.null);
         const self_name = node.name[0..cstrLen(node.name)];
 
         // start from the first same-named sibling under parent
@@ -772,57 +773,57 @@ fn sxmlOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             if (cn.type == c.XML_ELEMENT_NODE and cn.name != null and std.mem.eql(u8, cn.name[0..cstrLen(cn.name)], self_name)) {
                 if (found == idx) {
                     const wrapper = try buildWrapper(ctx, doc, cn);
-                    return .{ .object = wrapper };
+                    return NativeResult.borrowed(.{ .object = wrapper });
                 }
                 found += 1;
             }
         }
-        return .null;
+        return NativeResult.scalar(.null);
     }
     // string offset: attribute access
     if (args[0] == .string) {
         const attr_z = try dupZ(ctx, args[0].string.bytes());
-        if (c.xmlHasProp(node, @ptrCast(attr_z.ptr)) == null) return .null;
+        if (c.xmlHasProp(node, @ptrCast(attr_z.ptr)) == null) return NativeResult.scalar(.null);
         const wrapper = try buildAttrWrapper(ctx, doc, node, args[0].string.bytes());
-        return .{ .object = wrapper };
+        return NativeResult.borrowed(.{ .object = wrapper });
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn sxmlOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const node = getNodePtr(obj) orelse return .{ .bool = false };
+fn sxmlOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const node = getNodePtr(obj) orelse return NativeResult.scalar(.{ .bool = false });
     if (args[0] == .string) {
         const z = try dupZ(ctx, args[0].string.bytes());
-        return .{ .bool = c.xmlHasProp(node, @ptrCast(z.ptr)) != null };
+        return NativeResult.scalar(.{ .bool = c.xmlHasProp(node, @ptrCast(z.ptr)) != null });
     }
     if (args[0] == .int) {
         // numeric offset: counts same-named siblings of $this
         const idx = args[0].int;
-        if (idx < 0 or node.name == null) return .{ .bool = false };
+        if (idx < 0 or node.name == null) return NativeResult.scalar(.{ .bool = false });
         const self_name = node.name[0..cstrLen(node.name)];
         var n: ?*c.xmlNode = if (node.parent != null) node.parent.*.children else node;
         var found: i64 = 0;
         while (n != null) : (n = n.?.next) {
             const cn = n.?;
             if (cn.type == c.XML_ELEMENT_NODE and cn.name != null and std.mem.eql(u8, cn.name[0..cstrLen(cn.name)], self_name)) {
-                if (found == idx) return .{ .bool = true };
+                if (found == idx) return NativeResult.scalar(.{ .bool = true });
                 found += 1;
             }
         }
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn sxmlOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2) return .null;
-    const obj = getThis(ctx) orelse return .null;
-    const node = getNodePtr(obj) orelse return .null;
+fn sxmlOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2) return NativeResult.scalar(.null);
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const node = getNodePtr(obj) orelse return NativeResult.scalar(.null);
     // numeric offset: replace text content of the Nth same-named sibling
     if (args[0] == .int) {
         const idx = args[0].int;
-        if (idx < 0 or node.name == null) return .null;
+        if (idx < 0 or node.name == null) return NativeResult.scalar(.null);
         const self_name = node.name[0..cstrLen(node.name)];
         var n: ?*c.xmlNode = if (node.parent != null) node.parent.*.children else node;
         var found: i64 = 0;
@@ -831,18 +832,18 @@ fn sxmlOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             if (cn.type == c.XML_ELEMENT_NODE and cn.name != null and std.mem.eql(u8, cn.name[0..cstrLen(cn.name)], self_name)) {
                 if (found == idx) {
                     if (args[1] == .string) try setNodeText(ctx, cn, args[1].string.bytes());
-                    return .null;
+                    return NativeResult.scalar(.null);
                 }
                 found += 1;
             }
         }
-        return .null;
+        return NativeResult.scalar(.null);
     }
-    if (args[0] != .string or args[1] != .string) return .null;
+    if (args[0] != .string or args[1] != .string) return NativeResult.scalar(.null);
     const name_z = try dupZ(ctx, args[0].string.bytes());
     const val_z = try dupZ(ctx, args[1].string.bytes());
     _ = c.xmlSetProp(node, @ptrCast(name_z.ptr), @ptrCast(val_z.ptr));
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 // replaces the text content of an element node with the supplied string.
@@ -861,10 +862,10 @@ fn setNodeText(ctx: *NativeContext, n: *c.xmlNode, text: []const u8) !void {
     if (txt_node != null) _ = c.xmlAddChild(n, txt_node);
 }
 
-fn sxmlSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string) return .null;
-    const obj = getThis(ctx) orelse return .null;
-    const node = getNodePtr(obj) orelse return .null;
+fn sxmlSet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string) return NativeResult.scalar(.null);
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const node = getNodePtr(obj) orelse return NativeResult.scalar(.null);
     const new_text: []const u8 = switch (args[1]) {
         .string => |s| s.bytes(),
         .int => |i| blk: {
@@ -878,37 +879,37 @@ fn sxmlSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             break :blk try dupString(ctx, s);
         },
         .bool => |b| if (b) "1" else "",
-        else => return .null,
+        else => return NativeResult.scalar(.null),
     };
     // find existing child with this element name; if not found, create one
     var ch = node.children;
     while (ch != null) : (ch = ch.*.next) {
         if (ch.*.type == c.XML_ELEMENT_NODE and nameMatches(ch, args[0].string.bytes())) {
             try setNodeText(ctx, ch, new_text);
-            return .null;
+            return NativeResult.scalar(.null);
         }
     }
     const name_z = try dupZ(ctx, args[0].string.bytes());
     const val_z = try dupZ(ctx, new_text);
     _ = c.xmlNewTextChild(node, null, @ptrCast(name_z.ptr), @ptrCast(val_z.ptr));
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn sxmlOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .null;
-    const obj = getThis(ctx) orelse return .null;
-    const node = getNodePtr(obj) orelse return .null;
+fn sxmlOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const node = getNodePtr(obj) orelse return NativeResult.scalar(.null);
     const name_z = try dupZ(ctx, args[0].string.bytes());
     _ = c.xmlUnsetProp(node, @ptrCast(name_z.ptr));
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 // iterator support: walks same-named siblings starting from this node,
 // or all children if used as `foreach ($root as $k => $v)`
-fn sxmlGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const node = getNodePtr(obj) orelse return .null;
-    const doc = getDocPtr(obj) orelse return .null;
+fn sxmlGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const node = getNodePtr(obj) orelse return NativeResult.scalar(.null);
+    const doc = getDocPtr(obj) orelse return NativeResult.scalar(.null);
 
     // attribute view still uses the ArrayIterator path because attribute names
     // are unique per element (so dedup in a PhpArray is harmless and the
@@ -945,7 +946,7 @@ fn sxmlGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         try iter_obj.set(ctx.allocator, "__data", .{ .array = arr });
         try iter_obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
         try iter_obj.set(ctx.allocator, "__flags", .{ .int = 0 });
-        return .{ .object = iter_obj };
+        return NativeResult.borrowed(.{ .object = iter_obj });
     }
 
     // children / sibling iteration uses a custom xml-tree walker so duplicate-
@@ -963,13 +964,13 @@ fn sxmlGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         try iter_obj.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed("children") });
     } else {
         // sibling mode: start from $this and only emit same-named siblings
-        if (node.name == null) return .{ .object = iter_obj };
+        if (node.name == null) return NativeResult.borrowed(.{ .object = iter_obj });
         try iter_obj.set(ctx.allocator, "__node", .{ .int = @intCast(@intFromPtr(node)) });
         try iter_obj.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed("siblings") });
         const name_copy = try dupString(ctx, node.name[0..cstrLen(node.name)]);
         try iter_obj.set(ctx.allocator, "__same_name", .{ .string = Value.String.borrowed(name_copy) });
     }
-    return .{ .object = iter_obj };
+    return NativeResult.borrowed(.{ .object = iter_obj });
 }
 
 // ---------------- registration ----------------
@@ -1069,20 +1070,20 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "SimpleXMLIterator::next", sxiNext);
 }
 
-fn sxmlIterRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn sxmlIterRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // SimpleXMLIterator iterates the children of $this. seed __mode and start
-    const obj = getThis(ctx) orelse return .null;
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed("children") });
     try obj.set(ctx.allocator, "__same_name", .{ .string = Value.String.borrowed("") });
     return sxiRewind(ctx, &.{});
 }
 
-fn sxmlIterCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn sxmlIterCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // wrap the child node as another SimpleXMLIterator so the foreach value
     // also implements RecursiveIterator (needed by RecursiveIteratorIterator)
-    const obj = getThis(ctx) orelse return .null;
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const cur = obj.get("__cursor");
-    if (cur != .int or cur.int == 0) return .null;
+    if (cur != .int or cur.int == 0) return NativeResult.scalar(.null);
     const node: *c.xmlNode = @ptrFromInt(@as(usize, @intCast(cur.int)));
     const doc: *c.xmlDoc = @ptrFromInt(@as(usize, @intCast(obj.get("__doc").int)));
     const wrapper = try ctx.createObject("SimpleXMLIterator");
@@ -1090,37 +1091,37 @@ fn sxmlIterCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     try wrapper.set(ctx.allocator, "__doc", .{ .int = @intCast(@intFromPtr(doc)) });
     try wrapper.set(ctx.allocator, "__is_attr", .{ .bool = false });
     try wrapper.set(ctx.allocator, "__iter_children", .{ .bool = true });
-    return .{ .object = wrapper };
+    return NativeResult.borrowed(.{ .object = wrapper });
 }
 
 // hasChildren / getChildren operate on the CURRENT iteration position (cursor)
 // not the wrapper's own __node. zphp's RecursiveIteratorIterator calls these
 // on the iterator itself between valid() and current(), expecting them to
 // describe the element about to be yielded
-fn sxmlIterHasChildren(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn sxmlIterHasChildren(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const cur = obj.get("__cursor");
-    if (cur != .int or cur.int == 0) return .{ .bool = false };
+    if (cur != .int or cur.int == 0) return NativeResult.scalar(.{ .bool = false });
     const node: *c.xmlNode = @ptrFromInt(@as(usize, @intCast(cur.int)));
     var ch = node.children;
     while (ch != null) : (ch = ch.*.next) {
-        if (ch.*.type == c.XML_ELEMENT_NODE) return .{ .bool = true };
+        if (ch.*.type == c.XML_ELEMENT_NODE) return NativeResult.scalar(.{ .bool = true });
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn sxmlIterGetChildren(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn sxmlIterGetChildren(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const cur = obj.get("__cursor");
-    if (cur != .int or cur.int == 0) return .null;
+    if (cur != .int or cur.int == 0) return NativeResult.scalar(.null);
     const node: *c.xmlNode = @ptrFromInt(@as(usize, @intCast(cur.int)));
-    const doc = getDocPtr(obj) orelse return .null;
+    const doc = getDocPtr(obj) orelse return NativeResult.scalar(.null);
     const wrapper = try ctx.createObject("SimpleXMLIterator");
     try wrapper.set(ctx.allocator, "__node", .{ .int = @intCast(@intFromPtr(node)) });
     try wrapper.set(ctx.allocator, "__doc", .{ .int = @intCast(@intFromPtr(doc)) });
     try wrapper.set(ctx.allocator, "__is_attr", .{ .bool = false });
     try wrapper.set(ctx.allocator, "__iter_children", .{ .bool = true });
-    return .{ .object = wrapper };
+    return NativeResult.borrowed(.{ .object = wrapper });
 }
 
 // these walk xml node siblings via the underlying libxml node pointers stored
@@ -1128,11 +1129,11 @@ fn sxmlIterGetChildren(ctx: *NativeContext, _: []const Value) RuntimeError!Value
 // __doc (xmlDoc), __mode ("children" | "siblings"), __cursor (current xmlNode*
 // or 0 when done), __same_name (the element name to filter by in sibling mode)
 
-fn sxiRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn sxiRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const node = getIterStartPtr(obj) orelse {
         try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
-        return .null;
+        return NativeResult.scalar(.null);
     };
     const mode = obj.get("__mode");
     const start_ptr: ?*c.xmlNode = if (mode == .string and std.mem.eql(u8, mode.string.bytes(), "children"))
@@ -1145,39 +1146,39 @@ fn sxiRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     }
     const cur: usize = if (p) |np| @intFromPtr(np) else 0;
     try obj.set(ctx.allocator, "__cursor", .{ .int = @intCast(cur) });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn sxiValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn sxiValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const cur = obj.get("__cursor");
-    return .{ .bool = cur == .int and cur.int != 0 };
+    return NativeResult.scalar(.{ .bool = cur == .int and cur.int != 0 });
 }
 
-fn sxiCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn sxiCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const cur = obj.get("__cursor");
-    if (cur != .int or cur.int == 0) return .null;
+    if (cur != .int or cur.int == 0) return NativeResult.scalar(.null);
     const node: *c.xmlNode = @ptrFromInt(@as(usize, @intCast(cur.int)));
     const doc: *c.xmlDoc = @ptrFromInt(@as(usize, @intCast(obj.get("__doc").int)));
     const wrapper = try buildWrapper(ctx, doc, node);
-    return .{ .object = wrapper };
+    return NativeResult.borrowed(.{ .object = wrapper });
 }
 
-fn sxiKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn sxiKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const cur = obj.get("__cursor");
-    if (cur != .int or cur.int == 0) return .null;
+    if (cur != .int or cur.int == 0) return NativeResult.scalar(.null);
     const node: *c.xmlNode = @ptrFromInt(@as(usize, @intCast(cur.int)));
-    if (node.name == null) return .null;
+    if (node.name == null) return NativeResult.scalar(.null);
     const name = node.name[0..cstrLen(node.name)];
-    return .{ .string = Value.String.borrowed(try dupString(ctx, name)) };
+    return try NativeResult.copyString(ctx.allocator, name);
 }
 
-fn sxiNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn sxiNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const cur = obj.get("__cursor");
-    if (cur != .int or cur.int == 0) return .null;
+    if (cur != .int or cur.int == 0) return NativeResult.scalar(.null);
     var p: ?*c.xmlNode = @ptrFromInt(@as(usize, @intCast(cur.int)));
     if (p) |cp| p = @ptrCast(cp.next);
     while (p != null) : (p = @ptrCast(p.?.next)) {
@@ -1185,7 +1186,7 @@ fn sxiNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     }
     const nxt: usize = if (p) |np| @intFromPtr(np) else 0;
     try obj.set(ctx.allocator, "__cursor", .{ .int = @intCast(nxt) });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 fn sxiAcceptable(obj: *PhpObject, n: *c.xmlNode) bool {

@@ -1,6 +1,7 @@
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 const c = @cImport({
@@ -20,8 +21,8 @@ pub const entries = .{
     .{ "openssl_pbkdf2", opensslPbkdf2 },
 };
 
-fn opensslPbkdf2(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 4 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+fn opensslPbkdf2(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 4 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     const password = args[0].string.bytes();
     const salt = args[1].string.bytes();
     const key_length: usize = @intCast(@max(0, Value.toInt(args[2])));
@@ -29,11 +30,11 @@ fn opensslPbkdf2(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const digest_algo = if (args.len >= 5 and args[4] == .string) args[4].string.bytes() else "sha1";
 
     var name_buf: [64]u8 = undefined;
-    if (digest_algo.len >= name_buf.len) return .{ .bool = false };
+    if (digest_algo.len >= name_buf.len) return NativeResult.scalar(.{ .bool = false });
     @memcpy(name_buf[0..digest_algo.len], digest_algo);
     name_buf[digest_algo.len] = 0;
 
-    const md = c.EVP_MD_fetch(null, &name_buf, null) orelse return .{ .bool = false };
+    const md = c.EVP_MD_fetch(null, &name_buf, null) orelse return NativeResult.scalar(.{ .bool = false });
     defer c.EVP_MD_free(md);
 
     const out = try ctx.allocator.alloc(u8, key_length);
@@ -49,40 +50,37 @@ fn opensslPbkdf2(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     );
     if (rc != 1) {
         ctx.allocator.free(out);
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     }
-    try ctx.vm.strings.append(ctx.allocator, out);
-    return .{ .string = Value.String.borrowed(out) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
 }
 
-fn opensslDigest(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+fn opensslDigest(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     const data = args[0].string.bytes();
     const algo = args[1].string.bytes();
     const raw_output = args.len >= 3 and args[2].isTruthy();
 
     var name_buf: [64]u8 = undefined;
-    if (algo.len >= name_buf.len) return .{ .bool = false };
+    if (algo.len >= name_buf.len) return NativeResult.scalar(.{ .bool = false });
     @memcpy(name_buf[0..algo.len], algo);
     name_buf[algo.len] = 0;
 
-    const md = c.EVP_MD_fetch(null, &name_buf, null) orelse return .{ .bool = false };
+    const md = c.EVP_MD_fetch(null, &name_buf, null) orelse return NativeResult.scalar(.{ .bool = false });
     defer c.EVP_MD_free(md);
 
-    const ctx_md = c.EVP_MD_CTX_new() orelse return .{ .bool = false };
+    const ctx_md = c.EVP_MD_CTX_new() orelse return NativeResult.scalar(.{ .bool = false });
     defer c.EVP_MD_CTX_free(ctx_md);
 
-    if (c.EVP_DigestInit_ex(ctx_md, md, null) != 1) return .{ .bool = false };
-    if (data.len > 0 and c.EVP_DigestUpdate(ctx_md, data.ptr, data.len) != 1) return .{ .bool = false };
+    if (c.EVP_DigestInit_ex(ctx_md, md, null) != 1) return NativeResult.scalar(.{ .bool = false });
+    if (data.len > 0 and c.EVP_DigestUpdate(ctx_md, data.ptr, data.len) != 1) return NativeResult.scalar(.{ .bool = false });
 
     var out_buf: [c.EVP_MAX_MD_SIZE]u8 = undefined;
     var out_len: c_uint = 0;
-    if (c.EVP_DigestFinal_ex(ctx_md, &out_buf, &out_len) != 1) return .{ .bool = false };
+    if (c.EVP_DigestFinal_ex(ctx_md, &out_buf, &out_len) != 1) return NativeResult.scalar(.{ .bool = false });
 
     if (raw_output) {
-        const dup = try ctx.allocator.dupe(u8, out_buf[0..out_len]);
-        try ctx.vm.strings.append(ctx.allocator, dup);
-        return .{ .string = Value.String.borrowed(dup) };
+        return try NativeResult.copyString(ctx.allocator, out_buf[0..out_len]);
     }
     const hex = try ctx.allocator.alloc(u8, out_len * 2);
     const hex_chars = "0123456789abcdef";
@@ -90,18 +88,17 @@ fn opensslDigest(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         hex[i * 2] = hex_chars[b >> 4];
         hex[i * 2 + 1] = hex_chars[b & 0xf];
     }
-    try ctx.vm.strings.append(ctx.allocator, hex);
-    return .{ .string = Value.String.borrowed(hex) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, hex));
 }
 
-fn opensslGetMdMethods(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn opensslGetMdMethods(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     var arr = try ctx.createArray();
     const names = [_][]const u8{ "md5", "sha1", "sha224", "sha256", "sha384", "sha512", "sha3-224", "sha3-256", "sha3-384", "sha3-512" };
     for (names) |n| try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(n) });
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn opensslRandomPseudoBytes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn opensslRandomPseudoBytes(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .int or args[0].int <= 0) {
         try ctx.vm.setPendingException("ValueError", "openssl_random_pseudo_bytes(): Argument #1 ($length) must be greater than 0");
         return error.RuntimeError;
@@ -110,11 +107,10 @@ fn opensslRandomPseudoBytes(ctx: *NativeContext, args: []const Value) RuntimeErr
     const buf = try ctx.allocator.alloc(u8, n);
     if (c.RAND_bytes(buf.ptr, @intCast(n)) != 1) {
         ctx.allocator.free(buf);
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     }
-    try ctx.vm.strings.append(ctx.allocator, buf);
     if (args.len >= 2) ctx.setCallerVar(1, args.len, .{ .bool = true });
-    return .{ .string = Value.String.borrowed(buf) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, buf));
 }
 
 fn fetchCipher(name: []const u8) ?*const c.EVP_CIPHER {
@@ -129,23 +125,23 @@ fn freeCipher(cipher: *const c.EVP_CIPHER) void {
     c.EVP_CIPHER_free(@constCast(cipher));
 }
 
-fn cipherIvLength(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const cipher = fetchCipher(args[0].string.bytes()) orelse return .{ .bool = false };
+fn cipherIvLength(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const cipher = fetchCipher(args[0].string.bytes()) orelse return NativeResult.scalar(.{ .bool = false });
     defer freeCipher(cipher);
-    return .{ .int = c.EVP_CIPHER_iv_length(cipher) };
+    return NativeResult.scalar(.{ .int = c.EVP_CIPHER_iv_length(cipher) });
 }
 
-fn cipherKeyLength(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const cipher = fetchCipher(args[0].string.bytes()) orelse return .{ .bool = false };
+fn cipherKeyLength(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const cipher = fetchCipher(args[0].string.bytes()) orelse return NativeResult.scalar(.{ .bool = false });
     defer freeCipher(cipher);
-    return .{ .int = c.EVP_CIPHER_key_length(cipher) };
+    return NativeResult.scalar(.{ .int = c.EVP_CIPHER_key_length(cipher) });
 }
 
-fn opensslEncrypt(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn opensslEncrypt(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 3 or args[0] != .string or args[1] != .string or args[2] != .string)
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
 
     const data = args[0].string.bytes();
     const cipher_name = args[1].string.bytes();
@@ -153,64 +149,64 @@ fn opensslEncrypt(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const options: i64 = if (args.len > 3 and args[3] == .int) args[3].int else 0;
     const iv: []const u8 = if (args.len > 4 and args[4] == .string) args[4].string.bytes() else "";
 
-    const cipher = fetchCipher(cipher_name) orelse return .{ .bool = false };
+    const cipher = fetchCipher(cipher_name) orelse return NativeResult.scalar(.{ .bool = false });
     defer freeCipher(cipher);
 
-    const evp_ctx = c.EVP_CIPHER_CTX_new() orelse return .{ .bool = false };
+    const evp_ctx = c.EVP_CIPHER_CTX_new() orelse return NativeResult.scalar(.{ .bool = false });
     defer c.EVP_CIPHER_CTX_free(evp_ctx);
 
     const is_aead = isAeadCipher(cipher);
     const aad: []const u8 = if (args.len > 6 and args[6] == .string) args[6].string.bytes() else "";
 
     if (c.EVP_EncryptInit_ex(evp_ctx, cipher, null, null, null) != 1)
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
 
     if (is_aead) {
         if (c.EVP_CIPHER_CTX_ctrl(evp_ctx, c.EVP_CTRL_AEAD_SET_IVLEN, @intCast(iv.len), null) != 1)
-            return .{ .bool = false };
+            return NativeResult.scalar(.{ .bool = false });
     }
 
     if (c.EVP_EncryptInit_ex(evp_ctx, null, null, key.ptr, if (iv.len > 0) iv.ptr else null) != 1)
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
 
     var written: c_int = 0;
     if (is_aead and aad.len > 0) {
         if (c.EVP_EncryptUpdate(evp_ctx, null, &written, aad.ptr, @intCast(aad.len)) != 1)
-            return .{ .bool = false };
+            return NativeResult.scalar(.{ .bool = false });
     }
 
     const block_size: usize = @intCast(c.EVP_CIPHER_block_size(cipher));
     const out_len = data.len + block_size;
-    const out_buf = ctx.allocator.alloc(u8, out_len) catch return .{ .bool = false };
+    const out_buf = ctx.allocator.alloc(u8, out_len) catch return NativeResult.scalar(.{ .bool = false });
     defer ctx.allocator.free(out_buf);
 
     if (c.EVP_EncryptUpdate(evp_ctx, out_buf.ptr, &written, data.ptr, @intCast(data.len)) != 1)
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
 
     var total: usize = @intCast(written);
     if (c.EVP_EncryptFinal_ex(evp_ctx, out_buf.ptr + total, &written) != 1)
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     total += @intCast(written);
 
     if (is_aead and args.len > 5) {
         var tag_buf: [16]u8 = undefined;
         const tag_len: usize = if (args.len > 7 and args[7] == .int and args[7].int > 0) @intCast(@min(args[7].int, 16)) else 16;
         if (c.EVP_CIPHER_CTX_ctrl(evp_ctx, c.EVP_CTRL_AEAD_GET_TAG, @intCast(tag_len), &tag_buf) != 1)
-            return .{ .bool = false };
+            return NativeResult.scalar(.{ .bool = false });
         const tag_str = try ctx.createString(tag_buf[0..tag_len]);
         ctx.setCallerVar(5, args.len, .{ .string = Value.String.borrowed(tag_str) });
     }
 
     const raw = out_buf[0..total];
     if (options & 1 != 0) {
-        return .{ .string = Value.String.borrowed(try ctx.createString(raw)) };
+        return try NativeResult.copyString(ctx.allocator, raw);
     }
-    return .{ .string = Value.String.borrowed(try base64Encode(ctx, raw)) };
+    return NativeResult.takeString(try base64Encode(ctx, raw));
 }
 
-fn opensslDecrypt(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn opensslDecrypt(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 3 or args[0] != .string or args[1] != .string or args[2] != .string)
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
 
     const raw_data = args[0].string.bytes();
     const cipher_name = args[1].string.bytes();
@@ -218,75 +214,75 @@ fn opensslDecrypt(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const options: i64 = if (args.len > 3 and args[3] == .int) args[3].int else 0;
     const iv: []const u8 = if (args.len > 4 and args[4] == .string) args[4].string.bytes() else "";
 
-    const cipher = fetchCipher(cipher_name) orelse return .{ .bool = false };
+    const cipher = fetchCipher(cipher_name) orelse return NativeResult.scalar(.{ .bool = false });
     defer freeCipher(cipher);
 
     var decoded_buf: [8192]u8 = undefined;
     const data = if (options & 1 != 0) raw_data else blk: {
-        const len = std.base64.standard.Decoder.calcSizeForSlice(raw_data) catch return .{ .bool = false };
-        if (len > decoded_buf.len) return .{ .bool = false };
-        std.base64.standard.Decoder.decode(decoded_buf[0..len], raw_data) catch return .{ .bool = false };
+        const len = std.base64.standard.Decoder.calcSizeForSlice(raw_data) catch return NativeResult.scalar(.{ .bool = false });
+        if (len > decoded_buf.len) return NativeResult.scalar(.{ .bool = false });
+        std.base64.standard.Decoder.decode(decoded_buf[0..len], raw_data) catch return NativeResult.scalar(.{ .bool = false });
         break :blk decoded_buf[0..len];
     };
 
-    const evp_ctx = c.EVP_CIPHER_CTX_new() orelse return .{ .bool = false };
+    const evp_ctx = c.EVP_CIPHER_CTX_new() orelse return NativeResult.scalar(.{ .bool = false });
     defer c.EVP_CIPHER_CTX_free(evp_ctx);
 
     const is_aead = isAeadCipher(cipher);
     const aad: []const u8 = if (args.len > 6 and args[6] == .string) args[6].string.bytes() else "";
 
     if (c.EVP_DecryptInit_ex(evp_ctx, cipher, null, null, null) != 1)
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
 
     if (is_aead) {
         if (c.EVP_CIPHER_CTX_ctrl(evp_ctx, c.EVP_CTRL_AEAD_SET_IVLEN, @intCast(iv.len), null) != 1)
-            return .{ .bool = false };
+            return NativeResult.scalar(.{ .bool = false });
     }
 
     if (c.EVP_DecryptInit_ex(evp_ctx, null, null, key.ptr, if (iv.len > 0) iv.ptr else null) != 1)
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
 
     if (is_aead and args.len > 5 and args[5] == .string) {
         const tag = args[5].string.bytes();
         if (tag.len > 0) {
             if (c.EVP_CIPHER_CTX_ctrl(evp_ctx, c.EVP_CTRL_AEAD_SET_TAG, @intCast(tag.len), @constCast(tag.ptr)) != 1)
-                return .{ .bool = false };
+                return NativeResult.scalar(.{ .bool = false });
         }
     }
 
     var written: c_int = 0;
     if (is_aead and aad.len > 0) {
         if (c.EVP_DecryptUpdate(evp_ctx, null, &written, aad.ptr, @intCast(aad.len)) != 1)
-            return .{ .bool = false };
+            return NativeResult.scalar(.{ .bool = false });
     }
 
-    const out_buf = ctx.allocator.alloc(u8, data.len + 128) catch return .{ .bool = false };
+    const out_buf = ctx.allocator.alloc(u8, data.len + 128) catch return NativeResult.scalar(.{ .bool = false });
     defer ctx.allocator.free(out_buf);
 
     if (c.EVP_DecryptUpdate(evp_ctx, out_buf.ptr, &written, data.ptr, @intCast(data.len)) != 1)
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
 
     var total: usize = @intCast(written);
     if (c.EVP_DecryptFinal_ex(evp_ctx, out_buf.ptr + total, &written) != 1)
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     total += @intCast(written);
 
-    return .{ .string = Value.String.borrowed(try ctx.createString(out_buf[0..total])) };
+    return try NativeResult.copyString(ctx.allocator, out_buf[0..total]);
 }
 
 fn isAeadCipher(cipher: *const c.EVP_CIPHER) bool {
     return (c.EVP_CIPHER_flags(cipher) & c.EVP_CIPH_FLAG_AEAD_CIPHER) != 0;
 }
 
-fn base64Encode(ctx: *NativeContext, data: []const u8) ![]const u8 {
+fn base64Encode(ctx: *NativeContext, data: []const u8) !Value.String {
     const len = std.base64.standard.Encoder.calcSize(data.len);
     const buf = try ctx.allocator.alloc(u8, len);
-    const result = std.base64.standard.Encoder.encode(buf, data);
-    try ctx.strings.append(ctx.allocator, buf);
-    return result;
+    errdefer ctx.allocator.free(buf);
+    _ = std.base64.standard.Encoder.encode(buf, data);
+    return Value.String.adopt(ctx.allocator, buf);
 }
 
-fn getCipherMethods(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn getCipherMethods(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const methods = [_][]const u8{
         "aes-128-cbc",  "aes-192-cbc",       "aes-256-cbc",
         "aes-128-gcm",  "aes-192-gcm",       "aes-256-gcm",
@@ -298,5 +294,5 @@ fn getCipherMethods(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     for (methods) |name| {
         try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(name) });
     }
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }

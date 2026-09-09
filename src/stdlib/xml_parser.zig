@@ -3,6 +3,7 @@ const Value = @import("../runtime/value.zig").Value;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const vm_mod = @import("../runtime/vm.zig");
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const VM = vm_mod.VM;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
@@ -50,7 +51,7 @@ fn dupString(ctx: *NativeContext, s: []const u8) ![]const u8 {
     return owned;
 }
 
-fn create(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn create(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = try ctx.createObject("XMLParser");
     try obj.set(ctx.allocator, "__case_fold", .{ .bool = true });
     try obj.set(ctx.allocator, "__skip_white", .{ .bool = false });
@@ -58,10 +59,10 @@ fn create(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     try obj.set(ctx.allocator, "__col", .{ .int = 0 });
     try obj.set(ctx.allocator, "__byte", .{ .int = 0 });
     try obj.set(ctx.allocator, "__error", .{ .int = 0 });
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn createNs(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn createNs(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return create(ctx, args);
 }
 
@@ -70,95 +71,95 @@ fn parserObj(args: []const Value) ?*PhpObject {
     return args[0].object;
 }
 
-fn setElementHandler(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const p = parserObj(args) orelse return .{ .bool = false };
+fn setElementHandler(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = parserObj(args) orelse return NativeResult.scalar(.{ .bool = false });
     if (args.len >= 2) try p.set(ctx.allocator, "__start_handler", args[1]);
     if (args.len >= 3) try p.set(ctx.allocator, "__end_handler", args[2]);
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn setCharHandler(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const p = parserObj(args) orelse return .{ .bool = false };
+fn setCharHandler(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = parserObj(args) orelse return NativeResult.scalar(.{ .bool = false });
     if (args.len >= 2) try p.set(ctx.allocator, "__char_handler", args[1]);
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn setDefaultHandler(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const p = parserObj(args) orelse return .{ .bool = false };
+fn setDefaultHandler(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = parserObj(args) orelse return NativeResult.scalar(.{ .bool = false });
     if (args.len >= 2) try p.set(ctx.allocator, "__default_handler", args[1]);
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn setPiHandler(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const p = parserObj(args) orelse return .{ .bool = false };
+fn setPiHandler(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = parserObj(args) orelse return NativeResult.scalar(.{ .bool = false });
     if (args.len >= 2) try p.set(ctx.allocator, "__pi_handler", args[1]);
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn setObject(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const p = parserObj(args) orelse return .{ .bool = false };
+fn setObject(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = parserObj(args) orelse return NativeResult.scalar(.{ .bool = false });
     if (args.len >= 2 and args[1] == .object) try p.set(ctx.allocator, "__bound_object", args[1]);
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn setOption(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const p = parserObj(args) orelse return .{ .bool = false };
-    if (args.len < 3) return .{ .bool = false };
+fn setOption(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = parserObj(args) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len < 3) return NativeResult.scalar(.{ .bool = false });
     const opt: i64 = Value.toInt(args[1]);
     switch (opt) {
         1 => try p.set(ctx.allocator, "__case_fold", .{ .bool = Value.isTruthy(args[2]) }),
         4 => try p.set(ctx.allocator, "__skip_white", .{ .bool = Value.isTruthy(args[2]) }),
         else => {},
     }
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn getOption(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const p = parserObj(args) orelse return .{ .bool = false };
-    if (args.len < 2) return .{ .bool = false };
+fn getOption(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = parserObj(args) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len < 2) return NativeResult.scalar(.{ .bool = false });
     const opt: i64 = Value.toInt(args[1]);
-    return switch (opt) {
+    return NativeResult.scalar(switch (opt) {
         1 => .{ .bool = (p.get("__case_fold") == .bool and p.get("__case_fold").bool) },
         4 => .{ .bool = (p.get("__skip_white") == .bool and p.get("__skip_white").bool) },
         else => .{ .bool = false },
-    };
+    });
 }
 
-fn parserFree(_: *NativeContext, _: []const Value) RuntimeError!Value {
+fn parserFree(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // arena-based memory; nothing to free explicitly
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn getErrorCode(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const p = parserObj(args) orelse return .{ .int = 0 };
-    return p.get("__error");
+fn getErrorCode(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = parserObj(args) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.share(p.get("__error"));
 }
 
-fn errorString(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .string = Value.String.borrowed("") };
+fn errorString(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.literal("");
     const code: i64 = Value.toInt(args[0]);
-    return .{ .string = Value.String.borrowed(switch (code) {
+    return try NativeResult.copyString(ctx.allocator, switch (code) {
         0 => "No error",
         1 => "Out of memory",
         2 => "Syntax error",
         4 => "Invalid token",
         else => "Unknown error",
-    }) };
+    });
 }
 
-fn getCurrentLine(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const p = parserObj(args) orelse return .{ .int = 0 };
-    return p.get("__line");
+fn getCurrentLine(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = parserObj(args) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.share(p.get("__line"));
 }
 
-fn getCurrentCol(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const p = parserObj(args) orelse return .{ .int = 0 };
-    return p.get("__col");
+fn getCurrentCol(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = parserObj(args) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.share(p.get("__col"));
 }
 
-fn getCurrentByte(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    const p = parserObj(args) orelse return .{ .int = 0 };
-    return p.get("__byte");
+fn getCurrentByte(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = parserObj(args) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.share(p.get("__byte"));
 }
 
 const ParseState = struct {
@@ -189,10 +190,10 @@ const ParseState = struct {
     }
 };
 
-fn xmlParse(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .object) return .{ .int = 0 };
+fn xmlParse(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .object) return NativeResult.scalar(.{ .int = 0 });
     const parser = args[0].object;
-    const data = if (args[1] == .string) args[1].string.bytes() else return .{ .int = 0 };
+    const data = if (args[1] == .string) args[1].string.bytes() else return NativeResult.scalar(.{ .int = 0 });
     const is_final = args.len < 3 or Value.isTruthy(args[2]);
     _ = is_final;
 
@@ -337,7 +338,7 @@ fn xmlParse(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     try parser.set(ctx.allocator, "__line", .{ .int = st.line });
     try parser.set(ctx.allocator, "__col", .{ .int = st.col });
     try parser.set(ctx.allocator, "__byte", .{ .int = @intCast(st.pos) });
-    return .{ .int = 1 };
+    return NativeResult.scalar(.{ .int = 1 });
 }
 
 fn foldName(ctx: *NativeContext, name: []const u8, case_fold: bool) ![]const u8 {

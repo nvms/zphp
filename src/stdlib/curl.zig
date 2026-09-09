@@ -3,6 +3,7 @@ const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
 const vm_mod = @import("../runtime/vm.zig");
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const VM = vm_mod.VM;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
@@ -82,10 +83,10 @@ fn dupeZ(ctx: *NativeContext, s: []const u8) ![:0]u8 {
     return z[0..s.len :0];
 }
 
-fn curlInit(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn curlInit(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     ensureGlobalInit();
 
-    const handle = c.curl_easy_init() orelse return .{ .bool = false };
+    const handle = c.curl_easy_init() orelse return NativeResult.scalar(.{ .bool = false });
 
     const obj = try ctx.createObject("CurlHandle");
     try obj.set(ctx.allocator, "__curl_ptr", .{ .int = @intCast(@intFromPtr(handle)) });
@@ -105,23 +106,23 @@ fn curlInit(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         _ = c.curl_easy_setopt(handle, c.CURLOPT_URL, url_z.ptr);
     }
 
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn curlSetopt(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 3) return .{ .bool = false };
-    const obj = getThisObj(args) orelse return .{ .bool = false };
-    const handle = getHandle(obj) orelse return .{ .bool = false };
-    if (args[1] != .int) return .{ .bool = false };
+fn curlSetopt(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 3) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThisObj(args) orelse return NativeResult.scalar(.{ .bool = false });
+    const handle = getHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args[1] != .int) return NativeResult.scalar(.{ .bool = false });
     const option = args[1].int;
     return applySetopt(ctx, handle, obj, option, args[2]);
 }
 
-fn applySetopt(ctx: *NativeContext, handle: *c.CURL, obj: *PhpObject, option: i64, value: Value) RuntimeError!Value {
+fn applySetopt(ctx: *NativeContext, handle: *c.CURL, obj: *PhpObject, option: i64, value: Value) RuntimeError!NativeResult {
     if (option == c.CURLOPT_SHARE) {
         // PHP ignores non-share values (including null); they do not detach.
-        if (value != .object or !std.mem.eql(u8, value.object.class_name, "CurlShareHandle")) return .{ .bool = true };
-        const share = getShareState(value.object) orelse return .{ .bool = false };
+        if (value != .object or !std.mem.eql(u8, value.object.class_name, "CurlShareHandle")) return NativeResult.scalar(.{ .bool = true });
+        const share = getShareState(value.object) orelse return NativeResult.scalar(.{ .bool = false });
         const code = c.curl_easy_setopt(handle, c.CURLOPT_SHARE, share.handle);
         if (code == c.CURLE_OK) {
             // Native references outlive PHP wrappers, including request sweeping
@@ -131,7 +132,7 @@ fn applySetopt(ctx: *NativeContext, handle: *c.CURL, obj: *PhpObject, option: i6
             obj.properties.getPtr("__share_state").?.* = .{ .int = @intCast(@intFromPtr(share)) };
         }
         try obj.set(ctx.allocator, "__errno", .{ .int = @intCast(code) });
-        return .{ .bool = code == c.CURLE_OK };
+        return NativeResult.scalar(.{ .bool = code == c.CURLE_OK });
     }
     // string options
     if (option == c.CURLOPT_URL or
@@ -158,11 +159,11 @@ fn applySetopt(ctx: *NativeContext, handle: *c.CURL, obj: *PhpObject, option: i6
         const s = switch (value) {
             .string => value.string.bytes(),
             .null => "",
-            else => return .{ .bool = false },
+            else => return NativeResult.scalar(.{ .bool = false }),
         };
         const z = try dupeZ(ctx, s);
         const code: c_uint = @intCast(c.curl_easy_setopt(handle, @intCast(option), z.ptr));
-        return .{ .bool = code == c.CURLE_OK };
+        return NativeResult.scalar(.{ .bool = code == c.CURLE_OK });
     }
 
     // long options
@@ -188,10 +189,10 @@ fn applySetopt(ctx: *NativeContext, handle: *c.CURL, obj: *PhpObject, option: i6
         const v: c_long = switch (value) {
             .int => @intCast(value.int),
             .bool => if (value.bool) @as(c_long, 1) else 0,
-            else => return .{ .bool = false },
+            else => return NativeResult.scalar(.{ .bool = false }),
         };
         const code: c_uint = @intCast(c.curl_easy_setopt(handle, @intCast(option), v));
-        return .{ .bool = code == c.CURLE_OK };
+        return NativeResult.scalar(.{ .bool = code == c.CURLE_OK });
     }
 
     // CURLOPT_RETURNTRANSFER - PHP-specific, not a real libcurl option
@@ -202,7 +203,7 @@ fn applySetopt(ctx: *NativeContext, handle: *c.CURL, obj: *PhpObject, option: i6
             else => false,
         };
         try obj.set(ctx.allocator, "__return_transfer", .{ .bool = rt });
-        return .{ .bool = true };
+        return NativeResult.scalar(.{ .bool = true });
     }
 
     // CURLOPT_FOLLOWLOCATION
@@ -210,10 +211,10 @@ fn applySetopt(ctx: *NativeContext, handle: *c.CURL, obj: *PhpObject, option: i6
         const v: c_long = switch (value) {
             .int => @intCast(value.int),
             .bool => if (value.bool) @as(c_long, 1) else 0,
-            else => return .{ .bool = false },
+            else => return NativeResult.scalar(.{ .bool = false }),
         };
         const code: c_uint = @intCast(c.curl_easy_setopt(handle, c.CURLOPT_FOLLOWLOCATION, v));
-        return .{ .bool = code == c.CURLE_OK };
+        return NativeResult.scalar(.{ .bool = code == c.CURLE_OK });
     }
 
     // CURLOPT_POST
@@ -221,28 +222,28 @@ fn applySetopt(ctx: *NativeContext, handle: *c.CURL, obj: *PhpObject, option: i6
         const v: c_long = switch (value) {
             .int => @intCast(value.int),
             .bool => if (value.bool) @as(c_long, 1) else 0,
-            else => return .{ .bool = false },
+            else => return NativeResult.scalar(.{ .bool = false }),
         };
         const code: c_uint = @intCast(c.curl_easy_setopt(handle, c.CURLOPT_POST, v));
-        return .{ .bool = code == c.CURLE_OK };
+        return NativeResult.scalar(.{ .bool = code == c.CURLE_OK });
     }
 
     // CURLOPT_POSTFIELDS
     if (option == c.CURLOPT_POSTFIELDS) {
         const s = switch (value) {
             .string => value.string.bytes(),
-            else => return .{ .bool = false },
+            else => return NativeResult.scalar(.{ .bool = false }),
         };
         const z = try dupeZ(ctx, s);
         const code: c_uint = @intCast(c.curl_easy_setopt(handle, c.CURLOPT_POSTFIELDS, z.ptr));
-        if (code != c.CURLE_OK) return .{ .bool = false };
+        if (code != c.CURLE_OK) return NativeResult.scalar(.{ .bool = false });
         const len_code: c_uint = @intCast(c.curl_easy_setopt(handle, c.CURLOPT_POSTFIELDSIZE, @as(c_long, @intCast(s.len))));
-        return .{ .bool = len_code == c.CURLE_OK };
+        return NativeResult.scalar(.{ .bool = len_code == c.CURLE_OK });
     }
 
     // CURLOPT_HTTPHEADER
     if (option == c.CURLOPT_HTTPHEADER) {
-        if (value != .array) return .{ .bool = false };
+        if (value != .array) return NativeResult.scalar(.{ .bool = false });
 
         // free previous slist if any
         const prev_v = obj.get("__slist_ptr");
@@ -261,9 +262,9 @@ fn applySetopt(ctx: *NativeContext, handle: *c.CURL, obj: *PhpObject, option: i6
         if (slist) |sl| {
             try obj.set(ctx.allocator, "__slist_ptr", .{ .int = @intCast(@intFromPtr(sl)) });
             const code: c_uint = @intCast(c.curl_easy_setopt(handle, c.CURLOPT_HTTPHEADER, sl));
-            return .{ .bool = code == c.CURLE_OK };
+            return NativeResult.scalar(.{ .bool = code == c.CURLE_OK });
         }
-        return .{ .bool = true };
+        return NativeResult.scalar(.{ .bool = true });
     }
 
     // CURLOPT_PUT
@@ -271,10 +272,10 @@ fn applySetopt(ctx: *NativeContext, handle: *c.CURL, obj: *PhpObject, option: i6
         const v: c_long = switch (value) {
             .int => @intCast(value.int),
             .bool => if (value.bool) @as(c_long, 1) else 0,
-            else => return .{ .bool = false },
+            else => return NativeResult.scalar(.{ .bool = false }),
         };
         const code: c_uint = @intCast(c.curl_easy_setopt(handle, c.CURLOPT_PUT, v));
-        return .{ .bool = code == c.CURLE_OK };
+        return NativeResult.scalar(.{ .bool = code == c.CURLE_OK });
     }
 
     // CURLOPT_HEADER - include headers in output
@@ -282,10 +283,10 @@ fn applySetopt(ctx: *NativeContext, handle: *c.CURL, obj: *PhpObject, option: i6
         const v: c_long = switch (value) {
             .int => @intCast(value.int),
             .bool => if (value.bool) @as(c_long, 1) else 0,
-            else => return .{ .bool = false },
+            else => return NativeResult.scalar(.{ .bool = false }),
         };
         const code: c_uint = @intCast(c.curl_easy_setopt(handle, c.CURLOPT_HEADER, v));
-        return .{ .bool = code == c.CURLE_OK };
+        return NativeResult.scalar(.{ .bool = code == c.CURLE_OK });
     }
 
     // CURLINFO_HEADER_OUT (debug)
@@ -300,7 +301,7 @@ fn applySetopt(ctx: *NativeContext, handle: *c.CURL, obj: *PhpObject, option: i6
             const code: c_uint = @intCast(c.curl_easy_setopt(handle, c.CURLOPT_VERBOSE, @as(c_long, 1)));
             _ = code;
         }
-        return .{ .bool = true };
+        return NativeResult.scalar(.{ .bool = true });
     }
 
     // CURLOPT_HTTPGET / CURLOPT_UPLOAD - plain long toggles
@@ -308,11 +309,11 @@ fn applySetopt(ctx: *NativeContext, handle: *c.CURL, obj: *PhpObject, option: i6
         const v: c_long = switch (value) {
             .int => @intCast(value.int),
             .bool => if (value.bool) @as(c_long, 1) else 0,
-            else => return .{ .bool = false },
+            else => return NativeResult.scalar(.{ .bool = false }),
         };
         const opt: c_uint = if (option == c.CURLOPT_HTTPGET) c.CURLOPT_HTTPGET else c.CURLOPT_UPLOAD;
         const code: c_uint = @intCast(c.curl_easy_setopt(handle, opt, v));
-        return .{ .bool = code == c.CURLE_OK };
+        return NativeResult.scalar(.{ .bool = code == c.CURLE_OK });
     }
 
     // PHP throws ValueError for unrecognized CURLOPT_* constants
@@ -320,18 +321,18 @@ fn applySetopt(ctx: *NativeContext, handle: *c.CURL, obj: *PhpObject, option: i6
     return error.RuntimeError;
 }
 
-fn curlSetoptArray(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2) return .{ .bool = false };
-    const obj = getThisObj(args) orelse return .{ .bool = false };
-    const handle = getHandle(obj) orelse return .{ .bool = false };
-    if (args[1] != .array) return .{ .bool = false };
+fn curlSetoptArray(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThisObj(args) orelse return NativeResult.scalar(.{ .bool = false });
+    const handle = getHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args[1] != .array) return NativeResult.scalar(.{ .bool = false });
 
     for (args[1].array.entries.items) |entry| {
         if (entry.key != .int) continue;
         const result = try applySetopt(ctx, handle, obj, entry.key.int, entry.value);
-        if (result == .bool and !result.bool) return .{ .bool = false };
+        if (result.value == .bool and !result.value.bool) return NativeResult.scalar(.{ .bool = false });
     }
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
 const WriteCallbackData = struct {
@@ -346,10 +347,10 @@ fn writeCallback(data: [*]u8, size: usize, nmemb: usize, userdata: *anyopaque) c
     return total;
 }
 
-fn curlExec(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
-    const obj = getThisObj(args) orelse return .{ .bool = false };
-    const handle = getHandle(obj) orelse return .{ .bool = false };
+fn curlExec(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThisObj(args) orelse return NativeResult.scalar(.{ .bool = false });
+    const handle = getHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
 
     const return_transfer_v = obj.get("__return_transfer");
     const return_transfer = return_transfer_v == .bool and return_transfer_v.bool;
@@ -374,7 +375,7 @@ fn curlExec(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const owned = try ctx.createString(msg);
         try obj.set(ctx.allocator, "__error", .{ .string = Value.String.borrowed(owned) });
         try obj.set(ctx.allocator, "__errno", .{ .int = @intCast(result) });
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     }
 
     try obj.set(ctx.allocator, "__error", .{ .string = Value.String.borrowed("") });
@@ -386,19 +387,19 @@ fn curlExec(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     try obj.set(ctx.allocator, "__http_code", .{ .int = @intCast(http_code) });
 
     if (return_transfer) {
-        const str = try ctx.createString(cb_data.buffer.items);
-        return .{ .string = Value.String.borrowed(str) };
+        const str = try Value.String.create(ctx.allocator, cb_data.buffer.items);
+        return NativeResult.takeString(str);
     }
 
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn curlClose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn curlClose(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     _ = ctx;
-    if (args.len == 0) return .null;
-    const obj = getThisObj(args) orelse return .null;
+    if (args.len == 0) return NativeResult.scalar(.null);
+    const obj = getThisObj(args) orelse return NativeResult.scalar(.null);
     cleanupHandle(obj);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 pub fn cleanupHandle(obj: *PhpObject) void {
@@ -422,44 +423,44 @@ pub fn cleanupHandle(obj: *PhpObject) void {
     }
 }
 
-fn curlError(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .string = Value.String.borrowed("") };
-    const obj = getThisObj(args) orelse return .{ .string = Value.String.borrowed("") };
-    return obj.get("__error");
+fn curlError(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.literal("");
+    const obj = getThisObj(args) orelse return NativeResult.literal("");
+    return NativeResult.share(obj.get("__error"));
 }
 
-fn curlErrno(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .int = 0 };
-    const obj = getThisObj(args) orelse return .{ .int = 0 };
-    return obj.get("__errno");
+fn curlErrno(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .int = 0 });
+    const obj = getThisObj(args) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.share(obj.get("__errno"));
 }
 
-fn curlGetinfo(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
-    const obj = getThisObj(args) orelse return .{ .bool = false };
-    const handle = getHandle(obj) orelse return .{ .bool = false };
+fn curlGetinfo(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThisObj(args) orelse return NativeResult.scalar(.{ .bool = false });
+    const handle = getHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
 
     // no specific option - return all info as array
     if (args.len < 2 or args[1] == .null) {
         return getAllInfo(ctx, handle);
     }
 
-    if (args[1] != .int) return .{ .bool = false };
+    if (args[1] != .int) return NativeResult.scalar(.{ .bool = false });
     const option = args[1].int;
     return getInfoOption(ctx, handle, option);
 }
 
-fn getInfoOption(ctx: *NativeContext, handle: *c.CURL, option: i64) RuntimeError!Value {
+fn getInfoOption(ctx: *NativeContext, handle: *c.CURL, option: i64) RuntimeError!NativeResult {
     if (option == c.CURLINFO_COOKIELIST) {
         var list: ?*c.struct_curl_slist = null;
-        if (c.curl_easy_getinfo(handle, c.CURLINFO_COOKIELIST, &list) != c.CURLE_OK) return .{ .bool = false };
+        if (c.curl_easy_getinfo(handle, c.CURLINFO_COOKIELIST, &list) != c.CURLE_OK) return NativeResult.scalar(.{ .bool = false });
         defer c.curl_slist_free_all(list);
         const arr = try ctx.createArray();
         var node = list;
         while (node) |item| : (node = item.next) {
             try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(try ctx.createString(std.mem.span(item.data))) });
         }
-        return .{ .array = arr };
+        return NativeResult.borrowed(.{ .array = arr });
     }
     // string info types
     if (option == c.CURLINFO_EFFECTIVE_URL or
@@ -471,10 +472,10 @@ fn getInfoOption(ctx: *NativeContext, handle: *c.CURL, option: i64) RuntimeError
     {
         var ptr: [*c]u8 = null;
         const code: c_uint = @intCast(c.curl_easy_getinfo(handle, @intCast(option), &ptr));
-        if (code != c.CURLE_OK or ptr == null) return .{ .bool = false };
+        if (code != c.CURLE_OK or ptr == null) return NativeResult.scalar(.{ .bool = false });
         const s = std.mem.span(ptr);
-        const owned = try ctx.createString(s);
-        return .{ .string = Value.String.borrowed(owned) };
+        const owned = try Value.String.create(ctx.allocator, s);
+        return NativeResult.takeString(owned);
     }
 
     // long info types
@@ -490,8 +491,8 @@ fn getInfoOption(ctx: *NativeContext, handle: *c.CURL, option: i64) RuntimeError
     {
         var val: c_long = 0;
         const code: c_uint = @intCast(c.curl_easy_getinfo(handle, @intCast(option), &val));
-        if (code != c.CURLE_OK) return .{ .bool = false };
-        return .{ .int = @intCast(val) };
+        if (code != c.CURLE_OK) return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.scalar(.{ .int = @intCast(val) });
     }
 
     // double info types
@@ -510,14 +511,14 @@ fn getInfoOption(ctx: *NativeContext, handle: *c.CURL, option: i64) RuntimeError
     {
         var val: f64 = 0;
         const code: c_uint = @intCast(c.curl_easy_getinfo(handle, @intCast(option), &val));
-        if (code != c.CURLE_OK) return .{ .bool = false };
-        return .{ .float = val };
+        if (code != c.CURLE_OK) return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.scalar(.{ .float = val });
     }
 
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn getAllInfo(ctx: *NativeContext, handle: *c.CURL) RuntimeError!Value {
+fn getAllInfo(ctx: *NativeContext, handle: *c.CURL) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
 
     var url_ptr: [*c]u8 = null;
@@ -695,13 +696,13 @@ fn getAllInfo(ctx: *NativeContext, handle: *c.CURL) RuntimeError!Value {
     if (c.curl_easy_getinfo(handle, c.CURLINFO_APPCONNECT_TIME_T, &appc_us) == c.CURLE_OK)
         try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("appconnect_time_us") }, .{ .int = @intCast(appc_us) });
 
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn curlReset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .null;
-    const obj = getThisObj(args) orelse return .null;
-    const handle = getHandle(obj) orelse return .null;
+fn curlReset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.null);
+    const obj = getThisObj(args) orelse return NativeResult.scalar(.null);
+    const handle = getHandle(obj) orelse return NativeResult.scalar(.null);
     c.curl_easy_reset(handle);
     try obj.set(ctx.allocator, "__return_transfer", .{ .bool = false });
     try obj.set(ctx.allocator, "__header_out", .{ .bool = false });
@@ -717,18 +718,17 @@ fn curlReset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try obj.set(ctx.allocator, "__slist_ptr", .{ .int = 0 });
     }
 
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn curlStrerror(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .int) return .null;
+fn curlStrerror(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .int) return NativeResult.scalar(.null);
     const code: c_uint = @intCast(args[0].int);
     const msg = c.curl_easy_strerror(code);
-    if (msg == null) return .null;
+    if (msg == null) return NativeResult.scalar(.null);
     const span = std.mem.span(msg);
     const owned = try ctx.allocator.dupe(u8, span);
-    try ctx.strings.append(ctx.allocator, owned);
-    return .{ .string = Value.String.borrowed(owned) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, owned));
 }
 
 // Separate native ownership keeps shares alive even when their PHP wrapper is
@@ -774,12 +774,12 @@ fn requireShare(ctx: *NativeContext, args: []const Value, name: []const u8) Runt
     return error.RuntimeError;
 }
 
-fn curlShareConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn curlShareConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     try ctx.vm.setPendingException("Error", "Cannot directly construct CurlShareHandle, use curl_share_init() instead");
     return error.RuntimeError;
 }
 
-fn curlShareClone(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn curlShareClone(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // The VM copies properties before invoking __clone. Remove the borrowed
     // native pointer so failed-clone teardown cannot release the original state.
     if (getThis(ctx)) |obj| {
@@ -789,27 +789,27 @@ fn curlShareClone(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     return error.RuntimeError;
 }
 
-fn curlShareInit(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn curlShareInit(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     ensureGlobalInit();
-    const handle = c.curl_share_init() orelse return .{ .bool = false };
+    const handle = c.curl_share_init() orelse return NativeResult.scalar(.{ .bool = false });
     errdefer _ = c.curl_share_cleanup(handle);
     const state = try std.heap.page_allocator.create(ShareState);
     errdefer std.heap.page_allocator.destroy(state);
     const obj = try ctx.createObject("CurlShareHandle");
     state.* = .{ .handle = handle };
     try obj.set(ctx.allocator, "__share_state", .{ .int = @intCast(@intFromPtr(state)) });
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn curlShareClose(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn curlShareClose(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     // Like PHP 8, close is a validated no-op; destruction owns cleanup.
     _ = try requireShare(ctx, args, "curl_share_close");
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn curlShareSetopt(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn curlShareSetopt(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const state = try requireShare(ctx, args, "curl_share_setopt");
-    if (args.len < 3) return .{ .bool = false };
+    if (args.len < 3) return NativeResult.scalar(.{ .bool = false });
     const option = Value.toInt(args[1]);
     if (option != c.CURLSHOPT_SHARE and option != c.CURLSHOPT_UNSHARE) {
         state.errno = c.CURLSHE_BAD_OPTION;
@@ -818,19 +818,19 @@ fn curlShareSetopt(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     }
     const data: c_int = @truncate(Value.toInt(args[2]));
     state.errno = @intCast(c.curl_share_setopt(state.handle, @as(c_uint, @intCast(option)), data));
-    return .{ .bool = state.errno == c.CURLSHE_OK };
+    return NativeResult.scalar(.{ .bool = state.errno == c.CURLSHE_OK });
 }
 
-fn curlShareErrno(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    return .{ .int = (try requireShare(ctx, args, "curl_share_errno")).errno };
+fn curlShareErrno(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .int = (try requireShare(ctx, args, "curl_share_errno")).errno });
 }
 
-fn curlShareStrerror(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .null;
+fn curlShareStrerror(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.null);
     const code: c_uint = @bitCast(@as(c_int, @truncate(Value.toInt(args[0]))));
     const msg = c.curl_share_strerror(code);
-    if (msg == null) return .null;
-    return .{ .string = Value.String.borrowed(try ctx.createString(std.mem.span(msg))) };
+    if (msg == null) return NativeResult.scalar(.null);
+    return try NativeResult.copyString(ctx.allocator, std.mem.span(msg));
 }
 
 // ---------------- curl_multi ----------------
@@ -848,33 +848,33 @@ fn getMultiHandle(obj: *PhpObject) ?*c.CURLM {
     return @ptrFromInt(@as(usize, @intCast(v.int)));
 }
 
-fn curlMultiInit(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn curlMultiInit(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     ensureGlobalInit();
-    const mh = c.curl_multi_init() orelse return .{ .bool = false };
+    const mh = c.curl_multi_init() orelse return NativeResult.scalar(.{ .bool = false });
     const obj = try ctx.createObject("CurlMultiHandle");
     try obj.set(ctx.allocator, "__multi_ptr", .{ .int = @intCast(@intFromPtr(mh)) });
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn curlMultiAddHandle(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .object or args[1] != .object) return .{ .int = 1 };
-    const mh = getMultiHandle(args[0].object) orelse return .{ .int = 1 };
-    const easy = getHandle(args[1].object) orelse return .{ .int = 1 };
+fn curlMultiAddHandle(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .object or args[1] != .object) return NativeResult.scalar(.{ .int = 1 });
+    const mh = getMultiHandle(args[0].object) orelse return NativeResult.scalar(.{ .int = 1 });
+    const easy = getHandle(args[1].object) orelse return NativeResult.scalar(.{ .int = 1 });
     // attach a persistent write buffer so getcontent() can read it later
     const return_transfer_v = args[1].object.get("__return_transfer");
     if (return_transfer_v == .bool and return_transfer_v.bool) {
-        const wcb = std.heap.page_allocator.create(WriteCallbackData) catch return .{ .int = 1 };
+        const wcb = std.heap.page_allocator.create(WriteCallbackData) catch return NativeResult.scalar(.{ .int = 1 });
         wcb.* = .{ .allocator = std.heap.page_allocator, .buffer = .{} };
         multi_wcb_table.put(std.heap.page_allocator, @intFromPtr(easy), wcb) catch {
             wcb.buffer.deinit(wcb.allocator);
             std.heap.page_allocator.destroy(wcb);
-            return .{ .int = 1 };
+            return NativeResult.scalar(.{ .int = 1 });
         };
         _ = c.curl_easy_setopt(easy, c.CURLOPT_WRITEFUNCTION, @as(?*const fn ([*]u8, usize, usize, *anyopaque) callconv(.c) usize, &writeCallback));
         _ = c.curl_easy_setopt(easy, c.CURLOPT_WRITEDATA, @as(*anyopaque, @ptrCast(wcb)));
     }
     const code = c.curl_multi_add_handle(mh, easy);
-    return .{ .int = @intCast(code) };
+    return NativeResult.scalar(.{ .int = @intCast(code) });
 }
 
 fn freeMultiWcb(easy: *c.CURL) void {
@@ -884,30 +884,30 @@ fn freeMultiWcb(easy: *c.CURL) void {
     }
 }
 
-fn curlMultiRemoveHandle(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .object or args[1] != .object) return .{ .int = 1 };
-    const mh = getMultiHandle(args[0].object) orelse return .{ .int = 1 };
-    const easy = getHandle(args[1].object) orelse return .{ .int = 1 };
+fn curlMultiRemoveHandle(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .object or args[1] != .object) return NativeResult.scalar(.{ .int = 1 });
+    const mh = getMultiHandle(args[0].object) orelse return NativeResult.scalar(.{ .int = 1 });
+    const easy = getHandle(args[1].object) orelse return NativeResult.scalar(.{ .int = 1 });
     const code = c.curl_multi_remove_handle(mh, easy);
     freeMultiWcb(easy);
-    return .{ .int = @intCast(code) };
+    return NativeResult.scalar(.{ .int = @intCast(code) });
 }
 
-fn curlMultiExec(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .object) return .{ .int = 1 };
-    const mh = getMultiHandle(args[0].object) orelse return .{ .int = 1 };
+fn curlMultiExec(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .object) return NativeResult.scalar(.{ .int = 1 });
+    const mh = getMultiHandle(args[0].object) orelse return NativeResult.scalar(.{ .int = 1 });
     var still_running: c_int = 0;
     const code = c.curl_multi_perform(mh, &still_running);
     // 2nd arg is by-ref: write the still-running count back
     if (args.len >= 2) {
         ctx.setCallerVar(1, args.len, .{ .int = @intCast(still_running) });
     }
-    return .{ .int = @intCast(code) };
+    return NativeResult.scalar(.{ .int = @intCast(code) });
 }
 
-fn curlMultiSelect(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .object) return .{ .int = -1 };
-    const mh = getMultiHandle(args[0].object) orelse return .{ .int = -1 };
+fn curlMultiSelect(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .object) return NativeResult.scalar(.{ .int = -1 });
+    const mh = getMultiHandle(args[0].object) orelse return NativeResult.scalar(.{ .int = -1 });
     const timeout_ms: c_int = if (args.len >= 2) blk: {
         const secs: f64 = switch (args[1]) {
             .float => |f| f,
@@ -918,24 +918,24 @@ fn curlMultiSelect(_: *NativeContext, args: []const Value) RuntimeError!Value {
     } else 1000;
     var numfds: c_int = 0;
     const code = c.curl_multi_poll(mh, null, 0, timeout_ms, &numfds);
-    if (code != c.CURLM_OK) return .{ .int = -1 };
-    return .{ .int = @intCast(numfds) };
+    if (code != c.CURLM_OK) return NativeResult.scalar(.{ .int = -1 });
+    return NativeResult.scalar(.{ .int = @intCast(numfds) });
 }
 
-fn curlMultiGetcontent(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .object) return .null;
-    const easy = getHandle(args[0].object) orelse return .null;
-    const wcb = multi_wcb_table.get(@intFromPtr(easy)) orelse return .null;
-    const str = try ctx.createString(wcb.buffer.items);
-    return .{ .string = Value.String.borrowed(str) };
+fn curlMultiGetcontent(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .object) return NativeResult.scalar(.null);
+    const easy = getHandle(args[0].object) orelse return NativeResult.scalar(.null);
+    const wcb = multi_wcb_table.get(@intFromPtr(easy)) orelse return NativeResult.scalar(.null);
+    const str = try Value.String.create(ctx.allocator, wcb.buffer.items);
+    return NativeResult.takeString(str);
 }
 
-fn curlMultiInfoRead(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .object) return .{ .bool = false };
-    const mh = getMultiHandle(args[0].object) orelse return .{ .bool = false };
+fn curlMultiInfoRead(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
+    const mh = getMultiHandle(args[0].object) orelse return NativeResult.scalar(.{ .bool = false });
     var msgs_in_queue: c_int = 0;
     const msg = c.curl_multi_info_read(mh, &msgs_in_queue);
-    if (msg == null) return .{ .bool = false };
+    if (msg == null) return NativeResult.scalar(.{ .bool = false });
     const arr = try ctx.createArray();
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("msg") }, .{ .int = @intCast(msg.*.msg) });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("result") }, .{ .int = @intCast(msg.*.data.result) });
@@ -945,32 +945,32 @@ fn curlMultiInfoRead(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
     if (args.len >= 2) {
         ctx.setCallerVar(1, args.len, .{ .int = @intCast(msgs_in_queue) });
     }
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn curlMultiClose(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .object) return .null;
-    const mh = getMultiHandle(args[0].object) orelse return .null;
+fn curlMultiClose(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .object) return NativeResult.scalar(.null);
+    const mh = getMultiHandle(args[0].object) orelse return NativeResult.scalar(.null);
     _ = c.curl_multi_cleanup(mh);
     args[0].object.properties.getPtr("__multi_ptr").?.* = .{ .int = 0 };
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn curlMultiStrerror(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .int) return .null;
+fn curlMultiStrerror(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .int) return NativeResult.scalar(.null);
     const msg = c.curl_multi_strerror(@intCast(args[0].int));
-    const str = try ctx.createString(std.mem.span(msg));
-    return .{ .string = Value.String.borrowed(str) };
+    const str = try Value.String.create(ctx.allocator, std.mem.span(msg));
+    return NativeResult.takeString(str);
 }
 
-fn curlMultiErrno(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .int = 0 };
+fn curlMultiErrno(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .int = 0 });
 }
 
-fn curlMultiSetopt(_: *NativeContext, _: []const Value) RuntimeError!Value {
+fn curlMultiSetopt(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // CURLMOPT_* options (pipelining, max connections, etc.) are accepted but
     // not all are wired - libcurl tolerates the defaults for correctness
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
 // ---------------- CURLFile ----------------
@@ -978,45 +978,45 @@ fn curlMultiSetopt(_: *NativeContext, _: []const Value) RuntimeError!Value {
 // just read/write those. curl_setopt(CURLOPT_POSTFIELDS) detects a CURLFile
 // inside an array and builds a multipart body
 
-fn curlFileConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn curlFileConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const name: []const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else "";
     const mime: []const u8 = if (args.len >= 2 and args[1] == .string) args[1].string.bytes() else "";
     const postname: []const u8 = if (args.len >= 3 and args[2] == .string) args[2].string.bytes() else "";
     try obj.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(name) });
     try obj.set(ctx.allocator, "mime", .{ .string = Value.String.borrowed(mime) });
     try obj.set(ctx.allocator, "postname", .{ .string = Value.String.borrowed(postname) });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn curlFileGetFilename(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    return obj.get("name");
+fn curlFileGetFilename(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(obj.get("name"));
 }
 
-fn curlFileGetMimeType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    return obj.get("mime");
+fn curlFileGetMimeType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(obj.get("mime"));
 }
 
-fn curlFileGetPostFilename(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    return obj.get("postname");
+fn curlFileGetPostFilename(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(obj.get("postname"));
 }
 
-fn curlFileSetMimeType(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn curlFileSetMimeType(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len >= 1 and args[0] == .string) try obj.set(ctx.allocator, "mime", args[0]);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn curlFileSetPostFilename(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn curlFileSetPostFilename(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len >= 1 and args[0] == .string) try obj.set(ctx.allocator, "postname", args[0]);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn curlFileCreate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn curlFileCreate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = try ctx.createObject("CURLFile");
     const name: []const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else "";
     const mime: []const u8 = if (args.len >= 2 and args[1] == .string) args[1].string.bytes() else "";
@@ -1024,40 +1024,38 @@ fn curlFileCreate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     try obj.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(name) });
     try obj.set(ctx.allocator, "mime", .{ .string = Value.String.borrowed(mime) });
     try obj.set(ctx.allocator, "postname", .{ .string = Value.String.borrowed(postname) });
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn curlEscape(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[1] != .string) return .{ .bool = false };
-    if (args[0] != .object) return .{ .bool = false };
-    const handle = getHandle(args[0].object) orelse return .{ .bool = false };
+fn curlEscape(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
+    if (args[0] != .object) return NativeResult.scalar(.{ .bool = false });
+    const handle = getHandle(args[0].object) orelse return NativeResult.scalar(.{ .bool = false });
     const s = args[1].string.bytes();
     const encoded = c.curl_easy_escape(handle, s.ptr, @intCast(s.len));
-    if (encoded == null) return .{ .bool = false };
+    if (encoded == null) return NativeResult.scalar(.{ .bool = false });
     defer c.curl_free(encoded);
     const span = std.mem.span(encoded);
     const owned = try ctx.allocator.dupe(u8, span);
-    try ctx.strings.append(ctx.allocator, owned);
-    return .{ .string = Value.String.borrowed(owned) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, owned));
 }
 
-fn curlUnescape(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[1] != .string) return .{ .bool = false };
-    if (args[0] != .object) return .{ .bool = false };
-    const handle = getHandle(args[0].object) orelse return .{ .bool = false };
+fn curlUnescape(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
+    if (args[0] != .object) return NativeResult.scalar(.{ .bool = false });
+    const handle = getHandle(args[0].object) orelse return NativeResult.scalar(.{ .bool = false });
     const s = args[1].string.bytes();
     var out_len: c_int = 0;
     const decoded = c.curl_easy_unescape(handle, s.ptr, @intCast(s.len), &out_len);
-    if (decoded == null) return .{ .bool = false };
+    if (decoded == null) return NativeResult.scalar(.{ .bool = false });
     defer c.curl_free(decoded);
     const slice = decoded[0..@as(usize, @intCast(out_len))];
     const owned = try ctx.allocator.dupe(u8, slice);
-    try ctx.strings.append(ctx.allocator, owned);
-    return .{ .string = Value.String.borrowed(owned) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, owned));
 }
 
-fn curlVersion(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const info = c.curl_version_info(c.CURLVERSION_NOW) orelse return .{ .bool = false };
+fn curlVersion(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const info = c.curl_version_info(c.CURLVERSION_NOW) orelse return NativeResult.scalar(.{ .bool = false });
     const arr = try ctx.createArray();
 
     // PHP emits in this exact order. include every key it does so
@@ -1108,7 +1106,7 @@ fn curlVersion(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("brotli_ver_num") }, .{ .int = 0 });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("brotli_version") }, .{ .string = Value.String.borrowed("") });
 
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
 fn cleanupPoolable(obj: *PhpObject) bool {
@@ -1277,7 +1275,7 @@ test "curl property growth across native contexts and allocation-free cleanup" {
     defer a.destroy(vm);
     defer vm.deinit();
     var init_ctx = vm.makeContext("curl_init");
-    const easy = try curlInit(&init_ctx, &.{});
+    const easy = (try curlInit(&init_ctx, &.{})).value;
     var later_ctx = vm.makeContext("curl_setopt");
     const headers = try later_ctx.createArray();
     try headers.append(later_ctx.allocator, .{ .string = Value.String.borrowed("X-Allocator-Test: yes") });
@@ -1299,7 +1297,7 @@ test "curl property growth across native contexts and allocation-free cleanup" {
     try std.testing.expectEqual(@as(i64, 0), easy.object.get("__curl_ptr").int);
     cleanupHandle(easy.object);
 
-    const multi = try curlMultiInit(&init_ctx, &.{});
+    const multi = (try curlMultiInit(&init_ctx, &.{})).value;
     i = 0;
     while (multi.object.properties.count() < multi.object.properties.capacity()) : (i += 1) {
         const key = try std.fmt.bufPrint(&keys[128 + i], "multi_property_{d}", .{i});

@@ -3,7 +3,8 @@ const Value = @import("../runtime/value.zig").Value;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
-const NativeFn = *const fn (*NativeContext, []const Value) RuntimeError!Value;
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
+const NativeFn = *const fn (*NativeContext, []const Value) RuntimeError!NativeResult;
 
 pub fn register(map: *std.StringHashMapUnmanaged(NativeFn), allocator: std.mem.Allocator) !void {
     const modules = .{
@@ -41,7 +42,14 @@ pub fn register(map: *std.StringHashMapUnmanaged(NativeFn), allocator: std.mem.A
     };
     @setEvalBranchQuota(10000);
     inline for (modules) |entries| {
-        inline for (entries) |f| try map.put(allocator, f[0], f[1]);
+        inline for (entries) |f| {
+            const info = @typeInfo(@TypeOf(f[1]));
+            const fn_info = if (info == .pointer) @typeInfo(info.pointer.child).@"fn" else info.@"fn";
+            if (fn_info.return_type.? != RuntimeError!NativeResult) {
+                @compileError("native function must return RuntimeError!NativeResult: " ++ f[0]);
+            }
+            try map.put(allocator, f[0], f[1]);
+        }
     }
 }
 

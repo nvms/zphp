@@ -3,6 +3,7 @@ const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const vm_mod = @import("../runtime/vm.zig");
 const NativeContext = vm_mod.NativeContext;
+const NativeResult = vm_mod.NativeResult;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 const PhpObject = @import("../runtime/value.zig").PhpObject;
@@ -34,17 +35,17 @@ pub const entries = .{
     .{ "json_validate", json_validate },
 };
 
-fn json_encode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
+fn json_encode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     const flags = if (args.len >= 2) Value.toInt(args[1]) else 0;
     const depth: usize = if (args.len >= 3) @intCast(@max(1, Value.toInt(args[2]))) else 512;
     var buf = std.ArrayListUnmanaged(u8){};
+    defer buf.deinit(ctx.allocator);
     var visited = std.ArrayListUnmanaged(usize){};
     defer visited.deinit(ctx.allocator);
     last_error = 0;
     last_error_msg = "No error";
     encodeValue(&buf, ctx.allocator, args[0], 0, depth, flags, ctx.vm, &visited) catch {
-        buf.deinit(ctx.allocator);
         if (last_error == 0) {
             last_error = 5;
             last_error_msg = "Malformed UTF-8 characters, possibly incorrectly encoded";
@@ -52,13 +53,12 @@ fn json_encode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if ((flags & JSON_THROW_ON_ERROR) != 0) {
             return throwJsonException(ctx, last_error_msg);
         }
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     };
     last_error = 0;
     last_error_msg = "No error";
-    const result = buf.toOwnedSlice(ctx.allocator) catch return .{ .bool = false };
-    try ctx.strings.append(ctx.allocator, result);
-    return .{ .string = Value.String.borrowed(result) };
+    const result = try buf.toOwnedSlice(ctx.allocator);
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, result));
 }
 
 fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Value, depth: usize, max_depth: usize, flags: i64, vm: ?*vm_mod.VM, visited: *std.ArrayListUnmanaged(usize)) !void {
@@ -485,8 +485,8 @@ fn appendIndent(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, depth: u
     for (0..depth) |_| try buf.appendSlice(a, "    ");
 }
 
-fn json_decode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .null;
+fn json_decode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.null);
     const s = args[0].string.bytes();
     const flags = if (args.len >= 4) Value.toInt(args[3]) else 0;
     // PHP semantics: JSON_OBJECT_AS_ARRAY only applies when $associative is
@@ -505,7 +505,7 @@ fn json_decode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if ((flags & JSON_THROW_ON_ERROR) != 0) {
             return throwJsonException(ctx, "Syntax error");
         }
-        return .null;
+        return NativeResult.scalar(.null);
     }
     var pos: usize = 0;
     const result = parseValue(ctx, s, &pos, assoc, depth, 0, flags) catch |err| {
@@ -517,8 +517,9 @@ fn json_decode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if ((flags & JSON_THROW_ON_ERROR) != 0) {
             return throwJsonException(ctx, last_error_msg);
         }
-        return .null;
+        return NativeResult.scalar(.null);
     };
+    defer if (result == .string) result.string.release();
     skipWhitespace(s, &pos);
     if (pos < s.len) {
         last_error = 4;
@@ -526,11 +527,11 @@ fn json_decode(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if ((flags & JSON_THROW_ON_ERROR) != 0) {
             return throwJsonException(ctx, "Syntax error");
         }
-        return .null;
+        return NativeResult.scalar(.null);
     }
     last_error = 0;
     last_error_msg = "No error";
-    return result;
+    return NativeResult.share(result);
 }
 
 // Match PHP's array-key coercion: a string key that looks like a decimal
@@ -658,8 +659,7 @@ fn parseString(ctx: *NativeContext, s: []const u8, pos: *usize) !Value {
     }
     pos.* += 1;
     const result = try buf.toOwnedSlice(ctx.allocator);
-    try ctx.strings.append(ctx.allocator, result);
-    return .{ .string = Value.String.borrowed(result) };
+    return .{ .string = try Value.String.adopt(ctx.allocator, result) };
 }
 
 fn parseNumber(ctx: *NativeContext, s: []const u8, pos: *usize, flags: i64) !Value {
@@ -685,9 +685,7 @@ fn parseNumber(ctx: *NativeContext, s: []const u8, pos: *usize, flags: i64) !Val
     }
     const i = std.fmt.parseInt(i64, num_str, 10) catch {
         if ((flags & JSON_BIGINT_AS_STRING) != 0) {
-            const dup = try ctx.allocator.dupe(u8, num_str);
-            try ctx.strings.append(ctx.allocator, dup);
-            return .{ .string = Value.String.borrowed(dup) };
+            return .{ .string = try Value.String.create(ctx.allocator, num_str) };
         }
         const f = std.fmt.parseFloat(f64, num_str) catch 0.0;
         return .{ .float = f };
@@ -737,6 +735,7 @@ fn parseArray(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max_
     }
     while (pos.* < s.len) {
         const val = try parseValue(ctx, s, pos, assoc, max_depth, cur_depth + 1, flags);
+        defer if (val == .string) val.string.release();
         try arr.append(ctx.allocator, val);
         skipWhitespace(s, pos);
         if (pos.* < s.len and s[pos.*] == ',') {
@@ -767,7 +766,7 @@ fn parseObject(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max
     skipWhitespace(s, pos);
 
     if (assoc) {
-        var arr = try ctx.createArray();
+        const arr = try ctx.createArray();
         if (pos.* < s.len and s[pos.*] == '}') {
             pos.* += 1;
             return .{ .array = arr };
@@ -779,6 +778,7 @@ fn parseObject(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max
                 return error.RuntimeError;
             }
             const key_val = try parseString(ctx, s, pos);
+            defer key_val.string.release();
             const key_str = if (key_val == .string) key_val.string.bytes() else "";
             skipWhitespace(s, pos);
             if (pos.* >= s.len or s[pos.*] != ':') {
@@ -787,7 +787,10 @@ fn parseObject(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max
             }
             pos.* += 1;
             const val = try parseValue(ctx, s, pos, assoc, max_depth, cur_depth + 1, flags);
-            try arr.set(ctx.allocator, decodeKeyToArrayKey(key_str), val);
+            defer if (val == .string) val.string.release();
+            var key = decodeKeyToArrayKey(key_str);
+            if (key == .string) key.string = key_val.string;
+            try ctx.vm.arraySetOwned(arr, key, val);
             skipWhitespace(s, pos);
             if (pos.* < s.len and s[pos.*] == ',') {
                 pos.* += 1;
@@ -816,6 +819,7 @@ fn parseObject(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max
             return error.RuntimeError;
         }
         const key_val = try parseString(ctx, s, pos);
+        defer key_val.string.release();
         const key_str = if (key_val == .string) key_val.string.bytes() else "";
         skipWhitespace(s, pos);
         if (pos.* >= s.len or s[pos.*] != ':') {
@@ -824,7 +828,9 @@ fn parseObject(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max
         }
         pos.* += 1;
         const val = try parseValue(ctx, s, pos, assoc, max_depth, cur_depth + 1, flags);
-        try obj.set(ctx.allocator, key_str, val);
+        defer if (val == .string) val.string.release();
+        const stored_key = if (obj.properties.getKey(key_str)) |existing| existing else try ctx.createString(key_str);
+        try obj.set(ctx.allocator, stored_key, val);
         skipWhitespace(s, pos);
         if (pos.* < s.len and s[pos.*] == ',') {
             pos.* += 1;
@@ -848,8 +854,8 @@ fn throwJsonException(ctx: *NativeContext, msg: []const u8) RuntimeError {
     return error.RuntimeError;
 }
 
-fn json_validate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn json_validate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const s = args[0].string.bytes();
     const depth: usize = if (args.len >= 2) @intCast(@max(1, Value.toInt(args[1]))) else 512;
     const flags = if (args.len >= 3) Value.toInt(args[2]) else 0;
@@ -858,29 +864,30 @@ fn json_validate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (s.len == 0) {
         last_error = 4;
         last_error_msg = "Syntax error";
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     }
     var pos: usize = 0;
-    _ = parseValue(ctx, s, &pos, true, depth, 0, flags) catch {
+    const parsed = parseValue(ctx, s, &pos, true, depth, 0, flags) catch {
         if (last_error == 0) {
             last_error = 4;
             last_error_msg = "Syntax error";
         }
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     };
+    defer if (parsed == .string) parsed.string.release();
     skipWhitespace(s, &pos);
     if (pos < s.len) {
         last_error = 4;
         last_error_msg = "Syntax error";
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     }
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_json_last_error(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .int = last_error };
+fn native_json_last_error(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .int = last_error });
 }
 
-fn native_json_last_error_msg(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .string = Value.String.borrowed(last_error_msg) };
+fn native_json_last_error_msg(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.copyString(ctx.allocator, last_error_msg);
 }

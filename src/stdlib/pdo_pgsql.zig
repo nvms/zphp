@@ -5,6 +5,7 @@ const PhpObject = @import("../runtime/value.zig").PhpObject;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 const pdo = @import("pdo.zig");
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 
 const pg = struct {
     const PGconn = opaque {};
@@ -39,7 +40,7 @@ fn getRes(obj: *PhpObject) ?*pg.PGresult {
     return pdo.getOpaquePtr(pg.PGresult, obj, "__res_ptr");
 }
 
-pub fn connect(ctx: *NativeContext, obj: *PhpObject, rest: []const u8, args: []const Value) RuntimeError!Value {
+pub fn connect(ctx: *NativeContext, obj: *PhpObject, rest: []const u8, args: []const Value) RuntimeError!NativeResult {
     // build libpq connection string from DSN params
     // pgsql:host=localhost;port=5432;dbname=test -> "host=localhost port=5432 dbname=test user=X password=Y"
     var conninfo = std.ArrayListUnmanaged(u8){};
@@ -79,10 +80,10 @@ pub fn connect(ctx: *NativeContext, obj: *PhpObject, rest: []const u8, args: []c
     }
 
     try obj.set(ctx.allocator, "__db_ptr", .{ .int = @intCast(@intFromPtr(conn)) });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-pub fn exec(ctx: *NativeContext, obj: *PhpObject, sql: []const u8) RuntimeError!Value {
+pub fn exec(ctx: *NativeContext, obj: *PhpObject, sql: []const u8) RuntimeError!NativeResult {
     const conn = getConn(obj) orelse return pdo.throwPdo(ctx, "Database not connected");
     const sql_z = try pdo.dupeZ(ctx, sql);
     const res = pg.PQexec(conn, sql_z) orelse return pdo.throwPdo(ctx, std.mem.span(pg.PQerrorMessage(conn)));
@@ -94,10 +95,10 @@ pub fn exec(ctx: *NativeContext, obj: *PhpObject, sql: []const u8) RuntimeError!
     }
     const affected = std.fmt.parseInt(i64, std.mem.span(pg.PQcmdTuples(res)), 10) catch 0;
     pg.PQclear(res);
-    return .{ .int = affected };
+    return NativeResult.scalar(.{ .int = affected });
 }
 
-pub fn query(ctx: *NativeContext, obj: *PhpObject, sql: []const u8) RuntimeError!Value {
+pub fn query(ctx: *NativeContext, obj: *PhpObject, sql: []const u8) RuntimeError!NativeResult {
     const conn = getConn(obj) orelse return pdo.throwPdo(ctx, "Database not connected");
     const sql_z = try pdo.dupeZ(ctx, sql);
     const res = pg.PQexec(conn, sql_z) orelse return pdo.throwPdo(ctx, std.mem.span(pg.PQerrorMessage(conn)));
@@ -115,10 +116,10 @@ pub fn query(ctx: *NativeContext, obj: *PhpObject, sql: []const u8) RuntimeError
     try stmt_obj.set(ctx.allocator, "__current_row", .{ .int = 0 });
     try stmt_obj.set(ctx.allocator, "__has_row", .{ .bool = pg.PQntuples(res) > 0 });
     try stmt_obj.set(ctx.allocator, "__stepped", .{ .bool = true });
-    return .{ .object = stmt_obj };
+    return NativeResult.borrowed(.{ .object = stmt_obj });
 }
 
-pub fn prepare(ctx: *NativeContext, obj: *PhpObject, sql: []const u8) RuntimeError!Value {
+pub fn prepare(ctx: *NativeContext, obj: *PhpObject, sql: []const u8) RuntimeError!NativeResult {
     const conn = getConn(obj) orelse return pdo.throwPdo(ctx, "Database not connected");
 
     // rewrite ? and :name to $1, $2, ... for postgres
@@ -179,13 +180,13 @@ pub fn prepare(ctx: *NativeContext, obj: *PhpObject, sql: []const u8) RuntimeErr
     }
     param_names.deinit(ctx.allocator);
 
-    return .{ .object = stmt_obj };
+    return NativeResult.borrowed(.{ .object = stmt_obj });
 }
 
-pub fn stmtExecute(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!Value {
-    const conn = getConn(obj) orelse return .{ .bool = false };
+pub fn stmtExecute(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!NativeResult {
+    const conn = getConn(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const sql_val = obj.get("__sql");
-    if (sql_val != .string) return .{ .bool = false };
+    if (sql_val != .string) return NativeResult.scalar(.{ .bool = false });
     const sql_z = try pdo.dupeZ(ctx, sql_val.string.bytes());
 
     // free previous result
@@ -236,7 +237,7 @@ pub fn stmtExecute(ctx: *NativeContext, obj: *PhpObject, args: []const Value) Ru
             }
         }
 
-        const res = pg.PQexecParams(conn, sql_z, @intCast(param_count), null, param_values.ptr, null, null, 0) orelse return .{ .bool = false };
+        const res = pg.PQexecParams(conn, sql_z, @intCast(param_count), null, param_values.ptr, null, null, 0) orelse return NativeResult.scalar(.{ .bool = false });
         const status = pg.PQresultStatus(res);
         if (status != pg.PGRES_TUPLES_OK and status != pg.PGRES_COMMAND_OK) {
             const msg = std.mem.span(pg.PQresultErrorMessage(res));
@@ -248,7 +249,7 @@ pub fn stmtExecute(ctx: *NativeContext, obj: *PhpObject, args: []const Value) Ru
         try obj.set(ctx.allocator, "__has_row", .{ .bool = pg.PQntuples(res) > 0 });
         try obj.set(ctx.allocator, "__row_count", .{ .int = std.fmt.parseInt(i64, std.mem.span(pg.PQcmdTuples(res)), 10) catch @intCast(pg.PQntuples(res)) });
     } else {
-        const res = pg.PQexec(conn, sql_z) orelse return .{ .bool = false };
+        const res = pg.PQexec(conn, sql_z) orelse return NativeResult.scalar(.{ .bool = false });
         const status = pg.PQresultStatus(res);
         if (status != pg.PGRES_TUPLES_OK and status != pg.PGRES_COMMAND_OK) {
             const msg = std.mem.span(pg.PQresultErrorMessage(res));
@@ -261,7 +262,7 @@ pub fn stmtExecute(ctx: *NativeContext, obj: *PhpObject, args: []const Value) Ru
         try obj.set(ctx.allocator, "__row_count", .{ .int = std.fmt.parseInt(i64, std.mem.span(pg.PQcmdTuples(res)), 10) catch @intCast(pg.PQntuples(res)) });
     }
     try obj.set(ctx.allocator, "__stepped", .{ .bool = true });
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
 fn valueToZ(ctx: *NativeContext, val: Value) !?[*:0]const u8 {
@@ -288,12 +289,12 @@ fn valueToZ(ctx: *NativeContext, val: Value) !?[*:0]const u8 {
     }
 }
 
-pub fn stmtFetch(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!Value {
-    const res = getRes(obj) orelse return .{ .bool = false };
+pub fn stmtFetch(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!NativeResult {
+    const res = getRes(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const cur_val = obj.get("__current_row");
     const current_row: c_int = if (cur_val == .int) @intCast(cur_val.int) else 0;
     const total_rows = pg.PQntuples(res);
-    if (current_row >= total_rows) return .{ .bool = false };
+    if (current_row >= total_rows) return NativeResult.scalar(.{ .bool = false });
 
     const mode: i64 = if (args.len >= 1 and args[0] == .int) args[0].int else 4;
     const num_fields = pg.PQnfields(res);
@@ -316,96 +317,96 @@ pub fn stmtFetch(ctx: *NativeContext, obj: *PhpObject, args: []const Value) Runt
     }
 
     try obj.set(ctx.allocator, "__current_row", .{ .int = current_row + 1 });
-    return .{ .array = row };
+    return NativeResult.borrowed(.{ .array = row });
 }
 
-pub fn stmtFetchAll(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!Value {
+pub fn stmtFetchAll(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!NativeResult {
     var result = try ctx.createArray();
     while (true) {
-        const row = try stmtFetch(ctx, obj, args);
+        const row = (try stmtFetch(ctx, obj, args)).value;
         if (row == .bool and !row.bool) break;
         try result.append(ctx.allocator, row);
     }
-    return .{ .array = result };
+    return NativeResult.borrowed(.{ .array = result });
 }
 
-pub fn stmtFetchColumn(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!Value {
-    const res = getRes(obj) orelse return .{ .bool = false };
+pub fn stmtFetchColumn(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!NativeResult {
+    const res = getRes(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const cur_val = obj.get("__current_row");
     const current_row: c_int = if (cur_val == .int) @intCast(cur_val.int) else 0;
-    if (current_row >= pg.PQntuples(res)) return .{ .bool = false };
+    if (current_row >= pg.PQntuples(res)) return NativeResult.scalar(.{ .bool = false });
 
     const col: c_int = if (args.len >= 1 and args[0] == .int) @intCast(args[0].int) else 0;
-    if (col >= pg.PQnfields(res)) return .{ .bool = false };
+    if (col >= pg.PQnfields(res)) return NativeResult.scalar(.{ .bool = false });
 
     try obj.set(ctx.allocator, "__current_row", .{ .int = current_row + 1 });
 
-    if (pg.PQgetisnull(res, current_row, col) != 0) return .null;
+    if (pg.PQgetisnull(res, current_row, col) != 0) return NativeResult.scalar(.null);
     const s = std.mem.span(pg.PQgetvalue(res, current_row, col));
-    return .{ .string = Value.String.borrowed(try ctx.createString(s)) };
+    return try NativeResult.copyString(ctx.allocator, s);
 }
 
-pub fn stmtColumnCount(obj: *PhpObject) RuntimeError!Value {
-    const res = getRes(obj) orelse return .{ .int = 0 };
-    return .{ .int = @intCast(pg.PQnfields(res)) };
+pub fn stmtColumnCount(obj: *PhpObject) RuntimeError!NativeResult {
+    const res = getRes(obj) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = @intCast(pg.PQnfields(res)) });
 }
 
-pub fn stmtCloseCursor(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
+pub fn stmtCloseCursor(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeResult {
     if (getRes(obj)) |res| {
         pg.PQclear(res);
         try obj.set(ctx.allocator, "__res_ptr", .{ .int = 0 });
     }
     try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
     try obj.set(ctx.allocator, "__current_row", .{ .int = 0 });
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-pub fn lastInsertId(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
+pub fn lastInsertId(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeResult {
     // postgres uses RETURNING or lastval() for insert IDs
-    const conn = getConn(obj) orelse return .{ .string = Value.String.borrowed("0") };
+    const conn = getConn(obj) orelse return NativeResult.literal("0");
     const sql_z: [*:0]const u8 = "SELECT lastval()";
-    const res = pg.PQexec(conn, sql_z) orelse return .{ .string = Value.String.borrowed("0") };
+    const res = pg.PQexec(conn, sql_z) orelse return NativeResult.literal("0");
     defer pg.PQclear(res);
-    if (pg.PQresultStatus(res) != pg.PGRES_TUPLES_OK or pg.PQntuples(res) == 0) return .{ .string = Value.String.borrowed("0") };
+    if (pg.PQresultStatus(res) != pg.PGRES_TUPLES_OK or pg.PQntuples(res) == 0) return NativeResult.literal("0");
     const s = std.mem.span(pg.PQgetvalue(res, 0, 0));
-    return .{ .string = Value.String.borrowed(try ctx.createString(s)) };
+    return try NativeResult.copyString(ctx.allocator, s);
 }
 
-pub fn beginTransaction(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
-    const conn = getConn(obj) orelse return .{ .bool = false };
-    const res = pg.PQexec(conn, "BEGIN") orelse return .{ .bool = false };
+pub fn beginTransaction(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeResult {
+    const conn = getConn(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    const res = pg.PQexec(conn, "BEGIN") orelse return NativeResult.scalar(.{ .bool = false });
     const ok = pg.PQresultStatus(res) == pg.PGRES_COMMAND_OK;
     pg.PQclear(res);
     _ = ctx;
-    return .{ .bool = ok };
+    return NativeResult.scalar(.{ .bool = ok });
 }
 
-pub fn commit(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
-    const conn = getConn(obj) orelse return .{ .bool = false };
-    const res = pg.PQexec(conn, "COMMIT") orelse return .{ .bool = false };
+pub fn commit(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeResult {
+    const conn = getConn(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    const res = pg.PQexec(conn, "COMMIT") orelse return NativeResult.scalar(.{ .bool = false });
     const ok = pg.PQresultStatus(res) == pg.PGRES_COMMAND_OK;
     pg.PQclear(res);
     _ = ctx;
-    return .{ .bool = ok };
+    return NativeResult.scalar(.{ .bool = ok });
 }
 
-pub fn rollBack(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
-    const conn = getConn(obj) orelse return .{ .bool = false };
-    const res = pg.PQexec(conn, "ROLLBACK") orelse return .{ .bool = false };
+pub fn rollBack(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeResult {
+    const conn = getConn(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    const res = pg.PQexec(conn, "ROLLBACK") orelse return NativeResult.scalar(.{ .bool = false });
     const ok = pg.PQresultStatus(res) == pg.PGRES_COMMAND_OK;
     pg.PQclear(res);
     _ = ctx;
-    return .{ .bool = ok };
+    return NativeResult.scalar(.{ .bool = ok });
 }
 
-pub fn errorInfo(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
-    const conn = getConn(obj) orelse return .null;
+pub fn errorInfo(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeResult {
+    const conn = getConn(obj) orelse return NativeResult.scalar(.null);
     var arr = try ctx.createArray();
     const msg = std.mem.span(pg.PQerrorMessage(conn));
     try arr.append(ctx.allocator, .{ .string = Value.String.borrowed("00000") });
     try arr.append(ctx.allocator, .null);
     try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(try ctx.createString(msg)) });
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
 pub fn cleanupStatement(obj: *PhpObject) void {

@@ -9,6 +9,7 @@ const ClassDef = vm_mod.ClassDef;
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 const strings_mod = @import("strings.zig");
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 
 // libicu uses preprocessor macros to rename its API per ABI version
 // (u_strFromUTF8 -> u_strFromUTF8_77 on linux distros). zig's @cImport doesn't
@@ -194,8 +195,7 @@ fn utf8ToU16(ctx: *NativeContext, s: []const u8) ![]u16 {
     return buf;
 }
 
-fn u16ToUtf8(ctx: *NativeContext, s: []const u16) ![]const u8 {
-    if (s.len == 0) return try dupString(ctx, "");
+fn u16ToOwned(ctx: *NativeContext, s: []const u16) ![]u8 {
     const cap: i32 = @intCast(s.len * 3 + 4);
     var buf = try ctx.allocator.alloc(u8, @intCast(cap));
     errdefer ctx.allocator.free(buf);
@@ -204,8 +204,22 @@ fn u16ToUtf8(ctx: *NativeContext, s: []const u16) ![]const u8 {
     _ = zphp_u_strToUTF8(buf.ptr, cap, &actual, s.ptr, @intCast(s.len), &status);
     if (intlRecord(ctx.vm, status)) return error.RuntimeError;
     buf = try ctx.allocator.realloc(buf, @intCast(actual));
+    return buf;
+}
+
+fn u16ToUtf8(ctx: *NativeContext, s: []const u16) ![]const u8 {
+    if (s.len == 0) return try dupString(ctx, "");
+    const buf = try u16ToOwned(ctx, s);
+    errdefer ctx.allocator.free(buf);
     try ctx.strings.append(ctx.allocator, buf);
     return buf;
+}
+
+fn u16ToResult(ctx: *NativeContext, s: []const u16) !NativeResult {
+    if (s.len == 0) return NativeResult.literal("");
+    const buf = try u16ToOwned(ctx, s);
+    errdefer ctx.allocator.free(buf);
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, buf));
 }
 
 // ---------------- Normalizer ----------------
@@ -227,10 +241,10 @@ fn getNormalizer(form: i64) ?*const UNormalizer2 {
     return n;
 }
 
-fn normalizerNormalize(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+fn normalizerNormalize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const form: i64 = if (args.len > 1 and args[1] == .int) args[1].int else 1;
-    const norm = getNormalizer(form) orelse return .{ .bool = false };
+    const norm = getNormalizer(form) orelse return NativeResult.scalar(.{ .bool = false });
 
     const u16src = try utf8ToU16(ctx, args[0].string.bytes());
     defer ctx.allocator.free(u16src);
@@ -240,98 +254,96 @@ fn normalizerNormalize(ctx: *NativeContext, args: []const Value) RuntimeError!Va
     defer ctx.allocator.free(buf);
     var status: UErrorCode = U_ZERO_ERROR;
     const actual = zphp_unorm2_normalize(norm, u16src.ptr, @intCast(u16src.len), buf.ptr, cap, &status);
-    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
+    if (intlRecord(ctx.vm, status)) return NativeResult.scalar(.{ .bool = false });
 
-    const out = try u16ToUtf8(ctx, buf[0..@intCast(actual)]);
-    return .{ .string = Value.String.borrowed(out) };
+    return try u16ToResult(ctx, buf[0..@intCast(actual)]);
 }
 
-fn normalizerIsNormalized(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+fn normalizerIsNormalized(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const form: i64 = if (args.len > 1 and args[1] == .int) args[1].int else 1;
-    const norm = getNormalizer(form) orelse return .{ .bool = false };
+    const norm = getNormalizer(form) orelse return NativeResult.scalar(.{ .bool = false });
     const u16src = try utf8ToU16(ctx, args[0].string.bytes());
     defer ctx.allocator.free(u16src);
     var status: UErrorCode = U_ZERO_ERROR;
     const ok = zphp_unorm2_isNormalized(norm, u16src.ptr, @intCast(u16src.len), &status);
-    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
-    return .{ .bool = ok != 0 };
+    if (intlRecord(ctx.vm, status)) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = ok != 0 });
 }
 
 // ---------------- Locale ----------------
 
-fn localeGetDefault(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn localeGetDefault(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const def = zphp_uloc_getDefault();
-    return .{ .string = Value.String.borrowed(try dupString(ctx, def[0..cstrLen(def)])) };
+    return try NativeResult.copyString(ctx.allocator, def[0..cstrLen(def)]);
 }
 
-fn localeSetDefault(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+fn localeSetDefault(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     var buf: [256]u8 = undefined;
     const n = @min(args[0].string.bytes().len, buf.len - 1);
     @memcpy(buf[0..n], args[0].string.bytes()[0..n]);
     buf[n] = 0;
     var status: UErrorCode = U_ZERO_ERROR;
     zphp_uloc_setDefault(@ptrCast(&buf), &status);
-    return .{ .bool = status <= U_ZERO_ERROR };
+    return NativeResult.scalar(.{ .bool = status <= U_ZERO_ERROR });
 }
 
 const KeywordFn = *const fn (loc: [*:0]const u8, buf: [*]u8, cap: i32, err: *UErrorCode) callconv(.c) i32;
 
-fn locKeywordCall(ctx: *NativeContext, args: []const Value, comptime fn_ptr: KeywordFn) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .null;
+fn locKeywordCall(ctx: *NativeContext, args: []const Value, comptime fn_ptr: KeywordFn) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
     const loc_z = try dupZ(ctx, args[0].string.bytes());
     var buf: [128]u8 = undefined;
     var status: UErrorCode = U_ZERO_ERROR;
     const n = fn_ptr(loc_z.ptr, &buf, @intCast(buf.len), &status);
-    if (status > U_ZERO_ERROR or n <= 0) return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
-    return .{ .string = Value.String.borrowed(try dupString(ctx, buf[0..@intCast(n)])) };
+    if (status > U_ZERO_ERROR or n <= 0) return try NativeResult.copyString(ctx.allocator, "");
+    return try NativeResult.copyString(ctx.allocator, buf[0..@intCast(n)]);
 }
 
-fn localeGetPrimaryLanguage(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn localeGetPrimaryLanguage(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return locKeywordCall(ctx, args, zphp_uloc_getLanguage);
 }
-fn localeGetRegion(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn localeGetRegion(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return locKeywordCall(ctx, args, zphp_uloc_getCountry);
 }
-fn localeGetScript(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn localeGetScript(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return locKeywordCall(ctx, args, zphp_uloc_getScript);
 }
-fn localeCanonicalize(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .null;
+fn localeCanonicalize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
     const loc_z = try dupZ(ctx, args[0].string.bytes());
     var buf: [256]u8 = undefined;
     var status: UErrorCode = U_ZERO_ERROR;
     const n = zphp_uloc_canonicalize(loc_z.ptr, &buf, @intCast(buf.len), &status);
-    if (status > U_ZERO_ERROR or n <= 0) return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
-    return .{ .string = Value.String.borrowed(try dupString(ctx, buf[0..@intCast(n)])) };
+    if (status > U_ZERO_ERROR or n <= 0) return try NativeResult.copyString(ctx.allocator, "");
+    return try NativeResult.copyString(ctx.allocator, buf[0..@intCast(n)]);
 }
 
 const DisplayFn = *const fn (loc: [*:0]const u8, inLoc: [*:0]const u8, buf: [*]UChar, cap: i32, err: *UErrorCode) callconv(.c) i32;
 
-fn displayCall(ctx: *NativeContext, args: []const Value, comptime fn_ptr: DisplayFn) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .null;
+fn displayCall(ctx: *NativeContext, args: []const Value, comptime fn_ptr: DisplayFn) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
     const tgt_z = try dupZ(ctx, args[0].string.bytes());
     const in_z: ?[:0]u8 = if (args.len > 1 and args[1] == .string) try dupZ(ctx, args[1].string.bytes()) else null;
     const in_ptr: [*:0]const u8 = if (in_z) |z| z.ptr else zphp_uloc_getDefault();
     var buf: [256]UChar = undefined;
     var status: UErrorCode = U_ZERO_ERROR;
     const n = fn_ptr(tgt_z.ptr, in_ptr, &buf, @intCast(buf.len), &status);
-    if (status > U_ZERO_ERROR or n <= 0) return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
-    const out = try u16ToUtf8(ctx, buf[0..@intCast(n)]);
-    return .{ .string = Value.String.borrowed(out) };
+    if (status > U_ZERO_ERROR or n <= 0) return try NativeResult.copyString(ctx.allocator, "");
+    return try u16ToResult(ctx, buf[0..@intCast(n)]);
 }
 
-fn localeGetDisplayName(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn localeGetDisplayName(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return displayCall(ctx, args, zphp_uloc_getDisplayName);
 }
-fn localeGetDisplayLanguage(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn localeGetDisplayLanguage(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return displayCall(ctx, args, zphp_uloc_getDisplayLanguage);
 }
-fn localeGetDisplayRegion(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn localeGetDisplayRegion(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return displayCall(ctx, args, zphp_uloc_getDisplayCountry);
 }
-fn localeGetDisplayScript(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn localeGetDisplayScript(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return displayCall(ctx, args, zphp_uloc_getDisplayScript);
 }
 
@@ -351,60 +363,60 @@ fn openCollatorFor(ctx: *NativeContext, locale: []const u8) !?*UCollator {
     return c;
 }
 
-fn collConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .null;
-    const obj = getThis(ctx) orelse return .null;
-    const c = (try openCollatorFor(ctx, args[0].string.bytes())) orelse return .null;
+fn collConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const c = (try openCollatorFor(ctx, args[0].string.bytes())) orelse return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__coll", .{ .int = @intCast(@intFromPtr(c)) });
     try obj.set(ctx.allocator, "__locale", .{ .string = args[0].string });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn collCreateStatic(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .null;
+fn collCreateStatic(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
     const obj = try ctx.createObject("Collator");
-    const c = (try openCollatorFor(ctx, args[0].string.bytes())) orelse return .null;
+    const c = (try openCollatorFor(ctx, args[0].string.bytes())) orelse return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__coll", .{ .int = @intCast(@intFromPtr(c)) });
     try obj.set(ctx.allocator, "__locale", .{ .string = args[0].string });
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn collCompare(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const c = getCollator(obj) orelse return .{ .bool = false };
+fn collCompare(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const c = getCollator(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const a = try utf8ToU16(ctx, args[0].string.bytes());
     defer ctx.allocator.free(a);
     const b = try utf8ToU16(ctx, args[1].string.bytes());
     defer ctx.allocator.free(b);
-    return .{ .int = @intCast(zphp_ucol_strcoll(c, a.ptr, @intCast(a.len), b.ptr, @intCast(b.len))) };
+    return NativeResult.scalar(.{ .int = @intCast(zphp_ucol_strcoll(c, a.ptr, @intCast(a.len), b.ptr, @intCast(b.len))) });
 }
 
-fn collSetStrength(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .int) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const c = getCollator(obj) orelse return .{ .bool = false };
+fn collSetStrength(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .int) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const c = getCollator(obj) orelse return NativeResult.scalar(.{ .bool = false });
     zphp_ucol_setStrength(c, @intCast(args[0].int));
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn collGetStrength(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    const c = getCollator(obj) orelse return .{ .int = 0 };
-    return .{ .int = @intCast(zphp_ucol_getStrength(c)) };
+fn collGetStrength(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    const c = getCollator(obj) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = @intCast(zphp_ucol_getStrength(c)) });
 }
 
-fn collGetLocale(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
+fn collGetLocale(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return try NativeResult.copyString(ctx.allocator, "");
     const v = obj.get("__locale");
-    if (v == .string) return v;
-    return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
+    if (v == .string) return NativeResult.share(v);
+    return try NativeResult.copyString(ctx.allocator, "");
 }
 
-fn collSort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .array) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const c = getCollator(obj) orelse return .{ .bool = false };
+fn collSort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .array) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const c = getCollator(obj) orelse return NativeResult.scalar(.{ .bool = false });
 
     const arr = args[0].array;
     const SortContext = struct { coll: *UCollator, ctx: *NativeContext };
@@ -427,7 +439,7 @@ fn collSort(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     arr.string_index.clearRetainingCapacity();
     arr.next_int_key = @intCast(arr.entries.items.len);
     arr.has_int_keys = true;
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
 // ---------------- NumberFormatter ----------------
@@ -458,30 +470,30 @@ fn openNumFmt(ctx: *NativeContext, locale: []const u8, style: i32, pattern: ?[]c
     return f;
 }
 
-fn nfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string) return .null;
-    const obj = getThis(ctx) orelse return .null;
+fn nfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string) return NativeResult.scalar(.null);
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const style: i32 = if (args[1] == .int) @intCast(args[1].int) else 1;
     const pattern: ?[]const u8 = if (args.len >= 3 and args[2] == .string) args[2].string.bytes() else null;
-    const f = (try openNumFmt(ctx, args[0].string.bytes(), style, pattern)) orelse return .null;
+    const f = (try openNumFmt(ctx, args[0].string.bytes(), style, pattern)) orelse return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__nfmt", .{ .int = @intCast(@intFromPtr(f)) });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn nfCreateStatic(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string) return .null;
+fn nfCreateStatic(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string) return NativeResult.scalar(.null);
     const obj = try ctx.createObject("NumberFormatter");
     const style: i32 = if (args[1] == .int) @intCast(args[1].int) else 1;
     const pattern: ?[]const u8 = if (args.len >= 3 and args[2] == .string) args[2].string.bytes() else null;
-    const f = (try openNumFmt(ctx, args[0].string.bytes(), style, pattern)) orelse return .null;
+    const f = (try openNumFmt(ctx, args[0].string.bytes(), style, pattern)) orelse return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__nfmt", .{ .int = @intCast(@intFromPtr(f)) });
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn nfFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const f = getNumFmt(obj) orelse return .{ .bool = false };
+fn nfFormat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const f = getNumFmt(obj) orelse return NativeResult.scalar(.{ .bool = false });
 
     var buf: [128]UChar = undefined;
     var status: UErrorCode = U_ZERO_ERROR;
@@ -490,66 +502,64 @@ fn nfFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     switch (args[0]) {
         .int => |i| n = zphp_unum_formatInt64(f, i, &buf, @intCast(buf.len), null, &status),
         .float => |fl| n = zphp_unum_formatDouble(f, fl, &buf, @intCast(buf.len), null, &status),
-        else => return .{ .bool = false },
+        else => return NativeResult.scalar(.{ .bool = false }),
     }
-    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
-    const out = try u16ToUtf8(ctx, buf[0..@intCast(n)]);
-    return .{ .string = Value.String.borrowed(out) };
+    if (intlRecord(ctx.vm, status)) return NativeResult.scalar(.{ .bool = false });
+    return try u16ToResult(ctx, buf[0..@intCast(n)]);
 }
 
-fn nfFormatCurrency(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[1] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const f = getNumFmt(obj) orelse return .{ .bool = false };
+fn nfFormatCurrency(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const f = getNumFmt(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const amount: f64 = switch (args[0]) {
         .int => |i| @floatFromInt(i),
         .float => |fl| fl,
-        else => return .{ .bool = false },
+        else => return NativeResult.scalar(.{ .bool = false }),
     };
     const ccy_u16 = try utf8ToU16(ctx, args[1].string.bytes());
     defer ctx.allocator.free(ccy_u16);
     var buf: [128]UChar = undefined;
     var status: UErrorCode = U_ZERO_ERROR;
     const n = zphp_unum_formatDoubleCurrency(f, amount, ccy_u16.ptr, &buf, @intCast(buf.len), null, &status);
-    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
-    const out = try u16ToUtf8(ctx, buf[0..@intCast(n)]);
-    return .{ .string = Value.String.borrowed(out) };
+    if (intlRecord(ctx.vm, status)) return NativeResult.scalar(.{ .bool = false });
+    return try u16ToResult(ctx, buf[0..@intCast(n)]);
 }
 
-fn nfParse(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const f = getNumFmt(obj) orelse return .{ .bool = false };
+fn nfParse(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const f = getNumFmt(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const u16src = try utf8ToU16(ctx, args[0].string.bytes());
     defer ctx.allocator.free(u16src);
     var pos: i32 = 0;
     var status: UErrorCode = U_ZERO_ERROR;
     const result = zphp_unum_parseDouble(f, u16src.ptr, @intCast(u16src.len), &pos, &status);
-    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
+    if (intlRecord(ctx.vm, status)) return NativeResult.scalar(.{ .bool = false });
     if (@trunc(result) == result and result < 1e15 and result > -1e15) {
-        return .{ .int = @intFromFloat(result) };
+        return NativeResult.scalar(.{ .int = @intFromFloat(result) });
     }
-    return .{ .float = result };
+    return NativeResult.scalar(.{ .float = result });
 }
 
-fn nfSetAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .int) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const f = getNumFmt(obj) orelse return .{ .bool = false };
+fn nfSetAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .int) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const f = getNumFmt(obj) orelse return NativeResult.scalar(.{ .bool = false });
     switch (args[1]) {
         .int => |i| zphp_unum_setAttribute(f, @intCast(args[0].int), @intCast(i)),
         .float => |fl| zphp_unum_setDoubleAttribute(f, @intCast(args[0].int), fl),
         .bool => |b| zphp_unum_setAttribute(f, @intCast(args[0].int), if (b) 1 else 0),
-        else => return .{ .bool = false },
+        else => return NativeResult.scalar(.{ .bool = false }),
     }
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn nfGetAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .int) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const f = getNumFmt(obj) orelse return .{ .bool = false };
-    return .{ .int = @intCast(zphp_unum_getAttribute(f, @intCast(args[0].int))) };
+fn nfGetAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .int) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const f = getNumFmt(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .int = @intCast(zphp_unum_getAttribute(f, @intCast(args[0].int))) });
 }
 
 // ---------------- Transliterator ----------------
@@ -560,24 +570,24 @@ fn getTranslit(obj: *const PhpObject) ?*UTransliterator {
     return @ptrFromInt(@as(usize, @intCast(v.int)));
 }
 
-fn transCreateStatic(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .null;
+fn transCreateStatic(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
     const id_u16 = try utf8ToU16(ctx, args[0].string.bytes());
     defer ctx.allocator.free(id_u16);
     var status: UErrorCode = U_ZERO_ERROR;
     const dir: i32 = if (args.len > 1 and args[1] == .int and args[1].int == 1) 1 else 0;
     const t = zphp_utrans_openU(id_u16.ptr, @intCast(id_u16.len), dir, null, 0, null, &status);
-    if (status > U_ZERO_ERROR or t == null) return .null;
+    if (status > U_ZERO_ERROR or t == null) return NativeResult.scalar(.null);
     const obj = try ctx.createObject("Transliterator");
     try obj.set(ctx.allocator, "__trans", .{ .int = @intCast(@intFromPtr(t.?)) });
     try obj.set(ctx.allocator, "id", .{ .string = args[0].string });
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn transTransliterate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const t = getTranslit(obj) orelse return .{ .bool = false };
+fn transTransliterate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const t = getTranslit(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const u16src = try utf8ToU16(ctx, args[0].string.bytes());
     defer ctx.allocator.free(u16src);
 
@@ -590,9 +600,8 @@ fn transTransliterate(ctx: *NativeContext, args: []const Value) RuntimeError!Val
     var limit: i32 = text_len;
     var status: UErrorCode = U_ZERO_ERROR;
     zphp_utrans_transUChars(t, buf.ptr, &text_len, cap, 0, &limit, &status);
-    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
-    const out = try u16ToUtf8(ctx, buf[0..@intCast(text_len)]);
-    return .{ .string = Value.String.borrowed(out) };
+    if (intlRecord(ctx.vm, status)) return NativeResult.scalar(.{ .bool = false });
+    return try u16ToResult(ctx, buf[0..@intCast(text_len)]);
 }
 
 // ---------------- IntlDateFormatter ----------------
@@ -630,36 +639,36 @@ fn defaultTzName(ctx: *NativeContext) []const u8 {
     return ctx.vm.default_tz_name;
 }
 
-fn dfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 3 or args[0] != .string) return .null;
-    const obj = getThis(ctx) orelse return .null;
+fn dfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 3 or args[0] != .string) return NativeResult.scalar(.null);
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const date_style: i32 = if (args[1] == .int) @intCast(args[1].int) else 0;
     const time_style: i32 = if (args[2] == .int) @intCast(args[2].int) else 0;
     const tz_opt: ?[]const u8 = if (args.len > 3 and args[3] == .string and args[3].string.bytes().len > 0) args[3].string.bytes() else defaultTzName(ctx);
     // skip args[4] (calendar) for now
     const pat_opt: ?[]const u8 = if (args.len > 5 and args[5] == .string and args[5].string.bytes().len > 0) args[5].string.bytes() else null;
 
-    const f = (try openDateFmt(ctx, args[0].string.bytes(), date_style, time_style, tz_opt, pat_opt)) orelse return .null;
+    const f = (try openDateFmt(ctx, args[0].string.bytes(), date_style, time_style, tz_opt, pat_opt)) orelse return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__dfmt", .{ .int = @intCast(@intFromPtr(f)) });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn dfCreateStatic(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 3 or args[0] != .string) return .null;
+fn dfCreateStatic(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 3 or args[0] != .string) return NativeResult.scalar(.null);
     const obj = try ctx.createObject("IntlDateFormatter");
     const date_style: i32 = if (args[1] == .int) @intCast(args[1].int) else 0;
     const time_style: i32 = if (args[2] == .int) @intCast(args[2].int) else 0;
     const tz_opt: ?[]const u8 = if (args.len > 3 and args[3] == .string and args[3].string.bytes().len > 0) args[3].string.bytes() else defaultTzName(ctx);
     const pat_opt: ?[]const u8 = if (args.len > 5 and args[5] == .string and args[5].string.bytes().len > 0) args[5].string.bytes() else null;
-    const f = (try openDateFmt(ctx, args[0].string.bytes(), date_style, time_style, tz_opt, pat_opt)) orelse return .null;
+    const f = (try openDateFmt(ctx, args[0].string.bytes(), date_style, time_style, tz_opt, pat_opt)) orelse return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__dfmt", .{ .int = @intCast(@intFromPtr(f)) });
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn dfFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const f = getDateFmt(obj) orelse return .{ .bool = false };
+fn dfFormat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const f = getDateFmt(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const millis: f64 = switch (args[0]) {
         .int => |i| @as(f64, @floatFromInt(i)) * 1000.0,
         .float => |fl| fl * 1000.0,
@@ -668,60 +677,58 @@ fn dfFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             const ts_v = o.get("timestamp");
             if (ts_v == .int) break :blk @as(f64, @floatFromInt(ts_v.int)) * 1000.0;
             if (ts_v == .float) break :blk ts_v.float * 1000.0;
-            return .{ .bool = false };
+            return NativeResult.scalar(.{ .bool = false });
         },
-        else => return .{ .bool = false },
+        else => return NativeResult.scalar(.{ .bool = false }),
     };
     var buf: [256]UChar = undefined;
     var status: UErrorCode = U_ZERO_ERROR;
     const n = zphp_udat_format(f, millis, &buf, @intCast(buf.len), null, &status);
-    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
-    const out = try u16ToUtf8(ctx, buf[0..@intCast(n)]);
-    return .{ .string = Value.String.borrowed(out) };
+    if (intlRecord(ctx.vm, status)) return NativeResult.scalar(.{ .bool = false });
+    return try u16ToResult(ctx, buf[0..@intCast(n)]);
 }
 
-fn dfParse(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const f = getDateFmt(obj) orelse return .{ .bool = false };
+fn dfParse(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const f = getDateFmt(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const u16src = try utf8ToU16(ctx, args[0].string.bytes());
     defer ctx.allocator.free(u16src);
     var pos: i32 = 0;
     var status: UErrorCode = U_ZERO_ERROR;
     const millis = zphp_udat_parse(f, u16src.ptr, @intCast(u16src.len), &pos, &status);
-    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
-    return .{ .int = @intFromFloat(millis / 1000.0) };
+    if (intlRecord(ctx.vm, status)) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .int = @intFromFloat(millis / 1000.0) });
 }
 
-fn dfGetPattern(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const f = getDateFmt(obj) orelse return .{ .bool = false };
+fn dfGetPattern(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const f = getDateFmt(obj) orelse return NativeResult.scalar(.{ .bool = false });
     var buf: [256]UChar = undefined;
     var status: UErrorCode = U_ZERO_ERROR;
     const n = zphp_udat_toPattern(f, 0, &buf, @intCast(buf.len), &status);
-    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
-    const out = try u16ToUtf8(ctx, buf[0..@intCast(n)]);
-    return .{ .string = Value.String.borrowed(out) };
+    if (intlRecord(ctx.vm, status)) return NativeResult.scalar(.{ .bool = false });
+    return try u16ToResult(ctx, buf[0..@intCast(n)]);
 }
 
-fn dfSetPattern(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const f = getDateFmt(obj) orelse return .{ .bool = false };
+fn dfSetPattern(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const f = getDateFmt(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const u16src = try utf8ToU16(ctx, args[0].string.bytes());
     defer ctx.allocator.free(u16src);
     zphp_udat_applyPattern(f, 0, u16src.ptr, @intCast(u16src.len));
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
 // ---------------- IDNA (idn_to_ascii / idn_to_utf8) ----------------
 
-fn idnConvert(ctx: *NativeContext, args: []const Value, to_ascii: bool) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+fn idnConvert(ctx: *NativeContext, args: []const Value, to_ascii: bool) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     var status: UErrorCode = U_ZERO_ERROR;
-    const idna = zphp_uidna_openUTS46(0, &status) orelse return .{ .bool = false };
+    const idna = zphp_uidna_openUTS46(0, &status) orelse return NativeResult.scalar(.{ .bool = false });
     defer zphp_uidna_close(idna);
-    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
+    if (intlRecord(ctx.vm, status)) return NativeResult.scalar(.{ .bool = false });
 
     const info_size = zphp_uidna_info_size();
     const info_buf = try ctx.allocator.alloc(u8, info_size);
@@ -736,16 +743,15 @@ fn idnConvert(ctx: *NativeContext, args: []const Value, to_ascii: bool) RuntimeE
         zphp_uidna_nameToASCII(idna, u16src.ptr, @intCast(u16src.len), &dest, @intCast(dest.len), @ptrCast(info_buf.ptr), &status)
     else
         zphp_uidna_nameToUnicode(idna, u16src.ptr, @intCast(u16src.len), &dest, @intCast(dest.len), @ptrCast(info_buf.ptr), &status);
-    if (status > U_ZERO_ERROR or n < 0) return .{ .bool = false };
-    const out = try u16ToUtf8(ctx, dest[0..@intCast(n)]);
-    return .{ .string = Value.String.borrowed(out) };
+    if (status > U_ZERO_ERROR or n < 0) return NativeResult.scalar(.{ .bool = false });
+    return try u16ToResult(ctx, dest[0..@intCast(n)]);
 }
 
-fn idnToAscii(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn idnToAscii(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return idnConvert(ctx, args, true);
 }
 
-fn idnToUtf8(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn idnToUtf8(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return idnConvert(ctx, args, false);
 }
 
@@ -796,8 +802,8 @@ fn buildArgEntries(ctx: *NativeContext, arr: *PhpArray, owned_u16: *std.ArrayLis
     return out;
 }
 
-fn msgFormatCommon(ctx: *NativeContext, locale: []const u8, pattern: []const u8, args_val: Value) RuntimeError!Value {
-    if (args_val != .array) return .{ .bool = false };
+fn msgFormatCommon(ctx: *NativeContext, locale: []const u8, pattern: []const u8, args_val: Value) RuntimeError!NativeResult {
+    if (args_val != .array) return NativeResult.scalar(.{ .bool = false });
     const arr = args_val.array;
 
     const loc_z = try dupZ(ctx, locale);
@@ -826,60 +832,59 @@ fn msgFormatCommon(ctx: *NativeContext, locale: []const u8, pattern: []const u8,
     else
         zphp_msgfmt_format_positional(loc_z.ptr, pat_u16.ptr, @intCast(pat_u16.len), arg_entries.ptr, @intCast(arg_entries.len), &buf, @intCast(buf.len), &status);
 
-    if (status > U_ZERO_ERROR or n < 0) return .{ .bool = false };
-    const out = try u16ToUtf8(ctx, buf[0..@intCast(n)]);
-    return .{ .string = Value.String.borrowed(out) };
+    if (status > U_ZERO_ERROR or n < 0) return NativeResult.scalar(.{ .bool = false });
+    return try u16ToResult(ctx, buf[0..@intCast(n)]);
 }
 
-fn mfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .null;
-    const obj = getThis(ctx) orelse return .null;
+fn mfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.null);
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__locale", .{ .string = args[0].string });
     try obj.set(ctx.allocator, "__pattern", .{ .string = args[1].string });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn mfCreate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+fn mfCreate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     const obj = try ctx.createObject("MessageFormatter");
     try obj.set(ctx.allocator, "__locale", .{ .string = args[0].string });
     try obj.set(ctx.allocator, "__pattern", .{ .string = args[1].string });
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn mfFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn mfFormat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const loc = obj.get("__locale");
     const pat = obj.get("__pattern");
-    if (loc != .string or pat != .string) return .{ .bool = false };
+    if (loc != .string or pat != .string) return NativeResult.scalar(.{ .bool = false });
     return msgFormatCommon(ctx, loc.string.bytes(), pat.string.bytes(), args[0]);
 }
 
-fn mfFormatMessage(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 3 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+fn mfFormatMessage(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 3 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     return msgFormatCommon(ctx, args[0].string.bytes(), args[1].string.bytes(), args[2]);
 }
 
-fn mfGetPattern(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
+fn mfGetPattern(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return try NativeResult.copyString(ctx.allocator, "");
     const v = obj.get("__pattern");
-    if (v == .string) return v;
-    return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
+    if (v == .string) return NativeResult.share(v);
+    return try NativeResult.copyString(ctx.allocator, "");
 }
 
-fn mfSetPattern(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn mfSetPattern(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     try obj.set(ctx.allocator, "__pattern", .{ .string = args[0].string });
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn mfGetLocale(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
+fn mfGetLocale(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return try NativeResult.copyString(ctx.allocator, "");
     const v = obj.get("__locale");
-    if (v == .string) return v;
-    return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
+    if (v == .string) return NativeResult.share(v);
+    return try NativeResult.copyString(ctx.allocator, "");
 }
 
 // ---------------- IntlCalendar ----------------
@@ -902,7 +907,7 @@ fn openCalendar(ctx: *NativeContext, tz_opt: ?[]const u8, locale: []const u8, ca
     return cal;
 }
 
-fn calCreateInstance(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn calCreateInstance(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     var tz_opt: ?[]const u8 = null;
     if (args.len > 0 and args[0] == .string) tz_opt = args[0].string.bytes();
     var locale: []const u8 = "";
@@ -911,20 +916,20 @@ fn calCreateInstance(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
         const def = zphp_uloc_getDefault();
         locale = def[0..cstrLen(def)];
     }
-    const cal = (try openCalendar(ctx, tz_opt, locale, 0)) orelse return .null;
+    const cal = (try openCalendar(ctx, tz_opt, locale, 0)) orelse return NativeResult.scalar(.null);
     const obj = try ctx.createObject("IntlGregorianCalendar");
     try obj.set(ctx.allocator, "__cal", .{ .int = @intCast(@intFromPtr(cal)) });
     try obj.set(ctx.allocator, "__locale", .{ .string = Value.String.borrowed(try dupString(ctx, locale)) });
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn calConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn calConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     // PHP: new IntlGregorianCalendar(...) supports several arg shapes:
     //   ()                          - default tz, default locale
     //   (string $tz, string $loc)   - explicit
     //   (int y, int m, int d)       - by-date
     //   (int y, int m, int d, int h, int mi, int s)
-    const obj = getThis(ctx) orelse return .null;
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
 
     // tz/locale form
     if (args.len <= 2 and (args.len == 0 or args[0] == .string or args[0] == .null)) {
@@ -936,16 +941,16 @@ fn calConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             const def = zphp_uloc_getDefault();
             locale = def[0..cstrLen(def)];
         }
-        const cal = (try openCalendar(ctx, tz_opt, locale, 0)) orelse return .null;
+        const cal = (try openCalendar(ctx, tz_opt, locale, 0)) orelse return NativeResult.scalar(.null);
         try obj.set(ctx.allocator, "__cal", .{ .int = @intCast(@intFromPtr(cal)) });
         try obj.set(ctx.allocator, "__locale", .{ .string = Value.String.borrowed(try dupString(ctx, locale)) });
-        return .null;
+        return NativeResult.scalar(.null);
     }
 
     // integer form: y, m, d, [h, mi, s]
     const def_locale_ptr = zphp_uloc_getDefault();
     const def_locale = def_locale_ptr[0..cstrLen(def_locale_ptr)];
-    const cal = (try openCalendar(ctx, null, def_locale, 0)) orelse return .null;
+    const cal = (try openCalendar(ctx, null, def_locale, 0)) orelse return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__cal", .{ .int = @intCast(@intFromPtr(cal)) });
     try obj.set(ctx.allocator, "__locale", .{ .string = Value.String.borrowed(try dupString(ctx, def_locale)) });
     if (args.len >= 3 and args[0] == .int and args[1] == .int and args[2] == .int) {
@@ -956,30 +961,30 @@ fn calConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             zphp_ucal_setDate(cal, @intCast(args[0].int), @intCast(args[1].int), @intCast(args[2].int), &status);
         }
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn calGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .int) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const cal = getCal(obj) orelse return .{ .bool = false };
+fn calGet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .int) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const cal = getCal(obj) orelse return NativeResult.scalar(.{ .bool = false });
     var status: UErrorCode = U_ZERO_ERROR;
     const r = zphp_ucal_get(cal, @intCast(args[0].int), &status);
-    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
-    return .{ .int = @intCast(r) };
+    if (intlRecord(ctx.vm, status)) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .int = @intCast(r) });
 }
 
-fn calSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2) return .{ .bool = false };
-    for (args) |a| if (a != .int) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const cal = getCal(obj) orelse return .{ .bool = false };
+fn calSet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2) return NativeResult.scalar(.{ .bool = false });
+    for (args) |a| if (a != .int) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const cal = getCal(obj) orelse return NativeResult.scalar(.{ .bool = false });
     // PHP overloads: set(field, value) | set(y, m, d) | set(y, m, d, h, i) |
     // set(y, m, d, h, i, s). matches ICU's ucal_setDateTime convenience helpers
     // by setting each field individually
     if (args.len == 2) {
         zphp_ucal_set(cal, @intCast(args[0].int), @intCast(args[1].int));
-        return .{ .bool = true };
+        return NativeResult.scalar(.{ .bool = true });
     }
     // year/month/day positional form
     const UCAL_YEAR: i32 = 1;
@@ -994,195 +999,194 @@ fn calSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (args.len >= 4) zphp_ucal_set(cal, UCAL_HOUR_OF_DAY, @intCast(args[3].int));
     if (args.len >= 5) zphp_ucal_set(cal, UCAL_MINUTE, @intCast(args[4].int));
     if (args.len >= 6) zphp_ucal_set(cal, UCAL_SECOND, @intCast(args[5].int));
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn calAdd(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .int or args[1] != .int) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const cal = getCal(obj) orelse return .{ .bool = false };
+fn calAdd(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .int or args[1] != .int) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const cal = getCal(obj) orelse return NativeResult.scalar(.{ .bool = false });
     var status: UErrorCode = U_ZERO_ERROR;
     zphp_ucal_add(cal, @intCast(args[0].int), @intCast(args[1].int), &status);
-    return .{ .bool = status <= U_ZERO_ERROR };
+    return NativeResult.scalar(.{ .bool = status <= U_ZERO_ERROR });
 }
 
-fn calRoll(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .int) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const cal = getCal(obj) orelse return .{ .bool = false };
+fn calRoll(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .int) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const cal = getCal(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const amount: i32 = switch (args[1]) {
         .int => |i| @intCast(i),
         .bool => |b| if (b) 1 else -1,
-        else => return .{ .bool = false },
+        else => return NativeResult.scalar(.{ .bool = false }),
     };
     var status: UErrorCode = U_ZERO_ERROR;
     zphp_ucal_roll(cal, @intCast(args[0].int), amount, &status);
-    return .{ .bool = status <= U_ZERO_ERROR };
+    return NativeResult.scalar(.{ .bool = status <= U_ZERO_ERROR });
 }
 
-fn calGetTime(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const cal = getCal(obj) orelse return .{ .bool = false };
+fn calGetTime(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const cal = getCal(obj) orelse return NativeResult.scalar(.{ .bool = false });
     var status: UErrorCode = U_ZERO_ERROR;
     const millis = zphp_ucal_getMillis(cal, &status);
-    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
-    return .{ .float = millis };
+    if (intlRecord(ctx.vm, status)) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .float = millis });
 }
 
-fn calSetTime(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const cal = getCal(obj) orelse return .{ .bool = false };
+fn calSetTime(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const cal = getCal(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const millis: f64 = switch (args[0]) {
         .int => |i| @floatFromInt(i),
         .float => |f| f,
-        else => return .{ .bool = false },
+        else => return NativeResult.scalar(.{ .bool = false }),
     };
     var status: UErrorCode = U_ZERO_ERROR;
     zphp_ucal_setMillis(cal, millis, &status);
-    return .{ .bool = status <= U_ZERO_ERROR };
+    return NativeResult.scalar(.{ .bool = status <= U_ZERO_ERROR });
 }
 
-fn calInDaylightTime(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const cal = getCal(obj) orelse return .{ .bool = false };
+fn calInDaylightTime(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const cal = getCal(obj) orelse return NativeResult.scalar(.{ .bool = false });
     var status: UErrorCode = U_ZERO_ERROR;
-    return .{ .bool = zphp_ucal_inDaylightTime(cal, &status) != 0 };
+    return NativeResult.scalar(.{ .bool = zphp_ucal_inDaylightTime(cal, &status) != 0 });
 }
 
-fn calIsSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .int) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const cal = getCal(obj) orelse return .{ .bool = false };
-    return .{ .bool = zphp_ucal_isSet(cal, @intCast(args[0].int)) != 0 };
+fn calIsSet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .int) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const cal = getCal(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = zphp_ucal_isSet(cal, @intCast(args[0].int)) != 0 });
 }
 
-fn calClear(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const cal = getCal(obj) orelse return .{ .bool = false };
+fn calClear(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const cal = getCal(obj) orelse return NativeResult.scalar(.{ .bool = false });
     if (args.len > 0 and args[0] == .int) {
         zphp_ucal_clearField(cal, @intCast(args[0].int));
     } else {
         zphp_ucal_clear(cal);
     }
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn calGetTimeZoneId(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const cal = getCal(obj) orelse return .{ .bool = false };
+fn calGetTimeZoneId(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const cal = getCal(obj) orelse return NativeResult.scalar(.{ .bool = false });
     var buf: [128]UChar = undefined;
     var status: UErrorCode = U_ZERO_ERROR;
     const n = zphp_ucal_getTimeZoneID(cal, &buf, @intCast(buf.len), &status);
-    if (status > U_ZERO_ERROR or n <= 0) return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
-    const out = try u16ToUtf8(ctx, buf[0..@intCast(n)]);
-    return .{ .string = Value.String.borrowed(out) };
+    if (status > U_ZERO_ERROR or n <= 0) return try NativeResult.copyString(ctx.allocator, "");
+    return try u16ToResult(ctx, buf[0..@intCast(n)]);
 }
 
-fn calSetTimeZone(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const cal = getCal(obj) orelse return .{ .bool = false };
+fn calSetTimeZone(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const cal = getCal(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const u16src = try utf8ToU16(ctx, args[0].string.bytes());
     defer ctx.allocator.free(u16src);
     var status: UErrorCode = U_ZERO_ERROR;
     zphp_ucal_setTimeZone(cal, u16src.ptr, @intCast(u16src.len), &status);
-    return .{ .bool = status <= U_ZERO_ERROR };
+    return NativeResult.scalar(.{ .bool = status <= U_ZERO_ERROR });
 }
 
-fn calGetFirstDayOfWeek(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    const cal = getCal(obj) orelse return .{ .int = 0 };
+fn calGetFirstDayOfWeek(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    const cal = getCal(obj) orelse return NativeResult.scalar(.{ .int = 0 });
     var status: UErrorCode = U_ZERO_ERROR;
-    return .{ .int = @intCast(zphp_ucal_getFirstDayOfWeek(cal, &status)) };
+    return NativeResult.scalar(.{ .int = @intCast(zphp_ucal_getFirstDayOfWeek(cal, &status)) });
 }
 
-fn calSetFirstDayOfWeek(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .int) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const cal = getCal(obj) orelse return .{ .bool = false };
+fn calSetFirstDayOfWeek(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .int) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const cal = getCal(obj) orelse return NativeResult.scalar(.{ .bool = false });
     zphp_ucal_setFirstDayOfWeek(cal, @intCast(args[0].int));
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn calIsWeekend(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const cal = getCal(obj) orelse return .{ .bool = false };
+fn calIsWeekend(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const cal = getCal(obj) orelse return NativeResult.scalar(.{ .bool = false });
     var status: UErrorCode = U_ZERO_ERROR;
     const date: f64 = if (args.len > 0) switch (args[0]) {
         .int => |i| @floatFromInt(i),
         .float => |f| f,
         else => zphp_ucal_getMillis(cal, &status),
     } else zphp_ucal_getMillis(cal, &status);
-    return .{ .bool = zphp_ucal_isWeekend(cal, date, &status) != 0 };
+    return NativeResult.scalar(.{ .bool = zphp_ucal_isWeekend(cal, date, &status) != 0 });
 }
 
-fn calGetType(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const cal = getCal(obj) orelse return .{ .bool = false };
+fn calGetType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const cal = getCal(obj) orelse return NativeResult.scalar(.{ .bool = false });
     var buf: [64]u8 = undefined;
     var status: UErrorCode = U_ZERO_ERROR;
     const n = zphp_ucal_getType(cal, &buf, @intCast(buf.len), &status);
-    if (status > U_ZERO_ERROR or n <= 0) return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
-    return .{ .string = Value.String.borrowed(try dupString(ctx, buf[0..@intCast(n)])) };
+    if (status > U_ZERO_ERROR or n <= 0) return try NativeResult.copyString(ctx.allocator, "");
+    return try NativeResult.copyString(ctx.allocator, buf[0..@intCast(n)]);
 }
 
-fn calGetLocale(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const cal = getCal(obj) orelse return .{ .bool = false };
+fn calGetLocale(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const cal = getCal(obj) orelse return NativeResult.scalar(.{ .bool = false });
     var buf: [128]u8 = undefined;
     var status: UErrorCode = U_ZERO_ERROR;
     const ltype: c_int = if (args.len > 0 and args[0] == .int) @intCast(args[0].int) else 0;
     const n = zphp_ucal_getLocaleByType(cal, ltype, &buf, @intCast(buf.len), &status);
-    if (status > U_ZERO_ERROR or n <= 0) return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
-    return .{ .string = Value.String.borrowed(try dupString(ctx, buf[0..@intCast(n)])) };
+    if (status > U_ZERO_ERROR or n <= 0) return try NativeResult.copyString(ctx.allocator, "");
+    return try NativeResult.copyString(ctx.allocator, buf[0..@intCast(n)]);
 }
 
-fn calGetActualMaximum(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .int) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const cal = getCal(obj) orelse return .{ .bool = false };
+fn calGetActualMaximum(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .int) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const cal = getCal(obj) orelse return NativeResult.scalar(.{ .bool = false });
     var status: UErrorCode = U_ZERO_ERROR;
     // UCAL_ACTUAL_MAXIMUM = 5: this-calendar's actual maximum for the field
     // (e.g. 29 for Feb in a leap year). UCAL_LEAST_MAXIMUM (3) would return
     // 28 across all years which is the wrong thing
-    return .{ .int = @intCast(zphp_ucal_getLimit(cal, @intCast(args[0].int), 5, &status)) };
+    return NativeResult.scalar(.{ .int = @intCast(zphp_ucal_getLimit(cal, @intCast(args[0].int), 5, &status)) });
 }
 
-fn calGetActualMinimum(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .int) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const cal = getCal(obj) orelse return .{ .bool = false };
+fn calGetActualMinimum(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .int) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const cal = getCal(obj) orelse return NativeResult.scalar(.{ .bool = false });
     var status: UErrorCode = U_ZERO_ERROR;
     // UCAL_ACTUAL_MINIMUM = 4
-    return .{ .int = @intCast(zphp_ucal_getLimit(cal, @intCast(args[0].int), 4, &status)) };
+    return NativeResult.scalar(.{ .int = @intCast(zphp_ucal_getLimit(cal, @intCast(args[0].int), 4, &status)) });
 }
 
-fn calIsLenient(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const cal = getCal(obj) orelse return .{ .bool = false };
-    return .{ .bool = zphp_ucal_getLenient(cal) != 0 };
+fn calIsLenient(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const cal = getCal(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = zphp_ucal_getLenient(cal) != 0 });
 }
 
-fn calSetLenient(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .bool) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const cal = getCal(obj) orelse return .{ .bool = false };
+fn calSetLenient(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .bool) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const cal = getCal(obj) orelse return NativeResult.scalar(.{ .bool = false });
     zphp_ucal_setLenient(cal, if (args[0].bool) 1 else 0);
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn calEquals(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn calEquals(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     // PHP's IntlCalendar::equals compares calendars by their effective wall
     // time. ucal_equivalentTo is the wrong check - it tests calendar-type
     // and tz equivalence which is stricter than what PHP does
-    if (args.len < 1 or args[0] != .object) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const a = getCal(obj) orelse return .{ .bool = false };
-    const b = getCal(args[0].object) orelse return .{ .bool = false };
+    if (args.len < 1 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const a = getCal(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    const b = getCal(args[0].object) orelse return NativeResult.scalar(.{ .bool = false });
     var s1: UErrorCode = U_ZERO_ERROR;
     var s2: UErrorCode = U_ZERO_ERROR;
-    return .{ .bool = zphp_ucal_getMillis(a, &s1) == zphp_ucal_getMillis(b, &s2) };
+    return NativeResult.scalar(.{ .bool = zphp_ucal_getMillis(a, &s1) == zphp_ucal_getMillis(b, &s2) });
 }
 
 // ---------------- IntlBreakIterator ----------------
@@ -1205,76 +1209,76 @@ fn openBrk(ctx: *NativeContext, brk_type: c_int, locale: []const u8) !?*ZphpBrk 
     return w;
 }
 
-fn brkMakeInstance(ctx: *NativeContext, brk_type: c_int, locale: []const u8) RuntimeError!Value {
-    const w = (try openBrk(ctx, brk_type, locale)) orelse return .null;
+fn brkMakeInstance(ctx: *NativeContext, brk_type: c_int, locale: []const u8) RuntimeError!NativeResult {
+    const w = (try openBrk(ctx, brk_type, locale)) orelse return NativeResult.scalar(.null);
     const obj = try ctx.createObject("IntlBreakIterator");
     try obj.set(ctx.allocator, "__brk", .{ .int = @intCast(@intFromPtr(w)) });
     try obj.set(ctx.allocator, "__type", .{ .int = @intCast(brk_type) });
     try obj.set(ctx.allocator, "__locale", .{ .string = Value.String.borrowed(try dupString(ctx, locale)) });
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn brkCreateWord(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn brkCreateWord(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const locale = if (args.len > 0 and args[0] == .string) args[0].string.bytes() else "";
     return brkMakeInstance(ctx, 1, locale);
 }
 
-fn brkCreateChar(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn brkCreateChar(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const locale = if (args.len > 0 and args[0] == .string) args[0].string.bytes() else "";
     return brkMakeInstance(ctx, 0, locale);
 }
 
-fn brkCreateLine(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn brkCreateLine(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const locale = if (args.len > 0 and args[0] == .string) args[0].string.bytes() else "";
     return brkMakeInstance(ctx, 2, locale);
 }
 
-fn brkCreateSentence(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn brkCreateSentence(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const locale = if (args.len > 0 and args[0] == .string) args[0].string.bytes() else "";
     return brkMakeInstance(ctx, 3, locale);
 }
 
-fn brkCreateTitle(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn brkCreateTitle(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const locale = if (args.len > 0 and args[0] == .string) args[0].string.bytes() else "";
     return brkMakeInstance(ctx, 4, locale);
 }
 
-fn brkSetText(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const w = getBrk(obj) orelse return .{ .bool = false };
+fn brkSetText(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const w = getBrk(obj) orelse return NativeResult.scalar(.{ .bool = false });
     var status: UErrorCode = U_ZERO_ERROR;
     const txt = args[0].string.bytes();
     const ptr: [*]const u8 = if (txt.len > 0) txt.ptr else @ptrCast(""[0..]);
     zphp_ubrk_setText(w, ptr, @intCast(txt.len), &status);
-    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
+    if (intlRecord(ctx.vm, status)) return NativeResult.scalar(.{ .bool = false });
     // also store the text so getText round-trips without losing it
     try obj.set(ctx.allocator, "__text", .{ .string = Value.String.borrowed(try dupString(ctx, txt)) });
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn brkGetText(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn brkGetText(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const v = obj.get("__text");
-    if (v == .string) return v;
-    return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
+    if (v == .string) return NativeResult.share(v);
+    return try NativeResult.copyString(ctx.allocator, "");
 }
 
-fn brkFirst(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = -1 };
-    const w = getBrk(obj) orelse return .{ .int = -1 };
-    return .{ .int = @intCast(zphp_ubrk_first(w)) };
+fn brkFirst(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = -1 });
+    const w = getBrk(obj) orelse return NativeResult.scalar(.{ .int = -1 });
+    return NativeResult.scalar(.{ .int = @intCast(zphp_ubrk_first(w)) });
 }
 
-fn brkLast(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = -1 };
-    const w = getBrk(obj) orelse return .{ .int = -1 };
-    return .{ .int = @intCast(zphp_ubrk_last(w)) };
+fn brkLast(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = -1 });
+    const w = getBrk(obj) orelse return NativeResult.scalar(.{ .int = -1 });
+    return NativeResult.scalar(.{ .int = @intCast(zphp_ubrk_last(w)) });
 }
 
-fn brkNext(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = -1 };
-    const w = getBrk(obj) orelse return .{ .int = -1 };
+fn brkNext(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = -1 });
+    const w = getBrk(obj) orelse return NativeResult.scalar(.{ .int = -1 });
     // PHP's next($offset) advances by that many boundaries when given
     if (args.len > 0 and args[0] == .int) {
         const n = args[0].int;
@@ -1292,64 +1296,64 @@ fn brkNext(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 if (last == -1) break;
             }
         }
-        return .{ .int = @intCast(last) };
+        return NativeResult.scalar(.{ .int = @intCast(last) });
     }
-    return .{ .int = @intCast(zphp_ubrk_next(w)) };
+    return NativeResult.scalar(.{ .int = @intCast(zphp_ubrk_next(w)) });
 }
 
-fn brkPrevious(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = -1 };
-    const w = getBrk(obj) orelse return .{ .int = -1 };
-    return .{ .int = @intCast(zphp_ubrk_previous(w)) };
+fn brkPrevious(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = -1 });
+    const w = getBrk(obj) orelse return NativeResult.scalar(.{ .int = -1 });
+    return NativeResult.scalar(.{ .int = @intCast(zphp_ubrk_previous(w)) });
 }
 
-fn brkCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = -1 };
-    const w = getBrk(obj) orelse return .{ .int = -1 };
-    return .{ .int = @intCast(zphp_ubrk_current(w)) };
+fn brkCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = -1 });
+    const w = getBrk(obj) orelse return NativeResult.scalar(.{ .int = -1 });
+    return NativeResult.scalar(.{ .int = @intCast(zphp_ubrk_current(w)) });
 }
 
-fn brkFollowing(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .int) return .{ .int = -1 };
-    const obj = getThis(ctx) orelse return .{ .int = -1 };
-    const w = getBrk(obj) orelse return .{ .int = -1 };
-    return .{ .int = @intCast(zphp_ubrk_following(w, @intCast(args[0].int))) };
+fn brkFollowing(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .int) return NativeResult.scalar(.{ .int = -1 });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = -1 });
+    const w = getBrk(obj) orelse return NativeResult.scalar(.{ .int = -1 });
+    return NativeResult.scalar(.{ .int = @intCast(zphp_ubrk_following(w, @intCast(args[0].int))) });
 }
 
-fn brkPreceding(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .int) return .{ .int = -1 };
-    const obj = getThis(ctx) orelse return .{ .int = -1 };
-    const w = getBrk(obj) orelse return .{ .int = -1 };
-    return .{ .int = @intCast(zphp_ubrk_preceding(w, @intCast(args[0].int))) };
+fn brkPreceding(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .int) return NativeResult.scalar(.{ .int = -1 });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = -1 });
+    const w = getBrk(obj) orelse return NativeResult.scalar(.{ .int = -1 });
+    return NativeResult.scalar(.{ .int = @intCast(zphp_ubrk_preceding(w, @intCast(args[0].int))) });
 }
 
-fn brkIsBoundary(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .int) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const w = getBrk(obj) orelse return .{ .bool = false };
-    return .{ .bool = zphp_ubrk_isBoundary(w, @intCast(args[0].int)) != 0 };
+fn brkIsBoundary(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .int) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const w = getBrk(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = zphp_ubrk_isBoundary(w, @intCast(args[0].int)) != 0 });
 }
 
-fn brkGetRuleStatus(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    const w = getBrk(obj) orelse return .{ .int = 0 };
-    return .{ .int = @intCast(zphp_ubrk_getRuleStatus(w)) };
+fn brkGetRuleStatus(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    const w = getBrk(obj) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = @intCast(zphp_ubrk_getRuleStatus(w)) });
 }
 
-fn brkGetLocale(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
-    const w = getBrk(obj) orelse return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
+fn brkGetLocale(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return try NativeResult.copyString(ctx.allocator, "");
+    const w = getBrk(obj) orelse return try NativeResult.copyString(ctx.allocator, "");
     var buf: [128]u8 = undefined;
     var status: UErrorCode = U_ZERO_ERROR;
     const ltype: c_int = if (args.len > 0 and args[0] == .int) @intCast(args[0].int) else 0;
     const n = zphp_ubrk_getLocaleByType(w, ltype, &buf, @intCast(buf.len), &status);
-    if (status > U_ZERO_ERROR or n <= 0) return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
-    return .{ .string = Value.String.borrowed(try dupString(ctx, buf[0..@intCast(n)])) };
+    if (status > U_ZERO_ERROR or n <= 0) return try NativeResult.copyString(ctx.allocator, "");
+    return try NativeResult.copyString(ctx.allocator, buf[0..@intCast(n)]);
 }
 
 // ---------------- registration ----------------
 
-const NativeFn = *const fn (*NativeContext, []const Value) RuntimeError!Value;
+const NativeFn = *const fn (*NativeContext, []const Value) RuntimeError!NativeResult;
 
 // every intl op resets vm.last_intl_error_code on entry so a successful call
 // surfaces "U_ZERO_ERROR" through intl_get_error_*. failures record the failing
@@ -1357,7 +1361,7 @@ const NativeFn = *const fn (*NativeContext, []const Value) RuntimeError!Value;
 // get_error_message, is_failure, error_name) do NOT reset
 fn intlWrap(comptime inner: NativeFn) NativeFn {
     return struct {
-        fn wrapped(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+        fn wrapped(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
             ctx.vm.last_intl_error_code = 0;
             return inner(ctx, args);
         }
@@ -1406,24 +1410,24 @@ fn errorNameForCode(code: i32) []const u8 {
     };
 }
 
-fn intlGetErrorMessage(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .string = Value.String.borrowed(errorNameForCode(ctx.vm.last_intl_error_code)) };
+fn intlGetErrorMessage(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return try NativeResult.copyString(ctx.allocator, errorNameForCode(ctx.vm.last_intl_error_code));
 }
 
-fn intlGetErrorCode(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .int = ctx.vm.last_intl_error_code };
+fn intlGetErrorCode(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .int = ctx.vm.last_intl_error_code });
 }
 
-fn intlIsFailure(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1) return .{ .bool = false };
+fn intlIsFailure(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
     const c = Value.toInt(args[0]);
-    return .{ .bool = c > 0 };
+    return NativeResult.scalar(.{ .bool = c > 0 });
 }
 
-fn intlErrorName(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1) return .{ .string = Value.String.borrowed("U_ZERO_ERROR") };
+fn intlErrorName(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1) return NativeResult.literal("U_ZERO_ERROR");
     const c: i32 = @intCast(Value.toInt(args[0]));
-    return .{ .string = Value.String.borrowed(errorNameForCode(c)) };
+    return try NativeResult.copyString(ctx.allocator, errorNameForCode(c));
 }
 
 pub const entries = .{
@@ -1463,32 +1467,32 @@ pub const entries = .{
 
 // count grapheme clusters in a UTF-8 string. uses ICU's character-level
 // BreakIterator and counts boundary crossings
-fn graphemeStrlen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn graphemeStrlen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const s = args[0].string.bytes();
-    const w = (try openBrk(ctx, 0, "")) orelse return .{ .bool = false };
+    const w = (try openBrk(ctx, 0, "")) orelse return NativeResult.scalar(.{ .bool = false });
     defer zphp_ubrk_close(w);
     var status: UErrorCode = U_ZERO_ERROR;
     zphp_ubrk_setText(w, s.ptr, @intCast(s.len), &status);
-    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
+    if (intlRecord(ctx.vm, status)) return NativeResult.scalar(.{ .bool = false });
     var count: i64 = 0;
     _ = zphp_ubrk_first(w);
     while (zphp_ubrk_next(w) != -1) count += 1;
-    return .{ .int = count };
+    return NativeResult.scalar(.{ .int = count });
 }
 
 // grapheme-aware substring. start and length are in grapheme units.
-fn graphemeSubstr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string) return .{ .bool = false };
+fn graphemeSubstr(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const s = args[0].string.bytes();
     const start: i64 = Value.toInt(args[1]);
     const length_arg: ?i64 = if (args.len >= 3 and args[2] != .null) Value.toInt(args[2]) else null;
 
-    const w = (try openBrk(ctx, 0, "")) orelse return .{ .bool = false };
+    const w = (try openBrk(ctx, 0, "")) orelse return NativeResult.scalar(.{ .bool = false });
     defer zphp_ubrk_close(w);
     var status: UErrorCode = U_ZERO_ERROR;
     zphp_ubrk_setText(w, s.ptr, @intCast(s.len), &status);
-    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
+    if (intlRecord(ctx.vm, status)) return NativeResult.scalar(.{ .bool = false });
 
     // collect grapheme byte offsets
     var offsets = std.ArrayListUnmanaged(i32){};
@@ -1500,7 +1504,7 @@ fn graphemeSubstr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const n: i64 = @intCast(offsets.items.len -| 1);
     var s_idx: i64 = start;
     if (s_idx < 0) s_idx = @max(0, n + s_idx);
-    if (s_idx > n) return .{ .bool = false };
+    if (s_idx > n) return NativeResult.scalar(.{ .bool = false });
     const start_byte: usize = @intCast(offsets.items[@intCast(s_idx)]);
 
     var end_byte: usize = s.len;
@@ -1516,7 +1520,7 @@ fn graphemeSubstr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (end_byte < start_byte) end_byte = start_byte;
     }
 
-    return .{ .string = Value.String.borrowed(try dupString(ctx, s[start_byte..end_byte])) };
+    return try NativeResult.copyString(ctx.allocator, s[start_byte..end_byte]);
 }
 
 // grapheme_extract($haystack, $size, $type, $offset): extract a run of grapheme
@@ -1525,20 +1529,20 @@ fn graphemeSubstr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 // returns the extracted string or false. the by-ref $next (5th) out-param isn't
 // written back (no generic native by-ref path); callers using only the return
 // value (e.g. symfony/string startsWith) are unaffected
-fn graphemeExtract(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string) return .{ .bool = false };
+fn graphemeExtract(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const s = args[0].string.bytes();
     const size: i64 = Value.toInt(args[1]);
     const extr_type: i64 = if (args.len >= 3 and args[2] != .null) Value.toInt(args[2]) else 0;
     const start_off: i64 = if (args.len >= 4 and args[3] != .null) Value.toInt(args[3]) else 0;
-    if (size < 0 or extr_type < 0 or extr_type > 2 or start_off < 0 or @as(usize, @intCast(start_off)) > s.len) return .{ .bool = false };
+    if (size < 0 or extr_type < 0 or extr_type > 2 or start_off < 0 or @as(usize, @intCast(start_off)) > s.len) return NativeResult.scalar(.{ .bool = false });
     const start: usize = @intCast(start_off);
 
-    const w = (try openBrk(ctx, 0, "")) orelse return .{ .bool = false };
+    const w = (try openBrk(ctx, 0, "")) orelse return NativeResult.scalar(.{ .bool = false });
     defer zphp_ubrk_close(w);
     var status: UErrorCode = U_ZERO_ERROR;
     zphp_ubrk_setText(w, s.ptr, @intCast(s.len), &status);
-    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
+    if (intlRecord(ctx.vm, status)) return NativeResult.scalar(.{ .bool = false });
 
     var offsets = std.ArrayListUnmanaged(i32){};
     defer offsets.deinit(ctx.allocator);
@@ -1549,10 +1553,10 @@ fn graphemeExtract(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     // first cluster boundary at or after the requested byte offset
     var bi: usize = 0;
     while (bi < offsets.items.len and @as(usize, @intCast(offsets.items[bi])) < start) bi += 1;
-    if (bi >= offsets.items.len) return .{ .bool = false };
+    if (bi >= offsets.items.len) return NativeResult.scalar(.{ .bool = false });
     const begin_byte: usize = @intCast(offsets.items[bi]);
     // nothing to extract (empty haystack, or offset at/after the last cluster)
-    if (begin_byte >= s.len) return .{ .bool = false };
+    if (begin_byte >= s.len) return NativeResult.scalar(.{ .bool = false });
 
     var end_byte: usize = begin_byte;
     var taken: i64 = 0;
@@ -1572,7 +1576,7 @@ fn graphemeExtract(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
         taken += 1;
         chars += cl_chars;
     }
-    return .{ .string = Value.String.borrowed(try dupString(ctx, s[begin_byte..end_byte])) };
+    return try NativeResult.copyString(ctx.allocator, s[begin_byte..end_byte]);
 }
 
 // grapheme cluster boundary byte offsets for s: [0, ..., s.len]. count of
@@ -1636,25 +1640,25 @@ fn graphemeIndexOfByte(bounds: []const i32, byte_pos: usize) ?usize {
     return null;
 }
 
-fn graphemeOffsetError(ctx: *NativeContext, comptime fname: []const u8) RuntimeError!Value {
+fn graphemeOffsetError(ctx: *NativeContext, comptime fname: []const u8) RuntimeError!NativeResult {
     try ctx.vm.setPendingException("ValueError", fname ++ "(): Argument #3 ($offset) must be contained in argument #1 ($haystack)");
     return error.RuntimeError;
 }
 
-fn graphemePositionImpl(ctx: *NativeContext, args: []const Value, comptime fname: []const u8, case_insensitive: bool, reverse: bool) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return Value{ .bool = false };
+fn graphemePositionImpl(ctx: *NativeContext, args: []const Value, comptime fname: []const u8, case_insensitive: bool, reverse: bool) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     const haystack = args[0].string.bytes();
     const needle = args[1].string.bytes();
     const offset: i64 = if (args.len >= 3 and args[2] != .null) Value.toInt(args[2]) else 0;
 
-    var bounds = (try collectGraphemeBounds(ctx, haystack)) orelse return Value{ .bool = false };
+    var bounds = (try collectGraphemeBounds(ctx, haystack)) orelse return NativeResult.scalar(.{ .bool = false });
     defer bounds.deinit(ctx.allocator);
     const n_g: i64 = @intCast(bounds.items.len - 1);
     if (offset < -n_g or offset > n_g) return graphemeOffsetError(ctx, fname);
 
     if (needle.len == 0) {
-        if (reverse) return .{ .int = if (offset >= 0) n_g else n_g + offset };
-        return .{ .int = if (offset >= 0) offset else n_g + offset };
+        if (reverse) return NativeResult.scalar(.{ .int = if (offset >= 0) n_g else n_g + offset });
+        return NativeResult.scalar(.{ .int = if (offset >= 0) offset else n_g + offset });
     }
 
     var h_search: []const u8 = haystack;
@@ -1686,47 +1690,47 @@ fn graphemePositionImpl(ctx: *NativeContext, args: []const Value, comptime fname
                 if (gi <= n_g + offset) best = gi;
             }
         }
-        if (best) |b| return .{ .int = b };
-        return .{ .bool = false };
+        if (best) |b| return NativeResult.scalar(.{ .int = b });
+        return NativeResult.scalar(.{ .bool = false });
     }
 
     const start_g: usize = @intCast(if (offset >= 0) offset else n_g + offset);
     var from: usize = @intCast(bounds.items[start_g]);
     while (std.mem.indexOfPos(u8, h_search, from, n_search)) |p| : (from = p + 1) {
         const g = graphemeIndexOfByte(bounds.items, p) orelse continue;
-        return .{ .int = @intCast(g) };
+        return NativeResult.scalar(.{ .int = @intCast(g) });
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn graphemeStrpos(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn graphemeStrpos(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return graphemePositionImpl(ctx, args, "grapheme_strpos", false, false);
 }
 
-fn graphemeStripos(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn graphemeStripos(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return graphemePositionImpl(ctx, args, "grapheme_stripos", true, false);
 }
 
-fn graphemeStrrpos(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn graphemeStrrpos(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return graphemePositionImpl(ctx, args, "grapheme_strrpos", false, true);
 }
 
-fn graphemeStrripos(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn graphemeStrripos(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return graphemePositionImpl(ctx, args, "grapheme_strripos", true, true);
 }
 
-fn graphemeStrstrImpl(ctx: *NativeContext, args: []const Value, case_insensitive: bool) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return Value{ .bool = false };
+fn graphemeStrstrImpl(ctx: *NativeContext, args: []const Value, case_insensitive: bool) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     const haystack = args[0].string.bytes();
     const needle = args[1].string.bytes();
     const before_needle = args.len >= 3 and args[2].isTruthy();
 
     if (needle.len == 0) {
-        if (before_needle) return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
-        return .{ .string = Value.String.borrowed(try dupString(ctx, haystack)) };
+        if (before_needle) return try NativeResult.copyString(ctx.allocator, "");
+        return try NativeResult.copyString(ctx.allocator, haystack);
     }
 
-    var bounds = (try collectGraphemeBounds(ctx, haystack)) orelse return Value{ .bool = false };
+    var bounds = (try collectGraphemeBounds(ctx, haystack)) orelse return NativeResult.scalar(.{ .bool = false });
     defer bounds.deinit(ctx.allocator);
 
     var h_search: []const u8 = haystack;
@@ -1745,22 +1749,22 @@ fn graphemeStrstrImpl(ctx: *NativeContext, args: []const Value, case_insensitive
     var from: usize = 0;
     while (std.mem.indexOfPos(u8, h_search, from, n_search)) |p| : (from = p + 1) {
         if (graphemeIndexOfByte(bounds.items, p) == null) continue;
-        if (before_needle) return .{ .string = Value.String.borrowed(try dupString(ctx, haystack[0..p])) };
-        return .{ .string = Value.String.borrowed(try dupString(ctx, haystack[p..])) };
+        if (before_needle) return try NativeResult.copyString(ctx.allocator, haystack[0..p]);
+        return try NativeResult.copyString(ctx.allocator, haystack[p..]);
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn graphemeStrstr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn graphemeStrstr(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return graphemeStrstrImpl(ctx, args, false);
 }
 
-fn graphemeStristr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn graphemeStristr(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return graphemeStrstrImpl(ctx, args, true);
 }
 
-fn graphemeStrSplit(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn graphemeStrSplit(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const s = args[0].string.bytes();
     const length: i64 = if (args.len >= 2 and args[1] != .null) Value.toInt(args[1]) else 1;
     if (length < 1 or length > 1073741823) {
@@ -1768,7 +1772,7 @@ fn graphemeStrSplit(ctx: *NativeContext, args: []const Value) RuntimeError!Value
         return error.RuntimeError;
     }
 
-    var bounds = (try collectGraphemeBounds(ctx, s)) orelse return Value{ .bool = false };
+    var bounds = (try collectGraphemeBounds(ctx, s)) orelse return NativeResult.scalar(.{ .bool = false });
     defer bounds.deinit(ctx.allocator);
     const n_g = bounds.items.len - 1;
 
@@ -1781,12 +1785,12 @@ fn graphemeStrSplit(ctx: *NativeContext, args: []const Value) RuntimeError!Value
         const b: usize = @intCast(bounds.items[end]);
         try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(try dupString(ctx, s[a..b])) });
     }
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
 // procedural shim: accepts a Transliterator instance or an ID string
-fn transliteratorTransliterate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[1] != .string) return .{ .bool = false };
+fn transliteratorTransliterate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
 
     var t_obj: ?*PhpObject = null;
     var owned = false;
@@ -1796,19 +1800,19 @@ fn transliteratorTransliterate(ctx: *NativeContext, args: []const Value) Runtime
 
     switch (args[0]) {
         .object => |o| {
-            if (!std.mem.eql(u8, o.class_name, "Transliterator")) return .{ .bool = false };
+            if (!std.mem.eql(u8, o.class_name, "Transliterator")) return NativeResult.scalar(.{ .bool = false });
             t_obj = o;
         },
         .string => {
-            const created = try transCreateStatic(ctx, args[0..1]);
-            if (created != .object) return .{ .bool = false };
+            const created = (try transCreateStatic(ctx, args[0..1])).value;
+            if (created != .object) return NativeResult.scalar(.{ .bool = false });
             t_obj = created.object;
             owned = false; // the wrapper is tracked by ctx; native close would double-free
         },
-        else => return .{ .bool = false },
+        else => return NativeResult.scalar(.{ .bool = false }),
     }
 
-    const t = getTranslit(t_obj.?) orelse return .{ .bool = false };
+    const t = getTranslit(t_obj.?) orelse return NativeResult.scalar(.{ .bool = false });
     const u16src = try utf8ToU16(ctx, args[1].string.bytes());
     defer ctx.allocator.free(u16src);
 
@@ -1821,9 +1825,8 @@ fn transliteratorTransliterate(ctx: *NativeContext, args: []const Value) Runtime
     var limit: i32 = text_len;
     var status: UErrorCode = U_ZERO_ERROR;
     zphp_utrans_transUChars(t, buf.ptr, &text_len, cap, 0, &limit, &status);
-    if (intlRecord(ctx.vm, status)) return .{ .bool = false };
-    const out = try u16ToUtf8(ctx, buf[0..@intCast(text_len)]);
-    return .{ .string = Value.String.borrowed(out) };
+    if (intlRecord(ctx.vm, status)) return NativeResult.scalar(.{ .bool = false });
+    return try u16ToResult(ctx, buf[0..@intCast(text_len)]);
 }
 
 pub fn register(vm: *VM, a: Allocator) !void {
@@ -1869,10 +1872,10 @@ fn registerIntlCharStub(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "IntlChar::getUnicodeVersion", intlCharGetUnicodeVersion);
 }
 
-fn intlCharGetUnicodeVersion(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn intlCharGetUnicodeVersion(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
     for ([_]i64{ 17, 0, 0, 0 }) |part| try arr.append(ctx.allocator, .{ .int = part });
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
 // decode the first UTF-8 codepoint of a string, or accept an int directly.
@@ -1889,20 +1892,19 @@ fn intlCharCodepoint(v: Value) ?u32 {
     return std.unicode.utf8Decode(s[0..len]) catch null;
 }
 
-fn intlCharOrd(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .null;
-    const cp = intlCharCodepoint(args[0]) orelse return .null;
-    return .{ .int = @intCast(cp) };
+fn intlCharOrd(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.null);
+    const cp = intlCharCodepoint(args[0]) orelse return NativeResult.scalar(.null);
+    return NativeResult.scalar(.{ .int = @intCast(cp) });
 }
 
-fn intlCharChr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .null;
-    const cp = intlCharCodepoint(args[0]) orelse return .null;
+fn intlCharChr(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.null);
+    const cp = intlCharCodepoint(args[0]) orelse return NativeResult.scalar(.null);
     var buf: [4]u8 = undefined;
-    const n = std.unicode.utf8Encode(@intCast(cp), &buf) catch return .null;
+    const n = std.unicode.utf8Encode(@intCast(cp), &buf) catch return NativeResult.scalar(.null);
     const owned = try ctx.allocator.dupe(u8, buf[0..n]);
-    try ctx.strings.append(ctx.allocator, owned);
-    return .{ .string = Value.String.borrowed(owned) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, owned));
 }
 
 fn intlBoolPredicate(args: []const Value, comptime pred: fn (u32) bool) Value {
@@ -1948,55 +1950,55 @@ fn isXDigitCp(cp: u32) bool {
     return isDigitCp(cp) or (cp >= 'a' and cp <= 'f') or (cp >= 'A' and cp <= 'F');
 }
 
-fn intlCharIsalpha(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return intlBoolPredicate(args, isAlphaCp);
+fn intlCharIsalpha(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(intlBoolPredicate(args, isAlphaCp));
 }
-fn intlCharIsdigit(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return intlBoolPredicate(args, isDigitCp);
+fn intlCharIsdigit(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(intlBoolPredicate(args, isDigitCp));
 }
-fn intlCharIsalnum(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return intlBoolPredicate(args, isAlnumCp);
+fn intlCharIsalnum(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(intlBoolPredicate(args, isAlnumCp));
 }
-fn intlCharIsupper(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return intlBoolPredicate(args, isUpperCp);
+fn intlCharIsupper(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(intlBoolPredicate(args, isUpperCp));
 }
-fn intlCharIslower(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return intlBoolPredicate(args, isLowerCp);
+fn intlCharIslower(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(intlBoolPredicate(args, isLowerCp));
 }
-fn intlCharIsspace(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return intlBoolPredicate(args, isSpaceCp);
+fn intlCharIsspace(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(intlBoolPredicate(args, isSpaceCp));
 }
-fn intlCharIscntrl(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return intlBoolPredicate(args, isCntrlCp);
+fn intlCharIscntrl(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(intlBoolPredicate(args, isCntrlCp));
 }
-fn intlCharIsblank(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return intlBoolPredicate(args, isBlankCp);
+fn intlCharIsblank(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(intlBoolPredicate(args, isBlankCp));
 }
-fn intlCharIspunct(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return intlBoolPredicate(args, isPunctCp);
+fn intlCharIspunct(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(intlBoolPredicate(args, isPunctCp));
 }
-fn intlCharIsgraph(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return intlBoolPredicate(args, isGraphCp);
+fn intlCharIsgraph(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(intlBoolPredicate(args, isGraphCp));
 }
-fn intlCharIsprint(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return intlBoolPredicate(args, isPrintCp);
+fn intlCharIsprint(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(intlBoolPredicate(args, isPrintCp));
 }
-fn intlCharIsxdigit(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return intlBoolPredicate(args, isXDigitCp);
+fn intlCharIsxdigit(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(intlBoolPredicate(args, isXDigitCp));
 }
 
-fn intlCharTolower(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .null;
-    const cp = intlCharCodepoint(args[0]) orelse return .null;
+fn intlCharTolower(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.null);
+    const cp = intlCharCodepoint(args[0]) orelse return NativeResult.scalar(.null);
     const out: u32 = if (cp >= 'A' and cp <= 'Z') cp + 32 else cp;
-    return .{ .int = @intCast(out) };
+    return NativeResult.scalar(.{ .int = @intCast(out) });
 }
 
-fn intlCharToupper(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .null;
-    const cp = intlCharCodepoint(args[0]) orelse return .null;
+fn intlCharToupper(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.null);
+    const cp = intlCharCodepoint(args[0]) orelse return NativeResult.scalar(.null);
     const out: u32 = if (cp >= 'a' and cp <= 'z') cp - 32 else cp;
-    return .{ .int = @intCast(out) };
+    return NativeResult.scalar(.{ .int = @intCast(out) });
 }
 
 fn registerBreakIteratorClass(vm: *VM, a: Allocator) !void {
@@ -2266,8 +2268,8 @@ fn registerLocaleClass(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "Locale::acceptFromHttp", intlWrap(localeAcceptFromHttp));
 }
 
-fn localeComposeLocale(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .array) return .{ .bool = false };
+fn localeComposeLocale(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .array) return NativeResult.scalar(.{ .bool = false });
     const arr = args[0].array;
     var buf: std.ArrayListUnmanaged(u8) = .{};
     defer buf.deinit(ctx.allocator);
@@ -2294,13 +2296,11 @@ fn localeComposeLocale(ctx: *NativeContext, args: []const Value) RuntimeError!Va
             try buf.appendSlice(ctx.allocator, v.string.bytes());
         } else break;
     }
-    const owned = try ctx.allocator.dupe(u8, buf.items);
-    try ctx.vm.strings.append(ctx.allocator, owned);
-    return .{ .string = Value.String.borrowed(owned) };
+    return try NativeResult.copyString(ctx.allocator, buf.items);
 }
 
-fn localeParseLocale(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .null;
+fn localeParseLocale(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
     const s = args[0].string.bytes();
     const out = try ctx.createArray();
     // split on '_' / '-' separators
@@ -2344,14 +2344,14 @@ fn localeParseLocale(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
         try ctx.vm.strings.append(ctx.allocator, owned_key);
         try out.set(ctx.allocator, .{ .string = Value.String.borrowed(owned_key) }, .{ .string = Value.String.borrowed(parts[idx]) });
     }
-    return .{ .array = out };
+    return NativeResult.borrowed(.{ .array = out });
 }
 
-fn localeGetAllVariants(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn localeGetAllVariants(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const out = try ctx.createArray();
-    if (args.len < 1 or args[0] != .string) return .{ .array = out };
-    const parsed = try localeParseLocale(ctx, args);
-    if (parsed != .array) return .{ .array = out };
+    if (args.len < 1 or args[0] != .string) return NativeResult.borrowed(.{ .array = out });
+    const parsed = (try localeParseLocale(ctx, args)).value;
+    if (parsed != .array) return NativeResult.borrowed(.{ .array = out });
     var i: usize = 0;
     while (i < 16) : (i += 1) {
         var key_buf: [16]u8 = undefined;
@@ -2359,26 +2359,26 @@ fn localeGetAllVariants(ctx: *NativeContext, args: []const Value) RuntimeError!V
         const v = parsed.array.get(.{ .string = Value.String.borrowed(key) });
         if (v == .string) try out.append(ctx.allocator, v) else break;
     }
-    return .{ .array = out };
+    return NativeResult.borrowed(.{ .array = out });
 }
 
-fn localeGetKeywords(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .array = try ctx.createArray() };
+fn localeGetKeywords(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.borrowed(.{ .array = try ctx.createArray() });
 }
 
-fn localeFilterMatches(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
-    return .{ .bool = std.ascii.eqlIgnoreCase(args[0].string.bytes(), args[1].string.bytes()) };
+fn localeFilterMatches(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = std.ascii.eqlIgnoreCase(args[0].string.bytes(), args[1].string.bytes()) });
 }
 
-fn localeLookup(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[1] != .string) return .{ .string = Value.String.borrowed("") };
-    return args[1];
+fn localeLookup(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[1] != .string) return NativeResult.literal("");
+    return NativeResult.share(args[1]);
 }
 
-fn localeAcceptFromHttp(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn localeAcceptFromHttp(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     // best-effort: take the first locale from a comma-separated header
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const s = args[0].string.bytes();
     var first_end: usize = s.len;
     for (s, 0..) |c, i| {
@@ -2388,9 +2388,7 @@ fn localeAcceptFromHttp(ctx: *NativeContext, args: []const Value) RuntimeError!V
         }
     }
     const slice = std.mem.trim(u8, s[0..first_end], " \t");
-    const owned = try ctx.allocator.dupe(u8, slice);
-    try ctx.vm.strings.append(ctx.allocator, owned);
-    return .{ .string = Value.String.borrowed(owned) };
+    return try NativeResult.copyString(ctx.allocator, slice);
 }
 
 fn registerCollatorClass(vm: *VM, a: Allocator) !void {
@@ -2497,30 +2495,30 @@ fn registerTransliteratorClass(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "IntlTimeZone::getRawOffset", intlTimeZoneGetRawOffset);
 }
 
-fn intlTimeZoneCreate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .null;
+fn intlTimeZoneCreate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
     const obj = try ctx.createObject("IntlTimeZone");
     try obj.set(ctx.allocator, "__id", .{ .string = args[0].string });
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn intlTimeZoneCreateDefault(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn intlTimeZoneCreateDefault(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = try ctx.createObject("IntlTimeZone");
     try obj.set(ctx.allocator, "__id", .{ .string = Value.String.borrowed(ctx.vm.default_tz_name) });
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn intlTimeZoneGetId(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this = ctx.vm.currentFrame().vars.get("$this") orelse return .{ .bool = false };
-    if (this != .object) return .{ .bool = false };
-    return this.object.get("__id");
+fn intlTimeZoneGetId(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.scalar(.{ .bool = false });
+    if (this != .object) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.share(this.object.get("__id"));
 }
 
-fn intlTimeZoneGetRawOffset(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn intlTimeZoneGetRawOffset(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // raw offset (ignoring DST) in milliseconds; zphp's tz table tracks
     // std_offset in seconds. UTC fallback when unknown
     _ = ctx;
-    return .{ .int = 0 };
+    return NativeResult.scalar(.{ .int = 0 });
 }
 
 fn registerConstants(vm: *VM, a: Allocator) !void {

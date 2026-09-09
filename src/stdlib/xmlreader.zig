@@ -2,6 +2,7 @@ const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
 const vm_mod = @import("../runtime/vm.zig");
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const VM = vm_mod.VM;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
@@ -59,9 +60,9 @@ pub fn cleanupObject(obj: *PhpObject) void {
 
 // ---------------- methods ----------------
 
-fn xrOpen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn xrOpen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     closeExisting(obj);
 
     const path_z = try dupZ(ctx, args[0].string.bytes());
@@ -73,13 +74,13 @@ fn xrOpen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const opts: c_int = if (args.len > 2 and args[2] == .int) @intCast(args[2].int) else 0;
 
     const reader = c.xmlReaderForFile(path_z.ptr, enc_ptr, opts);
-    if (reader == null) return .{ .bool = false };
+    if (reader == null) return NativeResult.scalar(.{ .bool = false });
     try setReader(obj, ctx.allocator, reader);
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn xrXml(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+fn xrXml(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const src = args[0].string.bytes();
     const enc_z: ?[:0]u8 = if (args.len > 1 and args[1] == .string and args[1].string.bytes().len > 0)
         try dupZ(ctx, args[1].string.bytes())
@@ -90,8 +91,8 @@ fn xrXml(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     const reader = c.xmlReaderForMemory(src.ptr, @intCast(src.len), null, enc_ptr, opts);
     if (reader == null) {
-        if (getThis(ctx)) |_| return .{ .bool = false };
-        return .{ .bool = false };
+        if (getThis(ctx)) |_| return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.scalar(.{ .bool = false });
     }
 
     // PHP's XMLReader::XML works both as an instance method (initializes $this and
@@ -100,15 +101,15 @@ fn xrXml(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (getThis(ctx)) |obj| {
         closeExisting(obj);
         try setReader(obj, ctx.allocator, reader);
-        return .{ .bool = true };
+        return NativeResult.scalar(.{ .bool = true });
     }
     const obj = try ctx.createObject("XMLReader");
     try setReader(obj, ctx.allocator, reader);
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn xrFromString(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+fn xrFromString(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const obj = try ctx.createObject("XMLReader");
     const src = args[0].string.bytes();
     const enc_z: ?[:0]u8 = if (args.len > 1 and args[1] == .string and args[1].string.bytes().len > 0)
@@ -118,13 +119,13 @@ fn xrFromString(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const enc_ptr: [*c]const u8 = if (enc_z) |e| @ptrCast(e.ptr) else null;
     const opts: c_int = if (args.len > 2 and args[2] == .int) @intCast(args[2].int) else 0;
     const reader = c.xmlReaderForMemory(src.ptr, @intCast(src.len), null, enc_ptr, opts);
-    if (reader == null) return .{ .bool = false };
+    if (reader == null) return NativeResult.scalar(.{ .bool = false });
     try setReader(obj, ctx.allocator, reader);
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn xrFromUri(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+fn xrFromUri(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const obj = try ctx.createObject("XMLReader");
     const path_z = try dupZ(ctx, args[0].string.bytes());
     const enc_z: ?[:0]u8 = if (args.len > 1 and args[1] == .string and args[1].string.bytes().len > 0)
@@ -134,161 +135,161 @@ fn xrFromUri(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const enc_ptr: [*c]const u8 = if (enc_z) |e| @ptrCast(e.ptr) else null;
     const opts: c_int = if (args.len > 2 and args[2] == .int) @intCast(args[2].int) else 0;
     const reader = c.xmlReaderForFile(path_z.ptr, enc_ptr, opts);
-    if (reader == null) return .{ .bool = false };
+    if (reader == null) return NativeResult.scalar(.{ .bool = false });
     try setReader(obj, ctx.allocator, reader);
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn xrClose(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn xrClose(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     closeExisting(obj);
     try setReader(obj, ctx.allocator, null);
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn xrRead(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const r = getReader(obj) orelse return .{ .bool = false };
-    return .{ .bool = c.xmlTextReaderRead(r) == 1 };
+fn xrRead(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const r = getReader(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = c.xmlTextReaderRead(r) == 1 });
 }
 
-fn xrNext(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const r = getReader(obj) orelse return .{ .bool = false };
+fn xrNext(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const r = getReader(obj) orelse return NativeResult.scalar(.{ .bool = false });
     if (args.len > 0 and args[0] == .string and args[0].string.bytes().len > 0) {
         const name_z = try dupZ(ctx, args[0].string.bytes());
         // walk until we hit a matching element
         while (true) {
             const rc = c.xmlTextReaderNext(r);
-            if (rc != 1) return .{ .bool = false };
+            if (rc != 1) return NativeResult.scalar(.{ .bool = false });
             const nt = c.xmlTextReaderNodeType(r);
             if (nt == c.XML_READER_TYPE_ELEMENT) {
                 const cur = c.xmlTextReaderConstLocalName(r);
                 if (cur != null and std.mem.eql(u8, cur[0..cstrLen(cur)], name_z[0..name_z.len])) {
-                    return .{ .bool = true };
+                    return NativeResult.scalar(.{ .bool = true });
                 }
             }
         }
     }
-    return .{ .bool = c.xmlTextReaderNext(r) == 1 };
+    return NativeResult.scalar(.{ .bool = c.xmlTextReaderNext(r) == 1 });
 }
 
-fn xrMoveToAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const r = getReader(obj) orelse return .{ .bool = false };
+fn xrMoveToAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const r = getReader(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const name_z = try dupZ(ctx, args[0].string.bytes());
-    return .{ .bool = c.xmlTextReaderMoveToAttribute(r, @ptrCast(name_z.ptr)) == 1 };
+    return NativeResult.scalar(.{ .bool = c.xmlTextReaderMoveToAttribute(r, @ptrCast(name_z.ptr)) == 1 });
 }
 
-fn xrMoveToAttributeNo(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .int) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const r = getReader(obj) orelse return .{ .bool = false };
-    return .{ .bool = c.xmlTextReaderMoveToAttributeNo(r, @intCast(args[0].int)) == 1 };
+fn xrMoveToAttributeNo(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .int) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const r = getReader(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = c.xmlTextReaderMoveToAttributeNo(r, @intCast(args[0].int)) == 1 });
 }
 
-fn xrMoveToAttributeNs(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const r = getReader(obj) orelse return .{ .bool = false };
+fn xrMoveToAttributeNs(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const r = getReader(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const name_z = try dupZ(ctx, args[0].string.bytes());
     const ns_z = try dupZ(ctx, args[1].string.bytes());
-    return .{ .bool = c.xmlTextReaderMoveToAttributeNs(r, @ptrCast(name_z.ptr), @ptrCast(ns_z.ptr)) == 1 };
+    return NativeResult.scalar(.{ .bool = c.xmlTextReaderMoveToAttributeNs(r, @ptrCast(name_z.ptr), @ptrCast(ns_z.ptr)) == 1 });
 }
 
-fn xrMoveToElement(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const r = getReader(obj) orelse return .{ .bool = false };
-    return .{ .bool = c.xmlTextReaderMoveToElement(r) == 1 };
+fn xrMoveToElement(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const r = getReader(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = c.xmlTextReaderMoveToElement(r) == 1 });
 }
 
-fn xrMoveToFirstAttribute(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const r = getReader(obj) orelse return .{ .bool = false };
-    return .{ .bool = c.xmlTextReaderMoveToFirstAttribute(r) == 1 };
+fn xrMoveToFirstAttribute(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const r = getReader(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = c.xmlTextReaderMoveToFirstAttribute(r) == 1 });
 }
 
-fn xrMoveToNextAttribute(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const r = getReader(obj) orelse return .{ .bool = false };
-    return .{ .bool = c.xmlTextReaderMoveToNextAttribute(r) == 1 };
+fn xrMoveToNextAttribute(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const r = getReader(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = c.xmlTextReaderMoveToNextAttribute(r) == 1 });
 }
 
-fn xrGetAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .null;
-    const obj = getThis(ctx) orelse return .null;
-    const r = getReader(obj) orelse return .null;
+fn xrGetAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const r = getReader(obj) orelse return NativeResult.scalar(.null);
     const name_z = try dupZ(ctx, args[0].string.bytes());
     const v = c.xmlTextReaderGetAttribute(r, @ptrCast(name_z.ptr));
-    if (v == null) return .null;
+    if (v == null) return NativeResult.scalar(.null);
     defer c.xmlFree.?(v);
-    return .{ .string = Value.String.borrowed(try dupString(ctx, v[0..cstrLen(v)])) };
+    return try NativeResult.copyString(ctx.allocator, v[0..cstrLen(v)]);
 }
 
-fn xrGetAttributeNo(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .int) return .null;
-    const obj = getThis(ctx) orelse return .null;
-    const r = getReader(obj) orelse return .null;
+fn xrGetAttributeNo(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .int) return NativeResult.scalar(.null);
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const r = getReader(obj) orelse return NativeResult.scalar(.null);
     const v = c.xmlTextReaderGetAttributeNo(r, @intCast(args[0].int));
-    if (v == null) return .null;
+    if (v == null) return NativeResult.scalar(.null);
     defer c.xmlFree.?(v);
-    return .{ .string = Value.String.borrowed(try dupString(ctx, v[0..cstrLen(v)])) };
+    return try NativeResult.copyString(ctx.allocator, v[0..cstrLen(v)]);
 }
 
-fn xrGetAttributeNs(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .null;
-    const obj = getThis(ctx) orelse return .null;
-    const r = getReader(obj) orelse return .null;
+fn xrGetAttributeNs(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.null);
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const r = getReader(obj) orelse return NativeResult.scalar(.null);
     const name_z = try dupZ(ctx, args[0].string.bytes());
     const ns_z = try dupZ(ctx, args[1].string.bytes());
     const v = c.xmlTextReaderGetAttributeNs(r, @ptrCast(name_z.ptr), @ptrCast(ns_z.ptr));
-    if (v == null) return .null;
+    if (v == null) return NativeResult.scalar(.null);
     defer c.xmlFree.?(v);
-    return .{ .string = Value.String.borrowed(try dupString(ctx, v[0..cstrLen(v)])) };
+    return try NativeResult.copyString(ctx.allocator, v[0..cstrLen(v)]);
 }
 
-fn xrReadInnerXml(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const r = getReader(obj) orelse return .{ .bool = false };
+fn xrReadInnerXml(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const r = getReader(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const v = c.xmlTextReaderReadInnerXml(r);
-    if (v == null) return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
+    if (v == null) return try NativeResult.copyString(ctx.allocator, "");
     defer c.xmlFree.?(v);
-    return .{ .string = Value.String.borrowed(try dupString(ctx, v[0..cstrLen(v)])) };
+    return try NativeResult.copyString(ctx.allocator, v[0..cstrLen(v)]);
 }
 
-fn xrReadOuterXml(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const r = getReader(obj) orelse return .{ .bool = false };
+fn xrReadOuterXml(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const r = getReader(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const v = c.xmlTextReaderReadOuterXml(r);
-    if (v == null) return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
+    if (v == null) return try NativeResult.copyString(ctx.allocator, "");
     defer c.xmlFree.?(v);
-    return .{ .string = Value.String.borrowed(try dupString(ctx, v[0..cstrLen(v)])) };
+    return try NativeResult.copyString(ctx.allocator, v[0..cstrLen(v)]);
 }
 
-fn xrReadString(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const r = getReader(obj) orelse return .{ .bool = false };
+fn xrReadString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const r = getReader(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const v = c.xmlTextReaderReadString(r);
-    if (v == null) return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
+    if (v == null) return try NativeResult.copyString(ctx.allocator, "");
     defer c.xmlFree.?(v);
-    return .{ .string = Value.String.borrowed(try dupString(ctx, v[0..cstrLen(v)])) };
+    return try NativeResult.copyString(ctx.allocator, v[0..cstrLen(v)]);
 }
 
-fn xrIsValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const r = getReader(obj) orelse return .{ .bool = false };
-    return .{ .bool = c.xmlTextReaderIsValid(r) == 1 };
+fn xrIsValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const r = getReader(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = c.xmlTextReaderIsValid(r) == 1 });
 }
 
-fn xrExpand(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn xrExpand(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // expand() returns a DOMNode for the current node. requires the dom module's
     // wrapping. building a DOMElement/DOMText/etc wrapper here would create a
     // node tied to an internal reader doc; PHP's documented behavior is the
     // same. We pass through to dom.wrapNode equivalent.
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const r = getReader(obj) orelse return .{ .bool = false };
-    const node = c.xmlTextReaderExpand(r) orelse return .{ .bool = false };
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const r = getReader(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    const node = c.xmlTextReaderExpand(r) orelse return NativeResult.scalar(.{ .bool = false });
     // build a minimal DOMNode wrapper. dispatch class name from node type
     const cls = switch (node.*.type) {
         1 => "DOMElement", // XML_ELEMENT_NODE
@@ -300,72 +301,72 @@ fn xrExpand(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     };
     const dom_obj = try ctx.createObject(cls);
     try dom_obj.set(ctx.allocator, "__node", .{ .int = @intCast(@intFromPtr(node)) });
-    return .{ .object = dom_obj };
+    return NativeResult.borrowed(.{ .object = dom_obj });
 }
 
-fn xrGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .null;
-    const obj = getThis(ctx) orelse return .null;
-    const r = getReader(obj) orelse return .null;
+fn xrGet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const r = getReader(obj) orelse return NativeResult.scalar(.null);
     const prop = args[0].string.bytes();
 
     if (std.mem.eql(u8, prop, "nodeType")) {
-        return .{ .int = @intCast(c.xmlTextReaderNodeType(r)) };
+        return NativeResult.scalar(.{ .int = @intCast(c.xmlTextReaderNodeType(r)) });
     }
     if (std.mem.eql(u8, prop, "name")) {
         const v = c.xmlTextReaderConstName(r);
-        if (v == null) return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
-        return .{ .string = Value.String.borrowed(try dupString(ctx, v[0..cstrLen(v)])) };
+        if (v == null) return try NativeResult.copyString(ctx.allocator, "");
+        return try NativeResult.copyString(ctx.allocator, v[0..cstrLen(v)]);
     }
     if (std.mem.eql(u8, prop, "localName")) {
         const v = c.xmlTextReaderConstLocalName(r);
-        if (v == null) return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
-        return .{ .string = Value.String.borrowed(try dupString(ctx, v[0..cstrLen(v)])) };
+        if (v == null) return try NativeResult.copyString(ctx.allocator, "");
+        return try NativeResult.copyString(ctx.allocator, v[0..cstrLen(v)]);
     }
     if (std.mem.eql(u8, prop, "prefix")) {
         const v = c.xmlTextReaderConstPrefix(r);
-        if (v == null) return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
-        return .{ .string = Value.String.borrowed(try dupString(ctx, v[0..cstrLen(v)])) };
+        if (v == null) return try NativeResult.copyString(ctx.allocator, "");
+        return try NativeResult.copyString(ctx.allocator, v[0..cstrLen(v)]);
     }
     if (std.mem.eql(u8, prop, "namespaceURI")) {
         const v = c.xmlTextReaderConstNamespaceUri(r);
-        if (v == null) return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
-        return .{ .string = Value.String.borrowed(try dupString(ctx, v[0..cstrLen(v)])) };
+        if (v == null) return try NativeResult.copyString(ctx.allocator, "");
+        return try NativeResult.copyString(ctx.allocator, v[0..cstrLen(v)]);
     }
     if (std.mem.eql(u8, prop, "value")) {
         const v = c.xmlTextReaderConstValue(r);
-        if (v == null) return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
-        return .{ .string = Value.String.borrowed(try dupString(ctx, v[0..cstrLen(v)])) };
+        if (v == null) return try NativeResult.copyString(ctx.allocator, "");
+        return try NativeResult.copyString(ctx.allocator, v[0..cstrLen(v)]);
     }
     if (std.mem.eql(u8, prop, "baseURI")) {
         const v = c.xmlTextReaderConstBaseUri(r);
-        if (v == null) return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
-        return .{ .string = Value.String.borrowed(try dupString(ctx, v[0..cstrLen(v)])) };
+        if (v == null) return try NativeResult.copyString(ctx.allocator, "");
+        return try NativeResult.copyString(ctx.allocator, v[0..cstrLen(v)]);
     }
     if (std.mem.eql(u8, prop, "xmlLang")) {
         const v = c.xmlTextReaderConstXmlLang(r);
-        if (v == null) return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
-        return .{ .string = Value.String.borrowed(try dupString(ctx, v[0..cstrLen(v)])) };
+        if (v == null) return try NativeResult.copyString(ctx.allocator, "");
+        return try NativeResult.copyString(ctx.allocator, v[0..cstrLen(v)]);
     }
     if (std.mem.eql(u8, prop, "depth")) {
-        return .{ .int = @intCast(c.xmlTextReaderDepth(r)) };
+        return NativeResult.scalar(.{ .int = @intCast(c.xmlTextReaderDepth(r)) });
     }
     if (std.mem.eql(u8, prop, "attributeCount")) {
-        return .{ .int = @intCast(c.xmlTextReaderAttributeCount(r)) };
+        return NativeResult.scalar(.{ .int = @intCast(c.xmlTextReaderAttributeCount(r)) });
     }
     if (std.mem.eql(u8, prop, "hasAttributes")) {
-        return .{ .bool = c.xmlTextReaderHasAttributes(r) == 1 };
+        return NativeResult.scalar(.{ .bool = c.xmlTextReaderHasAttributes(r) == 1 });
     }
     if (std.mem.eql(u8, prop, "hasValue")) {
-        return .{ .bool = c.xmlTextReaderHasValue(r) == 1 };
+        return NativeResult.scalar(.{ .bool = c.xmlTextReaderHasValue(r) == 1 });
     }
     if (std.mem.eql(u8, prop, "isDefault")) {
-        return .{ .bool = c.xmlTextReaderIsDefault(r) == 1 };
+        return NativeResult.scalar(.{ .bool = c.xmlTextReaderIsDefault(r) == 1 });
     }
     if (std.mem.eql(u8, prop, "isEmptyElement")) {
-        return .{ .bool = c.xmlTextReaderIsEmptyElement(r) == 1 };
+        return NativeResult.scalar(.{ .bool = c.xmlTextReaderIsEmptyElement(r) == 1 });
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 // ---------------- registration ----------------

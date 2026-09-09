@@ -2,6 +2,7 @@ const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 // coerce to string with __toString support. preg functions previously
@@ -325,25 +326,25 @@ fn emitCompileWarning(ctx: *NativeContext, fn_name: []const u8, pattern: []const
     ctx.vm.emitWarning(msg);
 }
 
-fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2) return .{ .bool = false };
-    const pat_str = coerceStrArg(ctx, args[0]) orelse return .{ .bool = false };
-    const subj_str = coerceStrArg(ctx, args[1]) orelse return .{ .bool = false };
+fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2) return NativeResult.scalar(.{ .bool = false });
+    const pat_str = coerceStrArg(ctx, args[0]) orelse return NativeResult.scalar(.{ .bool = false });
+    const subj_str = coerceStrArg(ctx, args[1]) orelse return NativeResult.scalar(.{ .bool = false });
     setPregError(0);
     const info = parsePattern(pat_str) orelse {
         setPregError(1);
-        return Value{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     };
     const subject = subj_str;
 
     const code = compilePattern(info.pattern, info.flags) orelse {
         setPregError(1);
         emitCompileWarning(ctx, "preg_match", info.pattern, info.flags);
-        return Value{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     };
     defer pcre2.pcre2_code_free_8(code);
 
-    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return Value{ .bool = false };
+    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return NativeResult.scalar(.{ .bool = false });
     defer pcre2.pcre2_match_data_free_8(match_data);
 
     const flags: u32 = if (args.len >= 4) @intCast(@max(0, Value.toInt(args[3]))) else 0;
@@ -361,7 +362,7 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 ctx.setCallerVar(2, args.len, .{ .array = matches_arr });
             }
         }
-        return .{ .int = 0 };
+        return NativeResult.scalar(.{ .int = 0 });
     }
 
     if (args.len >= 3) {
@@ -406,7 +407,7 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
     }
 
-    return .{ .int = 1 };
+    return NativeResult.scalar(.{ .int = 1 });
 }
 
 fn addNamedGroupsInterleaved(ctx: *NativeContext, arr: *PhpArray, code: *pcre2.Code, ovector: [*]usize, subject: []const u8, count: usize, offset_capture: bool, unmatched_as_null: bool) !void {
@@ -523,12 +524,12 @@ fn addNamedGroups(ctx: *NativeContext, arr: *PhpArray, code: *pcre2.Code, ovecto
     }
 }
 
-fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     setPregError(0);
     const info = parsePattern(args[0].string.bytes()) orelse {
         setPregError(1);
-        return Value{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     };
     const subject = args[1].string.bytes();
 
@@ -540,11 +541,11 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const code = compilePattern(info.pattern, info.flags) orelse {
         setPregError(1);
         emitCompileWarning(ctx, "preg_match_all", info.pattern, info.flags);
-        return Value{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     };
     defer pcre2.pcre2_code_free_8(code);
 
-    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return Value{ .int = 0 };
+    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return NativeResult.scalar(.{ .int = 0 });
     defer pcre2.pcre2_match_data_free_8(match_data);
 
     var capture_count: u32 = 0;
@@ -687,7 +688,7 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         ctx.setCallerVar(2, args.len, .{ .array = out });
     }
 
-    return .{ .int = total_matches };
+    return NativeResult.scalar(.{ .int = total_matches });
 }
 
 fn matchGroupValue(ctx: *NativeContext, subject: []const u8, ovector: [*]usize, count: usize, i: usize, offset_capture: bool) RuntimeError!Value {
@@ -829,8 +830,8 @@ fn translateReplacement(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
-fn preg_filter(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 3) return .null;
+fn preg_filter(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 3) return NativeResult.scalar(.null);
     if (args[2] == .array) {
         const subj_arr = args[2].array;
         const out = try ctx.allocator.create(@import("../runtime/value.zig").PhpArray);
@@ -838,7 +839,7 @@ fn preg_filter(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try ctx.vm.arrays.append(ctx.allocator, out);
         for (subj_arr.entries.items) |se| {
             var sub_args: [3]Value = .{ args[0], args[1], se.value };
-            const replaced = try preg_replace(ctx, sub_args[0..3]);
+            const replaced = (try preg_replace(ctx, sub_args[0..3])).value;
             defer if (replaced == .string) replaced.string.release();
             // PHP preg_filter keeps only entries where the replacement actually
             // changed the string (i.e. at least one match)
@@ -846,16 +847,33 @@ fn preg_filter(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 try out.set(ctx.allocator, se.key, replaced);
             }
         }
-        return .{ .array = out };
+        return NativeResult.borrowed(.{ .array = out });
     }
     const replaced = try preg_replace(ctx, args);
-    if (replaced == .string and args[2] == .string and !std.mem.eql(u8, replaced.string.bytes(), args[2].string.bytes())) return replaced;
-    if (replaced == .string) replaced.string.release();
-    return .null;
+    if (replaced.value == .string and args[2] == .string and !std.mem.eql(u8, replaced.value.string.bytes(), args[2].string.bytes())) return replaced;
+    if (replaced.value == .string) replaced.value.string.release();
+    return NativeResult.scalar(.null);
 }
 
-fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 3) return .null;
+// PHP coerces a scalar subject to string before matching, so a scalar
+// always comes back as a string even when nothing matched
+fn replaceWithCoercedSubject(ctx: *NativeContext, args: []const Value, comptime idx: usize, comptime native: anytype) RuntimeError!?NativeResult {
+    if (args.len <= idx or args[idx] == .string or args[idx] == .array or args[idx] == .object) return null;
+    var buf = std.ArrayListUnmanaged(u8){};
+    defer buf.deinit(ctx.allocator);
+    try args[idx].format(&buf, ctx.allocator);
+    const subject = try Value.String.create(ctx.allocator, buf.items);
+    defer subject.release();
+    var coerced: [5]Value = undefined;
+    if (args.len > coerced.len) return null;
+    @memcpy(coerced[0..args.len], args);
+    coerced[idx] = .{ .string = subject };
+    return try native(ctx, coerced[0..args.len]);
+}
+
+fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 3) return NativeResult.scalar(.null);
+    if (try replaceWithCoercedSubject(ctx, args, 2, preg_replace)) |coerced| return coerced;
     // subject can be an array - apply replacements element-wise and return array
     if (args[2] == .array) {
         const subj_arr = args[2].array;
@@ -872,38 +890,38 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 sub_args[3] = args[3];
                 n = 4;
             }
-            const replaced = try preg_replace(ctx, sub_args[0..n]);
+            const replaced = (try preg_replace(ctx, sub_args[0..n])).value;
             defer if (replaced == .string) replaced.string.release();
             try result_arr.set(ctx.allocator, se.key, replaced);
         }
-        return .{ .array = result_arr };
+        return NativeResult.borrowed(.{ .array = result_arr });
     }
     // pattern can be array - call recursively for each (pattern, replacement) pair
     if (args[0] == .array) {
         return try pregReplaceArrayPattern(ctx, args);
     }
-    if (args[0] != .string or args[2] != .string) return if (args[2] == .string) .{ .string = try Value.String.create(ctx.allocator, args[2].string.bytes()) } else args[2];
+    if (args[0] != .string or args[2] != .string) return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
     const info = parsePattern(args[0].string.bytes()) orelse {
         setPregError(1);
-        return .null;
+        return NativeResult.scalar(.null);
     };
-    const replacement = if (args[1] == .string) args[1].string.bytes() else return if (args[2] == .string) .{ .string = try Value.String.create(ctx.allocator, args[2].string.bytes()) } else args[2];
+    const replacement = if (args[1] == .string) args[1].string.bytes() else return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
     const subject = args[2].string.bytes();
     const limit: i64 = if (args.len >= 4 and args[3] != .null) Value.toInt(args[3]) else -1;
 
     if (limit == 0) {
         if (args.len >= 5) ctx.setCallerVar(4, args.len, .{ .int = 0 });
-        return .{ .string = try Value.String.create(ctx.allocator, subject) };
+        return NativeResult.takeString(try Value.String.create(ctx.allocator, subject));
     }
 
     const code = compilePattern(info.pattern, info.flags) orelse {
         setPregError(1);
         emitCompileWarning(ctx, "preg_replace", info.pattern, info.flags);
-        return .null;
+        return NativeResult.scalar(.null);
     };
     defer pcre2.pcre2_code_free_8(code);
 
-    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return if (args[2] == .string) .{ .string = try Value.String.create(ctx.allocator, args[2].string.bytes()) } else args[2];
+    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
     defer pcre2.pcre2_match_data_free_8(match_data);
 
     if (limit > 0) {
@@ -932,11 +950,11 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
 
     if (rc >= 0) {
         ctx.setCallerVar(4, args.len, .{ .int = @intCast(rc) });
-        return if (args[2] == .string) .{ .string = try Value.String.create(ctx.allocator, args[2].string.bytes()) } else args[2];
+        return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
     }
     if (rc != pcre2.ERROR_NOMEMORY) {
         ctx.setCallerVar(4, args.len, .{ .int = 0 });
-        return if (args[2] == .string) .{ .string = try Value.String.create(ctx.allocator, args[2].string.bytes()) } else args[2];
+        return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
     }
 
     const buf = try ctx.allocator.alloc(u8, out_len);
@@ -957,18 +975,18 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     if (rc < 0) {
         ctx.allocator.free(buf);
         ctx.setCallerVar(4, args.len, .{ .int = 0 });
-        return if (args[2] == .string) .{ .string = try Value.String.create(ctx.allocator, args[2].string.bytes()) } else args[2];
+        return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
     }
 
     ctx.setCallerVar(4, args.len, .{ .int = @intCast(rc) });
     const result = try Value.String.adopt(ctx.allocator, buf);
-    return .{ .string = result.borrowedSlice(0, out_len) };
+    return NativeResult.takeString(result.borrowedSlice(0, out_len));
 }
 
-fn pregReplaceArrayPattern(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn pregReplaceArrayPattern(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const patterns = args[0].array;
-    var current: Value = if (args[2] == .string) .{ .string = try Value.String.create(ctx.allocator, args[2].string.bytes()) } else args[2];
-    errdefer if (current == .string) current.string.release();
+    var current: NativeResult = if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
+    errdefer if (current.value == .string) current.value.string.release();
     var total_count: i64 = 0;
     const limit_per: i64 = if (args.len >= 4) Value.toInt(args[3]) else -1;
     for (patterns.entries.items, 0..) |pe, idx| {
@@ -981,8 +999,8 @@ fn pregReplaceArrayPattern(ctx: *NativeContext, args: []const Value) RuntimeErro
             }
         }
         // count matches against the current subject (respecting limit)
-        if (current == .string) {
-            const before = current.string.bytes();
+        if (current.value == .string) {
+            const before = current.value.string.bytes();
             if (parsePattern(pe.value.string.bytes())) |info| {
                 if (compilePattern(info.pattern, info.flags)) |code| {
                     defer pcre2.pcre2_code_free_8(code);
@@ -1007,7 +1025,7 @@ fn pregReplaceArrayPattern(ctx: *NativeContext, args: []const Value) RuntimeErro
         var rest: [3]Value = undefined;
         rest[0] = pe.value;
         rest[1] = replacement;
-        rest[2] = current;
+        rest[2] = current.value;
         var single_args: [4]Value = undefined;
         single_args[0] = rest[0];
         single_args[1] = rest[1];
@@ -1018,14 +1036,14 @@ fn pregReplaceArrayPattern(ctx: *NativeContext, args: []const Value) RuntimeErro
             n = 4;
         }
         const next = try preg_replace(ctx, single_args[0..n]);
-        if (current == .string) current.string.release();
+        if (current.value == .string) current.value.string.release();
         current = next;
     }
     ctx.setCallerVar(4, args.len, .{ .int = total_count });
     return current;
 }
 
-fn pregReplaceLimited(ctx: *NativeContext, code: *pcre2.Code, match_data: *pcre2.MatchData, subject: []const u8, replacement: []const u8, limit: usize, args: []const Value) RuntimeError!Value {
+fn pregReplaceLimited(ctx: *NativeContext, code: *pcre2.Code, match_data: *pcre2.MatchData, subject: []const u8, replacement: []const u8, limit: usize, args: []const Value) RuntimeError!NativeResult {
     var parts = std.ArrayListUnmanaged(u8){};
     defer parts.deinit(ctx.allocator);
     var offset: usize = 0;
@@ -1092,11 +1110,12 @@ fn pregReplaceLimited(ctx: *NativeContext, code: *pcre2.Code, match_data: *pcre2
     const buf = try ctx.allocator.alloc(u8, parts.items.len);
     @memcpy(buf, parts.items);
     ctx.setCallerVar(4, args.len, .{ .int = @intCast(count) });
-    return .{ .string = try Value.String.adopt(ctx.allocator, buf) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, buf));
 }
 
-fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 3) return .null;
+fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 3) return NativeResult.scalar(.null);
+    if (try replaceWithCoercedSubject(ctx, args, 2, preg_replace_callback)) |coerced| return coerced;
     if (args[2] == .array) {
         const result = try ctx.createArray();
         for (args[2].array.entries.items) |entry| {
@@ -1105,37 +1124,37 @@ fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!
             sub_args[1] = args[1];
             sub_args[2] = entry.value;
             if (args.len >= 4) sub_args[3] = args[3];
-            const replaced = try preg_replace_callback(ctx, sub_args[0..@min(args.len, 4)]);
+            const replaced = (try preg_replace_callback(ctx, sub_args[0..@min(args.len, 4)])).value;
             defer if (replaced == .string) replaced.string.release();
             try result.set(ctx.allocator, entry.key, replaced);
         }
-        return .{ .array = result };
+        return NativeResult.borrowed(.{ .array = result });
     }
     if (args[0] == .array) {
-        var current: Value = if (args[2] == .string) .{ .string = try Value.String.create(ctx.allocator, args[2].string.bytes()) } else args[2];
-        errdefer if (current == .string) current.string.release();
+        var current: NativeResult = if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
+        errdefer if (current.value == .string) current.value.string.release();
         for (args[0].array.entries.items) |pat_entry| {
             if (pat_entry.value != .string) continue;
             var sub_args: [5]Value = undefined;
             sub_args[0] = pat_entry.value;
             sub_args[1] = args[1];
-            sub_args[2] = current;
+            sub_args[2] = current.value;
             if (args.len >= 4) sub_args[3] = args[3];
             const next = try preg_replace_callback(ctx, sub_args[0..@min(args.len, 4)]);
-            if (current == .string) current.string.release();
+            if (current.value == .string) current.value.string.release();
             current = next;
         }
         return current;
     }
-    if (args[0] != .string or args[2] != .string) return if (args[2] == .string) .{ .string = try Value.String.create(ctx.allocator, args[2].string.bytes()) } else args[2];
-    const info = parsePattern(args[0].string.bytes()) orelse return if (args[2] == .string) .{ .string = try Value.String.create(ctx.allocator, args[2].string.bytes()) } else args[2];
+    if (args[0] != .string or args[2] != .string) return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
+    const info = parsePattern(args[0].string.bytes()) orelse return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
     const callback = args[1];
     const subject = args[2].string.bytes();
 
-    const code = compilePattern(info.pattern, info.flags) orelse return if (args[2] == .string) .{ .string = try Value.String.create(ctx.allocator, args[2].string.bytes()) } else args[2];
+    const code = compilePattern(info.pattern, info.flags) orelse return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
     defer pcre2.pcre2_code_free_8(code);
 
-    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return if (args[2] == .string) .{ .string = try Value.String.create(ctx.allocator, args[2].string.bytes()) } else args[2];
+    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
     defer pcre2.pcre2_match_data_free_8(match_data);
 
     var capture_count: u32 = 0;
@@ -1222,11 +1241,12 @@ fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!
     if (args.len >= 5) ctx.setCallerVar(4, args.len, .{ .int = replace_count });
 
     const s = try result.toOwnedSlice(ctx.allocator);
-    return .{ .string = try Value.String.adopt(ctx.allocator, s) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, s));
 }
 
-fn preg_replace_callback_array(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .array) return if (args.len >= 2) args[1] else Value.null;
+fn preg_replace_callback_array(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .array) return if (args.len >= 2) NativeResult.share(args[1]) else NativeResult.scalar(.null);
+    if (try replaceWithCoercedSubject(ctx, args, 1, preg_replace_callback_array)) |coerced| return coerced;
     const map = args[0].array;
     if (args[1] == .array) {
         const result = try ctx.createArray();
@@ -1235,23 +1255,23 @@ fn preg_replace_callback_array(ctx: *NativeContext, args: []const Value) Runtime
             sub_args[0] = args[0];
             sub_args[1] = entry.value;
             if (args.len >= 3) sub_args[2] = args[2];
-            const replaced = try preg_replace_callback_array(ctx, sub_args[0..args.len]);
+            const replaced = (try preg_replace_callback_array(ctx, sub_args[0..args.len])).value;
             defer if (replaced == .string) replaced.string.release();
             try result.set(ctx.allocator, entry.key, replaced);
         }
-        return .{ .array = result };
+        return NativeResult.borrowed(.{ .array = result });
     }
-    if (args[1] != .string) return args[1];
-    var current: Value = .{ .string = try Value.String.create(ctx.allocator, args[1].string.bytes()) };
-    errdefer if (current == .string) current.string.release();
+    if (args[1] != .string) return NativeResult.share(args[1]);
+    var current = NativeResult.takeString(try Value.String.create(ctx.allocator, args[1].string.bytes()));
+    errdefer current.value.string.release();
     var total_count: i64 = 0;
     const limit: i64 = if (args.len >= 3) Value.toInt(args[2]) else -1;
 
     for (map.entries.items) |entry| {
         if (entry.key != .string) continue;
         // count matches in current subject for this pattern
-        if (current == .string) {
-            const subject = current.string.bytes();
+        if (current.value == .string) {
+            const subject = current.value.string.bytes();
             if (parsePattern(entry.key.string.bytes())) |info| {
                 if (compilePattern(info.pattern, info.flags)) |code| {
                     defer pcre2.pcre2_code_free_8(code);
@@ -1276,15 +1296,15 @@ fn preg_replace_callback_array(ctx: *NativeContext, args: []const Value) Runtime
         var sub_args: [4]Value = undefined;
         sub_args[0] = .{ .string = entry.key.string };
         sub_args[1] = entry.value;
-        sub_args[2] = current;
+        sub_args[2] = current.value;
         var n: usize = 3;
         if (args.len >= 3) {
             sub_args[3] = args[2];
             n = 4;
         }
         const r = try preg_replace_callback(ctx, sub_args[0..n]);
-        if (r == .string) {
-            current.string.release();
+        if (r.value == .string) {
+            current.value.string.release();
             current = r;
         }
     }
@@ -1300,11 +1320,11 @@ fn utf8SeqLen(lead: u8) usize {
     return 1; // continuation byte / invalid - treat as single byte
 }
 
-fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     const info = parsePattern(args[0].string.bytes()) orelse {
         setPregError(1);
-        return Value{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     };
     const subject = args[1].string.bytes();
     const limit: i64 = if (args.len >= 3 and args[2] != .null) Value.toInt(args[2]) else -1;
@@ -1313,10 +1333,10 @@ fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const no_empty = (flags & 1) != 0;
     const offset_capture = (flags & 4) != 0;
 
-    const code = compilePattern(info.pattern, info.flags) orelse return Value.null;
+    const code = compilePattern(info.pattern, info.flags) orelse return NativeResult.scalar(.null);
     defer pcre2.pcre2_code_free_8(code);
 
-    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return Value.null;
+    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return NativeResult.scalar(.null);
     defer pcre2.pcre2_match_data_free_8(match_data);
 
     var result = try ctx.createArray();
@@ -1426,11 +1446,11 @@ fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
     }
 
-    return .{ .array = result };
+    return NativeResult.borrowed(.{ .array = result });
 }
 
-fn preg_quote(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .string = Value.String.borrowed("") };
+fn preg_quote(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.literal("");
     const input = args[0].string.bytes();
     const delimiter: ?u8 = if (args.len >= 2 and args[1] == .string and args[1].string.bytes().len > 0) args[1].string.bytes()[0] else null;
 
@@ -1447,23 +1467,22 @@ fn preg_quote(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try buf.append(ctx.allocator, c);
     }
     const result = try buf.toOwnedSlice(ctx.allocator);
-    try ctx.strings.append(ctx.allocator, result);
-    return .{ .string = Value.String.borrowed(result) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, result));
 }
 
-fn preg_grep(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .array) return .{ .bool = false };
+fn preg_grep(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .array) return NativeResult.scalar(.{ .bool = false });
     const info = parsePattern(args[0].string.bytes()) orelse {
         setPregError(1);
-        return Value{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     };
     const input = args[1].array;
     const invert = args.len >= 3 and Value.toInt(args[2]) == 1;
 
-    const code = compilePattern(info.pattern, info.flags) orelse return Value.null;
+    const code = compilePattern(info.pattern, info.flags) orelse return NativeResult.scalar(.null);
     defer pcre2.pcre2_code_free_8(code);
 
-    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return Value.null;
+    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return NativeResult.scalar(.null);
     defer pcre2.pcre2_match_data_free_8(match_data);
 
     var result = try ctx.createArray();
@@ -1475,7 +1494,7 @@ fn preg_grep(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             try result.set(ctx.allocator, entry.key, entry.value);
         }
     }
-    return .{ .array = result };
+    return NativeResult.borrowed(.{ .array = result });
 }
 
 // global preg_last_error state - mirrors PHP's per-thread last error
@@ -1485,11 +1504,11 @@ fn setPregError(code: i64) void {
     preg_last_error_code = code;
 }
 
-fn preg_last_error(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .int = preg_last_error_code };
+fn preg_last_error(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .int = preg_last_error_code });
 }
 
-fn preg_last_error_msg(_: *NativeContext, _: []const Value) RuntimeError!Value {
+fn preg_last_error_msg(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const msg: []const u8 = switch (preg_last_error_code) {
         0 => "No error",
         1 => "Internal error",
@@ -1500,19 +1519,19 @@ fn preg_last_error_msg(_: *NativeContext, _: []const Value) RuntimeError!Value {
         6 => "JIT stack limit exhausted",
         else => "Unknown error",
     };
-    return .{ .string = Value.String.borrowed(msg) };
+    return try NativeResult.copyString(ctx.allocator, msg);
 }
 
-fn mb_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .null;
+fn mb_split(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.null);
     const pattern = args[0].string.bytes();
     const subject = args[1].string.bytes();
     const limit: i64 = if (args.len >= 3 and args[2] != .null) Value.toInt(args[2]) else -1;
 
-    const code = compilePattern(pattern, pcre2.UTF) orelse return Value.null;
+    const code = compilePattern(pattern, pcre2.UTF) orelse return NativeResult.scalar(.null);
     defer pcre2.pcre2_code_free_8(code);
 
-    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return Value.null;
+    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return NativeResult.scalar(.null);
     defer pcre2.pcre2_match_data_free_8(match_data);
 
     var result = try ctx.createArray();
@@ -1546,20 +1565,20 @@ fn mb_split(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try result.append(ctx.allocator, .{ .string = Value.String.borrowed(try ctx.createString(subject[offset..])) });
     }
 
-    return .{ .array = result };
+    return NativeResult.borrowed(.{ .array = result });
 }
 
-fn mb_ereg_match(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+fn mb_ereg_match(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     const pattern = args[0].string.bytes();
     const subject = args[1].string.bytes();
 
-    const code = compilePattern(pattern, pcre2.UTF | pcre2.ANCHORED) orelse return .{ .bool = false };
+    const code = compilePattern(pattern, pcre2.UTF | pcre2.ANCHORED) orelse return NativeResult.scalar(.{ .bool = false });
     defer pcre2.pcre2_code_free_8(code);
 
-    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return .{ .bool = false };
+    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return NativeResult.scalar(.{ .bool = false });
     defer pcre2.pcre2_match_data_free_8(match_data);
 
     const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, 0, 0, match_data, null);
-    return .{ .bool = rc >= 0 };
+    return NativeResult.scalar(.{ .bool = rc >= 0 });
 }

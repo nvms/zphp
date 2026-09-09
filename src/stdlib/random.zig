@@ -10,6 +10,7 @@ const ClassDef = vm_mod.ClassDef;
 const Mt19937 = @import("mt19937.zig").Mt19937;
 const Xoshiro256ss = @import("xoshiro256ss.zig").Xoshiro256ss;
 const PcgOneseq128 = @import("pcg_oneseq_128.zig").PcgOneseq128;
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
@@ -84,8 +85,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "Random\\Engine\\Secure::generate", secureGenerate);
 }
 
-fn noopConstruct(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .null;
+fn noopConstruct(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.null);
 }
 
 fn getThis(ctx: *NativeContext) ?*PhpObject {
@@ -117,8 +118,8 @@ fn loadState(obj: *PhpObject, comptime T: type) ?T {
 
 // ---- Mt19937 ----
 
-fn mtConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const this = getThis(ctx) orelse return .null;
+fn mtConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const seed_int: u32 = if (args.len >= 1 and args[0] != .null)
         @as(u32, @truncate(@as(u64, @bitCast(Value.toInt(args[0])))))
     else
@@ -131,25 +132,23 @@ fn mtConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     var m = Mt19937{};
     m.seed(seed_int);
     try storeState(ctx, this, std.mem.asBytes(&m));
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn mtGenerate(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this = getThis(ctx) orelse return .null;
-    var m = loadState(this, Mt19937) orelse return .null;
+fn mtGenerate(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    var m = loadState(this, Mt19937) orelse return NativeResult.scalar(.null);
     const v = m.nextU32();
     try storeState(ctx, this, std.mem.asBytes(&m));
     var bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &bytes, v, .little);
-    const owned = try ctx.allocator.dupe(u8, &bytes);
-    try ctx.vm.strings.append(ctx.allocator, owned);
-    return .{ .string = Value.String.borrowed(owned) };
+    return try NativeResult.copyString(ctx.allocator, &bytes);
 }
 
 // ---- PCG OneSeq 128 XSL RR 64 ----
 
-fn pcgConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const this = getThis(ctx) orelse return .null;
+fn pcgConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     var p = PcgOneseq128{};
     if (args.len >= 1 and args[0] != .null) {
         if (args[0] == .string) {
@@ -165,25 +164,23 @@ fn pcgConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         p.seedInt(freshU64FromCrypto());
     }
     try storeState(ctx, this, std.mem.asBytes(&p));
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn pcgGenerate(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this = getThis(ctx) orelse return .null;
-    var p = loadState(this, PcgOneseq128) orelse return .null;
+fn pcgGenerate(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    var p = loadState(this, PcgOneseq128) orelse return NativeResult.scalar(.null);
     const v = p.next();
     try storeState(ctx, this, std.mem.asBytes(&p));
     var bytes: [8]u8 = undefined;
     std.mem.writeInt(u64, &bytes, v, .little);
-    const owned = try ctx.allocator.dupe(u8, &bytes);
-    try ctx.vm.strings.append(ctx.allocator, owned);
-    return .{ .string = Value.String.borrowed(owned) };
+    return try NativeResult.copyString(ctx.allocator, &bytes);
 }
 
 // ---- Xoshiro256** ----
 
-fn xoshConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const this = getThis(ctx) orelse return .null;
+fn xoshConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     var x = Xoshiro256ss{};
     if (args.len >= 1 and args[0] != .null) {
         if (args[0] == .string) {
@@ -199,27 +196,23 @@ fn xoshConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         x.seedInt(freshU64FromCrypto());
     }
     try storeState(ctx, this, std.mem.asBytes(&x));
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn xoshGenerate(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const this = getThis(ctx) orelse return .null;
-    var x = loadState(this, Xoshiro256ss) orelse return .null;
+fn xoshGenerate(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    var x = loadState(this, Xoshiro256ss) orelse return NativeResult.scalar(.null);
     const v = x.next();
     try storeState(ctx, this, std.mem.asBytes(&x));
     var bytes: [8]u8 = undefined;
     std.mem.writeInt(u64, &bytes, v, .little);
-    const owned = try ctx.allocator.dupe(u8, &bytes);
-    try ctx.vm.strings.append(ctx.allocator, owned);
-    return .{ .string = Value.String.borrowed(owned) };
+    return try NativeResult.copyString(ctx.allocator, &bytes);
 }
 
-fn secureGenerate(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn secureGenerate(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     var bytes: [8]u8 = undefined;
     std.crypto.random.bytes(&bytes);
-    const owned = try ctx.allocator.dupe(u8, &bytes);
-    try ctx.vm.strings.append(ctx.allocator, owned);
-    return .{ .string = Value.String.borrowed(owned) };
+    return try NativeResult.copyString(ctx.allocator, &bytes);
 }
 
 // ---- Randomizer dispatch ----
@@ -280,8 +273,8 @@ fn engine(ctx: *NativeContext) ?*PhpObject {
     return v.object;
 }
 
-fn rzConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const this = getThis(ctx) orelse return .null;
+fn rzConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len >= 1 and args[0] != .null) {
         if (args[0] != .object) {
             try ctx.vm.setPendingException("TypeError", "Random\\Randomizer::__construct(): Argument #1 ($engine) must be of type ?Random\\Engine");
@@ -289,7 +282,7 @@ fn rzConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
         try this.set(ctx.allocator, "_engine", args[0]);
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 // PHP's range32 with rejection sampling, using whatever engine is attached
@@ -327,27 +320,27 @@ fn rangeU64(ctx: *NativeContext, eng_opt: ?*PhpObject, umax: u64) u64 {
     }
 }
 
-fn rzGetInt(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .int or args[1] != .int) return .{ .int = 0 };
+fn rzGetInt(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .int or args[1] != .int) return NativeResult.scalar(.{ .int = 0 });
     const lo = args[0].int;
     const hi = args[1].int;
     if (hi < lo) {
         try ctx.vm.setPendingException("ValueError", "Random\\Randomizer::getInt(): Argument #2 ($max) must be greater than or equal to argument #1 ($min)");
         return error.RuntimeError;
     }
-    if (hi == lo) return .{ .int = lo };
+    if (hi == lo) return NativeResult.scalar(.{ .int = lo });
     const eng_opt = engine(ctx);
     const range: u64 = @intCast(hi - lo);
     if (range <= 0xffffffff) {
         const r: u32 = rangeU32(ctx, eng_opt, @intCast(range));
-        return .{ .int = lo + @as(i64, r) };
+        return NativeResult.scalar(.{ .int = lo + @as(i64, r) });
     }
     const r: u64 = rangeU64(ctx, eng_opt, range);
-    return .{ .int = lo + @as(i64, @intCast(r)) };
+    return NativeResult.scalar(.{ .int = lo + @as(i64, @intCast(r)) });
 }
 
-fn rzGetBytes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .int or args[0].int < 1) return .{ .bool = false };
+fn rzGetBytes(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .int or args[0].int < 1) return NativeResult.scalar(.{ .bool = false });
     const n: usize = @intCast(args[0].int);
     const buf = try ctx.allocator.alloc(u8, n);
     const eng_opt = engine(ctx);
@@ -360,36 +353,35 @@ fn rzGetBytes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         @memcpy(buf[written .. written + take], chunk[0..take]);
         written += take;
     }
-    try ctx.vm.strings.append(ctx.allocator, buf);
-    return .{ .string = Value.String.borrowed(buf) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, buf));
 }
 
-fn rzNextInt(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn rzNextInt(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const eng_opt = engine(ctx);
     const v = if (eng_opt) |e| engineNextU64(ctx, e) else freshU64FromCrypto();
     // PHP's nextInt returns a non-negative 63-bit integer
-    return .{ .int = @as(i64, @intCast(v >> 1)) };
+    return NativeResult.scalar(.{ .int = @as(i64, @intCast(v >> 1)) });
 }
 
-fn rzGetFloat(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn rzGetFloat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     var lo: f64 = 0.0;
     var hi: f64 = 1.0;
     if (args.len >= 2 and args[0] != .null) lo = Value.toFloat(args[0]);
     if (args.len >= 2 and args[1] != .null) hi = Value.toFloat(args[1]);
-    if (hi <= lo) return .{ .float = lo };
+    if (hi <= lo) return NativeResult.scalar(.{ .float = lo });
     const eng_opt = engine(ctx);
     const v = if (eng_opt) |e| engineNextU64(ctx, e) else freshU64FromCrypto();
     // 53-bit precision, mapped into [0, 1)
     const denom: f64 = @as(f64, @floatFromInt(@as(u64, 1) << 53));
     const r = @as(f64, @floatFromInt(v >> 11)) / denom;
-    return .{ .float = lo + r * (hi - lo) };
+    return NativeResult.scalar(.{ .float = lo + r * (hi - lo) });
 }
 
-fn rzNextFloat(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn rzNextFloat(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const eng_opt = engine(ctx);
     const v = if (eng_opt) |e| engineNextU64(ctx, e) else freshU64FromCrypto();
     const denom: f64 = @as(f64, @floatFromInt(@as(u64, 1) << 53));
-    return .{ .float = @as(f64, @floatFromInt(v >> 11)) / denom };
+    return NativeResult.scalar(.{ .float = @as(f64, @floatFromInt(v >> 11)) / denom });
 }
 
 fn rollN(ctx: *NativeContext, n: usize) usize {
@@ -398,8 +390,8 @@ fn rollN(ctx: *NativeContext, n: usize) usize {
     return @intCast(rangeU64(ctx, eng_opt, @as(u64, @intCast(n - 1))));
 }
 
-fn rzShuffleArray(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .array) return .{ .bool = false };
+fn rzShuffleArray(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .array) return NativeResult.scalar(.{ .bool = false });
     const src = args[0].array;
     const dst = try ctx.allocator.create(PhpArray);
     dst.* = .{};
@@ -413,11 +405,11 @@ fn rzShuffleArray(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         dst.entries.items[i].value = dst.entries.items[j].value;
         dst.entries.items[j].value = tmp;
     }
-    return .{ .array = dst };
+    return NativeResult.borrowed(.{ .array = dst });
 }
 
-fn rzShuffleBytes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+fn rzShuffleBytes(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const src = args[0].string.bytes();
     const buf = try ctx.allocator.dupe(u8, src);
     var i: usize = buf.len;
@@ -428,15 +420,14 @@ fn rzShuffleBytes(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         buf[i] = buf[j];
         buf[j] = tmp;
     }
-    try ctx.vm.strings.append(ctx.allocator, buf);
-    return .{ .string = Value.String.borrowed(buf) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, buf));
 }
 
-fn rzPickArrayKeys(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .array or args[1] != .int) return .{ .bool = false };
+fn rzPickArrayKeys(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .array or args[1] != .int) return NativeResult.scalar(.{ .bool = false });
     const src = args[0].array;
     const want: usize = @intCast(args[1].int);
-    if (want > src.entries.items.len) return .{ .bool = false };
+    if (want > src.entries.items.len) return NativeResult.scalar(.{ .bool = false });
     const keys = try ctx.allocator.alloc(PhpArray.Key, src.entries.items.len);
     defer ctx.allocator.free(keys);
     for (src.entries.items, 0..) |e, idx| keys[idx] = e.key;
@@ -458,5 +449,5 @@ fn rzPickArrayKeys(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
         };
         try out.append(ctx.allocator, v);
     }
-    return .{ .array = out };
+    return NativeResult.borrowed(.{ .array = out });
 }

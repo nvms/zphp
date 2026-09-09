@@ -1,3 +1,4 @@
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
@@ -11,19 +12,19 @@ pub const entries = .{
 
 const ScannerMode = enum(u2) { normal = 0, raw = 1, typed = 2 };
 
-fn native_parse_ini_string(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_parse_ini_string(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const input = args[0].string.bytes();
     const process_sections = if (args.len >= 2) Value.isTruthy(args[1]) else false;
     const mode = parseMode(if (args.len >= 3) args[2] else .{ .int = 0 });
     return parseIni(ctx, input, process_sections, mode);
 }
 
-fn native_parse_ini_file(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_parse_ini_file(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
-    const content = std.fs.cwd().readFileAlloc(ctx.allocator, path, 1024 * 1024 * 64) catch return Value{ .bool = false };
-    try ctx.strings.append(ctx.allocator, content);
+    const content = std.fs.cwd().readFileAlloc(ctx.allocator, path, 1024 * 1024 * 64) catch return NativeResult.scalar(Value{ .bool = false });
+    defer ctx.allocator.free(content);
     const process_sections = if (args.len >= 2) Value.isTruthy(args[1]) else false;
     const mode = parseMode(if (args.len >= 3) args[2] else .{ .int = 0 });
     return parseIni(ctx, content, process_sections, mode);
@@ -38,8 +39,8 @@ fn parseMode(v: Value) ScannerMode {
     };
 }
 
-fn parseIni(ctx: *NativeContext, input: []const u8, process_sections: bool, mode: ScannerMode) RuntimeError!Value {
-    var result = try ctx.createArray();
+fn parseIni(ctx: *NativeContext, input: []const u8, process_sections: bool, mode: ScannerMode) RuntimeError!NativeResult {
+    const result = try ctx.createArray();
     var current_section: ?*PhpArray = null;
 
     var pos: usize = 0;
@@ -61,11 +62,11 @@ fn parseIni(ctx: *NativeContext, input: []const u8, process_sections: bool, mode
                 if (process_sections) {
                     const section_name = line[1..end];
                     const section_arr = try ctx.createArray();
-                    try result.set(ctx.allocator, .{ .string = Value.String.borrowed(section_name) }, .{ .array = section_arr });
+                    try storeKey(ctx, result, section_name, .{ .array = section_arr });
                     current_section = section_arr;
                 }
             } else {
-                return .{ .bool = false };
+                return NativeResult.scalar(.{ .bool = false });
             }
             continue;
         }
@@ -75,26 +76,27 @@ fn parseIni(ctx: *NativeContext, input: []const u8, process_sections: bool, mode
             const raw_key = trimSpaces(line[0..eq_pos]);
             const raw_val = trimSpaces(if (eq_pos + 1 < line.len) line[eq_pos + 1 ..] else "");
 
-            const value = processValue(ctx, raw_val, mode);
+            const value = (try processValue(ctx, raw_val, mode)).value;
+            defer if (value == .string) value.string.release();
             const target = if (process_sections and current_section != null) current_section.? else result;
 
             if (isArrayKey(raw_key)) {
                 try setArrayKey(ctx, target, raw_key, value);
             } else {
-                try target.set(ctx.allocator, .{ .string = Value.String.borrowed(raw_key) }, value);
+                try storeKey(ctx, target, raw_key, value);
             }
         }
     }
 
-    return .{ .array = result };
+    return NativeResult.borrowed(.{ .array = result });
 }
 
-fn processValue(ctx: *NativeContext, raw: []const u8, mode: ScannerMode) Value {
-    if (raw.len == 0) return .{ .string = Value.String.borrowed("") };
+fn processValue(ctx: *NativeContext, raw: []const u8, mode: ScannerMode) RuntimeError!NativeResult {
+    if (raw.len == 0) return NativeResult.literal("");
 
     // strip quotes
     if (raw.len >= 2 and ((raw[0] == '"' and raw[raw.len - 1] == '"') or (raw[0] == '\'' and raw[raw.len - 1] == '\''))) {
-        return .{ .string = Value.String.borrowed(raw[1 .. raw.len - 1]) };
+        return NativeResult.copyString(ctx.allocator, raw[1 .. raw.len - 1]);
     }
 
     // strip inline comments (unquoted values only)
@@ -105,38 +107,38 @@ fn processValue(ctx: *NativeContext, raw: []const u8, mode: ScannerMode) Value {
         }
     }
 
-    if (mode == .raw) return .{ .string = Value.String.borrowed(val) };
+    if (mode == .raw) return NativeResult.copyString(ctx.allocator, val);
 
     // normal + typed modes: substitute bare PHP constants (PHP_INT_MAX,
     // user-defined via define(), etc.) - identifier-shaped values match
     // against vm.php_constants then vm.user_constants
     if (looksLikeIdentifier(val)) {
         if (ctx.vm.php_constants.get(val)) |cv| {
-            if (mode == .typed) return cv;
+            if (mode == .typed) return NativeResult.share(cv);
             // normal mode: coerce to string representation
             return constToString(ctx, cv);
         }
         if (ctx.vm.user_constants.contains(val)) {
             if (ctx.vm.php_constants.get(val)) |cv| {
-                if (mode == .typed) return cv;
+                if (mode == .typed) return NativeResult.share(cv);
                 return constToString(ctx, cv);
             }
         }
     }
 
     if (mode == .typed) {
-        if (isBoolTrue(val)) return .{ .bool = true };
-        if (isBoolFalse(val)) return .{ .bool = false };
-        if (isNull(val)) return .null;
-        if (parseInteger(val)) |i| return .{ .int = i };
-        if (parseFloat(val)) |f| return .{ .float = f };
-        return .{ .string = Value.String.borrowed(val) };
+        if (isBoolTrue(val)) return NativeResult.scalar(.{ .bool = true });
+        if (isBoolFalse(val)) return NativeResult.scalar(.{ .bool = false });
+        if (isNull(val)) return NativeResult.scalar(.null);
+        if (parseInteger(val)) |i| return NativeResult.scalar(.{ .int = i });
+        if (parseFloat(val)) |f| return NativeResult.scalar(.{ .float = f });
+        return NativeResult.copyString(ctx.allocator, val);
     }
 
     // normal mode: booleans become "1"/""
-    if (isBoolTrue(val)) return .{ .string = Value.String.borrowed("1") };
-    if (isBoolFalse(val)) return .{ .string = Value.String.borrowed("") };
-    return .{ .string = Value.String.borrowed(val) };
+    if (isBoolTrue(val)) return NativeResult.literal("1");
+    if (isBoolFalse(val)) return NativeResult.literal("");
+    return NativeResult.copyString(ctx.allocator, val);
 }
 
 fn looksLikeIdentifier(s: []const u8) bool {
@@ -150,22 +152,20 @@ fn looksLikeIdentifier(s: []const u8) bool {
     return true;
 }
 
-fn constToString(ctx: *NativeContext, v: Value) Value {
+fn constToString(ctx: *NativeContext, v: Value) RuntimeError!NativeResult {
     switch (v) {
-        .string => return v,
+        .string => return NativeResult.share(v),
         .int => |i| {
-            const s = std.fmt.allocPrint(ctx.allocator, "{d}", .{i}) catch return .{ .string = Value.String.borrowed("") };
-            ctx.strings.append(ctx.allocator, s) catch {};
-            return .{ .string = Value.String.borrowed(s) };
+            const s = try std.fmt.allocPrint(ctx.allocator, "{d}", .{i});
+            return NativeResult.takeString(try Value.String.adopt(ctx.allocator, s));
         },
         .float => |f| {
-            const s = std.fmt.allocPrint(ctx.allocator, "{d}", .{f}) catch return .{ .string = Value.String.borrowed("") };
-            ctx.strings.append(ctx.allocator, s) catch {};
-            return .{ .string = Value.String.borrowed(s) };
+            const s = try std.fmt.allocPrint(ctx.allocator, "{d}", .{f});
+            return NativeResult.takeString(try Value.String.adopt(ctx.allocator, s));
         },
-        .bool => |b| return .{ .string = Value.String.borrowed(if (b) "1" else "") },
-        .null => return .{ .string = Value.String.borrowed("") },
-        else => return .{ .string = Value.String.borrowed("") },
+        .bool => |b| return if (b) NativeResult.literal("1") else NativeResult.literal(""),
+        .null => return NativeResult.literal(""),
+        else => return NativeResult.literal(""),
     }
 }
 
@@ -216,13 +216,13 @@ fn setArrayKey(ctx: *NativeContext, target: *PhpArray, key: []const u8, value: V
         arr = existing.array;
     } else {
         arr = try ctx.createArray();
-        try target.set(ctx.allocator, .{ .string = Value.String.borrowed(base) }, .{ .array = arr });
+        try storeKey(ctx, target, base, .{ .array = arr });
     }
 
     if (inner.len == 0) {
         try arr.append(ctx.allocator, value);
     } else {
-        try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(inner) }, value);
+        try storeKey(ctx, arr, inner, value);
     }
 }
 
@@ -232,4 +232,10 @@ fn trimSpaces(s: []const u8) []const u8 {
     var end = s.len;
     while (end > start and (s[end - 1] == ' ' or s[end - 1] == '\t')) end -= 1;
     return s[start..end];
+}
+
+fn storeKey(ctx: *NativeContext, array: *PhpArray, bytes: []const u8, value: Value) RuntimeError!void {
+    const key = try Value.String.create(ctx.allocator, bytes);
+    defer key.release();
+    try ctx.vm.arraySetOwned(array, .{ .string = key }, value);
 }

@@ -1,3 +1,4 @@
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
@@ -170,46 +171,44 @@ pub const entries = .{
     .{ "token_name", native_token_name },
 };
 
-fn native_define(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string) return .{ .bool = false };
-    if (ctx.vm.php_constants.contains(args[0].string.bytes())) return .{ .bool = false };
+fn native_define(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    if (ctx.vm.php_constants.contains(args[0].string.bytes())) return NativeResult.scalar(.{ .bool = false });
     const name = try ctx.createString(args[0].string.bytes());
     try ctx.vm.user_constants.put(ctx.allocator, name, {});
     try ctx.vm.php_constants.put(ctx.allocator, name, args[1]);
     VM.retainValue(args[1]);
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_defined(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_defined(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const name = args[0].string.bytes();
-    if (ctx.vm.php_constants.contains(name)) return .{ .bool = true };
+    if (ctx.vm.php_constants.contains(name)) return NativeResult.scalar(.{ .bool = true });
     // PHP treats leading-backslash and no-leading-backslash equivalently
     // for fully qualified constant lookups: defined('\M\PI') == defined('M\PI')
     if (name.len > 0 and name[0] == '\\') {
-        if (ctx.vm.php_constants.contains(name[1..])) return .{ .bool = true };
+        if (ctx.vm.php_constants.contains(name[1..])) return NativeResult.scalar(.{ .bool = true });
     }
     if (std.mem.indexOf(u8, name, "::")) |sep| {
         const class_name = name[0..sep];
         const prop_name = name[sep + 2 ..];
-        if (ctx.vm.getStaticProp(class_name, prop_name) != null) return .{ .bool = true };
+        if (ctx.vm.getStaticProp(class_name, prop_name) != null) return NativeResult.scalar(.{ .bool = true });
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_constant(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .null;
+fn native_constant(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.null);
     const name = args[0].string.bytes();
     if (ctx.vm.php_constants.get(name)) |v| {
-        if (v == .string) v.string.retain();
-        return v;
+        return NativeResult.share(v);
     }
     if (std.mem.indexOf(u8, name, "::")) |sep| {
         const class_name = name[0..sep];
         const prop_name = name[sep + 2 ..];
         if (ctx.vm.getStaticProp(class_name, prop_name)) |v| {
-            if (v == .string) v.string.retain();
-            return v;
+            return NativeResult.share(v);
         }
     }
     const msg = try std.fmt.allocPrint(ctx.allocator, "Undefined constant \"{s}\"", .{name});
@@ -218,7 +217,7 @@ fn native_constant(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
     return error.RuntimeError;
 }
 
-fn native_get_defined_constants(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_get_defined_constants(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const categorize = args.len >= 1 and args[0].isTruthy();
     if (categorize) {
         const root = try ctx.createArray();
@@ -235,14 +234,14 @@ fn native_get_defined_constants(ctx: *NativeContext, args: []const Value) Runtim
         }
         try root.set(ctx.allocator, .{ .string = Value.String.borrowed("Core") }, .{ .array = internal });
         try root.set(ctx.allocator, .{ .string = Value.String.borrowed("user") }, .{ .array = user });
-        return .{ .array = root };
+        return NativeResult.borrowed(.{ .array = root });
     }
     const flat = try ctx.createArray();
     var it = ctx.vm.php_constants.iterator();
     while (it.next()) |entry| {
         try flat.set(ctx.allocator, .{ .string = Value.String.borrowed(entry.key_ptr.*) }, entry.value_ptr.*);
     }
-    return .{ .array = flat };
+    return NativeResult.borrowed(.{ .array = flat });
 }
 
 fn countRecursive(a: *const PhpArray) i64 {
@@ -255,14 +254,14 @@ fn countRecursive(a: *const PhpArray) i64 {
     return total;
 }
 
-fn count(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .int = 0 };
+fn count(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .int = 0 });
     const recursive = args.len >= 2 and args[1] == .int and args[1].int == 1;
     return switch (args[0]) {
-        .array => |a| .{ .int = if (recursive) countRecursive(a) else a.length() },
+        .array => |a| NativeResult.scalar(.{ .int = if (recursive) countRecursive(a) else a.length() }),
         .object => |obj| {
             if (ctx.vm.hasMethod(obj.class_name, "count")) {
-                return ctx.vm.callMethod(obj, "count", &.{}) catch .{ .int = 1 };
+                return NativeResult.share(ctx.vm.callMethod(obj, "count", &.{}) catch .{ .int = 1 });
             }
             const msg = try std.fmt.allocPrint(ctx.allocator, "count(): Argument #1 ($value) must be of type Countable|array, {s} given", .{phpTypeName(args[0])});
             try ctx.vm.strings.append(ctx.allocator, msg);
@@ -295,8 +294,8 @@ pub fn phpTypeName(v: Value) []const u8 {
     };
 }
 
-fn intval(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .int = 0 };
+fn intval(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .int = 0 });
     if (args.len >= 2 and args[1] == .int and args[1].int != 10 and args[0] == .string) {
         var base: u8 = @intCast(@max(0, @min(36, args[1].int)));
         var s = std.mem.trim(u8, args[0].string.bytes(), " \t\n\r");
@@ -332,101 +331,101 @@ fn intval(_: *NativeContext, args: []const Value) RuntimeError!Value {
             if (digit >= base) break;
         }
         const v = if (end == 0) @as(i64, 0) else (std.fmt.parseInt(i64, s[0..end], base) catch 0);
-        return .{ .int = if (negative) -v else v };
+        return NativeResult.scalar(.{ .int = if (negative) -v else v });
     }
     // PHP: intval(array) is 0 for empty array, 1 for non-empty
     if (args[0] == .array) {
-        return .{ .int = if (args[0].array.entries.items.len == 0) @as(i64, 0) else @as(i64, 1) };
+        return NativeResult.scalar(.{ .int = if (args[0].array.entries.items.len == 0) @as(i64, 0) else @as(i64, 1) });
     }
-    return .{ .int = Value.toInt(args[0]) };
+    return NativeResult.scalar(.{ .int = Value.toInt(args[0]) });
 }
 
-fn floatval(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .float = 0.0 };
-    return .{ .float = Value.toFloat(args[0]) };
+fn floatval(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .float = 0.0 });
+    return NativeResult.scalar(.{ .float = Value.toFloat(args[0]) });
 }
 
-fn strval(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .string = Value.String.borrowed("") };
-    if (args[0] == .string) return args[0];
+fn strval(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.literal("");
+    if (args[0] == .string) return NativeResult.share(args[0]);
     // PHP's strval on an object dispatches through __toString. Without this,
     // we'd print "Object" instead of the user-defined string form
     if (args[0] == .object) {
         const obj = args[0].object;
         if (ctx.vm.hasMethod(obj.class_name, "__toString")) {
             const r = try ctx.vm.callMethod(obj, "__toString", &.{});
-            if (r == .string) return r;
+            if (r == .string) return NativeResult.share(r);
         }
     }
     var buf = std.ArrayListUnmanaged(u8){};
+    defer buf.deinit(ctx.allocator);
     try args[0].format(&buf, ctx.allocator);
     const s = try buf.toOwnedSlice(ctx.allocator);
-    try ctx.strings.append(ctx.allocator, s);
-    return .{ .string = Value.String.borrowed(s) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, s));
 }
 
-fn gettype(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .string = Value.String.borrowed("NULL") };
-    return .{ .string = Value.String.borrowed(switch (args[0]) {
-        .null => "NULL",
-        .bool => "boolean",
-        .int => "integer",
-        .float => "double",
-        .string => |s| if (std.mem.startsWith(u8, s.bytes(), "__closure_")) "object" else "string",
-        .array => "array",
-        .object => |o| if (std.mem.eql(u8, o.class_name, "FileHandle")) "resource" else "object",
-        .generator, .fiber => "object",
-    }) };
+fn gettype(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.literal("NULL");
+    return switch (args[0]) {
+        .null => NativeResult.literal("NULL"),
+        .bool => NativeResult.literal("boolean"),
+        .int => NativeResult.literal("integer"),
+        .float => NativeResult.literal("double"),
+        .string => |s| if (std.mem.startsWith(u8, s.bytes(), "__closure_")) NativeResult.literal("object") else NativeResult.literal("string"),
+        .array => NativeResult.literal("array"),
+        .object => |o| if (std.mem.eql(u8, o.class_name, "FileHandle")) NativeResult.literal("resource") else NativeResult.literal("object"),
+        .generator, .fiber => NativeResult.literal("object"),
+    };
 }
 
-fn get_debug_type(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .string = Value.String.borrowed("null") };
-    return .{ .string = Value.String.borrowed(switch (args[0]) {
-        .null => "null",
-        .bool => "bool",
-        .int => "int",
-        .float => "float",
-        .string => |s| if (std.mem.startsWith(u8, s.bytes(), "__closure_")) "Closure" else "string",
-        .array => "array",
-        .object => |o| if (std.mem.eql(u8, o.class_name, "FileHandle")) "resource (stream)" else o.class_name,
-        .generator => "Generator",
-        .fiber => "Fiber",
-    }) };
+fn get_debug_type(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.literal("null");
+    return switch (args[0]) {
+        .null => NativeResult.literal("null"),
+        .bool => NativeResult.literal("bool"),
+        .int => NativeResult.literal("int"),
+        .float => NativeResult.literal("float"),
+        .string => |s| if (std.mem.startsWith(u8, s.bytes(), "__closure_")) NativeResult.literal("Closure") else NativeResult.literal("string"),
+        .array => NativeResult.literal("array"),
+        .object => |o| if (std.mem.eql(u8, o.class_name, "FileHandle")) NativeResult.literal("resource (stream)") else try NativeResult.copyString(ctx.allocator, o.class_name),
+        .generator => NativeResult.literal("Generator"),
+        .fiber => NativeResult.literal("Fiber"),
+    };
 }
 
-fn is_array(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return .{ .bool = args.len > 0 and args[0] == .array };
+fn is_array(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = args.len > 0 and args[0] == .array });
 }
 
-fn is_null(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return .{ .bool = args.len == 0 or args[0] == .null };
+fn is_null(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = args.len == 0 or args[0] == .null });
 }
 
-fn is_int(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return .{ .bool = args.len > 0 and args[0] == .int };
+fn is_int(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = args.len > 0 and args[0] == .int });
 }
 
-fn is_float(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return .{ .bool = args.len > 0 and args[0] == .float };
+fn is_float(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = args.len > 0 and args[0] == .float });
 }
 
-fn is_string(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
-    if (args[0] != .string) return .{ .bool = false };
-    return .{ .bool = !std.mem.startsWith(u8, args[0].string.bytes(), "__closure_") };
+fn is_string(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
+    if (args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = !std.mem.startsWith(u8, args[0].string.bytes(), "__closure_") });
 }
 
-fn is_bool(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return .{ .bool = args.len > 0 and args[0] == .bool };
+fn is_bool(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = args.len > 0 and args[0] == .bool });
 }
 
-fn is_numeric(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
-    return .{ .bool = switch (args[0]) {
+fn is_numeric(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = switch (args[0]) {
         .int, .float => true,
         .string => |s| isNumericString(s.bytes()),
         else => false,
-    } };
+    } });
 }
 
 // PHP's is_numeric: optional sign, digits, optional fractional/exponent.
@@ -462,18 +461,18 @@ fn isNumericString(input: []const u8) bool {
     return i == s.len;
 }
 
-fn native_isset(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
-    return .{ .bool = args[0] != .null };
+fn native_isset(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = args[0] != .null });
 }
 
-fn native_empty(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = true };
-    return .{ .bool = !args[0].isTruthy() };
+fn native_empty(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = true });
+    return NativeResult.scalar(.{ .bool = !args[0].isTruthy() });
 }
 
-fn strlen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .int = 0 };
+fn strlen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .int = 0 });
     return switch (args[0]) {
         .string => |s| blk: {
             // closures live as '__closure_<id>' strings in zphp; treat them
@@ -484,24 +483,24 @@ fn strlen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
                 try ctx.vm.setPendingException("TypeError", msg);
                 break :blk error.RuntimeError;
             }
-            break :blk .{ .int = @intCast(s.bytes().len) };
+            break :blk NativeResult.scalar(.{ .int = @intCast(s.bytes().len) });
         },
         .int => |i| blk: {
             var buf: [32]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch break :blk .{ .int = 0 };
-            break :blk .{ .int = @intCast(s.len) };
+            const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch break :blk NativeResult.scalar(.{ .int = 0 });
+            break :blk NativeResult.scalar(.{ .int = @intCast(s.len) });
         },
         .float => |f| blk: {
             var buf: [64]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "{d}", .{f}) catch break :blk .{ .int = 0 };
-            break :blk .{ .int = @intCast(s.len) };
+            const s = std.fmt.bufPrint(&buf, "{d}", .{f}) catch break :blk NativeResult.scalar(.{ .int = 0 });
+            break :blk NativeResult.scalar(.{ .int = @intCast(s.len) });
         },
-        .bool => |b| .{ .int = if (b) 1 else 0 },
-        .null => .{ .int = 0 },
+        .bool => |b| NativeResult.scalar(.{ .int = if (b) 1 else 0 }),
+        .null => NativeResult.scalar(.{ .int = 0 }),
         .object => |obj| blk: {
             if (ctx.vm.hasMethod(obj.class_name, "__toString")) {
                 const result = try ctx.vm.callMethod(obj, "__toString", &.{});
-                if (result == .string) break :blk .{ .int = @intCast(result.string.bytes().len) };
+                if (result == .string) break :blk NativeResult.scalar(.{ .int = @intCast(result.string.bytes().len) });
             }
             // object without __toString: PHP throws TypeError with the class name
             const msg = try std.fmt.allocPrint(ctx.allocator, "strlen(): Argument #1 ($string) must be of type string, {s} given", .{phpTypeName(args[0])});
@@ -513,27 +512,27 @@ fn strlen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             try ctx.vm.setPendingException("TypeError", "strlen(): Argument #1 ($string) must be of type string, array given");
             break :blk error.RuntimeError;
         },
-        else => .{ .int = 0 },
+        else => NativeResult.scalar(.{ .int = 0 }),
     };
 }
 
-fn boolval(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
-    return .{ .bool = args[0].isTruthy() };
+fn boolval(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = args[0].isTruthy() });
 }
 
-fn is_object(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
-    if (args[0] == .object) return .{ .bool = true };
-    if (args[0] == .generator) return .{ .bool = true };
-    if (args[0] == .fiber) return .{ .bool = true };
-    if (args[0] == .string and std.mem.startsWith(u8, args[0].string.bytes(), "__closure_")) return .{ .bool = true };
-    return .{ .bool = false };
+fn is_object(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
+    if (args[0] == .object) return NativeResult.scalar(.{ .bool = true });
+    if (args[0] == .generator) return NativeResult.scalar(.{ .bool = true });
+    if (args[0] == .fiber) return NativeResult.scalar(.{ .bool = true });
+    if (args[0] == .string and std.mem.startsWith(u8, args[0].string.bytes(), "__closure_")) return NativeResult.scalar(.{ .bool = true });
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn is_scalar(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
-    return .{
+fn is_scalar(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{
         .bool = switch (args[0]) {
             .int, .float, .bool => true,
             // closures are stored as a Value.string with a "__closure_" prefix;
@@ -541,32 +540,32 @@ fn is_scalar(_: *NativeContext, args: []const Value) RuntimeError!Value {
             .string => |s| !std.mem.startsWith(u8, s.bytes(), "__closure_"),
             else => false,
         },
-    };
+    });
 }
 
-fn is_iterable(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
-    if (args[0] == .array or args[0] == .generator) return .{ .bool = true };
+fn is_iterable(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
+    if (args[0] == .array or args[0] == .generator) return NativeResult.scalar(.{ .bool = true });
     if (args[0] == .object) {
         const cn = args[0].object.class_name;
-        if (ctx.vm.isInstanceOf(cn, "Traversable")) return .{ .bool = true };
-        if (ctx.vm.isInstanceOf(cn, "Iterator")) return .{ .bool = true };
-        if (ctx.vm.isInstanceOf(cn, "IteratorAggregate")) return .{ .bool = true };
-        if (ctx.vm.hasMethod(cn, "getIterator")) return .{ .bool = true };
-        if (ctx.vm.hasMethod(cn, "current") and ctx.vm.hasMethod(cn, "next")) return .{ .bool = true };
+        if (ctx.vm.isInstanceOf(cn, "Traversable")) return NativeResult.scalar(.{ .bool = true });
+        if (ctx.vm.isInstanceOf(cn, "Iterator")) return NativeResult.scalar(.{ .bool = true });
+        if (ctx.vm.isInstanceOf(cn, "IteratorAggregate")) return NativeResult.scalar(.{ .bool = true });
+        if (ctx.vm.hasMethod(cn, "getIterator")) return NativeResult.scalar(.{ .bool = true });
+        if (ctx.vm.hasMethod(cn, "current") and ctx.vm.hasMethod(cn, "next")) return NativeResult.scalar(.{ .bool = true });
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn is_countable(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
-    if (args[0] == .array) return .{ .bool = true };
+fn is_countable(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
+    if (args[0] == .array) return NativeResult.scalar(.{ .bool = true });
     if (args[0] == .object) {
         const cn = args[0].object.class_name;
-        if (ctx.vm.isInstanceOf(cn, "Countable")) return .{ .bool = true };
-        if (ctx.vm.hasMethod(cn, "count")) return .{ .bool = true };
+        if (ctx.vm.isInstanceOf(cn, "Countable")) return NativeResult.scalar(.{ .bool = true });
+        if (ctx.vm.hasMethod(cn, "count")) return NativeResult.scalar(.{ .bool = true });
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
 fn ctypeCheck(args: []const Value, comptime pred: fn (u8) bool) Value {
@@ -593,38 +592,38 @@ fn ctypeCheck(args: []const Value, comptime pred: fn (u8) bool) Value {
     return .{ .bool = true };
 }
 
-fn ctype_alpha(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return ctypeCheck(args, std.ascii.isAlphabetic);
+fn ctype_alpha(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(ctypeCheck(args, std.ascii.isAlphabetic));
 }
-fn ctype_digit(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return ctypeCheck(args, std.ascii.isDigit);
+fn ctype_digit(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(ctypeCheck(args, std.ascii.isDigit));
 }
-fn ctype_alnum(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return ctypeCheck(args, std.ascii.isAlphanumeric);
+fn ctype_alnum(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(ctypeCheck(args, std.ascii.isAlphanumeric));
 }
-fn ctype_space(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return ctypeCheck(args, std.ascii.isWhitespace);
+fn ctype_space(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(ctypeCheck(args, std.ascii.isWhitespace));
 }
-fn ctype_upper(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return ctypeCheck(args, std.ascii.isUpper);
+fn ctype_upper(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(ctypeCheck(args, std.ascii.isUpper));
 }
-fn ctype_lower(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return ctypeCheck(args, std.ascii.isLower);
+fn ctype_lower(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(ctypeCheck(args, std.ascii.isLower));
 }
-fn ctype_xdigit(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return ctypeCheck(args, std.ascii.isHex);
+fn ctype_xdigit(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(ctypeCheck(args, std.ascii.isHex));
 }
-fn ctype_print(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return ctypeCheck(args, std.ascii.isPrint);
+fn ctype_print(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(ctypeCheck(args, std.ascii.isPrint));
 }
-fn ctype_punct(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return ctypeCheck(args, isPunct);
+fn ctype_punct(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(ctypeCheck(args, isPunct));
 }
-fn ctype_cntrl(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return ctypeCheck(args, std.ascii.isControl);
+fn ctype_cntrl(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(ctypeCheck(args, std.ascii.isControl));
 }
-fn ctype_graph(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    return ctypeCheck(args, isGraph);
+fn ctype_graph(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(ctypeCheck(args, isGraph));
 }
 
 // PHP's setlocale wraps libc setlocale. zphp doesn't actually flip the process
@@ -643,10 +642,10 @@ fn ensureLocaleInit() void {
     current_locale_initialized = true;
 }
 
-fn native_setlocale(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_setlocale(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     ensureLocaleInit();
     // PHP: setlocale($category, ...$locales). first arg is category (int)
-    if (args.len < 1) return .{ .string = Value.String.borrowed(try dupString(ctx, current_locale[0..current_locale_len])) };
+    if (args.len < 1) return NativeResult.copyString(ctx.allocator, current_locale[0..current_locale_len]);
 
     // collect candidate locale strings from args 1..n. each may be a string or an
     // array (variadic / array form). first one that "works" wins; "0" queries
@@ -655,7 +654,7 @@ fn native_setlocale(ctx: *NativeContext, args: []const Value) RuntimeError!Value
         switch (args[i]) {
             .string => |s| {
                 if (std.mem.eql(u8, s.bytes(), "0")) {
-                    return .{ .string = Value.String.borrowed(try dupString(ctx, current_locale[0..current_locale_len])) };
+                    return NativeResult.copyString(ctx.allocator, current_locale[0..current_locale_len]);
                 }
                 // accept the string verbatim. empty string maps to "C"
                 const new = if (s.bytes().len == 0) "C" else s.bytes();
@@ -663,7 +662,7 @@ fn native_setlocale(ctx: *NativeContext, args: []const Value) RuntimeError!Value
                     @memcpy(current_locale[0..new.len], new);
                     current_locale_len = new.len;
                 }
-                return .{ .string = Value.String.borrowed(try dupString(ctx, new)) };
+                return NativeResult.copyString(ctx.allocator, new);
             },
             .array => |arr| {
                 for (arr.entries.items) |e| {
@@ -674,45 +673,45 @@ fn native_setlocale(ctx: *NativeContext, args: []const Value) RuntimeError!Value
                         @memcpy(current_locale[0..s.len], s);
                         current_locale_len = s.len;
                     }
-                    return .{ .string = Value.String.borrowed(try dupString(ctx, s)) };
+                    return NativeResult.copyString(ctx.allocator, s);
                 }
             },
             else => continue,
         }
     }
     // no acceptable locale provided
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
 // minimal localeconv: returns a default "C" locale info array. real apps use
 // this for currency formatting fallbacks; the intl extension is the real path
-fn native_localeconv(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_localeconv(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
-    const empty = try dupString(ctx, "");
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(try dupString(ctx, "decimal_point")) }, .{ .string = Value.String.borrowed(try dupString(ctx, ".")) });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(try dupString(ctx, "thousands_sep")) }, .{ .string = Value.String.borrowed(empty) });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(try dupString(ctx, "int_curr_symbol")) }, .{ .string = Value.String.borrowed(empty) });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(try dupString(ctx, "currency_symbol")) }, .{ .string = Value.String.borrowed(empty) });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(try dupString(ctx, "mon_decimal_point")) }, .{ .string = Value.String.borrowed(empty) });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(try dupString(ctx, "mon_thousands_sep")) }, .{ .string = Value.String.borrowed(empty) });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(try dupString(ctx, "positive_sign")) }, .{ .string = Value.String.borrowed(empty) });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(try dupString(ctx, "negative_sign")) }, .{ .string = Value.String.borrowed(empty) });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(try dupString(ctx, "int_frac_digits")) }, .{ .int = 127 });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(try dupString(ctx, "frac_digits")) }, .{ .int = 127 });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(try dupString(ctx, "p_cs_precedes")) }, .{ .int = 127 });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(try dupString(ctx, "p_sep_by_space")) }, .{ .int = 127 });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(try dupString(ctx, "n_cs_precedes")) }, .{ .int = 127 });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(try dupString(ctx, "n_sep_by_space")) }, .{ .int = 127 });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(try dupString(ctx, "p_sign_posn")) }, .{ .int = 127 });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(try dupString(ctx, "n_sign_posn")) }, .{ .int = 127 });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(try dupString(ctx, "grouping")) }, .{ .array = try ctx.createArray() });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(try dupString(ctx, "mon_grouping")) }, .{ .array = try ctx.createArray() });
-    return .{ .array = arr };
+    const empty = "";
+    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("decimal_point") }, .{ .string = Value.String.borrowed(".") });
+    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("thousands_sep") }, .{ .string = Value.String.borrowed(empty) });
+    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("int_curr_symbol") }, .{ .string = Value.String.borrowed(empty) });
+    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("currency_symbol") }, .{ .string = Value.String.borrowed(empty) });
+    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("mon_decimal_point") }, .{ .string = Value.String.borrowed(empty) });
+    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("mon_thousands_sep") }, .{ .string = Value.String.borrowed(empty) });
+    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("positive_sign") }, .{ .string = Value.String.borrowed(empty) });
+    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("negative_sign") }, .{ .string = Value.String.borrowed(empty) });
+    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("int_frac_digits") }, .{ .int = 127 });
+    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("frac_digits") }, .{ .int = 127 });
+    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("p_cs_precedes") }, .{ .int = 127 });
+    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("p_sep_by_space") }, .{ .int = 127 });
+    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("n_cs_precedes") }, .{ .int = 127 });
+    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("n_sep_by_space") }, .{ .int = 127 });
+    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("p_sign_posn") }, .{ .int = 127 });
+    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("n_sign_posn") }, .{ .int = 127 });
+    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("grouping") }, .{ .array = try ctx.createArray() });
+    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("mon_grouping") }, .{ .array = try ctx.createArray() });
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn native_nl_langinfo(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_nl_langinfo(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     _ = args;
-    return .{ .string = Value.String.borrowed(try dupString(ctx, "")) };
+    return NativeResult.literal("");
 }
 
 fn dupString(ctx: *NativeContext, s: []const u8) ![]const u8 {
@@ -728,53 +727,53 @@ fn isGraph(c: u8) bool {
     return std.ascii.isPrint(c) and c != ' ';
 }
 
-fn get_class(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn get_class(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) {
-        const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return Value{ .bool = false };
-        if (this_val != .object) return .{ .bool = false };
-        return .{ .string = Value.String.borrowed(this_val.object.class_name) };
+        const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.scalar(Value{ .bool = false });
+        if (this_val != .object) return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.copyString(ctx.allocator, this_val.object.class_name);
     }
-    if (args[0] == .object) return .{ .string = Value.String.borrowed(args[0].object.class_name) };
-    if (args[0] == .generator) return .{ .string = Value.String.borrowed("Generator") };
-    if (args[0] == .fiber) return .{ .string = Value.String.borrowed("Fiber") };
-    if (args[0] == .string and std.mem.startsWith(u8, args[0].string.bytes(), "__closure_")) return .{ .string = Value.String.borrowed("Closure") };
-    return .{ .bool = false };
+    if (args[0] == .object) return NativeResult.copyString(ctx.allocator, args[0].object.class_name);
+    if (args[0] == .generator) return NativeResult.literal("Generator");
+    if (args[0] == .fiber) return NativeResult.literal("Fiber");
+    if (args[0] == .string and std.mem.startsWith(u8, args[0].string.bytes(), "__closure_")) return NativeResult.literal("Closure");
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn get_called_class(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn get_called_class(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     var i = ctx.vm.frame_count;
     while (i > 0) {
         i -= 1;
-        if (ctx.vm.frames[i].called_class) |cc| return .{ .string = Value.String.borrowed(cc) };
+        if (ctx.vm.frames[i].called_class) |cc| return NativeResult.copyString(ctx.allocator, cc);
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_get_declared_classes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_get_declared_classes(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
     var it = ctx.vm.classes.iterator();
     while (it.next()) |e| {
         try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(e.key_ptr.*) });
     }
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn native_get_declared_interfaces(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_get_declared_interfaces(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
     var it = ctx.vm.interfaces.iterator();
     while (it.next()) |e| {
         try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(e.key_ptr.*) });
     }
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn native_get_declared_traits(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_get_declared_traits(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
     var it = ctx.vm.traits.iterator();
     while (it.next()) |e| {
         try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(e.key_ptr.*) });
     }
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
 fn classExistsCaseInsensitive(ctx: *NativeContext, name: []const u8) bool {
@@ -786,32 +785,32 @@ fn classExistsCaseInsensitive(ctx: *NativeContext, name: []const u8) bool {
     return false;
 }
 
-fn class_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn class_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const raw = args[0].string.bytes();
     const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
-    if (std.ascii.eqlIgnoreCase(name, "stdClass") or std.ascii.eqlIgnoreCase(name, "Attribute")) return .{ .bool = true };
-    if (std.ascii.eqlIgnoreCase(name, "Closure") or std.ascii.eqlIgnoreCase(name, "Generator") or std.ascii.eqlIgnoreCase(name, "Fiber")) return .{ .bool = true };
-    if (ctx.vm.interfaces.contains(name)) return .{ .bool = false };
-    if (ctx.vm.traits.contains(name)) return .{ .bool = false };
-    if (classExistsCaseInsensitive(ctx, name)) return .{ .bool = true };
+    if (std.ascii.eqlIgnoreCase(name, "stdClass") or std.ascii.eqlIgnoreCase(name, "Attribute")) return NativeResult.scalar(.{ .bool = true });
+    if (std.ascii.eqlIgnoreCase(name, "Closure") or std.ascii.eqlIgnoreCase(name, "Generator") or std.ascii.eqlIgnoreCase(name, "Fiber")) return NativeResult.scalar(.{ .bool = true });
+    if (ctx.vm.interfaces.contains(name)) return NativeResult.scalar(.{ .bool = false });
+    if (ctx.vm.traits.contains(name)) return NativeResult.scalar(.{ .bool = false });
+    if (classExistsCaseInsensitive(ctx, name)) return NativeResult.scalar(.{ .bool = true });
     const autoload = args.len < 2 or !(args[1] == .bool and !args[1].bool);
     if (autoload and ctx.vm.autoload_callbacks.items.len > 0) {
         try ctx.vm.tryAutoload(name);
-        return .{ .bool = classExistsCaseInsensitive(ctx, name) and !ctx.vm.interfaces.contains(name) };
+        return NativeResult.scalar(.{ .bool = classExistsCaseInsensitive(ctx, name) and !ctx.vm.interfaces.contains(name) });
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn method_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[1] != .string) return .{ .bool = false };
+fn method_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     // closures (stored as unique name strings) report themselves as the
     // 'Closure' class. they always have __invoke + the public Closure API
     if (args[0] == .string and std.mem.startsWith(u8, args[0].string.bytes(), "__closure_")) {
         const m = args[1].string.bytes();
         const closure_methods = [_][]const u8{ "__invoke", "bindTo", "bind", "call", "fromCallable", "getClosureScopeClass", "getClosureThis", "getClosureCalledClass", "getClosureUsedVariables" };
-        for (closure_methods) |cm| if (std.ascii.eqlIgnoreCase(cm, m)) return .{ .bool = true };
-        return .{ .bool = false };
+        for (closure_methods) |cm| if (std.ascii.eqlIgnoreCase(cm, m)) return NativeResult.scalar(.{ .bool = true });
+        return NativeResult.scalar(.{ .bool = false });
     }
     var current: ?[]const u8 = if (args[0] == .object)
         args[0].object.class_name
@@ -830,13 +829,13 @@ fn method_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     // method tables so method_exists works on tagged values and "Generator"/"Fiber" strings.
     if (std.mem.eql(u8, current.?, "Generator")) {
         const gen_methods = [_][]const u8{ "current", "key", "next", "rewind", "send", "throw", "getReturn", "valid" };
-        for (gen_methods) |m| if (std.ascii.eqlIgnoreCase(m, method_name)) return .{ .bool = true };
-        return .{ .bool = false };
+        for (gen_methods) |m| if (std.ascii.eqlIgnoreCase(m, method_name)) return NativeResult.scalar(.{ .bool = true });
+        return NativeResult.scalar(.{ .bool = false });
     }
     if (std.mem.eql(u8, current.?, "Fiber")) {
         const fiber_methods = [_][]const u8{ "start", "resume", "throw", "getReturn", "isStarted", "isSuspended", "isRunning", "isTerminated", "suspend", "getCurrent" };
-        for (fiber_methods) |m| if (std.ascii.eqlIgnoreCase(m, method_name)) return .{ .bool = true };
-        return .{ .bool = false };
+        for (fiber_methods) |m| if (std.ascii.eqlIgnoreCase(m, method_name)) return NativeResult.scalar(.{ .bool = true });
+        return NativeResult.scalar(.{ .bool = false });
     }
     var buf: [256]u8 = undefined;
     var depth: usize = 0;
@@ -857,10 +856,10 @@ fn method_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         if (depth > 0 and private_at_this_class) {
             // skip this class's match; continue up
         } else {
-            const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ cn, canonical_method }) catch return Value{ .bool = false };
-            if (ctx.vm.native_fns.contains(full)) return .{ .bool = true };
-            if (ctx.vm.functions.contains(full)) return .{ .bool = true };
-            if (!std.mem.eql(u8, canonical_method, method_name)) return .{ .bool = true };
+            const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ cn, canonical_method }) catch return NativeResult.scalar(Value{ .bool = false });
+            if (ctx.vm.native_fns.contains(full)) return NativeResult.scalar(.{ .bool = true });
+            if (ctx.vm.functions.contains(full)) return NativeResult.scalar(.{ .bool = true });
+            if (!std.mem.eql(u8, canonical_method, method_name)) return NativeResult.scalar(.{ .bool = true });
         }
         if (ctx.vm.classes.get(cn)) |cls| {
             current = cls.parent;
@@ -872,28 +871,28 @@ fn method_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         }
         depth += 1;
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn property_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[1] != .string) return .{ .bool = false };
+fn property_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     const prop_name = args[1].string.bytes();
     if (args[0] == .object) {
         const obj = args[0].object;
-        if (obj.getSlotIndex(prop_name) != null) return .{ .bool = true };
-        if (obj.properties.contains(prop_name)) return .{ .bool = true };
+        if (obj.getSlotIndex(prop_name) != null) return NativeResult.scalar(.{ .bool = true });
+        if (obj.properties.contains(prop_name)) return NativeResult.scalar(.{ .bool = true });
         // a static property (or a declared instance property not yet
         // materialized) of the object's class or an ancestor also counts
         var current: ?[]const u8 = obj.class_name;
         while (current) |name| {
             const cls = ctx.vm.classes.get(name) orelse break;
-            if (cls.static_props.contains(prop_name)) return .{ .bool = true };
+            if (cls.static_props.contains(prop_name)) return NativeResult.scalar(.{ .bool = true });
             for (cls.properties.items) |p| {
-                if (std.mem.eql(u8, p.name, prop_name)) return .{ .bool = true };
+                if (std.mem.eql(u8, p.name, prop_name)) return NativeResult.scalar(.{ .bool = true });
             }
             current = cls.parent;
         }
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     }
     if (args[0] == .string) {
         const raw = args[0].string.bytes();
@@ -905,23 +904,23 @@ fn property_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
             for (cls.properties.items) |p| {
                 if (std.mem.eql(u8, p.name, prop_name)) {
                     if (!is_own and p.visibility == .private) break;
-                    return .{ .bool = true };
+                    return NativeResult.scalar(.{ .bool = true });
                 }
             }
             if (cls.static_props.get(prop_name)) |_| {
                 const vis = cls.const_visibility.get(prop_name) orelse @as(ClassDef.Visibility, .public);
-                if (is_own or vis != .private) return .{ .bool = true };
+                if (is_own or vis != .private) return NativeResult.scalar(.{ .bool = true });
             }
             current = cls.parent;
             is_own = false;
         }
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_is_callable(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
+fn native_is_callable(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     const val = args[0];
     // PHP's 3rd by-ref param receives the resolved callable name on success
     // (or its string form). populated regardless of return value so caller
@@ -938,36 +937,36 @@ fn native_is_callable(ctx: *NativeContext, args: []const Value) RuntimeError!Val
         const raw = val.string.bytes();
         const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
         fillName(ctx, args, name);
-        if (ctx.vm.native_fns.contains(name)) return .{ .bool = true };
-        if (ctx.vm.functions.contains(name)) return .{ .bool = true };
+        if (ctx.vm.native_fns.contains(name)) return NativeResult.scalar(.{ .bool = true });
+        if (ctx.vm.functions.contains(name)) return NativeResult.scalar(.{ .bool = true });
         // Class::method string form
         if (std.mem.indexOf(u8, name, "::")) |sep| {
             const class_part = name[0..sep];
             const method_part = name[sep + 2 ..];
-            if (ctx.vm.hasMethod(class_part, method_part)) return .{ .bool = true };
+            if (ctx.vm.hasMethod(class_part, method_part)) return NativeResult.scalar(.{ .bool = true });
         }
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     }
     if (val == .object) {
-        if (std.mem.eql(u8, val.object.class_name, "Closure")) return .{ .bool = true };
+        if (std.mem.eql(u8, val.object.class_name, "Closure")) return NativeResult.scalar(.{ .bool = true });
         var buf: [256]u8 = undefined;
         const full = std.fmt.bufPrint(&buf, "{s}::__invoke", .{val.object.class_name}) catch "";
         fillName(ctx, args, full);
-        return .{ .bool = ctx.vm.hasMethod(val.object.class_name, "__invoke") };
+        return NativeResult.scalar(.{ .bool = ctx.vm.hasMethod(val.object.class_name, "__invoke") });
     }
     if (val == .array) {
         const arr = val.array;
-        if (arr.entries.items.len != 2) return .{ .bool = false };
+        if (arr.entries.items.len != 2) return NativeResult.scalar(.{ .bool = false });
         const target = arr.entries.items[0].value;
         const method_val = arr.entries.items[1].value;
-        if (method_val != .string) return .{ .bool = false };
+        if (method_val != .string) return NativeResult.scalar(.{ .bool = false });
         const method = method_val.string.bytes();
         const raw_class = if (target == .object)
             target.object.class_name
         else if (target == .string)
             target.string.bytes()
         else
-            return .{ .bool = false };
+            return NativeResult.scalar(.{ .bool = false });
         const class_name = if (raw_class.len > 0 and raw_class[0] == '\\') raw_class[1..] else raw_class;
         {
             var name_buf: [256]u8 = undefined;
@@ -976,44 +975,45 @@ fn native_is_callable(ctx: *NativeContext, args: []const Value) RuntimeError!Val
         }
         if (ctx.vm.classes.get(class_name)) |cdef| {
             if (cdef.methods.get(method)) |mi| {
-                if (mi.visibility != .public) return .{ .bool = false };
+                if (mi.visibility != .public) return NativeResult.scalar(.{ .bool = false });
                 // [ClassName, 'method'] is only callable when method is static.
                 // instance methods need an actual object on the left
-                if (target == .string and !mi.is_static) return .{ .bool = false };
+                if (target == .string and !mi.is_static) return NativeResult.scalar(.{ .bool = false });
             }
         }
         var buf: [256]u8 = undefined;
-        const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ class_name, method }) catch return .{ .bool = false };
-        if (ctx.vm.native_fns.contains(full)) return .{ .bool = true };
-        if (ctx.vm.functions.contains(full)) return .{ .bool = true };
-        return .{ .bool = false };
+        const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ class_name, method }) catch return NativeResult.scalar(.{ .bool = false });
+        if (ctx.vm.native_fns.contains(full)) return NativeResult.scalar(.{ .bool = true });
+        if (ctx.vm.functions.contains(full)) return NativeResult.scalar(.{ .bool = true });
+        return NativeResult.scalar(.{ .bool = false });
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_settype(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[1] != .string) return args[0];
+fn native_settype(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.null);
+    if (args.len < 2 or args[1] != .string) return NativeResult.share(args[0]);
     const type_name = args[1].string.bytes();
     const val = args[0];
     if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "integer"))
-        return .{ .int = Value.toInt(val) };
+        return NativeResult.scalar(.{ .int = Value.toInt(val) });
     if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "double"))
-        return .{ .float = Value.toFloat(val) };
+        return NativeResult.scalar(.{ .float = Value.toFloat(val) });
     if (std.mem.eql(u8, type_name, "string")) {
-        if (val == .string) return val;
+        if (val == .string) return NativeResult.share(val);
         if (val == .array) ctx.vm.emitWarning("Array to string conversion");
         var buf = std.ArrayListUnmanaged(u8){};
+        defer buf.deinit(ctx.allocator);
         try val.format(&buf, ctx.allocator);
         const s = try buf.toOwnedSlice(ctx.allocator);
-        try ctx.strings.append(ctx.allocator, s);
-        return .{ .string = Value.String.borrowed(s) };
+        return NativeResult.takeString(try Value.String.adopt(ctx.allocator, s));
     }
     if (std.mem.eql(u8, type_name, "bool") or std.mem.eql(u8, type_name, "boolean"))
-        return .{ .bool = val.isTruthy() };
+        return NativeResult.scalar(.{ .bool = val.isTruthy() });
     if (std.mem.eql(u8, type_name, "null"))
-        return .null;
+        return NativeResult.scalar(.null);
     if (std.mem.eql(u8, type_name, "array")) {
-        if (val == .array) return val;
+        if (val == .array) return NativeResult.share(val);
         if (val == .object) {
             const obj = val.object;
             const arr = try ctx.allocator.create(PhpArray);
@@ -1030,7 +1030,7 @@ fn native_settype(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             while (dyn_iter.next()) |entry| {
                 try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(entry.key_ptr.*) }, entry.value_ptr.*);
             }
-            return .{ .array = arr };
+            return NativeResult.borrowed(.{ .array = arr });
         }
         const arr = try ctx.allocator.create(PhpArray);
         arr.* = .{};
@@ -1038,10 +1038,10 @@ fn native_settype(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         // scalar becomes a single-element array [value]
         if (val != .null) try arr.append(ctx.allocator, val);
         try ctx.arrays.append(ctx.allocator, arr);
-        return .{ .array = arr };
+        return NativeResult.borrowed(.{ .array = arr });
     }
     if (std.mem.eql(u8, type_name, "object")) {
-        if (val == .object) return val;
+        if (val == .object) return NativeResult.share(val);
         const obj = try ctx.allocator.create(PhpObject);
         obj.* = .{ .class_name = "stdClass" };
         try ctx.vm.objects.append(ctx.allocator, obj);
@@ -1059,44 +1059,44 @@ fn native_settype(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         } else if (val != .null) {
             try obj.set(ctx.allocator, "scalar", val);
         }
-        return .{ .object = obj };
+        return NativeResult.borrowed(.{ .object = obj });
     }
     try ctx.vm.setPendingException("ValueError", "settype(): Argument #2 ($type) must be a valid type");
     return error.RuntimeError;
 }
 
-fn native_call_user_func(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .null;
-    return ctx.invokeCallable(args[0], args[1..]);
+fn native_call_user_func(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.null);
+    return NativeResult.share(try ctx.invokeCallable(args[0], args[1..]));
 }
 
-fn native_call_user_func_array(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2) return .null;
-    if (args[1] != .array) return ctx.invokeCallable(args[0], &.{});
+fn native_call_user_func_array(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2) return NativeResult.scalar(.null);
+    if (args[1] != .array) return NativeResult.share(try ctx.invokeCallable(args[0], &.{}));
     const arr = args[1].array;
     var call_args: [16]Value = undefined;
     const count_val: usize = @min(16, arr.entries.items.len);
     for (0..count_val) |i| call_args[i] = arr.entries.items[i].value;
-    return ctx.invokeCallable(args[0], call_args[0..count_val]);
+    return NativeResult.share(try ctx.invokeCallable(args[0], call_args[0..count_val]));
 }
 
-fn native_function_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_function_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const raw = args[0].string.bytes();
     const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
-    if (ctx.vm.native_fns.contains(name)) return .{ .bool = true };
-    if (ctx.vm.functions.contains(name)) return .{ .bool = true };
-    return .{ .bool = false };
+    if (ctx.vm.native_fns.contains(name)) return NativeResult.scalar(.{ .bool = true });
+    if (ctx.vm.functions.contains(name)) return NativeResult.scalar(.{ .bool = true });
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_get_object_vars(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_get_object_vars(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     // closures are stored as name strings and report as 'object'/'Closure'
     // but have no user-visible properties - return empty array per PHP
     if (args.len > 0 and args[0] == .string and std.mem.startsWith(u8, args[0].string.bytes(), "__closure_")) {
         const empty = try ctx.createArray();
-        return .{ .array = empty };
+        return NativeResult.borrowed(.{ .array = empty });
     }
-    if (args.len == 0 or args[0] != .object) return Value{ .bool = false };
+    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(Value{ .bool = false });
     try ctx.vm.triggerLazyInit(args[0].object);
     const obj = args[0].object.storage();
     var arr = try ctx.createArray();
@@ -1140,7 +1140,7 @@ fn native_get_object_vars(ctx: *NativeContext, args: []const Value) RuntimeError
         if (vis == .protected and !can_see_protected) continue;
         try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(name) }, entry.value_ptr.*);
     }
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
 fn propVisibility(class_def: ?@import("../runtime/vm.zig").ClassDef, name: []const u8) @import("../runtime/vm.zig").ClassDef.Visibility {
@@ -1191,14 +1191,14 @@ fn isInClassHierarchy(vm: *@import("../runtime/vm.zig").VM, candidate: []const u
     return false;
 }
 
-fn native_get_class_methods(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return Value{ .bool = false };
+fn native_get_class_methods(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(Value{ .bool = false });
     // closures (stored as name strings) report the standard Closure API
     if (args[0] == .string and std.mem.startsWith(u8, args[0].string.bytes(), "__closure_")) {
         var arr = try ctx.createArray();
         const methods = [_][]const u8{ "bind", "bindTo", "call", "fromCallable", "__invoke" };
         for (methods) |m| try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(m) });
-        return .{ .array = arr };
+        return NativeResult.borrowed(.{ .array = arr });
     }
     const class_name = if (args[0] == .object)
         args[0].object.class_name
@@ -1209,19 +1209,19 @@ fn native_get_class_methods(ctx: *NativeContext, args: []const Value) RuntimeErr
     else if (args[0] == .string)
         args[0].string.bytes()
     else
-        return Value{ .bool = false };
+        return NativeResult.scalar(Value{ .bool = false });
 
     if (std.mem.eql(u8, class_name, "Generator")) {
         var arr = try ctx.createArray();
         const methods = [_][]const u8{ "rewind", "valid", "current", "key", "next", "send", "throw", "getReturn", "__debugInfo" };
         for (methods) |m| try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(m) });
-        return .{ .array = arr };
+        return NativeResult.borrowed(.{ .array = arr });
     }
     if (std.mem.eql(u8, class_name, "Fiber")) {
         var arr = try ctx.createArray();
         const methods = [_][]const u8{ "__construct", "start", "resume", "throw", "isStarted", "isSuspended", "isRunning", "isTerminated", "getReturn", "getCurrent", "suspend" };
         for (methods) |m| try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(m) });
-        return .{ .array = arr };
+        return NativeResult.borrowed(.{ .array = arr });
     }
 
     // visibility: caller in same class sees all; subclass sees public+protected;
@@ -1265,7 +1265,7 @@ fn native_get_class_methods(ctx: *NativeContext, args: []const Value) RuntimeErr
         } else break;
         depth += 1;
     }
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
 fn isInClassChain(vm: *@import("../runtime/vm.zig").VM, a: []const u8, b: []const u8) bool {
@@ -1283,11 +1283,11 @@ fn isInClassChain(vm: *@import("../runtime/vm.zig").VM, a: []const u8, b: []cons
     return false;
 }
 
-fn native_get_class_vars(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return Value{ .bool = false };
+fn native_get_class_vars(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(Value{ .bool = false });
     const raw = args[0].string.bytes();
     const class_name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
-    const cls = ctx.vm.classes.get(class_name) orelse return Value{ .bool = false };
+    const cls = ctx.vm.classes.get(class_name) orelse return NativeResult.scalar(Value{ .bool = false });
     const caller = ctx.vm.currentDefiningClass();
     var arr = try ctx.createArray();
     for (cls.properties.items) |prop| {
@@ -1306,100 +1306,100 @@ fn native_get_class_vars(ctx: *NativeContext, args: []const Value) RuntimeError!
         if (cls.constant_names.contains(e.key_ptr.*)) continue;
         try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(e.key_ptr.*) }, e.value_ptr.*);
     }
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn native_get_parent_class(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_get_parent_class(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) {
         // no-arg form: use the calling class
-        const caller = ctx.vm.currentDefiningClass() orelse return Value{ .bool = false };
-        const cls = ctx.vm.classes.get(caller) orelse return Value{ .bool = false };
-        if (cls.parent) |p| return Value{ .string = Value.String.borrowed(p) };
-        return Value{ .bool = false };
+        const caller = ctx.vm.currentDefiningClass() orelse return NativeResult.scalar(Value{ .bool = false });
+        const cls = ctx.vm.classes.get(caller) orelse return NativeResult.scalar(Value{ .bool = false });
+        if (cls.parent) |p| return NativeResult.copyString(ctx.allocator, p);
+        return NativeResult.scalar(Value{ .bool = false });
     }
     // closures (string-form) report as Closure with no parent
     if (args[0] == .string and std.mem.startsWith(u8, args[0].string.bytes(), "__closure_")) {
-        return Value{ .bool = false };
+        return NativeResult.scalar(Value{ .bool = false });
     }
     const raw = if (args[0] == .object)
         args[0].object.class_name
     else if (args[0] == .string)
         args[0].string.bytes()
     else
-        return Value{ .bool = false };
+        return NativeResult.scalar(Value{ .bool = false });
     const class_name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
-    if (ctx.vm.traits.contains(class_name) or ctx.vm.interfaces.contains(class_name)) return .{ .bool = false };
+    if (ctx.vm.traits.contains(class_name) or ctx.vm.interfaces.contains(class_name)) return NativeResult.scalar(.{ .bool = false });
     const cls = ctx.vm.classes.get(class_name) orelse {
         try ctx.vm.setPendingException("TypeError", "get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name");
         return error.RuntimeError;
     };
-    if (cls.parent) |p| return Value{ .string = Value.String.borrowed(p) };
-    return Value{ .bool = false };
+    if (cls.parent) |p| return NativeResult.copyString(ctx.allocator, p);
+    return NativeResult.scalar(Value{ .bool = false });
 }
 
-fn native_is_a(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[1] != .string) return .{ .bool = false };
+fn native_is_a(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     const raw_target = args[1].string.bytes();
     const target = if (raw_target.len > 0 and raw_target[0] == '\\') raw_target[1..] else raw_target;
     if (args[0] == .generator) {
-        return .{ .bool = std.mem.eql(u8, target, "Generator") or std.mem.eql(u8, target, "Iterator") or std.mem.eql(u8, target, "Traversable") };
+        return NativeResult.scalar(.{ .bool = std.mem.eql(u8, target, "Generator") or std.mem.eql(u8, target, "Iterator") or std.mem.eql(u8, target, "Traversable") });
     }
-    if (args[0] == .fiber) return .{ .bool = std.mem.eql(u8, target, "Fiber") };
+    if (args[0] == .fiber) return NativeResult.scalar(.{ .bool = std.mem.eql(u8, target, "Fiber") });
     // closures stored as unique name strings present as object/Closure
     if (args[0] == .string and std.mem.startsWith(u8, args[0].string.bytes(), "__closure_")) {
-        return .{ .bool = std.mem.eql(u8, target, "Closure") };
+        return NativeResult.scalar(.{ .bool = std.mem.eql(u8, target, "Closure") });
     }
     if (args[0] == .string) {
         // string arg requires explicit allow_string=true (3rd arg)
         const allow_string = args.len >= 3 and args[2].isTruthy();
-        if (!allow_string) return .{ .bool = false };
-        return .{ .bool = ctx.vm.isInstanceOf(args[0].string.bytes(), target) };
+        if (!allow_string) return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.scalar(.{ .bool = ctx.vm.isInstanceOf(args[0].string.bytes(), target) });
     }
-    const class_name = if (args[0] == .object) args[0].object.class_name else return .{ .bool = false };
-    return .{ .bool = ctx.vm.isInstanceOf(class_name, target) };
+    const class_name = if (args[0] == .object) args[0].object.class_name else return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = ctx.vm.isInstanceOf(class_name, target) });
 }
 
-fn native_is_subclass_of(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[1] != .string) return .{ .bool = false };
+fn native_is_subclass_of(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     if (args[0] == .generator) {
         const t = args[1].string.bytes();
-        return .{ .bool = std.mem.eql(u8, t, "Iterator") or std.mem.eql(u8, t, "Traversable") };
+        return NativeResult.scalar(.{ .bool = std.mem.eql(u8, t, "Iterator") or std.mem.eql(u8, t, "Traversable") });
     }
-    if (args[0] == .fiber) return .{ .bool = false };
+    if (args[0] == .fiber) return NativeResult.scalar(.{ .bool = false });
     const class_name = if (args[0] == .object)
         args[0].object.class_name
     else if (args[0] == .string)
         args[0].string.bytes()
     else
-        return Value{ .bool = false };
+        return NativeResult.scalar(Value{ .bool = false });
     const target_name = args[1].string.bytes();
     ctx.vm.tryAutoload(class_name) catch {};
     ctx.vm.tryAutoload(target_name) catch {};
     // is_subclass_of returns false if same class, only true for actual subclasses
-    if (std.mem.eql(u8, class_name, target_name)) return .{ .bool = false };
-    return .{ .bool = ctx.vm.isInstanceOf(class_name, target_name) };
+    if (std.mem.eql(u8, class_name, target_name)) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = ctx.vm.isInstanceOf(class_name, target_name) });
 }
 
-fn native_spl_object_id(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return Value{ .int = 0 };
+fn native_spl_object_id(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(Value{ .int = 0 });
     if (args[0] == .object) {
         if (args[0].object.id == 0) {
             ctx.vm.next_object_id += 1;
             args[0].object.id = ctx.vm.next_object_id;
         }
-        return .{ .int = @intCast(args[0].object.id) };
+        return NativeResult.scalar(.{ .int = @intCast(args[0].object.id) });
     }
-    if (args[0] == .generator) return .{ .int = @intCast(@intFromPtr(args[0].generator)) };
-    if (args[0] == .fiber) return .{ .int = @intCast(@intFromPtr(args[0].fiber)) };
+    if (args[0] == .generator) return NativeResult.scalar(.{ .int = @intCast(@intFromPtr(args[0].generator)) });
+    if (args[0] == .fiber) return NativeResult.scalar(.{ .int = @intCast(@intFromPtr(args[0].fiber)) });
     // closures stored as unique name strings - mirror spl_object_hash by
     // using the string's pointer as the id
     if (args[0] == .string and std.mem.startsWith(u8, args[0].string.bytes(), "__closure_")) {
-        return .{ .int = @intCast(@intFromPtr(args[0].string.bytes().ptr)) };
+        return NativeResult.scalar(.{ .int = @intCast(@intFromPtr(args[0].string.bytes().ptr)) });
     }
-    return Value{ .int = 0 };
+    return NativeResult.scalar(Value{ .int = 0 });
 }
 
-fn native_exit(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_exit(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len > 0) {
         if (args[0] == .string) {
             try ctx.vm.output.appendSlice(ctx.allocator, args[0].string.bytes());
@@ -1458,8 +1458,8 @@ fn tokenizeVersion(s: []const u8, out: *[16]VersionToken) usize {
     return tok_count;
 }
 
-fn native_version_compare(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .null;
+fn native_version_compare(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.null);
     const v1 = args[0].string.bytes();
     const v2 = args[1].string.bytes();
 
@@ -1556,42 +1556,42 @@ fn native_version_compare(ctx: *NativeContext, args: []const Value) RuntimeError
             cmp != 0
         else
             false;
-        return .{ .bool = result };
+        return NativeResult.scalar(.{ .bool = result });
     }
 
     _ = ctx;
-    return .{ .int = cmp };
+    return NativeResult.scalar(.{ .int = cmp });
 }
 
-fn native_php_sapi_name(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .string = Value.String.borrowed("cli") };
+fn native_php_sapi_name(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.literal("cli");
 }
 
-fn native_php_version(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .string = Value.String.borrowed("8.4.1") };
+fn native_php_version(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.literal("8.4.1");
 }
 
-fn native_getmypid(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .int = @intCast(std.c.getpid()) };
+fn native_getmypid(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .int = @intCast(std.c.getpid()) });
 }
 
-fn native_getmyuid(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .int = @intCast(std.c.getuid()) };
+fn native_getmyuid(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .int = @intCast(std.c.getuid()) });
 }
 
 extern "c" fn getgid() c_uint;
 
-fn native_getmygid(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .int = @intCast(getgid()) };
+fn native_getmygid(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .int = @intCast(getgid()) });
 }
 
-fn native_get_cfg_var(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return Value{ .bool = false };
+fn native_get_cfg_var(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(Value{ .bool = false });
 }
 
 extern "c" fn getlogin() ?[*:0]const u8;
 
-fn native_get_current_user(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_get_current_user(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // PHP returns the owner of the running script. for the CLI that's the
     // current process user; for SAPIs without that distinction, it's the
     // login. fall back to USER / LOGNAME env vars when the syscall returns
@@ -1599,21 +1599,17 @@ fn native_get_current_user(ctx: *NativeContext, _: []const Value) RuntimeError!V
     if (getlogin()) |raw| {
         const span = std.mem.span(raw);
         if (span.len > 0) {
-            const owned = try ctx.allocator.dupe(u8, span);
-            try ctx.strings.append(ctx.allocator, owned);
-            return .{ .string = Value.String.borrowed(owned) };
+            return NativeResult.copyString(ctx.allocator, span);
         }
     }
     inline for ([_][]const u8{ "USER", "LOGNAME" }) |key| {
         if (std.posix.getenv(key)) |val| {
             if (val.len > 0) {
-                const owned = try ctx.allocator.dupe(u8, val);
-                try ctx.strings.append(ctx.allocator, owned);
-                return .{ .string = Value.String.borrowed(owned) };
+                return NativeResult.copyString(ctx.allocator, val);
             }
         }
     }
-    return .{ .string = Value.String.borrowed("") };
+    return NativeResult.literal("");
 }
 
 fn iniDefault(name: []const u8) ?[]const u8 {
@@ -1661,20 +1657,21 @@ fn iniDefault(name: []const u8) ?[]const u8 {
     return null;
 }
 
-fn native_ini_get(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return Value{ .bool = false };
+fn native_ini_get(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(Value{ .bool = false });
     const name = args[0].string.bytes();
-    if (ctx.vm.ini_settings.get(name)) |stored| return .{ .string = Value.String.borrowed(stored) };
-    if (iniDefault(name)) |def| return .{ .string = Value.String.borrowed(def) };
-    return Value{ .bool = false };
+    if (ctx.vm.ini_settings.get(name)) |stored| return NativeResult.copyString(ctx.allocator, stored);
+    if (iniDefault(name)) |def| return NativeResult.copyString(ctx.allocator, def);
+    return NativeResult.scalar(Value{ .bool = false });
 }
 
-fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string) return Value{ .bool = false };
+fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string) return NativeResult.scalar(Value{ .bool = false });
     const name = args[0].string.bytes();
     // PHP rejects unknown directives. Only allow known names.
-    const previous: []const u8 = if (ctx.vm.ini_settings.get(name)) |s| s else if (iniDefault(name)) |d| d else return Value{ .bool = false };
+    const previous: []const u8 = if (ctx.vm.ini_settings.get(name)) |s| s else if (iniDefault(name)) |d| d else return NativeResult.scalar(Value{ .bool = false });
     var buf = std.ArrayListUnmanaged(u8){};
+    defer buf.deinit(ctx.allocator);
     try args[1].format(&buf, ctx.allocator);
     const new_val = try buf.toOwnedSlice(ctx.allocator);
     try ctx.vm.strings.append(ctx.allocator, new_val);
@@ -1687,7 +1684,7 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const seconds = std.fmt.parseInt(i64, std.mem.trim(u8, new_val, " \t\r\n"), 10) catch 0;
         ctx.vm.setExecutionLimit(seconds);
     }
-    return .{ .string = Value.String.borrowed(previous) };
+    return NativeResult.copyString(ctx.allocator, previous);
 }
 
 const SUPPORTED_EXTENSIONS = [_][]const u8{
@@ -1701,25 +1698,25 @@ const SUPPORTED_EXTENSIONS = [_][]const u8{
     "soap",      "zlib",       "posix",     "pcntl",     "random",
 };
 
-fn native_extension_loaded(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_extension_loaded(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const name = args[0].string.bytes();
     for (SUPPORTED_EXTENSIONS) |s| {
-        if (std.ascii.eqlIgnoreCase(name, s)) return .{ .bool = true };
+        if (std.ascii.eqlIgnoreCase(name, s)) return NativeResult.scalar(.{ .bool = true });
     }
     // also accept the historic "datetime" alias for "date"
-    if (std.ascii.eqlIgnoreCase(name, "datetime")) return .{ .bool = true };
-    return .{ .bool = false };
+    if (std.ascii.eqlIgnoreCase(name, "datetime")) return NativeResult.scalar(.{ .bool = true });
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_get_loaded_extensions(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_get_loaded_extensions(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
     for (SUPPORTED_EXTENSIONS) |s| try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(s) });
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn native_get_extension_funcs(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_get_extension_funcs(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const name = args[0].string.bytes();
     // not granular about which fn belongs to which extension - PHP code that
     // calls this typically just checks for non-false. return false for unknown
@@ -1727,43 +1724,43 @@ fn native_get_extension_funcs(ctx: *NativeContext, args: []const Value) RuntimeE
     // functions enumerable" behavior
     for (SUPPORTED_EXTENSIONS) |s| {
         if (std.ascii.eqlIgnoreCase(name, s)) {
-            return .{ .array = try ctx.createArray() };
+            return NativeResult.borrowed(.{ .array = try ctx.createArray() });
         }
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_get_included_files(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_get_included_files(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     var arr = try ctx.createArray();
     var iter = ctx.vm.loaded_files.iterator();
     while (iter.next()) |entry| {
         try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(entry.key_ptr.*) });
     }
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn native_register_shutdown_function(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .null;
-    VM.retainValue(args[0]);
+fn native_register_shutdown_function(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.null);
     try ctx.vm.shutdown_callbacks.append(ctx.allocator, args[0]);
-    return .null;
+    VM.retainValue(args[0]);
+    return NativeResult.scalar(.null);
 }
 
-fn native_memory_get_usage(_: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_memory_get_usage(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // pull current process RSS via getrusage. PHP distinguishes "current" from
     // "peak" usage; zphp's arena doesn't track byte-accurate current bytes per
     // call, so we report the OS-level resident-set peak. matches the common
     // "did memory grow?" check and stays monotonic, while giving a value that's
     // proportional to actual usage (unlike the previous 1024-byte stub)
     var usage: std.c.rusage = undefined;
-    if (std.c.getrusage(std.c.rusage.SELF, &usage) != 0) return .{ .int = 0 };
+    if (std.c.getrusage(std.c.rusage.SELF, &usage) != 0) return NativeResult.scalar(.{ .int = 0 });
     // ru_maxrss is bytes on macOS, kilobytes on Linux/BSD
     const builtin = @import("builtin");
     const mult: i64 = if (builtin.target.os.tag == .macos or builtin.target.os.tag == .ios) 1 else 1024;
-    return .{ .int = @as(i64, @intCast(usage.maxrss)) * mult };
+    return NativeResult.scalar(.{ .int = @as(i64, @intCast(usage.maxrss)) * mult });
 }
 
-fn native_set_error_handler(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_set_error_handler(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const prev = ctx.vm.user_error_handler orelse Value.null;
     if (ctx.vm.user_error_handler) |h| {
         try ctx.vm.error_handler_stack.append(ctx.allocator, .{ .handler = h, .mask = ctx.vm.user_error_handler_mask });
@@ -1774,20 +1771,19 @@ fn native_set_error_handler(ctx: *NativeContext, args: []const Value) RuntimeErr
     } else {
         ctx.vm.user_error_handler = null;
     }
-    ctx.returnShared(prev);
     ctx.vm.user_error_handler_mask = if (args.len >= 2 and args[1] == .int) args[1].int else -1;
-    return prev;
+    return NativeResult.share(prev);
 }
 
-fn native_error_clear_last(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_error_clear_last(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     ctx.vm.last_error_type = 0;
     ctx.vm.last_error_message = "";
     ctx.vm.last_error_file = "";
     ctx.vm.last_error_line = 0;
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn native_set_exception_handler(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_set_exception_handler(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     // push onto stack so restore_exception_handler can pop later. PHP
     // exposes a real LIFO of installed handlers - code that inventories the
     // active handlers by repeatedly calling set then restore spins forever
@@ -1800,34 +1796,33 @@ fn native_set_exception_handler(ctx: *NativeContext, args: []const Value) Runtim
     } else {
         ctx.vm.user_exception_handler = null;
     }
-    ctx.returnShared(prev);
-    return prev;
+    return NativeResult.share(prev);
 }
 
-fn native_get_error_handler(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    return ctx.vm.user_error_handler orelse Value.null;
+fn native_get_error_handler(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.share(ctx.vm.user_error_handler orelse Value.null);
 }
 
-fn native_get_exception_handler(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    return ctx.vm.user_exception_handler orelse Value.null;
+fn native_get_exception_handler(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.share(ctx.vm.user_exception_handler orelse Value.null);
 }
 
-fn native_eval(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .null;
-    return ctx.vm.evalSource(args[0].string.bytes());
+fn native_eval(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
+    return NativeResult.transfer(try ctx.vm.evalSource(args[0].string.bytes()));
 }
 
-fn native_restore_exception_handler(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_restore_exception_handler(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     if (ctx.vm.user_exception_handler) |h| ctx.vm.releaseValue(h);
     if (ctx.vm.exception_handler_stack.items.len > 0) {
         ctx.vm.user_exception_handler = ctx.vm.exception_handler_stack.pop().?;
     } else {
         ctx.vm.user_exception_handler = null;
     }
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_restore_error_handler(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_restore_error_handler(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     if (ctx.vm.user_error_handler) |h| ctx.vm.releaseValue(h);
     if (ctx.vm.error_handler_stack.items.len > 0) {
         const entry = ctx.vm.error_handler_stack.pop().?;
@@ -1837,14 +1832,14 @@ fn native_restore_error_handler(ctx: *NativeContext, _: []const Value) RuntimeEr
         ctx.vm.user_error_handler = null;
         ctx.vm.user_error_handler_mask = -1;
     }
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_assert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = true };
+fn native_assert(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = true });
     const active = ctx.vm.ini_settings.get("assert.active") orelse "1";
-    if (std.mem.eql(u8, active, "0")) return .{ .bool = true };
-    if (args[0].isTruthy()) return .{ .bool = true };
+    if (std.mem.eql(u8, active, "0")) return NativeResult.scalar(.{ .bool = true });
+    if (args[0].isTruthy()) return NativeResult.scalar(.{ .bool = true });
     // a Throwable as the 2nd arg is always thrown on failure, regardless of assert.exception
     if (args.len >= 2 and args[1] == .object) {
         ctx.vm.pending_exception = args[1];
@@ -1863,15 +1858,15 @@ fn native_assert(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         try ctx.vm.setPendingException("AssertionError", msg);
         return error.RuntimeError;
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_noop_true(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = true };
+fn native_noop_true(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_assert_options(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
+fn native_assert_options(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     const opt = Value.toInt(args[0]);
     const key: []const u8 = switch (opt) {
         1 => "assert.active",
@@ -1880,7 +1875,7 @@ fn native_assert_options(ctx: *NativeContext, args: []const Value) RuntimeError!
         4 => "assert.warning",
         5 => "assert.quiet_eval",
         6 => "assert.exception",
-        else => return .{ .bool = false },
+        else => return NativeResult.scalar(.{ .bool = false }),
     };
 
     // get previous value (defaults match PHP: ACTIVE=1, EXCEPTION=1, others=0)
@@ -1888,7 +1883,6 @@ fn native_assert_options(ctx: *NativeContext, args: []const Value) RuntimeError!
     if (opt == 2) {
         if (ctx.vm.ini_callbacks.get("assert.callback")) |cb| {
             prev = cb;
-            ctx.returnShared(prev);
         }
     } else {
         const default_v: i64 = if (opt == 1 or opt == 6) 1 else 0;
@@ -1898,6 +1892,8 @@ fn native_assert_options(ctx: *NativeContext, args: []const Value) RuntimeError!
         prev = .{ .int = std.fmt.parseInt(i64, s, 10) catch 0 };
     }
 
+    const result = NativeResult.share(prev);
+    errdefer if (result.value == .string) result.value.string.release();
     if (args.len >= 2) {
         if (opt == 2) {
             VM.retainValue(args[1]);
@@ -1906,7 +1902,7 @@ fn native_assert_options(ctx: *NativeContext, args: []const Value) RuntimeError!
         } else {
             var buf: [32]u8 = undefined;
             const v = Value.toInt(args[1]);
-            const s = std.fmt.bufPrint(&buf, "{d}", .{v}) catch return prev;
+            const s = std.fmt.bufPrint(&buf, "{d}", .{v}) catch return result;
             const owned = try ctx.allocator.dupe(u8, s);
             try ctx.vm.strings.append(ctx.allocator, owned);
             const key_owned = try ctx.allocator.dupe(u8, key);
@@ -1914,65 +1910,65 @@ fn native_assert_options(ctx: *NativeContext, args: []const Value) RuntimeError!
             try ctx.vm.ini_settings.put(ctx.allocator, key_owned, owned);
         }
     }
-    return prev;
+    return result;
 }
 
-fn native_noop_null(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .null;
+fn native_noop_null(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.null);
 }
 
-fn native_noop_zero(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .int = 0 };
+fn native_noop_zero(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .int = 0 });
 }
 
-fn native_gc_enabled(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = ctx.vm.gc_enabled };
+fn native_gc_enabled(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = ctx.vm.gc_enabled });
 }
 
-fn native_gc_disable(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_gc_disable(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     ctx.vm.gc_enabled = false;
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn native_gc_enable(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_gc_enable(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     ctx.vm.gc_enabled = true;
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn native_gc_collect_cycles(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_gc_collect_cycles(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const collected = ctx.vm.collectCycles();
-    return .{ .int = @intCast(collected) };
+    return NativeResult.scalar(.{ .int = @intCast(collected) });
 }
 
-fn native_noop_false(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = false };
+fn native_noop_false(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_ini_get_all(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_ini_get_all(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // returns an empty array - PHP returns a dict of all settings, but most
     // userland code just iterates it or queries specific keys (use ini_get)
-    return .{ .array = try ctx.createArray() };
+    return NativeResult.borrowed(.{ .array = try ctx.createArray() });
 }
 
-fn native_ini_restore(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .null;
+fn native_ini_restore(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.null);
 }
 
-fn native_opcache_get_status(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_opcache_get_status(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("opcache_enabled") }, .{ .bool = false });
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn native_opcache_get_configuration(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_opcache_get_configuration(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
     const directives = try ctx.createArray();
     try directives.set(ctx.allocator, .{ .string = Value.String.borrowed("opcache.enable") }, .{ .bool = false });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("directives") }, .{ .array = directives });
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn native_gc_status(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_gc_status(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // PHP 8.3+ adds several GC introspection keys (application_time,
     // collector_time, etc.). emit the full key set so callers that read
     // them via array access don't see undefined-index notices
@@ -1990,27 +1986,27 @@ fn native_gc_status(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("collector_time") }, .{ .float = 0 });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("destructor_time") }, .{ .float = 0 });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("free_time") }, .{ .float = 0 });
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn native_highlight_string(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_highlight_string(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     // PHP returns syntax-highlighted HTML; we return false (PHP errors on bad input
     // also return false, so this is safe as a "no-op" while still being callable)
     if (args.len >= 2 and args[1] == .bool and args[1].bool) {
-        if (args.len >= 1 and args[0] == .string) return args[0];
-        return .{ .string = Value.String.borrowed("") };
+        if (args.len >= 1 and args[0] == .string) return NativeResult.share(args[0]);
+        return NativeResult.literal("");
     }
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_highlight_file(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = true };
+fn native_highlight_file(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_strftime(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_strftime(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     // strftime is deprecated since 8.1; we delegate to date() with a best-effort
     // format remap for the most common specifiers
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const fmt = args[0].string.bytes();
     const ts: Value = if (args.len >= 2) args[1] else try ctx.vm.callByName("time", &.{});
     var buf: std.ArrayListUnmanaged(u8) = .{};
@@ -2051,24 +2047,22 @@ fn native_strftime(ctx: *NativeContext, args: []const Value) RuntimeError!Value 
         const r = try ctx.vm.callByName("date", &.{ .{ .string = Value.String.borrowed(mapped) }, ts });
         if (r == .string) try buf.appendSlice(ctx.allocator, r.string.bytes());
     }
-    const owned = try ctx.allocator.dupe(u8, buf.items);
-    try ctx.vm.strings.append(ctx.allocator, owned);
-    return .{ .string = Value.String.borrowed(owned) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, try buf.toOwnedSlice(ctx.allocator)));
 }
 
-fn native_gmstrftime(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_gmstrftime(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return native_strftime(ctx, args);
 }
 
-fn native_getmxrr(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_getmxrr(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // empty MX array, return false (no records found) - matches PHP behavior
     // when MX query fails. tools that branch on this still work.
     _ = ctx;
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_spl_autoload_call(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .null;
+fn native_spl_autoload_call(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
     const name = args[0].string.bytes();
     var i: usize = 0;
     while (i < ctx.vm.autoload_callbacks.items.len) : (i += 1) {
@@ -2076,10 +2070,10 @@ fn native_spl_autoload_call(ctx: *NativeContext, args: []const Value) RuntimeErr
         _ = ctx.invokeCallable(cb, &.{.{ .string = Value.String.borrowed(name) }}) catch {};
         if (ctx.vm.classes.contains(name)) break;
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn native_spl_classes(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_spl_classes(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
     const names = [_][]const u8{
         "AppendIterator",                  "ArrayIterator",              "ArrayObject",              "BadFunctionCallException",
@@ -2097,40 +2091,40 @@ fn native_spl_classes(ctx: *NativeContext, _: []const Value) RuntimeError!Value 
         "SplStack",                        "SplTempFileObject",          "UnderflowException",       "UnexpectedValueException",
     };
     for (names) |n| try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(n) }, .{ .string = Value.String.borrowed(n) });
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn native_iconv_mime_decode(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_iconv_mime_decode(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     // best-effort: return the input as-is, ignoring mime encoding
-    if (args.len == 0 or args[0] != .string) return .{ .string = Value.String.borrowed("") };
-    return args[0];
+    if (args.len == 0 or args[0] != .string) return NativeResult.literal("");
+    return NativeResult.share(args[0]);
 }
 
-fn native_iconv_mime_decode_headers(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .array = try ctx.createArray() };
-    return .{ .array = try ctx.createArray() };
+fn native_iconv_mime_decode_headers(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+    return NativeResult.borrowed(.{ .array = try ctx.createArray() });
 }
 
-fn native_iconv_mime_encode(_: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_iconv_mime_encode(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     // best-effort: emit "Header: value" unencoded
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
-    return args[1];
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.share(args[1]);
 }
 
-fn native_get_include_path(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .string = Value.String.borrowed(".") };
+fn native_get_include_path(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.literal(".");
 }
 
-fn native_set_include_path(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .string = Value.String.borrowed(".") };
+fn native_set_include_path(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.literal(".");
 }
 
-fn native_error_reporting(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_error_reporting(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const prev = ctx.vm.error_reporting_level;
     if (args.len > 0) {
         ctx.vm.error_reporting_level = Value.toInt(args[0]);
     }
-    return .{ .int = prev };
+    return NativeResult.scalar(.{ .int = prev });
 }
 
 // runtime helper emitted by the compiler for match-without-default. produces
@@ -2138,9 +2132,10 @@ fn native_error_reporting(ctx: *NativeContext, args: []const Value) RuntimeError
 //   int/float/bool/null  -> "Unhandled match case 99"
 //   string               -> "Unhandled match case 'hello'"
 //   array/object         -> "Unhandled match case of type array" / "...stdClass"
-fn native_match_unhandled_msg(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_match_unhandled_msg(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const v = if (args.len > 0) args[0] else Value{ .null = {} };
     var buf = std.ArrayListUnmanaged(u8){};
+    defer buf.deinit(ctx.allocator);
     try buf.appendSlice(ctx.allocator, "Unhandled match case ");
     switch (v) {
         .int => |i| try std.fmt.format(buf.writer(ctx.allocator), "{d}", .{i}),
@@ -2166,24 +2161,23 @@ fn native_match_unhandled_msg(ctx: *NativeContext, args: []const Value) RuntimeE
         .fiber => try buf.appendSlice(ctx.allocator, "of type Fiber"),
     }
     const owned = try buf.toOwnedSlice(ctx.allocator);
-    try ctx.strings.append(ctx.allocator, owned);
-    return .{ .string = Value.String.borrowed(owned) };
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, owned));
 }
 
-fn native_error_log(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_error_log(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const message = args[0].string.bytes();
     const msg_type: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
     switch (msg_type) {
         3 => {
             // append to the file named by arg #3
-            if (args.len < 3 or args[2] != .string) return .{ .bool = false };
+            if (args.len < 3 or args[2] != .string) return NativeResult.scalar(.{ .bool = false });
             const path = args[2].string.bytes();
-            const f = std.fs.cwd().createFile(path, .{ .truncate = false }) catch return .{ .bool = false };
+            const f = std.fs.cwd().createFile(path, .{ .truncate = false }) catch return NativeResult.scalar(.{ .bool = false });
             defer f.close();
             f.seekFromEnd(0) catch {};
-            f.writeAll(message) catch return .{ .bool = false };
-            return .{ .bool = true };
+            f.writeAll(message) catch return NativeResult.scalar(.{ .bool = false });
+            return NativeResult.scalar(.{ .bool = true });
         },
         else => {
             // type 0 (system logger) / 4 (SAPI) - PHP's CLI SAPI writes to
@@ -2196,15 +2190,15 @@ fn native_error_log(ctx: *NativeContext, args: []const Value) RuntimeError!Value
                 vm.output.clearRetainingCapacity();
             }
             const stderr_file = std.fs.File{ .handle = 2 };
-            stderr_file.writeAll(message) catch return .{ .bool = false };
+            stderr_file.writeAll(message) catch return NativeResult.scalar(.{ .bool = false });
             stderr_file.writeAll("\n") catch {};
-            return .{ .bool = true };
+            return NativeResult.scalar(.{ .bool = true });
         },
     }
 }
 
-fn native_trigger_error(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_trigger_error(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const message = args[0].string.bytes();
     const errno: i64 = if (args.len >= 2) Value.toInt(args[1]) else 1024; // E_USER_NOTICE
 
@@ -2238,7 +2232,7 @@ fn native_trigger_error(ctx: *NativeContext, args: []const Value) RuntimeError!V
             };
             const result = try ctx.invokeCallable(handler, call_args);
             // returning false (or null in PHP 8+) lets the default handler run
-            if (result != .bool or result.bool) return .{ .bool = true };
+            if (result != .bool or result.bool) return NativeResult.scalar(.{ .bool = true });
         }
     }
 
@@ -2256,17 +2250,17 @@ fn native_trigger_error(ctx: *NativeContext, args: []const Value) RuntimeError!V
             _ = stdout_file.write(ctx.vm.output.items) catch {};
             ctx.vm.output.clearRetainingCapacity();
         }
-        const stderr_text = std.fmt.allocPrint(ctx.allocator, "PHP {s}:  {s} in {s} on line {d}\n", .{ label, message, file, line }) catch return Value{ .bool = true };
-        try ctx.vm.strings.append(ctx.allocator, stderr_text);
+        const stderr_text = std.fmt.allocPrint(ctx.allocator, "PHP {s}:  {s} in {s} on line {d}\n", .{ label, message, file, line }) catch return NativeResult.scalar(Value{ .bool = true });
+        defer ctx.allocator.free(stderr_text);
         const stderr_file = std.fs.File{ .handle = 2 };
         _ = stderr_file.write(stderr_text) catch {};
         if (ctx.vm.displayErrorsEnabled()) {
-            const stdout_text = std.fmt.allocPrint(ctx.allocator, "\n{s}: {s} in {s} on line {d}\n", .{ label, message, file, line }) catch return Value{ .bool = true };
-            try ctx.vm.strings.append(ctx.allocator, stdout_text);
+            const stdout_text = std.fmt.allocPrint(ctx.allocator, "\n{s}: {s} in {s} on line {d}\n", .{ label, message, file, line }) catch return NativeResult.scalar(Value{ .bool = true });
+            defer ctx.allocator.free(stdout_text);
             try ctx.vm.output.appendSlice(ctx.allocator, stdout_text);
         }
     }
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
 fn errnoLabel(errno: i64) []const u8 {
@@ -2286,23 +2280,23 @@ fn errnoLabel(errno: i64) []const u8 {
     };
 }
 
-fn native_error_get_last(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    if (ctx.vm.last_error_type == 0) return .null;
+fn native_error_get_last(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    if (ctx.vm.last_error_type == 0) return NativeResult.scalar(.null);
     var arr = try ctx.createArray();
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("type") }, .{ .int = ctx.vm.last_error_type });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("message") }, .{ .string = Value.String.borrowed(ctx.vm.last_error_message) });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(ctx.vm.last_error_file) });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("line") }, .{ .int = ctx.vm.last_error_line });
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn native_class_alias(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return .{ .bool = false };
+fn native_class_alias(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     const original = args[0].string.bytes();
     const alias = args[1].string.bytes();
     const autoload = if (args.len >= 3) args[2].isTruthy() else true;
     if (autoload and !ctx.vm.classes.contains(original)) {
-        ctx.vm.tryAutoload(original) catch return Value{ .bool = false };
+        ctx.vm.tryAutoload(original) catch return NativeResult.scalar(.{ .bool = false });
     }
     if (ctx.vm.classes.get(original)) |cls| {
         var alias_def = ClassDef{ .name = alias, .parent = original };
@@ -2320,30 +2314,28 @@ fn native_class_alias(ctx: *NativeContext, args: []const Value) RuntimeError!Val
         // don't register alias::method in functions map - resolveMethod walks
         // the parent chain and must find the original class name for correct
         // private visibility checks in currentDefiningClass
-        return .{ .bool = true };
+        return NativeResult.scalar(.{ .bool = true });
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_spl_autoload_register(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
-    VM.retainValue(args[0]);
+fn native_spl_autoload_register(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     try ctx.vm.autoload_callbacks.append(ctx.allocator, args[0]);
-    return .{ .bool = true };
+    VM.retainValue(args[0]);
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_spl_autoload_functions(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    var arr = try ctx.allocator.create(PhpArray);
-    arr.* = .{};
-    try ctx.vm.arrays.append(ctx.allocator, arr);
+fn native_spl_autoload_functions(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const arr = try ctx.createArray();
     for (ctx.vm.autoload_callbacks.items) |cb| {
         try arr.append(ctx.allocator, cb);
     }
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn native_spl_autoload_unregister(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
+fn native_spl_autoload_unregister(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     const target = args[0];
     var i: usize = 0;
     while (i < ctx.vm.autoload_callbacks.items.len) {
@@ -2355,7 +2347,7 @@ fn native_spl_autoload_unregister(ctx: *NativeContext, args: []const Value) Runt
             i += 1;
         }
     }
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
 fn callablesEqual(a: Value, b: Value) bool {
@@ -2387,18 +2379,18 @@ fn getFrameParamValue(frame: anytype, slot_names: []const []const u8, param: []c
     return frame.vars.get(param) orelse .null;
 }
 
-fn native_func_get_args(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_func_get_args(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
 
     if (ctx.vm.getFrameArgs()) |saved_args| {
         for (saved_args) |val| {
             try arr.append(ctx.allocator, val);
         }
-        return .{ .array = arr };
+        return NativeResult.borrowed(.{ .array = arr });
     }
 
     const frame = ctx.vm.currentFrame();
-    const func = frame.func orelse return .{ .array = arr };
+    const func = frame.func orelse return NativeResult.borrowed(.{ .array = arr });
     const slot_names = func.slot_names;
     const actual_ac: usize = if (ctx.vm.getFrameArgCount()) |ac| ac else func.arity;
 
@@ -2420,14 +2412,14 @@ fn native_func_get_args(ctx: *NativeContext, _: []const Value) RuntimeError!Valu
             try arr.append(ctx.allocator, val);
         }
     }
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn native_func_num_args(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_func_num_args(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const frame = ctx.vm.currentFrame();
-    const func = frame.func orelse return .{ .int = 0 };
+    const func = frame.func orelse return NativeResult.scalar(.{ .int = 0 });
 
-    if (ctx.vm.getFrameArgCount()) |ac| return .{ .int = @intCast(ac) };
+    if (ctx.vm.getFrameArgCount()) |ac| return NativeResult.scalar(.{ .int = @intCast(ac) });
 
     if (func.is_variadic) {
         const fixed: usize = func.arity - 1;
@@ -2437,86 +2429,86 @@ fn native_func_num_args(ctx: *NativeContext, _: []const Value) RuntimeError!Valu
         if (variadic_val == .array) {
             total += variadic_val.array.length();
         }
-        return .{ .int = total };
+        return NativeResult.scalar(.{ .int = total });
     }
-    return .{ .int = @intCast(func.arity) };
+    return NativeResult.scalar(.{ .int = @intCast(func.arity) });
 }
 
-fn native_func_get_arg(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
+fn native_func_get_arg(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     const idx = Value.toInt(args[0]);
-    if (idx < 0) return .{ .bool = false };
+    if (idx < 0) return NativeResult.scalar(.{ .bool = false });
     const index: usize = @intCast(idx);
 
     if (ctx.vm.getFrameArgs()) |saved_args| {
-        if (index < saved_args.len) return saved_args[index];
-        return .{ .bool = false };
+        if (index < saved_args.len) return NativeResult.share(saved_args[index]);
+        return NativeResult.scalar(.{ .bool = false });
     }
 
     const frame = ctx.vm.currentFrame();
-    const func = frame.func orelse return .{ .bool = false };
+    const func = frame.func orelse return NativeResult.scalar(.{ .bool = false });
     const slot_names = func.slot_names;
 
     if (func.is_variadic) {
         const fixed: usize = func.arity - 1;
         if (index < fixed) {
-            return getFrameParamValue(frame, slot_names, func.params[index]);
+            return NativeResult.share(getFrameParamValue(frame, slot_names, func.params[index]));
         }
         const variadic_val = getFrameParamValue(frame, slot_names, func.params[fixed]);
         if (variadic_val == .array) {
             const vi: i64 = @intCast(index - fixed);
             const result = variadic_val.array.get(.{ .int = vi });
-            if (result != .null) return result;
+            if (result != .null) return NativeResult.share(result);
         }
-        return .{ .bool = false };
+        return NativeResult.scalar(.{ .bool = false });
     }
 
-    if (index >= func.arity) return .{ .bool = false };
-    return getFrameParamValue(frame, slot_names, func.params[index]);
+    if (index >= func.arity) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.share(getFrameParamValue(frame, slot_names, func.params[index]));
 }
 
-fn native_interface_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_interface_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const raw = args[0].string.bytes();
     const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
-    if (ctx.vm.interfaces.contains(name)) return .{ .bool = true };
+    if (ctx.vm.interfaces.contains(name)) return NativeResult.scalar(.{ .bool = true });
     const autoload = if (args.len > 1 and args[1] == .bool) args[1].bool else true;
     if (autoload) {
         ctx.vm.tryAutoload(name) catch {};
-        return .{ .bool = ctx.vm.interfaces.contains(name) };
+        return NativeResult.scalar(.{ .bool = ctx.vm.interfaces.contains(name) });
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_enum_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_enum_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const name = args[0].string.bytes();
     if (ctx.vm.classes.get(name)) |cls| {
-        if (cls.is_enum) return .{ .bool = true };
+        if (cls.is_enum) return NativeResult.scalar(.{ .bool = true });
     }
     const autoload = if (args.len > 1 and args[1] == .bool) args[1].bool else true;
     if (autoload) {
         ctx.vm.tryAutoload(name) catch {};
         if (ctx.vm.classes.get(name)) |cls| {
-            return .{ .bool = cls.is_enum };
+            return NativeResult.scalar(.{ .bool = cls.is_enum });
         }
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_class_implements(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
+fn native_class_implements(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     const raw = if (args[0] == .object)
         args[0].object.class_name
     else if (args[0] == .string)
         args[0].string.bytes()
     else
-        return Value{ .bool = false };
+        return NativeResult.scalar(Value{ .bool = false });
     const class_name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
 
     const cls = ctx.vm.classes.get(class_name);
     const interface = ctx.vm.interfaces.get(class_name);
-    if (cls == null and interface == null and !ctx.vm.traits.contains(class_name)) return .{ .bool = false };
+    if (cls == null and interface == null and !ctx.vm.traits.contains(class_name)) return NativeResult.scalar(.{ .bool = false });
 
     var result = try ctx.createArray();
     var queue = std.ArrayListUnmanaged([]const u8){};
@@ -2566,22 +2558,22 @@ fn native_class_implements(ctx: *NativeContext, args: []const Value) RuntimeErro
         }
     }
 
-    return .{ .array = result };
+    return NativeResult.borrowed(.{ .array = result });
 }
 
-fn native_class_parents(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
+fn native_class_parents(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     const raw = if (args[0] == .object)
         args[0].object.class_name
     else if (args[0] == .string)
         args[0].string.bytes()
     else
-        return Value{ .bool = false };
+        return NativeResult.scalar(Value{ .bool = false });
     const class_name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
 
     const cls = ctx.vm.classes.get(class_name) orelse {
         try ctx.vm.tryAutoload(class_name);
-        if (ctx.vm.classes.get(class_name) == null) return Value{ .bool = false };
+        if (ctx.vm.classes.get(class_name) == null) return NativeResult.scalar(Value{ .bool = false });
         const normalized = [_]Value{.{ .string = Value.String.borrowed(class_name) }};
         return native_class_parents(ctx, &normalized);
     };
@@ -2594,22 +2586,22 @@ fn native_class_parents(ctx: *NativeContext, args: []const Value) RuntimeError!V
         parent = pcls.parent;
     }
 
-    return .{ .array = result };
+    return NativeResult.borrowed(.{ .array = result });
 }
 
-fn native_class_uses(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
+fn native_class_uses(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     const raw = if (args[0] == .object)
         args[0].object.class_name
     else if (args[0] == .string)
         args[0].string.bytes()
     else
-        return Value{ .bool = false };
+        return NativeResult.scalar(Value{ .bool = false });
     const class_name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
 
     if (!ctx.vm.classes.contains(class_name) and !ctx.vm.traits.contains(class_name) and !ctx.vm.interfaces.contains(class_name)) {
         if (args.len < 2 or args[1].isTruthy()) try ctx.vm.tryAutoload(class_name);
-        if (!ctx.vm.classes.contains(class_name) and !ctx.vm.traits.contains(class_name) and !ctx.vm.interfaces.contains(class_name)) return .{ .bool = false };
+        if (!ctx.vm.classes.contains(class_name) and !ctx.vm.traits.contains(class_name) and !ctx.vm.interfaces.contains(class_name)) return NativeResult.scalar(.{ .bool = false });
     }
     const used_traits = if (ctx.vm.classes.get(class_name)) |cls|
         cls.used_traits.items
@@ -2620,13 +2612,13 @@ fn native_class_uses(ctx: *NativeContext, args: []const Value) RuntimeError!Valu
     for (used_traits) |trait| {
         try result.set(ctx.allocator, .{ .string = Value.String.borrowed(trait) }, .{ .string = Value.String.borrowed(trait) });
     }
-    return .{ .array = result };
+    return NativeResult.borrowed(.{ .array = result });
 }
 
-fn native_iterator_to_array(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .array = try ctx.createArray() };
+fn native_iterator_to_array(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.borrowed(.{ .array = try ctx.createArray() });
 
-    if (args[0] == .array) return args[0];
+    if (args[0] == .array) return NativeResult.borrowed(args[0]);
     const preserve_keys = if (args.len > 1 and args[1] == .bool) args[1].bool else true;
 
     if (args[0] == .generator) {
@@ -2637,7 +2629,7 @@ fn native_iterator_to_array(ctx: *NativeContext, args: []const Value) RuntimeErr
 
         while (gen.state != .completed) {
             if (preserve_keys) {
-                try arr.set(ctx.allocator, switch (gen.current_key) {
+                try ctx.vm.arraySetOwned(arr, switch (gen.current_key) {
                     .int => |i| .{ .int = i },
                     .string => |s| .{ .string = s },
                     else => .{ .int = arr.length() },
@@ -2647,7 +2639,7 @@ fn native_iterator_to_array(ctx: *NativeContext, args: []const Value) RuntimeErr
             }
             try ctx.vm.resumeGenerator(gen, .null);
         }
-        return .{ .array = arr };
+        return NativeResult.borrowed(.{ .array = arr });
     }
 
     if (args[0] == .object) {
@@ -2667,15 +2659,17 @@ fn native_iterator_to_array(ctx: *NativeContext, args: []const Value) RuntimeErr
             return native_iterator_to_array(ctx, inner_args[0..n]);
         }
         const has_traversal = ctx.vm.hasMethod(obj.class_name, "rewind") and ctx.vm.hasMethod(obj.class_name, "valid") and ctx.vm.hasMethod(obj.class_name, "current");
-        if (!is_iterator and !has_traversal) return .{ .array = arr };
-        if (!ctx.vm.hasMethod(obj.class_name, "rewind")) return .{ .array = arr };
+        if (!is_iterator and !has_traversal) return NativeResult.borrowed(.{ .array = arr });
+        if (!ctx.vm.hasMethod(obj.class_name, "rewind")) return NativeResult.borrowed(.{ .array = arr });
         _ = try ctx.vm.callMethod(obj, "rewind", &.{});
         var valid_v = try ctx.vm.callMethod(obj, "valid", &.{});
         while (valid_v.isTruthy()) {
             const cur = try ctx.vm.callMethod(obj, "current", &.{});
+            if (cur == .string) cur.string.retain();
+            defer if (cur == .string) cur.string.release();
             if (preserve_keys) {
                 const key = try ctx.vm.callMethod(obj, "key", &.{});
-                try arr.set(ctx.allocator, switch (key) {
+                try ctx.vm.arraySetOwned(arr, switch (key) {
                     .int => |i| .{ .int = i },
                     .string => |s| .{ .string = s },
                     else => .{ .int = arr.length() },
@@ -2686,16 +2680,16 @@ fn native_iterator_to_array(ctx: *NativeContext, args: []const Value) RuntimeErr
             _ = try ctx.vm.callMethod(obj, "next", &.{});
             valid_v = try ctx.vm.callMethod(obj, "valid", &.{});
         }
-        return .{ .array = arr };
+        return NativeResult.borrowed(.{ .array = arr });
     }
 
-    return .{ .array = try ctx.createArray() };
+    return NativeResult.borrowed(.{ .array = try ctx.createArray() });
 }
 
-fn native_iterator_count(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .int = 0 };
+fn native_iterator_count(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .int = 0 });
 
-    if (args[0] == .array) return .{ .int = args[0].array.length() };
+    if (args[0] == .array) return NativeResult.scalar(.{ .int = args[0].array.length() });
 
     if (args[0] == .generator) {
         const gen = args[0].generator;
@@ -2707,7 +2701,7 @@ fn native_iterator_count(ctx: *NativeContext, args: []const Value) RuntimeError!
             n += 1;
             try ctx.vm.resumeGenerator(gen, .null);
         }
-        return .{ .int = n };
+        return NativeResult.scalar(.{ .int = n });
     }
 
     if (args[0] == .object) {
@@ -2723,10 +2717,10 @@ fn native_iterator_count(ctx: *NativeContext, args: []const Value) RuntimeError!
                     n += 1;
                     try ctx.vm.resumeGenerator(gen, .null);
                 }
-                return .{ .int = n };
+                return NativeResult.scalar(.{ .int = n });
             }
         }
-        if (!ctx.vm.hasMethod(obj.class_name, "rewind")) return .{ .int = 0 };
+        if (!ctx.vm.hasMethod(obj.class_name, "rewind")) return NativeResult.scalar(.{ .int = 0 });
         _ = try ctx.vm.callMethod(obj, "rewind", &.{});
         var n: i64 = 0;
         while (true) {
@@ -2735,14 +2729,14 @@ fn native_iterator_count(ctx: *NativeContext, args: []const Value) RuntimeError!
             n += 1;
             _ = try ctx.vm.callMethod(obj, "next", &.{});
         }
-        return .{ .int = n };
+        return NativeResult.scalar(.{ .int = n });
     }
 
-    return .{ .int = 0 };
+    return NativeResult.scalar(.{ .int = 0 });
 }
 
-fn native_iterator_apply(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2) return .{ .int = 0 };
+fn native_iterator_apply(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2) return NativeResult.scalar(.{ .int = 0 });
 
     var tmp_buf: ?[]Value = null;
     defer if (tmp_buf) |b| ctx.allocator.free(b);
@@ -2765,7 +2759,7 @@ fn native_iterator_apply(ctx: *NativeContext, args: []const Value) RuntimeError!
             if (!r.isTruthy()) break;
             try ctx.vm.resumeGenerator(gen, .null);
         }
-        return .{ .int = n };
+        return NativeResult.scalar(.{ .int = n });
     }
 
     if (args[0] == .array) {
@@ -2775,7 +2769,7 @@ fn native_iterator_apply(ctx: *NativeContext, args: []const Value) RuntimeError!
             n += 1;
             if (!r.isTruthy()) break;
         }
-        return .{ .int = n };
+        return NativeResult.scalar(.{ .int = n });
     }
 
     if (args[0] == .object) {
@@ -2806,15 +2800,15 @@ fn native_iterator_apply(ctx: *NativeContext, args: []const Value) RuntimeError!
                 if (!r.isTruthy()) break;
                 _ = try ctx.vm.callMethod(obj, "next", &.{});
             }
-            return .{ .int = n };
+            return NativeResult.scalar(.{ .int = n });
         }
     }
 
-    return .{ .int = 0 };
+    return NativeResult.scalar(.{ .int = 0 });
 }
 
-fn native_filter_id(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+fn native_filter_id(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const name = args[0].string.bytes();
     // PHP's filter_id maps a filter name to its numeric ID (matches the
     // FILTER_VALIDATE_*/FILTER_SANITIZE_* / FILTER_DEFAULT constants)
@@ -2843,11 +2837,11 @@ fn native_filter_id(_: *NativeContext, args: []const Value) RuntimeError!Value {
         .{ .name = "unsafe_html", .id = 521 },
         .{ .name = "callback", .id = 1024 },
     };
-    for (filters) |f| if (std.mem.eql(u8, f.name, name)) return .{ .int = f.id };
-    return .{ .bool = false };
+    for (filters) |f| if (std.mem.eql(u8, f.name, name)) return NativeResult.scalar(.{ .int = f.id });
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_filter_list(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_filter_list(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
     const names = [_][]const u8{
         "int",          "boolean",        "float",         "validate_regexp",    "validate_domain",
@@ -2860,32 +2854,32 @@ fn native_filter_list(ctx: *NativeContext, _: []const Value) RuntimeError!Value 
     while (i < names.len) : (i += 1) {
         try arr.set(ctx.allocator, .{ .int = @intCast(i) }, .{ .string = Value.String.borrowed(names[i]) });
     }
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn native_filter_has_var(_: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_filter_has_var(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // filter_has_var inspects INPUT_* superglobals which zphp populates per
     // request. for the CLI / generic context, returning false is the safest
     // PHP-compatible answer
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_filter_input(_: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_filter_input(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // CLI / no-request context: no INPUT_* values to read, return null
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn native_filter_input_array(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .null;
+fn native_filter_input_array(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.null);
 }
 
-fn native_filter_var_array(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .array) return .{ .bool = false };
+fn native_filter_var_array(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .array) return NativeResult.scalar(.{ .bool = false });
     const data = args[0].array;
     const result = try ctx.createArray();
     if (args.len < 2 or args[1] != .array) {
         for (data.entries.items) |entry| try result.set(ctx.allocator, entry.key, entry.value);
-        return .{ .array = result };
+        return NativeResult.borrowed(.{ .array = result });
     }
     const rules = args[1].array;
     for (rules.entries.items) |rule_entry| {
@@ -2893,9 +2887,10 @@ fn native_filter_var_array(ctx: *NativeContext, args: []const Value) RuntimeErro
         const data_v = data.get(key);
         const sub_args = [_]Value{ data_v, rule_entry.value };
         const filtered = try native_filter_var(ctx, &sub_args);
-        try result.set(ctx.allocator, key, filtered);
+        defer if (filtered.value == .string) filtered.value.string.release();
+        try result.set(ctx.allocator, key, filtered.value);
     }
-    return .{ .array = result };
+    return NativeResult.borrowed(.{ .array = result });
 }
 
 // validates the integer part of a thousands-separated number: an optional
@@ -2925,13 +2920,13 @@ fn validThousandGrouping(s: []const u8) bool {
     return true;
 }
 
-fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1) return .{ .bool = false };
+fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
     const value = args[0];
 
-    if (args.len < 2) return value;
+    if (args.len < 2) return NativeResult.share(value);
 
-    const filter = if (args[1] == .int) args[1].int else return .{ .bool = false };
+    const filter = if (args[1] == .int) args[1].int else return NativeResult.scalar(.{ .bool = false });
     const flags: i64 = if (args.len > 2 and args[2] == .int) args[2].int else 0;
 
     // resolve options array if 3rd arg is array: ["options" => [...], "flags" => ...]
@@ -2959,55 +2954,57 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Val
     const force_array = (eff_flags & 0x04000000) != 0; // FILTER_FORCE_ARRAY
     if (require_array or force_array) {
         if (value != .array) {
-            if (require_array) return fail_default;
+            if (require_array) return NativeResult.share(fail_default);
             // force_array wraps scalar
             const out = try _ctx.createArray();
             const single_flags = eff_flags & ~@as(i64, 0x05000000);
             const sub_args = [_]Value{ value, args[1], .{ .int = single_flags } };
             const filtered = try native_filter_var(_ctx, &sub_args);
-            try out.append(_ctx.allocator, filtered);
-            return .{ .array = out };
+            defer if (filtered.value == .string) filtered.value.string.release();
+            try out.append(_ctx.allocator, filtered.value);
+            return NativeResult.borrowed(.{ .array = out });
         }
         const out = try _ctx.createArray();
         const single_flags = eff_flags & ~@as(i64, 0x05000000);
         for (value.array.entries.items) |e| {
             const sub_args = [_]Value{ e.value, args[1], .{ .int = single_flags } };
             const filtered = try native_filter_var(_ctx, &sub_args);
+            defer if (filtered.value == .string) filtered.value.string.release();
             try out.set(_ctx.allocator, switch (e.key) {
                 .int => |i| .{ .int = i },
                 .string => |s| .{ .string = s },
-            }, filtered);
+            }, filtered.value);
         }
-        return .{ .array = out };
+        return NativeResult.borrowed(.{ .array = out });
     }
 
     switch (filter) {
         275 => { // FILTER_VALIDATE_IP
-            const s = if (value == .string) value.string.bytes() else return .{ .bool = false };
+            const s = if (value == .string) value.string.bytes() else return NativeResult.scalar(.{ .bool = false });
             const ipv4_only = (flags & 1048576) != 0;
             const ipv6_only = (flags & 2097152) != 0;
             const no_priv = (flags & 8388608) != 0;
             const no_res = (flags & 4194304) != 0;
             if (!ipv6_only and isValidIPv4(s)) {
-                if (no_priv and isPrivateIPv4(s)) return .{ .bool = false };
-                if (no_res and isReservedIPv4(s)) return .{ .bool = false };
-                return value;
+                if (no_priv and isPrivateIPv4(s)) return NativeResult.scalar(.{ .bool = false });
+                if (no_res and isReservedIPv4(s)) return NativeResult.scalar(.{ .bool = false });
+                return NativeResult.share(value);
             }
-            if (ipv4_only) return .{ .bool = false };
-            if (!ipv4_only and isValidIPv6(s)) return value;
-            return .{ .bool = false };
+            if (ipv4_only) return NativeResult.scalar(.{ .bool = false });
+            if (!ipv4_only and isValidIPv6(s)) return NativeResult.share(value);
+            return NativeResult.scalar(.{ .bool = false });
         },
         274 => { // FILTER_VALIDATE_EMAIL
-            const s = if (value == .string) value.string.bytes() else return .{ .bool = false };
+            const s = if (value == .string) value.string.bytes() else return NativeResult.scalar(.{ .bool = false });
             if (std.mem.indexOf(u8, s, "@")) |at| {
-                if (at > 0 and at < s.len - 1 and std.mem.indexOf(u8, s[at + 1 ..], ".") != null) return value;
+                if (at > 0 and at < s.len - 1 and std.mem.indexOf(u8, s[at + 1 ..], ".") != null) return NativeResult.share(value);
             }
-            return .{ .bool = false };
+            return NativeResult.scalar(.{ .bool = false });
         },
         273 => { // FILTER_VALIDATE_URL
-            const s = if (value == .string) value.string.bytes() else return .{ .bool = false };
-            if (std.mem.startsWith(u8, s, "http://") or std.mem.startsWith(u8, s, "https://") or std.mem.startsWith(u8, s, "ftp://")) return value;
-            return .{ .bool = false };
+            const s = if (value == .string) value.string.bytes() else return NativeResult.scalar(.{ .bool = false });
+            if (std.mem.startsWith(u8, s, "http://") or std.mem.startsWith(u8, s, "https://") or std.mem.startsWith(u8, s, "ftp://")) return NativeResult.share(value);
+            return NativeResult.scalar(.{ .bool = false });
         },
         257 => { // FILTER_VALIDATE_INT
             const allow_octal = (eff_flags & 1) != 0; // FILTER_FLAG_ALLOW_OCTAL
@@ -3020,13 +3017,13 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Val
                 // filter: true->"1"->1, false->""->fail, 3.0->"3"->3, 3.7->fail
                 const s: []const u8 = if (value == .string) value.string.bytes() else sblk: {
                     if (value == .bool or value == .float) {
-                        value.format(&str_buf, _ctx.allocator) catch return fail_default;
+                        value.format(&str_buf, _ctx.allocator) catch return NativeResult.share(fail_default);
                         break :sblk str_buf.items;
                     }
-                    return fail_default;
+                    return NativeResult.share(fail_default);
                 };
                 const trimmed = std.mem.trim(u8, s, " \t\n\r");
-                if (trimmed.len == 0) return fail_default;
+                if (trimmed.len == 0) return NativeResult.share(fail_default);
                 // optional sign
                 var rest = trimmed;
                 var sign: i64 = 1;
@@ -3036,39 +3033,39 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Val
                     sign = -1;
                     rest = rest[1..];
                 }
-                if (rest.len == 0) return fail_default;
+                if (rest.len == 0) return NativeResult.share(fail_default);
                 // hex with ALLOW_HEX
                 if (allow_hex and rest.len > 2 and rest[0] == '0' and (rest[1] == 'x' or rest[1] == 'X')) {
-                    const v = std.fmt.parseInt(i64, rest[2..], 16) catch return fail_default;
+                    const v = std.fmt.parseInt(i64, rest[2..], 16) catch return NativeResult.share(fail_default);
                     break :blk sign * v;
                 }
                 // octal with ALLOW_OCTAL, "0o" prefix
                 if (allow_octal and rest.len > 2 and rest[0] == '0' and (rest[1] == 'o' or rest[1] == 'O')) {
-                    const v = std.fmt.parseInt(i64, rest[2..], 8) catch return fail_default;
+                    const v = std.fmt.parseInt(i64, rest[2..], 8) catch return NativeResult.share(fail_default);
                     break :blk sign * v;
                 }
                 // octal with ALLOW_OCTAL ("0" prefix)
                 if (allow_octal and rest.len > 1 and rest[0] == '0' and std.ascii.isDigit(rest[1])) {
-                    const v = std.fmt.parseInt(i64, rest[1..], 8) catch return fail_default;
+                    const v = std.fmt.parseInt(i64, rest[1..], 8) catch return NativeResult.share(fail_default);
                     break :blk sign * v;
                 }
                 // default: decimal, reject leading-zero ints (except plain "0")
-                if (rest.len > 1 and rest[0] == '0') return fail_default;
-                if (!std.ascii.isDigit(rest[0])) return fail_default;
-                const parsed = std.fmt.parseInt(i64, rest, 10) catch return fail_default;
+                if (rest.len > 1 and rest[0] == '0') return NativeResult.share(fail_default);
+                if (!std.ascii.isDigit(rest[0])) return NativeResult.share(fail_default);
+                const parsed = std.fmt.parseInt(i64, rest, 10) catch return NativeResult.share(fail_default);
                 break :blk sign * parsed;
             };
             if (opts_arr) |opts| {
                 const min_v = opts.get(.{ .string = Value.String.borrowed("min_range") });
-                if (min_v != .null and n < Value.toInt(min_v)) return fail_default;
+                if (min_v != .null and n < Value.toInt(min_v)) return NativeResult.share(fail_default);
                 const max_v = opts.get(.{ .string = Value.String.borrowed("max_range") });
-                if (max_v != .null and n > Value.toInt(max_v)) return fail_default;
+                if (max_v != .null and n > Value.toInt(max_v)) return NativeResult.share(fail_default);
             }
-            return .{ .int = n };
+            return NativeResult.scalar(.{ .int = n });
         },
         259 => { // FILTER_VALIDATE_FLOAT
-            if (value == .float or value == .int) return value;
-            const s = if (value == .string) value.string.bytes() else return .{ .bool = false };
+            if (value == .float or value == .int) return NativeResult.share(value);
+            const s = if (value == .string) value.string.bytes() else return NativeResult.scalar(.{ .bool = false });
             const trimmed = std.mem.trim(u8, s, " ");
             var parse_src: []const u8 = trimmed;
             var cleaned = std.ArrayListUnmanaged(u8){};
@@ -3076,53 +3073,53 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Val
             if (std.mem.indexOfScalar(u8, trimmed, ',') != null) {
                 // a ',' is only valid with FILTER_FLAG_ALLOW_THOUSAND, and only
                 // as a \d{1,3}(,\d{3})* grouping in the integer part
-                if ((eff_flags & 8192) == 0) return .{ .bool = false };
-                if (!validThousandGrouping(trimmed)) return .{ .bool = false };
+                if ((eff_flags & 8192) == 0) return NativeResult.scalar(.{ .bool = false });
+                if (!validThousandGrouping(trimmed)) return NativeResult.scalar(.{ .bool = false });
                 for (trimmed) |c| {
-                    if (c != ',') cleaned.append(_ctx.allocator, c) catch return .{ .bool = false };
+                    if (c != ',') cleaned.append(_ctx.allocator, c) catch return NativeResult.scalar(.{ .bool = false });
                 }
                 parse_src = cleaned.items;
             }
-            const f = std.fmt.parseFloat(f64, parse_src) catch return .{ .bool = false };
-            return .{ .float = f };
+            const f = std.fmt.parseFloat(f64, parse_src) catch return NativeResult.scalar(.{ .bool = false });
+            return NativeResult.scalar(.{ .float = f });
         },
         258 => { // FILTER_VALIDATE_BOOLEAN
             const null_on_fail = (eff_flags & 134217728) != 0; // FILTER_NULL_ON_FAILURE
             const fail_val: Value = if (null_on_fail) .null else .{ .bool = false };
-            if (value == .bool) return value;
-            if (value == .int) return .{ .bool = value.int != 0 };
-            const s = if (value == .string) value.string.bytes() else return fail_val;
-            if (std.mem.eql(u8, s, "true") or std.mem.eql(u8, s, "1") or std.mem.eql(u8, s, "yes") or std.mem.eql(u8, s, "on")) return .{ .bool = true };
-            if (std.mem.eql(u8, s, "false") or std.mem.eql(u8, s, "0") or std.mem.eql(u8, s, "no") or std.mem.eql(u8, s, "off")) return .{ .bool = false };
-            return fail_val;
+            if (value == .bool) return NativeResult.share(value);
+            if (value == .int) return NativeResult.scalar(.{ .bool = value.int != 0 });
+            const s = if (value == .string) value.string.bytes() else return NativeResult.share(fail_val);
+            if (std.mem.eql(u8, s, "true") or std.mem.eql(u8, s, "1") or std.mem.eql(u8, s, "yes") or std.mem.eql(u8, s, "on")) return NativeResult.scalar(.{ .bool = true });
+            if (std.mem.eql(u8, s, "false") or std.mem.eql(u8, s, "0") or std.mem.eql(u8, s, "no") or std.mem.eql(u8, s, "off")) return NativeResult.scalar(.{ .bool = false });
+            return NativeResult.share(fail_val);
         },
         272 => { // FILTER_VALIDATE_REGEXP
             const s = if (value == .string) value.string.bytes() else if (value == .int) (try _ctx.createString(blk: {
                 var b: [32]u8 = undefined;
                 break :blk std.fmt.bufPrint(&b, "{d}", .{value.int}) catch "";
-            })) else return fail_default;
+            })) else return NativeResult.share(fail_default);
             if (opts_arr) |opts| {
                 const re_v = opts.get(.{ .string = Value.String.borrowed("regexp") });
                 if (re_v == .string) {
-                    const r = _ctx.vm.callByName("preg_match", &.{ re_v, .{ .string = Value.String.borrowed(s) } }) catch return fail_default;
-                    if (r == .int and r.int > 0) return value;
+                    const r = _ctx.vm.callByName("preg_match", &.{ re_v, .{ .string = Value.String.borrowed(s) } }) catch return NativeResult.share(fail_default);
+                    if (r == .int and r.int > 0) return NativeResult.share(value);
                 }
             }
-            return fail_default;
+            return NativeResult.share(fail_default);
         },
         277 => { // FILTER_VALIDATE_DOMAIN
-            const s = if (value == .string) value.string.bytes() else return fail_default;
-            if (s.len == 0 or s.len > 253) return fail_default;
+            const s = if (value == .string) value.string.bytes() else return NativeResult.share(fail_default);
+            if (s.len == 0 or s.len > 253) return NativeResult.share(fail_default);
             const strict = (eff_flags & 1048576) != 0; // FILTER_FLAG_HOSTNAME
             if (strict) {
                 for (s) |c| {
-                    if (!std.ascii.isAlphanumeric(c) and c != '.' and c != '-') return fail_default;
+                    if (!std.ascii.isAlphanumeric(c) and c != '.' and c != '-') return NativeResult.share(fail_default);
                 }
             }
-            return value;
+            return NativeResult.share(value);
         },
         276 => { // FILTER_VALIDATE_MAC
-            const s = if (value == .string) value.string.bytes() else return fail_default;
+            const s = if (value == .string) value.string.bytes() else return NativeResult.share(fail_default);
             // colon: 6 hex pairs separated by ":" or "-", or 3 quads of 4 hex separated by "."
             const HexHelpers = struct {
                 fn isHex(c: u8) bool {
@@ -3137,41 +3134,42 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Val
                 var it = std.mem.splitScalar(u8, s, sep);
                 var n: usize = 0;
                 while (it.next()) |p| {
-                    if (p.len != 2) return fail_default;
-                    if (!HexHelpers.isHex(p[0]) or !HexHelpers.isHex(p[1])) return fail_default;
+                    if (p.len != 2) return NativeResult.share(fail_default);
+                    if (!HexHelpers.isHex(p[0]) or !HexHelpers.isHex(p[1])) return NativeResult.share(fail_default);
                     n += 1;
                 }
-                if (n == 6) return value;
-                return fail_default;
+                if (n == 6) return NativeResult.share(value);
+                return NativeResult.share(fail_default);
             }
             if (parts_dot == 3) {
                 var it = std.mem.splitScalar(u8, s, '.');
                 var n: usize = 0;
                 while (it.next()) |p| {
-                    if (p.len != 4) return fail_default;
-                    for (p) |c| if (!HexHelpers.isHex(c)) return fail_default;
+                    if (p.len != 4) return NativeResult.share(fail_default);
+                    for (p) |c| if (!HexHelpers.isHex(c)) return NativeResult.share(fail_default);
                     n += 1;
                 }
-                if (n == 3) return value;
+                if (n == 3) return NativeResult.share(value);
             }
-            return fail_default;
+            return NativeResult.share(fail_default);
         },
         519 => { // FILTER_SANITIZE_NUMBER_INT
-            const s = if (value == .string) value.string.bytes() else return fail_default;
+            const s = if (value == .string) value.string.bytes() else return NativeResult.share(fail_default);
             var buf = std.ArrayListUnmanaged(u8){};
+            defer buf.deinit(_ctx.allocator);
             for (s) |c| {
                 if (std.ascii.isDigit(c) or c == '+' or c == '-') try buf.append(_ctx.allocator, c);
             }
             const out = try buf.toOwnedSlice(_ctx.allocator);
-            try _ctx.strings.append(_ctx.allocator, out);
-            return .{ .string = Value.String.borrowed(out) };
+            return NativeResult.takeString(try Value.String.adopt(_ctx.allocator, out));
         },
         520 => { // FILTER_SANITIZE_NUMBER_FLOAT
-            const s = if (value == .string) value.string.bytes() else return fail_default;
+            const s = if (value == .string) value.string.bytes() else return NativeResult.share(fail_default);
             const allow_frac = (eff_flags & 4096) != 0;
             const allow_thou = (eff_flags & 8192) != 0;
             const allow_sci = (eff_flags & 16384) != 0;
             var buf = std.ArrayListUnmanaged(u8){};
+            defer buf.deinit(_ctx.allocator);
             for (s) |c| {
                 if (std.ascii.isDigit(c) or c == '+' or c == '-') {
                     try buf.append(_ctx.allocator, c);
@@ -3184,16 +3182,16 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Val
                 }
             }
             const out = try buf.toOwnedSlice(_ctx.allocator);
-            try _ctx.strings.append(_ctx.allocator, out);
-            return .{ .string = Value.String.borrowed(out) };
+            return NativeResult.takeString(try Value.String.adopt(_ctx.allocator, out));
         },
         515 => { // FILTER_SANITIZE_SPECIAL_CHARS
-            const s = if (value == .string) value.string.bytes() else return .{ .bool = false };
-            return .{ .string = Value.String.borrowed(try sanitizeSpecialChars(_ctx, s)) };
+            const s = if (value == .string) value.string.bytes() else return NativeResult.scalar(.{ .bool = false });
+            return NativeResult.takeString(try sanitizeSpecialChars(_ctx, s));
         },
         522 => { // FILTER_SANITIZE_FULL_SPECIAL_CHARS
-            const s = if (value == .string) value.string.bytes() else return .{ .bool = false };
+            const s = if (value == .string) value.string.bytes() else return NativeResult.scalar(.{ .bool = false });
             var buf = std.ArrayListUnmanaged(u8){};
+            defer buf.deinit(_ctx.allocator);
             for (s) |c| {
                 switch (c) {
                     '<' => try buf.appendSlice(_ctx.allocator, "&lt;"),
@@ -3205,12 +3203,12 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Val
                 }
             }
             const out = try buf.toOwnedSlice(_ctx.allocator);
-            try _ctx.strings.append(_ctx.allocator, out);
-            return .{ .string = Value.String.borrowed(out) };
+            return NativeResult.takeString(try Value.String.adopt(_ctx.allocator, out));
         },
         518 => { // FILTER_SANITIZE_URL
-            const s = if (value == .string) value.string.bytes() else return .{ .bool = false };
+            const s = if (value == .string) value.string.bytes() else return NativeResult.scalar(.{ .bool = false });
             var buf = std.ArrayListUnmanaged(u8){};
+            defer buf.deinit(_ctx.allocator);
             for (s) |c| {
                 // PHP strips all chars except a-zA-Z0-9 and the URL-reserved set
                 if (std.ascii.isAlphanumeric(c)) {
@@ -3223,12 +3221,12 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Val
                 }
             }
             const out = try buf.toOwnedSlice(_ctx.allocator);
-            try _ctx.strings.append(_ctx.allocator, out);
-            return .{ .string = Value.String.borrowed(out) };
+            return NativeResult.takeString(try Value.String.adopt(_ctx.allocator, out));
         },
         517 => { // FILTER_SANITIZE_EMAIL
-            const s = if (value == .string) value.string.bytes() else return .{ .bool = false };
+            const s = if (value == .string) value.string.bytes() else return NativeResult.scalar(.{ .bool = false });
             var buf = std.ArrayListUnmanaged(u8){};
+            defer buf.deinit(_ctx.allocator);
             for (s) |c| {
                 if (std.ascii.isAlphanumeric(c) or c == '@' or c == '.' or c == '!' or c == '#' or
                     c == '$' or c == '%' or c == '&' or c == '\'' or c == '*' or c == '+' or
@@ -3239,8 +3237,7 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Val
                 }
             }
             const out = try buf.toOwnedSlice(_ctx.allocator);
-            try _ctx.strings.append(_ctx.allocator, out);
-            return .{ .string = Value.String.borrowed(out) };
+            return NativeResult.takeString(try Value.String.adopt(_ctx.allocator, out));
         },
         1024 => { // FILTER_CALLBACK
             // options is the callable; PHP invokes it with the value and uses
@@ -3251,17 +3248,18 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Val
                 const top = args[2].array;
                 const o = top.get(.{ .string = Value.String.borrowed("options") });
                 if (o != .null) {
-                    return _ctx.invokeCallable(o, &.{value}) catch return .{ .bool = false };
+                    return NativeResult.share(_ctx.invokeCallable(o, &.{value}) catch return NativeResult.scalar(.{ .bool = false }));
                 }
             }
-            return .{ .bool = false };
+            return NativeResult.scalar(.{ .bool = false });
         },
-        else => return value,
+        else => return NativeResult.share(value),
     }
 }
 
-fn sanitizeSpecialChars(ctx: *NativeContext, s: []const u8) ![]const u8 {
+fn sanitizeSpecialChars(ctx: *NativeContext, s: []const u8) !Value.String {
     var buf = std.ArrayListUnmanaged(u8){};
+    defer buf.deinit(ctx.allocator);
     for (s) |c| {
         switch (c) {
             '<' => try buf.appendSlice(ctx.allocator, "&#60;"),
@@ -3281,8 +3279,7 @@ fn sanitizeSpecialChars(ctx: *NativeContext, s: []const u8) ![]const u8 {
         }
     }
     const out = try buf.toOwnedSlice(ctx.allocator);
-    try ctx.strings.append(ctx.allocator, out);
-    return out;
+    return Value.String.adopt(ctx.allocator, out);
 }
 
 fn isValidIPv4(s: []const u8) bool {
@@ -3350,23 +3347,23 @@ fn isValidIPv6(s: []const u8) bool {
     return groups == 8;
 }
 
-fn native_is_resource(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1) return .{ .bool = false };
-    return .{ .bool = args[0] == .object and isResourceObject(args[0].object.class_name) };
+fn native_is_resource(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = args[0] == .object and isResourceObject(args[0].object.class_name) });
 }
 
-fn native_get_resource_type(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1) return .{ .bool = false };
+fn native_get_resource_type(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
     if (args[0] == .object) {
         const cn = args[0].object.class_name;
         // map zphp internal class names to PHP-canonical resource type strings
-        if (std.mem.eql(u8, cn, "FileHandle")) return .{ .string = Value.String.borrowed("stream") };
-        if (std.mem.eql(u8, cn, "StreamContext")) return .{ .string = Value.String.borrowed("stream-context") };
-        if (std.mem.eql(u8, cn, "CurlHandle")) return .{ .string = Value.String.borrowed("curl") };
-        if (std.mem.eql(u8, cn, "GdImage")) return .{ .string = Value.String.borrowed("gd") };
-        return .{ .string = Value.String.borrowed(cn) };
+        if (std.mem.eql(u8, cn, "FileHandle")) return NativeResult.literal("stream");
+        if (std.mem.eql(u8, cn, "StreamContext")) return NativeResult.literal("stream-context");
+        if (std.mem.eql(u8, cn, "CurlHandle")) return NativeResult.literal("curl");
+        if (std.mem.eql(u8, cn, "GdImage")) return NativeResult.literal("gd");
+        return NativeResult.copyString(ctx.allocator, cn);
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
 pub fn isResourceObject(name: []const u8) bool {
@@ -3376,8 +3373,8 @@ pub fn isResourceObject(name: []const u8) bool {
         std.mem.eql(u8, name, "FileHandle");
 }
 
-fn native_spl_object_hash(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
+fn native_spl_object_hash(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     var id: u64 = 0;
     switch (args[0]) {
         .object => |o| {
@@ -3396,15 +3393,14 @@ fn native_spl_object_hash(ctx: *NativeContext, args: []const Value) RuntimeError
             if (std.mem.startsWith(u8, s.bytes(), "__closure_")) {
                 id = @intCast(@intFromPtr(s.bytes().ptr));
             } else {
-                return .{ .bool = false };
+                return NativeResult.scalar(.{ .bool = false });
             }
         },
-        else => return .{ .bool = false },
+        else => return NativeResult.scalar(.{ .bool = false }),
     }
     // PHP format: 16 hex chars of id, then 16 zeros
-    const hash = std.fmt.allocPrint(ctx.allocator, "{x:0>16}0000000000000000", .{id}) catch return .{ .bool = false };
-    ctx.vm.strings.append(ctx.allocator, hash) catch {};
-    return .{ .string = Value.String.borrowed(hash) };
+    const hash = try std.fmt.allocPrint(ctx.allocator, "{x:0>16}0000000000000000", .{id});
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, hash));
 }
 
 const T_INLINE_HTML: i64 = 267;
@@ -3488,15 +3484,15 @@ fn keywordTokenId(ident: []const u8) ?i64 {
 fn makeToken(ctx: *NativeContext, id: i64, text: []const u8, line: i64) RuntimeError!Value {
     const arr = try ctx.createArray();
     try arr.append(ctx.allocator, .{ .int = id });
-    const s = try std.fmt.allocPrint(ctx.allocator, "{s}", .{text});
-    try ctx.strings.append(ctx.allocator, s);
-    try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(s) });
+    const s = try Value.String.create(ctx.allocator, text);
+    defer s.release();
+    try arr.append(ctx.allocator, .{ .string = s });
     try arr.append(ctx.allocator, .{ .int = line });
     return .{ .array = arr };
 }
 
-fn native_token_get_all(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .array = try ctx.createArray() };
+fn native_token_get_all(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const input = args[0].string.bytes();
     const result = try ctx.createArray();
     var pos: usize = 0;
@@ -3613,171 +3609,171 @@ fn native_token_get_all(ctx: *NativeContext, args: []const Value) RuntimeError!V
                 try result.append(ctx.allocator, try makeToken(ctx, tok_id, ident, line));
             } else {
                 // single character token returned as string
-                const s = try std.fmt.allocPrint(ctx.allocator, "{c}", .{input[pos]});
-                try ctx.strings.append(ctx.allocator, s);
-                try result.append(ctx.allocator, .{ .string = Value.String.borrowed(s) });
+                const s = try Value.String.create(ctx.allocator, input[pos .. pos + 1]);
+                defer s.release();
+                try result.append(ctx.allocator, .{ .string = s });
                 pos += 1;
             }
         }
     }
-    return .{ .array = result };
+    return NativeResult.borrowed(.{ .array = result });
 }
 
-fn native_token_name(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .int) return .{ .string = Value.String.borrowed("UNKNOWN") };
-    return .{ .string = Value.String.borrowed(switch (args[0].int) {
-        322 => "T_ABSTRACT",
-        409 => "T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG",
-        410 => "T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG",
-        362 => "T_AND_EQUAL",
-        344 => "T_ARRAY",
-        384 => "T_ARRAY_CAST",
-        301 => "T_AS",
-        355 => "T_ATTRIBUTE",
-        411 => "T_BAD_CHARACTER",
-        369 => "T_BOOLEAN_AND",
-        368 => "T_BOOLEAN_OR",
-        386 => "T_BOOL_CAST",
-        307 => "T_BREAK",
-        345 => "T_CALLABLE",
-        304 => "T_CASE",
-        315 => "T_CATCH",
-        336 => "T_CLASS",
-        349 => "T_CLASS_C",
-        285 => "T_CLONE",
-        396 => "T_CLOSE_TAG",
-        405 => "T_COALESCE",
-        367 => "T_COALESCE_EQUAL",
-        392 => "T_COMMENT",
-        360 => "T_CONCAT_EQUAL",
-        312 => "T_CONST",
-        269 => "T_CONSTANT_ENCAPSED_STRING",
-        308 => "T_CONTINUE",
-        401 => "T_CURLY_OPEN",
-        380 => "T_DEC",
-        299 => "T_DECLARE",
-        305 => "T_DEFAULT",
-        348 => "T_DIR",
-        359 => "T_DIV_EQUAL",
-        261 => "T_DNUMBER",
-        292 => "T_DO",
-        393 => "T_DOC_COMMENT",
-        400 => "T_DOLLAR_OPEN_CURLY_BRACES",
-        391 => "T_DOUBLE_ARROW",
-        382 => "T_DOUBLE_CAST",
-        402 => "T_DOUBLE_COLON",
-        291 => "T_ECHO",
-        404 => "T_ELLIPSIS",
-        289 => "T_ELSE",
-        288 => "T_ELSEIF",
-        334 => "T_EMPTY",
-        268 => "T_ENCAPSED_AND_WHITESPACE",
-        300 => "T_ENDDECLARE",
-        296 => "T_ENDFOR",
-        298 => "T_ENDFOREACH",
-        290 => "T_ENDIF",
-        303 => "T_ENDSWITCH",
-        294 => "T_ENDWHILE",
-        399 => "T_END_HEREDOC",
-        339 => "T_ENUM",
-        274 => "T_EVAL",
-        286 => "T_EXIT",
-        340 => "T_EXTENDS",
-        347 => "T_FILE",
-        323 => "T_FINAL",
-        316 => "T_FINALLY",
-        311 => "T_FN",
-        295 => "T_FOR",
-        297 => "T_FOREACH",
-        310 => "T_FUNCTION",
-        352 => "T_FUNC_C",
-        320 => "T_GLOBAL",
-        309 => "T_GOTO",
-        335 => "T_HALT_COMPILER",
-        287 => "T_IF",
-        341 => "T_IMPLEMENTS",
-        379 => "T_INC",
-        272 => "T_INCLUDE",
-        273 => "T_INCLUDE_ONCE",
-        267 => "T_INLINE_HTML",
-        283 => "T_INSTANCEOF",
-        319 => "T_INSTEADOF",
-        338 => "T_INTERFACE",
-        381 => "T_INT_CAST",
-        333 => "T_ISSET",
-        370 => "T_IS_EQUAL",
-        375 => "T_IS_GREATER_OR_EQUAL",
-        372 => "T_IS_IDENTICAL",
-        371 => "T_IS_NOT_EQUAL",
-        373 => "T_IS_NOT_IDENTICAL",
-        374 => "T_IS_SMALLER_OR_EQUAL",
-        346 => "T_LINE",
-        343 => "T_LIST",
-        260 => "T_LNUMBER",
-        279 => "T_LOGICAL_AND",
-        277 => "T_LOGICAL_OR",
-        278 => "T_LOGICAL_XOR",
-        306 => "T_MATCH",
-        351 => "T_METHOD_C",
-        357 => "T_MINUS_EQUAL",
-        361 => "T_MOD_EQUAL",
-        358 => "T_MUL_EQUAL",
-        342 => "T_NAMESPACE",
-        263 => "T_NAME_FULLY_QUALIFIED",
-        265 => "T_NAME_QUALIFIED",
-        264 => "T_NAME_RELATIVE",
-        284 => "T_NEW",
-        354 => "T_NS_C",
-        403 => "T_NS_SEPARATOR",
-        390 => "T_NULLSAFE_OBJECT_OPERATOR",
-        271 => "T_NUM_STRING",
-        385 => "T_OBJECT_CAST",
-        389 => "T_OBJECT_OPERATOR",
-        394 => "T_OPEN_TAG",
-        395 => "T_OPEN_TAG_WITH_ECHO",
-        363 => "T_OR_EQUAL",
-        408 => "T_PIPE",
-        356 => "T_PLUS_EQUAL",
-        406 => "T_POW",
-        407 => "T_POW_EQUAL",
-        280 => "T_PRINT",
-        324 => "T_PRIVATE",
-        327 => "T_PRIVATE_SET",
-        353 => "T_PROPERTY_C",
-        325 => "T_PROTECTED",
-        328 => "T_PROTECTED_SET",
-        326 => "T_PUBLIC",
-        329 => "T_PUBLIC_SET",
-        330 => "T_READONLY",
-        275 => "T_REQUIRE",
-        276 => "T_REQUIRE_ONCE",
-        313 => "T_RETURN",
-        377 => "T_SL",
-        365 => "T_SL_EQUAL",
-        376 => "T_SPACESHIP",
-        378 => "T_SR",
-        366 => "T_SR_EQUAL",
-        398 => "T_START_HEREDOC",
-        321 => "T_STATIC",
-        262 => "T_STRING",
-        383 => "T_STRING_CAST",
-        270 => "T_STRING_VARNAME",
-        302 => "T_SWITCH",
-        317 => "T_THROW",
-        337 => "T_TRAIT",
-        350 => "T_TRAIT_C",
-        314 => "T_TRY",
-        332 => "T_UNSET",
-        387 => "T_UNSET_CAST",
-        318 => "T_USE",
-        331 => "T_VAR",
-        266 => "T_VARIABLE",
-        388 => "T_VOID_CAST",
-        293 => "T_WHILE",
-        397 => "T_WHITESPACE",
-        364 => "T_XOR_EQUAL",
-        281 => "T_YIELD",
-        282 => "T_YIELD_FROM",
-        else => "UNKNOWN",
-    }) };
+fn native_token_name(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .int) return NativeResult.literal("UNKNOWN");
+    return switch (args[0].int) {
+        322 => NativeResult.literal("T_ABSTRACT"),
+        409 => NativeResult.literal("T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG"),
+        410 => NativeResult.literal("T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG"),
+        362 => NativeResult.literal("T_AND_EQUAL"),
+        344 => NativeResult.literal("T_ARRAY"),
+        384 => NativeResult.literal("T_ARRAY_CAST"),
+        301 => NativeResult.literal("T_AS"),
+        355 => NativeResult.literal("T_ATTRIBUTE"),
+        411 => NativeResult.literal("T_BAD_CHARACTER"),
+        369 => NativeResult.literal("T_BOOLEAN_AND"),
+        368 => NativeResult.literal("T_BOOLEAN_OR"),
+        386 => NativeResult.literal("T_BOOL_CAST"),
+        307 => NativeResult.literal("T_BREAK"),
+        345 => NativeResult.literal("T_CALLABLE"),
+        304 => NativeResult.literal("T_CASE"),
+        315 => NativeResult.literal("T_CATCH"),
+        336 => NativeResult.literal("T_CLASS"),
+        349 => NativeResult.literal("T_CLASS_C"),
+        285 => NativeResult.literal("T_CLONE"),
+        396 => NativeResult.literal("T_CLOSE_TAG"),
+        405 => NativeResult.literal("T_COALESCE"),
+        367 => NativeResult.literal("T_COALESCE_EQUAL"),
+        392 => NativeResult.literal("T_COMMENT"),
+        360 => NativeResult.literal("T_CONCAT_EQUAL"),
+        312 => NativeResult.literal("T_CONST"),
+        269 => NativeResult.literal("T_CONSTANT_ENCAPSED_STRING"),
+        308 => NativeResult.literal("T_CONTINUE"),
+        401 => NativeResult.literal("T_CURLY_OPEN"),
+        380 => NativeResult.literal("T_DEC"),
+        299 => NativeResult.literal("T_DECLARE"),
+        305 => NativeResult.literal("T_DEFAULT"),
+        348 => NativeResult.literal("T_DIR"),
+        359 => NativeResult.literal("T_DIV_EQUAL"),
+        261 => NativeResult.literal("T_DNUMBER"),
+        292 => NativeResult.literal("T_DO"),
+        393 => NativeResult.literal("T_DOC_COMMENT"),
+        400 => NativeResult.literal("T_DOLLAR_OPEN_CURLY_BRACES"),
+        391 => NativeResult.literal("T_DOUBLE_ARROW"),
+        382 => NativeResult.literal("T_DOUBLE_CAST"),
+        402 => NativeResult.literal("T_DOUBLE_COLON"),
+        291 => NativeResult.literal("T_ECHO"),
+        404 => NativeResult.literal("T_ELLIPSIS"),
+        289 => NativeResult.literal("T_ELSE"),
+        288 => NativeResult.literal("T_ELSEIF"),
+        334 => NativeResult.literal("T_EMPTY"),
+        268 => NativeResult.literal("T_ENCAPSED_AND_WHITESPACE"),
+        300 => NativeResult.literal("T_ENDDECLARE"),
+        296 => NativeResult.literal("T_ENDFOR"),
+        298 => NativeResult.literal("T_ENDFOREACH"),
+        290 => NativeResult.literal("T_ENDIF"),
+        303 => NativeResult.literal("T_ENDSWITCH"),
+        294 => NativeResult.literal("T_ENDWHILE"),
+        399 => NativeResult.literal("T_END_HEREDOC"),
+        339 => NativeResult.literal("T_ENUM"),
+        274 => NativeResult.literal("T_EVAL"),
+        286 => NativeResult.literal("T_EXIT"),
+        340 => NativeResult.literal("T_EXTENDS"),
+        347 => NativeResult.literal("T_FILE"),
+        323 => NativeResult.literal("T_FINAL"),
+        316 => NativeResult.literal("T_FINALLY"),
+        311 => NativeResult.literal("T_FN"),
+        295 => NativeResult.literal("T_FOR"),
+        297 => NativeResult.literal("T_FOREACH"),
+        310 => NativeResult.literal("T_FUNCTION"),
+        352 => NativeResult.literal("T_FUNC_C"),
+        320 => NativeResult.literal("T_GLOBAL"),
+        309 => NativeResult.literal("T_GOTO"),
+        335 => NativeResult.literal("T_HALT_COMPILER"),
+        287 => NativeResult.literal("T_IF"),
+        341 => NativeResult.literal("T_IMPLEMENTS"),
+        379 => NativeResult.literal("T_INC"),
+        272 => NativeResult.literal("T_INCLUDE"),
+        273 => NativeResult.literal("T_INCLUDE_ONCE"),
+        267 => NativeResult.literal("T_INLINE_HTML"),
+        283 => NativeResult.literal("T_INSTANCEOF"),
+        319 => NativeResult.literal("T_INSTEADOF"),
+        338 => NativeResult.literal("T_INTERFACE"),
+        381 => NativeResult.literal("T_INT_CAST"),
+        333 => NativeResult.literal("T_ISSET"),
+        370 => NativeResult.literal("T_IS_EQUAL"),
+        375 => NativeResult.literal("T_IS_GREATER_OR_EQUAL"),
+        372 => NativeResult.literal("T_IS_IDENTICAL"),
+        371 => NativeResult.literal("T_IS_NOT_EQUAL"),
+        373 => NativeResult.literal("T_IS_NOT_IDENTICAL"),
+        374 => NativeResult.literal("T_IS_SMALLER_OR_EQUAL"),
+        346 => NativeResult.literal("T_LINE"),
+        343 => NativeResult.literal("T_LIST"),
+        260 => NativeResult.literal("T_LNUMBER"),
+        279 => NativeResult.literal("T_LOGICAL_AND"),
+        277 => NativeResult.literal("T_LOGICAL_OR"),
+        278 => NativeResult.literal("T_LOGICAL_XOR"),
+        306 => NativeResult.literal("T_MATCH"),
+        351 => NativeResult.literal("T_METHOD_C"),
+        357 => NativeResult.literal("T_MINUS_EQUAL"),
+        361 => NativeResult.literal("T_MOD_EQUAL"),
+        358 => NativeResult.literal("T_MUL_EQUAL"),
+        342 => NativeResult.literal("T_NAMESPACE"),
+        263 => NativeResult.literal("T_NAME_FULLY_QUALIFIED"),
+        265 => NativeResult.literal("T_NAME_QUALIFIED"),
+        264 => NativeResult.literal("T_NAME_RELATIVE"),
+        284 => NativeResult.literal("T_NEW"),
+        354 => NativeResult.literal("T_NS_C"),
+        403 => NativeResult.literal("T_NS_SEPARATOR"),
+        390 => NativeResult.literal("T_NULLSAFE_OBJECT_OPERATOR"),
+        271 => NativeResult.literal("T_NUM_STRING"),
+        385 => NativeResult.literal("T_OBJECT_CAST"),
+        389 => NativeResult.literal("T_OBJECT_OPERATOR"),
+        394 => NativeResult.literal("T_OPEN_TAG"),
+        395 => NativeResult.literal("T_OPEN_TAG_WITH_ECHO"),
+        363 => NativeResult.literal("T_OR_EQUAL"),
+        408 => NativeResult.literal("T_PIPE"),
+        356 => NativeResult.literal("T_PLUS_EQUAL"),
+        406 => NativeResult.literal("T_POW"),
+        407 => NativeResult.literal("T_POW_EQUAL"),
+        280 => NativeResult.literal("T_PRINT"),
+        324 => NativeResult.literal("T_PRIVATE"),
+        327 => NativeResult.literal("T_PRIVATE_SET"),
+        353 => NativeResult.literal("T_PROPERTY_C"),
+        325 => NativeResult.literal("T_PROTECTED"),
+        328 => NativeResult.literal("T_PROTECTED_SET"),
+        326 => NativeResult.literal("T_PUBLIC"),
+        329 => NativeResult.literal("T_PUBLIC_SET"),
+        330 => NativeResult.literal("T_READONLY"),
+        275 => NativeResult.literal("T_REQUIRE"),
+        276 => NativeResult.literal("T_REQUIRE_ONCE"),
+        313 => NativeResult.literal("T_RETURN"),
+        377 => NativeResult.literal("T_SL"),
+        365 => NativeResult.literal("T_SL_EQUAL"),
+        376 => NativeResult.literal("T_SPACESHIP"),
+        378 => NativeResult.literal("T_SR"),
+        366 => NativeResult.literal("T_SR_EQUAL"),
+        398 => NativeResult.literal("T_START_HEREDOC"),
+        321 => NativeResult.literal("T_STATIC"),
+        262 => NativeResult.literal("T_STRING"),
+        383 => NativeResult.literal("T_STRING_CAST"),
+        270 => NativeResult.literal("T_STRING_VARNAME"),
+        302 => NativeResult.literal("T_SWITCH"),
+        317 => NativeResult.literal("T_THROW"),
+        337 => NativeResult.literal("T_TRAIT"),
+        350 => NativeResult.literal("T_TRAIT_C"),
+        314 => NativeResult.literal("T_TRY"),
+        332 => NativeResult.literal("T_UNSET"),
+        387 => NativeResult.literal("T_UNSET_CAST"),
+        318 => NativeResult.literal("T_USE"),
+        331 => NativeResult.literal("T_VAR"),
+        266 => NativeResult.literal("T_VARIABLE"),
+        388 => NativeResult.literal("T_VOID_CAST"),
+        293 => NativeResult.literal("T_WHILE"),
+        397 => NativeResult.literal("T_WHITESPACE"),
+        364 => NativeResult.literal("T_XOR_EQUAL"),
+        281 => NativeResult.literal("T_YIELD"),
+        282 => NativeResult.literal("T_YIELD_FROM"),
+        else => NativeResult.literal("UNKNOWN"),
+    };
 }

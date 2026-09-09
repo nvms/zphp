@@ -1,5 +1,6 @@
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
@@ -9,7 +10,7 @@ fn enumClassFromCallName(ctx: *NativeContext) ?[]const u8 {
     return null;
 }
 
-pub fn enumCases(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+pub fn enumCases(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const enum_name = enumClassFromCallName(ctx) orelse return error.RuntimeError;
     const def = ctx.vm.classes.get(enum_name) orelse return error.RuntimeError;
     var arr = try ctx.createArray();
@@ -18,7 +19,7 @@ pub fn enumCases(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
             try arr.append(ctx.allocator, val);
         }
     }
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
 fn coerceForLookup(ctx: *NativeContext, def_backed: anytype, arg: Value) !Value {
@@ -124,37 +125,38 @@ fn checkEnumArgType(ctx: *NativeContext, backed: anytype, enum_name: []const u8,
     return null;
 }
 
-pub fn enumFrom(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+pub fn enumFrom(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return error.RuntimeError;
     const enum_name = enumClassFromCallName(ctx) orelse return error.RuntimeError;
     const def = ctx.vm.classes.get(enum_name) orelse return error.RuntimeError;
-    if (try checkEnumArgType(ctx, def.backed_type, enum_name, "from", args[0])) |err_val| return err_val;
+    if (try checkEnumArgType(ctx, def.backed_type, enum_name, "from", args[0])) |err_val| return NativeResult.borrowed(err_val);
     const lookup = try coerceForLookup(ctx, def.backed_type, args[0]);
     var iter = def.static_props.iterator();
     while (iter.next()) |entry| {
         if (entry.value_ptr.* == .object) {
             const case_val = entry.value_ptr.*.object.get("value");
-            if (Value.identical(case_val, lookup)) return entry.value_ptr.*;
+            if (Value.identical(case_val, lookup)) return NativeResult.borrowed(entry.value_ptr.*);
         }
     }
     const arg_str = try argDisplayString(ctx, lookup);
     const msg = try std.fmt.allocPrint(ctx.allocator, "{s} is not a valid backing value for enum {s}", .{ arg_str, enum_name });
     try ctx.vm.strings.append(ctx.allocator, msg);
-    return throwBuiltin(ctx, "ValueError", msg);
+    _ = try throwBuiltin(ctx, "ValueError", msg);
+    unreachable;
 }
 
-pub fn enumTryFrom(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .null;
-    const enum_name = enumClassFromCallName(ctx) orelse return .null;
-    const def = ctx.vm.classes.get(enum_name) orelse return .null;
-    if (try checkEnumArgType(ctx, def.backed_type, enum_name, "tryFrom", args[0])) |err_val| return err_val;
+pub fn enumTryFrom(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.null);
+    const enum_name = enumClassFromCallName(ctx) orelse return NativeResult.scalar(.null);
+    const def = ctx.vm.classes.get(enum_name) orelse return NativeResult.scalar(.null);
+    if (try checkEnumArgType(ctx, def.backed_type, enum_name, "tryFrom", args[0])) |err_val| return NativeResult.borrowed(err_val);
     const lookup = try coerceForLookup(ctx, def.backed_type, args[0]);
     var iter = def.static_props.iterator();
     while (iter.next()) |entry| {
         if (entry.value_ptr.* == .object) {
             const case_val = entry.value_ptr.*.object.get("value");
-            if (Value.identical(case_val, lookup)) return entry.value_ptr.*;
+            if (Value.identical(case_val, lookup)) return NativeResult.borrowed(entry.value_ptr.*);
         }
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }

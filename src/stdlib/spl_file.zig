@@ -4,6 +4,7 @@ const PhpArray = @import("../runtime/value.zig").PhpArray;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
 const vm_mod = @import("../runtime/vm.zig");
 const VM = vm_mod.VM;
+const NativeResult = vm_mod.NativeResult;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
 
@@ -95,12 +96,6 @@ fn objGetInt(obj: *PhpObject, key: []const u8) i64 {
     return 0;
 }
 
-fn createString(ctx: *NativeContext, s: []const u8) ![]const u8 {
-    const copy = try ctx.allocator.dupe(u8, s);
-    try ctx.vm.strings.append(ctx.allocator, copy);
-    return copy;
-}
-
 fn getHandle(obj: *PhpObject) ?Value {
     const fh = obj.get("__sfo_fh");
     if (fh == .object) return fh;
@@ -108,46 +103,45 @@ fn getHandle(obj: *PhpObject) ?Value {
 }
 
 fn defaultCsvControl(ctx: *NativeContext) RuntimeError!*PhpArray {
-    const arr = try ctx.allocator.create(PhpArray);
-    arr.* = .{};
-    try ctx.vm.arrays.append(ctx.allocator, arr);
+    const arr = try ctx.createArray();
     try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(",") });
     try arr.append(ctx.allocator, .{ .string = Value.String.borrowed("\"") });
     try arr.append(ctx.allocator, .{ .string = Value.String.borrowed("\\") });
     return arr;
 }
 
-fn sfoConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1 or args[0] != .string) return .null;
+fn sfoConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
     const mode: Value = if (args.len >= 2 and args[1] == .string) args[1] else .{ .string = Value.String.borrowed("r") };
     const fh = try ctx.vm.callByName("fopen", &.{ args[0], mode });
     if (fh != .object) {
         const msg = try std.fmt.allocPrint(ctx.allocator, "SplFileObject::__construct(): Failed to open stream: {s}", .{args[0].string.bytes()});
         try ctx.vm.strings.append(ctx.allocator, msg);
-        if (try ctx.vm.throwBuiltinException("RuntimeException", msg)) return .null;
+        if (try ctx.vm.throwBuiltinException("RuntimeException", msg)) return NativeResult.scalar(.null);
         return error.RuntimeError;
     }
     try obj.set(ctx.allocator, "__sfo_fh", fh);
-    try obj.set(ctx.allocator, "__pathname", .{ .string = Value.String.borrowed(try createString(ctx, args[0].string.bytes())) });
+    try obj.set(ctx.allocator, "__pathname", args[0]);
     try obj.set(ctx.allocator, "__sfo_line", .{ .int = 0 });
     try obj.set(ctx.allocator, "__sfo_flags", .{ .int = 0 });
     try obj.set(ctx.allocator, "__sfo_max", .{ .int = 0 });
     try obj.set(ctx.allocator, "__sfo_csv", .{ .array = try defaultCsvControl(ctx) });
     try obj.set(ctx.allocator, "__sfo_current", .null);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn stfoConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    _ = getThis(ctx) orelse return .null;
+fn stfoConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    _ = getThis(ctx) orelse return NativeResult.scalar(.null);
     var path_buf: [64]u8 = undefined;
     const path = if (args.len >= 1 and args[0] != .null) blk: {
         const max = Value.toInt(args[0]);
         const s = std.fmt.bufPrint(&path_buf, "php://temp/maxmemory:{d}", .{max}) catch "php://temp";
         break :blk s;
     } else "php://temp";
-    const path_str = try createString(ctx, path);
-    return sfoConstruct(ctx, &.{ .{ .string = Value.String.borrowed(path_str) }, .{ .string = Value.String.borrowed("w+") } });
+    const path_str = try Value.String.create(ctx.allocator, path);
+    defer path_str.release();
+    return sfoConstruct(ctx, &.{ .{ .string = path_str }, .{ .string = Value.String.borrowed("w+") } });
 }
 
 fn readOneLine(ctx: *NativeContext, obj: *PhpObject) RuntimeError!void {
@@ -158,6 +152,8 @@ fn readOneLine(ctx: *NativeContext, obj: *PhpObject) RuntimeError!void {
     const flags = objGetInt(obj, "__sfo_flags");
     while (true) {
         var line: Value = undefined;
+        var trimmed: ?Value.String = null;
+        defer if (trimmed) |value| value.release();
         if ((flags & FLAG_READ_CSV) != 0) {
             const csv_v = obj.get("__sfo_csv");
             const sep_v: Value = if (csv_v == .array) csv_v.array.get(.{ .int = 0 }) else .{ .string = Value.String.borrowed(",") };
@@ -174,7 +170,8 @@ fn readOneLine(ctx: *NativeContext, obj: *PhpObject) RuntimeError!void {
         if ((flags & FLAG_READ_CSV) == 0 and (flags & FLAG_DROP_NEW_LINE) != 0 and line == .string) {
             var s = line.string.bytes();
             while (s.len > 0 and (s[s.len - 1] == '\n' or s[s.len - 1] == '\r')) s = s[0 .. s.len - 1];
-            line = .{ .string = Value.String.borrowed(try createString(ctx, s)) };
+            trimmed = try Value.String.create(ctx.allocator, s);
+            line = .{ .string = trimmed.? };
         }
         if ((flags & FLAG_SKIP_EMPTY) != 0) {
             const is_empty = blk: {
@@ -198,14 +195,14 @@ fn readOneLine(ctx: *NativeContext, obj: *PhpObject) RuntimeError!void {
     }
 }
 
-fn sfoRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const fh = getHandle(obj) orelse return .null;
+fn sfoRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const fh = getHandle(obj) orelse return NativeResult.scalar(.null);
     _ = try ctx.vm.callByName("fseek", &.{ fh, .{ .int = 0 } });
     try obj.set(ctx.allocator, "__sfo_line", .{ .int = 0 });
     // mark current as "unread" so the first current()/valid() call lazily fetches
     try obj.set(ctx.allocator, "__sfo_current", .null);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
 fn ensureCurrent(ctx: *NativeContext, obj: *@import("../runtime/value.zig").PhpObject) !void {
@@ -213,108 +210,108 @@ fn ensureCurrent(ctx: *NativeContext, obj: *@import("../runtime/value.zig").PhpO
     if (cur == .null) try readOneLine(ctx, obj);
 }
 
-fn sfoValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn sfoValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     try ensureCurrent(ctx, obj);
     const cur = obj.get("__sfo_current");
-    if (cur == .bool and !cur.bool) return .{ .bool = false };
-    if (cur == .null) return .{ .bool = false };
-    return .{ .bool = true };
+    if (cur == .bool and !cur.bool) return NativeResult.scalar(.{ .bool = false });
+    if (cur == .null) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn sfoCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn sfoCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     try ensureCurrent(ctx, obj);
-    return obj.get("__sfo_current");
+    return NativeResult.share(obj.get("__sfo_current"));
 }
 
-fn sfoKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    return .{ .int = objGetInt(obj, "__sfo_line") };
+fn sfoKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = objGetInt(obj, "__sfo_line") });
 }
 
-fn sfoNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn sfoNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__sfo_line", .{ .int = objGetInt(obj, "__sfo_line") + 1 });
     try readOneLine(ctx, obj);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn sfoFgets(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const fh = getHandle(obj) orelse return .{ .bool = false };
+fn sfoFgets(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const fh = getHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
     try obj.set(ctx.allocator, "__sfo_line", .{ .int = objGetInt(obj, "__sfo_line") + 1 });
-    return ctx.vm.callByName("fgets", &.{fh});
+    return NativeResult.share(try ctx.vm.callByName("fgets", &.{fh}));
 }
 
-fn sfoFgetcsv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const fh = getHandle(obj) orelse return .{ .bool = false };
+fn sfoFgetcsv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const fh = getHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const csv_v = obj.get("__sfo_csv");
     const sep: Value = if (args.len >= 1 and args[0] == .string) args[0] else if (csv_v == .array) csv_v.array.get(.{ .int = 0 }) else .{ .string = Value.String.borrowed(",") };
     const enc: Value = if (args.len >= 2 and args[1] == .string) args[1] else if (csv_v == .array) csv_v.array.get(.{ .int = 1 }) else .{ .string = Value.String.borrowed("\"") };
     const esc: Value = if (args.len >= 3 and args[2] == .string) args[2] else if (csv_v == .array) csv_v.array.get(.{ .int = 2 }) else .{ .string = Value.String.borrowed("\\") };
     try obj.set(ctx.allocator, "__sfo_line", .{ .int = objGetInt(obj, "__sfo_line") + 1 });
-    return ctx.vm.callByName("fgetcsv", &.{ fh, .{ .int = 0 }, sep, enc, esc });
+    return NativeResult.share(try ctx.vm.callByName("fgetcsv", &.{ fh, .{ .int = 0 }, sep, enc, esc }));
 }
 
-fn sfoFputcsv(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const fh = getHandle(obj) orelse return .{ .bool = false };
-    if (args.len < 1 or args[0] != .array) return .{ .bool = false };
+fn sfoFputcsv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const fh = getHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len < 1 or args[0] != .array) return NativeResult.scalar(.{ .bool = false });
     const csv_v = obj.get("__sfo_csv");
     const sep: Value = if (args.len >= 2 and args[1] == .string) args[1] else if (csv_v == .array) csv_v.array.get(.{ .int = 0 }) else .{ .string = Value.String.borrowed(",") };
     const enc: Value = if (args.len >= 3 and args[2] == .string) args[2] else if (csv_v == .array) csv_v.array.get(.{ .int = 1 }) else .{ .string = Value.String.borrowed("\"") };
     const esc: Value = if (args.len >= 4 and args[3] == .string) args[3] else if (csv_v == .array) csv_v.array.get(.{ .int = 2 }) else .{ .string = Value.String.borrowed("\\") };
     const eol: Value = if (args.len >= 5 and args[4] == .string) args[4] else .{ .string = Value.String.borrowed("\n") };
-    return ctx.vm.callByName("fputcsv", &.{ fh, args[0], sep, enc, esc, eol });
+    return NativeResult.share(try ctx.vm.callByName("fputcsv", &.{ fh, args[0], sep, enc, esc, eol }));
 }
 
-fn sfoFread(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const fh = getHandle(obj) orelse return .{ .bool = false };
-    if (args.len < 1) return .{ .bool = false };
-    return ctx.vm.callByName("fread", &.{ fh, args[0] });
+fn sfoFread(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const fh = getHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.share(try ctx.vm.callByName("fread", &.{ fh, args[0] }));
 }
 
-fn sfoFwrite(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const fh = getHandle(obj) orelse return .{ .bool = false };
-    if (args.len < 1) return .{ .bool = false };
-    if (args.len >= 2) return ctx.vm.callByName("fwrite", &.{ fh, args[0], args[1] });
-    return ctx.vm.callByName("fwrite", &.{ fh, args[0] });
+fn sfoFwrite(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const fh = getHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
+    if (args.len >= 2) return NativeResult.share(try ctx.vm.callByName("fwrite", &.{ fh, args[0], args[1] }));
+    return NativeResult.share(try ctx.vm.callByName("fwrite", &.{ fh, args[0] }));
 }
 
-fn sfoFseek(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = -1 };
-    const fh = getHandle(obj) orelse return .{ .int = -1 };
-    if (args.len < 1) return .{ .int = -1 };
+fn sfoFseek(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = -1 });
+    const fh = getHandle(obj) orelse return NativeResult.scalar(.{ .int = -1 });
+    if (args.len < 1) return NativeResult.scalar(.{ .int = -1 });
     const whence: Value = if (args.len >= 2) args[1] else .{ .int = 0 };
-    return ctx.vm.callByName("fseek", &.{ fh, args[0], whence });
+    return NativeResult.share(try ctx.vm.callByName("fseek", &.{ fh, args[0], whence }));
 }
 
-fn sfoFtell(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const fh = getHandle(obj) orelse return .{ .bool = false };
-    return ctx.vm.callByName("ftell", &.{fh});
+fn sfoFtell(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const fh = getHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.share(try ctx.vm.callByName("ftell", &.{fh}));
 }
 
-fn sfoFeof(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = true };
-    const fh = getHandle(obj) orelse return .{ .bool = true };
-    return ctx.vm.callByName("feof", &.{fh});
+fn sfoFeof(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = true });
+    const fh = getHandle(obj) orelse return NativeResult.scalar(.{ .bool = true });
+    return NativeResult.share(try ctx.vm.callByName("feof", &.{fh}));
 }
 
-fn sfoFgetc(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const fh = getHandle(obj) orelse return .{ .bool = false };
-    return ctx.vm.callByName("fgetc", &.{fh});
+fn sfoFgetc(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const fh = getHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.share(try ctx.vm.callByName("fgetc", &.{fh}));
 }
 
-fn sfoFpassthru(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    const fh = getHandle(obj) orelse return .{ .int = 0 };
-    if (ctx.vm.native_fns.get("fpassthru")) |_| return ctx.vm.callByName("fpassthru", &.{fh});
+fn sfoFpassthru(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    const fh = getHandle(obj) orelse return NativeResult.scalar(.{ .int = 0 });
+    if (ctx.vm.native_fns.get("fpassthru")) |_| return NativeResult.share(try ctx.vm.callByName("fpassthru", &.{fh}));
     var total: i64 = 0;
     while (true) {
         const chunk = try ctx.vm.callByName("fread", &.{ fh, .{ .int = 8192 } });
@@ -322,42 +319,40 @@ fn sfoFpassthru(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
         try ctx.vm.output.appendSlice(ctx.allocator, chunk.string.bytes());
         total += @intCast(chunk.string.bytes().len);
     }
-    return .{ .int = total };
+    return NativeResult.scalar(.{ .int = total });
 }
 
-fn sfoFflush(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const fh = getHandle(obj) orelse return .{ .bool = false };
-    if (ctx.vm.native_fns.get("fflush")) |_| return ctx.vm.callByName("fflush", &.{fh});
-    return .{ .bool = true };
+fn sfoFflush(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const fh = getHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    if (ctx.vm.native_fns.get("fflush")) |_| return NativeResult.share(try ctx.vm.callByName("fflush", &.{fh}));
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn sfoFtruncate(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const fh = getHandle(obj) orelse return .{ .bool = false };
-    if (args.len < 1) return .{ .bool = false };
-    if (ctx.vm.native_fns.get("ftruncate")) |_| return ctx.vm.callByName("ftruncate", &.{ fh, args[0] });
-    return .{ .bool = false };
+fn sfoFtruncate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const fh = getHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
+    if (ctx.vm.native_fns.get("ftruncate")) |_| return NativeResult.share(try ctx.vm.callByName("ftruncate", &.{ fh, args[0] }));
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn sfoFlock(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    const fh = getHandle(obj) orelse return .{ .bool = false };
-    if (args.len < 1) return .{ .bool = false };
-    if (ctx.vm.native_fns.get("flock")) |_| return ctx.vm.callByName("flock", &.{ fh, args[0] });
-    return .{ .bool = true };
+fn sfoFlock(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const fh = getHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
+    if (ctx.vm.native_fns.get("flock")) |_| return NativeResult.share(try ctx.vm.callByName("flock", &.{ fh, args[0] }));
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn sfoGetCsvControl(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    return obj.get("__sfo_csv");
+fn sfoGetCsvControl(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(obj.get("__sfo_csv"));
 }
 
-fn sfoSetCsvControl(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    const arr = try ctx.allocator.create(PhpArray);
-    arr.* = .{};
-    try ctx.vm.arrays.append(ctx.allocator, arr);
+fn sfoSetCsvControl(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = try ctx.createArray();
     const sep: Value = if (args.len >= 1 and args[0] == .string) args[0] else .{ .string = Value.String.borrowed(",") };
     const enc: Value = if (args.len >= 2 and args[1] == .string) args[1] else .{ .string = Value.String.borrowed("\"") };
     const esc: Value = if (args.len >= 3 and args[2] == .string) args[2] else .{ .string = Value.String.borrowed("\\") };
@@ -365,36 +360,36 @@ fn sfoSetCsvControl(ctx: *NativeContext, args: []const Value) RuntimeError!Value
     try arr.append(ctx.allocator, enc);
     try arr.append(ctx.allocator, esc);
     try obj.set(ctx.allocator, "__sfo_csv", .{ .array = arr });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn sfoGetMaxLineLen(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    return .{ .int = objGetInt(obj, "__sfo_max") };
+fn sfoGetMaxLineLen(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = objGetInt(obj, "__sfo_max") });
 }
 
-fn sfoSetMaxLineLen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1) return .null;
+fn sfoSetMaxLineLen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__sfo_max", .{ .int = Value.toInt(args[0]) });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn sfoGetFlags(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    return .{ .int = objGetInt(obj, "__sfo_flags") };
+fn sfoGetFlags(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = objGetInt(obj, "__sfo_flags") });
 }
 
-fn sfoSetFlags(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1) return .null;
+fn sfoSetFlags(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__sfo_flags", .{ .int = Value.toInt(args[0]) });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn sfoSeek(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1) return .null;
+fn sfoSeek(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
     const target = Value.toInt(args[0]);
     _ = try sfoRewind(ctx, &.{});
     // rewind leaves the file handle at byte 0 and __sfo_line at 0 / current
@@ -409,13 +404,13 @@ fn sfoSeek(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
             _ = try sfoNext(ctx, &.{});
         }
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn sfoHasChildren(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = false };
+fn sfoHasChildren(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn sfoGetChildren(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .null;
+fn sfoGetChildren(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.null);
 }

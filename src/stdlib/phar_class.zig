@@ -4,6 +4,7 @@ const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
 const vm_mod = @import("../runtime/vm.zig");
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const VM = vm_mod.VM;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
@@ -145,9 +146,9 @@ fn dupString(ctx: *NativeContext, s: []const u8) ![]const u8 {
     return owned;
 }
 
-fn phConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1 or args[0] != .string) return .null;
+fn phConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
     const filename = try dupString(ctx, args[0].string.bytes());
     try obj.set(ctx.allocator, "__filename", .{ .string = Value.String.borrowed(filename) });
     try obj.set(ctx.allocator, "__stub", .{ .string = Value.String.borrowed(phar.default_stub) });
@@ -159,16 +160,16 @@ fn phConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     // if file exists, parse it and load entries
     const cwd = std.fs.cwd();
     const file = cwd.openFile(filename, .{}) catch |e| switch (e) {
-        error.FileNotFound => return .null,
-        else => return .null,
+        error.FileNotFound => return NativeResult.scalar(.null),
+        else => return NativeResult.scalar(.null),
     };
     defer file.close();
-    const stat = file.stat() catch return .null;
-    const bytes = ctx.allocator.alloc(u8, @intCast(stat.size)) catch return .null;
+    const stat = file.stat() catch return NativeResult.scalar(.null);
+    const bytes = ctx.allocator.alloc(u8, @intCast(stat.size)) catch return NativeResult.scalar(.null);
     defer ctx.allocator.free(bytes);
-    _ = file.readAll(bytes) catch return .null;
+    _ = file.readAll(bytes) catch return NativeResult.scalar(.null);
 
-    var parsed = phar.parse(ctx.allocator, bytes) catch return .null;
+    var parsed = phar.parse(ctx.allocator, bytes) catch return NativeResult.scalar(.null);
     defer parsed.deinit(ctx.allocator);
 
     // capture stub: bytes before manifest start
@@ -191,35 +192,35 @@ fn phConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
         const name_copy = try dupString(ctx, kv.key_ptr.*);
         try entries_arr.set(ctx.allocator, .{ .string = Value.String.borrowed(name_copy) }, .{ .string = Value.String.borrowed(data) });
     }
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn phAddFromString(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 2) return .null;
-    if (args[0] != .string) return .null;
+fn phAddFromString(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 2) return NativeResult.scalar(.null);
+    if (args[0] != .string) return NativeResult.scalar(.null);
     const name_str = try dupString(ctx, args[0].string.bytes());
     const content = if (args[1] == .string) try dupString(ctx, args[1].string.bytes()) else "";
     const arr = try ensureEntries(ctx, obj);
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(name_str) }, .{ .string = Value.String.borrowed(content) });
     try saveIfNotBuffering(ctx, obj);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn phAddFile(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1 or args[0] != .string) return .null;
+fn phAddFile(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
     const path = args[0].string.bytes();
     const local_name = if (args.len >= 2 and args[1] == .string) args[1].string.bytes() else std.fs.path.basename(path);
 
     const cwd = std.fs.cwd();
-    const file = cwd.openFile(path, .{}) catch return .null;
+    const file = cwd.openFile(path, .{}) catch return NativeResult.scalar(.null);
     defer file.close();
-    const stat = file.stat() catch return .null;
-    const buf = ctx.allocator.alloc(u8, @intCast(stat.size)) catch return .null;
+    const stat = file.stat() catch return NativeResult.scalar(.null);
+    const buf = ctx.allocator.alloc(u8, @intCast(stat.size)) catch return NativeResult.scalar(.null);
     _ = file.readAll(buf) catch {
         ctx.allocator.free(buf);
-        return .null;
+        return NativeResult.scalar(.null);
     };
     try ctx.strings.append(ctx.allocator, buf);
 
@@ -227,231 +228,231 @@ fn phAddFile(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     const name_str = try dupString(ctx, local_name);
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(name_str) }, .{ .string = Value.String.borrowed(buf) });
     try saveIfNotBuffering(ctx, obj);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn phSetStub(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+fn phSetStub(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const stub = try dupString(ctx, args[0].string.bytes());
     try obj.set(ctx.allocator, "__stub", .{ .string = Value.String.borrowed(stub) });
     try saveIfNotBuffering(ctx, obj);
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn phGetStub(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .string = Value.String.borrowed("") };
-    return obj.get("__stub");
+fn phGetStub(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.literal("");
+    return NativeResult.share(obj.get("__stub"));
 }
 
-fn phGetAlias(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn phGetAlias(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const v = obj.get("__alias");
-    if (v == .string and v.string.bytes().len == 0) return .null;
-    return v;
+    if (v == .string and v.string.bytes().len == 0) return NativeResult.scalar(.null);
+    return NativeResult.share(v);
 }
 
-fn phSetAlias(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+fn phSetAlias(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const alias = try dupString(ctx, args[0].string.bytes());
     try obj.set(ctx.allocator, "__alias", .{ .string = Value.String.borrowed(alias) });
     try saveIfNotBuffering(ctx, obj);
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn phCount(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .int = 0 };
-    const arr = getEntries(obj) orelse return .{ .int = 0 };
-    return .{ .int = arr.length() };
+fn phCount(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+    const arr = getEntries(obj) orelse return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = arr.length() });
 }
 
-fn phOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
-    const arr = getEntries(obj) orelse return .{ .bool = false };
-    if (arr.string_index.contains(args[0].string.bytes())) return .{ .bool = true };
-    return .{ .bool = false };
+fn phOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const arr = getEntries(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    if (arr.string_index.contains(args[0].string.bytes())) return NativeResult.scalar(.{ .bool = true });
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn phOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1 or args[0] != .string) return .null;
-    const arr = getEntries(obj) orelse return .null;
-    return arr.get(.{ .string = args[0].string });
+fn phOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
+    const arr = getEntries(obj) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(arr.get(.{ .string = args[0].string }));
 }
 
-fn phOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 2 or args[0] != .string) return .null;
+fn phOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 2 or args[0] != .string) return NativeResult.scalar(.null);
     const name = try dupString(ctx, args[0].string.bytes());
     const content = if (args[1] == .string) try dupString(ctx, args[1].string.bytes()) else "";
     const arr = try ensureEntries(ctx, obj);
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(name) }, .{ .string = Value.String.borrowed(content) });
     try saveIfNotBuffering(ctx, obj);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn phOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1 or args[0] != .string) return .null;
-    const arr = getEntries(obj) orelse return .null;
+fn phOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
+    const arr = getEntries(obj) orelse return NativeResult.scalar(.null);
     arr.remove(.{ .string = args[0].string });
     try saveIfNotBuffering(ctx, obj);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn phStartBuffering(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn phStartBuffering(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__buffering", .{ .bool = true });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn phStopBuffering(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn phStopBuffering(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__buffering", .{ .bool = false });
     try saveAll(ctx, obj);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn phGetPath(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .string = Value.String.borrowed("") };
-    return obj.get("__filename");
+fn phGetPath(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.literal("");
+    return NativeResult.share(obj.get("__filename"));
 }
 
-fn phIsWritable(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = true };
+fn phIsWritable(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn phRewind(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn phRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn phValid(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn phValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const cursor = obj.get("__cursor");
-    const arr = getEntries(obj) orelse return .{ .bool = false };
-    if (cursor != .int) return .{ .bool = false };
-    return .{ .bool = cursor.int >= 0 and cursor.int < arr.length() };
+    const arr = getEntries(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    if (cursor != .int) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = cursor.int >= 0 and cursor.int < arr.length() });
 }
 
-fn phKey(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn phKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const cursor = obj.get("__cursor");
-    const arr = getEntries(obj) orelse return .null;
-    if (cursor != .int) return .null;
+    const arr = getEntries(obj) orelse return NativeResult.scalar(.null);
+    if (cursor != .int) return NativeResult.scalar(.null);
     const idx: usize = @intCast(cursor.int);
-    if (idx >= arr.entries.items.len) return .null;
+    if (idx >= arr.entries.items.len) return NativeResult.scalar(.null);
     const key = arr.entries.items[idx].key;
     return switch (key) {
-        .string => |s| .{ .string = s },
-        .int => |i| .{ .int = i },
+        .string => |s| NativeResult.shareString(s),
+        .int => |i| NativeResult.scalar(.{ .int = i }),
     };
 }
 
-fn phCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn phCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const cursor = obj.get("__cursor");
-    const arr = getEntries(obj) orelse return .null;
-    if (cursor != .int) return .null;
+    const arr = getEntries(obj) orelse return NativeResult.scalar(.null);
+    if (cursor != .int) return NativeResult.scalar(.null);
     const idx: usize = @intCast(cursor.int);
-    if (idx >= arr.entries.items.len) return .null;
-    return arr.entries.items[idx].value;
+    if (idx >= arr.entries.items.len) return NativeResult.scalar(.null);
+    return NativeResult.share(arr.entries.items[idx].value);
 }
 
-fn phNext(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
+fn phNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const cursor = obj.get("__cursor");
     const next_val: i64 = if (cursor == .int) cursor.int + 1 else 0;
     try obj.set(ctx.allocator, "__cursor", .{ .int = next_val });
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn phGetMetadata(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    return obj.get("__metadata");
+fn phGetMetadata(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(obj.get("__metadata"));
 }
 
-fn phSetMetadata(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .null;
-    if (args.len < 1) return .null;
+fn phSetMetadata(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len < 1) return NativeResult.scalar(.null);
     try obj.set(ctx.allocator, "__metadata", args[0]);
-    return .null;
+    return NativeResult.scalar(.null);
 }
 
-fn phHasMetadata(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
-    const obj = getThis(ctx) orelse return .{ .bool = false };
+fn phHasMetadata(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const v = obj.get("__metadata");
-    return .{ .bool = v != .null };
+    return NativeResult.scalar(.{ .bool = v != .null });
 }
 
-fn phCanWrite(_: *NativeContext, _: []const Value) RuntimeError!Value {
+fn phCanWrite(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // Phar::canWrite() reports whether the phar.readonly ini setting allows
     // writing. zphp doesn't enforce that flag and always writes
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn phCanCompress(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = true };
-    if (args[0] != .int) return .{ .bool = false };
+fn phCanCompress(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = true });
+    if (args[0] != .int) return NativeResult.scalar(.{ .bool = false });
     // 4096 = Phar::GZ (we support), 8192 = Phar::BZ2 (we don't)
-    return .{ .bool = args[0].int == 0 or args[0].int == 4096 };
+    return NativeResult.scalar(.{ .bool = args[0].int == 0 or args[0].int == 4096 });
 }
 
-fn phRunning(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn phRunning(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // returns the path to the currently-executing phar, or "" when not running from one
     _ = ctx;
-    return .{ .string = Value.String.borrowed("") };
+    return NativeResult.literal("");
 }
 
-fn phLoadPhar(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .{ .bool = true };
+fn phLoadPhar(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn phGetSupportedCompression(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn phGetSupportedCompression(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
     try arr.append(ctx.allocator, .{ .string = Value.String.borrowed("GZ") });
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn phGetSupportedSignatures(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn phGetSupportedSignatures(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
     try arr.append(ctx.allocator, .{ .string = Value.String.borrowed("MD5") });
     try arr.append(ctx.allocator, .{ .string = Value.String.borrowed("SHA-1") });
     try arr.append(ctx.allocator, .{ .string = Value.String.borrowed("SHA-256") });
     try arr.append(ctx.allocator, .{ .string = Value.String.borrowed("SHA-512") });
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn phIsValidPharFilename(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+fn phIsValidPharFilename(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const name = args[0].string.bytes();
-    return .{ .bool = std.mem.endsWith(u8, name, ".phar") or std.mem.endsWith(u8, name, ".phar.gz") };
+    return NativeResult.scalar(.{ .bool = std.mem.endsWith(u8, name, ".phar") or std.mem.endsWith(u8, name, ".phar.gz") });
 }
 
-fn phMungServer(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .null;
+fn phMungServer(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.null);
 }
 
-fn phUnlinkArchive(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
-    std.fs.cwd().deleteFile(args[0].string.bytes()) catch return .{ .bool = false };
-    return .{ .bool = true };
+fn phUnlinkArchive(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    std.fs.cwd().deleteFile(args[0].string.bytes()) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn phInterceptFileFuncs(_: *NativeContext, _: []const Value) RuntimeError!Value {
-    return .null;
+fn phInterceptFileFuncs(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.null);
 }
 
-fn phMapPhar(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn phMapPhar(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     // `Phar::mapPhar('alias')` registers an alias for the currently-running
     // phar file so subsequent `phar://alias/...` reads resolve to it
-    if (args.len < 1 or args[0] != .string) return .{ .bool = true };
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = true });
     const alias = args[0].string.bytes();
     const fp = ctx.vm.file_path;
-    if (fp.len == 0) return .{ .bool = true };
+    if (fp.len == 0) return NativeResult.scalar(.{ .bool = true });
     const resolved_fp = std.fs.cwd().realpathAlloc(ctx.allocator, fp) catch try ctx.allocator.dupe(u8, fp);
     defer ctx.allocator.free(resolved_fp);
     const alias_dup = try ctx.allocator.dupe(u8, alias);
@@ -459,7 +460,7 @@ fn phMapPhar(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
     try ctx.vm.strings.append(ctx.allocator, alias_dup);
     try ctx.vm.strings.append(ctx.allocator, fp_dup);
     try ctx.vm.phar_aliases.put(ctx.allocator, alias_dup, fp_dup);
-    return .{ .bool = true };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
 fn saveIfNotBuffering(ctx: *NativeContext, obj: *PhpObject) !void {

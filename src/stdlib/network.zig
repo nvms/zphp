@@ -1,3 +1,4 @@
+const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
@@ -42,7 +43,7 @@ fn streamFd(v: Value) ?i32 {
 // polls the underlying fds of the stream objects in each (by-ref) array and
 // rewrites each array to the ready subset, returning the number ready (false on
 // error). read=POLLIN, write=POLLOUT, except=POLLPRI. null $seconds blocks
-fn native_stream_select(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_stream_select(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     var pollfds: std.ArrayListUnmanaged(std.posix.pollfd) = .{};
     defer pollfds.deinit(ctx.allocator);
     const Tracked = struct { slot: u8, val: Value };
@@ -72,7 +73,7 @@ fn native_stream_select(ctx: *NativeContext, args: []const Value) RuntimeError!V
     const timeout_ms: i32 = if (block) -1 else @intCast(@max(0, sec * 1000 + @divTrunc(usec, 1000)));
 
     if (pollfds.items.len > 0) {
-        _ = std.posix.poll(pollfds.items, timeout_ms) catch return .{ .bool = false };
+        _ = std.posix.poll(pollfds.items, timeout_ms) catch return NativeResult.scalar(.{ .bool = false });
     }
 
     var out = [_]?*PhpArray{ null, null, null };
@@ -92,7 +93,7 @@ fn native_stream_select(ctx: *NativeContext, args: []const Value) RuntimeError!V
         const arr = out[slot] orelse try ctx.createArray();
         ctx.setCallerVar(slot, args.len, .{ .array = arr });
     }
-    return .{ .int = count };
+    return NativeResult.scalar(.{ .int = count });
 }
 
 extern "c" fn socketpair(domain: c_int, sock_type: c_int, protocol: c_int, sv: *[2]c_int) c_int;
@@ -100,12 +101,12 @@ extern "c" fn socketpair(domain: c_int, sock_type: c_int, protocol: c_int, sv: *
 // stream_socket_pair(int $domain, int $type, int $protocol): array|false
 // creates a connected pair of sockets (socketpair(2)) returned as two stream
 // objects (each with __fd) usable by fread/fwrite/stream_select/fclose
-fn native_stream_socket_pair(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_stream_socket_pair(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const domain: c_int = if (args.len > 0) @intCast(Value.toInt(args[0])) else @intCast(std.posix.AF.UNIX);
     const sock_type: c_int = if (args.len > 1) @intCast(Value.toInt(args[1])) else @intCast(std.posix.SOCK.STREAM);
     const protocol: c_int = if (args.len > 2) @intCast(Value.toInt(args[2])) else 0;
     var sv: [2]c_int = undefined;
-    if (socketpair(domain, sock_type, protocol, &sv) != 0) return .{ .bool = false };
+    if (socketpair(domain, sock_type, protocol, &sv) != 0) return NativeResult.scalar(.{ .bool = false });
     const arr = try ctx.createArray();
     for (sv) |fd| {
         const obj = try ctx.allocator.create(PhpObject);
@@ -117,10 +118,10 @@ fn native_stream_socket_pair(ctx: *NativeContext, args: []const Value) RuntimeEr
         try obj.set(ctx.allocator, "__net", .{ .bool = true });
         try arr.append(ctx.allocator, .{ .object = obj });
     }
-    return .{ .array = arr };
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn native_stream_context_create(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_stream_context_create(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = try ctx.vm.allocator.create(PhpObject);
     obj.* = .{ .class_name = "StreamContext" };
     try ctx.vm.objects.append(ctx.vm.allocator, obj);
@@ -130,23 +131,23 @@ fn native_stream_context_create(ctx: *NativeContext, args: []const Value) Runtim
     if (args.len >= 2 and args[1] == .array) {
         try obj.set(ctx.allocator, "params", args[1]);
     }
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn native_stream_context_get_options(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .object) return .{ .bool = false };
+fn native_stream_context_get_options(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
     const opts = args[0].object.get("options");
-    if (opts == .array) return opts;
-    return .{ .bool = false };
+    if (opts == .array) return NativeResult.borrowed(opts);
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_stream_context_get_params(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .object) return .{ .bool = false };
-    return args[0].object.get("params");
+fn native_stream_context_get_params(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.share(args[0].object.get("params"));
 }
 
-fn native_stream_context_set_options(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .object) return .{ .bool = false };
+fn native_stream_context_set_options(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
     // 4-arg form: stream_context_set_option($ctx, $wrapper, $option, $value)
     // merges the (wrapper, option) into the existing options array
     if (args.len >= 4 and args[1] == .string and args[2] == .string) {
@@ -165,10 +166,10 @@ fn native_stream_context_set_options(ctx: *NativeContext, args: []const Value) R
             wrap_arr = wrap_v.array;
         } else {
             wrap_arr = try ctx.createArray();
-            try opts.set(ctx.allocator, wrap_key, .{ .array = wrap_arr });
+            try ctx.vm.arraySetOwned(opts, wrap_key, .{ .array = wrap_arr });
         }
-        try wrap_arr.set(ctx.allocator, PhpArray.Key{ .string = args[2].string }, args[3]);
-        return .{ .bool = true };
+        try ctx.vm.arraySetOwned(wrap_arr, PhpArray.Key{ .string = args[2].string }, args[3]);
+        return NativeResult.scalar(.{ .bool = true });
     }
     // 3-arg form: stream_context_set_option($ctx, $wrapper, $options_assoc) -
     // PHP also accepts this; merge per-wrapper
@@ -179,68 +180,62 @@ fn native_stream_context_set_options(ctx: *NativeContext, args: []const Value) R
             opts = try ctx.createArray();
             try args[0].object.set(ctx.allocator, "options", .{ .array = opts });
         }
-        try opts.set(ctx.allocator, PhpArray.Key{ .string = args[1].string }, args[2]);
-        return .{ .bool = true };
+        try ctx.vm.arraySetOwned(opts, PhpArray.Key{ .string = args[1].string }, args[2]);
+        return NativeResult.scalar(.{ .bool = true });
     }
     if (args[1] == .array) {
         try args[0].object.set(ctx.allocator, "options", args[1]);
-        return .{ .bool = true };
+        return NativeResult.scalar(.{ .bool = true });
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_stream_context_set_params(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 2 or args[0] != .object) return .{ .bool = false };
+fn native_stream_context_set_params(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
     if (args[1] == .array) {
         try args[0].object.set(ctx.allocator, "params", args[1]);
-        return .{ .bool = true };
+        return NativeResult.scalar(.{ .bool = true });
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_stream_context_get_default(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_stream_context_get_default(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = try ctx.vm.allocator.create(PhpObject);
     obj.* = .{ .class_name = "StreamContext" };
     try ctx.vm.objects.append(ctx.vm.allocator, obj);
-    return .{ .object = obj };
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn native_stream_context_set_default(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
+fn native_stream_context_set_default(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return native_stream_context_create(ctx, args);
 }
 
-fn createString(ctx: *NativeContext, s: []const u8) ![]const u8 {
-    const copy = try ctx.allocator.dupe(u8, s);
-    try ctx.vm.strings.append(ctx.allocator, copy);
-    return copy;
-}
-
-fn native_gethostbyname(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_gethostbyname(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const host = args[0].string.bytes();
-    var list = std.net.getAddressList(ctx.allocator, host, 0) catch return args[0];
+    var list = std.net.getAddressList(ctx.allocator, host, 0) catch return NativeResult.share(args[0]);
     defer list.deinit();
-    if (list.addrs.len == 0) return args[0];
+    if (list.addrs.len == 0) return NativeResult.share(args[0]);
     for (list.addrs) |addr| {
         if (addr.any.family == std.posix.AF.INET) {
             var buf: [32]u8 = undefined;
-            const written = std.fmt.bufPrint(&buf, "{f}", .{addr}) catch return args[0];
+            const written = std.fmt.bufPrint(&buf, "{f}", .{addr}) catch return NativeResult.share(args[0]);
             // strip port if present (Address.format adds :port)
             const colon = std.mem.lastIndexOfScalar(u8, written, ':') orelse written.len;
-            return .{ .string = Value.String.borrowed(try createString(ctx, written[0..colon])) };
+            return NativeResult.copyString(ctx.allocator, written[0..colon]);
         }
     }
-    return args[0];
+    return NativeResult.share(args[0]);
 }
 
 // gethostbynamel: like gethostbyname but returns all resolved IPv4 addresses
 // as a numerically-indexed array, or false on failure
-fn native_gethostbynamel(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_gethostbynamel(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const host = args[0].string.bytes();
-    var list = std.net.getAddressList(ctx.allocator, host, 0) catch return .{ .bool = false };
+    var list = std.net.getAddressList(ctx.allocator, host, 0) catch return NativeResult.scalar(.{ .bool = false });
     defer list.deinit();
-    if (list.addrs.len == 0) return .{ .bool = false };
+    if (list.addrs.len == 0) return NativeResult.scalar(.{ .bool = false });
     const arr = try ctx.createArray();
     var seen = std.StringHashMapUnmanaged(void){};
     defer seen.deinit(ctx.allocator);
@@ -252,88 +247,89 @@ fn native_gethostbynamel(ctx: *NativeContext, args: []const Value) RuntimeError!
         const ip_str = written[0..colon];
         // dedup - the same IP can come back multiple times for different ports
         if (seen.contains(ip_str)) continue;
-        const owned = try createString(ctx, ip_str);
-        try seen.put(ctx.allocator, owned, {});
-        try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(owned) });
+        const owned = try Value.String.create(ctx.allocator, ip_str);
+        defer owned.release();
+        try seen.put(ctx.allocator, owned.bytes(), {});
+        try arr.append(ctx.allocator, .{ .string = owned });
     }
-    if (arr.entries.items.len == 0) return .{ .bool = false };
-    return .{ .array = arr };
+    if (arr.entries.items.len == 0) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn native_gethostbyaddr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_gethostbyaddr(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     // best-effort: just echo back the IP if we can't reverse-resolve
-    return .{ .string = Value.String.borrowed(try createString(ctx, args[0].string.bytes())) };
+    return NativeResult.copyString(ctx.allocator, args[0].string.bytes());
 }
 
-fn native_gethostname(ctx: *NativeContext, _: []const Value) RuntimeError!Value {
+fn native_gethostname(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     var buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
-    const name = std.posix.gethostname(&buf) catch return .{ .bool = false };
-    return .{ .string = Value.String.borrowed(try createString(ctx, name)) };
+    const name = std.posix.gethostname(&buf) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.copyString(ctx.allocator, name);
 }
 
-fn native_inet_pton(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_inet_pton(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const s = args[0].string.bytes();
     // try IPv4
     if (std.net.Address.parseIp4(s, 0)) |addr| {
         const bytes = std.mem.toBytes(addr.in.sa.addr);
-        return .{ .string = Value.String.borrowed(try createString(ctx, &bytes)) };
+        return NativeResult.copyString(ctx.allocator, &bytes);
     } else |_| {}
     // try IPv6
     if (std.net.Address.parseIp6(s, 0)) |addr| {
-        return .{ .string = Value.String.borrowed(try createString(ctx, &addr.in6.sa.addr)) };
+        return NativeResult.copyString(ctx.allocator, &addr.in6.sa.addr);
     } else |_| {}
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_inet_ntop(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_inet_ntop(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const bytes = args[0].string.bytes();
     if (bytes.len == 4) {
         var buf: [32]u8 = undefined;
-        const out = std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}", .{ bytes[0], bytes[1], bytes[2], bytes[3] }) catch return .{ .bool = false };
-        return .{ .string = Value.String.borrowed(try createString(ctx, out)) };
+        const out = std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}", .{ bytes[0], bytes[1], bytes[2], bytes[3] }) catch return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.copyString(ctx.allocator, out);
     }
     if (bytes.len == 16) {
         var addr: [16]u8 = undefined;
         @memcpy(&addr, bytes);
         const ip = std.net.Address.initIp6(addr, 0, 0, 0);
         var buf: [64]u8 = undefined;
-        const out = std.fmt.bufPrint(&buf, "{f}", .{ip}) catch return .{ .bool = false };
+        const out = std.fmt.bufPrint(&buf, "{f}", .{ip}) catch return NativeResult.scalar(.{ .bool = false });
         // strip [...]:port wrapping
         var s = out;
         if (s.len > 0 and s[0] == '[') {
-            const close = std.mem.indexOfScalar(u8, s, ']') orelse return .{ .bool = false };
+            const close = std.mem.indexOfScalar(u8, s, ']') orelse return NativeResult.scalar(.{ .bool = false });
             s = s[1..close];
         }
-        return .{ .string = Value.String.borrowed(try createString(ctx, s)) };
+        return NativeResult.copyString(ctx.allocator, s);
     }
-    return .{ .bool = false };
+    return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_ip2long(_: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
+fn native_ip2long(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     var parts: [4]u32 = undefined;
     var idx: usize = 0;
     var it = std.mem.splitScalar(u8, args[0].string.bytes(), '.');
     while (it.next()) |part| {
-        if (idx >= 4) return .{ .bool = false };
-        parts[idx] = std.fmt.parseUnsigned(u8, part, 10) catch return .{ .bool = false };
+        if (idx >= 4) return NativeResult.scalar(.{ .bool = false });
+        parts[idx] = std.fmt.parseUnsigned(u8, part, 10) catch return NativeResult.scalar(.{ .bool = false });
         idx += 1;
     }
-    if (idx != 4) return .{ .bool = false };
+    if (idx != 4) return NativeResult.scalar(.{ .bool = false });
     const long: i64 = @intCast((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]);
-    return .{ .int = long };
+    return NativeResult.scalar(.{ .int = long });
 }
 
-fn native_long2ip(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0) return .{ .bool = false };
+fn native_long2ip(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     const n = Value.toInt(args[0]);
     const u: u32 = @truncate(@as(u64, @bitCast(n)));
     var buf: [32]u8 = undefined;
-    const out = std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}", .{ (u >> 24) & 0xff, (u >> 16) & 0xff, (u >> 8) & 0xff, u & 0xff }) catch return .{ .bool = false };
-    return .{ .string = Value.String.borrowed(try createString(ctx, out)) };
+    const out = std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}", .{ (u >> 24) & 0xff, (u >> 16) & 0xff, (u >> 8) & 0xff, u & 0xff }) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.copyString(ctx.allocator, out);
 }
 
 fn parseHostPort(target: []const u8) ?struct { host: []const u8, port: u16, scheme: []const u8 } {
@@ -367,49 +363,47 @@ fn openTcpHandle(ctx: *NativeContext, host: []const u8, port: u16) !*PhpObject {
     return obj;
 }
 
-fn native_fsockopen(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
+fn native_fsockopen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const host = args[0].string.bytes();
     const port: u16 = if (args.len >= 2) @intCast(@max(0, Value.toInt(args[1]))) else 80;
-    if (port == 0) return .{ .bool = false };
-    const obj = openTcpHandle(ctx, host, port) catch return .{ .bool = false };
-    return .{ .object = obj };
+    if (port == 0) return NativeResult.scalar(.{ .bool = false });
+    const obj = openTcpHandle(ctx, host, port) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn native_stream_socket_client(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len < 1 or args[0] != .string) return .{ .bool = false };
-    const target = parseHostPort(args[0].string.bytes()) orelse return .{ .bool = false };
-    if (target.port == 0) return .{ .bool = false };
-    const obj = openTcpHandle(ctx, target.host, target.port) catch return .{ .bool = false };
-    return .{ .object = obj };
+fn native_stream_socket_client(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const target = parseHostPort(args[0].string.bytes()) orelse return NativeResult.scalar(.{ .bool = false });
+    if (target.port == 0) return NativeResult.scalar(.{ .bool = false });
+    const obj = openTcpHandle(ctx, target.host, target.port) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn native_checkdnsrr(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    var list = std.net.getAddressList(ctx.allocator, args[0].string.bytes(), 0) catch return .{ .bool = false };
+fn native_checkdnsrr(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    var list = std.net.getAddressList(ctx.allocator, args[0].string.bytes(), 0) catch return NativeResult.scalar(.{ .bool = false });
     defer list.deinit();
-    return .{ .bool = list.addrs.len > 0 };
+    return NativeResult.scalar(.{ .bool = list.addrs.len > 0 });
 }
 
-fn native_dns_get_record(ctx: *NativeContext, args: []const Value) RuntimeError!Value {
-    if (args.len == 0 or args[0] != .string) return .{ .bool = false };
-    const result = try ctx.allocator.create(PhpArray);
-    result.* = .{};
-    try ctx.vm.arrays.append(ctx.allocator, result);
-    var list = std.net.getAddressList(ctx.allocator, args[0].string.bytes(), 0) catch return .{ .array = result };
+fn native_dns_get_record(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const result = try ctx.createArray();
+    var list = std.net.getAddressList(ctx.allocator, args[0].string.bytes(), 0) catch return NativeResult.borrowed(.{ .array = result });
     defer list.deinit();
     for (list.addrs) |addr| {
-        const entry = try ctx.allocator.create(PhpArray);
-        entry.* = .{};
-        try ctx.vm.arrays.append(ctx.allocator, entry);
-        try entry.set(ctx.allocator, .{ .string = Value.String.borrowed("host") }, .{ .string = Value.String.borrowed(try createString(ctx, args[0].string.bytes())) });
+        const entry = try ctx.createArray();
+        try entry.set(ctx.allocator, .{ .string = Value.String.borrowed("host") }, args[0]);
         try entry.set(ctx.allocator, .{ .string = Value.String.borrowed("class") }, .{ .string = Value.String.borrowed("IN") });
         if (addr.any.family == std.posix.AF.INET) {
             const bytes = std.mem.toBytes(addr.in.sa.addr);
             var buf: [32]u8 = undefined;
             const ip = std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}", .{ bytes[0], bytes[1], bytes[2], bytes[3] }) catch continue;
             try entry.set(ctx.allocator, .{ .string = Value.String.borrowed("type") }, .{ .string = Value.String.borrowed("A") });
-            try entry.set(ctx.allocator, .{ .string = Value.String.borrowed("ip") }, .{ .string = Value.String.borrowed(try createString(ctx, ip)) });
+            const owned = try Value.String.create(ctx.allocator, ip);
+            defer owned.release();
+            try entry.set(ctx.allocator, .{ .string = Value.String.borrowed("ip") }, .{ .string = owned });
         } else if (addr.any.family == std.posix.AF.INET6) {
             try entry.set(ctx.allocator, .{ .string = Value.String.borrowed("type") }, .{ .string = Value.String.borrowed("AAAA") });
             var buf: [64]u8 = undefined;
@@ -418,9 +412,11 @@ fn native_dns_get_record(ctx: *NativeContext, args: []const Value) RuntimeError!
             if (out.len > 0 and out[0] == '[') {
                 if (std.mem.indexOfScalar(u8, out, ']')) |ci| out = out[1..ci];
             }
-            try entry.set(ctx.allocator, .{ .string = Value.String.borrowed("ipv6") }, .{ .string = Value.String.borrowed(try createString(ctx, out)) });
+            const owned = try Value.String.create(ctx.allocator, out);
+            defer owned.release();
+            try entry.set(ctx.allocator, .{ .string = Value.String.borrowed("ipv6") }, .{ .string = owned });
         }
         try result.append(ctx.allocator, .{ .array = entry });
     }
-    return .{ .array = result };
+    return NativeResult.borrowed(.{ .array = result });
 }
