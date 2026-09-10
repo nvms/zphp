@@ -36,6 +36,10 @@ bench: ## Run runtime benchmarks (ReleaseFast)
 bench-compare: ## Time this tree against its merge base with main on this machine (ReleaseFast, interleaved); pass BASE=<ref> to pick the base
 	python3 ./benchmarks/compare $(if $(BASE),--base $(BASE),)
 
+.PHONY: fuzz
+fuzz: build ## Mutation-fuzz the pipeline and decoders on the Debug build (FUZZ_SECONDS per fuzzer, default 120)
+	python3 ./tests/fuzz/run all $(or $(FUZZ_SECONDS),120)
+
 .PHONY: soak
 soak: ## Run the memory soak (ReleaseFast): a string-heavy loop must hold a flat RSS
 	zig build -Doptimize=ReleaseFast

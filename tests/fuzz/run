@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""Mutation fuzzers for the PHP pipeline and the decoders.
+
+    tests/fuzz/run source 120      # mutate tests/*.php through lexer, parser, compiler, VM
+    tests/fuzz/run decoders 120    # mutate inputs to unserialize, json, unpack, PCRE, XML, UTF-8, string natives
+    tests/fuzz/run all 120
+
+The number is a time budget in seconds per fuzzer. Run against a Debug build:
+its bounds, overflow and allocator checks are what turn corruption into a
+visible panic. A case that panics, segfaults, exceeds 1.5 GB, or runs longer
+than the watchdog is saved under tests/fuzz/findings/ with its kind. Timeouts
+are only leads: confirm against php before treating one as a bug (the
+program itself may loop, and some natives are quadratic in php too).
+"""
+import glob
+import os
+import random
+import subprocess
+import sys
+import threading
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ZPHP = os.environ.get("ZPHP", os.path.join(ROOT, "zig-out", "bin", "zphp"))
+FINDINGS = os.path.join(ROOT, "tests", "fuzz", "findings")
+SCRATCH = os.path.join(os.environ.get("TMPDIR", "/tmp"), "zphp-fuzz")
+WATCHDOG_SECONDS = 8
+RSS_LIMIT_KB = 1_500_000
+
+TOKENS = [b"(", b")", b"{", b"}", b"[", b"]", b";", b",", b"$", b"->", b"::", b"=>", b"...", b"&", b"?", b":", b"'", b'"', b"\\", b"\n", b"<?php", b"?>", b"fn", b"function", b"class", b"yield", b"match", b"static", b"new", b"#[", b"`", b"\x00", b"\xff", b"0x", b"1e999", b"9223372036854775808"]
+
+DECODER_SEEDS = {
+    "unserialize": [b'a:2:{i:0;s:3:"abc";s:1:"k";O:8:"stdClass":1:{s:1:"p";d:1.5;}}', b'C:11:"ArrayObject":21:{x:i:0;a:0:{};m:a:0:{}}', b'E:6:"Foo:BAR";', b"a:1:{i:0;R:1;}", b's:5:"hello";', b'O:3:"Foo":1:{s:1:"a";N;}'],
+    "json": [b'{"a":[1,2.5e3,"x\\u00e9",null,true,{"b":{}}],"c":"\\ud83d\\ude00"}', b"[[[[[1]]]]]", b'"\\u0000\\ud800"', b"123456789012345678901234567890", b'{"a":1,"a":2}'],
+    "unpack": [bytes(range(256)), b"\xff" * 8, b"A" * 100, b""],
+    "preg": [b"/(a+)+$/", b"/(?<name>\\w+)\\k<name>/u", b"/[[:alpha:]]{2,}/i", b"/(?R)/", b"/\\p{L}+/u", b"/x{1,999999}/", b"/(*LIMIT_MATCH=1)a/", b"/\\Q.\\E/"],
+    "xml": [b'<?xml version="1.0"?><!DOCTYPE a [<!ENTITY x "y">]><a b="1">&x;<c/><![CDATA[z]]></a>', b"<html><body><p>x<b>y</p></body></html>", b'<a xmlns:n="urn:n"><n:b/></a>', b"<a>" * 200],
+    "utf8": ["h\u00e9llo w\u00f6rld \U0001f600 \u65e5\u672c".encode(), b"\xc3\x28\xa0\xa1\xe2\x28\xa1\xf0\x28\x8c\xbc\xf0\x90\x28\xbc\xed\xa0\x80", b"\xef\xbb\xbfabc", b"e\xcc\x81" * 50],
+    "urls": [b"https://u:p@host:8080/p/a?q=1&b[]=2#frag", b"a=1&b[x]=2&c[]=3&d", b"%E2%9C%93%zz%", b"2024-02-30 25:61:00 +99:00 next thursday", b"%s %d %5.2f %'*10s %%", b"Y-m-d\\TH:i:sP", b'1,"a ""b""",\'c\''],
+}
+
+
+def mutate(data, tokens):
+    b = bytearray(data)
+    for _ in range(random.randint(1, 8)):
+        if not b:
+            b = bytearray(b"x")
+        i = random.randrange(len(b))
+        op = random.random()
+        if op < 0.3 and tokens:
+            b[i : i + 1] = random.choice(tokens)
+        elif op < 0.5:
+            del b[i : i + random.randint(1, 20)]
+        elif op < 0.7:
+            b.insert(i, random.randrange(256))
+        elif op < 0.85:
+            j = random.randrange(len(b))
+            b[i:i] = b[j : j + random.randint(1, 40)]
+        else:
+            b[i:i] = bytes([b[i]]) * random.randint(10, 2000)
+    return bytes(b)
+
+
+def run_case(argv):
+    proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    outcome = []
+
+    def watch():
+        started = time.time()
+        while proc.poll() is None and time.time() - started < WATCHDOG_SECONDS:
+            rss = subprocess.run(["ps", "-o", "rss=", "-p", str(proc.pid)], capture_output=True, text=True).stdout.strip()
+            if rss and int(rss) > RSS_LIMIT_KB:
+                outcome.append("memory")
+                proc.kill()
+                return
+            time.sleep(0.05)
+        if proc.poll() is None:
+            outcome.append("timeout")
+            proc.kill()
+
+    watcher = threading.Thread(target=watch)
+    watcher.start()
+    stderr = proc.communicate()[1]
+    watcher.join()
+    if outcome:
+        return outcome[0]
+    if proc.returncode in (-6, -11, 134, 139) or b"panic" in stderr or b"Segmentation" in stderr:
+        line = next((l for l in stderr.split(b"\n") if b"panic" in l or b"Segmentation" in l), b"crash")
+        return "crash: " + line[:120].decode(errors="replace")
+    return None
+
+
+def fuzz(name, budget, make_case):
+    os.makedirs(FINDINGS, exist_ok=True)
+    os.makedirs(SCRATCH, exist_ok=True)
+    deadline = time.time() + budget
+    cases = 0
+    found = {}
+    while time.time() < deadline:
+        kind, data, argv = make_case(cases)
+        cases += 1
+        result = run_case(argv)
+        if not result:
+            continue
+        key = f"{kind}|{result[:60]}"
+        if key in found:
+            found[key] += 1
+            continue
+        found[key] = 1
+        path = os.path.join(FINDINGS, f"{name}-{kind}-{len(found)}.bin")
+        with open(path, "wb") as f:
+            f.write(data)
+        print(f"  [{cases}] {kind}: {result} -> {path}", flush=True)
+    print(f"{name}: {cases} cases, {sum(found.values())} findings, {len(found)} distinct")
+    return len(found)
+
+
+def source_case(index):
+    seeds = source_case.seeds
+    data = mutate(random.choice(seeds), TOKENS)
+    path = os.path.join(SCRATCH, f"src_{index % 4}.php")
+    with open(path, "wb") as f:
+        f.write(data)
+    return "php", data, [ZPHP, "run", path]
+
+
+def decoder_case(index):
+    kind = random.choice(list(DECODER_SEEDS))
+    data = mutate(random.choice(DECODER_SEEDS[kind]), [])
+    path = os.path.join(SCRATCH, f"dec_{index % 4}.bin")
+    with open(path, "wb") as f:
+        f.write(data)
+    return kind, data, [ZPHP, "run", os.path.join(ROOT, "tests", "fuzz", "decoders.php"), kind, path]
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] not in ("source", "decoders", "all"):
+        print(__doc__)
+        return 2
+    if not os.path.exists(ZPHP):
+        print(f"error: {ZPHP} not found - run make build first", file=sys.stderr)
+        return 2
+    budget = float(sys.argv[2]) if len(sys.argv) > 2 else 120
+    random.seed(int(os.environ.get("FUZZ_SEED", time.time())))
+    # seeds that talk to processes, sockets, stdin, or the clock produce
+    # timeouts that are the program's own doing, not the runtime's
+    noisy = (b"proc_open", b"shell_exec", b"exec(", b"popen", b"sleep(", b"fsockopen", b"curl_", b"stream_socket", b"passthru", b"system(", b"STDIN", b"readline", b"`", b"pcntl_", b"set_time_limit")
+    source_case.seeds = [open(f, "rb").read() for f in glob.glob(os.path.join(ROOT, "tests", "*.php"))]
+    source_case.seeds = [s for s in source_case.seeds if len(s) < 6000 and not any(n in s for n in noisy)]
+    findings = 0
+    if sys.argv[1] in ("source", "all"):
+        findings += fuzz("source", budget, source_case)
+    if sys.argv[1] in ("decoders", "all"):
+        findings += fuzz("decoders", budget, decoder_case)
+    return 1 if findings else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
