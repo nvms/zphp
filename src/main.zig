@@ -6,6 +6,7 @@ const VM = @import("runtime/vm.zig").VM;
 const Value = runtime_value.Value;
 const CompileResult = @import("pipeline/compiler.zig").CompileResult;
 const extension = @import("extension.zig");
+const ini_config = @import("ini_config.zig");
 const bytecode_format = @import("bytecode_format.zig");
 const error_format = @import("error_format.zig");
 
@@ -35,7 +36,7 @@ pub fn main() !void {
         return;
     }
 
-    const args = try loadExtensionFlags(allocator, raw_args);
+    const args = try loadStartupFlags(allocator, raw_args);
     defer allocator.free(args);
 
     if (args.len < 2) {
@@ -46,12 +47,18 @@ pub fn main() !void {
     try dispatch(allocator, args);
 }
 
-// `zphp [--extension=PATH]... <command> ...` loads dynamic extensions before
-// any VM exists, then ZPHP_EXTENSION_DIR adds every library in that
-// directory. returns the args with the flags removed
-fn loadExtensionFlags(allocator: std.mem.Allocator, raw_args: []const []const u8) ![]const []const u8 {
+// `zphp [--extension=PATH]... [--ini=PATH] [-d name=value]... <command> ...`
+// loads dynamic extensions and the ini file before any VM exists. the ini
+// file comes from --ini, ZPHP_INI, or php.ini in the working directory; its
+// extension= lines load after the flags, -d definitions apply last, then
+// ZPHP_EXTENSION_DIR adds every library in that directory. returns the args
+// with the flags removed
+fn loadStartupFlags(allocator: std.mem.Allocator, raw_args: []const []const u8) ![]const []const u8 {
     var args = std.ArrayListUnmanaged([]const u8){};
     errdefer args.deinit(allocator);
+    var defines = std.ArrayListUnmanaged([]const u8){};
+    defer defines.deinit(allocator);
+    var ini_path: ?[]const u8 = null;
     try args.append(allocator, raw_args[0]);
     var i: usize = 1;
     while (i < raw_args.len) : (i += 1) {
@@ -59,19 +66,35 @@ fn loadExtensionFlags(allocator: std.mem.Allocator, raw_args: []const []const u8
         if (std.mem.startsWith(u8, arg, "--extension=")) {
             extension.loadDynamic(arg["--extension=".len..]);
         } else if (std.mem.eql(u8, arg, "--extension")) {
-            if (i + 1 >= raw_args.len) {
-                try writeStderr("usage: zphp --extension=PATH <command>\n");
-                std.process.exit(1);
-            }
             i += 1;
-            extension.loadDynamic(raw_args[i]);
+            extension.loadDynamic(try flagValue(raw_args, i, "usage: zphp --extension=PATH <command>\n"));
+        } else if (std.mem.startsWith(u8, arg, "--ini=")) {
+            ini_path = arg["--ini=".len..];
+        } else if (std.mem.eql(u8, arg, "--ini")) {
+            i += 1;
+            ini_path = try flagValue(raw_args, i, "usage: zphp --ini=PATH <command>\n");
+        } else if (std.mem.startsWith(u8, arg, "-d") and arg.len > 2) {
+            try defines.append(allocator, arg[2..]);
+        } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--define")) {
+            i += 1;
+            try defines.append(allocator, try flagValue(raw_args, i, "usage: zphp -d name=value <command>\n"));
         } else {
             try args.appendSlice(allocator, raw_args[i..]);
             break;
         }
     }
+    ini_config.discover(ini_path);
+    for (defines.items) |d| ini_config.define(d);
     if (std.posix.getenv("ZPHP_EXTENSION_DIR")) |dir| extension.loadDirectory(dir);
     return args.toOwnedSlice(allocator);
+}
+
+fn flagValue(raw_args: []const []const u8, i: usize, usage: []const u8) ![]const u8 {
+    if (i >= raw_args.len) {
+        try writeStderr(usage);
+        std.process.exit(1);
+    }
+    return raw_args[i];
 }
 
 fn dispatch(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -695,6 +718,7 @@ fn writeStderr(msg: []const u8) !void {
 }
 
 test {
+    _ = @import("ini_config.zig");
     _ = @import("pipeline/token.zig");
     _ = @import("pipeline/lexer.zig");
     _ = @import("pipeline/ast.zig");

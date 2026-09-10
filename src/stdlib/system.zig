@@ -594,10 +594,9 @@ fn native_getcwd(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
     return try NativeResult.copyString(ctx.allocator, cwd);
 }
 
-fn native_php_ini_loaded_file(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    // zphp doesn't read a php.ini file; report false to match PHP behavior
-    // when no ini was loaded
-    return NativeResult.scalar(.{ .bool = false });
+fn native_php_ini_loaded_file(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const path = @import("../ini_config.zig").loadedFile() orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.copyString(ctx.allocator, path);
 }
 
 fn native_php_ini_scanned_files(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {

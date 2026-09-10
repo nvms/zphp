@@ -1951,7 +1951,15 @@ fn native_ini_get_all(ctx: *NativeContext, _: []const Value) RuntimeError!Native
     return NativeResult.borrowed(.{ .array = try ctx.createArray() });
 }
 
-fn native_ini_restore(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+fn native_ini_restore(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.null);
+    const name = args[0].string.bytes();
+    _ = ctx.vm.ini_settings.remove(name);
+    if (@import("../ini_config.zig").get(name)) |configured| {
+        const owned_name = try ctx.allocator.dupe(u8, name);
+        try ctx.vm.strings.append(ctx.allocator, owned_name);
+        try ctx.vm.ini_settings.put(ctx.allocator, owned_name, configured);
+    }
     return NativeResult.scalar(.null);
 }
 

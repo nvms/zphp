@@ -54,6 +54,17 @@ The glibc and macOS builds run on the platform they were made for; the musl buil
 
 See the [documentation](https://nvms.github.io/zphp/) for build instructions and usage guides.
 
+## Configuration
+
+zphp reads a php.ini file at startup: `--ini=PATH`, then the `ZPHP_INI` environment variable, then `php.ini` in the working directory, whichever comes first. `-d name=value` overrides a directive from the command line, as with `php -d`.
+
+```sh
+zphp --ini=/etc/zphp/php.ini serve public/index.php
+zphp -d date.timezone=Europe/Berlin -d memory_limit=512M run job.php
+```
+
+Values follow php.ini rules: quotes are stripped, `On`/`Off` become `1` and empty, `${VAR}` expands from the environment, and `error_reporting = E_ALL & ~E_DEPRECATED` is evaluated. `date.timezone`, `error_reporting`, and `max_execution_time` take effect at the start of every request, and `ini_set` only changes the current request; the next one starts from the file again. `extension=` lines load extensions, by path or by name inside `extension_dir`, and `php_ini_loaded_file()` reports what was read.
+
 ## Extensions
 
 zphp loads native extensions written against a C ABI. An extension registers functions, classes, constants, ini defaults, and resource types once at load time, and every PHP call into it goes straight to a resolved function pointer. The header is `include/zphp_extension.h`; the same source builds as a shared library or gets compiled into zphp.

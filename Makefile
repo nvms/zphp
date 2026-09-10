@@ -44,6 +44,10 @@ fuzz: build ## Mutation-fuzz the pipeline and decoders on the Debug build (FUZZ_
 ext: build ## Run extension API tests (builds tests/extensions/demo.c with zig cc; STATIC=1 also builds a zphp with it compiled in, BENCH=1 prints call overhead)
 	./tests/extensions/run
 
+.PHONY: ini
+ini: build ## Run php.ini loading tests (--ini, ZPHP_INI, -d, serve isolation, extension= lines)
+	./tests/ini_test
+
 .PHONY: soak
 soak: ## Run the memory soak (ReleaseFast): a string-heavy loop must hold a flat RSS
 	zig build -Doptimize=ReleaseFast

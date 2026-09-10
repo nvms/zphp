@@ -1,0 +1,73 @@
+#!/bin/bash
+# php.ini loading: --ini, ZPHP_INI, php.ini in the working directory, -d
+# overrides, value cooking, live mirrors (timezone, error_reporting), request
+# isolation under serve, and extension= lines through the extension loader
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+ZPHP="${ZPHP:-$ROOT/zig-out/bin/zphp}"
+INI="$SCRIPT_DIR/ini/php.ini"
+PORT="${PORT:-19914}"
+OUT="$(mktemp -d "${TMPDIR:-/tmp}/zphp-ini.XXXXXX")"
+trap 'rm -rf "$OUT"; [ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" 2>/dev/null; true' EXIT
+export ZPHP_INI_TEST_NAME=probe
+case "$(uname -s)" in Darwin) LIB=dylib ;; *) LIB=so ;; esac
+if [ "$(uname -s)" = Darwin ] && [ -z "${DEVELOPER_DIR:-}" ] && [ -d /Library/Developer/CommandLineTools ]; then
+    export DEVELOPER_DIR=/Library/Developer/CommandLineTools
+fi
+
+passed=0
+failed=0
+check() {
+    local name="$1" expected="$2" actual="$3"
+    if [ "$expected" = "$actual" ]; then passed=$((passed + 1)); else
+        failed=$((failed + 1)); printf 'FAIL %s\n  expected: %s\n  actual:   %s\n' "$name" "$expected" "$actual"; fi
+}
+contains() {
+    local name="$1" needle="$2" haystack="$3"
+    if [[ "$haystack" == *"$needle"* ]]; then passed=$((passed + 1)); else
+        failed=$((failed + 1)); printf 'FAIL %s\n  expected to contain: %s\n  actual: %s\n' "$name" "$needle" "$haystack"; fi
+}
+
+expected='{"loaded":true,"tz":"America\/New_York","tz_default":"America\/New_York","tz_date":"America\/New_York","error_reporting":"22527","error_reporting_live":22527,"display_errors":"","memory_limit":"256M","max_execution_time":"30","name":"probe-app","flag":"1","quoted":"a;b","missing":false}'
+check "--ini=PATH" "$expected" "$("$ZPHP" --ini="$INI" run "$SCRIPT_DIR/ini/probe.php")"
+check "--ini PATH" "$expected" "$("$ZPHP" --ini "$INI" run "$SCRIPT_DIR/ini/probe.php")"
+check "ZPHP_INI" "$expected" "$(ZPHP_INI="$INI" "$ZPHP" run "$SCRIPT_DIR/ini/probe.php")"
+cp "$INI" "$OUT/php.ini"
+check "php.ini in the working directory" "$expected" "$(cd "$OUT" && "$ZPHP" run "$SCRIPT_DIR/ini/probe.php")"
+contains "no ini file" '"loaded":false,"tz":"UTC"' "$("$ZPHP" run "$SCRIPT_DIR/ini/probe.php")"
+contains "-d overrides the file" '"tz":"Europe\/Paris","tz_default":"Europe\/Paris"' "$("$ZPHP" --ini="$INI" -d date.timezone=Europe/Paris run "$SCRIPT_DIR/ini/probe.php")"
+contains "-d name=value form" '"memory_limit":"1G"' "$("$ZPHP" --ini="$INI" -d memory_limit=1G run "$SCRIPT_DIR/ini/probe.php")"
+contains "-d without a file" '"loaded":false,"tz":"Asia\/Tokyo"' "$("$ZPHP" -d date.timezone=Asia/Tokyo run "$SCRIPT_DIR/ini/probe.php")"
+check "ini_restore returns to the file value" "512M|256M" "$("$ZPHP" --ini="$INI" run "$SCRIPT_DIR/ini/restore.php")"
+out="$("$ZPHP" --ini="$OUT/missing.ini" run "$SCRIPT_DIR/ini/probe.php" 2>&1)" && status=0 || status=$?
+check "missing explicit file exits 1" "1" "$status"
+contains "missing explicit file message" "ini file" "$out"
+printf 'error_reporting = E_ALL &\n' > "$OUT/bad.ini"
+contains "an unparseable level expression stays a string" '"error_reporting":"E_ALL &"' "$("$ZPHP" --ini="$OUT/bad.ini" run "$SCRIPT_DIR/ini/probe.php")"
+
+# serve: ini_set and date_default_timezone_set in one request never reach the next
+"$ZPHP" --ini="$INI" serve "$SCRIPT_DIR/ini/app.php" --port "$PORT" --workers 1 >"$OUT/serve.log" 2>&1 &
+SERVER_PID=$!
+for _ in $(seq 1 50); do curl -s -o /dev/null "http://localhost:$PORT/health" 2>/dev/null && break; sleep 0.1; done
+get() { curl -s "http://localhost:$PORT/$1"; }
+check "serve probe" "256M|America/New_York|probe-app" "$(get probe)"
+check "serve dirty request" "1G|Asia/Tokyo" "$(get dirty)"
+check "serve probe after dirty" "256M|America/New_York|probe-app" "$(get probe)"
+for _ in $(seq 1 10); do get dirty >/dev/null; done
+check "serve probe after 10 dirty requests" "256M|America/New_York|probe-app" "$(get probe)"
+kill "$SERVER_PID" 2>/dev/null || true; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""
+
+# extension= lines: a path, and a bare name resolved against extension_dir
+zig cc -shared -O2 -I "$ROOT/include" -o "$OUT/demo.$LIB" "$ROOT/tests/extensions/demo.c"
+printf 'extension = %s\ndemo.greeting = salut\n' "$OUT/demo.$LIB" > "$OUT/ext-path.ini"
+check "extension= by path" 'string(11) "salut, ini!"' "$("$ZPHP" --ini="$OUT/ext-path.ini" run <(echo '<?php var_dump(demo_greet("ini"));') 2>&1 | tail -1)"
+mkdir -p "$OUT/extdir" && cp "$OUT/demo.$LIB" "$OUT/extdir/"
+printf 'extension_dir = %s\nextension = demo\n' "$OUT/extdir" > "$OUT/ext-name.ini"
+check "extension= by name in extension_dir" 'bool(true)' "$("$ZPHP" --ini="$OUT/ext-name.ini" run <(echo '<?php var_dump(extension_loaded("demo"));') 2>&1 | tail -1)"
+printf 'extension = demo\n' > "$OUT/extdir/php.ini"
+check "extension= by name next to the ini file" 'bool(true)' "$("$ZPHP" --ini="$OUT/extdir/php.ini" run <(echo '<?php var_dump(extension_loaded("demo"));') 2>&1 | tail -1)"
+
+echo "$passed passed, $failed failed"
+[ "$failed" -eq 0 ]

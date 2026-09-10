@@ -393,6 +393,8 @@ jobs:
       - run: zig build
       - name: Run ./tests/extensions/run (dynamic and static)
         run: STATIC=1 ./tests/extensions/run
+      - name: Run ./tests/ini_test
+        run: ./tests/ini_test
 
   compile:
     needs: changes

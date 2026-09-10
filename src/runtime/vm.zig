@@ -2884,6 +2884,7 @@ pub const VM = struct {
 
     pub fn interpret(self: *VM, result: *const CompileResult) RuntimeError!void {
         self.installHooks();
+        try @import("../ini_config.zig").applyToVm(self);
         try extension.beginRequest(self);
         try self.registerResultFunctions(result);
         for (result.type_hints.items) |th| {
