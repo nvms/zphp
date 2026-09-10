@@ -45,10 +45,21 @@ pub fn build(b: *std.Build) void {
     exe_mod.link_libc = true;
     exe_mod.addObject(fast_loop_obj);
 
+    // musl release binaries are fully static so they run on any linux. every
+    // system library becomes the path of its archive, the archives behind
+    // them come from pkg-config's static view, and the exe is linked -static
+    const static_musl = target.result.abi.isMusl();
+    if (static_musl) {
+        addStaticDependencies(b, exe_mod);
+        addGccLibstdcxx(b, exe_mod);
+        pinStaticArchives(b, exe_mod);
+    }
+
     const exe = b.addExecutable(.{
         .name = "zphp",
         .root_module = exe_mod,
         .use_llvm = true,
+        .linkage = if (static_musl) .static else null,
     });
     exe.stack_size = 64 * 1024 * 1024;
     b.installArtifact(exe);
@@ -147,6 +158,87 @@ fn addMysqlClient(b: *std.Build, mod: *std.Build.Module) void {
         return;
     }
     mod.linkSystemLibrary("mysqlclient", .{});
+}
+
+// every -l and -L that `pkg-config --static --libs` reports for the libraries
+// zphp links, so a static musl link sees the archives behind each archive
+// (curl needs nghttp2, brotli, zstd, idn2, psl; gd needs png, jpeg, webp,
+// freetype; ldap needs sasl; ...). packages without a .pc file are covered
+// by the direct linkSystemLibrary calls above
+fn addStaticDependencies(b: *std.Build, mod: *std.Build.Module) void {
+    const pkgs = [_][]const u8{ "libpcre2-8", "sqlite3", "zlib", "libmariadb", "libpq", "openssl", "libnghttp2", "libcurl", "libxml-2.0", "icu-i18n", "icu-uc", "gmp", "gdlib", "libsodium", "ldap", "lber" };
+    const target = mod.resolved_target.?.result;
+    for (pkgs) |pkg| {
+        const r = std.process.Child.run(.{
+            .allocator = b.allocator,
+            .argv = &.{ "pkg-config", "--static", "--libs", pkg },
+        }) catch continue;
+        if (r.term != .Exited or r.term.Exited != 0) continue;
+        var it = std.mem.tokenizeAny(u8, r.stdout, " \t\r\n");
+        while (it.next()) |flag| {
+            if (std.mem.startsWith(u8, flag, "-l")) {
+                const name = staticArchiveName(flag[2..]);
+                if (std.zig.target.isLibCLibName(&target, name)) continue;
+                mod.linkSystemLibrary(name, .{ .use_pkg_config = .no });
+            } else if (std.mem.startsWith(u8, flag, "-L")) {
+                mod.addLibraryPath(.{ .cwd_relative = flag[2..] });
+            }
+        }
+    }
+}
+
+// libpq.pc names libpgcommon and libpgport, but those archives are the
+// frontend builds with the encoding symbols renamed to *_private; the copies
+// libpq.a itself was linked against are the _shlib archives
+fn staticArchiveName(name: []const u8) []const u8 {
+    if (std.mem.eql(u8, name, "pgcommon")) return "pgcommon_shlib";
+    if (std.mem.eql(u8, name, "pgport")) return "pgport_shlib";
+    return name;
+}
+
+// alpine's icu archives are gcc builds that pull in libstdc++ internals, so
+// gcc's libstdc++.a is linked alongside the libc++ zig links for the icu shim.
+// zig treats -lstdc++ as a request for its own libc++, hence the archive path
+fn addGccLibstdcxx(b: *std.Build, mod: *std.Build.Module) void {
+    const r = std.process.Child.run(.{
+        .allocator = b.allocator,
+        .argv = &.{ "cc", "-print-file-name=libstdc++.a" },
+    }) catch return;
+    if (r.term != .Exited or r.term.Exited != 0) return;
+    const path = std.mem.trim(u8, r.stdout, " \r\n");
+    if (!std.fs.path.isAbsolute(path)) return;
+    mod.addObjectFile(.{ .cwd_relative = path });
+}
+
+// zig resolves -l flags with the mode in force when it parses them, and the
+// build system emits -static after them, so a -l would still pick a shared
+// object. archive paths sidestep that: they are plain link inputs
+fn pinStaticArchives(b: *std.Build, mod: *std.Build.Module) void {
+    for (mod.link_objects.items) |*obj| switch (obj.*) {
+        .system_lib => |lib| obj.* = .{ .static_path = .{ .cwd_relative = findStaticArchive(b, mod, lib.name) } },
+        else => {},
+    };
+}
+
+fn findStaticArchive(b: *std.Build, mod: *std.Build.Module, name: []const u8) []const u8 {
+    const file = b.fmt("lib{s}.a", .{name});
+    for (mod.lib_paths.items) |lib_path| {
+        const dir = switch (lib_path) {
+            .cwd_relative => |p| p,
+            else => continue,
+        };
+        if (archiveIn(b, dir, file)) |path| return path;
+    }
+    for ([_][]const u8{ "/usr/local/lib", "/usr/lib" }) |dir| {
+        if (archiveIn(b, dir, file)) |path| return path;
+    }
+    std.debug.panic("no static archive lib{s}.a for the musl build", .{name});
+}
+
+fn archiveIn(b: *std.Build, dir: []const u8, file: []const u8) ?[]const u8 {
+    const path = b.pathJoin(&.{ dir, file });
+    std.fs.cwd().access(path, .{}) catch return null;
+    return path;
 }
 
 fn pkgConfigVariable(b: *std.Build, pkg: []const u8, name: []const u8) ?[]const u8 {

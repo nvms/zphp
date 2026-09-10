@@ -61,17 +61,21 @@ jobs:
           branch: v3.22
           apk-tools-url: https://gitlab.alpinelinux.org/api/v4/projects/5/packages/generic/v2.14.10/${{ matrix.alpine }}/apk.static#!sha256!${{ matrix.apk_sha }}
           packages: >
-            build-base linux-headers curl xz
-            pcre2-dev sqlite-dev sqlite-static zlib-dev zlib-static
+            build-base linux-headers curl xz cmake m4 python3
+            pcre2-dev pcre2-static sqlite-dev sqlite-static zlib-dev zlib-static
             mariadb-connector-c-dev mariadb-static libpq-dev
             openssl-dev openssl-libs-static
-            nghttp2-dev nghttp2-static curl-dev curl-static
-            libxml2-dev libxml2-static
+            curl-dev curl-static c-ares-dev
+            zstd-static libidn2-dev libidn2-static libunistring-dev libunistring-static
+            libxml2-dev libxml2-static xz-static
             icu-dev icu-static icu-libs
-            gmp-dev
-            gd-dev
+            libpng-dev libpng-static libjpeg-turbo-dev libjpeg-turbo-static freetype-dev freetype-static bzip2-static
             libsodium-dev libsodium-static
-            openldap-dev
+
+      - name: build static dependencies (alpine)
+        if: matrix.alpine
+        shell: alpine.sh --root {0}
+        run: sh .github/scripts/musl_static_deps.sh
 
       - name: install zig (alpine)
         if: matrix.alpine
@@ -92,6 +96,8 @@ jobs:
       - name: build (musl)
         if: matrix.alpine
         shell: alpine.sh {0}
+        env:
+          PKG_CONFIG_PATH: /usr/local/lib/pkgconfig
         run: zig build -Doptimize=ReleaseFast -Dcpu=baseline
 
       - name: smoke test (musl)
@@ -119,10 +125,13 @@ jobs:
           ./zphp-${{ matrix.name }} version
           ./zphp-${{ matrix.name }} run .github/scripts/release_smoke.php
 
+      # a musl artifact must be static: it runs on the ubuntu host here, outside
+      # alpine, with no musl loader available
       - name: smoke test packaged binary (musl)
         if: matrix.alpine
-        shell: alpine.sh {0}
         run: |
+          file zphp-${{ matrix.name }}
+          file zphp-${{ matrix.name }} | grep -q "statically linked"
           ./zphp-${{ matrix.name }} version
           ./zphp-${{ matrix.name }} run .github/scripts/release_smoke.php
 
@@ -135,11 +144,13 @@ jobs:
         run: |
           {
             echo "zphp-${{ matrix.name }} built on ${{ matrix.os }} in alpine v3.22 with zig 0.15.1"
-            echo "dynamically linked against musl; needs a musl-based system with these packages:"
+            echo "statically linked; no runtime library dependencies. archives linked in:"
             echo
-            ldd zphp-${{ matrix.name }} || true
+            echo "built from source by .github/scripts/musl_static_deps.sh:"
+            cat /usr/local/share/zphp-static-deps.txt
             echo
-            apk info -v 2>/dev/null | grep -E '^(musl|pcre2|sqlite|zlib|mariadb|libpq|openssl|nghttp2|curl|libxml2|icu|gmp|gd|libsodium|libldap|openldap)' || true
+            echo "alpine packages:"
+            apk info -v 2>/dev/null | grep -E '^(musl|pcre2|sqlite|zlib|mariadb|libpq|openssl|curl|c-ares|zstd|libidn2|libunistring|libxml2|xz|icu|libpng|libjpeg|freetype|bzip2|libsodium|brotli|nghttp2|libpsl)' || true
           } > zphp-${{ matrix.name }}.libs.txt
           cat zphp-${{ matrix.name }}.libs.txt
 
@@ -196,7 +207,8 @@ jobs:
       - name: execute published binary
         run: |
           cd artifacts
-          chmod +x zphp-linux-x86_64
+          chmod +x zphp-linux-x86_64 zphp-linux-x86_64-musl
+          ./zphp-linux-x86_64-musl version
           ./zphp-linux-x86_64 version
       - name: create release
         uses: softprops/action-gh-release@v2

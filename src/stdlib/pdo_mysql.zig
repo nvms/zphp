@@ -14,25 +14,25 @@ const mysql = struct {
     // only access the name pointer at offset 0 which is stable
     const MYSQL_FIELD = opaque {};
 
-    extern "mysqlclient" fn mysql_init(m: ?*MYSQL) callconv(.c) ?*MYSQL;
-    extern "mysqlclient" fn mysql_real_connect(m: *MYSQL, host: ?[*:0]const u8, user: ?[*:0]const u8, passwd: ?[*:0]const u8, db: ?[*:0]const u8, port: c_uint, socket: ?[*:0]const u8, flags: c_ulong) callconv(.c) ?*MYSQL;
-    extern "mysqlclient" fn mysql_close(m: *MYSQL) callconv(.c) void;
-    extern "mysqlclient" fn mysql_error(m: *MYSQL) callconv(.c) [*:0]const u8;
-    extern "mysqlclient" fn mysql_real_query(m: *MYSQL, q: [*]const u8, len: c_ulong) callconv(.c) c_int;
-    extern "mysqlclient" fn mysql_store_result(m: *MYSQL) callconv(.c) ?*MYSQL_RES;
-    extern "mysqlclient" fn mysql_affected_rows(m: *MYSQL) callconv(.c) u64;
-    extern "mysqlclient" fn mysql_insert_id(m: *MYSQL) callconv(.c) u64;
-    extern "mysqlclient" fn mysql_num_fields(res: *MYSQL_RES) callconv(.c) c_uint;
-    extern "mysqlclient" fn mysql_field_seek(res: *MYSQL_RES, offset: c_uint) callconv(.c) c_uint;
-    extern "mysqlclient" fn mysql_fetch_field(res: *MYSQL_RES) callconv(.c) ?*MYSQL_FIELD;
-    extern "mysqlclient" fn mysql_fetch_row(res: *MYSQL_RES) callconv(.c) ?[*]?[*:0]const u8;
-    extern "mysqlclient" fn mysql_fetch_lengths(res: *MYSQL_RES) callconv(.c) ?[*]c_ulong;
-    extern "mysqlclient" fn mysql_free_result(res: *MYSQL_RES) callconv(.c) void;
-    extern "mysqlclient" fn mysql_num_rows(res: *MYSQL_RES) callconv(.c) u64;
-    extern "mysqlclient" fn mysql_real_escape_string(m: *MYSQL, to: [*]u8, from: [*]const u8, length: c_ulong) callconv(.c) c_ulong;
-    extern "mysqlclient" fn mysql_autocommit(m: *MYSQL, auto_mode: u8) callconv(.c) u8;
-    extern "mysqlclient" fn mysql_commit(m: *MYSQL) callconv(.c) u8;
-    extern "mysqlclient" fn mysql_rollback(m: *MYSQL) callconv(.c) u8;
+    extern "c" fn mysql_init(m: ?*MYSQL) callconv(.c) ?*MYSQL;
+    extern "c" fn mysql_real_connect(m: *MYSQL, host: ?[*:0]const u8, user: ?[*:0]const u8, passwd: ?[*:0]const u8, db: ?[*:0]const u8, port: c_uint, socket: ?[*:0]const u8, flags: c_ulong) callconv(.c) ?*MYSQL;
+    extern "c" fn mysql_close(m: *MYSQL) callconv(.c) void;
+    extern "c" fn mysql_error(m: *MYSQL) callconv(.c) [*:0]const u8;
+    extern "c" fn mysql_real_query(m: *MYSQL, q: [*]const u8, len: c_ulong) callconv(.c) c_int;
+    extern "c" fn mysql_store_result(m: *MYSQL) callconv(.c) ?*MYSQL_RES;
+    extern "c" fn mysql_affected_rows(m: *MYSQL) callconv(.c) u64;
+    extern "c" fn mysql_insert_id(m: *MYSQL) callconv(.c) u64;
+    extern "c" fn mysql_num_fields(res: *MYSQL_RES) callconv(.c) c_uint;
+    extern "c" fn mysql_field_seek(res: *MYSQL_RES, offset: c_uint) callconv(.c) c_uint;
+    extern "c" fn mysql_fetch_field(res: *MYSQL_RES) callconv(.c) ?*MYSQL_FIELD;
+    extern "c" fn mysql_fetch_row(res: *MYSQL_RES) callconv(.c) ?[*]?[*:0]const u8;
+    extern "c" fn mysql_fetch_lengths(res: *MYSQL_RES) callconv(.c) ?[*]c_ulong;
+    extern "c" fn mysql_free_result(res: *MYSQL_RES) callconv(.c) void;
+    extern "c" fn mysql_num_rows(res: *MYSQL_RES) callconv(.c) u64;
+    extern "c" fn mysql_real_escape_string(m: *MYSQL, to: [*]u8, from: [*]const u8, length: c_ulong) callconv(.c) c_ulong;
+    extern "c" fn mysql_autocommit(m: *MYSQL, auto_mode: u8) callconv(.c) u8;
+    extern "c" fn mysql_commit(m: *MYSQL) callconv(.c) u8;
+    extern "c" fn mysql_rollback(m: *MYSQL) callconv(.c) u8;
 };
 
 fn fieldName(field: *mysql.MYSQL_FIELD) [*:0]const u8 {

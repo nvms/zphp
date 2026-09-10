@@ -47,7 +47,7 @@ const pcre2 = struct {
     const ERROR_NOMEMORY: c_int = -48;
     const UNSET: usize = std.math.maxInt(usize);
 
-    extern "pcre2-8" fn pcre2_compile_8(
+    extern "c" fn pcre2_compile_8(
         pattern: [*]const u8,
         length: usize,
         options: u32,
@@ -56,22 +56,22 @@ const pcre2 = struct {
         ccontext: ?*anyopaque,
     ) callconv(.c) ?*Code;
 
-    extern "pcre2-8" fn pcre2_code_free_8(code: ?*Code) callconv(.c) void;
+    extern "c" fn pcre2_code_free_8(code: ?*Code) callconv(.c) void;
 
-    extern "pcre2-8" fn pcre2_get_error_message_8(
+    extern "c" fn pcre2_get_error_message_8(
         errorcode: c_int,
         buffer: [*]u8,
         bufflen: usize,
     ) callconv(.c) c_int;
 
-    extern "pcre2-8" fn pcre2_match_data_create_from_pattern_8(
+    extern "c" fn pcre2_match_data_create_from_pattern_8(
         code: *const Code,
         gcontext: ?*anyopaque,
     ) callconv(.c) ?*MatchData;
 
-    extern "pcre2-8" fn pcre2_match_data_free_8(match_data: ?*MatchData) callconv(.c) void;
+    extern "c" fn pcre2_match_data_free_8(match_data: ?*MatchData) callconv(.c) void;
 
-    extern "pcre2-8" fn pcre2_match_8(
+    extern "c" fn pcre2_match_8(
         code: *const Code,
         subject: [*]const u8,
         length: usize,
@@ -81,21 +81,21 @@ const pcre2 = struct {
         mcontext: ?*anyopaque,
     ) callconv(.c) c_int;
 
-    extern "pcre2-8" fn pcre2_get_ovector_pointer_8(
+    extern "c" fn pcre2_get_ovector_pointer_8(
         match_data: *MatchData,
     ) callconv(.c) [*]usize;
 
-    extern "pcre2-8" fn pcre2_pattern_info_8(
+    extern "c" fn pcre2_pattern_info_8(
         code: *const Code,
         what: u32,
         where: *anyopaque,
     ) callconv(.c) c_int;
 
-    extern "pcre2-8" fn pcre2_get_mark_8(
+    extern "c" fn pcre2_get_mark_8(
         match_data: *MatchData,
     ) callconv(.c) ?[*:0]const u8;
 
-    extern "pcre2-8" fn pcre2_substitute_8(
+    extern "c" fn pcre2_substitute_8(
         code: *const Code,
         subject: [*]const u8,
         length: usize,
@@ -109,7 +109,7 @@ const pcre2 = struct {
         outlengthptr: *usize,
     ) callconv(.c) c_int;
 
-    extern "pcre2-8" fn pcre2_config_8(what: u32, where_: ?*anyopaque) callconv(.c) c_int;
+    extern "c" fn pcre2_config_8(what: u32, where_: ?*anyopaque) callconv(.c) c_int;
     const CONFIG_VERSION: u32 = 11;
 };
 

@@ -15,21 +15,21 @@ const pg = struct {
     const PGRES_COMMAND_OK: c_int = 1;
     const PGRES_TUPLES_OK: c_int = 2;
 
-    extern "pq" fn PQconnectdb(conninfo: [*:0]const u8) callconv(.c) ?*PGconn;
-    extern "pq" fn PQstatus(conn: *PGconn) callconv(.c) c_int;
-    extern "pq" fn PQfinish(conn: *PGconn) callconv(.c) void;
-    extern "pq" fn PQerrorMessage(conn: *PGconn) callconv(.c) [*:0]const u8;
-    extern "pq" fn PQexec(conn: *PGconn, query: [*:0]const u8) callconv(.c) ?*PGresult;
-    extern "pq" fn PQexecParams(conn: *PGconn, command: [*:0]const u8, nParams: c_int, paramTypes: ?[*]const c_uint, paramValues: ?[*]const ?[*:0]const u8, paramLengths: ?[*]const c_int, paramFormats: ?[*]const c_int, resultFormat: c_int) callconv(.c) ?*PGresult;
-    extern "pq" fn PQresultStatus(res: *PGresult) callconv(.c) c_int;
-    extern "pq" fn PQresultErrorMessage(res: *PGresult) callconv(.c) [*:0]const u8;
-    extern "pq" fn PQclear(res: *PGresult) callconv(.c) void;
-    extern "pq" fn PQntuples(res: *PGresult) callconv(.c) c_int;
-    extern "pq" fn PQnfields(res: *PGresult) callconv(.c) c_int;
-    extern "pq" fn PQfname(res: *PGresult, field_num: c_int) callconv(.c) ?[*:0]const u8;
-    extern "pq" fn PQgetvalue(res: *PGresult, tup_num: c_int, field_num: c_int) callconv(.c) [*:0]const u8;
-    extern "pq" fn PQgetisnull(res: *PGresult, tup_num: c_int, field_num: c_int) callconv(.c) c_int;
-    extern "pq" fn PQcmdTuples(res: *PGresult) callconv(.c) [*:0]const u8;
+    extern "c" fn PQconnectdb(conninfo: [*:0]const u8) callconv(.c) ?*PGconn;
+    extern "c" fn PQstatus(conn: *PGconn) callconv(.c) c_int;
+    extern "c" fn PQfinish(conn: *PGconn) callconv(.c) void;
+    extern "c" fn PQerrorMessage(conn: *PGconn) callconv(.c) [*:0]const u8;
+    extern "c" fn PQexec(conn: *PGconn, query: [*:0]const u8) callconv(.c) ?*PGresult;
+    extern "c" fn PQexecParams(conn: *PGconn, command: [*:0]const u8, nParams: c_int, paramTypes: ?[*]const c_uint, paramValues: ?[*]const ?[*:0]const u8, paramLengths: ?[*]const c_int, paramFormats: ?[*]const c_int, resultFormat: c_int) callconv(.c) ?*PGresult;
+    extern "c" fn PQresultStatus(res: *PGresult) callconv(.c) c_int;
+    extern "c" fn PQresultErrorMessage(res: *PGresult) callconv(.c) [*:0]const u8;
+    extern "c" fn PQclear(res: *PGresult) callconv(.c) void;
+    extern "c" fn PQntuples(res: *PGresult) callconv(.c) c_int;
+    extern "c" fn PQnfields(res: *PGresult) callconv(.c) c_int;
+    extern "c" fn PQfname(res: *PGresult, field_num: c_int) callconv(.c) ?[*:0]const u8;
+    extern "c" fn PQgetvalue(res: *PGresult, tup_num: c_int, field_num: c_int) callconv(.c) [*:0]const u8;
+    extern "c" fn PQgetisnull(res: *PGresult, tup_num: c_int, field_num: c_int) callconv(.c) c_int;
+    extern "c" fn PQcmdTuples(res: *PGresult) callconv(.c) [*:0]const u8;
 };
 
 fn getConn(obj: *PhpObject) ?*pg.PGconn {

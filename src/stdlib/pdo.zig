@@ -30,31 +30,31 @@ const sqlite = struct {
     const BLOB: c_int = 4;
     const NULL: c_int = 5;
 
-    extern "sqlite3" fn sqlite3_open(filename: [*:0]const u8, ppDb: *?*Db) callconv(.c) c_int;
-    extern "sqlite3" fn sqlite3_close_v2(db: *Db) callconv(.c) c_int;
-    extern "sqlite3" fn sqlite3_free(ptr: ?*anyopaque) callconv(.c) void;
-    extern "sqlite3" fn sqlite3_exec(db: *Db, sql: [*:0]const u8, callback: ?*anyopaque, arg: ?*anyopaque, errmsg: ?*[*:0]u8) callconv(.c) c_int;
-    extern "sqlite3" fn sqlite3_prepare_v2(db: *Db, sql: [*:0]const u8, nByte: c_int, ppStmt: *?*Stmt, pzTail: ?*[*:0]const u8) callconv(.c) c_int;
-    extern "sqlite3" fn sqlite3_step(stmt: *Stmt) callconv(.c) c_int;
-    extern "sqlite3" fn sqlite3_finalize(stmt: *Stmt) callconv(.c) c_int;
-    extern "sqlite3" fn sqlite3_reset(stmt: *Stmt) callconv(.c) c_int;
-    extern "sqlite3" fn sqlite3_column_count(stmt: *Stmt) callconv(.c) c_int;
-    extern "sqlite3" fn sqlite3_column_name(stmt: *Stmt, n: c_int) callconv(.c) ?[*:0]const u8;
-    extern "sqlite3" fn sqlite3_column_type(stmt: *Stmt, n: c_int) callconv(.c) c_int;
-    extern "sqlite3" fn sqlite3_column_int64(stmt: *Stmt, n: c_int) callconv(.c) i64;
-    extern "sqlite3" fn sqlite3_column_double(stmt: *Stmt, n: c_int) callconv(.c) f64;
-    extern "sqlite3" fn sqlite3_column_text(stmt: *Stmt, n: c_int) callconv(.c) ?[*:0]const u8;
-    extern "sqlite3" fn sqlite3_column_bytes(stmt: *Stmt, n: c_int) callconv(.c) c_int;
-    extern "sqlite3" fn sqlite3_bind_null(stmt: *Stmt, n: c_int) callconv(.c) c_int;
-    extern "sqlite3" fn sqlite3_bind_int64(stmt: *Stmt, n: c_int, val: i64) callconv(.c) c_int;
-    extern "sqlite3" fn sqlite3_bind_double(stmt: *Stmt, n: c_int, val: f64) callconv(.c) c_int;
-    extern "sqlite3" fn sqlite3_bind_text(stmt: *Stmt, n: c_int, val: [*]const u8, nBytes: c_int, destructor: ?*const fn (?*anyopaque) callconv(.c) void) callconv(.c) c_int;
-    extern "sqlite3" fn sqlite3_bind_parameter_index(stmt: *Stmt, name: [*:0]const u8) callconv(.c) c_int;
-    extern "sqlite3" fn sqlite3_changes(db: *Db) callconv(.c) c_int;
-    extern "sqlite3" fn sqlite3_last_insert_rowid(db: *Db) callconv(.c) i64;
-    extern "sqlite3" fn sqlite3_errmsg(db: *Db) callconv(.c) [*:0]const u8;
-    extern "sqlite3" fn sqlite3_errcode(db: *Db) callconv(.c) c_int;
-    extern "sqlite3" fn sqlite3_stmt_readonly(stmt: *Stmt) callconv(.c) c_int;
+    extern "c" fn sqlite3_open(filename: [*:0]const u8, ppDb: *?*Db) callconv(.c) c_int;
+    extern "c" fn sqlite3_close_v2(db: *Db) callconv(.c) c_int;
+    extern "c" fn sqlite3_free(ptr: ?*anyopaque) callconv(.c) void;
+    extern "c" fn sqlite3_exec(db: *Db, sql: [*:0]const u8, callback: ?*anyopaque, arg: ?*anyopaque, errmsg: ?*[*:0]u8) callconv(.c) c_int;
+    extern "c" fn sqlite3_prepare_v2(db: *Db, sql: [*:0]const u8, nByte: c_int, ppStmt: *?*Stmt, pzTail: ?*[*:0]const u8) callconv(.c) c_int;
+    extern "c" fn sqlite3_step(stmt: *Stmt) callconv(.c) c_int;
+    extern "c" fn sqlite3_finalize(stmt: *Stmt) callconv(.c) c_int;
+    extern "c" fn sqlite3_reset(stmt: *Stmt) callconv(.c) c_int;
+    extern "c" fn sqlite3_column_count(stmt: *Stmt) callconv(.c) c_int;
+    extern "c" fn sqlite3_column_name(stmt: *Stmt, n: c_int) callconv(.c) ?[*:0]const u8;
+    extern "c" fn sqlite3_column_type(stmt: *Stmt, n: c_int) callconv(.c) c_int;
+    extern "c" fn sqlite3_column_int64(stmt: *Stmt, n: c_int) callconv(.c) i64;
+    extern "c" fn sqlite3_column_double(stmt: *Stmt, n: c_int) callconv(.c) f64;
+    extern "c" fn sqlite3_column_text(stmt: *Stmt, n: c_int) callconv(.c) ?[*:0]const u8;
+    extern "c" fn sqlite3_column_bytes(stmt: *Stmt, n: c_int) callconv(.c) c_int;
+    extern "c" fn sqlite3_bind_null(stmt: *Stmt, n: c_int) callconv(.c) c_int;
+    extern "c" fn sqlite3_bind_int64(stmt: *Stmt, n: c_int, val: i64) callconv(.c) c_int;
+    extern "c" fn sqlite3_bind_double(stmt: *Stmt, n: c_int, val: f64) callconv(.c) c_int;
+    extern "c" fn sqlite3_bind_text(stmt: *Stmt, n: c_int, val: [*]const u8, nBytes: c_int, destructor: ?*const fn (?*anyopaque) callconv(.c) void) callconv(.c) c_int;
+    extern "c" fn sqlite3_bind_parameter_index(stmt: *Stmt, name: [*:0]const u8) callconv(.c) c_int;
+    extern "c" fn sqlite3_changes(db: *Db) callconv(.c) c_int;
+    extern "c" fn sqlite3_last_insert_rowid(db: *Db) callconv(.c) i64;
+    extern "c" fn sqlite3_errmsg(db: *Db) callconv(.c) [*:0]const u8;
+    extern "c" fn sqlite3_errcode(db: *Db) callconv(.c) c_int;
+    extern "c" fn sqlite3_stmt_readonly(stmt: *Stmt) callconv(.c) c_int;
 
     // user-defined SQL function bindings for PDO\Sqlite::createFunction
     pub const Context = opaque {};
@@ -63,7 +63,7 @@ const sqlite = struct {
     pub const UTF8: c_int = 1;
     pub const DETERMINISTIC: c_int = 0x800;
 
-    extern "sqlite3" fn sqlite3_create_function_v2(
+    extern "c" fn sqlite3_create_function_v2(
         db: *Db,
         zFunctionName: [*:0]const u8,
         nArg: c_int,
@@ -74,7 +74,7 @@ const sqlite = struct {
         xFinal: ?*const fn (*Context) callconv(.c) void,
         xDestroy: ?*const fn (?*anyopaque) callconv(.c) void,
     ) callconv(.c) c_int;
-    extern "sqlite3" fn sqlite3_create_collation_v2(
+    extern "c" fn sqlite3_create_collation_v2(
         db: *Db,
         zName: [*:0]const u8,
         eTextRep: c_int,
@@ -83,22 +83,22 @@ const sqlite = struct {
         xDestroy: ?*const fn (?*anyopaque) callconv(.c) void,
     ) callconv(.c) c_int;
 
-    extern "sqlite3" fn sqlite3_aggregate_context(ctx: *Context, size: c_int) callconv(.c) ?*anyopaque;
-    extern "sqlite3" fn sqlite3_user_data(ctx: *Context) callconv(.c) ?*anyopaque;
+    extern "c" fn sqlite3_aggregate_context(ctx: *Context, size: c_int) callconv(.c) ?*anyopaque;
+    extern "c" fn sqlite3_user_data(ctx: *Context) callconv(.c) ?*anyopaque;
 
-    extern "sqlite3" fn sqlite3_value_type(v: *Value_t) callconv(.c) c_int;
-    extern "sqlite3" fn sqlite3_value_int64(v: *Value_t) callconv(.c) i64;
-    extern "sqlite3" fn sqlite3_value_double(v: *Value_t) callconv(.c) f64;
-    extern "sqlite3" fn sqlite3_value_text(v: *Value_t) callconv(.c) ?[*:0]const u8;
-    extern "sqlite3" fn sqlite3_value_bytes(v: *Value_t) callconv(.c) c_int;
+    extern "c" fn sqlite3_value_type(v: *Value_t) callconv(.c) c_int;
+    extern "c" fn sqlite3_value_int64(v: *Value_t) callconv(.c) i64;
+    extern "c" fn sqlite3_value_double(v: *Value_t) callconv(.c) f64;
+    extern "c" fn sqlite3_value_text(v: *Value_t) callconv(.c) ?[*:0]const u8;
+    extern "c" fn sqlite3_value_bytes(v: *Value_t) callconv(.c) c_int;
 
-    extern "sqlite3" fn sqlite3_result_null(ctx: *Context) callconv(.c) void;
-    extern "sqlite3" fn sqlite3_result_int64(ctx: *Context, v: i64) callconv(.c) void;
-    extern "sqlite3" fn sqlite3_result_double(ctx: *Context, v: f64) callconv(.c) void;
+    extern "c" fn sqlite3_result_null(ctx: *Context) callconv(.c) void;
+    extern "c" fn sqlite3_result_int64(ctx: *Context, v: i64) callconv(.c) void;
+    extern "c" fn sqlite3_result_double(ctx: *Context, v: f64) callconv(.c) void;
     // destructor accepts SQLite's TRANSIENT/STATIC sentinel ints as well as
     // real function pointers; declared as ?*anyopaque to allow the sentinel
-    extern "sqlite3" fn sqlite3_result_text(ctx: *Context, v: [*]const u8, n: c_int, destructor: ?*anyopaque) callconv(.c) void;
-    extern "sqlite3" fn sqlite3_result_error(ctx: *Context, msg: [*]const u8, n: c_int) callconv(.c) void;
+    extern "c" fn sqlite3_result_text(ctx: *Context, v: [*]const u8, n: c_int, destructor: ?*anyopaque) callconv(.c) void;
+    extern "c" fn sqlite3_result_error(ctx: *Context, msg: [*]const u8, n: c_int) callconv(.c) void;
 
     // SQLITE_TRANSIENT is the magic value -1 cast to a destructor pointer;
     // SQLite recognizes it and copies the buffer before returning
