@@ -42,6 +42,16 @@ zphp install
 
 Download builds from [GitHub Releases](https://github.com/nvms/zphp/releases).
 
+| Asset | Platform | Notes |
+|---|---|---|
+| `zphp-linux-x86_64-musl` | Linux x86_64 | Static. Runs on any distribution. |
+| `zphp-linux-aarch64-musl` | Linux aarch64 | Static. Runs on any distribution. |
+| `zphp-linux-x86_64` | Ubuntu 24.04 x86_64 | Links the system libraries listed in the matching `.libs.txt`. |
+| `zphp-linux-aarch64` | Ubuntu 24.04 aarch64 | Links the system libraries listed in the matching `.libs.txt`. |
+| `zphp-macos-aarch64` | macOS 15 or newer, Apple Silicon | Links Homebrew libraries listed in the matching `.libs.txt`. |
+
+Pick a musl build unless you are on the exact platform a glibc build was made on. Every release ships a `SHA256SUMS` file, a `.libs.txt` per binary naming the native libraries it was linked against, and a build provenance attestation you can check with `gh attestation verify zphp-<platform> --repo nvms/zphp`.
+
 See the [documentation](https://nvms.github.io/zphp/) for build instructions and usage guides.
 
 ## Project Status
