@@ -17,6 +17,7 @@ env:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
@@ -56,12 +57,13 @@ jobs:
         uses: jirutka/setup-alpine@v1
         with:
           arch: ${{ matrix.alpine }}
-          branch: latest-stable
+          # pinned: a new alpine release changes library packaging under our feet
+          branch: v3.22
           apk-tools-url: https://gitlab.alpinelinux.org/api/v4/projects/5/packages/generic/v2.14.10/${{ matrix.alpine }}/apk.static#!sha256!${{ matrix.apk_sha }}
           packages: >
             build-base linux-headers curl xz
             pcre2-dev sqlite-dev sqlite-static zlib-dev zlib-static
-            mariadb-connector-c-dev libpq-dev
+            mariadb-connector-c-dev mariadb-static libpq-dev
             openssl-dev openssl-libs-static
             nghttp2-dev nghttp2-static curl-dev curl-static
             libxml2-dev libxml2-static

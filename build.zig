@@ -28,7 +28,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkSystemLibrary("pcre2-8", .{ .preferred_link_mode = .static });
     exe_mod.linkSystemLibrary("sqlite3", .{ .preferred_link_mode = .static });
     exe_mod.linkSystemLibrary("z", .{ .preferred_link_mode = .static });
-    exe_mod.linkSystemLibrary("mysqlclient", .{});
+    addMysqlClient(b, exe_mod);
     exe_mod.linkSystemLibrary("pq", .{});
     addOpenSsl(b, exe_mod);
     exe_mod.linkSystemLibrary("nghttp2", .{ .preferred_link_mode = .static });
@@ -77,7 +77,7 @@ pub fn build(b: *std.Build) void {
     test_mod.linkSystemLibrary("pcre2-8", .{ .preferred_link_mode = .static });
     test_mod.linkSystemLibrary("sqlite3", .{ .preferred_link_mode = .static });
     test_mod.linkSystemLibrary("z", .{ .preferred_link_mode = .static });
-    test_mod.linkSystemLibrary("mysqlclient", .{});
+    addMysqlClient(b, test_mod);
     test_mod.linkSystemLibrary("pq", .{});
     addOpenSsl(b, test_mod);
     test_mod.linkSystemLibrary("nghttp2", .{ .preferred_link_mode = .static });
@@ -131,6 +131,22 @@ fn addOpenSsl(b: *std.Build, mod: *std.Build.Module) void {
     if (pkgConfigVariable(b, "openssl", "libdir")) |lib| {
         mod.addLibraryPath(.{ .cwd_relative = lib });
     }
+}
+
+// ubuntu and homebrew ship mysqlclient.pc. alpine ships the same API as
+// libmariadb.pc (mariadb-connector-c-dev) with headers under /usr/include/mysql
+// and the static archive in mariadb-static
+fn addMysqlClient(b: *std.Build, mod: *std.Build.Module) void {
+    if (pkgConfigVariable(b, "mysqlclient", "libdir") != null) {
+        mod.linkSystemLibrary("mysqlclient", .{});
+        return;
+    }
+    if (pkgConfigVariable(b, "libmariadb", "includedir")) |inc| {
+        mod.addIncludePath(.{ .cwd_relative = inc });
+        mod.linkSystemLibrary("mariadb", .{ .preferred_link_mode = .static });
+        return;
+    }
+    mod.linkSystemLibrary("mysqlclient", .{});
 }
 
 fn pkgConfigVariable(b: *std.Build, pkg: []const u8, name: []const u8) ?[]const u8 {
