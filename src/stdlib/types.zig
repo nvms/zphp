@@ -1706,12 +1706,13 @@ fn native_extension_loaded(_: *NativeContext, args: []const Value) RuntimeError!
     }
     // also accept the historic "datetime" alias for "date"
     if (std.ascii.eqlIgnoreCase(name, "datetime")) return NativeResult.scalar(.{ .bool = true });
-    return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = @import("../extension.zig").isLoaded(name) });
 }
 
 fn native_get_loaded_extensions(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
     for (SUPPORTED_EXTENSIONS) |s| try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(s) });
+    for (@import("../extension.zig").loaded()) |ext| try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(ext.name) });
     return NativeResult.borrowed(.{ .array = arr });
 }
 

@@ -1021,6 +1021,7 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
     // persist session data if session was started
     var session_ctx = w.vm.makeContext(null);
     @import("stdlib/session.zig").finalizeSession(&session_ctx);
+    @import("extension.zig").endRequest(&w.vm);
 
     const ct = w.vm.response_content_type;
     const code = w.vm.response_code;
@@ -1132,6 +1133,7 @@ fn handleH2Request(w: *Worker, conn: *Connection, session: *h2.H2Session, stream
 
     var session_ctx = w.vm.makeContext(null);
     @import("stdlib/session.zig").finalizeSession(&session_ctx);
+    @import("extension.zig").endRequest(&w.vm);
 
     const ct = w.vm.response_content_type;
     const code: u16 = std.math.cast(u16, w.vm.response_code) orelse 200;

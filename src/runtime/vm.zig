@@ -223,7 +223,8 @@ pub const NativeContext = struct {
 };
 
 pub const NativeResult = @import("native_result.zig").NativeResult;
-const NativeFn = *const fn (*NativeContext, []const Value) RuntimeError!NativeResult;
+const extension = @import("../extension.zig");
+pub const NativeFn = *const fn (*NativeContext, []const Value) RuntimeError!NativeResult;
 pub const NativeBinop = enum { add, sub, mul, div, mod, pow, compare, negate };
 
 pub const CaptureEntry = struct {
@@ -1130,6 +1131,13 @@ pub const VM = struct {
         // when a different class arrives or new code is declared
         intent: []IntentIC = &.{},
         arg_stack: []RefSource = &.{},
+        // third-party extension state lives here, off the VM struct, so the
+        // VM's field offsets stay put (see GOTCHAS on codegen perturbation):
+        // one slot per loaded extension, an arena for the value handles a
+        // call hands out, and whether request_init has run
+        ext_slots: []extension.VmSlot = &.{},
+        ext_arena: std.heap.ArenaAllocator = undefined,
+        ext_request_active: bool = false,
         // provenance of the call family opcode being executed, saved across a
         // nested call so a native callback's own calls cannot clobber it
         saved_sources: std.ArrayListUnmanaged(RefSource) = .{},
@@ -1378,6 +1386,8 @@ pub const VM = struct {
         const locals_buf = try allocator.alloc(Value, 8192);
         vm.ic.?.locals_buf = locals_buf.ptr;
         vm.ic.?.locals_cap = 8192;
+        vm.ic.?.ext_arena = std.heap.ArenaAllocator.init(allocator);
+        try extension.vmInit(vm);
         // snapshot the builtin heap + class registration so serve-mode reset can
         // keep it instead of rebuilding every request (registry native fns are
         // never cleared; stdlib classes + their enum-case objects ARE the churn)
@@ -2323,8 +2333,12 @@ pub const VM = struct {
                 value.* = .null;
             }
         }
-        var class_it = self.classes.valueIterator();
-        while (class_it.next()) |class| {
+        // builtin classes survive a serve reset with their constants, enum
+        // cases, and property defaults intact; only user classes are torn down
+        var class_it = self.classes.iterator();
+        while (class_it.next()) |class_entry| {
+            if (!free_all and self.builtin_classes.contains(class_entry.key_ptr.*)) continue;
+            const class = class_entry.value_ptr;
             for (class.properties.items) |*property| {
                 if (property.default == .string) {
                     self.releaseValue(property.default);
@@ -2390,6 +2404,7 @@ pub const VM = struct {
         @import("../stdlib/xmlwriter.zig").cleanupResources(self.objects);
         @import("../stdlib/intl.zig").cleanupResources(self.objects);
         @import("../stdlib/gmp.zig").cleanupResources(self.objects);
+        extension.cleanupResources(self.objects);
         @import("../stdlib/gd.zig").cleanupResources(self.objects);
         @import("../stdlib/ftp.zig").cleanupResources(self.objects);
         @import("../stdlib/ldap.zig").cleanupResources(self.objects);
@@ -2524,6 +2539,7 @@ pub const VM = struct {
     }
 
     pub fn deinit(self: *VM) void {
+        extension.vmDeinit(self);
         if (self.ic) |ic| for (ic.arg_stack) |*source| self.releaseArgSource(source);
         self.clearActiveArgSources();
         self.clearArgArraySources(null);
@@ -2710,6 +2726,7 @@ pub const VM = struct {
         self.releaseCallbackRegistries();
         // reap before freeHeapItems frees the proc objects (the map keys)
         self.reapProcChildren();
+        extension.endRequest(self);
         self.frame_high_water = 0;
         self.obj_ref_active = false;
         self.array_ref_active = false;
@@ -2838,6 +2855,7 @@ pub const VM = struct {
             self.php_constants.clearRetainingCapacity();
             self.user_constants.clearRetainingCapacity();
             initConstants(&self.php_constants, self.allocator) catch {};
+            extension.applyConstants(self) catch {};
             // builtins persist across reset now (freeClassState kept them), so the
             // stdlib classes + their native methods + enum objects DON'T need
             // rebuilding every request - that re-registration was the dominant
@@ -2866,6 +2884,7 @@ pub const VM = struct {
 
     pub fn interpret(self: *VM, result: *const CompileResult) RuntimeError!void {
         self.installHooks();
+        try extension.beginRequest(self);
         try self.registerResultFunctions(result);
         for (result.type_hints.items) |th| {
             try g_type_info.put(self.allocator, th.name, .{ .param_types = th.param_types, .return_type = th.return_type });

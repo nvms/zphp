@@ -510,6 +510,7 @@ curl -s -o /dev/null http://localhost:$PORT/isolation/dirty
 iso2=$(curl -s http://localhost:$PORT/isolation/probe)
 iso3=$(curl -s http://localhost:$PORT/isolation/probe)
 check_contains "isolation probe shape" '"tz":"UTC"' "$iso1"
+check_contains "builtin class constants survive the per-request reset" '"atom":"Y-m-d\\\\TH:i:sP","enum_case":"HalfEven"' "$iso1"
 check "request isolation after dirty request" "$iso1" "$iso2"
 check "request isolation second probe" "$iso1" "$iso3"
 iso_loop_ok=1

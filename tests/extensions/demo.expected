@@ -1,0 +1,77 @@
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+string(9) "Exception"
+int(5)
+string(13) "hello, world!"
+string(5) "1.2.3"
+int(42)
+float(0.5)
+bool(true)
+int(10)
+string(7) "counter"
+int(7)
+bool(true)
+string(48) "Demo\Counter(native counter, count=7, tally=yes)"
+int(7)
+caught: counter limit reached
+DemoException: boom
+array(5) {
+  ["count"]=>
+  int(4)
+  ["sum"]=>
+  int(6)
+  ["keys"]=>
+  array(4) {
+    [0]=>
+    int(0)
+    [1]=>
+    int(1)
+    [2]=>
+    int(2)
+    [3]=>
+    string(4) "name"
+  }
+  ["first"]=>
+  int(1)
+  ["name"]=>
+  string(1) "x"
+}
+array(7) {
+  [0]=>
+  string(4) "null"
+  [1]=>
+  string(4) "bool"
+  [2]=>
+  string(3) "int"
+  [3]=>
+  string(5) "float"
+  [4]=>
+  string(6) "string"
+  [5]=>
+  string(5) "array"
+  [6]=>
+  string(6) "object"
+}
+string(3) "ABC"
+int(42)
+Error: Call to undefined function nope_missing()
+int(1)
+int(2)
+int(1)
+echoed
+string(5) "hello"
+string(10) "hi, again!"
+int(8)
+string(8) "hello wo"
+string(10) "DemoBuffer"
+int(0)
+int(1)
+int(2)
+unwound
+int(3)
+demo_read(): Argument #1 ($buffer) must be an open DemoBuffer
+done
+shutdown sees 2

@@ -1,0 +1,124 @@
+#!/bin/bash
+# extension api tests: builds the demo extension as a shared library with
+# zig cc, loads it into zphp, and checks loading, rejection, isolation under
+# serve, and resource cleanup. STATIC=1 additionally builds a zphp with the
+# demo compiled in and runs the same script through it. BENCH=1 prints call
+# overhead numbers (ReleaseFast build recommended)
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+ZPHP="${ZPHP:-$ROOT/zig-out/bin/zphp}"
+PORT="${PORT:-19913}"
+OUT="$(mktemp -d "${TMPDIR:-/tmp}/zphp-ext.XXXXXX")"
+trap 'rm -rf "$OUT"; [ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" 2>/dev/null; true' EXIT
+
+case "$(uname -s)" in
+    Darwin) LIB=dylib ;;
+    *) LIB=so ;;
+esac
+if [ "$(uname -s)" = Darwin ] && [ -z "${DEVELOPER_DIR:-}" ] && [ -d /Library/Developer/CommandLineTools ]; then
+    export DEVELOPER_DIR=/Library/Developer/CommandLineTools
+fi
+
+passed=0
+failed=0
+check() {
+    local name="$1" expected="$2" actual="$3"
+    if [ "$expected" = "$actual" ]; then
+        passed=$((passed + 1))
+    else
+        failed=$((failed + 1))
+        printf 'FAIL %s\n  expected: %s\n  actual:   %s\n' "$name" "$expected" "$actual"
+    fi
+}
+contains() {
+    local name="$1" needle="$2" haystack="$3"
+    if [[ "$haystack" == *"$needle"* ]]; then
+        passed=$((passed + 1))
+    else
+        failed=$((failed + 1))
+        printf 'FAIL %s\n  expected to contain: %s\n  actual: %s\n' "$name" "$needle" "$haystack"
+    fi
+}
+build_ext() {
+    zig cc -shared -O2 -I "$ROOT/include" -o "$OUT/$1.$LIB" "$SCRIPT_DIR/$1.c"
+}
+
+for ext in demo bad_abi dup clash failing_init noentry; do build_ext "$ext"; done
+DEMO="$OUT/demo.$LIB"
+
+# the script under a dynamic extension
+actual="$("$ZPHP" --extension="$DEMO" run "$SCRIPT_DIR/demo.php" 2>&1)" || true
+check "demo.php output" "$(cat "$SCRIPT_DIR/demo.expected")" "$actual"
+actual="$("$ZPHP" --extension "$DEMO" run "$SCRIPT_DIR/demo.php" 2>&1 | head -1)" || true
+check "--extension PATH form" 'bool(true)' "$actual"
+actual="$(ZPHP_EXTENSION_DIR="$OUT" "$ZPHP" run "$SCRIPT_DIR/demo.php" 2>&1 | tail -1)" || true
+contains "ZPHP_EXTENSION_DIR loads a directory" "zphp: extension" "$actual"
+mkdir -p "$OUT/dir" && cp "$DEMO" "$OUT/dir/"
+actual="$(ZPHP_EXTENSION_DIR="$OUT/dir" "$ZPHP" run "$SCRIPT_DIR/demo.php" 2>&1 | head -1)" || true
+check "ZPHP_EXTENSION_DIR loads the demo" 'bool(true)' "$actual"
+
+# rejected extensions never reach the script
+reject() {
+    local name="$1" needle="$2"; shift 2
+    local out status
+    out="$("$ZPHP" "$@" run "$SCRIPT_DIR/demo.php" 2>&1)" && status=0 || status=$?
+    check "$name exits 1" "1" "$status"
+    contains "$name message" "$needle" "$out"
+}
+reject "abi mismatch" "built for ABI 99, this zphp provides ABI 1" --extension="$OUT/bad_abi.$LIB"
+reject "duplicate function across extensions" "function 'demo_add' is already registered by extension 'demo'" --extension="$DEMO" --extension="$OUT/dup.$LIB"
+reject "clash with a builtin" "function 'strlen' is already defined" --extension="$OUT/clash.$LIB"
+reject "failing module_init" "module_init failed with status 7" --extension="$OUT/failing_init.$LIB"
+reject "missing entry point" "no zphp_extension_entry symbol" --extension="$OUT/noentry.$LIB"
+reject "missing file" "cannot load" --extension="$OUT/missing.$LIB"
+echo "not a library" > "$OUT/text.$LIB"
+reject "not a library" "cannot load" --extension="$OUT/text.$LIB"
+reject "same extension twice" "an extension named 'demo' is already loaded" --extension="$DEMO" --extension="$DEMO"
+out="$("$ZPHP" run "$SCRIPT_DIR/demo.php" 2>&1)" && status=0 || status=$?
+check "without the extension the script fails" "255" "$status"
+
+# serve: request-local state resets, worker-local state persists, resources
+# held past the end of a request are destroyed, ini changes do not leak
+"$ZPHP" --extension="$DEMO" serve "$SCRIPT_DIR/app.php" --port "$PORT" --workers 1 >"$OUT/serve.log" 2>&1 &
+SERVER_PID=$!
+for _ in $(seq 1 50); do
+    curl -s -o /dev/null "http://localhost:$PORT/health" 2>/dev/null && break
+    sleep 0.1
+done
+get() { curl -s "http://localhost:$PORT/$1"; }
+for round in 1 2 3; do
+    check "serve round $round request-local counter" "2" "$(get counter)"
+    check "serve round $round worker-local hits" "$round" "$(get hits)"
+    check "serve round $round class and global constants" "10|counter|1.2.3|42" "$(get const)"
+    check "serve round $round ini isolation" "hello|changed, x!" "$(get ini)"
+    check "serve round $round object round trip" "2|Demo\\Counter(native counter, count=2, tally=yes)" "$(get obj)"
+    check "serve round $round exception" "caught x" "$(get throw)"
+    check "serve round $round resource kept past the request" "made" "$(get leak)"
+    check "serve round $round resource freed at request end" "$round" "$(get freed)"
+done
+for _ in $(seq 1 25); do get counter >/dev/null; done
+check "serve after 25 more requests" "2" "$(get counter)"
+kill "$SERVER_PID" 2>/dev/null || true
+wait "$SERVER_PID" 2>/dev/null || true
+SERVER_PID=""
+
+# a static build runs the same script with nothing loaded at runtime
+if [ "${STATIC:-0}" = 1 ]; then
+    make -C "$ROOT" --no-print-directory "${STATIC_TARGET:-build}" ZIG_FLAGS="-Dextension=$SCRIPT_DIR/demo.c --prefix $OUT/static" >/dev/null
+    actual="$("$OUT/static/bin/zphp" run "$SCRIPT_DIR/demo.php" 2>&1)" || true
+    check "static extension: demo.php output" "$(cat "$SCRIPT_DIR/demo.expected")" "$actual"
+    out="$("$OUT/static/bin/zphp" --extension="$DEMO" run "$SCRIPT_DIR/demo.php" 2>&1)" && status=0 || status=$?
+    check "static extension: loading it again dynamically is rejected" "1" "$status"
+    contains "static extension: duplicate message" "an extension named 'demo' is already loaded" "$out"
+    if [ "${BENCH:-0}" = 1 ]; then
+        echo "static:  $("$OUT/static/bin/zphp" run "$SCRIPT_DIR/bench.php")"
+    fi
+fi
+if [ "${BENCH:-0}" = 1 ]; then
+    echo "dynamic: $("$ZPHP" --extension="$DEMO" run "$SCRIPT_DIR/bench.php")"
+fi
+
+echo "$passed passed, $failed failed"
+[ "$failed" -eq 0 ]

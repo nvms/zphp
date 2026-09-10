@@ -25,6 +25,17 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // static extensions: C sources compiled into the binary. the generated
+    // module lists their entry points so the loader finds them without dlopen
+    const extension_sources = b.option([]const []const u8, "extension", "C source of a static extension, repeatable; the file stem is the extension name") orelse &.{};
+    const static_extensions = staticExtensionsModule(b, extension_sources);
+    exe_mod.addImport("static_extensions", static_extensions);
+    fast_loop_mod.addImport("static_extensions", static_extensions);
+    for (extension_sources) |source| {
+        exe_mod.addCSourceFile(.{ .file = .{ .cwd_relative = source }, .flags = &.{ "-std=c11", "-DZPHP_STATIC_EXTENSION" } });
+    }
+    exe_mod.addIncludePath(b.path("include"));
+
     exe_mod.linkSystemLibrary("pcre2-8", .{ .preferred_link_mode = .static });
     exe_mod.linkSystemLibrary("sqlite3", .{ .preferred_link_mode = .static });
     exe_mod.linkSystemLibrary("z", .{ .preferred_link_mode = .static });
@@ -84,6 +95,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    test_mod.addImport("static_extensions", static_extensions);
 
     test_mod.linkSystemLibrary("pcre2-8", .{ .preferred_link_mode = .static });
     test_mod.linkSystemLibrary("sqlite3", .{ .preferred_link_mode = .static });
@@ -239,6 +251,33 @@ fn archiveIn(b: *std.Build, dir: []const u8, file: []const u8) ?[]const u8 {
     const path = b.pathJoin(&.{ dir, file });
     std.fs.cwd().access(path, .{}) catch return null;
     return path;
+}
+
+fn staticExtensionsModule(b: *std.Build, sources: []const []const u8) *std.Build.Module {
+    var code = std.ArrayListUnmanaged(u8){};
+    const w = code.writer(b.allocator);
+    w.writeAll("pub const Entry = *const fn (*const anyopaque) callconv(.c) ?*const anyopaque;\n") catch @panic("OOM");
+    w.writeAll("pub const StaticExtension = struct { name: []const u8, entry: Entry };\n") catch @panic("OOM");
+    for (sources) |source| {
+        const stem = std.fs.path.stem(source);
+        if (!validIdentifier(stem)) std.debug.panic("-Dextension={s}: the file stem must be a C identifier, it names the extension entry", .{source});
+        w.print("extern fn zphp_extension_entry_{s}(api: *const anyopaque) callconv(.c) ?*const anyopaque;\n", .{stem}) catch @panic("OOM");
+    }
+    w.writeAll("pub const entries = [_]StaticExtension{") catch @panic("OOM");
+    for (sources) |source| {
+        const stem = std.fs.path.stem(source);
+        w.print(" .{{ .name = \"{s}\", .entry = &zphp_extension_entry_{s} }},", .{ source, stem }) catch @panic("OOM");
+    }
+    w.writeAll(" };\n") catch @panic("OOM");
+    const files = b.addWriteFiles();
+    const path = files.add("static_extensions.zig", code.items);
+    return b.createModule(.{ .root_source_file = path });
+}
+
+fn validIdentifier(s: []const u8) bool {
+    if (s.len == 0 or std.ascii.isDigit(s[0])) return false;
+    for (s) |ch| if (!(std.ascii.isAlphanumeric(ch) or ch == '_')) return false;
+    return true;
 }
 
 fn pkgConfigVariable(b: *std.Build, pkg: []const u8, name: []const u8) ?[]const u8 {

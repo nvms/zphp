@@ -54,6 +54,36 @@ The glibc and macOS builds run on the platform they were made for; the musl buil
 
 See the [documentation](https://nvms.github.io/zphp/) for build instructions and usage guides.
 
+## Extensions
+
+zphp loads native extensions written against a C ABI. An extension registers functions, classes, constants, ini defaults, and resource types once at load time, and every PHP call into it goes straight to a resolved function pointer. The header is `include/zphp_extension.h`; the same source builds as a shared library or gets compiled into zphp.
+
+```c
+#include "zphp_extension.h"
+
+static void hello_add(zphp_ctx *ctx) {
+    zphp_return_int(ctx, zphp_get_int(zphp_arg(ctx, 0)) + zphp_get_int(zphp_arg(ctx, 1)));
+}
+
+static int module_init(zphp_module *m) {
+    return zphp_register_function(m, "hello_add", hello_add);
+}
+
+static const zphp_extension hello = {
+    .abi = ZPHP_EXTENSION_ABI, .name = "hello", .version = "1.0.0", .module_init = module_init,
+};
+
+ZPHP_EXTENSION(hello, &hello)
+```
+
+```sh
+zig cc -shared -O2 -I include -o hello.so hello.c
+zphp --extension=hello.so run app.php          # dynamic
+zig build -Doptimize=ReleaseFast -Dextension=hello.c   # static, compiled into zphp
+```
+
+`ZPHP_EXTENSION_DIR` names a directory whose libraries load automatically. Extensions get module, worker, and request lifecycle hooks, a request-local and a worker-local data slot, and a destructor per resource type that runs when the PHP value is unset, goes out of scope, unwinds through an exception, or the request ends. Values cross the boundary as opaque handles, so the runtime's internals can change without breaking compiled extensions; an ABI version in the descriptor rejects mismatches at load time. The static musl release binaries cannot load shared libraries and take static extensions only. `tests/extensions/demo.c` exercises the whole API.
+
 ## Project Status
 
 zphp was originally developed and maintained heavily through AI-assisted development.

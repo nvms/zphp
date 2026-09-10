@@ -5,6 +5,7 @@ const runtime_value = @import("runtime/value.zig");
 const VM = @import("runtime/vm.zig").VM;
 const Value = runtime_value.Value;
 const CompileResult = @import("pipeline/compiler.zig").CompileResult;
+const extension = @import("extension.zig");
 const bytecode_format = @import("bytecode_format.zig");
 const error_format = @import("error_format.zig");
 
@@ -23,14 +24,19 @@ pub fn main() !void {
     };
     const allocator = if (release_allocator) std.heap.smp_allocator else gpa.allocator();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const raw_args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, raw_args);
+
+    extension.loadStatic();
 
     if (bytecode_format.detectEmbeddedBytecode(allocator)) |bc| {
         defer allocator.free(bc);
-        try runBytecode(allocator, bc, args[0], if (args.len > 1) args[1..] else &.{});
+        try runBytecode(allocator, bc, raw_args[0], if (raw_args.len > 1) raw_args[1..] else &.{});
         return;
     }
+
+    const args = try loadExtensionFlags(allocator, raw_args);
+    defer allocator.free(args);
 
     if (args.len < 2) {
         try writeStdout("zphp 0.8.0\n");
@@ -38,6 +44,34 @@ pub fn main() !void {
     }
 
     try dispatch(allocator, args);
+}
+
+// `zphp [--extension=PATH]... <command> ...` loads dynamic extensions before
+// any VM exists, then ZPHP_EXTENSION_DIR adds every library in that
+// directory. returns the args with the flags removed
+fn loadExtensionFlags(allocator: std.mem.Allocator, raw_args: []const []const u8) ![]const []const u8 {
+    var args = std.ArrayListUnmanaged([]const u8){};
+    errdefer args.deinit(allocator);
+    try args.append(allocator, raw_args[0]);
+    var i: usize = 1;
+    while (i < raw_args.len) : (i += 1) {
+        const arg = raw_args[i];
+        if (std.mem.startsWith(u8, arg, "--extension=")) {
+            extension.loadDynamic(arg["--extension=".len..]);
+        } else if (std.mem.eql(u8, arg, "--extension")) {
+            if (i + 1 >= raw_args.len) {
+                try writeStderr("usage: zphp --extension=PATH <command>\n");
+                std.process.exit(1);
+            }
+            i += 1;
+            extension.loadDynamic(raw_args[i]);
+        } else {
+            try args.appendSlice(allocator, raw_args[i..]);
+            break;
+        }
+    }
+    if (std.posix.getenv("ZPHP_EXTENSION_DIR")) |dir| extension.loadDirectory(dir);
+    return args.toOwnedSlice(allocator);
 }
 
 fn dispatch(allocator: std.mem.Allocator, args: []const []const u8) !void {

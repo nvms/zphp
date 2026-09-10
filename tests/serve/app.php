@@ -157,6 +157,8 @@ if ($path === "/health") {
         "strtok" => strtok(","),
         "last_error" => error_get_last(),
         "dt_errors" => DateTime::getLastErrors(),
+        "atom" => DateTime::ATOM,
+        "enum_case" => RoundingMode::HalfEven->name,
     ]);
 } elseif ($path === "/header-trailing-space") {
     header("X-Trailing-Space: hello    ");
