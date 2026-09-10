@@ -519,6 +519,50 @@ for i in $(seq 1 25); do
 done
 check "request isolation over repeated dirty requests" "1" "$iso_loop_ok"
 
+# test: hostile request bodies are rejected and the server stays up
+hostile() {
+    python3 - "$PORT" "$1" <<'PY'
+import socket, sys
+port = int(sys.argv[1]); payload = sys.argv[2].encode().decode("unicode_escape").encode("latin-1")
+s = socket.create_connection(("127.0.0.1", port), timeout=5)
+s.sendall(payload)
+data = b""
+try:
+    while True:
+        c = s.recv(65536)
+        if not c: break
+        data += c
+except socket.timeout: pass
+print(data.split(b"\r\n")[0].decode(errors="replace"))
+PY
+}
+check "huge chunk size rejected" "HTTP/1.1 400 Bad Request" "$(hostile 'POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\nFFFFFFFFFFFFFFFF\r\nhello\r\n0\r\n\r\n')"
+check "non-hex chunk size rejected" "HTTP/1.1 400 Bad Request" "$(hostile 'POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nhello\r\n0\r\n\r\n')"
+check "conflicting content-length rejected" "HTTP/1.1 400 Bad Request" "$(hostile 'POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nContent-Length: 50\r\n\r\nhello')"
+check "negative content-length rejected" "HTTP/1.1 400 Bad Request" "$(hostile 'POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: -1\r\n\r\n')"
+check "valid chunked body still works" "HTTP/1.1 200 OK" "$(hostile 'POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nContent-Type: text/plain\r\n\r\n5\r\nhello\r\n0\r\n\r\n')"
+resp=$(curl -s http://localhost:$PORT/health)
+check "healthy after hostile bodies" '{"status":"ok"}' "$resp"
+
+# test: idle connections are closed after --idle-timeout
+IDLE_PORT=$((PORT + 1))
+"$ZPHP" serve "$APP" --port $IDLE_PORT --workers 1 --idle-timeout 1 > /dev/null 2>&1 &
+IDLE_PID=$!
+sleep 1
+idle_result=$(python3 - "$IDLE_PORT" <<'PY'
+import socket, sys, time
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=5)
+s.sendall(b"GET /health HTTP/1.1\r\nHost: x\r\nX-Slow: ")
+time.sleep(3)
+try:
+    print("closed" if s.recv(16) == b"" else "open")
+except OSError:
+    print("closed")
+PY
+)
+check "stalled connection closed by idle timeout" "closed" "$idle_result"
+kill $IDLE_PID 2>/dev/null; wait $IDLE_PID 2>/dev/null
+
 # test: graceful shutdown
 kill -TERM $SERVER_PID
 exit_code=0

@@ -46,7 +46,13 @@ pub const ServeConfig = struct {
     tls_cert: ?[]const u8 = null,
     tls_key: ?[]const u8 = null,
     watch: bool = false,
+    // a connection that sends nothing for this long while a request is still
+    // being read is closed; 0 disables. keeps stalled and slow-drip clients
+    // from holding the per-worker connection table forever
+    idle_timeout_seconds: u32 = 60,
 };
+
+const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 const Request = struct {
     method: []const u8 = "GET",
@@ -83,6 +89,7 @@ const Connection = struct {
     keep_alive: bool,
     ws_obj: ?*PhpObject,
     h2_session: ?*h2.H2Session,
+    last_activity_ms: i64,
 
     fn init(allocator: Allocator, server_conn: std.net.Server.Connection, ssl_ptr: ?*tls.SSL) !Connection {
         return .{
@@ -96,6 +103,7 @@ const Connection = struct {
             .keep_alive = true,
             .ws_obj = null,
             .h2_session = null,
+            .last_activity_ms = std.time.milliTimestamp(),
         };
     }
 
@@ -197,6 +205,7 @@ const Worker = struct {
     doc_root: []const u8,
     port: u16,
     ws_enabled: bool,
+    idle_timeout_ms: i64,
     ws_initialized: bool,
     tls_ctx: ?*tls.SSL_CTX,
     env_snapshot: ?env.EnvSnapshot,
@@ -274,7 +283,7 @@ fn loadFile(path: []const u8, allocator: Allocator, _: *@import("runtime/vm.zig"
     return heap_result;
 }
 
-fn initWorker(allocator: Allocator, result: *const CompileResult, doc_root: []const u8, port: u16, ws_enabled: bool, tls_ctx: ?*tls.SSL_CTX) !Worker {
+fn initWorker(allocator: Allocator, result: *const CompileResult, doc_root: []const u8, port: u16, ws_enabled: bool, tls_ctx: ?*tls.SSL_CTX, idle_timeout_ms: i64) !Worker {
     var vm = try VM.init(allocator);
     errdefer vm.deinit();
     vm.file_loader = &loadFile;
@@ -291,6 +300,7 @@ fn initWorker(allocator: Allocator, result: *const CompileResult, doc_root: []co
         .doc_root = doc_root,
         .port = port,
         .ws_enabled = ws_enabled,
+        .idle_timeout_ms = idle_timeout_ms,
         .ws_initialized = false,
         .tls_ctx = tls_ctx,
         .env_snapshot = env.EnvSnapshot.capture(allocator),
@@ -312,12 +322,12 @@ fn currentUmask() std.c.mode_t {
 // workers come up one at a time into the leading slots. a worker whose VM,
 // pipe, or thread fails is torn down on the spot and never counted, so
 // routing and shutdown only ever touch the first `active` slots
-fn startWorkers(allocator: Allocator, workers: []Worker, threads: []std.Thread, result: *const CompileResult, doc_root: []const u8, port: u16, ws_enabled: bool, tls_ctx: ?*tls.SSL_CTX) !usize {
+fn startWorkers(allocator: Allocator, workers: []Worker, threads: []std.Thread, result: *const CompileResult, doc_root: []const u8, port: u16, ws_enabled: bool, tls_ctx: ?*tls.SSL_CTX, idle_timeout_ms: i64) !usize {
     var active: usize = 0;
     errdefer stopWorkers(workers[0..active], threads[0..active]);
     for (0..workers.len) |_| {
         const wd = &workers[active];
-        wd.* = initWorker(allocator, result, doc_root, port, ws_enabled, tls_ctx) catch |err| {
+        wd.* = initWorker(allocator, result, doc_root, port, ws_enabled, tls_ctx, idle_timeout_ms) catch |err| {
             reportWorkerFailure(err);
             continue;
         };
@@ -575,7 +585,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
         }
 
         queue.reset();
-        const active = startWorkers(allocator, workers_data, threads, &result, doc_root, config.port, ws_enabled, tls_ctx) catch |err| {
+        const active = startWorkers(allocator, workers_data, threads, &result, doc_root, config.port, ws_enabled, tls_ctx, @as(i64, config.idle_timeout_seconds) * 1000) catch |err| {
             try writeStderr("error: no worker could start\n");
             result.deinit();
             ast.deinit();
@@ -684,7 +694,23 @@ fn eventLoop(w: *Worker) void {
             }
         }
 
+        closeIdleConnections(w);
         compactConnections(w);
+    }
+}
+
+// a client still reading a request (or still in the TLS handshake) that has
+// been silent past the idle timeout is dropped. established WebSocket and
+// HTTP/2 sessions are the application's business and are left alone
+fn closeIdleConnections(w: *Worker) void {
+    if (w.idle_timeout_ms <= 0) return;
+    const now = std.time.milliTimestamp();
+    var i: usize = 1;
+    while (i < w.n_fds) : (i += 1) {
+        if (w.conns[i]) |*c| {
+            if (c.state != .http_reading and c.state != .tls_handshaking) continue;
+            if (now - c.last_activity_ms > w.idle_timeout_ms) c.state = .closing;
+        }
     }
 }
 
@@ -771,31 +797,65 @@ fn shiftBuffer(c: *Connection, consumed: usize) void {
 
 const ChunkedResult = struct { body_len: usize, raw_len: usize };
 
-fn decodeChunkedBody(data: []u8) ?ChunkedResult {
+const ChunkedDecode = union(enum) { need_more, malformed, done: ChunkedResult };
+
+// decodes in place. a chunk size that is not hex, exceeds the body limit, or
+// would overflow the buffer arithmetic is malformed rather than a reason to
+// keep waiting; chunk extensions after ';' are ignored
+fn decodeChunkedBody(data: []u8) ChunkedDecode {
     var read_pos: usize = 0;
     var write_pos: usize = 0;
 
     while (read_pos < data.len) {
-        const size_end = std.mem.indexOfPos(u8, data, read_pos, "\r\n") orelse return null;
-        const size_str = data[read_pos..size_end];
-        const chunk_len = std.fmt.parseInt(usize, size_str, 16) catch return null;
+        const size_end = std.mem.indexOfPos(u8, data, read_pos, "\r\n") orelse return .need_more;
+        var size_str: []const u8 = data[read_pos..size_end];
+        if (std.mem.indexOfScalar(u8, size_str, ';')) |ext| size_str = size_str[0..ext];
+        size_str = std.mem.trim(u8, size_str, " \t");
+        if (size_str.len == 0 or size_str.len > 16) return .malformed;
+        const chunk_len = std.fmt.parseInt(usize, size_str, 16) catch return .malformed;
+        if (chunk_len > MAX_BODY_BYTES or write_pos + chunk_len > MAX_BODY_BYTES) return .malformed;
 
         if (chunk_len == 0) {
             const final_end = size_end + 2;
-            if (final_end + 2 > data.len) return null;
-            return .{ .body_len = write_pos, .raw_len = final_end + 2 };
+            if (final_end + 2 > data.len) return .need_more;
+            if (!std.mem.eql(u8, data[final_end .. final_end + 2], "\r\n")) return .malformed;
+            return .{ .done = .{ .body_len = write_pos, .raw_len = final_end + 2 } };
         }
 
         const chunk_start = size_end + 2;
         const chunk_end = chunk_start + chunk_len;
-        if (chunk_end + 2 > data.len) return null;
+        if (chunk_end + 2 > data.len) return .need_more;
+        if (!std.mem.eql(u8, data[chunk_end .. chunk_end + 2], "\r\n")) return .malformed;
 
         std.mem.copyForwards(u8, data[write_pos .. write_pos + chunk_len], data[chunk_start..chunk_end]);
         write_pos += chunk_len;
         read_pos = chunk_end + 2;
     }
 
-    return null;
+    return .need_more;
+}
+
+const ContentLength = union(enum) { none, invalid, value: usize };
+
+// RFC 9112: more than one Content-Length with differing values, or a value
+// that is not a plain decimal, is a request the server must reject
+fn contentLengthOf(req: *const Request) ContentLength {
+    var found: ?usize = null;
+    for (req.headers[0..req.header_count]) |h| {
+        if (!std.ascii.eqlIgnoreCase(h.name, "Content-Length")) continue;
+        const text = std.mem.trim(u8, h.value, " \t");
+        if (text.len == 0 or text.len > 19) return .invalid;
+        for (text) |ch| if (!std.ascii.isDigit(ch)) return .invalid;
+        const n = std.fmt.parseInt(usize, text, 10) catch return .invalid;
+        if (found) |prev| if (prev != n) return .invalid;
+        found = n;
+    }
+    return if (found) |n| .{ .value = n } else .none;
+}
+
+fn rejectRequest(w: *Worker, c: *Connection, code: i64, body: []const u8) void {
+    writeResponse(c, code, "text/plain", null, body, false, false, w.allocator) catch {};
+    c.state = .closing;
 }
 
 // TLS handshake continuation
@@ -846,6 +906,7 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
         return;
     }
     c.buffered += n;
+    c.last_activity_ms = std.time.milliTimestamp();
 
     const raw = c.buf[0..c.buffered];
     const hdr_end_pos = std.mem.indexOf(u8, raw, "\r\n\r\n") orelse return;
@@ -863,19 +924,21 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
 
     if (is_chunked) {
         const body_start = raw[header_end..c.buffered];
-        const decoded_len = decodeChunkedBody(body_start) orelse return;
+        const decoded_len = switch (decodeChunkedBody(body_start)) {
+            .need_more => return,
+            .malformed => return rejectRequest(w, c, 400, "Malformed chunked body"),
+            .done => |d| d,
+        };
         body_len = decoded_len.body_len;
         consumed = header_end + decoded_len.raw_len;
         req.body = raw[header_end .. header_end + body_len];
     } else {
-        if (req.getHeader("Content-Length")) |cl| {
-            body_len = std.fmt.parseInt(usize, cl, 10) catch 0;
-            if (body_len > 64 * 1024 * 1024) {
-                writeResponse(c, 413, "text/plain", null, "Request body too large", false, false, w.allocator) catch {};
-                c.state = .closing;
-                return;
-            }
+        switch (contentLengthOf(&req)) {
+            .none => {},
+            .invalid => return rejectRequest(w, c, 400, "Invalid Content-Length"),
+            .value => |declared| body_len = declared,
         }
+        if (body_len > MAX_BODY_BYTES) return rejectRequest(w, c, 413, "Request body too large");
         consumed = header_end + body_len;
         if (c.buffered < consumed) return;
     }
@@ -1819,7 +1882,7 @@ test "worker startup keeps only the workers that came up and stops cleanly" {
 
     var probe = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = std.math.maxInt(usize) });
     queue.reset();
-    const all = try startWorkers(probe.allocator(), &workers, &threads, &result, ".", 0, false, null);
+    const all = try startWorkers(probe.allocator(), &workers, &threads, &result, ".", 0, false, null, 0);
     try testing.expectEqual(@as(usize, 2), all);
     stopWorkers(workers[0..all], threads[0..all]);
     const per_worker = probe.alloc_index / 2;
@@ -1828,11 +1891,11 @@ test "worker startup keeps only the workers that came up and stops cleanly" {
     // the first registration, so only the slot bookkeeping is under test
     var partial = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = per_worker });
     queue.reset();
-    const some = try startWorkers(partial.allocator(), &workers, &threads, &result, ".", 0, false, null);
+    const some = try startWorkers(partial.allocator(), &workers, &threads, &result, ".", 0, false, null, 0);
     try testing.expectEqual(@as(usize, 1), some);
     stopWorkers(workers[0..some], threads[0..some]);
 
     var none = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
     queue.reset();
-    try testing.expectError(error.NoWorkersStarted, startWorkers(none.allocator(), &workers, &threads, &result, ".", 0, false, null));
+    try testing.expectError(error.NoWorkersStarted, startWorkers(none.allocator(), &workers, &threads, &result, ".", 0, false, null, 0));
 }

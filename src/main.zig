@@ -57,6 +57,9 @@ fn dispatch(allocator: std.mem.Allocator, args: []const []const u8) !void {
             } else if (std.mem.eql(u8, args[i], "--workers") and i + 1 < args.len) {
                 config.workers = std.fmt.parseInt(u16, args[i + 1], 10) catch 0;
                 i += 1;
+            } else if (std.mem.eql(u8, args[i], "--idle-timeout") and i + 1 < args.len) {
+                config.idle_timeout_seconds = std.fmt.parseInt(u32, args[i + 1], 10) catch 60;
+                i += 1;
             } else if (std.mem.eql(u8, args[i], "--tls-cert") and i + 1 < args.len) {
                 config.tls_cert = args[i + 1];
                 i += 1;
