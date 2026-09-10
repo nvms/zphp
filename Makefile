@@ -32,6 +32,10 @@ bench: ## Run runtime benchmarks (ReleaseFast)
 	zig build -Doptimize=ReleaseFast
 	./benchmarks/runtime/run
 
+.PHONY: bench-compare
+bench-compare: ## Time this tree against its merge base with main on this machine (ReleaseFast, interleaved); pass BASE=<ref> to pick the base
+	python3 ./benchmarks/compare $(if $(BASE),--base $(BASE),)
+
 .PHONY: soak
 soak: ## Run the memory soak (ReleaseFast): a string-heavy loop must hold a flat RSS
 	zig build -Doptimize=ReleaseFast
