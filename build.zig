@@ -66,6 +66,13 @@ pub fn build(b: *std.Build) void {
         pinStaticArchives(b, exe_mod);
     }
 
+    // -Dframe-pointers keeps frame pointers in release builds so `sample`
+    // and perf can unwind the stack when profiling by time
+    if (b.option(bool, "frame-pointers", "keep frame pointers for profiling") orelse false) {
+        exe_mod.omit_frame_pointer = false;
+        fast_loop_mod.omit_frame_pointer = false;
+    }
+
     const exe = b.addExecutable(.{
         .name = "zphp",
         .root_module = exe_mod,
