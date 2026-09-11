@@ -187,8 +187,105 @@ jobs:
             zphp-${{ matrix.name }}
             zphp-${{ matrix.name }}.libs.txt
 
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          path-type: inherit
+          update: true
+          install: >-
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-pcre2
+            mingw-w64-x86_64-sqlite3
+            mingw-w64-x86_64-zlib
+            mingw-w64-x86_64-libmariadbclient
+            mingw-w64-x86_64-postgresql
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-nghttp2
+            mingw-w64-x86_64-curl
+            mingw-w64-x86_64-libxml2
+            mingw-w64-x86_64-icu
+            mingw-w64-x86_64-gmp
+            mingw-w64-x86_64-libgd
+            mingw-w64-x86_64-libsodium
+            mingw-w64-x86_64-openldap
+            zip
+            unzip
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.1
+
+      - name: build
+        run: zig build -Doptimize=ReleaseFast
+
+      # the exe links the mingw dlls dynamically; ldd resolves the whole
+      # closure, and everything it finds under /mingw64 ships next to the exe
+      - name: package
+        run: |
+          set -euo pipefail
+          dir=zphp-windows-x86_64
+          mkdir -p "$dir"
+          cp zig-out/bin/zphp.exe "$dir/zphp.exe"
+          ldd zig-out/bin/zphp.exe | awk '/=> \/mingw64\//{print $3}' | sort -u | while read -r dll; do
+            cp "$dll" "$dir/"
+          done
+          ls "$dir"
+
+      # PATH without /mingw64/bin: only the bundled dlls can satisfy the exe
+      - name: smoke test packaged binary
+        run: |
+          set -euo pipefail
+          unset OPENSSL_CONF
+          export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v '/mingw64/bin' | paste -sd:)
+          ./zphp-windows-x86_64/zphp.exe version
+          ./zphp-windows-x86_64/zphp.exe run .github/scripts/release_smoke.php
+
+      - name: record linked libraries
+        run: |
+          {
+            echo "zphp-windows-x86_64 built on windows-latest with zig 0.15.1 and msys2 mingw-w64"
+            echo
+            ldd zig-out/bin/zphp.exe
+            echo
+            pacman -Q | grep -E '^mingw-w64-x86_64-(gcc-libs|libwinpthread|pcre2|sqlite3|zlib|libmariadbclient|postgresql|openssl|nghttp2|curl|libxml2|icu|gmp|libgd|libsodium|openldap|libpng|libjpeg|freetype|libtiff|libwebp|libiconv|gettext|xz|zstd|brotli|libpsl|libidn2|libunistring|libssh2|c-ares|bzip2|libavif|libheif|libimagequant|libxpm|expat|readline|termcap|libtasn1|p11-kit|ca-certificates|libffi|libsystre|libtre|cyrus-sasl|krb5|libwebp|libdeflate|jbigkit|lerc|zlib)' || true
+          } > zphp-windows-x86_64.libs.txt
+          cat zphp-windows-x86_64.libs.txt
+
+      - name: zip
+        run: zip -r zphp-windows-x86_64.zip zphp-windows-x86_64
+
+      # the zip is what ships: unpack it somewhere else and run those bytes
+      - name: execute packaged zip
+        run: |
+          set -euo pipefail
+          unset OPENSSL_CONF
+          export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v '/mingw64/bin' | paste -sd:)
+          rm -rf /tmp/zphp-zip && mkdir -p /tmp/zphp-zip
+          unzip -q zphp-windows-x86_64.zip -d /tmp/zphp-zip
+          /tmp/zphp-zip/zphp-windows-x86_64/zphp.exe version
+          /tmp/zphp-zip/zphp-windows-x86_64/zphp.exe run .github/scripts/release_smoke.php
+
+      - uses: actions/attest-build-provenance@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          subject-path: zphp-windows-x86_64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zphp-windows-x86_64
+          path: |
+            zphp-windows-x86_64.zip
+            zphp-windows-x86_64.libs.txt
+
   release:
-    needs: build
+    needs: [build, windows]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     steps:
