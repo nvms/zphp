@@ -10,6 +10,7 @@ const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
+const NativeHandle = @import("../runtime/value.zig").NativeHandle;
 const vm_mod = @import("../runtime/vm.zig");
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const VM = vm_mod.VM;
@@ -69,15 +70,15 @@ fn fieldName(field: *mysql.MYSQL_FIELD) [*:0]const u8 {
 }
 
 fn getConn(obj: *PhpObject) ?*mysql.MYSQL {
-    const v = obj.get("__conn");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return obj.native.get(mysql.MYSQL, .mysqli);
 }
 
 fn getRes(obj: *PhpObject) ?*mysql.MYSQL_RES {
-    const v = obj.get("__res");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return obj.native.get(mysql.MYSQL_RES, .mysqli_result);
+}
+
+fn setConn(obj: *PhpObject, conn: ?*mysql.MYSQL) void {
+    obj.native = .{ .kind = .mysqli, .ptr = NativeHandle.addr(conn) };
 }
 
 // returns the mysqli object regardless of whether the user passed a
@@ -114,11 +115,7 @@ fn setErrorState(ctx: *NativeContext, obj: *PhpObject, conn: ?*mysql.MYSQL) !voi
 
 fn mysqliInit(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = try ctx.createObject("mysqli");
-    if (mysql.mysql_init(null)) |c| {
-        try obj.set(ctx.allocator, "__conn", .{ .int = @intCast(@intFromPtr(c)) });
-    } else {
-        try obj.set(ctx.allocator, "__conn", .{ .int = 0 });
-    }
+    setConn(obj, mysql.mysql_init(null));
     try obj.set(ctx.allocator, "error", .{ .string = Value.String.borrowed("") });
     try obj.set(ctx.allocator, "errno", .{ .int = 0 });
     try obj.set(ctx.allocator, "__connected", .{ .bool = false });
@@ -129,7 +126,7 @@ fn mysqliInit(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
 fn doConnect(ctx: *NativeContext, obj: *PhpObject, host: ?[]const u8, user: ?[]const u8, pass: ?[]const u8, db: ?[]const u8, port: u32, socket: ?[]const u8) !bool {
     const conn = getConn(obj) orelse blk: {
         const c = mysql.mysql_init(null) orelse return false;
-        try obj.set(ctx.allocator, "__conn", .{ .int = @intCast(@intFromPtr(c)) });
+        setConn(obj, c);
         break :blk c;
     };
 
@@ -219,7 +216,7 @@ fn mysqliClose(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
         // mysql_close is safe to call on a handle returned by mysql_init even
         // when never connected — releases the allocated handle either way
         mysql.mysql_close(c);
-        try link.set(ctx.allocator, "__conn", .{ .int = 0 });
+        link.native.ptr = 0;
         try link.set(ctx.allocator, "__connected", .{ .bool = false });
     }
     return NativeResult.scalar(.{ .bool = true });
@@ -275,7 +272,7 @@ fn mysqliQuery(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     const res = res_opt orelse return NativeResult.scalar(.{ .bool = true });
 
     const result_obj = try ctx.createObject("mysqli_result");
-    try result_obj.set(ctx.allocator, "__res", .{ .int = @intCast(@intFromPtr(res)) });
+    result_obj.native = .{ .kind = .mysqli_result, .ptr = @intFromPtr(res) };
     try result_obj.set(ctx.allocator, "num_rows", .{ .int = @intCast(mysql.mysql_num_rows(res)) });
     const nf: i64 = @intCast(mysql.mysql_num_fields(res));
     try result_obj.set(ctx.allocator, "num_fields", .{ .int = nf });
@@ -555,7 +552,7 @@ fn mysqliFreeResult(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     const result_obj = linkObj(ctx, args, 0) orelse return NativeResult.scalar(.null);
     if (getRes(result_obj)) |r| {
         mysql.mysql_free_result(r);
-        try result_obj.set(ctx.allocator, "__res", .{ .int = 0 });
+        result_obj.native.ptr = 0;
     }
     return NativeResult.scalar(.null);
 }
@@ -643,7 +640,7 @@ fn mysqliConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     try obj.set(ctx.allocator, "__connected", .{ .bool = false });
 
     const c = mysql.mysql_init(null) orelse return NativeResult.scalar(.null);
-    try obj.set(ctx.allocator, "__conn", .{ .int = @intCast(@intFromPtr(c)) });
+    setConn(obj, c);
 
     // when called with no args, leave the handle uninitialized (mirrors mysqli_init)
     if (args.len == 0) return NativeResult.scalar(.null);
@@ -772,13 +769,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
 pub fn cleanupConnections(objects: std.ArrayListUnmanaged(*PhpObject)) void {
     for (objects.items) |obj| {
-        if (std.mem.eql(u8, obj.class_name, "mysqli_result")) {
-            if (getRes(obj)) |r| mysql.mysql_free_result(r);
-        }
+        if (getRes(obj)) |r| mysql.mysql_free_result(r);
     }
     for (objects.items) |obj| {
-        if (std.mem.eql(u8, obj.class_name, "mysqli")) {
-            if (getConn(obj)) |c| mysql.mysql_close(c);
-        }
+        if (getConn(obj)) |c| mysql.mysql_close(c);
     }
 }

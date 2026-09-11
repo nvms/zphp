@@ -1,6 +1,7 @@
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
+const NativeHandle = @import("../runtime/value.zig").NativeHandle;
 const vm_mod = @import("../runtime/vm.zig");
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const VM = vm_mod.VM;
@@ -17,6 +18,7 @@ const ZphpMpz = opaque {};
 
 extern fn zphp_mpz_create() ?*ZphpMpz;
 extern fn zphp_mpz_destroy(p: ?*ZphpMpz) void;
+extern fn zphp_mpz_set(r: *ZphpMpz, a: *const ZphpMpz) void;
 extern fn zphp_mpz_set_str(p: *ZphpMpz, s: [*:0]const u8, base: c_int) c_int;
 extern fn zphp_mpz_set_si(p: *ZphpMpz, v: i64) i64;
 extern fn zphp_mpz_get_si(p: *const ZphpMpz) i64;
@@ -79,20 +81,17 @@ fn cstrLen(p: [*c]const u8) usize {
 }
 
 fn getMpz(obj: *const PhpObject) ?*ZphpMpz {
-    const v = obj.get("__mpz");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return obj.native.get(ZphpMpz, .gmp);
 }
 
-fn setMpz(obj: *PhpObject, allocator: Allocator, p: ?*ZphpMpz) !void {
-    const i: i64 = if (p) |x| @intCast(@intFromPtr(x)) else 0;
-    try obj.set(allocator, "__mpz", .{ .int = i });
+fn setMpz(obj: *PhpObject, p: ?*ZphpMpz) void {
+    obj.native = .{ .kind = .gmp, .ptr = NativeHandle.addr(p) };
 }
 
 fn createGmpObj(ctx: *NativeContext) !*PhpObject {
     const obj = try ctx.createObject("GMP");
     const p = zphp_mpz_create() orelse return error.OutOfMemory;
-    try setMpz(obj, ctx.allocator, p);
+    setMpz(obj, p);
     return obj;
 }
 
@@ -512,12 +511,19 @@ pub const entries = .{
 
 fn cleanupGmp(obj: *PhpObject) bool {
     if (getMpz(obj)) |p| zphp_mpz_destroy(p);
-    if (obj.properties.getPtr("__mpz")) |slot| slot.* = .{ .int = 0 };
+    obj.native.ptr = 0;
+    return true;
+}
+
+fn cloneGmp(_: *VM, src: *PhpObject, copy: *PhpObject) bool {
+    const p = zphp_mpz_create() orelse return false;
+    if (getMpz(src)) |orig| zphp_mpz_set(p, orig);
+    setMpz(copy, p);
     return true;
 }
 
 pub fn register(vm: *VM, a: Allocator) !void {
-    var def = ClassDef{ .name = "GMP", .native_cleanup = cleanupGmp };
+    var def = ClassDef{ .name = "GMP", .native_cleanup = cleanupGmp, .native_clone = cloneGmp };
     // GMP is mostly a value-holding class; user-facing methods are
     // PHP's procedural ones. providing __toString lets `(string)$gmp` work
     try def.methods.put(a, "__toString", .{ .name = "__toString", .arity = 0 });
@@ -548,7 +554,7 @@ fn gmpToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult 
 
 pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
     for (objects.items) |obj| {
-        if (obj.pooled or !std.mem.eql(u8, obj.class_name, "GMP")) continue;
+        if (obj.pooled or obj.native.kind != .gmp) continue;
         _ = cleanupGmp(obj);
     }
 }

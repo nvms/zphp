@@ -2,6 +2,7 @@ const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
+const NativeHandle = @import("../runtime/value.zig").NativeHandle;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 const pdo = @import("pdo.zig");
@@ -33,11 +34,23 @@ const pg = struct {
 };
 
 fn getConn(obj: *PhpObject) ?*pg.PGconn {
-    return pdo.getOpaquePtr(pg.PGconn, obj, "__db_ptr");
+    return obj.native.get(pg.PGconn, .pdo_pgsql) orelse obj.native.getAux(pg.PGconn, .pdo_pgsql_stmt);
 }
 
 fn getRes(obj: *PhpObject) ?*pg.PGresult {
-    return pdo.getOpaquePtr(pg.PGresult, obj, "__res_ptr");
+    return obj.native.get(pg.PGresult, .pdo_pgsql_stmt);
+}
+
+fn attachConn(obj: *PhpObject, conn: *pg.PGconn) void {
+    obj.native = .{ .kind = .pdo_pgsql, .ptr = @intFromPtr(conn) };
+}
+
+fn attachStmt(obj: *PhpObject, conn: *pg.PGconn, res: ?*pg.PGresult) void {
+    obj.native = .{ .kind = .pdo_pgsql_stmt, .ptr = NativeHandle.addr(res), .aux = @intFromPtr(conn) };
+}
+
+fn setRes(obj: *PhpObject, res: ?*pg.PGresult) void {
+    obj.native.ptr = NativeHandle.addr(res);
 }
 
 pub fn connect(ctx: *NativeContext, obj: *PhpObject, rest: []const u8, args: []const Value) RuntimeError!NativeResult {
@@ -74,12 +87,12 @@ pub fn connect(ctx: *NativeContext, obj: *PhpObject, rest: []const u8, args: []c
 
     const conn = pg.PQconnectdb(conninfo_z) orelse return pdo.throwPdo(ctx, "Failed to connect to PostgreSQL");
     if (pg.PQstatus(conn) != pg.CONNECTION_OK) {
-        const msg = std.mem.span(pg.PQerrorMessage(conn));
+        const msg = try ctx.createString(std.mem.span(pg.PQerrorMessage(conn)));
         pg.PQfinish(conn);
         return pdo.throwPdo(ctx, msg);
     }
 
-    try obj.set(ctx.allocator, "__db_ptr", .{ .int = @intCast(@intFromPtr(conn)) });
+    attachConn(obj, conn);
     return NativeResult.scalar(.null);
 }
 
@@ -110,9 +123,7 @@ pub fn query(ctx: *NativeContext, obj: *PhpObject, sql: []const u8) RuntimeError
     }
 
     const stmt_obj = try ctx.createObject("PDOStatement");
-    try stmt_obj.set(ctx.allocator, "__driver", .{ .string = Value.String.borrowed("pgsql") });
-    try stmt_obj.set(ctx.allocator, "__db_ptr", .{ .int = @intCast(@intFromPtr(conn)) });
-    try stmt_obj.set(ctx.allocator, "__res_ptr", .{ .int = @intCast(@intFromPtr(res)) });
+    attachStmt(stmt_obj, conn, res);
     try stmt_obj.set(ctx.allocator, "__current_row", .{ .int = 0 });
     try stmt_obj.set(ctx.allocator, "__has_row", .{ .bool = pg.PQntuples(res) > 0 });
     try stmt_obj.set(ctx.allocator, "__stepped", .{ .bool = true });
@@ -159,9 +170,7 @@ pub fn prepare(ctx: *NativeContext, obj: *PhpObject, sql: []const u8) RuntimeErr
     }
 
     const stmt_obj = try ctx.createObject("PDOStatement");
-    try stmt_obj.set(ctx.allocator, "__driver", .{ .string = Value.String.borrowed("pgsql") });
-    try stmt_obj.set(ctx.allocator, "__db_ptr", .{ .int = @intCast(@intFromPtr(conn)) });
-    try stmt_obj.set(ctx.allocator, "__res_ptr", .{ .int = 0 });
+    attachStmt(stmt_obj, conn, null);
     try stmt_obj.set(ctx.allocator, "__current_row", .{ .int = 0 });
     try stmt_obj.set(ctx.allocator, "__has_row", .{ .bool = false });
     try stmt_obj.set(ctx.allocator, "__stepped", .{ .bool = false });
@@ -192,7 +201,7 @@ pub fn stmtExecute(ctx: *NativeContext, obj: *PhpObject, args: []const Value) Ru
     // free previous result
     if (getRes(obj)) |old_res| {
         pg.PQclear(old_res);
-        try obj.set(ctx.allocator, "__res_ptr", .{ .int = 0 });
+        setRes(obj, null);
     }
 
     const pc_val = obj.get("__param_count");
@@ -244,7 +253,7 @@ pub fn stmtExecute(ctx: *NativeContext, obj: *PhpObject, args: []const Value) Ru
             pg.PQclear(res);
             return pdo.throwPdo(ctx, msg);
         }
-        try obj.set(ctx.allocator, "__res_ptr", .{ .int = @intCast(@intFromPtr(res)) });
+        setRes(obj, res);
         try obj.set(ctx.allocator, "__current_row", .{ .int = 0 });
         try obj.set(ctx.allocator, "__has_row", .{ .bool = pg.PQntuples(res) > 0 });
         try obj.set(ctx.allocator, "__row_count", .{ .int = std.fmt.parseInt(i64, std.mem.span(pg.PQcmdTuples(res)), 10) catch @intCast(pg.PQntuples(res)) });
@@ -256,7 +265,7 @@ pub fn stmtExecute(ctx: *NativeContext, obj: *PhpObject, args: []const Value) Ru
             pg.PQclear(res);
             return pdo.throwPdo(ctx, msg);
         }
-        try obj.set(ctx.allocator, "__res_ptr", .{ .int = @intCast(@intFromPtr(res)) });
+        setRes(obj, res);
         try obj.set(ctx.allocator, "__current_row", .{ .int = 0 });
         try obj.set(ctx.allocator, "__has_row", .{ .bool = pg.PQntuples(res) > 0 });
         try obj.set(ctx.allocator, "__row_count", .{ .int = std.fmt.parseInt(i64, std.mem.span(pg.PQcmdTuples(res)), 10) catch @intCast(pg.PQntuples(res)) });
@@ -354,7 +363,7 @@ pub fn stmtColumnCount(obj: *PhpObject) RuntimeError!NativeResult {
 pub fn stmtCloseCursor(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeResult {
     if (getRes(obj)) |res| {
         pg.PQclear(res);
-        try obj.set(ctx.allocator, "__res_ptr", .{ .int = 0 });
+        setRes(obj, null);
     }
     try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
     try obj.set(ctx.allocator, "__current_row", .{ .int = 0 });
@@ -412,13 +421,13 @@ pub fn errorInfo(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeResult
 pub fn cleanupStatement(obj: *PhpObject) void {
     if (getRes(obj)) |res| {
         pg.PQclear(res);
-        obj.properties.put(std.heap.page_allocator, "__res_ptr", .{ .int = 0 }) catch {};
+        setRes(obj, null);
     }
 }
 
 pub fn cleanupConnection(obj: *PhpObject) void {
-    if (getConn(obj)) |conn| {
+    if (obj.native.get(pg.PGconn, .pdo_pgsql)) |conn| {
         pg.PQfinish(conn);
-        obj.properties.put(std.heap.page_allocator, "__db_ptr", .{ .int = 0 }) catch {};
+        obj.native.ptr = 0;
     }
 }

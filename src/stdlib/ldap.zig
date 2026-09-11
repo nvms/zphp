@@ -2,6 +2,7 @@ const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
+const NativeHandle = @import("../runtime/value.zig").NativeHandle;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
@@ -44,9 +45,7 @@ pub const entries = .{
 };
 
 fn getLdap(obj: *PhpObject) ?*c.LDAP {
-    const v = obj.get("__ptr");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return obj.native.get(c.LDAP, .ldap);
 }
 
 fn getHandle(args: []const Value, expect: []const u8) ?*PhpObject {
@@ -57,9 +56,7 @@ fn getHandle(args: []const Value, expect: []const u8) ?*PhpObject {
 }
 
 fn getResult(obj: *PhpObject) ?*c.LDAPMessage {
-    const v = obj.get("__ptr");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return obj.native.get(c.LDAPMessage, .ldap_result);
 }
 
 fn cstrToOwned(ctx: *NativeContext, p: ?[*:0]const u8) RuntimeError!NativeResult {
@@ -93,7 +90,7 @@ fn native_connect(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     _ = c.ldap_set_option(ldap_ptr, c.LDAP_OPT_PROTOCOL_VERSION, &version);
 
     const obj = try ctx.createObject("LDAP\\Connection");
-    try obj.set(ctx.allocator, "__ptr", .{ .int = @intCast(@intFromPtr(ldap_ptr)) });
+    obj.native = .{ .kind = .ldap, .ptr = NativeHandle.addr(ldap_ptr) };
     return NativeResult.borrowed(.{ .object = obj });
 }
 
@@ -120,7 +117,7 @@ fn native_unbind(_: *NativeContext, args: []const Value) RuntimeError!NativeResu
     const o = getHandle(args, "LDAP\\Connection") orelse return NativeResult.scalar(.{ .bool = false });
     const ld = getLdap(o) orelse return NativeResult.scalar(.{ .bool = true });
     _ = c.ldap_unbind_ext_s(ld, null, null);
-    o.set(std.heap.page_allocator, "__ptr", .{ .int = 0 }) catch {};
+    o.native.ptr = 0;
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -159,8 +156,7 @@ fn doSearch(ctx: *NativeContext, args: []const Value, scope: c_int) RuntimeError
         return NativeResult.scalar(.{ .bool = false });
     }
     const obj = try ctx.createObject("LDAP\\Result");
-    try obj.set(ctx.allocator, "__ptr", .{ .int = @intCast(@intFromPtr(result)) });
-    try obj.set(ctx.allocator, "__ld", .{ .int = @intCast(@intFromPtr(ld)) });
+    obj.native = .{ .kind = .ldap_result, .ptr = NativeHandle.addr(result), .aux = @intFromPtr(ld) };
     return NativeResult.borrowed(.{ .object = obj });
 }
 
@@ -482,7 +478,7 @@ fn native_free_result(_: *NativeContext, args: []const Value) RuntimeError!Nativ
     if (!std.mem.eql(u8, o.class_name, "LDAP\\Result")) return NativeResult.scalar(.{ .bool = false });
     const r = getResult(o) orelse return NativeResult.scalar(.{ .bool = true });
     _ = c.ldap_msgfree(r);
-    o.set(std.heap.page_allocator, "__ptr", .{ .int = 0 }) catch {};
+    o.native.ptr = 0;
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -522,19 +518,8 @@ fn native_count_references(_: *NativeContext, _: []const Value) RuntimeError!Nat
 
 pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
     for (objects.items) |obj| {
-        if (std.mem.eql(u8, obj.class_name, "LDAP\\Connection")) {
-            const v = obj.get("__ptr");
-            if (v == .int and v.int != 0) {
-                const ld: *c.LDAP = @ptrFromInt(@as(usize, @intCast(v.int)));
-                _ = c.ldap_unbind_ext_s(ld, null, null);
-            }
-        } else if (std.mem.eql(u8, obj.class_name, "LDAP\\Result")) {
-            const v = obj.get("__ptr");
-            if (v == .int and v.int != 0) {
-                const r: *c.LDAPMessage = @ptrFromInt(@as(usize, @intCast(v.int)));
-                _ = c.ldap_msgfree(r);
-            }
-        }
+        if (getLdap(obj)) |ld| _ = c.ldap_unbind_ext_s(ld, null, null);
+        if (getResult(obj)) |r| _ = c.ldap_msgfree(r);
     }
 }
 

@@ -57,9 +57,29 @@ fn ensureGlobalInit() void {
 }
 
 fn getHandle(obj: *PhpObject) ?*c.CURL {
-    const v = obj.get("__curl_ptr");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return obj.native.get(c.CURL, .curl);
+}
+
+fn getSlist(obj: *PhpObject) ?*c.struct_curl_slist {
+    return obj.native.getAux(c.struct_curl_slist, .curl);
+}
+
+fn getEasyShare(obj: *PhpObject) ?*ShareState {
+    return obj.native.getExtra(ShareState, .curl);
+}
+
+fn freeSlist(obj: *PhpObject) void {
+    if (getSlist(obj)) |sl| {
+        c.curl_slist_free_all(sl);
+        obj.native.aux = 0;
+    }
+}
+
+fn cloneHandle(_: *VM, src: *PhpObject, copy: *PhpObject) bool {
+    const handle = getHandle(src) orelse return false;
+    const dup = c.curl_easy_duphandle(handle) orelse return false;
+    copy.native = .{ .kind = .curl, .ptr = @intFromPtr(dup) };
+    return true;
 }
 
 fn getThis(ctx: *NativeContext) ?*PhpObject {
@@ -89,17 +109,12 @@ fn curlInit(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     const handle = c.curl_easy_init() orelse return NativeResult.scalar(.{ .bool = false });
 
     const obj = try ctx.createObject("CurlHandle");
-    try obj.set(ctx.allocator, "__curl_ptr", .{ .int = @intCast(@intFromPtr(handle)) });
+    obj.native = .{ .kind = .curl, .ptr = @intFromPtr(handle) };
     try obj.set(ctx.allocator, "__error", .{ .string = Value.String.borrowed("") });
     try obj.set(ctx.allocator, "__errno", .{ .int = 0 });
     try obj.set(ctx.allocator, "__return_transfer", .{ .bool = false });
     try obj.set(ctx.allocator, "__header_out", .{ .bool = false });
     try obj.set(ctx.allocator, "__http_code", .{ .int = 0 });
-
-    try obj.set(ctx.allocator, "__share_state", .{ .int = 0 });
-
-    // store slist pointers for cleanup
-    try obj.set(ctx.allocator, "__slist_ptr", .{ .int = 0 });
 
     if (args.len > 0 and args[0] == .string) {
         const url_z = try dupeZ(ctx, args[0].string.bytes());
@@ -129,7 +144,7 @@ fn applySetopt(ctx: *NativeContext, handle: *c.CURL, obj: *PhpObject, option: i6
             // in allocation order. reset preserves libcurl's share association.
             share.refs += 1;
             releaseEasyShare(obj);
-            obj.properties.getPtr("__share_state").?.* = .{ .int = @intCast(@intFromPtr(share)) };
+            obj.native.extra = @intFromPtr(share);
         }
         try obj.set(ctx.allocator, "__errno", .{ .int = @intCast(code) });
         return NativeResult.scalar(.{ .bool = code == c.CURLE_OK });
@@ -245,12 +260,7 @@ fn applySetopt(ctx: *NativeContext, handle: *c.CURL, obj: *PhpObject, option: i6
     if (option == c.CURLOPT_HTTPHEADER) {
         if (value != .array) return NativeResult.scalar(.{ .bool = false });
 
-        // free previous slist if any
-        const prev_v = obj.get("__slist_ptr");
-        if (prev_v == .int and prev_v.int != 0) {
-            const prev: *c.struct_curl_slist = @ptrFromInt(@as(usize, @intCast(prev_v.int)));
-            c.curl_slist_free_all(prev);
-        }
+        freeSlist(obj);
 
         var slist: ?*c.struct_curl_slist = null;
         for (value.array.entries.items) |entry| {
@@ -260,7 +270,7 @@ fn applySetopt(ctx: *NativeContext, handle: *c.CURL, obj: *PhpObject, option: i6
             }
         }
         if (slist) |sl| {
-            try obj.set(ctx.allocator, "__slist_ptr", .{ .int = @intCast(@intFromPtr(sl)) });
+            obj.native.aux = @intFromPtr(sl);
             const code: c_uint = @intCast(c.curl_easy_setopt(handle, c.CURLOPT_HTTPHEADER, sl));
             return NativeResult.scalar(.{ .bool = code == c.CURLE_OK });
         }
@@ -404,22 +414,11 @@ fn curlClose(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
 
 pub fn cleanupHandle(obj: *PhpObject) void {
     if (obj.pooled) return;
-    // The property map belongs to the VM allocator (also used by native
-    // contexts). Cleanup only clears existing pointer slots: even put of an
-    // existing key can grow a full map, so it must not use page_allocator.
-    // free slist
-    const slist_v = obj.get("__slist_ptr");
-    if (slist_v == .int and slist_v.int != 0) {
-        const sl: *c.struct_curl_slist = @ptrFromInt(@as(usize, @intCast(slist_v.int)));
-        c.curl_slist_free_all(sl);
-        obj.properties.getPtr("__slist_ptr").?.* = .{ .int = 0 };
-    }
-
-    // free curl handle
+    freeSlist(obj);
     if (getHandle(obj)) |handle| {
         c.curl_easy_cleanup(handle);
         releaseEasyShare(obj);
-        obj.properties.getPtr("__curl_ptr").?.* = .{ .int = 0 };
+        obj.native.ptr = 0;
     }
 }
 
@@ -709,15 +708,7 @@ fn curlReset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
     try obj.set(ctx.allocator, "__error", .{ .string = Value.String.borrowed("") });
     try obj.set(ctx.allocator, "__errno", .{ .int = 0 });
     try obj.set(ctx.allocator, "__http_code", .{ .int = 0 });
-
-    // free slist
-    const slist_v = obj.get("__slist_ptr");
-    if (slist_v == .int and slist_v.int != 0) {
-        const sl: *c.struct_curl_slist = @ptrFromInt(@as(usize, @intCast(slist_v.int)));
-        c.curl_slist_free_all(sl);
-        try obj.set(ctx.allocator, "__slist_ptr", .{ .int = 0 });
-    }
-
+    freeSlist(obj);
     return NativeResult.scalar(.null);
 }
 
@@ -740,9 +731,7 @@ const ShareState = struct {
 };
 
 fn getShareState(obj: *PhpObject) ?*ShareState {
-    const v = obj.get("__share_state");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return obj.native.get(ShareState, .curl_share);
 }
 
 fn releaseShare(state: *ShareState) void {
@@ -754,14 +743,18 @@ fn releaseShare(state: *ShareState) void {
 }
 
 fn releaseEasyShare(obj: *PhpObject) void {
-    if (getShareState(obj)) |state| {
-        obj.properties.getPtr("__share_state").?.* = .{ .int = 0 };
+    if (getEasyShare(obj)) |state| {
+        obj.native.extra = 0;
         releaseShare(state);
     }
 }
 
 fn cleanupShare(obj: *PhpObject) bool {
-    if (!obj.pooled) releaseEasyShare(obj);
+    if (obj.pooled) return true;
+    if (getShareState(obj)) |state| {
+        obj.native.ptr = 0;
+        releaseShare(state);
+    }
     return true;
 }
 
@@ -779,16 +772,6 @@ fn curlShareConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!Native
     return error.RuntimeError;
 }
 
-fn curlShareClone(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    // The VM copies properties before invoking __clone. Remove the borrowed
-    // native pointer so failed-clone teardown cannot release the original state.
-    if (getThis(ctx)) |obj| {
-        if (obj.properties.getPtr("__share_state")) |ptr| ptr.* = .{ .int = 0 };
-    }
-    try ctx.vm.setPendingException("Error", "Trying to clone an uncloneable object of class CurlShareHandle");
-    return error.RuntimeError;
-}
-
 fn curlShareInit(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     ensureGlobalInit();
     const handle = c.curl_share_init() orelse return NativeResult.scalar(.{ .bool = false });
@@ -797,7 +780,7 @@ fn curlShareInit(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
     errdefer std.heap.page_allocator.destroy(state);
     const obj = try ctx.createObject("CurlShareHandle");
     state.* = .{ .handle = handle };
-    try obj.set(ctx.allocator, "__share_state", .{ .int = @intCast(@intFromPtr(state)) });
+    obj.native = .{ .kind = .curl_share, .ptr = @intFromPtr(state) };
     return NativeResult.borrowed(.{ .object = obj });
 }
 
@@ -843,16 +826,14 @@ fn curlShareStrerror(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
 var multi_wcb_table: std.AutoHashMapUnmanaged(usize, *WriteCallbackData) = .{};
 
 fn getMultiHandle(obj: *PhpObject) ?*c.CURLM {
-    const v = obj.get("__multi_ptr");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return obj.native.get(c.CURLM, .curl_multi);
 }
 
 fn curlMultiInit(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     ensureGlobalInit();
     const mh = c.curl_multi_init() orelse return NativeResult.scalar(.{ .bool = false });
     const obj = try ctx.createObject("CurlMultiHandle");
-    try obj.set(ctx.allocator, "__multi_ptr", .{ .int = @intCast(@intFromPtr(mh)) });
+    obj.native = .{ .kind = .curl_multi, .ptr = @intFromPtr(mh) };
     return NativeResult.borrowed(.{ .object = obj });
 }
 
@@ -952,7 +933,7 @@ fn curlMultiClose(_: *NativeContext, args: []const Value) RuntimeError!NativeRes
     if (args.len < 1 or args[0] != .object) return NativeResult.scalar(.null);
     const mh = getMultiHandle(args[0].object) orelse return NativeResult.scalar(.null);
     _ = c.curl_multi_cleanup(mh);
-    args[0].object.properties.getPtr("__multi_ptr").?.* = .{ .int = 0 };
+    args[0].object.native.ptr = 0;
     return NativeResult.scalar(.null);
 }
 
@@ -1115,7 +1096,7 @@ fn cleanupPoolable(obj: *PhpObject) bool {
 }
 
 pub fn register(vm: *VM, a: std.mem.Allocator) !void {
-    var curl_def = ClassDef{ .name = "CurlHandle", .native_cleanup = cleanupPoolable };
+    var curl_def = ClassDef{ .name = "CurlHandle", .native_cleanup = cleanupPoolable, .native_clone = cloneHandle };
     try vm.classes.put(a, "CurlHandle", curl_def);
     _ = &curl_def;
 
@@ -1123,7 +1104,6 @@ pub fn register(vm: *VM, a: std.mem.Allocator) !void {
     try vm.classes.put(a, "CurlShareHandle", share_def);
     _ = &share_def;
     try vm.native_fns.put(a, "CurlShareHandle::__construct", curlShareConstruct);
-    try vm.native_fns.put(a, "CurlShareHandle::__clone", curlShareClone);
 
     var mh_def = ClassDef{ .name = "CurlMultiHandle" };
     try vm.classes.put(a, "CurlMultiHandle", mh_def);
@@ -1261,10 +1241,10 @@ pub fn register(vm: *VM, a: std.mem.Allocator) !void {
 
 pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
     for (objects.items) |obj| {
-        if (std.mem.eql(u8, obj.class_name, "CurlHandle")) {
-            cleanupHandle(obj);
-        } else if (std.mem.eql(u8, obj.class_name, "CurlShareHandle")) {
-            _ = cleanupShare(obj);
+        switch (obj.native.kind) {
+            .curl => cleanupHandle(obj),
+            .curl_share => _ = cleanupShare(obj),
+            else => {},
         }
     }
 }
@@ -1294,7 +1274,7 @@ test "curl property growth across native contexts and allocation-free cleanup" {
     const capacity = easy.object.properties.capacity();
     _ = try curlClose(&later_ctx, &.{easy});
     try std.testing.expectEqual(capacity, easy.object.properties.capacity());
-    try std.testing.expectEqual(@as(i64, 0), easy.object.get("__curl_ptr").int);
+    try std.testing.expectEqual(@as(usize, 0), easy.object.native.ptr);
     cleanupHandle(easy.object);
 
     const multi = (try curlMultiInit(&init_ctx, &.{})).value;

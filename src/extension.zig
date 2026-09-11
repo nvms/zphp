@@ -16,6 +16,7 @@ const InterfaceDef = vm_mod.InterfaceDef;
 const value_mod = @import("runtime/value.zig");
 const Value = value_mod.Value;
 const PhpArray = value_mod.PhpArray;
+const NativeHandle = value_mod.NativeHandle;
 const PhpObject = value_mod.PhpObject;
 const static_extensions = @import("static_extensions");
 
@@ -358,17 +359,18 @@ pub fn vmDeinit(vm: *VM) void {
 
 // the destructor runs once, then the pointer is zeroed
 fn resourceCleanup(obj: *PhpObject) bool {
-    if (obj.native_ptr == 0 or obj.native_kind == 0) return true;
-    const index: usize = obj.native_kind - 1;
-    if (index < resource_types.items.len) resource_types.items[index].dtor(@ptrFromInt(obj.native_ptr));
-    obj.native_ptr = 0;
+    const id = obj.native.extensionId() orelse return true;
+    if (obj.native.ptr == 0 or id == 0) return true;
+    const index: usize = id - 1;
+    if (index < resource_types.items.len) resource_types.items[index].dtor(@ptrFromInt(obj.native.ptr));
+    obj.native.ptr = 0;
     return true;
 }
 
 pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
     if (resource_types.items.len == 0) return;
     for (objects.items) |obj| {
-        if (obj.pooled or obj.native_kind == 0) continue;
+        if (obj.pooled or obj.native.extensionId() == null) continue;
         _ = resourceCleanup(obj);
     }
 }
@@ -736,8 +738,7 @@ fn apiMakeResource(call: *Call, kind: u32, ptr: ?*anyopaque) callconv(.c) ?*Valu
     if (kind == 0 or kind > resource_types.items.len) return null;
     const class_name = resource_types.items[kind - 1].class_name;
     const obj = call.ctx.createObject(class_name) catch return null;
-    obj.native_ptr = @intFromPtr(ptr);
-    obj.native_kind = kind;
+    obj.native = .{ .kind = NativeHandle.extensionKind(kind), .ptr = @intFromPtr(ptr) };
     return cell(call, .{ .object = obj });
 }
 
@@ -745,9 +746,7 @@ fn apiResourcePtr(call: *Call, v: ?*const Value, kind: u32) callconv(.c) ?*anyop
     _ = call;
     const value = v orelse return null;
     if (value.* != .object) return null;
-    const obj = value.object;
-    if (obj.native_kind != kind or obj.native_ptr == 0) return null;
-    return @ptrFromInt(obj.native_ptr);
+    return value.object.native.get(anyopaque, NativeHandle.extensionKind(kind));
 }
 
 fn collectArgs(buf: []Value, args: ?[*]const ?*const Value, count: usize) ?[]Value {

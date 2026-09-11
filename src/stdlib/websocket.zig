@@ -40,14 +40,9 @@ const WsWriter = struct {
 };
 
 fn getWriter(obj: *PhpObject) ?WsWriter {
-    const fd_val = obj.get("__ws_fd");
-    if (fd_val != .int or fd_val.int < 0) return null;
-    const ssl_val = obj.get("__ws_ssl");
-    const ssl_ptr: ?*tls.SSL = if (ssl_val == .int and ssl_val.int != 0)
-        @ptrFromInt(@as(usize, @intCast(ssl_val.int)))
-    else
-        null;
-    return .{ .fd = platform.socketFromInt(fd_val.int) orelse return null, .ssl = ssl_ptr };
+    if (obj.native.kind != .websocket) return null;
+    const ssl = obj.native.get(tls.SSL, .websocket);
+    return .{ .fd = platform.socketFromInt(@intCast(obj.native.aux)) orelse return null, .ssl = ssl };
 }
 
 fn wsSend(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

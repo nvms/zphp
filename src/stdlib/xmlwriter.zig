@@ -1,6 +1,7 @@
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
+const NativeHandle = @import("../runtime/value.zig").NativeHandle;
 const vm_mod = @import("../runtime/vm.zig");
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const VM = vm_mod.VM;
@@ -34,22 +35,22 @@ fn getThis(ctx: *NativeContext) ?*PhpObject {
 }
 
 fn getWriter(obj: *const PhpObject) ?*c.xmlTextWriter {
-    const v = obj.get("__writer");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return obj.native.get(c.xmlTextWriter, .xml_writer);
 }
 
 fn getBuffer(obj: *const PhpObject) ?*c.xmlBuffer {
-    const v = obj.get("__buffer");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return obj.native.getAux(c.xmlBuffer, .xml_writer);
+}
+
+fn setWriter(obj: *PhpObject, writer: ?*c.xmlTextWriter, buffer: ?*c.xmlBuffer) void {
+    obj.native = .{ .kind = .xml_writer, .ptr = NativeHandle.addr(writer), .aux = NativeHandle.addr(buffer) };
 }
 
 fn closeExisting(obj: *PhpObject) void {
     if (getWriter(obj)) |w| c.xmlFreeTextWriter(w);
     if (getBuffer(obj)) |b| c.xmlBufferFree(b);
-    if (obj.properties.getPtr("__writer")) |slot| slot.* = .{ .int = 0 };
-    if (obj.properties.getPtr("__buffer")) |slot| slot.* = .{ .int = 0 };
+    obj.native.ptr = 0;
+    obj.native.aux = 0;
 }
 
 pub fn cleanupObject(obj: *PhpObject) void {
@@ -71,8 +72,7 @@ fn xwOpenMemory(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
         c.xmlBufferFree(buf);
         return NativeResult.scalar(.{ .bool = false });
     }
-    try obj.set(ctx.allocator, "__buffer", .{ .int = @intCast(@intFromPtr(buf)) });
-    try obj.set(ctx.allocator, "__writer", .{ .int = @intCast(@intFromPtr(writer)) });
+    setWriter(obj, writer, buf);
     if (getThis(ctx) == null) return NativeResult.borrowed(.{ .object = obj });
     return NativeResult.scalar(.{ .bool = true });
 }
@@ -88,7 +88,7 @@ fn xwOpenURI(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
     defer ctx.allocator.free(path_z);
     const writer = c.xmlNewTextWriterFilename(path_z.ptr, 0);
     if (writer == null) return NativeResult.scalar(.{ .bool = false });
-    try obj.set(ctx.allocator, "__writer", .{ .int = @intCast(@intFromPtr(writer)) });
+    setWriter(obj, writer, null);
     if (getThis(ctx) == null) return NativeResult.borrowed(.{ .object = obj });
     return NativeResult.scalar(.{ .bool = true });
 }
@@ -101,8 +101,7 @@ fn xwToMemory(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
         c.xmlBufferFree(buf);
         return NativeResult.scalar(.{ .bool = false });
     }
-    try obj.set(ctx.allocator, "__buffer", .{ .int = @intCast(@intFromPtr(buf)) });
-    try obj.set(ctx.allocator, "__writer", .{ .int = @intCast(@intFromPtr(writer)) });
+    setWriter(obj, writer, buf);
     return NativeResult.borrowed(.{ .object = obj });
 }
 
@@ -113,7 +112,7 @@ fn xwToUri(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     defer ctx.allocator.free(path_z);
     const writer = c.xmlNewTextWriterFilename(path_z.ptr, 0);
     if (writer == null) return NativeResult.scalar(.{ .bool = false });
-    try obj.set(ctx.allocator, "__writer", .{ .int = @intCast(@intFromPtr(writer)) });
+    setWriter(obj, writer, null);
     return NativeResult.borrowed(.{ .object = obj });
 }
 

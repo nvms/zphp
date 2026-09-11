@@ -6,6 +6,8 @@ const VM = @import("runtime/vm.zig").VM;
 const Value = @import("runtime/value.zig").Value;
 const PhpArray = @import("runtime/value.zig").PhpArray;
 const PhpObject = @import("runtime/value.zig").PhpObject;
+const NativeHandle = @import("runtime/value.zig").NativeHandle;
+const platform = @import("platform.zig");
 
 const tls = @import("tls.zig");
 const h2 = @import("h2.zig");
@@ -764,7 +766,7 @@ fn compactConnections(w: *Worker) void {
             if (c.state == .closing) {
                 if (c.ws_obj) |ws_obj| {
                     ws_obj.set(w.allocator, "__ws_closed", .{ .bool = true }) catch {};
-                    ws_obj.set(w.allocator, "__ws_ssl", .{ .int = 0 }) catch {};
+                    ws_obj.native.ptr = 0;
                     if (w.vm.functions.contains("ws_onClose")) {
                         _ = w.vm.callByName("ws_onClose", &.{Value{ .object = ws_obj }}) catch {};
                     }
@@ -1193,14 +1195,9 @@ fn handleWsUpgrade(w: *Worker, c: *Connection, ws_key: []const u8) void {
         c.state = .closing;
         return;
     };
-    ws_obj.* = .{ .class_name = "WebSocketConnection" };
-    ws_obj.set(w.allocator, "__ws_fd", .{ .int = @intCast(c.fd) }) catch {
-        c.state = .closing;
-        return;
-    };
-    ws_obj.set(w.allocator, "__ws_ssl", .{ .int = if (c.ssl) |s| @intCast(@intFromPtr(s)) else @as(i64, 0) }) catch {
-        c.state = .closing;
-        return;
+    ws_obj.* = .{
+        .class_name = "WebSocketConnection",
+        .native = .{ .kind = .websocket, .ptr = NativeHandle.addr(c.ssl), .aux = @intCast(platform.socketToInt(c.fd)) },
     };
     ws_obj.set(w.allocator, "__ws_closed", .{ .bool = false }) catch {
         c.state = .closing;

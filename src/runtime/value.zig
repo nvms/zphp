@@ -761,6 +761,80 @@ pub const Fiber = struct {
     }
 };
 
+// the raw pointers a native class keeps on an instance, tagged with the
+// binding that owns them so one binding's pointer never reaches another's
+// code. up to three addresses: a libxml node with its document and an
+// iteration cursor, a curl easy handle with its header list and share
+pub const NativeHandle = struct {
+    kind: Kind = .none,
+    owns: bool = false,
+    owns_aux: bool = false,
+    ptr: usize = 0,
+    aux: usize = 0,
+    extra: usize = 0,
+
+    pub const Kind = enum(u32) {
+        none = 0,
+        curl,
+        curl_share,
+        curl_multi,
+        dom,
+        gd,
+        gmp,
+        collator,
+        number_formatter,
+        date_formatter,
+        calendar,
+        break_iterator,
+        transliterator,
+        ldap,
+        ldap_result,
+        mysqli,
+        mysqli_result,
+        pdo_sqlite,
+        pdo_sqlite_stmt,
+        pdo_mysql,
+        pdo_mysql_stmt,
+        pdo_pgsql,
+        pdo_pgsql_stmt,
+        simplexml,
+        websocket,
+        xml_reader,
+        xml_writer,
+        _,
+    };
+
+    const extension_base: u32 = 0x10000;
+
+    pub fn extensionKind(id: u32) Kind {
+        return @enumFromInt(extension_base + id);
+    }
+
+    pub fn extensionId(self: NativeHandle) ?u32 {
+        const raw = @intFromEnum(self.kind);
+        return if (raw >= extension_base) raw - extension_base else null;
+    }
+
+    pub fn addr(p: anytype) usize {
+        return if (p) |q| @intFromPtr(q) else 0;
+    }
+
+    pub fn get(self: NativeHandle, comptime T: type, kind: Kind) ?*T {
+        if (self.kind != kind or self.ptr == 0) return null;
+        return @ptrFromInt(self.ptr);
+    }
+
+    pub fn getAux(self: NativeHandle, comptime T: type, kind: Kind) ?*T {
+        if (self.kind != kind or self.aux == 0) return null;
+        return @ptrFromInt(self.aux);
+    }
+
+    pub fn getExtra(self: NativeHandle, comptime T: type, kind: Kind) ?*T {
+        if (self.kind != kind or self.extra == 0) return null;
+        return @ptrFromInt(self.extra);
+    }
+};
+
 pub const PhpObject = struct {
     class_name: []const u8,
     properties: std.StringArrayHashMapUnmanaged(Value) = .{},
@@ -799,11 +873,9 @@ pub const PhpObject = struct {
     // a reference cell has targeted one of this object's properties; the
     // release path must detach those weak mirrors before the address is reused
     ref_mirrored: bool = false,
-    // a native handle owned by an extension resource: the pointer and the
-    // registered type id live here, not in properties, so php code cannot
-    // read or forge them
-    native_ptr: usize = 0,
-    native_kind: u32 = 0,
+    // native pointers behind a builtin or extension class live here, never
+    // in properties, so php code cannot read or forge them
+    native: NativeHandle = .{},
 
     pub const LazyState = struct {
         initializer: Value,

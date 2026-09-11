@@ -30,6 +30,10 @@ void zphp_mpz_destroy(zphp_mpz* p) {
     free(p);
 }
 
+void zphp_mpz_set(zphp_mpz* r, const zphp_mpz* a) {
+    mpz_set(r->v, a->v);
+}
+
 int zphp_mpz_set_str(zphp_mpz* p, const char* s, int base) {
     return mpz_set_str(p->v, s, base);
 }

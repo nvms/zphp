@@ -283,6 +283,9 @@ pub const ClassDef = struct {
     is_final: bool = false,
     is_readonly: bool = false,
     native_cleanup: ?*const fn (*PhpObject) bool = null,
+    // copies the native handle for `clone`; a class with a handle and no
+    // hook is uncloneable, like php's handle classes
+    native_clone: ?*const fn (*VM, *PhpObject, *PhpObject) bool = null,
     // arithmetic and comparison on instances of a native class (BcMath\Number).
     // null result means the operand pair is not supported and the ordinary
     // TypeError path runs
@@ -6678,10 +6681,9 @@ pub const VM = struct {
                             return error.RuntimeError;
                         };
                         src = src.storage();
-                        if (src.native_kind != 0) {
-                            const msg = try std.fmt.allocPrint(self.allocator, "Trying to clone an uncloneable object of class {s}", .{src.class_name});
-                            try self.strings.append(self.allocator, msg);
-                            if (try self.throwBuiltinException("Error", msg)) continue;
+                        const native_clone = if (src.native.kind == .none) null else self.nativeCloneHook(src.class_name);
+                        if (src.native.kind != .none and native_clone == null) {
+                            if (try self.throwUncloneable(src.class_name)) continue;
                             return error.RuntimeError;
                         }
                         const copy = try self.allocator.create(PhpObject);
@@ -6700,6 +6702,10 @@ pub const VM = struct {
                             try copy.properties.put(self.allocator, entry.key_ptr.*, try self.copyObjectCloneValue(entry.value_ptr.*));
                         }
                         try self.objects.append(self.allocator, copy);
+                        if (native_clone) |hook| if (!hook(self, src, copy)) {
+                            if (try self.throwUncloneable(src.class_name)) continue;
+                            return error.RuntimeError;
+                        };
                         if (src.ref_mirrored) {
                             if (src.slot_layout) |layout| {
                                 for (layout.names) |name| {
@@ -11422,6 +11428,23 @@ pub const VM = struct {
             .generator => "Generator",
             .fiber => "Fiber",
         };
+    }
+
+    // the hook sits on the builtin class; a user subclass inherits it
+    fn nativeCloneHook(self: *VM, class_name: []const u8) ?*const fn (*VM, *PhpObject, *PhpObject) bool {
+        var name: ?[]const u8 = class_name;
+        while (name) |n| {
+            const def = self.classes.get(n) orelse return null;
+            if (def.native_clone) |hook| return hook;
+            name = def.parent;
+        }
+        return null;
+    }
+
+    pub fn throwUncloneable(self: *VM, class_name: []const u8) !bool {
+        const msg = try std.fmt.allocPrint(self.allocator, "Trying to clone an uncloneable object of class {s}", .{class_name});
+        try self.strings.append(self.allocator, msg);
+        return self.throwBuiltinException("Error", msg);
     }
 
     pub fn throwBuiltinException(self: *VM, class_name: []const u8, message: []const u8) !bool {

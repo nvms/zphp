@@ -1,6 +1,8 @@
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
+const NativeHandle = @import("../runtime/value.zig").NativeHandle;
+const dom = @import("dom.zig");
 const vm_mod = @import("../runtime/vm.zig");
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const VM = vm_mod.VM;
@@ -39,19 +41,16 @@ fn getThis(ctx: *NativeContext) ?*PhpObject {
 }
 
 fn getReader(obj: *const PhpObject) ?*c.xmlTextReader {
-    const v = obj.get("__reader");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return obj.native.get(c.xmlTextReader, .xml_reader);
 }
 
-fn setReader(obj: *PhpObject, allocator: Allocator, reader: ?*c.xmlTextReader) !void {
-    const p: i64 = if (reader) |r| @intCast(@intFromPtr(r)) else 0;
-    try obj.set(allocator, "__reader", .{ .int = p });
+fn setReader(obj: *PhpObject, reader: ?*c.xmlTextReader) void {
+    obj.native = .{ .kind = .xml_reader, .ptr = NativeHandle.addr(reader) };
 }
 
 fn closeExisting(obj: *PhpObject) void {
     if (getReader(obj)) |r| c.xmlFreeTextReader(r);
-    if (obj.properties.getPtr("__reader")) |slot| slot.* = .{ .int = 0 };
+    obj.native.ptr = 0;
 }
 
 pub fn cleanupObject(obj: *PhpObject) void {
@@ -75,7 +74,7 @@ fn xrOpen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
 
     const reader = c.xmlReaderForFile(path_z.ptr, enc_ptr, opts);
     if (reader == null) return NativeResult.scalar(.{ .bool = false });
-    try setReader(obj, ctx.allocator, reader);
+    setReader(obj, reader);
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -100,11 +99,11 @@ fn xrXml(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     // is absent we synthesize a new instance
     if (getThis(ctx)) |obj| {
         closeExisting(obj);
-        try setReader(obj, ctx.allocator, reader);
+        setReader(obj, reader);
         return NativeResult.scalar(.{ .bool = true });
     }
     const obj = try ctx.createObject("XMLReader");
-    try setReader(obj, ctx.allocator, reader);
+    setReader(obj, reader);
     return NativeResult.borrowed(.{ .object = obj });
 }
 
@@ -120,7 +119,7 @@ fn xrFromString(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     const opts: c_int = if (args.len > 2 and args[2] == .int) @intCast(args[2].int) else 0;
     const reader = c.xmlReaderForMemory(src.ptr, @intCast(src.len), null, enc_ptr, opts);
     if (reader == null) return NativeResult.scalar(.{ .bool = false });
-    try setReader(obj, ctx.allocator, reader);
+    setReader(obj, reader);
     return NativeResult.borrowed(.{ .object = obj });
 }
 
@@ -136,14 +135,13 @@ fn xrFromUri(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
     const opts: c_int = if (args.len > 2 and args[2] == .int) @intCast(args[2].int) else 0;
     const reader = c.xmlReaderForFile(path_z.ptr, enc_ptr, opts);
     if (reader == null) return NativeResult.scalar(.{ .bool = false });
-    try setReader(obj, ctx.allocator, reader);
+    setReader(obj, reader);
     return NativeResult.borrowed(.{ .object = obj });
 }
 
 fn xrClose(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     closeExisting(obj);
-    try setReader(obj, ctx.allocator, null);
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -300,7 +298,7 @@ fn xrExpand(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
         else => "DOMNode",
     };
     const dom_obj = try ctx.createObject(cls);
-    try dom_obj.set(ctx.allocator, "__node", .{ .int = @intCast(@intFromPtr(node)) });
+    dom.setNodePtr(dom_obj, @ptrCast(node));
     return NativeResult.borrowed(.{ .object = dom_obj });
 }
 

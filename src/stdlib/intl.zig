@@ -2,6 +2,7 @@ const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
+const NativeHandle = @import("../runtime/value.zig").NativeHandle;
 const vm_mod = @import("../runtime/vm.zig");
 const VM = vm_mod.VM;
 const NativeContext = vm_mod.NativeContext;
@@ -58,6 +59,7 @@ extern fn zphp_ucol_getStrength(c: *const UCollator) i32;
 
 extern fn zphp_unum_open(style: i32, pattern: ?[*]const UChar, patLen: i32, locale: [*:0]const u8, parseErr: ?*anyopaque, err: *UErrorCode) ?*UNumberFormat;
 extern fn zphp_unum_close(f: *UNumberFormat) void;
+extern fn zphp_unum_clone(f: *const UNumberFormat, err: *UErrorCode) ?*UNumberFormat;
 extern fn zphp_unum_formatInt64(f: *const UNumberFormat, v: i64, buf: [*]UChar, cap: i32, pos: ?*anyopaque, err: *UErrorCode) i32;
 extern fn zphp_unum_formatDouble(f: *const UNumberFormat, v: f64, buf: [*]UChar, cap: i32, pos: ?*anyopaque, err: *UErrorCode) i32;
 extern fn zphp_unum_formatDoubleCurrency(f: *const UNumberFormat, v: f64, ccy: [*]UChar, buf: [*]UChar, cap: i32, pos: ?*anyopaque, err: *UErrorCode) i32;
@@ -68,11 +70,13 @@ extern fn zphp_unum_getAttribute(f: *const UNumberFormat, attr: i32) i32;
 
 extern fn zphp_utrans_openU(id: [*]const UChar, idLen: i32, dir: i32, rules: ?[*]const UChar, rulesLen: i32, parseErr: ?*anyopaque, err: *UErrorCode) ?*UTransliterator;
 extern fn zphp_utrans_close(t: *UTransliterator) void;
+extern fn zphp_utrans_clone(t: *const UTransliterator, err: *UErrorCode) ?*UTransliterator;
 extern fn zphp_utrans_transUChars(t: *const UTransliterator, text: [*]UChar, textLen: *i32, textCap: i32, start: i32, limit: *i32, err: *UErrorCode) void;
 
 const UDateFormat = opaque {};
 extern fn zphp_udat_open(timeStyle: i32, dateStyle: i32, locale: [*:0]const u8, tzId: ?[*]const UChar, tzIdLen: i32, pattern: ?[*]const UChar, patternLen: i32, err: *UErrorCode) ?*UDateFormat;
 extern fn zphp_udat_close(f: *UDateFormat) void;
+extern fn zphp_udat_clone(f: *const UDateFormat, err: *UErrorCode) ?*UDateFormat;
 extern fn zphp_udat_format(f: *const UDateFormat, date: f64, result: [*]UChar, resultLen: i32, pos: ?*anyopaque, err: *UErrorCode) i32;
 extern fn zphp_udat_parse(f: *const UDateFormat, text: [*]const UChar, textLen: i32, parsePos: ?*i32, err: *UErrorCode) f64;
 extern fn zphp_udat_applyPattern(f: *UDateFormat, localized: u8, pattern: [*]const UChar, patternLen: i32) void;
@@ -133,6 +137,7 @@ extern fn zphp_ucal_setLenient(cal: *UCalendar, lenient: i32) void;
 const ZphpBrk = opaque {};
 extern fn zphp_ubrk_open(brk_type: c_int, locale: [*:0]const u8, err: *UErrorCode) ?*ZphpBrk;
 extern fn zphp_ubrk_close(w: *ZphpBrk) void;
+extern fn zphp_ubrk_clone(w: *const ZphpBrk, err: *UErrorCode) ?*ZphpBrk;
 extern fn zphp_ubrk_setText(w: *ZphpBrk, text: [*]const u8, len: i32, err: *UErrorCode) void;
 extern fn zphp_ubrk_getText(w: *ZphpBrk, len: *i32) [*:0]const u8;
 extern fn zphp_ubrk_first(w: *ZphpBrk) i32;
@@ -180,6 +185,32 @@ fn getThis(ctx: *NativeContext) ?*PhpObject {
     if (v != .object) return null;
     return v.object;
 }
+
+fn handle(kind: NativeHandle.Kind, ptr: anytype) NativeHandle {
+    return .{ .kind = kind, .ptr = @intFromPtr(ptr) };
+}
+
+fn cloneHook(comptime T: type, comptime kind: NativeHandle.Kind, comptime dupFn: anytype, comptime closeFn: anytype) fn (*VM, *PhpObject, *PhpObject) bool {
+    return struct {
+        fn hook(_: *VM, src: *PhpObject, copy: *PhpObject) bool {
+            const p = src.native.get(T, kind) orelse return false;
+            var status: UErrorCode = U_ZERO_ERROR;
+            const dup = dupFn(p, &status);
+            if (status > U_ZERO_ERROR) {
+                if (dup) |d| closeFn(d);
+                return false;
+            }
+            copy.native = handle(kind, dup orelse return false);
+            return true;
+        }
+    }.hook;
+}
+
+const cloneNumFmt = cloneHook(UNumberFormat, .number_formatter, zphp_unum_clone, zphp_unum_close);
+const cloneTranslit = cloneHook(UTransliterator, .transliterator, zphp_utrans_clone, zphp_utrans_close);
+const cloneDateFmt = cloneHook(UDateFormat, .date_formatter, zphp_udat_clone, zphp_udat_close);
+const cloneCal = cloneHook(UCalendar, .calendar, zphp_ucal_clone, zphp_ucal_close);
+const cloneBrk = cloneHook(ZphpBrk, .break_iterator, zphp_ubrk_clone, zphp_ubrk_close);
 
 // utf-8 → utf-16. shrinks to actual length so caller can free the returned slice
 fn utf8ToU16(ctx: *NativeContext, s: []const u8) ![]u16 {
@@ -350,9 +381,7 @@ fn localeGetDisplayScript(ctx: *NativeContext, args: []const Value) RuntimeError
 // ---------------- Collator ----------------
 
 fn getCollator(obj: *const PhpObject) ?*UCollator {
-    const v = obj.get("__coll");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return obj.native.get(UCollator, .collator);
 }
 
 fn openCollatorFor(ctx: *NativeContext, locale: []const u8) !?*UCollator {
@@ -367,7 +396,7 @@ fn collConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const c = (try openCollatorFor(ctx, args[0].string.bytes())) orelse return NativeResult.scalar(.null);
-    try obj.set(ctx.allocator, "__coll", .{ .int = @intCast(@intFromPtr(c)) });
+    obj.native = handle(.collator, c);
     try obj.set(ctx.allocator, "__locale", .{ .string = args[0].string });
     return NativeResult.scalar(.null);
 }
@@ -376,7 +405,7 @@ fn collCreateStatic(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
     const obj = try ctx.createObject("Collator");
     const c = (try openCollatorFor(ctx, args[0].string.bytes())) orelse return NativeResult.scalar(.null);
-    try obj.set(ctx.allocator, "__coll", .{ .int = @intCast(@intFromPtr(c)) });
+    obj.native = handle(.collator, c);
     try obj.set(ctx.allocator, "__locale", .{ .string = args[0].string });
     return NativeResult.borrowed(.{ .object = obj });
 }
@@ -445,9 +474,7 @@ fn collSort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
 // ---------------- NumberFormatter ----------------
 
 fn getNumFmt(obj: *const PhpObject) ?*UNumberFormat {
-    const v = obj.get("__nfmt");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return obj.native.get(UNumberFormat, .number_formatter);
 }
 
 fn openNumFmt(ctx: *NativeContext, locale: []const u8, style: i32, pattern: ?[]const u8) !?*UNumberFormat {
@@ -476,7 +503,7 @@ fn nfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     const style: i32 = if (args[1] == .int) @intCast(args[1].int) else 1;
     const pattern: ?[]const u8 = if (args.len >= 3 and args[2] == .string) args[2].string.bytes() else null;
     const f = (try openNumFmt(ctx, args[0].string.bytes(), style, pattern)) orelse return NativeResult.scalar(.null);
-    try obj.set(ctx.allocator, "__nfmt", .{ .int = @intCast(@intFromPtr(f)) });
+    obj.native = handle(.number_formatter, f);
     return NativeResult.scalar(.null);
 }
 
@@ -486,7 +513,7 @@ fn nfCreateStatic(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     const style: i32 = if (args[1] == .int) @intCast(args[1].int) else 1;
     const pattern: ?[]const u8 = if (args.len >= 3 and args[2] == .string) args[2].string.bytes() else null;
     const f = (try openNumFmt(ctx, args[0].string.bytes(), style, pattern)) orelse return NativeResult.scalar(.null);
-    try obj.set(ctx.allocator, "__nfmt", .{ .int = @intCast(@intFromPtr(f)) });
+    obj.native = handle(.number_formatter, f);
     return NativeResult.borrowed(.{ .object = obj });
 }
 
@@ -565,9 +592,7 @@ fn nfGetAttribute(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
 // ---------------- Transliterator ----------------
 
 fn getTranslit(obj: *const PhpObject) ?*UTransliterator {
-    const v = obj.get("__trans");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return obj.native.get(UTransliterator, .transliterator);
 }
 
 fn transCreateStatic(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -579,7 +604,7 @@ fn transCreateStatic(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
     const t = zphp_utrans_openU(id_u16.ptr, @intCast(id_u16.len), dir, null, 0, null, &status);
     if (status > U_ZERO_ERROR or t == null) return NativeResult.scalar(.null);
     const obj = try ctx.createObject("Transliterator");
-    try obj.set(ctx.allocator, "__trans", .{ .int = @intCast(@intFromPtr(t.?)) });
+    obj.native = handle(.transliterator, t.?);
     try obj.set(ctx.allocator, "id", .{ .string = args[0].string });
     return NativeResult.borrowed(.{ .object = obj });
 }
@@ -607,9 +632,7 @@ fn transTransliterate(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
 // ---------------- IntlDateFormatter ----------------
 
 fn getDateFmt(obj: *const PhpObject) ?*UDateFormat {
-    const v = obj.get("__dfmt");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return obj.native.get(UDateFormat, .date_formatter);
 }
 
 fn openDateFmt(ctx: *NativeContext, locale: []const u8, date_style: i32, time_style: i32, tz: ?[]const u8, pattern: ?[]const u8) !?*UDateFormat {
@@ -649,7 +672,7 @@ fn dfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     const pat_opt: ?[]const u8 = if (args.len > 5 and args[5] == .string and args[5].string.bytes().len > 0) args[5].string.bytes() else null;
 
     const f = (try openDateFmt(ctx, args[0].string.bytes(), date_style, time_style, tz_opt, pat_opt)) orelse return NativeResult.scalar(.null);
-    try obj.set(ctx.allocator, "__dfmt", .{ .int = @intCast(@intFromPtr(f)) });
+    obj.native = handle(.date_formatter, f);
     return NativeResult.scalar(.null);
 }
 
@@ -661,7 +684,7 @@ fn dfCreateStatic(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     const tz_opt: ?[]const u8 = if (args.len > 3 and args[3] == .string and args[3].string.bytes().len > 0) args[3].string.bytes() else defaultTzName(ctx);
     const pat_opt: ?[]const u8 = if (args.len > 5 and args[5] == .string and args[5].string.bytes().len > 0) args[5].string.bytes() else null;
     const f = (try openDateFmt(ctx, args[0].string.bytes(), date_style, time_style, tz_opt, pat_opt)) orelse return NativeResult.scalar(.null);
-    try obj.set(ctx.allocator, "__dfmt", .{ .int = @intCast(@intFromPtr(f)) });
+    obj.native = handle(.date_formatter, f);
     return NativeResult.borrowed(.{ .object = obj });
 }
 
@@ -890,9 +913,7 @@ fn mfGetLocale(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult 
 // ---------------- IntlCalendar ----------------
 
 fn getCal(obj: *const PhpObject) ?*UCalendar {
-    const v = obj.get("__cal");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return obj.native.get(UCalendar, .calendar);
 }
 
 fn openCalendar(ctx: *NativeContext, tz_opt: ?[]const u8, locale: []const u8, cal_type: c_int) !?*UCalendar {
@@ -918,7 +939,7 @@ fn calCreateInstance(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
     }
     const cal = (try openCalendar(ctx, tz_opt, locale, 0)) orelse return NativeResult.scalar(.null);
     const obj = try ctx.createObject("IntlGregorianCalendar");
-    try obj.set(ctx.allocator, "__cal", .{ .int = @intCast(@intFromPtr(cal)) });
+    obj.native = handle(.calendar, cal);
     try obj.set(ctx.allocator, "__locale", .{ .string = Value.String.borrowed(try dupString(ctx, locale)) });
     return NativeResult.borrowed(.{ .object = obj });
 }
@@ -942,7 +963,7 @@ fn calConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
             locale = def[0..cstrLen(def)];
         }
         const cal = (try openCalendar(ctx, tz_opt, locale, 0)) orelse return NativeResult.scalar(.null);
-        try obj.set(ctx.allocator, "__cal", .{ .int = @intCast(@intFromPtr(cal)) });
+        obj.native = handle(.calendar, cal);
         try obj.set(ctx.allocator, "__locale", .{ .string = Value.String.borrowed(try dupString(ctx, locale)) });
         return NativeResult.scalar(.null);
     }
@@ -951,7 +972,7 @@ fn calConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     const def_locale_ptr = zphp_uloc_getDefault();
     const def_locale = def_locale_ptr[0..cstrLen(def_locale_ptr)];
     const cal = (try openCalendar(ctx, null, def_locale, 0)) orelse return NativeResult.scalar(.null);
-    try obj.set(ctx.allocator, "__cal", .{ .int = @intCast(@intFromPtr(cal)) });
+    obj.native = handle(.calendar, cal);
     try obj.set(ctx.allocator, "__locale", .{ .string = Value.String.borrowed(try dupString(ctx, def_locale)) });
     if (args.len >= 3 and args[0] == .int and args[1] == .int and args[2] == .int) {
         var status: UErrorCode = U_ZERO_ERROR;
@@ -1192,9 +1213,7 @@ fn calEquals(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
 // ---------------- IntlBreakIterator ----------------
 
 fn getBrk(obj: *const PhpObject) ?*ZphpBrk {
-    const v = obj.get("__brk");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return obj.native.get(ZphpBrk, .break_iterator);
 }
 
 fn openBrk(ctx: *NativeContext, brk_type: c_int, locale: []const u8) !?*ZphpBrk {
@@ -1212,7 +1231,7 @@ fn openBrk(ctx: *NativeContext, brk_type: c_int, locale: []const u8) !?*ZphpBrk 
 fn brkMakeInstance(ctx: *NativeContext, brk_type: c_int, locale: []const u8) RuntimeError!NativeResult {
     const w = (try openBrk(ctx, brk_type, locale)) orelse return NativeResult.scalar(.null);
     const obj = try ctx.createObject("IntlBreakIterator");
-    try obj.set(ctx.allocator, "__brk", .{ .int = @intCast(@intFromPtr(w)) });
+    obj.native = handle(.break_iterator, w);
     try obj.set(ctx.allocator, "__type", .{ .int = @intCast(brk_type) });
     try obj.set(ctx.allocator, "__locale", .{ .string = Value.String.borrowed(try dupString(ctx, locale)) });
     return NativeResult.borrowed(.{ .object = obj });
@@ -2003,7 +2022,7 @@ fn intlCharToupper(_: *NativeContext, args: []const Value) RuntimeError!NativeRe
 
 fn registerBreakIteratorClass(vm: *VM, a: Allocator) !void {
     inline for (.{ "IntlBreakIterator", "IntlRuleBasedBreakIterator", "IntlCodePointBreakIterator" }) |cls_name| {
-        var def = ClassDef{ .name = cls_name };
+        var def = ClassDef{ .name = cls_name, .native_clone = cloneBrk };
         if (comptime !std.mem.eql(u8, cls_name, "IntlBreakIterator")) {
             def.parent = "IntlBreakIterator";
         }
@@ -2070,7 +2089,7 @@ fn registerBreakIteratorClass(vm: *VM, a: Allocator) !void {
 
 fn registerIntlCalendarClass(vm: *VM, a: Allocator) !void {
     inline for (.{ "IntlCalendar", "IntlGregorianCalendar" }) |cls_name| {
-        var def = ClassDef{ .name = cls_name };
+        var def = ClassDef{ .name = cls_name, .native_clone = cloneCal };
         if (comptime std.mem.eql(u8, cls_name, "IntlGregorianCalendar")) {
             def.parent = "IntlCalendar";
         }
@@ -2176,12 +2195,12 @@ fn registerMessageFormatterClass(vm: *VM, a: Allocator) !void {
 
 fn cleanupDateFormatter(obj: *PhpObject) bool {
     if (getDateFmt(obj)) |f| zphp_udat_close(f);
-    if (obj.properties.getPtr("__dfmt")) |slot| slot.* = .{ .int = 0 };
+    obj.native.ptr = 0;
     return true;
 }
 
 fn registerDateFormatterClass(vm: *VM, a: Allocator) !void {
-    var def = ClassDef{ .name = "IntlDateFormatter", .native_cleanup = cleanupDateFormatter };
+    var def = ClassDef{ .name = "IntlDateFormatter", .native_cleanup = cleanupDateFormatter, .native_clone = cloneDateFmt };
     try def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 3 });
     try def.methods.put(a, "create", .{ .name = "create", .arity = 3, .is_static = true });
     try def.methods.put(a, "format", .{ .name = "format", .arity = 1 });
@@ -2426,7 +2445,7 @@ fn registerCollatorClass(vm: *VM, a: Allocator) !void {
 }
 
 fn registerNumberFormatterClass(vm: *VM, a: Allocator) !void {
-    var def = ClassDef{ .name = "NumberFormatter" };
+    var def = ClassDef{ .name = "NumberFormatter", .native_clone = cloneNumFmt };
     try def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
     try def.methods.put(a, "create", .{ .name = "create", .arity = 2, .is_static = true });
     try def.methods.put(a, "format", .{ .name = "format", .arity = 1 });
@@ -2468,7 +2487,7 @@ fn registerNumberFormatterClass(vm: *VM, a: Allocator) !void {
 }
 
 fn registerTransliteratorClass(vm: *VM, a: Allocator) !void {
-    var def = ClassDef{ .name = "Transliterator" };
+    var def = ClassDef{ .name = "Transliterator", .native_clone = cloneTranslit };
     try def.methods.put(a, "create", .{ .name = "create", .arity = 1, .is_static = true });
     try def.methods.put(a, "transliterate", .{ .name = "transliterate", .arity = 1 });
     try def.constant_order.append(a, "FORWARD");
@@ -2543,21 +2562,14 @@ fn registerConstants(vm: *VM, a: Allocator) !void {
 pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
     for (objects.items) |obj| {
         if (obj.pooled) continue;
-        if (std.mem.eql(u8, obj.class_name, "Collator")) {
-            if (getCollator(obj)) |c| zphp_ucol_close(c);
-        } else if (std.mem.eql(u8, obj.class_name, "NumberFormatter")) {
-            if (getNumFmt(obj)) |f| zphp_unum_close(f);
-        } else if (std.mem.eql(u8, obj.class_name, "Transliterator")) {
-            if (getTranslit(obj)) |t| zphp_utrans_close(t);
-        } else if (std.mem.eql(u8, obj.class_name, "IntlDateFormatter")) {
-            _ = cleanupDateFormatter(obj);
-        } else if (std.mem.eql(u8, obj.class_name, "IntlCalendar") or std.mem.eql(u8, obj.class_name, "IntlGregorianCalendar")) {
-            if (getCal(obj)) |c| zphp_ucal_close(c);
-        } else if (std.mem.eql(u8, obj.class_name, "IntlBreakIterator") or
-            std.mem.eql(u8, obj.class_name, "IntlRuleBasedBreakIterator") or
-            std.mem.eql(u8, obj.class_name, "IntlCodePointBreakIterator"))
-        {
-            if (getBrk(obj)) |w| zphp_ubrk_close(w);
+        switch (obj.native.kind) {
+            .collator => if (getCollator(obj)) |c| zphp_ucol_close(c),
+            .number_formatter => if (getNumFmt(obj)) |f| zphp_unum_close(f),
+            .transliterator => if (getTranslit(obj)) |t| zphp_utrans_close(t),
+            .date_formatter => _ = cleanupDateFormatter(obj),
+            .calendar => if (getCal(obj)) |c| zphp_ucal_close(c),
+            .break_iterator => if (getBrk(obj)) |w| zphp_ubrk_close(w),
+            else => {},
         }
     }
 }

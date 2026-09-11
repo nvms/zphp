@@ -2,6 +2,7 @@ const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
+const NativeHandle = @import("../runtime/value.zig").NativeHandle;
 const vm_mod = @import("../runtime/vm.zig");
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const VM = vm_mod.VM;
@@ -103,29 +104,61 @@ fn freeCapturedError(e: *const CapturedError) void {
 }
 
 // ---------------- pointer storage on PhpObject ----------------
-// every wrapper stores its underlying xmlNodePtr as the "__node" property.
-// for DOMDocument the pointer is actually an xmlDocPtr (cast-compatible with
+// every wrapper keeps its xmlNodePtr in the object's native handle (kind
+// .dom). for DOMDocument the pointer is an xmlDocPtr (cast-compatible with
 // xmlNodePtr - libxml2 itself uses this dual identity throughout tree.c).
 //
 // the document wrapper owns the xmlDoc lifecycle: cleanupResources frees it.
 // child wrappers reference nodes inside the doc and free nothing themselves -
-// xmlFreeDoc walks the tree and frees everything.
+// xmlFreeDoc walks the tree and frees everything. the one exception is a
+// wrapper made by `clone`: its node is a detached copy nothing else reaches,
+// so it carries `owns` and the sweep frees it while it is still unattached
 
-fn getNodePtr(obj: *const PhpObject) ?*c.xmlNode {
-    const v = obj.get("__node");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+pub fn getNodePtr(obj: *const PhpObject) ?*c.xmlNode {
+    return obj.native.get(c.xmlNode, .dom);
 }
 
 fn getDocPtr(obj: *const PhpObject) ?*c.xmlDoc {
-    const v = obj.get("__node");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return obj.native.get(c.xmlDoc, .dom);
 }
 
-fn setNodePtr(obj: *PhpObject, allocator: Allocator, node: ?*c.xmlNode) !void {
-    const p: i64 = if (node) |n| @intCast(@intFromPtr(n)) else 0;
-    try obj.set(allocator, "__node", .{ .int = p });
+pub fn setNodePtr(obj: *PhpObject, node: ?*c.xmlNode) void {
+    obj.native = .{ .kind = .dom, .ptr = NativeHandle.addr(node) };
+}
+
+fn setDocPtr(obj: *PhpObject, doc: ?*c.xmlDoc) void {
+    obj.native = .{ .kind = .dom, .ptr = NativeHandle.addr(doc) };
+}
+
+// ---------------- clone ----------------
+
+fn cloneDocHandle(_: *VM, src: *PhpObject, copy: *PhpObject) bool {
+    const doc = getDocPtr(src) orelse {
+        setDocPtr(copy, null);
+        return true;
+    };
+    const dup = c.xmlCopyDoc(doc, 1) orelse return false;
+    setDocPtr(copy, dup);
+    pointOwnerAtSelf(copy);
+    return true;
+}
+
+// the property copy left the clone's __owner on the original document
+fn pointOwnerAtSelf(copy: *PhpObject) void {
+    const slot = copy.properties.getPtr("__owner") orelse return;
+    slot.* = .{ .object = copy };
+    copy.retain();
+}
+
+fn cloneNodeHandle(_: *VM, src: *PhpObject, copy: *PhpObject) bool {
+    const node = getNodePtr(src) orelse {
+        setNodePtr(copy, null);
+        return true;
+    };
+    const dup = c.xmlDocCopyNode(node, node.doc, 1) orelse return false;
+    setNodePtr(copy, dup);
+    copy.native.owns = true;
+    return true;
 }
 
 fn getThis(ctx: *NativeContext) ?*PhpObject {
@@ -185,7 +218,7 @@ fn wrapNode(ctx: *NativeContext, node: ?*c.xmlNode, owner_doc: ?*PhpObject) !Val
     const n = node orelse return .null;
     const cls = classForNodeType(n.type);
     const obj = try ctx.createObject(cls);
-    try setNodePtr(obj, ctx.allocator, n);
+    setNodePtr(obj, n);
     if (owner_doc) |d| try obj.set(ctx.allocator, "__owner", .{ .object = d });
     return .{ .object = obj };
 }
@@ -213,7 +246,7 @@ fn domDocConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Native
         const enc_z = try dupZ(ctx, encoding);
         doc.*.encoding = c.xmlStrdup(@ptrCast(enc_z.ptr));
     }
-    try setNodePtr(obj, ctx.allocator, @ptrCast(doc));
+    setDocPtr(obj, doc);
     try obj.set(ctx.allocator, "__owner", .{ .object = obj });
     try obj.set(ctx.allocator, "formatOutput", .{ .bool = false });
     try obj.set(ctx.allocator, "preserveWhiteSpace", .{ .bool = true });
@@ -239,12 +272,12 @@ fn domDocLoadXML(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     // replace any prior doc
     if (getDocPtr(obj)) |old| {
         c.xmlFreeDoc(old);
-        try setNodePtr(obj, ctx.allocator, null);
+        obj.native.ptr = 0;
     }
 
     const doc = c.xmlReadMemory(src.ptr, @intCast(src.len), null, null, opts);
     if (doc == null) return NativeResult.scalar(.{ .bool = false });
-    try setNodePtr(obj, ctx.allocator, @ptrCast(doc));
+    setDocPtr(obj, doc);
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -270,12 +303,12 @@ fn domDocLoad(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
 
     if (getDocPtr(obj)) |old| {
         c.xmlFreeDoc(old);
-        try setNodePtr(obj, ctx.allocator, null);
+        obj.native.ptr = 0;
     }
 
     const doc = c.xmlReadFile(path_z.ptr, null, opts);
     if (doc == null) return NativeResult.scalar(.{ .bool = false });
-    try setNodePtr(obj, ctx.allocator, @ptrCast(doc));
+    setDocPtr(obj, doc);
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -287,12 +320,12 @@ fn domDocLoadHTML(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
 
     if (getDocPtr(obj)) |old| {
         c.xmlFreeDoc(old);
-        try setNodePtr(obj, ctx.allocator, null);
+        obj.native.ptr = 0;
     }
 
     const doc = c.htmlReadMemory(src.ptr, @intCast(src.len), null, null, opts);
     if (doc == null) return NativeResult.scalar(.{ .bool = false });
-    try setNodePtr(obj, ctx.allocator, @ptrCast(doc));
+    setDocPtr(obj, doc);
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -304,12 +337,12 @@ fn domDocLoadHTMLFile(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
 
     if (getDocPtr(obj)) |old| {
         c.xmlFreeDoc(old);
-        try setNodePtr(obj, ctx.allocator, null);
+        obj.native.ptr = 0;
     }
 
     const doc = c.htmlReadFile(path_z.ptr, null, opts);
     if (doc == null) return NativeResult.scalar(.{ .bool = false });
-    try setNodePtr(obj, ctx.allocator, @ptrCast(doc));
+    setDocPtr(obj, doc);
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -1469,7 +1502,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
 }
 
 fn registerDocClass(vm: *VM, a: Allocator) !void {
-    var def = ClassDef{ .name = "DOMDocument" };
+    var def = ClassDef{ .name = "DOMDocument", .native_clone = cloneDocHandle };
     try def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
     try def.methods.put(a, "loadXML", .{ .name = "loadXML", .arity = 1 });
     try def.methods.put(a, "load", .{ .name = "load", .arity = 1 });
@@ -1534,7 +1567,7 @@ fn registerDocClass(vm: *VM, a: Allocator) !void {
 }
 
 fn registerNodeClass(vm: *VM, a: Allocator) !void {
-    var def = ClassDef{ .name = "DOMNode" };
+    var def = ClassDef{ .name = "DOMNode", .native_clone = cloneNodeHandle };
     try def.methods.put(a, "appendChild", .{ .name = "appendChild", .arity = 1 });
     try def.methods.put(a, "removeChild", .{ .name = "removeChild", .arity = 1 });
     try def.methods.put(a, "replaceChild", .{ .name = "replaceChild", .arity = 2 });
@@ -1579,7 +1612,7 @@ fn registerNodeNativeFns(vm: *VM, a: Allocator, comptime class_name: []const u8)
 }
 
 fn registerElementClass(vm: *VM, a: Allocator) !void {
-    var def = ClassDef{ .name = "DOMElement" };
+    var def = ClassDef{ .name = "DOMElement", .native_clone = cloneNodeHandle };
     def.parent = "DOMNode";
     try def.methods.put(a, "getAttribute", .{ .name = "getAttribute", .arity = 1 });
     try def.methods.put(a, "setAttribute", .{ .name = "setAttribute", .arity = 2 });
@@ -1625,7 +1658,7 @@ fn registerElementClass(vm: *VM, a: Allocator) !void {
 
 fn registerCharacterDataClasses(vm: *VM, a: Allocator) !void {
     inline for (.{ "DOMText", "DOMComment", "DOMCdataSection", "DOMCharacterData", "DOMProcessingInstruction", "DOMEntityReference", "DOMDocumentFragment" }) |name| {
-        var def = ClassDef{ .name = name };
+        var def = ClassDef{ .name = name, .native_clone = cloneNodeHandle };
         def.parent = "DOMNode";
         try def.methods.put(a, "appendData", .{ .name = "appendData", .arity = 1 });
         try def.methods.put(a, "substringData", .{ .name = "substringData", .arity = 2 });
@@ -1645,7 +1678,7 @@ fn registerCharacterDataClasses(vm: *VM, a: Allocator) !void {
 }
 
 fn registerAttrClass(vm: *VM, a: Allocator) !void {
-    var def = ClassDef{ .name = "DOMAttr" };
+    var def = ClassDef{ .name = "DOMAttr", .native_clone = cloneNodeHandle };
     def.parent = "DOMNode";
     try def.methods.put(a, "appendChild", .{ .name = "appendChild", .arity = 1 });
     try def.methods.put(a, "cloneNode", .{ .name = "cloneNode", .arity = 0 });
@@ -1896,9 +1929,17 @@ fn libxmlSetExternalEntityLoader(_: *NativeContext, _: []const Value) RuntimeErr
 }
 
 pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
+    for (objects.items) |obj| freeDetachedCopy(obj);
     for (objects.items) |obj| {
         if (std.mem.eql(u8, obj.class_name, "DOMDocument")) {
             if (getDocPtr(obj)) |doc| c.xmlFreeDoc(doc);
         }
     }
+}
+
+// a cloned node that was appended somewhere is freed with its tree
+fn freeDetachedCopy(obj: *PhpObject) void {
+    if (!obj.native.owns) return;
+    const node = getNodePtr(obj) orelse return;
+    if (node.parent == null) c.xmlFreeNode(node);
 }

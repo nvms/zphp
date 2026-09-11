@@ -2,6 +2,7 @@ const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
+const NativeHandle = @import("../runtime/value.zig").NativeHandle;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 const pdo = @import("pdo.zig");
@@ -42,11 +43,23 @@ fn fieldName(field: *mysql.MYSQL_FIELD) [*:0]const u8 {
 }
 
 fn getConn(obj: *PhpObject) ?*mysql.MYSQL {
-    return pdo.getOpaquePtr(mysql.MYSQL, obj, "__db_ptr");
+    return obj.native.get(mysql.MYSQL, .pdo_mysql) orelse obj.native.getAux(mysql.MYSQL, .pdo_mysql_stmt);
 }
 
 fn getRes(obj: *PhpObject) ?*mysql.MYSQL_RES {
-    return pdo.getOpaquePtr(mysql.MYSQL_RES, obj, "__res_ptr");
+    return obj.native.get(mysql.MYSQL_RES, .pdo_mysql_stmt);
+}
+
+fn attachConn(obj: *PhpObject, conn: *mysql.MYSQL) void {
+    obj.native = .{ .kind = .pdo_mysql, .ptr = @intFromPtr(conn) };
+}
+
+fn attachStmt(obj: *PhpObject, conn: *mysql.MYSQL, res: ?*mysql.MYSQL_RES) void {
+    obj.native = .{ .kind = .pdo_mysql_stmt, .ptr = NativeHandle.addr(res), .aux = @intFromPtr(conn) };
+}
+
+fn setRes(obj: *PhpObject, res: ?*mysql.MYSQL_RES) void {
+    obj.native.ptr = NativeHandle.addr(res);
 }
 
 fn parseDsnParams(rest: []const u8) struct { host: ?[]const u8, port: u16, dbname: ?[]const u8, unix_socket: ?[]const u8 } {
@@ -83,12 +96,12 @@ pub fn connect(ctx: *NativeContext, obj: *PhpObject, rest: []const u8, args: []c
     const sock_z: ?[*:0]const u8 = if (params.unix_socket) |s| (try pdo.dupeZ(ctx, s)).ptr else null;
 
     if (mysql.mysql_real_connect(conn, host_z, user_z, pass_z, db_z, params.port, sock_z, 0) == null) {
-        const msg = std.mem.span(mysql.mysql_error(conn));
+        const msg = try ctx.createString(std.mem.span(mysql.mysql_error(conn)));
         mysql.mysql_close(conn);
         return pdo.throwPdo(ctx, msg);
     }
 
-    try obj.set(ctx.allocator, "__db_ptr", .{ .int = @intCast(@intFromPtr(conn)) });
+    attachConn(obj, conn);
     return NativeResult.scalar(.null);
 }
 
@@ -110,9 +123,7 @@ pub fn query(ctx: *NativeContext, obj: *PhpObject, sql: []const u8) RuntimeError
     const res = mysql.mysql_store_result(conn) orelse return pdo.throwPdo(ctx, std.mem.span(mysql.mysql_error(conn)));
 
     const stmt_obj = try ctx.createObject("PDOStatement");
-    try stmt_obj.set(ctx.allocator, "__driver", .{ .string = Value.String.borrowed("mysql") });
-    try stmt_obj.set(ctx.allocator, "__db_ptr", .{ .int = @intCast(@intFromPtr(conn)) });
-    try stmt_obj.set(ctx.allocator, "__res_ptr", .{ .int = @intCast(@intFromPtr(res)) });
+    attachStmt(stmt_obj, conn, res);
     try stmt_obj.set(ctx.allocator, "__current_row", .{ .int = 0 });
     try stmt_obj.set(ctx.allocator, "__has_row", .{ .bool = true });
     try stmt_obj.set(ctx.allocator, "__stepped", .{ .bool = true });
@@ -149,9 +160,7 @@ pub fn prepare(ctx: *NativeContext, obj: *PhpObject, sql: []const u8) RuntimeErr
     }
 
     const stmt_obj = try ctx.createObject("PDOStatement");
-    try stmt_obj.set(ctx.allocator, "__driver", .{ .string = Value.String.borrowed("mysql") });
-    try stmt_obj.set(ctx.allocator, "__db_ptr", .{ .int = @intCast(@intFromPtr(conn)) });
-    try stmt_obj.set(ctx.allocator, "__res_ptr", .{ .int = 0 });
+    attachStmt(stmt_obj, conn, null);
     try stmt_obj.set(ctx.allocator, "__has_row", .{ .bool = false });
     try stmt_obj.set(ctx.allocator, "__stepped", .{ .bool = false });
 
@@ -187,7 +196,7 @@ pub fn stmtExecute(ctx: *NativeContext, obj: *PhpObject, args: []const Value) Ru
     // free previous result if any
     if (getRes(obj)) |old_res| {
         mysql.mysql_free_result(old_res);
-        try obj.set(ctx.allocator, "__res_ptr", .{ .int = 0 });
+        setRes(obj, null);
     }
 
     if (mysql.mysql_real_query(conn, sql.ptr, @intCast(sql.len)) != 0) {
@@ -195,7 +204,7 @@ pub fn stmtExecute(ctx: *NativeContext, obj: *PhpObject, args: []const Value) Ru
     }
 
     if (mysql.mysql_store_result(conn)) |res| {
-        try obj.set(ctx.allocator, "__res_ptr", .{ .int = @intCast(@intFromPtr(res)) });
+        setRes(obj, res);
         try obj.set(ctx.allocator, "__current_row", .{ .int = 0 });
         try obj.set(ctx.allocator, "__has_row", .{ .bool = true });
     } else {
@@ -360,7 +369,7 @@ pub fn stmtColumnCount(obj: *PhpObject) RuntimeError!NativeResult {
 pub fn stmtCloseCursor(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeResult {
     if (getRes(obj)) |res| {
         mysql.mysql_free_result(res);
-        try obj.set(ctx.allocator, "__res_ptr", .{ .int = 0 });
+        setRes(obj, null);
     }
     try obj.set(ctx.allocator, "__has_row", .{ .bool = false });
     return NativeResult.scalar(.{ .bool = true });
@@ -409,13 +418,13 @@ pub fn errorInfo(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeResult
 pub fn cleanupStatement(obj: *PhpObject) void {
     if (getRes(obj)) |res| {
         mysql.mysql_free_result(res);
-        obj.properties.put(std.heap.page_allocator, "__res_ptr", .{ .int = 0 }) catch {};
+        setRes(obj, null);
     }
 }
 
 pub fn cleanupConnection(obj: *PhpObject) void {
-    if (getConn(obj)) |conn| {
+    if (obj.native.get(mysql.MYSQL, .pdo_mysql)) |conn| {
         mysql.mysql_close(conn);
-        obj.properties.put(std.heap.page_allocator, "__db_ptr", .{ .int = 0 }) catch {};
+        obj.native.ptr = 0;
     }
 }

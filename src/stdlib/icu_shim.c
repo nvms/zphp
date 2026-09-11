@@ -98,6 +98,7 @@ UNumberFormat* zphp_unum_open(UNumberFormatStyle s, const UChar* pat, int32_t pa
     return unum_open(s, pat, patLen, loc, parse_err, err);
 }
 void zphp_unum_close(UNumberFormat* f) { unum_close(f); }
+UNumberFormat* zphp_unum_clone(const UNumberFormat* f, UErrorCode* err) { return unum_clone(f, err); }
 int32_t zphp_unum_formatInt64(const UNumberFormat* f, int64_t v, UChar* buf, int32_t cap, void* pos, UErrorCode* err) {
     return unum_formatInt64(f, v, buf, cap, pos, err);
 }
@@ -120,6 +121,7 @@ UTransliterator* zphp_utrans_openU(const UChar* id, int32_t idLen, UTransDirecti
     return utrans_openU(id, idLen, dir, rules, rulesLen, pe, err);
 }
 void zphp_utrans_close(UTransliterator* t) { utrans_close(t); }
+UTransliterator* zphp_utrans_clone(const UTransliterator* t, UErrorCode* err) { return utrans_clone(t, err); }
 void zphp_utrans_transUChars(const UTransliterator* t, UChar* text, int32_t* textLen, int32_t textCap, int32_t start, int32_t* limit, UErrorCode* err) {
     utrans_transUChars(t, text, textLen, textCap, start, limit, err);
 }
@@ -130,6 +132,7 @@ UDateFormat* zphp_udat_open(UDateFormatStyle timeStyle, UDateFormatStyle dateSty
     return udat_open(timeStyle, dateStyle, locale, tzID, tzIDLen, pattern, patternLen, err);
 }
 void zphp_udat_close(UDateFormat* f) { udat_close(f); }
+UDateFormat* zphp_udat_clone(const UDateFormat* f, UErrorCode* err) { return udat_clone(f, err); }
 int32_t zphp_udat_format(const UDateFormat* f, double date, UChar* result, int32_t resultLen, void* pos, UErrorCode* err) {
     return udat_format(f, date, result, resultLen, pos, err);
 }
@@ -299,6 +302,21 @@ void zphp_ubrk_setText(zphp_brk* w, const char* text, int32_t len, UErrorCode* e
     w->ut = utext_openUTF8(NULL, w->text_copy, w->text_len, err);
     if (U_FAILURE(*err)) return;
     ubrk_setUText(w->bi, w->ut, err);
+}
+
+/* ubrk_clone shares the source's UText, so the copy gets its own text buffer
+ * and is moved back to the source's boundary */
+zphp_brk* zphp_ubrk_clone(const zphp_brk* src, UErrorCode* err) {
+    zphp_brk* w = (zphp_brk*)calloc(1, sizeof(zphp_brk));
+    if (!w) { *err = U_MEMORY_ALLOCATION_ERROR; return NULL; }
+    w->bi = ubrk_clone(src->bi, err);
+    if (U_FAILURE(*err)) { free(w); return NULL; }
+    if (!src->text_copy) return w;
+    int32_t pos = ubrk_current(src->bi);
+    zphp_ubrk_setText(w, src->text_copy, src->text_len, err);
+    if (U_FAILURE(*err)) { zphp_ubrk_close(w); return NULL; }
+    if (pos >= 0) ubrk_isBoundary(w->bi, pos);
+    return w;
 }
 
 const char* zphp_ubrk_getText(zphp_brk* w, int32_t* len) {

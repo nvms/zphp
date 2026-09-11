@@ -1,6 +1,7 @@
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
+const NativeHandle = @import("../runtime/value.zig").NativeHandle;
 const vm_mod = @import("../runtime/vm.zig");
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const VM = vm_mod.VM;
@@ -20,19 +21,14 @@ const c = @cImport({
     @cInclude("unistd.h");
 });
 
-// PHP's GD functions return/accept a GdImage object whose underlying state is
-// a gdImagePtr (a C pointer). zphp wraps it in a PhpObject with __gd_ptr.
-
 fn getImg(obj: *const PhpObject) ?*c.gdImageStruct {
-    const v = obj.get("__gd_ptr");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return obj.native.get(c.gdImageStruct, .gd);
 }
 
 fn wrapImg(ctx: *NativeContext, im: ?*c.gdImageStruct) RuntimeError!NativeResult {
     if (im == null) return NativeResult.scalar(.{ .bool = false });
     const obj = try ctx.createObject("GdImage");
-    try obj.set(ctx.allocator, "__gd_ptr", .{ .int = @intCast(@intFromPtr(im.?)) });
+    obj.native = .{ .kind = .gd, .ptr = NativeHandle.addr(im) };
     return NativeResult.borrowed(.{ .object = obj });
 }
 
@@ -97,10 +93,7 @@ fn imgDestroy(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     _ = ctx;
     const im = argImg(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
     c.gdImageDestroy(im);
-    if (args[0] == .object) {
-        // zero the pointer so later operations no-op
-        args[0].object.set(std.heap.page_allocator, "__gd_ptr", .{ .int = 0 }) catch {};
-    }
+    if (args[0] == .object) args[0].object.native.ptr = 0;
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -720,7 +713,7 @@ pub const entries = .{
 
 fn cleanupImage(obj: *PhpObject) bool {
     if (getImg(obj)) |im| c.gdImageDestroy(im);
-    if (obj.properties.getPtr("__gd_ptr")) |slot| slot.* = .{ .int = 0 };
+    obj.native.ptr = 0;
     return true;
 }
 
@@ -757,7 +750,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
 pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
     for (objects.items) |obj| {
-        if (obj.pooled or !std.mem.eql(u8, obj.class_name, "GdImage")) continue;
+        if (obj.pooled or obj.native.kind != .gd) continue;
         _ = cleanupImage(obj);
     }
 }

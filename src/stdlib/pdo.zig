@@ -202,12 +202,6 @@ fn sqliteCollationTrampoline(p: ?*anyopaque, alen: c_int, aptr: ?*const anyopaqu
     };
 }
 
-pub fn getOpaquePtr(comptime T: type, obj: *PhpObject, prop: []const u8) ?*T {
-    const v = obj.get(prop);
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
-}
-
 fn getThis(ctx: *NativeContext) ?*PhpObject {
     const v = ctx.vm.currentFrame().vars.get("$this") orelse return null;
     if (v != .object) return null;
@@ -215,11 +209,19 @@ fn getThis(ctx: *NativeContext) ?*PhpObject {
 }
 
 fn getDbPtr(obj: *PhpObject) ?*sqlite.Db {
-    return getOpaquePtr(sqlite.Db, obj, "__db_ptr");
+    return obj.native.get(sqlite.Db, .pdo_sqlite) orelse obj.native.getAux(sqlite.Db, .pdo_sqlite_stmt);
 }
 
 fn getStmtPtr(obj: *PhpObject) ?*sqlite.Stmt {
-    return getOpaquePtr(sqlite.Stmt, obj, "__stmt_ptr");
+    return obj.native.get(sqlite.Stmt, .pdo_sqlite_stmt);
+}
+
+fn attachDb(obj: *PhpObject, db: *sqlite.Db) void {
+    obj.native = .{ .kind = .pdo_sqlite, .ptr = @intFromPtr(db) };
+}
+
+fn attachStmt(obj: *PhpObject, stmt: *sqlite.Stmt, db: *sqlite.Db) void {
+    obj.native = .{ .kind = .pdo_sqlite_stmt, .ptr = @intFromPtr(stmt), .aux = @intFromPtr(db) };
 }
 
 // SQLite callbacks cannot unwind through C. Re-throw their pending PHP
@@ -530,63 +532,54 @@ fn stmtFetchObject(ctx: *NativeContext, args: []const Value) RuntimeError!Native
 }
 
 fn cleanupStatement(obj: *PhpObject) bool {
-    const drv = getDriver(obj);
-    if (std.mem.eql(u8, drv, "mysql")) {
-        pdo_mysql.cleanupStatement(obj);
-    } else if (std.mem.eql(u8, drv, "pgsql")) {
-        pdo_pgsql.cleanupStatement(obj);
-    } else if (getStmtPtr(obj)) |stmt| {
-        _ = sqlite.sqlite3_finalize(stmt);
+    switch (obj.native.kind) {
+        .pdo_mysql_stmt => pdo_mysql.cleanupStatement(obj),
+        .pdo_pgsql_stmt => pdo_pgsql.cleanupStatement(obj),
+        else => if (getStmtPtr(obj)) |stmt| {
+            _ = sqlite.sqlite3_finalize(stmt);
+            obj.native.ptr = 0;
+        },
     }
-    if (obj.properties.getPtr("__stmt_ptr")) |slot| slot.* = .{ .int = 0 };
     return true;
 }
 
 fn cleanupConnection(obj: *PhpObject) bool {
-    const drv = getDriver(obj);
-    if (std.mem.eql(u8, drv, "mysql")) {
-        pdo_mysql.cleanupConnection(obj);
-    } else if (std.mem.eql(u8, drv, "pgsql")) {
-        pdo_pgsql.cleanupConnection(obj);
-    } else if (getDbPtr(obj)) |db| {
-        // v2 defers destruction until outstanding statements are finalized;
-        // sqlite3_close would return BUSY and leak the connection/registrations.
-        _ = sqlite.sqlite3_close_v2(db);
+    switch (obj.native.kind) {
+        .pdo_mysql => pdo_mysql.cleanupConnection(obj),
+        .pdo_pgsql => pdo_pgsql.cleanupConnection(obj),
+        else => if (getDbPtr(obj)) |db| {
+            // v2 defers destruction until outstanding statements are finalized;
+            // sqlite3_close would return BUSY and leak the connection/registrations.
+            _ = sqlite.sqlite3_close_v2(db);
+            obj.native.ptr = 0;
+        },
     }
-    if (obj.properties.getPtr("__db_ptr")) |slot| slot.* = .{ .int = 0 };
     return true;
 }
 
+fn isStatementKind(obj: *PhpObject) bool {
+    return switch (obj.native.kind) {
+        .pdo_sqlite_stmt, .pdo_mysql_stmt, .pdo_pgsql_stmt => true,
+        else => false,
+    };
+}
+
+fn isConnectionKind(obj: *PhpObject) bool {
+    return switch (obj.native.kind) {
+        .pdo_sqlite, .pdo_mysql, .pdo_pgsql => true,
+        else => false,
+    };
+}
+
 pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
-    // finalize statements first, then close databases. the obj is being torn down
-    // right after this so we don't need to clear the pointer fields in the
-    // property map (which would require the VM allocator to grow the bucket).
+    // finalize statements first, then close databases
     for (objects.items) |obj| {
         if (obj.pooled) continue;
-        if (std.mem.eql(u8, obj.class_name, "PDOStatement")) {
-            const drv = getDriver(obj);
-            if (std.mem.eql(u8, drv, "mysql")) {
-                pdo_mysql.cleanupStatement(obj);
-            } else if (std.mem.eql(u8, drv, "pgsql")) {
-                pdo_pgsql.cleanupStatement(obj);
-            } else {
-                if (getStmtPtr(obj)) |stmt| _ = sqlite.sqlite3_finalize(stmt);
-            }
-        }
+        if (isStatementKind(obj)) _ = cleanupStatement(obj);
     }
     for (objects.items) |obj| {
         if (obj.pooled) continue;
-        // PDO base class plus the PHP 8.4 driver subclasses live under PDO\
-        if (std.mem.eql(u8, obj.class_name, "PDO") or (obj.class_name.len >= 4 and std.ascii.eqlIgnoreCase(obj.class_name[0..4], "PDO\\"))) {
-            const drv = getDriver(obj);
-            if (std.mem.eql(u8, drv, "mysql")) {
-                pdo_mysql.cleanupConnection(obj);
-            } else if (std.mem.eql(u8, drv, "pgsql")) {
-                pdo_pgsql.cleanupConnection(obj);
-            } else {
-                if (getDbPtr(obj)) |db| _ = sqlite.sqlite3_close_v2(db);
-            }
-        }
+        if (isConnectionKind(obj)) _ = cleanupConnection(obj);
     }
 }
 
@@ -596,9 +589,11 @@ const pdo_mysql = @import("pdo_mysql.zig");
 const pdo_pgsql = @import("pdo_pgsql.zig");
 
 fn getDriver(obj: *PhpObject) []const u8 {
-    const v = obj.get("__driver");
-    if (v == .string) return v.string.bytes();
-    return "sqlite";
+    return switch (obj.native.kind) {
+        .pdo_mysql, .pdo_mysql_stmt => "mysql",
+        .pdo_pgsql, .pdo_pgsql_stmt => "pgsql",
+        else => "sqlite",
+    };
 }
 
 fn pdoConnect(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -830,14 +825,12 @@ fn pdoConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     const driver = dsn[0..colon];
     const rest = dsn[colon + 1 ..];
 
-    try obj.set(ctx.allocator, "__driver", .{ .string = Value.String.borrowed(try ctx.createString(driver)) });
-
     if (std.mem.eql(u8, driver, "sqlite")) {
         const path_z = try dupeZ(ctx, rest);
         var db: ?*sqlite.Db = null;
         const rc = sqlite.sqlite3_open(path_z, &db);
         if (rc != sqlite.OK or db == null) return throwPdo(ctx, "Failed to open database");
-        try obj.set(ctx.allocator, "__db_ptr", .{ .int = @intCast(@intFromPtr(db.?)) });
+        attachDb(obj, db.?);
         try applyOptionsArray(ctx, obj, args);
         return NativeResult.scalar(.null);
     }
@@ -908,8 +901,7 @@ fn pdoQuery(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     }
 
     const stmt_obj = try ctx.createObject("PDOStatement");
-    try stmt_obj.set(ctx.allocator, "__stmt_ptr", .{ .int = @intCast(@intFromPtr(stmt_ptr.?)) });
-    try stmt_obj.set(ctx.allocator, "__db_ptr", .{ .int = @intCast(@intFromPtr(db)) });
+    attachStmt(stmt_obj, stmt_ptr.?, db);
     try stmt_obj.set(ctx.allocator, "__pdo", .{ .object = obj });
     // step once to position on first row
     const step_rc = try stepSqlite(ctx, stmt_ptr.?);
@@ -938,8 +930,7 @@ fn pdoPrepare(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     }
 
     const stmt_obj = try ctx.createObject("PDOStatement");
-    try stmt_obj.set(ctx.allocator, "__stmt_ptr", .{ .int = @intCast(@intFromPtr(stmt_ptr.?)) });
-    try stmt_obj.set(ctx.allocator, "__db_ptr", .{ .int = @intCast(@intFromPtr(db)) });
+    attachStmt(stmt_obj, stmt_ptr.?, db);
     try stmt_obj.set(ctx.allocator, "__pdo", .{ .object = obj });
     try stmt_obj.set(ctx.allocator, "__has_row", .{ .bool = false });
     try stmt_obj.set(ctx.allocator, "__stepped", .{ .bool = false });
@@ -1086,19 +1077,14 @@ fn stmtExecute(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     try obj.set(ctx.allocator, "__stepped", .{ .bool = true });
 
     if (rc != sqlite.ROW and rc != sqlite.DONE) {
-        const db_val = obj.get("__db_ptr");
-        if (db_val == .int and db_val.int != 0) {
-            const db: *sqlite.Db = @ptrFromInt(@as(usize, @intCast(db_val.int)));
+        if (getDbPtr(obj)) |db| {
             const msg = std.mem.span(sqlite.sqlite3_errmsg(db));
             return throwPdo(ctx, try pdoSqlMsg(ctx, db, msg));
         }
         return NativeResult.scalar(.{ .bool = false });
     }
 
-    // store affected rows
-    const db_val = obj.get("__db_ptr");
-    if (db_val == .int and db_val.int != 0) {
-        const db: *sqlite.Db = @ptrFromInt(@as(usize, @intCast(db_val.int)));
+    if (getDbPtr(obj)) |db| {
         try obj.set(ctx.allocator, "__row_count", .{ .int = sqlite.sqlite3_changes(db) });
     }
 
