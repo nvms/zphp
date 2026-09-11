@@ -73,5 +73,13 @@ int(2)
 unwound
 int(3)
 demo_read(): Argument #1 ($buffer) must be an open DemoBuffer
+array(0) {
+}
+array(0) {
+}
+int(4)
+string(4) "stil"
+Trying to clone an uncloneable object of class DemoBuffer
+int(4)
 done
 shutdown sees 2

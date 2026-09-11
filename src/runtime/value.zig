@@ -799,6 +799,11 @@ pub const PhpObject = struct {
     // a reference cell has targeted one of this object's properties; the
     // release path must detach those weak mirrors before the address is reused
     ref_mirrored: bool = false,
+    // a native handle owned by an extension resource: the pointer and the
+    // registered type id live here, not in properties, so php code cannot
+    // read or forge them
+    native_ptr: usize = 0,
+    native_kind: u32 = 0,
 
     pub const LazyState = struct {
         initializer: Value,

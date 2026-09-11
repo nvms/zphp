@@ -38,6 +38,14 @@ function throws() { $x = demo_open(4); throw new RuntimeException("mid"); }
 try { throws(); } catch (RuntimeException $e) { echo "unwound\n"; }
 var_dump(demo_freed());
 try { demo_read("not a buffer"); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+$probe = demo_open(4);
+var_dump(get_object_vars($probe), (new ReflectionClass($probe))->getProperties());
+$probe->__ext_ptr = 0x41414141;
+$probe->__ext_type = 99;
+var_dump(demo_write($probe, "still mine"), demo_read($probe));
+try { $copy = clone $probe; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+unset($probe);
+var_dump(demo_freed());
 $keep = demo_open(2);
 register_shutdown_function(function () { echo "shutdown sees ", demo_add(1, 1), "\n"; });
 echo "done\n";
