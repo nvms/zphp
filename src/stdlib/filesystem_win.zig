@@ -1,7 +1,10 @@
 // the windows side of the filesystem natives that are posix calls on other
-// platforms. ownership, modes, links, and process pipes either have no
-// windows equivalent (php returns false there too) or are on the roadmap
+// platforms. ownership, modes, and links have no windows equivalent (php
+// returns false there too); processes go through proc_win.zig
 const std = @import("std");
+const platform = @import("../platform.zig");
+const filesystem = @import("filesystem.zig");
+const proc_win = @import("proc_win.zig");
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
@@ -22,12 +25,12 @@ pub const entries = .{
     .{ "stat", native_stat },
     .{ "lstat", native_stat },
     .{ "flock", native_flock },
-    .{ "popen", unsupported },
-    .{ "pclose", unsupported },
-    .{ "proc_open", unsupported },
-    .{ "proc_close", unsupported },
-    .{ "proc_get_status", unsupported },
-    .{ "proc_terminate", unsupported },
+    .{ "popen", filesystem.native_popen },
+    .{ "pclose", filesystem.native_pclose },
+    .{ "proc_open", proc_win.native_proc_open },
+    .{ "proc_close", proc_win.native_proc_close },
+    .{ "proc_get_status", proc_win.native_proc_get_status },
+    .{ "proc_terminate", proc_win.native_proc_terminate },
     .{ "stream_set_blocking", native_stream_set_blocking },
 };
 
@@ -96,10 +99,19 @@ fn native_flock(_: *NativeContext, args: []const Value) RuntimeError!NativeResul
     }
 }
 
-// php on windows accepts the call for its own memory and temp streams and
-// refuses it for plain files; sockets wait for the serve port
+// sockets switch modes; php's own memory and temp streams accept the call;
+// a plain file refuses it, as php does on windows
 fn native_stream_set_blocking(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
-    const path = args[0].object.get("__path");
+    const obj = args[0].object;
+    const net = obj.get("__net");
+    if (net == .bool and net.bool) {
+        const fd = obj.get("__fd");
+        if (fd != .int) return NativeResult.scalar(.{ .bool = false });
+        const sock = platform.socketFromInt(fd.int) orelse return NativeResult.scalar(.{ .bool = false });
+        platform.setNonBlocking(sock, !args[1].isTruthy()) catch return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.scalar(.{ .bool = true });
+    }
+    const path = obj.get("__path");
     return NativeResult.scalar(.{ .bool = path == .string and std.mem.startsWith(u8, path.string.bytes(), "php://") });
 }

@@ -30,12 +30,12 @@ fn getThis(ctx: *NativeContext) ?*PhpObject {
 }
 
 const WsWriter = struct {
-    fd: std.posix.fd_t,
+    fd: std.posix.socket_t,
     ssl: ?*tls.SSL,
 
     pub fn write(self: WsWriter, data: []const u8) !usize {
         if (self.ssl) |s| return tls.write(s, data);
-        return std.posix.write(self.fd, data);
+        return platform.send(self.fd, data);
     }
 };
 

@@ -104,7 +104,7 @@ fn connectTcp(host: []const u8, port: u16, allocator: std.mem.Allocator) !posix.
     const list = try net.getAddressList(allocator, host, port);
     defer list.deinit();
     for (list.addrs) |addr| {
-        const sock = posix.socket(addr.any.family, posix.SOCK.STREAM, 0) catch continue;
+        const sock = platform.tcpSocket(addr.any.family) catch continue;
         posix.connect(sock, &addr.any, addr.getOsSockLen()) catch {
             posix.close(sock);
             continue;

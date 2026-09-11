@@ -109,10 +109,7 @@ fn dispatch(allocator: std.mem.Allocator, args: []const []const u8) !void {
         try requireArg(args, 3, "usage: zphp run <file>\n");
         try runFile(allocator, args[2], if (args.len > 3) args[3..] else &.{});
     } else if (std.mem.eql(u8, cmd, "serve")) {
-        if (platform.is_windows) {
-            try writeStderr("zphp serve is not available on Windows yet\n");
-            std.process.exit(1);
-        } else try serveCommand(allocator, args);
+        try serveCommand(allocator, args);
     } else if (std.mem.eql(u8, cmd, "test")) {
         try @import("test_runner.zig").run(allocator, if (args.len >= 3) args[2] else null);
     } else if (std.mem.eql(u8, cmd, "install")) {
@@ -344,33 +341,10 @@ fn loadFile(path: []const u8, allocator: std.mem.Allocator, vm: *@import("runtim
     const closure_counter = compiler.closureCounter();
 
     if (std.mem.startsWith(u8, path, "phar://")) {
-        // resolve phar://[alias-or-fspath]/[internal-path] to (archive-path, internal-path)
-        // alias-aware lookup uses the VM's phar_aliases table populated by Phar::mapPhar
-        const tail = path[7..];
-        var archive: []const u8 = "";
-        var internal: []const u8 = "";
-        const sep = std.mem.indexOfScalar(u8, tail, '/') orelse tail.len;
-        const head = tail[0..sep];
-        if (vm.phar_aliases.get(head)) |arc| {
-            archive = arc;
-            internal = if (sep < tail.len) tail[sep + 1 ..] else "";
-        } else {
-            var split: usize = tail.len;
-            while (split > 0) {
-                while (split > 0 and tail[split - 1] != '/') split -= 1;
-                if (split == 0) break;
-                const candidate = tail[0 .. split - 1];
-                if (std.fs.cwd().statFile(candidate)) |st| {
-                    if (st.kind == .file) {
-                        archive = candidate;
-                        internal = tail[split..];
-                        break;
-                    }
-                } else |_| {}
-                split -= 1;
-            }
-        }
-        if (archive.len == 0) return null;
+        const phar_path = @import("stdlib/phar_path.zig");
+        const resolved_phar = phar_path.resolve(path, &vm.phar_aliases) orelse return null;
+        const archive = resolved_phar.archive_path;
+        const internal = resolved_phar.internal_path;
 
         const phar_mod = @import("stdlib/phar.zig");
         const PharCacheEntry = @import("runtime/vm.zig").PharCacheEntry;
@@ -410,9 +384,9 @@ fn loadFile(path: []const u8, allocator: std.mem.Allocator, vm: *@import("runtim
             };
             cache_entry = e;
         }
-        const normalized_internal = std.fs.path.resolve(allocator, &.{ "/", internal }) catch return null;
+        const normalized_internal = phar_path.normalizeInternal(allocator, internal) catch return null;
         defer allocator.free(normalized_internal);
-        const entry = cache_entry.parsed.lookup(std.mem.trimLeft(u8, normalized_internal, "/")) orelse return null;
+        const entry = cache_entry.parsed.lookup(normalized_internal) orelse return null;
         const payload = phar_mod.extract(allocator, &cache_entry.parsed, entry) catch return null;
         source = payload;
         // synthesize a display path so error messages identify the entry inside the phar
@@ -747,7 +721,8 @@ test {
     _ = @import("stdlib/exceptions.zig");
     _ = @import("stdlib/registry.zig");
     _ = @import("stdlib/datetime.zig");
-    if (!platform.is_windows) _ = @import("serve.zig");
+    _ = @import("stdlib/phar_path.zig");
+    _ = @import("serve.zig");
     _ = @import("stdlib/pcre.zig");
     _ = @import("pipeline/parser_tests.zig");
     _ = @import("integration_tests.zig");

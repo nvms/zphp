@@ -1,8 +1,6 @@
-proc_open_live.php: proc_open is not on windows yet
-proc_get_status_running.php: proc_open is not on windows yet
-proc_open_stream_select.php: proc_open is not on windows yet
-shell_exec_proc_open_basic.php: proc_open is not on windows yet
-stream_select.php: stream_socket_pair is not on windows yet
+proc_get_status_running.php: cmd.exe does not treat ; as a command separator, so `sleep 1; exit 5` exits at once and the liveness poll races in php too
+proc_open_stream_select.php: cmd.exe does not treat ; as a command separator, so the child never sleeps between the two lines
+shell_exec_proc_open_basic.php: the test writes under a literal /tmp through the shell, which msys resolves to its own root and file_get_contents to the drive root
 libxml_collect_errors.php: mingw libxml2 reports one error fewer than the linux build
 missing_constants.php: the runner's php has no sockets extension, so it lacks AF_INET and friends
 strncmp_byte_difference.php: msvcrt memcmp returns -1/1 where glibc returns the byte difference
@@ -20,11 +18,9 @@ soap_server.php: the runner's php has no soap extension
 posix.php: neither php nor zphp has the posix extension on windows; the fatal error lines differ
 pcntl_sigprocmask.php: php reports the missing function before evaluating its arguments, zphp the missing constant
 stream_set_blocking.php: the runner's php fails the test itself on windows
-stream_socket_pair.php: stream_socket_pair is not on windows yet
-proc_open_descriptors.php: proc_open is not on windows yet
+proc_open_descriptors.php: descriptors above 2, socket and pty specs, pwd and test -t are not available to php on windows either
 process_resource_long_running.php: 10000 process spawns exceed the 60 second bound on the runner
 require_global_scope_live.php: the test interpolates a backslash-t from the windows temp path
 pdo_prepared_bindings_fetchall_modes.php: php on windows cannot unlink a sqlite file it still holds open
 pdo_sqlite_query_prepare_txn.php: php on windows cannot unlink a sqlite file it still holds open
-phar_streams.php: phar archives under a windows temp path do not resolve yet; tracked for the serve port
-phar_streams_gz.php: phar archives under a windows temp path do not resolve yet; tracked for the serve port
+stream_socket_pair.php: the runner's php fails stream_socket_pair(STREAM_PF_UNIX) itself on windows (setsockopt 10042); zphp's pair works

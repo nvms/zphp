@@ -274,7 +274,8 @@ fi
 
 # --- TLS tests ---
 TLS_PORT=19877
-openssl req -x509 -newkey rsa:2048 -keyout /tmp/zphp_test.key -out /tmp/zphp_test.crt -days 1 -nodes -subj "/CN=localhost" 2>/dev/null
+# msys2 would rewrite the subject as a path without the exclusion
+MSYS2_ARG_CONV_EXCL="/CN" openssl req -x509 -newkey rsa:2048 -keyout /tmp/zphp_test.key -out /tmp/zphp_test.crt -days 1 -nodes -subj "/CN=localhost" 2>/dev/null
 
 "$ZPHP" serve "$APP" --port $TLS_PORT --workers 2 --tls-cert /tmp/zphp_test.crt --tls-key /tmp/zphp_test.key &
 TLS_PID=$!
@@ -450,13 +451,15 @@ rm -f /tmp/zphp_test.key /tmp/zphp_test.crt
 FAIL_PORT="${CURL_FAIL_PORT:-$((PORT + 25))}"
 READY_FILE=$(mktemp /tmp/zphp_fail_server.XXXXXX)
 rm -f "$READY_FILE"
+# python is a native program under msys2 and needs the windows spelling
+READY_NATIVE=$(command -v cygpath >/dev/null 2>&1 && cygpath -m "$READY_FILE" || echo "$READY_FILE")
 python3 -c "
 import socket
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(('127.0.0.1', $FAIL_PORT))
 s.listen(1)
-with open('$READY_FILE', 'w') as f:
+with open('$READY_NATIVE', 'w') as f:
     f.write('ready')
 while True:
     try:
@@ -562,7 +565,7 @@ except OSError:
 PY
 )
 check "stalled connection closed by idle timeout" "closed" "$idle_result"
-kill $IDLE_PID 2>/dev/null; wait $IDLE_PID 2>/dev/null
+kill $IDLE_PID 2>/dev/null; wait $IDLE_PID 2>/dev/null || true
 
 # test: graceful shutdown
 kill -TERM $SERVER_PID

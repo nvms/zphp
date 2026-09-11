@@ -423,6 +423,8 @@ jobs:
         run: zig build test
       - name: PHP compat
         run: ZPHP=./zig-out/bin/zphp.exe ./tests/run
+      - name: serve
+        run: unset OPENSSL_CONF; ZPHP=./zig-out/bin/zphp.exe ./tests/serve_test
 
   extensions:
     needs: changes

@@ -33,36 +33,44 @@ pub const entries = .{
     .{ "stream_socket_pair", native_stream_socket_pair },
 };
 
-fn streamFd(v: Value) ?std.posix.socket_t {
+fn streamFd(v: Value) ?i64 {
     if (v != .object) return null;
     const fdv = v.object.get("__fd");
     if (fdv != .int or fdv.int < 0) return null;
-    return platform.socketFromInt(fdv.int);
+    return fdv.int;
 }
 
-// stream_select(&$read, &$write, &$except, ?int $seconds, int $microseconds = 0): int|false
-// polls the underlying fds of the stream objects in each (by-ref) array and
-// rewrites each array to the ready subset, returning the number ready (false on
-// error). read=POLLIN, write=POLLOUT, except=POLLPRI. null $seconds blocks
-fn native_stream_select(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    var pollfds: std.ArrayListUnmanaged(std.posix.pollfd) = .{};
-    defer pollfds.deinit(ctx.allocator);
-    const Tracked = struct { slot: u8, val: Value };
-    var tracked: std.ArrayListUnmanaged(Tracked) = .{};
-    defer tracked.deinit(ctx.allocator);
+fn isNetStream(v: Value) bool {
+    const net = v.object.get("__net");
+    return net == .bool and net.bool;
+}
 
-    const want = [_]i16{ std.posix.POLL.IN, std.posix.POLL.OUT, std.posix.POLL.PRI };
-    var total_streams: usize = 0;
-    var slot: usize = 0;
-    while (slot < 3) : (slot += 1) {
-        if (slot >= args.len or args[slot] != .array) continue;
-        for (args[slot].array.entries.items) |entry| {
-            total_streams += 1;
-            const fd = streamFd(entry.value) orelse continue;
-            try pollfds.append(ctx.allocator, .{ .fd = fd, .events = want[slot], .revents = 0 });
-            try tracked.append(ctx.allocator, .{ .slot = @intCast(slot), .val = entry.value });
-        }
-    }
+const poll_events = [_]i16{ std.posix.POLL.IN, std.posix.POLL.OUT, std.posix.POLL.PRI };
+
+// one stream from one of the three select sets. sockets sit in the poll
+// list; on windows every other descriptor is a crt handle that WSAPoll
+// cannot wait on, so it is checked by hand
+const Watched = struct {
+    slot: u8,
+    val: Value,
+    fd: i64,
+    poll_index: ?usize,
+    ready: bool = false,
+};
+
+const WatchList = std.ArrayListUnmanaged(Watched);
+const PollList = std.ArrayListUnmanaged(std.posix.pollfd);
+
+// stream_select(&$read, &$write, &$except, ?int $seconds, int $microseconds = 0): int|false
+// waits on the streams in each (by-ref) array and rewrites each array to the
+// ready subset, returning the number ready (false on error). null $seconds blocks
+fn native_stream_select(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    var watched: WatchList = .{};
+    defer watched.deinit(ctx.allocator);
+    var pollfds: PollList = .{};
+    defer pollfds.deinit(ctx.allocator);
+
+    const total_streams = try watchStreams(ctx, args, &watched, &pollfds);
     if (total_streams == 0) {
         try ctx.vm.setPendingException("ValueError", "No stream arrays were passed");
         return error.RuntimeError;
@@ -73,22 +81,17 @@ fn native_stream_select(ctx: *NativeContext, args: []const Value) RuntimeError!N
     const usec: i64 = if (args.len > 4) Value.toInt(args[4]) else 0;
     const timeout_ms: i32 = if (block) -1 else @intCast(@max(0, sec * 1000 + @divTrunc(usec, 1000)));
 
-    if (pollfds.items.len > 0) {
-        _ = std.posix.poll(pollfds.items, timeout_ms) catch return NativeResult.scalar(.{ .bool = false });
-    }
+    awaitReady(watched.items, pollfds.items, timeout_ms) catch return NativeResult.scalar(.{ .bool = false });
 
     var out = [_]?*PhpArray{ null, null, null };
     var count: i64 = 0;
-    for (pollfds.items, tracked.items) |pfd, t| {
-        const mask = want[t.slot] | std.posix.POLL.ERR | std.posix.POLL.HUP;
-        if ((pfd.revents & mask) != 0) {
-            if (out[t.slot] == null) out[t.slot] = try ctx.createArray();
-            try out[t.slot].?.append(ctx.allocator, t.val);
-            count += 1;
-        }
+    for (watched.items) |w| {
+        if (!w.ready) continue;
+        if (out[w.slot] == null) out[w.slot] = try ctx.createArray();
+        try out[w.slot].?.append(ctx.allocator, w.val);
+        count += 1;
     }
-    // rewrite each by-ref array to the ready subset (empty array if none ready)
-    slot = 0;
+    var slot: usize = 0;
     while (slot < 3) : (slot += 1) {
         if (slot >= args.len or args[slot] != .array) continue;
         const arr = out[slot] orelse try ctx.createArray();
@@ -97,34 +100,123 @@ fn native_stream_select(ctx: *NativeContext, args: []const Value) RuntimeError!N
     return NativeResult.scalar(.{ .int = count });
 }
 
-extern "c" fn socketpair(domain: c_int, sock_type: c_int, protocol: c_int, sv: *[2]c_int) c_int;
-
-// stream_socket_pair(int $domain, int $type, int $protocol): array|false
-// creates a connected pair of sockets (socketpair(2)) returned as two stream
-// objects (each with __fd) usable by fread/fwrite/stream_select/fclose
-fn native_stream_socket_pair(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (platform.is_windows) return NativeResult.scalar(.{ .bool = false });
-    return posixSocketPair(ctx, args);
+fn watchStreams(ctx: *NativeContext, args: []const Value, watched: *WatchList, pollfds: *PollList) !usize {
+    var total: usize = 0;
+    var slot: usize = 0;
+    while (slot < 3) : (slot += 1) {
+        if (slot >= args.len or args[slot] != .array) continue;
+        for (args[slot].array.entries.items) |entry| {
+            total += 1;
+            const fd = streamFd(entry.value) orelse continue;
+            var poll_index: ?usize = null;
+            if (!platform.is_windows or isNetStream(entry.value)) {
+                const sock = platform.socketFromInt(fd) orelse continue;
+                poll_index = pollfds.items.len;
+                try pollfds.append(ctx.allocator, .{ .fd = sock, .events = poll_events[slot], .revents = 0 });
+            }
+            try watched.append(ctx.allocator, .{ .slot = @intCast(slot), .val = entry.value, .fd = fd, .poll_index = poll_index });
+        }
+    }
+    return total;
 }
 
-fn posixSocketPair(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const domain: c_int = if (args.len > 0) @intCast(Value.toInt(args[0])) else @intCast(std.posix.AF.UNIX);
-    const sock_type: c_int = if (args.len > 1) @intCast(Value.toInt(args[1])) else @intCast(std.posix.SOCK.STREAM);
-    const protocol: c_int = if (args.len > 2) @intCast(Value.toInt(args[2])) else 0;
-    var sv: [2]c_int = undefined;
-    if (socketpair(domain, sock_type, protocol, &sv) != 0) return NativeResult.scalar(.{ .bool = false });
+fn hasHandles(watched: []const Watched) bool {
+    for (watched) |w| if (w.poll_index == null) return true;
+    return false;
+}
+
+fn anyReady(watched: []const Watched) bool {
+    for (watched) |w| if (w.ready) return true;
+    return false;
+}
+
+// sockets wait in poll. with crt handles in the mix (windows only) the wait
+// is sliced: each slice peeks the handles, then polls or sleeps for the
+// slice, until something is ready or the timeout runs out
+fn awaitReady(watched: []Watched, pollfds: []std.posix.pollfd, timeout_ms: i32) !void {
+    if (!platform.is_windows or !hasHandles(watched)) {
+        try pollSockets(pollfds, timeout_ms);
+        markSocketsReady(watched, pollfds);
+        return;
+    }
+    const slice_ms: i32 = 10;
+    var remaining = timeout_ms;
+    while (true) {
+        const handle_ready = markHandlesReady(watched);
+        const wait_ms: i32 = if (handle_ready or remaining == 0) 0 else if (remaining < 0) slice_ms else @min(slice_ms, remaining);
+        try pollSockets(pollfds, wait_ms);
+        markSocketsReady(watched, pollfds);
+        if (anyReady(watched) or remaining == 0) return;
+        if (pollfds.len == 0) std.Thread.sleep(@as(u64, @intCast(wait_ms)) * std.time.ns_per_ms);
+        if (remaining > 0) remaining -= wait_ms;
+    }
+}
+
+fn pollSockets(pollfds: []std.posix.pollfd, timeout_ms: i32) !void {
+    if (pollfds.len == 0) return;
+    _ = std.posix.poll(pollfds, timeout_ms) catch return error.PollFailed;
+}
+
+fn markSocketsReady(watched: []Watched, pollfds: []const std.posix.pollfd) void {
+    for (watched) |*w| {
+        const idx = w.poll_index orelse continue;
+        const mask = poll_events[w.slot] | std.posix.POLL.ERR | std.posix.POLL.HUP;
+        if ((pollfds[idx].revents & mask) != 0) w.ready = true;
+    }
+}
+
+fn markHandlesReady(watched: []Watched) bool {
+    var any = false;
+    for (watched) |*w| {
+        if (w.poll_index != null) continue;
+        w.ready = switch (w.slot) {
+            0 => handleReadable(w.fd),
+            1 => true,
+            else => false,
+        };
+        if (w.ready) any = true;
+    }
+    return any;
+}
+
+const win = std.os.windows;
+const FILE_TYPE_PIPE: u32 = 3;
+extern "kernel32" fn GetFileType(handle: win.HANDLE) callconv(.winapi) u32;
+extern "kernel32" fn PeekNamedPipe(pipe: win.HANDLE, buffer: ?*anyopaque, size: u32, read: ?*u32, available: ?*u32, left: ?*u32) callconv(.winapi) win.BOOL;
+
+// a pipe is readable once bytes are pending or its writer is gone; a disk
+// file or console reads without waiting, which is what php's own select
+// emulation on windows reports
+fn handleReadable(fd: i64) bool {
+    const file = platform.fileFromFd(fd) orelse return true;
+    if (GetFileType(file.handle) != FILE_TYPE_PIPE) return true;
+    var available: u32 = 0;
+    if (PeekNamedPipe(file.handle, null, 0, null, &available, null) != 0) return available > 0;
+    return win.GetLastError() == .BROKEN_PIPE;
+}
+
+// stream_socket_pair(int $domain, int $type, int $protocol): array|false
+// a connected pair of stream sockets (a unix pair, or the loopback tcp pair
+// php itself uses on windows) returned as two net stream objects
+fn native_stream_socket_pair(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const pair = platform.socketPair() catch return NativeResult.scalar(.{ .bool = false });
     const arr = try ctx.createArray();
-    for (sv) |fd| {
-        const obj = try ctx.allocator.create(PhpObject);
-        obj.* = .{ .class_name = "FileHandle" };
-        try ctx.vm.objects.append(ctx.allocator, obj);
-        try obj.set(ctx.allocator, "__fd", .{ .int = @intCast(fd) });
-        try obj.set(ctx.allocator, "__open", .{ .bool = true });
-        try obj.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed("r+") });
-        try obj.set(ctx.allocator, "__net", .{ .bool = true });
+    for (pair) |sock| {
+        const obj = try socketStream(ctx, sock);
         try arr.append(ctx.allocator, .{ .object = obj });
     }
     return NativeResult.borrowed(.{ .array = arr });
+}
+
+fn socketStream(ctx: *NativeContext, sock: std.posix.socket_t) !*PhpObject {
+    const obj = try ctx.allocator.create(PhpObject);
+    obj.* = .{ .class_name = "FileHandle" };
+    try ctx.vm.objects.append(ctx.allocator, obj);
+    try obj.set(ctx.allocator, "__fd", .{ .int = platform.socketToInt(sock) });
+    try obj.set(ctx.allocator, "__open", .{ .bool = true });
+    try obj.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed("r+") });
+    try obj.set(ctx.allocator, "__net", .{ .bool = true });
+    return obj;
 }
 
 fn native_stream_context_create(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -358,15 +450,8 @@ fn openTcpHandle(ctx: *NativeContext, host: []const u8, port: u16) !*PhpObject {
     const addr_list = std.net.getAddressList(ctx.allocator, host, port) catch return error.RuntimeError;
     defer addr_list.deinit();
     if (addr_list.addrs.len == 0) return error.RuntimeError;
-    const stream = std.net.tcpConnectToAddress(addr_list.addrs[0]) catch return error.RuntimeError;
-    const obj = try ctx.allocator.create(PhpObject);
-    obj.* = .{ .class_name = "FileHandle" };
-    try ctx.vm.objects.append(ctx.allocator, obj);
-    try obj.set(ctx.allocator, "__fd", .{ .int = platform.socketToInt(stream.handle) });
-    try obj.set(ctx.allocator, "__open", .{ .bool = true });
-    try obj.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed("r+") });
-    try obj.set(ctx.allocator, "__net", .{ .bool = true });
-    return obj;
+    const stream = platform.tcpConnect(addr_list.addrs[0]) catch return error.RuntimeError;
+    return socketStream(ctx, stream.handle);
 }
 
 fn native_fsockopen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

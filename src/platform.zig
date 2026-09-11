@@ -274,3 +274,102 @@ pub fn setReadOnly(path: []const u8, read_only: bool) bool {
     const next = if (read_only) attrs | readonly_bit else attrs & ~readonly_bit;
     return SetFileAttributesW(wide.ptr, next) != 0;
 }
+
+// tcp sockets are created here so windows gets synchronous (non-overlapped)
+// handles: those work with ReadFile/WriteFile, which is what std.fs.File and
+// std.net.Stream use, while std's own sockets are overlapped and fail there
+pub fn tcpSocket(family: u32) !std.posix.socket_t {
+    if (is_windows) {
+        const ws = std.os.windows.ws2_32;
+        return std.os.windows.WSASocketW(@intCast(family), ws.SOCK.STREAM, ws.IPPROTO.TCP, null, 0, ws.WSA_FLAG_NO_HANDLE_INHERIT) catch return error.SocketCreationFailed;
+    }
+    return std.posix.socket(family, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, 0);
+}
+
+pub fn tcpListen(addr: std.net.Address, reuse_address: bool) !std.net.Server {
+    const sock = try tcpSocket(addr.any.family);
+    errdefer closeSocket(socketToInt(sock));
+    if (reuse_address) try std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
+    var len = addr.getOsSockLen();
+    try std.posix.bind(sock, &addr.any, len);
+    try std.posix.listen(sock, 128);
+    var bound: std.net.Address = undefined;
+    try std.posix.getsockname(sock, &bound.any, &len);
+    return .{ .listen_address = bound, .stream = .{ .handle = sock } };
+}
+
+pub fn tcpConnect(addr: std.net.Address) !std.net.Stream {
+    const sock = try tcpSocket(addr.any.family);
+    errdefer closeSocket(socketToInt(sock));
+    try std.posix.connect(sock, &addr.any, addr.getOsSockLen());
+    return .{ .handle = sock };
+}
+
+// a connected pair of stream sockets: unix domain elsewhere, a loopback tcp
+// connection on windows, where WSAPoll only waits on sockets so this is
+// also the wakeup primitive serve uses instead of a pipe
+pub fn socketPair() ![2]std.posix.socket_t {
+    if (!is_windows) {
+        var pair: [2]std.posix.socket_t = undefined;
+        if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketPairFailed;
+        return pair;
+    }
+    var server = try tcpListen(std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0), false);
+    defer server.deinit();
+    const client = try tcpConnect(server.listen_address);
+    errdefer client.close();
+    const accepted = try server.accept();
+    return .{ client.handle, accepted.stream.handle };
+}
+
+pub fn setNonBlocking(sock: std.posix.socket_t, enabled: bool) !void {
+    if (is_windows) {
+        var mode: c_ulong = if (enabled) 1 else 0;
+        if (std.os.windows.ws2_32.ioctlsocket(sock, std.os.windows.ws2_32.FIONBIO, &mode) != 0) return error.SetNonBlockingFailed;
+        return;
+    }
+    const nonblock: u32 = @as(u32, 1) << @bitOffsetOf(std.posix.O, "NONBLOCK");
+    const flags = try std.posix.fcntl(sock, std.posix.F.GETFL, 0);
+    const next = if (enabled) flags | nonblock else flags & ~@as(usize, nonblock);
+    _ = try std.posix.fcntl(sock, std.posix.F.SETFL, next);
+}
+
+pub fn recv(sock: std.posix.socket_t, buf: []u8) !usize {
+    return std.posix.recv(sock, buf, 0);
+}
+
+pub fn send(sock: std.posix.socket_t, buf: []const u8) !usize {
+    const flags: u32 = if (@import("builtin").os.tag == .linux) std.posix.MSG.NOSIGNAL else 0;
+    return std.posix.send(sock, buf, flags);
+}
+
+// SIGINT/SIGTERM elsewhere, the console control handler on windows; the
+// callback runs on a signal or console thread and may only touch a socket
+var shutdown_callback: ?*const fn () void = null;
+
+fn posixShutdownSignal(_: c_int) callconv(.c) void {
+    if (shutdown_callback) |cb| cb();
+}
+
+fn windowsShutdownSignal(_: u32) callconv(.winapi) std.os.windows.BOOL {
+    if (shutdown_callback) |cb| cb();
+    return std.os.windows.TRUE;
+}
+
+pub fn installShutdownHandler(cb: *const fn () void) !void {
+    shutdown_callback = cb;
+    if (is_windows) return std.os.windows.SetConsoleCtrlHandler(windowsShutdownSignal, true);
+    const action: std.posix.Sigaction = .{ .handler = .{ .handler = posixShutdownSignal }, .mask = std.posix.sigemptyset(), .flags = 0 };
+    std.posix.sigaction(std.posix.SIG.INT, &action, null);
+    std.posix.sigaction(std.posix.SIG.TERM, &action, null);
+}
+
+comptime {
+    _ = &tcpListen;
+    _ = &tcpConnect;
+    _ = &socketPair;
+    _ = &setNonBlocking;
+    _ = &recv;
+    _ = &send;
+    _ = &installShutdownHandler;
+}

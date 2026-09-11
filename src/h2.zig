@@ -1,6 +1,5 @@
 const std = @import("std");
 const tls = @import("tls.zig");
-const posix = std.posix;
 const Allocator = std.mem.Allocator;
 
 const c = @cImport({
@@ -71,7 +70,7 @@ pub const H2Stream = struct {
 
 const SessionConn = struct {
     ssl: *tls.SSL,
-    fd: posix.fd_t,
+    fd: std.posix.socket_t,
 };
 
 pub const H2Session = struct {
@@ -82,7 +81,7 @@ pub const H2Session = struct {
     send_buf: std.ArrayListUnmanaged(u8) = .{},
 
     // call initSession after allocating on heap so user_data pointer is stable
-    pub fn initSession(self: *H2Session, allocator: Allocator, ssl: *tls.SSL, fd: posix.fd_t) !void {
+    pub fn initSession(self: *H2Session, allocator: Allocator, ssl: *tls.SSL, fd: std.posix.socket_t) !void {
         self.allocator = allocator;
         self.io = .{ .ssl = ssl, .fd = fd };
         self.streams = [_]H2Stream{.{ .stream_id = 0 }} ** MAX_STREAMS;

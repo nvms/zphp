@@ -34,6 +34,7 @@ pub const ProcChild = struct {
     pid: platform.Pid,
     reaped: bool,
     pipe_fds: std.ArrayListUnmanaged(ProcPipe) = .{},
+    process: usize = 0,
 };
 const ProcChildMap = std.AutoHashMapUnmanaged(*PhpObject, ProcChild);
 
@@ -813,14 +814,17 @@ pub const VM = struct {
     }
 
     // reap every still-live child. an un-reaped pid is SIGKILL'd + waited (one
-    // waitpid per pid - again would ECHILD->unreachable). then any parent-side
+    // waitpid per pid - again would ECHILD->unreachable); on windows the
+    // process handle is terminated, waited, and closed. then any parent-side
     // pipe fd the script never fclose'd is closed. runs at reset (before
     // freeHeapItems) and deinit; clears the map after
     fn reapProcChildren(self: *VM) void {
         const pc = self.proc_children orelse return;
         var it = pc.valueIterator();
         while (it.next()) |entry| {
-            if (!platform.is_windows) {
+            if (platform.is_windows) {
+                reapWindowsChild(entry);
+            } else {
                 if (!entry.reaped) {
                     std.posix.kill(entry.pid, std.posix.SIG.KILL) catch {};
                     _ = std.posix.waitpid(entry.pid, 0);
@@ -832,6 +836,20 @@ pub const VM = struct {
             entry.pipe_fds.deinit(self.allocator);
         }
         pc.clearRetainingCapacity();
+    }
+
+    fn reapWindowsChild(entry: *ProcChild) void {
+        const kernel32 = std.os.windows.kernel32;
+        if (entry.process != 0) {
+            const handle: std.os.windows.HANDLE = @ptrFromInt(entry.process);
+            if (!entry.reaped) {
+                _ = kernel32.TerminateProcess(handle, 255);
+                _ = kernel32.WaitForSingleObject(handle, std.os.windows.INFINITE);
+            }
+            std.os.windows.CloseHandle(handle);
+            entry.process = 0;
+        }
+        for (entry.pipe_fds.items) |pipe| platform.closeFd(pipe.fd);
     }
 
     fn newRefCell(self: *VM) RuntimeError!*Value {

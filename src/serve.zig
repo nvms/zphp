@@ -18,7 +18,27 @@ const posix = std.posix;
 const zlib = @cImport(@cInclude("zlib.h"));
 const ws_proto = @import("websocket.zig");
 
-var signal_pipe: [2]posix.fd_t = .{ -1, -1 };
+// wakeups travel over connected socket pairs: the read end sits in the
+// poll set next to the connections, which is the only thing poll can wait on
+// everywhere
+const WakePair = [2]posix.socket_t;
+const no_socket: posix.socket_t = if (platform.is_windows) std.os.windows.ws2_32.INVALID_SOCKET else -1;
+
+var signal_socket: WakePair = .{ no_socket, no_socket };
+
+fn wake(pair: WakePair) void {
+    _ = platform.send(pair[1], &[_]u8{1}) catch {};
+}
+
+fn drainWake(pair: WakePair) void {
+    var drain: [64]u8 = undefined;
+    _ = platform.recv(pair[0], &drain) catch {};
+}
+
+fn closeWakePair(pair: WakePair) void {
+    platform.closeSocket(platform.socketToInt(pair[0]));
+    platform.closeSocket(platform.socketToInt(pair[1]));
+}
 
 fn maxPhpMtime(dir_path: []const u8) i128 {
     var max: i128 = 0;
@@ -36,8 +56,8 @@ fn maxPhpMtime(dir_path: []const u8) i128 {
     return max;
 }
 
-fn signalHandler(_: c_int) callconv(.c) void {
-    _ = posix.write(signal_pipe[1], &[_]u8{1}) catch {};
+fn requestShutdown() void {
+    wake(signal_socket);
 }
 
 pub const ServeConfig = struct {
@@ -81,7 +101,7 @@ const Request = struct {
 const ConnState = enum { tls_handshaking, http_reading, h2_active, ws_idle, closing };
 
 const Connection = struct {
-    fd: posix.fd_t,
+    fd: posix.socket_t,
     stream: std.net.Stream,
     ssl: ?*tls.SSL,
     addr_bytes: u32,
@@ -111,12 +131,12 @@ const Connection = struct {
 
     fn ioRead(self: *Connection, buf: []u8) !usize {
         if (self.ssl) |s| return tls.read(s, buf);
-        return posix.read(self.fd, buf);
+        return platform.recv(self.fd, buf);
     }
 
     fn ioWrite(self: *Connection, data: []const u8) !usize {
         if (self.ssl) |s| return tls.write(s, data);
-        return self.stream.write(data);
+        return platform.send(self.fd, data);
     }
 
     pub fn write(self: *Connection, data: []const u8) !usize {
@@ -211,7 +231,7 @@ const Worker = struct {
     ws_initialized: bool,
     tls_ctx: ?*tls.SSL_CTX,
     env_snapshot: ?env.EnvSnapshot,
-    wake_pipe: [2]posix.fd_t,
+    wake_socket: WakePair,
     poll_fds: [MAX_CONNS + 1]posix.pollfd,
     conns: [MAX_CONNS + 1]?Connection,
     n_fds: usize,
@@ -222,7 +242,7 @@ const Worker = struct {
     script_cache: std.StringHashMapUnmanaged(*CompileResult),
     // the process umask a request may change with umask(); restored before
     // the next request runs, as php_request_shutdown does
-    umask: std.c.mode_t,
+    umask: Umask.Mask,
 };
 
 // what to run for a request, and how to shape $_SERVER for it
@@ -290,11 +310,8 @@ fn initWorker(allocator: Allocator, result: *const CompileResult, doc_root: []co
     errdefer vm.deinit();
     vm.file_loader = &loadFile;
     vm.serve_mode = true;
-    const wake_pipe = try posix.pipe();
-    errdefer {
-        posix.close(wake_pipe[0]);
-        posix.close(wake_pipe[1]);
-    }
+    const wake_socket = try platform.socketPair();
+    errdefer closeWakePair(wake_socket);
     return .{
         .allocator = allocator,
         .result = result,
@@ -306,23 +323,33 @@ fn initWorker(allocator: Allocator, result: *const CompileResult, doc_root: []co
         .ws_initialized = false,
         .tls_ctx = tls_ctx,
         .env_snapshot = env.EnvSnapshot.capture(allocator),
-        .wake_pipe = wake_pipe,
-        .poll_fds = [_]posix.pollfd{.{ .fd = -1, .events = 0, .revents = 0 }} ** (MAX_CONNS + 1),
+        .wake_socket = wake_socket,
+        .poll_fds = [_]posix.pollfd{.{ .fd = no_socket, .events = 0, .revents = 0 }} ** (MAX_CONNS + 1),
         .conns = [_]?Connection{null} ** (MAX_CONNS + 1),
         .n_fds = 1,
         .script_cache = .{},
-        .umask = currentUmask(),
+        .umask = Umask.current(),
     };
 }
 
-fn currentUmask() std.c.mode_t {
-    const current = std.c.umask(0);
-    _ = std.c.umask(current);
-    return current;
-}
+const Umask = if (platform.is_windows) struct {
+    const Mask = void;
+    fn current() Mask {}
+    fn restore(_: Mask) void {}
+} else struct {
+    const Mask = std.c.mode_t;
+    fn current() Mask {
+        const mask = std.c.umask(0);
+        _ = std.c.umask(mask);
+        return mask;
+    }
+    fn restore(mask: Mask) void {
+        _ = std.c.umask(mask);
+    }
+};
 
 // workers come up one at a time into the leading slots. a worker whose VM,
-// pipe, or thread fails is torn down on the spot and never counted, so
+// wake socket, or thread fails is torn down on the spot and never counted, so
 // routing and shutdown only ever touch the first `active` slots
 fn startWorkers(allocator: Allocator, workers: []Worker, threads: []std.Thread, result: *const CompileResult, doc_root: []const u8, port: u16, ws_enabled: bool, tls_ctx: ?*tls.SSL_CTX, idle_timeout_ms: i64) !usize {
     var active: usize = 0;
@@ -333,7 +360,7 @@ fn startWorkers(allocator: Allocator, workers: []Worker, threads: []std.Thread, 
             reportWorkerFailure(err);
             continue;
         };
-        wd.poll_fds[0] = .{ .fd = wd.wake_pipe[0], .events = posix.POLL.IN, .revents = 0 };
+        wd.poll_fds[0] = .{ .fd = wd.wake_socket[0], .events = posix.POLL.IN, .revents = 0 };
         threads[active] = std.Thread.spawn(.{}, eventLoop, .{wd}) catch |err| {
             deinitWorker(wd);
             reportWorkerFailure(err);
@@ -347,7 +374,7 @@ fn startWorkers(allocator: Allocator, workers: []Worker, threads: []std.Thread, 
 
 fn stopWorkers(workers: []Worker, threads: []std.Thread) void {
     queue.close();
-    for (workers) |*wd| _ = posix.write(wd.wake_pipe[1], &[_]u8{1}) catch {};
+    for (workers) |*wd| wake(wd.wake_socket);
     for (threads) |t| t.join();
     for (workers) |*wd| deinitWorker(wd);
 }
@@ -366,8 +393,7 @@ fn deinitWorker(w: *Worker) void {
             conn.deinit(w.allocator);
         }
     }
-    posix.close(w.wake_pipe[0]);
-    posix.close(w.wake_pipe[1]);
+    closeWakePair(w.wake_socket);
     if (w.env_snapshot) |*s| @constCast(s).deinit();
     // deinit the VM FIRST: a leftover frame from a direct-dispatched script that
     // exit()'d (e.g. wp-login.php) still points at that script's slot_names, which
@@ -429,12 +455,6 @@ fn resolveDispatch(w: *Worker, req: *const Request) Dispatch {
     return .{ .result = compiled, .script_filename = compiled.file_path, .front_controller = false };
 }
 
-fn setNonBlocking(fd: posix.fd_t) void {
-    const O_NONBLOCK: u32 = if (@import("builtin").os.tag == .linux) 0x800 else 0x4;
-    const flags = posix.fcntl(fd, 3, 0) catch return;
-    _ = posix.fcntl(fd, 4, flags | O_NONBLOCK) catch return;
-}
-
 fn certMtime(path: []const u8) i128 {
     const f = std.fs.cwd().openFile(path, .{}) catch return 0;
     defer f.close();
@@ -454,19 +474,9 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
         break :blk @max(cpus, 1);
     };
 
-    signal_pipe = try posix.pipe();
-    defer {
-        posix.close(signal_pipe[0]);
-        posix.close(signal_pipe[1]);
-    }
-
-    var sa: posix.Sigaction = .{
-        .handler = .{ .handler = signalHandler },
-        .mask = posix.sigemptyset(),
-        .flags = 0,
-    };
-    posix.sigaction(posix.SIG.INT, &sa, null);
-    posix.sigaction(posix.SIG.TERM, &sa, null);
+    signal_socket = try platform.socketPair();
+    defer closeWakePair(signal_socket);
+    try platform.installShutdownHandler(requestShutdown);
 
     var tls_ctx: ?*tls.SSL_CTX = null;
     var tls_cert_z: ?[:0]u8 = null;
@@ -491,7 +501,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
     }
 
     const addr = std.net.Address.parseIp4("0.0.0.0", config.port) catch unreachable;
-    var server = try addr.listen(.{ .reuse_address = true });
+    var server = try platform.tcpListen(addr, true);
     defer server.deinit();
 
     const abs_path = std.fs.cwd().realpathAlloc(allocator, config.file) catch
@@ -513,7 +523,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
     const threads = try allocator.alloc(std.Thread, worker_count);
     defer allocator.free(threads);
 
-    setNonBlocking(server.stream.handle);
+    platform.setNonBlocking(server.stream.handle, true) catch {};
 
     var watch_mtime: i128 = if (config.watch) maxPhpMtime(doc_root) else 0;
     var first_run = true;
@@ -603,7 +613,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
 
         var main_poll: [2]posix.pollfd = .{
             .{ .fd = server.stream.handle, .events = posix.POLL.IN, .revents = 0 },
-            .{ .fd = signal_pipe[0], .events = posix.POLL.IN, .revents = 0 },
+            .{ .fd = signal_socket[0], .events = posix.POLL.IN, .revents = 0 },
         };
 
         const poll_timeout: i32 = if (config.watch or tls_ctx != null) 1000 else -1;
@@ -620,7 +630,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
             if (main_poll[0].revents & posix.POLL.IN != 0) {
                 const conn = server.accept() catch continue;
                 queue.push(.{ .conn = conn });
-                _ = posix.write(workers_data[robin].wake_pipe[1], &[_]u8{1}) catch {};
+                wake(workers_data[robin].wake_socket);
                 robin = (robin + 1) % active;
             }
 
@@ -663,10 +673,8 @@ fn eventLoop(w: *Worker) void {
     while (!queue.shutdown) {
         _ = posix.poll(w.poll_fds[0..w.n_fds], 1000) catch continue;
 
-        // check wake pipe
         if (w.poll_fds[0].revents & posix.POLL.IN != 0) {
-            var drain: [64]u8 = undefined;
-            _ = posix.read(w.wake_pipe[0], &drain) catch {};
+            drainWake(w.wake_socket);
             while (queue.tryPop()) |item| {
                 registerConnection(w, item.conn);
             }
@@ -721,7 +729,10 @@ fn registerConnection(w: *Worker, server_conn: std.net.Server.Connection) void {
         server_conn.stream.close();
         return;
     }
-    setNonBlocking(server_conn.stream.handle);
+    platform.setNonBlocking(server_conn.stream.handle, true) catch {
+        server_conn.stream.close();
+        return;
+    };
     var ssl_ptr: ?*tls.SSL = null;
     var initial_state: ConnState = .http_reading;
     var poll_events: i16 = posix.POLL.IN;
@@ -779,7 +790,7 @@ fn compactConnections(w: *Worker) void {
                     w.conns[i] = w.conns[last];
                 }
                 w.conns[last] = null;
-                w.poll_fds[last] = .{ .fd = -1, .events = 0, .revents = 0 };
+                w.poll_fds[last] = .{ .fd = no_socket, .events = 0, .revents = 0 };
                 w.n_fds -= 1;
                 continue;
             }
@@ -972,7 +983,7 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
     // PHP execution - php-fpm dispatch: an existing .php file runs directly,
     // anything else routes to the front-controller entry
     const dispatch = resolveDispatch(w, &req);
-    _ = std.c.umask(w.umask);
+    Umask.restore(w.umask);
     w.vm.reset();
     const mock_conn = std.net.Server.Connection{
         .stream = c.stream,
@@ -1105,7 +1116,7 @@ fn handleH2Request(w: *Worker, conn: *Connection, session: *h2.H2Session, stream
 
     // PHP execution - php-fpm dispatch (see HTTP/1.1 path)
     const dispatch = resolveDispatch(w, &req);
-    _ = std.c.umask(w.umask);
+    Umask.restore(w.umask);
     w.vm.reset();
     const mock_conn = std.net.Server.Connection{
         .stream = conn.stream,
@@ -1182,7 +1193,7 @@ fn handleWsUpgrade(w: *Worker, c: *Connection, ws_key: []const u8) void {
     };
 
     if (!w.ws_initialized) {
-        _ = std.c.umask(w.umask);
+        Umask.restore(w.umask);
         w.vm.reset();
         w.vm.interpret(w.result) catch {
             c.state = .closing;
@@ -1577,34 +1588,38 @@ fn extractParam(header: []const u8, name: []const u8) ?[]const u8 {
     return header[start..end];
 }
 
-const c_mkstemp = @cImport(@cInclude("stdlib.h"));
+fn uploadTempPath(a: Allocator) ![]const u8 {
+    const dir = platform.tempDir();
+    const sep = if (dir.len > 0 and platform.isSep(dir[dir.len - 1])) "" else platform.sep_str;
+    return std.fmt.allocPrint(a, "{s}{s}zphp_upload_{x:0>16}", .{ dir, sep, std.crypto.random.int(u64) });
+}
+
+const UploadTempFile = struct { path: []const u8, file: std.fs.File };
+
+fn createUploadTempFile(a: Allocator) !UploadTempFile {
+    var attempts: usize = 0;
+    while (attempts < 64) : (attempts += 1) {
+        const path = try uploadTempPath(a);
+        const file = std.fs.cwd().createFile(path, .{ .exclusive = true, .mode = 0o600 }) catch |err| {
+            a.free(path);
+            if (err == error.PathAlreadyExists) continue;
+            return error.TempFileCreation;
+        };
+        return .{ .path = path, .file = file };
+    }
+    return error.TempFileCreation;
+}
 
 fn writeTempFile(a: Allocator, data: []const u8) ![]const u8 {
-    const template = "/tmp/zphp_upload_XXXXXX";
-    const buf = try a.alloc(u8, template.len + 1);
-    @memcpy(buf[0..template.len], template);
-    buf[template.len] = 0;
-
-    const fd = c_mkstemp.mkstemp(buf.ptr);
-    if (fd < 0) {
-        a.free(buf);
-        return error.TempFileCreation;
-    }
-    defer posix.close(fd);
-
-    var written: usize = 0;
-    while (written < data.len) {
-        const n = posix.write(fd, data[written..]) catch {
-            a.free(buf);
-            return error.TempFileWrite;
-        };
-        written += n;
-    }
-
-    // return path without null terminator, but keep same allocation
-    const path = try a.dupe(u8, buf[0..template.len]);
-    a.free(buf);
-    return path;
+    const temp = try createUploadTempFile(a);
+    const written = temp.file.writeAll(data);
+    temp.file.close();
+    written catch {
+        std.fs.cwd().deleteFile(temp.path) catch {};
+        a.free(temp.path);
+        return error.TempFileWrite;
+    };
+    return temp.path;
 }
 
 fn urlDecode(a: Allocator, input: []const u8) ![]const u8 {
@@ -1828,7 +1843,7 @@ fn isCompressible(mime: []const u8) bool {
 
 fn gzipCompress(allocator: Allocator, input: []const u8) ?[]u8 {
     if (input.len == 0) return null;
-    const bound = zlib.compressBound(input.len);
+    const bound: usize = @intCast(zlib.compressBound(@intCast(input.len)));
     const out = allocator.alloc(u8, bound) catch return null;
 
     var stream: zlib.z_stream = std.mem.zeroes(zlib.z_stream);

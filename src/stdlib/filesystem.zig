@@ -9,6 +9,7 @@ const VM = vm_mod.VM;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
 const phar = @import("phar.zig");
+const phar_path = @import("phar_path.zig");
 const zlib = @cImport(@cInclude("zlib.h"));
 
 const Allocator = std.mem.Allocator;
@@ -212,9 +213,16 @@ pub fn register(vm: *VM, a: Allocator) !void {
     }
 }
 
+fn isNetStream(obj: *PhpObject) bool {
+    const net = obj.get("__net");
+    return net == .bool and net.bool;
+}
+
+// a socket is a handle of its own on windows, not a crt descriptor
 fn getFileHandle(obj: *PhpObject) ?std.fs.File {
     const v = obj.get("__fd");
     if (v != .int or v.int < 0) return null;
+    if (platform.is_windows and isNetStream(obj)) return .{ .handle = platform.socketFromInt(v.int) orelse return null };
     return platform.fileFromFd(v.int);
 }
 
@@ -284,54 +292,9 @@ fn base64DecodeBytes(a: Allocator, s: []const u8) !?[]u8 {
     return out;
 }
 
-const PharResolved = struct {
-    archive_path: []const u8, // slice into input - not owned
-    internal_path: []const u8, // slice into input - not owned
-};
-
-// resolves "phar:///abs/path/to/file.phar/internal/dir/file.txt" by walking
-// path components from longest to shortest until one names a real file on disk.
-// PHP allows phars without a .phar extension, so we can't shortcut on suffix
-fn resolvePharPath(path: []const u8) ?PharResolved {
-    return resolvePharPathWithCtx(path, null);
-}
-
-fn resolvePharPathWithCtx(path: []const u8, ctx: ?*NativeContext) ?PharResolved {
-    if (!std.mem.startsWith(u8, path, "phar://")) return null;
-    const tail = path[7..];
-    // try alias resolution first: the leading path component before the next
-    // slash may be a registered phar alias (set by Phar::mapPhar). this lets
-    // a phar self-reference its embedded files via `phar://my-alias/foo.php`
-    if (ctx) |c| {
-        if (c.vm.phar_aliases.count() > 0) {
-            const sep = std.mem.indexOfScalar(u8, tail, '/') orelse tail.len;
-            const alias = tail[0..sep];
-            if (c.vm.phar_aliases.get(alias)) |archive| {
-                const inner = if (sep < tail.len) tail[sep + 1 ..] else "";
-                return .{ .archive_path = archive, .internal_path = inner };
-            }
-        }
-    }
-    var split: usize = tail.len;
-    while (split > 0) {
-        // find the next slash from the right
-        while (split > 0 and tail[split - 1] != '/') split -= 1;
-        if (split == 0) break;
-        const candidate = tail[0 .. split - 1];
-        const stat = std.fs.cwd().statFile(candidate) catch {
-            split -= 1;
-            continue;
-        };
-        if (stat.kind == .file) {
-            return .{ .archive_path = candidate, .internal_path = tail[split..] };
-        }
-        split -= 1;
-    }
-    // try the whole tail as an archive (no internal path)
-    if (std.fs.cwd().statFile(tail)) |st| {
-        if (st.kind == .file) return .{ .archive_path = tail, .internal_path = "" };
-    } else |_| {}
-    return null;
+fn resolvePharPathWithCtx(path: []const u8, ctx: ?*NativeContext) ?phar_path.Resolved {
+    const aliases: ?*const phar_path.AliasMap = if (ctx) |c| &c.vm.phar_aliases else null;
+    return phar_path.resolve(path, aliases);
 }
 
 // loads and parses a phar from disk. caller owns returned bytes and must
@@ -355,13 +318,7 @@ fn freePhar(a: Allocator, loaded: *PharLoaded) void {
 
 // returns the raw decoded contents of the file at internal_path, or null if missing
 fn normalizePharInternalPath(a: Allocator, internal_path: []const u8) ![]u8 {
-    const resolved = try std.fs.path.resolve(a, &.{ "/", internal_path });
-    if (resolved.len > 0 and resolved[0] == '/') {
-        const normalized = try a.dupe(u8, resolved[1..]);
-        a.free(resolved);
-        return normalized;
-    }
-    return resolved;
+    return phar_path.normalizeInternal(a, internal_path);
 }
 
 fn readPharEntry(a: Allocator, archive_path: []const u8, internal_path: []const u8) !?[]u8 {
@@ -740,7 +697,9 @@ fn native_is_dir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         if (r.internal_path.len == 0) return NativeResult.scalar(.{ .bool = false }); // the archive is a file, not a dir
         var loaded = loadPhar(ctx.allocator, r.archive_path) catch return NativeResult.scalar(Value{ .bool = false });
         defer freePhar(ctx.allocator, &loaded);
-        return NativeResult.scalar(.{ .bool = loaded.parsed.isDir(r.internal_path) });
+        const normalized = normalizePharInternalPath(ctx.allocator, r.internal_path) catch return NativeResult.scalar(.{ .bool = false });
+        defer ctx.allocator.free(normalized);
+        return NativeResult.scalar(.{ .bool = loaded.parsed.isDir(normalized) });
     }
     var dir = std.fs.cwd().openDir(path, .{}) catch return NativeResult.scalar(Value{ .bool = false });
     dir.close();
@@ -1482,7 +1441,7 @@ fn openErrorReason(err: anyerror) []const u8 {
     };
 }
 
-fn openWithMode(path: []const u8, mode: []const u8) !std.fs.File {
+pub fn openWithMode(path: []const u8, mode: []const u8) !std.fs.File {
     if (mode.len == 0) return error.RuntimeError;
     const has_plus = mode.len > 1 and (mode[1] == '+' or (mode.len > 2 and mode[2] == '+'));
     return switch (mode[0]) {
@@ -1568,7 +1527,11 @@ fn native_fclose(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     }
     if (getFileHandle(obj)) |file| {
         // never close stdin/stdout/stderr - they're shared with the host process
-        if (!platform.isStdio(file)) platform.closeFile(file, obj.get("__fd").int);
+        if (isNetStream(obj)) {
+            platform.closeSocket(obj.get("__fd").int);
+        } else if (!platform.isStdio(file)) {
+            platform.closeFile(file, obj.get("__fd").int);
+        }
     }
     obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
     return NativeResult.scalar(.{ .bool = true });
@@ -2900,7 +2863,8 @@ fn runShellWith(
     stdout_b: StdioBehavior,
     stderr_b: StdioBehavior,
 ) !ShellResult {
-    var child = std.process.Child.init(&.{ "/bin/sh", "-c", command }, allocator);
+    const argv = platform.shellArgv(command);
+    var child = std.process.Child.init(&argv, allocator);
     child.stdin_behavior = if (stdin_data != null) .Pipe else .Ignore;
     child.stdout_behavior = if (stdout_b == .capture) .Pipe else .Inherit;
     child.stderr_behavior = if (stderr_b == .capture) .Pipe else .Inherit;
@@ -2949,7 +2913,7 @@ fn makePopenWriteHandle(ctx: *NativeContext, command: []const u8) !*PhpObject {
     return obj;
 }
 
-fn native_popen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+pub fn native_popen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     const cmd = args[0].string.bytes();
     const mode = args[1].string.bytes();
@@ -2968,7 +2932,7 @@ fn native_popen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_pclose(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+pub fn native_pclose(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.{ .int = -1 });
     const obj = args[0].object;
     const cmd_v = obj.get("__popen_cmd");
@@ -3364,12 +3328,10 @@ fn native_proc_terminate(ctx: *NativeContext, args: []const Value) RuntimeError!
 
 fn native_stream_set_blocking(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
-    const file = getFileHandle(args[0].object) orelse return NativeResult.scalar(.{ .bool = false });
-    const enable = args[1].isTruthy();
-    const O_NONBLOCK: u32 = if (@import("builtin").os.tag == .linux) 0x800 else 0x4;
-    const flags = std.posix.fcntl(file.handle, 3, 0) catch return NativeResult.scalar(.{ .bool = false });
-    const new_flags = if (enable) flags & ~@as(usize, O_NONBLOCK) else flags | O_NONBLOCK;
-    _ = std.posix.fcntl(file.handle, 4, new_flags) catch return NativeResult.scalar(.{ .bool = false });
+    const fd = args[0].object.get("__fd");
+    if (fd != .int) return NativeResult.scalar(.{ .bool = false });
+    const descriptor = platform.socketFromInt(fd.int) orelse return NativeResult.scalar(.{ .bool = false });
+    platform.setNonBlocking(descriptor, !args[1].isTruthy()) catch return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = true });
 }
 

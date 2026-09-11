@@ -1,5 +1,5 @@
 const std = @import("std");
-const posix = std.posix;
+const platform = @import("platform.zig");
 
 const c = @cImport({
     @cInclude("openssl/ssl.h");
@@ -74,9 +74,9 @@ pub fn freeContext(ctx: *SSL_CTX) void {
 
 pub const HandshakeResult = enum { complete, want_read, want_write, failed };
 
-pub fn beginAccept(ctx: *SSL_CTX, fd: posix.fd_t) ?*SSL {
+pub fn beginAccept(ctx: *SSL_CTX, fd: std.posix.socket_t) ?*SSL {
     const ssl = c.SSL_new(ctx) orelse return null;
-    if (c.SSL_set_fd(ssl, fd) != 1) {
+    if (c.SSL_set_fd(ssl, @intCast(platform.socketToInt(fd))) != 1) {
         c.SSL_free(ssl);
         return null;
     }
