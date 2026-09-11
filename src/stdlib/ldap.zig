@@ -380,7 +380,7 @@ fn native_compare(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     defer ctx.allocator.free(dn_z);
     const attr_z = try ctx.allocator.dupeZ(u8, args[2].string.bytes());
     defer ctx.allocator.free(attr_z);
-    var bval = c.berval{ .bv_len = args[3].string.bytes().len, .bv_val = @constCast(args[3].string.bytes().ptr) };
+    var bval = c.berval{ .bv_len = @intCast(args[3].string.bytes().len), .bv_val = @constCast(args[3].string.bytes().ptr) };
     const rc = c.ldap_compare_ext_s(ld, dn_z.ptr, attr_z.ptr, &bval, null, null);
     if (rc == c.LDAP_COMPARE_TRUE) return NativeResult.scalar(.{ .bool = true });
     if (rc == c.LDAP_COMPARE_FALSE) return NativeResult.scalar(.{ .bool = false });

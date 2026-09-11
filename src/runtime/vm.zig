@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("../platform.zig");
 const Value = @import("value.zig").Value;
 const PhpArray = @import("value.zig").PhpArray;
 const byref_args = @import("../stdlib/byref_args.zig");
@@ -28,9 +29,9 @@ pub const RuntimeError = error{ RuntimeError, OutOfMemory };
 // here (not on the proc object) because std.posix.waitpid hits `unreachable` on
 // ECHILD, so the pid must be waited EXACTLY once - and reapProcChildren runs at
 // deinit where the proc objects may already be freed, so it can't read them.
-pub const ProcPipe = struct { role: i64, fd: std.posix.fd_t };
+pub const ProcPipe = struct { role: i64, fd: platform.Fd };
 pub const ProcChild = struct {
-    pid: std.posix.pid_t,
+    pid: platform.Pid,
     reaped: bool,
     pipe_fds: std.ArrayListUnmanaged(ProcPipe) = .{},
 };
@@ -791,7 +792,7 @@ pub const VM = struct {
         return pc;
     }
 
-    pub fn registerProcChild(self: *VM, proc: *PhpObject, pid: std.posix.pid_t, pipe_fds: std.ArrayListUnmanaged(ProcPipe)) RuntimeError!void {
+    pub fn registerProcChild(self: *VM, proc: *PhpObject, pid: platform.Pid, pipe_fds: std.ArrayListUnmanaged(ProcPipe)) RuntimeError!void {
         try (try self.procChildren()).put(self.allocator, proc, .{ .pid = pid, .reaped = false, .pipe_fds = pipe_fds });
     }
 
@@ -816,12 +817,14 @@ pub const VM = struct {
         const pc = self.proc_children orelse return;
         var it = pc.valueIterator();
         while (it.next()) |entry| {
-            if (!entry.reaped) {
-                std.posix.kill(entry.pid, std.posix.SIG.KILL) catch {};
-                _ = std.posix.waitpid(entry.pid, 0);
-            }
-            for (entry.pipe_fds.items) |pipe| {
-                if (pipe.fd != -1) std.posix.close(pipe.fd);
+            if (!platform.is_windows) {
+                if (!entry.reaped) {
+                    std.posix.kill(entry.pid, std.posix.SIG.KILL) catch {};
+                    _ = std.posix.waitpid(entry.pid, 0);
+                }
+                for (entry.pipe_fds.items) |pipe| {
+                    if (pipe.fd != -1) std.posix.close(pipe.fd);
+                }
             }
             entry.pipe_fds.deinit(self.allocator);
         }
@@ -1365,12 +1368,12 @@ pub const VM = struct {
 
     fn initVm(vm: *VM, allocator: Allocator) RuntimeError!void {
         vm.string_pool.backing = allocator;
-        if (std.posix.getenv("ZPHP_HEAP_STATS") != null) vm.debug_closure_owners = .{};
-        if (std.posix.getenv("ZPHP_NO_POOL") != null) vm.debug_no_pool = true;
-        if (std.posix.getenv("ZPHP_GC_VERIFY") != null) vm.debug_gc_verify = true;
-        vm.debug_trace_class = std.posix.getenv("ZPHP_TRACE_OBJ_CLASS");
+        if (platform.getenv("ZPHP_HEAP_STATS") != null) vm.debug_closure_owners = .{};
+        if (platform.getenv("ZPHP_NO_POOL") != null) vm.debug_no_pool = true;
+        if (platform.getenv("ZPHP_GC_VERIFY") != null) vm.debug_gc_verify = true;
+        vm.debug_trace_class = platform.getenv("ZPHP_TRACE_OBJ_CLASS");
         vm.default_tz_name = "UTC";
-        vm.dbg_profile_enabled = std.posix.getenv("ZPHP_DBG_PROFILE") != null;
+        vm.dbg_profile_enabled = platform.getenv("ZPHP_DBG_PROFILE") != null;
         try @import("../stdlib/registry.zig").register(&vm.native_fns, allocator);
         try initConstants(&vm.php_constants, allocator);
         try registerStdlibClasses(vm, allocator);
@@ -1477,7 +1480,7 @@ pub const VM = struct {
         try c.put(a, "TRUE", .{ .bool = true });
         try c.put(a, "FALSE", .{ .bool = false });
         try c.put(a, "NULL", .null);
-        try c.put(a, "PHP_EOL", .{ .string = Value.String.borrowed("\n") });
+        try c.put(a, "PHP_EOL", .{ .string = Value.String.borrowed(if (platform.is_windows) "\r\n" else "\n") });
         try c.put(a, "PHP_INT_MAX", .{ .int = std.math.maxInt(i64) });
         try c.put(a, "PHP_INT_MIN", .{ .int = std.math.minInt(i64) });
         try c.put(a, "PHP_INT_SIZE", .{ .int = 8 });
@@ -1522,9 +1525,9 @@ pub const VM = struct {
             }
         }
         try c.put(a, "PHP_SAPI", .{ .string = Value.String.borrowed("cli") });
-        try c.put(a, "PHP_OS", .{ .string = Value.String.borrowed(if (@import("builtin").os.tag == .macos) "Darwin" else "Linux") });
-        try c.put(a, "DIRECTORY_SEPARATOR", .{ .string = Value.String.borrowed("/") });
-        try c.put(a, "PATH_SEPARATOR", .{ .string = Value.String.borrowed(":") });
+        try c.put(a, "PHP_OS", .{ .string = Value.String.borrowed(if (platform.is_windows) "WINNT" else if (platform.is_macos) "Darwin" else "Linux") });
+        try c.put(a, "DIRECTORY_SEPARATOR", .{ .string = Value.String.borrowed(if (platform.is_windows) "\\" else "/") });
+        try c.put(a, "PATH_SEPARATOR", .{ .string = Value.String.borrowed(if (platform.is_windows) ";" else ":") });
         // syslog priority + facility constants (zphp lacks a real syslog
         // backend, but vendor code references these constants at config time)
         try c.put(a, "LOG_EMERG", .{ .int = 0 });
@@ -1629,45 +1632,45 @@ pub const VM = struct {
         try c.put(a, "GLOB_ERR", .{ .int = 4 });
         try c.put(a, "GLOB_AVAILABLE_FLAGS", .{ .int = 8 | 32 | 16 | 4096 | 128 | 1073741824 | 4 });
         const posix = std.posix;
-        try c.put(a, "SIGHUP", .{ .int = @intCast(posix.SIG.HUP) });
-        try c.put(a, "SIGINT", .{ .int = @intCast(posix.SIG.INT) });
-        try c.put(a, "SIGQUIT", .{ .int = @intCast(posix.SIG.QUIT) });
-        try c.put(a, "SIGILL", .{ .int = @intCast(posix.SIG.ILL) });
-        try c.put(a, "SIGTRAP", .{ .int = @intCast(posix.SIG.TRAP) });
-        try c.put(a, "SIGABRT", .{ .int = @intCast(posix.SIG.ABRT) });
-        try c.put(a, "SIGIOT", .{ .int = @intCast(posix.SIG.ABRT) });
-        try c.put(a, "SIGBUS", .{ .int = @intCast(posix.SIG.BUS) });
-        try c.put(a, "SIGFPE", .{ .int = @intCast(posix.SIG.FPE) });
-        try c.put(a, "SIGKILL", .{ .int = @intCast(posix.SIG.KILL) });
-        try c.put(a, "SIGUSR1", .{ .int = @intCast(posix.SIG.USR1) });
-        try c.put(a, "SIGSEGV", .{ .int = @intCast(posix.SIG.SEGV) });
-        try c.put(a, "SIGUSR2", .{ .int = @intCast(posix.SIG.USR2) });
-        try c.put(a, "SIGPIPE", .{ .int = @intCast(posix.SIG.PIPE) });
-        try c.put(a, "SIGALRM", .{ .int = @intCast(posix.SIG.ALRM) });
-        try c.put(a, "SIGTERM", .{ .int = @intCast(posix.SIG.TERM) });
-        try c.put(a, "SIGCHLD", .{ .int = @intCast(posix.SIG.CHLD) });
-        try c.put(a, "SIGCLD", .{ .int = @intCast(posix.SIG.CHLD) });
-        try c.put(a, "SIGCONT", .{ .int = @intCast(posix.SIG.CONT) });
-        try c.put(a, "SIGSTOP", .{ .int = @intCast(posix.SIG.STOP) });
-        try c.put(a, "SIGTSTP", .{ .int = @intCast(posix.SIG.TSTP) });
-        try c.put(a, "SIGTTIN", .{ .int = @intCast(posix.SIG.TTIN) });
-        try c.put(a, "SIGTTOU", .{ .int = @intCast(posix.SIG.TTOU) });
-        try c.put(a, "SIGURG", .{ .int = @intCast(posix.SIG.URG) });
-        try c.put(a, "SIGXCPU", .{ .int = @intCast(posix.SIG.XCPU) });
-        try c.put(a, "SIGXFSZ", .{ .int = @intCast(posix.SIG.XFSZ) });
-        try c.put(a, "SIGVTALRM", .{ .int = @intCast(posix.SIG.VTALRM) });
-        try c.put(a, "SIGPROF", .{ .int = @intCast(posix.SIG.PROF) });
-        try c.put(a, "SIGWINCH", .{ .int = @intCast(posix.SIG.WINCH) });
-        try c.put(a, "SIGIO", .{ .int = @intCast(posix.SIG.IO) });
-        try c.put(a, "SIGSYS", .{ .int = @intCast(posix.SIG.SYS) });
+        if (!platform.is_windows) try c.put(a, "SIGHUP", .{ .int = @intCast(posix.SIG.HUP) });
+        if (!platform.is_windows) try c.put(a, "SIGINT", .{ .int = @intCast(posix.SIG.INT) });
+        if (!platform.is_windows) try c.put(a, "SIGQUIT", .{ .int = @intCast(posix.SIG.QUIT) });
+        if (!platform.is_windows) try c.put(a, "SIGILL", .{ .int = @intCast(posix.SIG.ILL) });
+        if (!platform.is_windows) try c.put(a, "SIGTRAP", .{ .int = @intCast(posix.SIG.TRAP) });
+        if (!platform.is_windows) try c.put(a, "SIGABRT", .{ .int = @intCast(posix.SIG.ABRT) });
+        if (!platform.is_windows) try c.put(a, "SIGIOT", .{ .int = @intCast(posix.SIG.ABRT) });
+        if (!platform.is_windows) try c.put(a, "SIGBUS", .{ .int = @intCast(posix.SIG.BUS) });
+        if (!platform.is_windows) try c.put(a, "SIGFPE", .{ .int = @intCast(posix.SIG.FPE) });
+        if (!platform.is_windows) try c.put(a, "SIGKILL", .{ .int = @intCast(posix.SIG.KILL) });
+        if (!platform.is_windows) try c.put(a, "SIGUSR1", .{ .int = @intCast(posix.SIG.USR1) });
+        if (!platform.is_windows) try c.put(a, "SIGSEGV", .{ .int = @intCast(posix.SIG.SEGV) });
+        if (!platform.is_windows) try c.put(a, "SIGUSR2", .{ .int = @intCast(posix.SIG.USR2) });
+        if (!platform.is_windows) try c.put(a, "SIGPIPE", .{ .int = @intCast(posix.SIG.PIPE) });
+        if (!platform.is_windows) try c.put(a, "SIGALRM", .{ .int = @intCast(posix.SIG.ALRM) });
+        if (!platform.is_windows) try c.put(a, "SIGTERM", .{ .int = @intCast(posix.SIG.TERM) });
+        if (!platform.is_windows) try c.put(a, "SIGCHLD", .{ .int = @intCast(posix.SIG.CHLD) });
+        if (!platform.is_windows) try c.put(a, "SIGCLD", .{ .int = @intCast(posix.SIG.CHLD) });
+        if (!platform.is_windows) try c.put(a, "SIGCONT", .{ .int = @intCast(posix.SIG.CONT) });
+        if (!platform.is_windows) try c.put(a, "SIGSTOP", .{ .int = @intCast(posix.SIG.STOP) });
+        if (!platform.is_windows) try c.put(a, "SIGTSTP", .{ .int = @intCast(posix.SIG.TSTP) });
+        if (!platform.is_windows) try c.put(a, "SIGTTIN", .{ .int = @intCast(posix.SIG.TTIN) });
+        if (!platform.is_windows) try c.put(a, "SIGTTOU", .{ .int = @intCast(posix.SIG.TTOU) });
+        if (!platform.is_windows) try c.put(a, "SIGURG", .{ .int = @intCast(posix.SIG.URG) });
+        if (!platform.is_windows) try c.put(a, "SIGXCPU", .{ .int = @intCast(posix.SIG.XCPU) });
+        if (!platform.is_windows) try c.put(a, "SIGXFSZ", .{ .int = @intCast(posix.SIG.XFSZ) });
+        if (!platform.is_windows) try c.put(a, "SIGVTALRM", .{ .int = @intCast(posix.SIG.VTALRM) });
+        if (!platform.is_windows) try c.put(a, "SIGPROF", .{ .int = @intCast(posix.SIG.PROF) });
+        if (!platform.is_windows) try c.put(a, "SIGWINCH", .{ .int = @intCast(posix.SIG.WINCH) });
+        if (!platform.is_windows) try c.put(a, "SIGIO", .{ .int = @intCast(posix.SIG.IO) });
+        if (!platform.is_windows) try c.put(a, "SIGSYS", .{ .int = @intCast(posix.SIG.SYS) });
         try c.put(a, "SIG_DFL", .{ .int = 0 });
         try c.put(a, "SIG_IGN", .{ .int = 1 });
         try c.put(a, "SIG_ERR", .{ .int = -1 });
         try c.put(a, "WNOHANG", .{ .int = 1 });
         try c.put(a, "WUNTRACED", .{ .int = 2 });
-        try c.put(a, "SIG_BLOCK", .{ .int = posix.SIG.BLOCK });
-        try c.put(a, "SIG_UNBLOCK", .{ .int = posix.SIG.UNBLOCK });
-        try c.put(a, "SIG_SETMASK", .{ .int = posix.SIG.SETMASK });
+        if (!platform.is_windows) try c.put(a, "SIG_BLOCK", .{ .int = posix.SIG.BLOCK });
+        if (!platform.is_windows) try c.put(a, "SIG_UNBLOCK", .{ .int = posix.SIG.UNBLOCK });
+        if (!platform.is_windows) try c.put(a, "SIG_SETMASK", .{ .int = posix.SIG.SETMASK });
         try c.put(a, "FTP_ASCII", .{ .int = 1 });
         try c.put(a, "FTP_TEXT", .{ .int = 1 });
         try c.put(a, "FTP_BINARY", .{ .int = 2 });
@@ -1989,11 +1992,11 @@ pub const VM = struct {
         try c.put(a, "STREAM_CLIENT_ASYNC_CONNECT", .{ .int = 2 });
         // socket address families / types (the OS values, so they pass straight
         // to socketpair()/socket()) - for stream_socket_pair etc.
-        try c.put(a, "STREAM_PF_INET", .{ .int = @as(i64, std.posix.AF.INET) });
-        try c.put(a, "STREAM_PF_INET6", .{ .int = @as(i64, std.posix.AF.INET6) });
-        try c.put(a, "STREAM_PF_UNIX", .{ .int = @as(i64, std.posix.AF.UNIX) });
-        try c.put(a, "STREAM_SOCK_STREAM", .{ .int = @as(i64, std.posix.SOCK.STREAM) });
-        try c.put(a, "STREAM_SOCK_DGRAM", .{ .int = @as(i64, std.posix.SOCK.DGRAM) });
+        try c.put(a, "STREAM_PF_INET", .{ .int = if (platform.is_windows) 2 else @as(i64, std.posix.AF.INET) });
+        try c.put(a, "STREAM_PF_INET6", .{ .int = if (platform.is_windows) 23 else @as(i64, std.posix.AF.INET6) });
+        try c.put(a, "STREAM_PF_UNIX", .{ .int = if (platform.is_windows) 1 else @as(i64, std.posix.AF.UNIX) });
+        try c.put(a, "STREAM_SOCK_STREAM", .{ .int = if (platform.is_windows) 1 else @as(i64, std.posix.SOCK.STREAM) });
+        try c.put(a, "STREAM_SOCK_DGRAM", .{ .int = if (platform.is_windows) 2 else @as(i64, std.posix.SOCK.DGRAM) });
         try c.put(a, "STREAM_IPPROTO_IP", .{ .int = 0 });
         try c.put(a, "STREAM_IPPROTO_TCP", .{ .int = 6 });
         try c.put(a, "STREAM_IPPROTO_UDP", .{ .int = 17 });
@@ -2544,7 +2547,7 @@ pub const VM = struct {
         self.clearActiveArgSources();
         self.clearArgArraySources(null);
         self.releaseBoundArgSources(null);
-        if (std.posix.getenv("ZPHP_HEAP_STATS") != null) self.printHeapStats();
+        if (platform.getenv("ZPHP_HEAP_STATS") != null) self.printHeapStats();
         self.releaseFrames();
         self.releaseCallbackRegistries();
         self.freeHeapItems(true);
@@ -3199,7 +3202,7 @@ pub const VM = struct {
                 // so we can find which native raised error.RuntimeError
                 // without setting an exception or error_msg. invaluable when
                 // bisecting an 'internal RuntimeError' to its source
-                if (std.posix.getenv("ZPHP_DBG_PANIC_INTERNAL") != null) {
+                if (platform.getenv("ZPHP_DBG_PANIC_INTERNAL") != null) {
                     std.debug.print("\n[ZPHP_DBG_PANIC_INTERNAL] uncontexted {s}\n", .{@errorName(err)});
                     if (@errorReturnTrace()) |trace| {
                         std.debug.dumpStackTrace(trace.*);
@@ -5814,8 +5817,8 @@ pub const VM = struct {
                 .make_var_array_elem_ref => {
                     const dst_idx = self.readU16();
                     const dst_name = self.currentChunk().constants.items[dst_idx].string.bytes();
-                    if (std.posix.getenv("ZPHP_DBG_REF") != null) {
-                        const sfe = std.fs.File{ .handle = 2 };
+                    if (platform.getenv("ZPHP_DBG_REF") != null) {
+                        const sfe = std.fs.File.stderr();
                         const f_dbg = self.currentFrame();
                         const fname = if (f_dbg.func) |fn_| fn_.name else "<g>";
                         const cls = f_dbg.called_class orelse "";
@@ -11340,7 +11343,7 @@ pub const VM = struct {
         self.strings.append(self.allocator, msg) catch {};
         // ZPHP_DBG_UKW=1 dumps the frame stack on each warning - invaluable
         // for tracking down false-positives where zphp warns but PHP doesn't
-        if (std.posix.getenv("ZPHP_DBG_UKW") != null) {
+        if (platform.getenv("ZPHP_DBG_UKW") != null) {
             std.debug.print("[UKW] {s} frames:\n", .{msg});
             var fi: usize = self.frame_count;
             while (fi > 0) {
@@ -11364,13 +11367,13 @@ pub const VM = struct {
         const file = if (self.frame_count > 0) self.frameFile(self.frame_count - 1) else self.file_path;
         if (self.error_silenced_depth != 0 or (self.error_reporting_level & 2) == 0) return;
         if (self.output.items.len > 0) {
-            const stdout_file = std.fs.File{ .handle = 1 };
+            const stdout_file = std.fs.File.stdout();
             _ = stdout_file.write(self.output.items) catch {};
             self.output.clearRetainingCapacity();
         }
         const stderr_text = std.fmt.allocPrint(self.allocator, "PHP Warning:  {s} in {s} on line {d}\n", .{ msg, file, line }) catch return;
         self.strings.append(self.allocator, stderr_text) catch {};
-        const stderr_file = std.fs.File{ .handle = 2 };
+        const stderr_file = std.fs.File.stderr();
         _ = stderr_file.write(stderr_text) catch {};
         if (self.displayErrorsEnabled()) {
             const stdout_text = std.fmt.allocPrint(self.allocator, "\nWarning: {s} in {s} on line {d}\n", .{ msg, file, line }) catch return;
@@ -13174,7 +13177,7 @@ pub const VM = struct {
     // those values point at. owners still referenced elsewhere are destroyed
     // by the string drain once their holders release them
     fn teardownCaptures(self: *VM) void {
-        if (std.posix.getenv("ZPHP_HEAP_STATS") != null) {
+        if (platform.getenv("ZPHP_HEAP_STATS") != null) {
             var it = self.capture_index.iterator();
             while (it.next()) |entry| if (entry.value_ptr.owner) |owner| {
                 const compile_name = self.getOrigClosureName(entry.key_ptr.*);
@@ -13219,13 +13222,13 @@ pub const VM = struct {
         const file = if (self.frame_count > 0) self.frameFile(self.frame_count - 1) else self.file_path;
         if (self.error_silenced_depth != 0 or (self.error_reporting_level & 2) == 0) return;
         if (self.output.items.len > 0) {
-            const stdout_file = std.fs.File{ .handle = 1 };
+            const stdout_file = std.fs.File.stdout();
             _ = stdout_file.write(self.output.items) catch {};
             self.output.clearRetainingCapacity();
         }
         const stderr_text = std.fmt.allocPrint(self.allocator, "PHP Warning:  {s} in {s} on line {d}\n", .{ msg, file, line }) catch return;
         self.strings.append(self.allocator, stderr_text) catch {};
-        const stderr_file = std.fs.File{ .handle = 2 };
+        const stderr_file = std.fs.File.stderr();
         _ = stderr_file.write(stderr_text) catch {};
         if (self.displayErrorsEnabled()) {
             const stdout_text = std.fmt.allocPrint(self.allocator, "\nWarning: {s} in {s} on line {d}\n", .{ msg, file, line }) catch return;
@@ -17233,7 +17236,7 @@ pub const VM = struct {
                 return x.count > y.count;
             }
         }.lt);
-        const sfe = std.fs.File{ .handle = 2 };
+        const sfe = std.fs.File.stderr();
         _ = sfe.write("[profile] top callees:\n") catch {};
         const n = @min(list.items.len, 30);
         for (list.items[0..n]) |e| {
@@ -18619,11 +18622,11 @@ pub const VM = struct {
     }
 
     fn gcTraceClass(self: *VM, vo: anytype, va: anytype, when: []const u8) void {
-        const class = std.posix.getenv("ZPHP_GC_TRACE_CLASS") orelse return;
+        const class = platform.getenv("ZPHP_GC_TRACE_CLASS") orelse return;
         for (self.objects.items) |obj| {
             if (obj.pooled or !std.mem.eql(u8, obj.class_name, class)) continue;
             std.debug.print("  trace {s} {s}#{d} refcount {d} destructed {} in_graph {} scratch {d}\n", .{ when, obj.class_name, obj.id, obj.refcount, obj.destructed, vo.contains(obj), obj.scratch_rc });
-            if (std.posix.getenv("ZPHP_GC_TRACE_FROM")) |from| {
+            if (platform.getenv("ZPHP_GC_TRACE_FROM")) |from| {
                 const from_run = std.fmt.parseInt(usize, from, 10) catch 0;
                 if (self.gc_runs == from_run and std.mem.eql(u8, when, "after")) @import("value.zig").trace_obj = obj;
                 if (self.gc_runs == from_run + 1 and std.mem.eql(u8, when, "before")) @import("value.zig").trace_obj = null;
@@ -18631,7 +18634,7 @@ pub const VM = struct {
             gc_verbose = true;
             self.gcVerifyNode(.{ .obj = obj }, vo, va);
             gc_verbose = false;
-            if (std.posix.getenv("ZPHP_GC_TRACE_DEEP") == null) continue;
+            if (platform.getenv("ZPHP_GC_TRACE_DEEP") == null) continue;
             for (self.arrays.items) |arr| {
                 if (arr.pooled or arr.elements_released) continue;
                 var holds = false;
@@ -18762,7 +18765,7 @@ pub const VM = struct {
 
     fn gcVerifyCollected(self: *VM, vo: anytype, va: anytype) void {
         std.debug.print("gc-verify: run {d}, visited {d} objects {d} arrays, candidates {d}/{d}\n", .{ self.gc_runs, vo.count(), va.count(), self.cycle_candidates.items.len, self.cycle_array_candidates.items.len });
-        if (std.posix.getenv("ZPHP_GC_TRACE_ARRAYS") != null) {
+        if (platform.getenv("ZPHP_GC_TRACE_ARRAYS") != null) {
             var dbg = va.iterator();
             while (dbg.next()) |kv| {
                 const arr = kv.key_ptr.*;

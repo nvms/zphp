@@ -1,7 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
 
-const STDERR = posix.STDERR_FILENO;
 
 // colors
 const reset = "\x1b[0m";
@@ -20,7 +19,7 @@ const bold_yellow = "\x1b[1;33m";
 const bold_white = "\x1b[1;37m";
 
 pub fn write(msg: []const u8) void {
-    _ = posix.write(STDERR, msg) catch {};
+    std.fs.File.stderr().writeAll(msg) catch {};
 }
 
 pub fn writeColor(color: []const u8, msg: []const u8) void {

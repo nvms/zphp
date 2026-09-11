@@ -6,6 +6,10 @@ const RuntimeError = error{ RuntimeError, OutOfMemory };
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const NativeFn = *const fn (*NativeContext, []const Value) RuntimeError!NativeResult;
 
+// php ships no pcntl on windows either
+const pcntl_entries = if (@import("builtin").os.tag == .windows) .{} else @import("pcntl.zig").entries;
+const system_posix_entries = if (@import("builtin").os.tag == .windows) .{} else @import("system.zig").posix_entries;
+
 pub fn register(map: *std.StringHashMapUnmanaged(NativeFn), allocator: std.mem.Allocator) !void {
     const modules = .{
         @import("types.zig").entries,
@@ -16,6 +20,7 @@ pub fn register(map: *std.StringHashMapUnmanaged(NativeFn), allocator: std.mem.A
         @import("filesystem.zig").entries,
         @import("http.zig").entries,
         @import("system.zig").entries,
+        system_posix_entries,
         @import("datetime.zig").entries,
         @import("pcre.zig").entries,
         @import("output.zig").entries,
@@ -34,7 +39,7 @@ pub fn register(map: *std.StringHashMapUnmanaged(NativeFn), allocator: std.mem.A
         @import("gmp.zig").entries,
         @import("gd.zig").entries,
         @import("dom.zig").libxml_entries,
-        @import("pcntl.zig").entries,
+        pcntl_entries,
         @import("ftp.zig").entries,
         @import("sodium.zig").entries,
         @import("ldap.zig").entries,

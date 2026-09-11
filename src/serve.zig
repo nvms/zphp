@@ -1870,7 +1870,7 @@ fn gzipCompress(allocator: Allocator, input: []const u8) ?[]u8 {
 }
 
 fn writeStderr(msg: []const u8) !void {
-    _ = try posix.write(posix.STDERR_FILENO, msg);
+    try std.fs.File.stderr().writeAll(msg);
 }
 
 test "worker startup keeps only the workers that came up and stops cleanly" {

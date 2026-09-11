@@ -2,6 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# tests that cannot be compared on a windows runner yet; each line names the test and why
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ON_WINDOWS=1 ;; *) ON_WINDOWS=0 ;; esac
 ZPHP="${ZPHP:-$SCRIPT_DIR/../zig-out/bin/zphp}"
 
 if ! command -v php &>/dev/null; then
@@ -38,6 +40,7 @@ for f in "$SCRIPT_DIR"/*.php; do
     name="$(basename "$f")"
     # skip tests that require external database servers
     case "$name" in pdo_mysql.php|pdo_pgsql.php) continue ;; esac
+    if [ "$ON_WINDOWS" = 1 ] && grep -q "^$name" "$SCRIPT_DIR/windows-skip.txt"; then continue; fi
     php_status=0
     zphp_status=0
     bounded php -d error_reporting='E_ALL & ~E_DEPRECATED' -d display_errors=0 -d zend.exception_ignore_args=0 -d zend.exception_string_param_max_len=15 "$f" >"$capture_dir/php.stdout" 2>"$capture_dir/php.stderr" || php_status=$?

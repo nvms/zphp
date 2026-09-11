@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("../platform.zig");
 const Value = @import("../runtime/value.zig").Value;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
 const vm_mod = @import("../runtime/vm.zig");
@@ -46,7 +47,7 @@ fn getWriter(obj: *PhpObject) ?WsWriter {
         @ptrFromInt(@as(usize, @intCast(ssl_val.int)))
     else
         null;
-    return .{ .fd = @intCast(fd_val.int), .ssl = ssl_ptr };
+    return .{ .fd = platform.socketFromInt(fd_val.int) orelse return null, .ssl = ssl_ptr };
 }
 
 fn wsSend(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

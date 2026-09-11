@@ -36,14 +36,14 @@ pub fn build(b: *std.Build) void {
     }
     exe_mod.addIncludePath(b.path("include"));
 
-    exe_mod.linkSystemLibrary("pcre2-8", .{ .preferred_link_mode = .static });
-    exe_mod.linkSystemLibrary("sqlite3", .{ .preferred_link_mode = .static });
-    exe_mod.linkSystemLibrary("z", .{ .preferred_link_mode = .static });
+    linkLib(b, exe_mod, "libpcre2-8", "pcre2-8", .static, .yes);
+    linkLib(b, exe_mod, "sqlite3", "sqlite3", .static, .yes);
+    linkLib(b, exe_mod, "zlib", "z", .static, .yes);
     addMysqlClient(b, exe_mod);
-    exe_mod.linkSystemLibrary("pq", .{});
+    addLibpq(b, exe_mod);
     addOpenSsl(b, exe_mod);
-    exe_mod.linkSystemLibrary("nghttp2", .{ .preferred_link_mode = .static });
-    exe_mod.linkSystemLibrary("curl", .{});
+    linkLib(b, exe_mod, "libnghttp2", "nghttp2", .static, .yes);
+    linkLib(b, exe_mod, "libcurl", "curl", .dynamic, .yes);
     addLibxml2(b, exe_mod);
     addLibicu(b, exe_mod);
     addIcuShim(b, exe_mod);
@@ -104,14 +104,14 @@ pub fn build(b: *std.Build) void {
     });
     test_mod.addImport("static_extensions", static_extensions);
 
-    test_mod.linkSystemLibrary("pcre2-8", .{ .preferred_link_mode = .static });
-    test_mod.linkSystemLibrary("sqlite3", .{ .preferred_link_mode = .static });
-    test_mod.linkSystemLibrary("z", .{ .preferred_link_mode = .static });
+    linkLib(b, test_mod, "libpcre2-8", "pcre2-8", .static, .yes);
+    linkLib(b, test_mod, "sqlite3", "sqlite3", .static, .yes);
+    linkLib(b, test_mod, "zlib", "z", .static, .yes);
     addMysqlClient(b, test_mod);
-    test_mod.linkSystemLibrary("pq", .{});
+    addLibpq(b, test_mod);
     addOpenSsl(b, test_mod);
-    test_mod.linkSystemLibrary("nghttp2", .{ .preferred_link_mode = .static });
-    test_mod.linkSystemLibrary("curl", .{});
+    linkLib(b, test_mod, "libnghttp2", "nghttp2", .static, .yes);
+    linkLib(b, test_mod, "libcurl", "curl", .dynamic, .yes);
     addLibxml2(b, test_mod);
     addLibicu(b, test_mod);
     addIcuShim(b, test_mod);
@@ -140,7 +140,7 @@ pub fn build(b: *std.Build) void {
 // dir without the libxml2/ suffix that the headers actually live in. resolve
 // the includedir via pkg-config / xml2-config and append libxml2/ explicitly
 fn addLibxml2(b: *std.Build, mod: *std.Build.Module) void {
-    mod.linkSystemLibrary("xml2", .{ .use_pkg_config = .no });
+    linkLib(b, mod, "libxml-2.0", "xml2", .dynamic, .no);
 
     if (pkgConfigVariable(b, "libxml-2.0", "includedir")) |inc| {
         const sub = std.fs.path.join(b.allocator, &.{ inc, "libxml2" }) catch return;
@@ -156,8 +156,8 @@ fn addLibxml2(b: *std.Build, mod: *std.Build.Module) void {
 }
 
 fn addOpenSsl(b: *std.Build, mod: *std.Build.Module) void {
-    mod.linkSystemLibrary("ssl", .{ .preferred_link_mode = .static, .use_pkg_config = .no });
-    mod.linkSystemLibrary("crypto", .{ .preferred_link_mode = .static, .use_pkg_config = .no });
+    linkLib(b, mod, "libssl", "ssl", .static, .no);
+    linkLib(b, mod, "libcrypto", "crypto", .static, .no);
     if (pkgConfigVariable(b, "openssl", "libdir")) |lib| {
         mod.addLibraryPath(.{ .cwd_relative = lib });
     }
@@ -167,6 +167,15 @@ fn addOpenSsl(b: *std.Build, mod: *std.Build.Module) void {
 // libmariadb.pc (mariadb-connector-c-dev) with headers under /usr/include/mysql
 // and the static archive in mariadb-static
 fn addMysqlClient(b: *std.Build, mod: *std.Build.Module) void {
+    // mingw's static mysql and postgres archives bundle their own ed25519 and
+    // pthread shims that collide with libsodium and winpthreads, so on windows
+    // those two come in through their import libraries and load as dlls
+    if (mod.resolved_target.?.result.os.tag == .windows) {
+        const pkg: []const u8 = if (pkgConfigVariable(b, "mysqlclient", "libdir") != null) "mysqlclient" else "libmariadb";
+        if (pkgConfigVariable(b, pkg, "includedir")) |inc| mod.addIncludePath(.{ .cwd_relative = inc });
+        linkWindowsImport(b, mod, pkg, "mariadb");
+        return;
+    }
     if (pkgConfigVariable(b, "mysqlclient", "libdir") != null) {
         mod.linkSystemLibrary("mysqlclient", .{});
         return;
@@ -287,6 +296,35 @@ fn validIdentifier(s: []const u8) bool {
     return true;
 }
 
+fn addLibpq(b: *std.Build, mod: *std.Build.Module) void {
+    if (mod.resolved_target.?.result.os.tag == .windows) {
+        if (pkgConfigVariable(b, "libpq", "includedir")) |inc| mod.addIncludePath(.{ .cwd_relative = inc });
+        linkWindowsImport(b, mod, "libpq", "pq");
+        return;
+    }
+    mod.linkSystemLibrary("pq", .{});
+}
+
+// one system library: on windows every dependency comes in through its mingw
+// import library and loads as a dll (the static archives there bundle
+// conflicting copies of pthreads, ed25519, and each other's dependencies);
+// elsewhere it is a normal system library with the given preference
+fn linkLib(b: *std.Build, mod: *std.Build.Module, pkg: []const u8, name: []const u8, mode: std.builtin.LinkMode, use_pkg_config: std.Build.Module.SystemLib.UsePkgConfig) void {
+    if (mod.resolved_target.?.result.os.tag == .windows) return linkWindowsImport(b, mod, pkg, name);
+    mod.linkSystemLibrary(name, .{ .preferred_link_mode = mode, .use_pkg_config = use_pkg_config });
+}
+
+// zig does not search for mingw's lib<name>.dll.a import libraries, so the
+// file is handed to the linker as an input. a package without a .pc file
+// lives in the same lib directory as zlib
+fn linkWindowsImport(b: *std.Build, mod: *std.Build.Module, pkg: []const u8, name: []const u8) void {
+    const libdir = pkgConfigVariable(b, pkg, "libdir") orelse pkgConfigVariable(b, "zlib", "libdir") orelse std.debug.panic("pkg-config has no libdir for {s}", .{pkg});
+    mod.addObjectFile(.{ .cwd_relative = b.fmt("{s}/lib{s}.dll.a", .{ libdir, name }) });
+    // zig only asks pkg-config for cflags when it links the library itself
+    if (pkgConfigCflagsIncludes(b, pkg)) |inc| mod.addSystemIncludePath(.{ .cwd_relative = inc });
+    if (pkgConfigVariable(b, pkg, "includedir")) |inc| mod.addSystemIncludePath(.{ .cwd_relative = inc });
+}
+
 fn pkgConfigVariable(b: *std.Build, pkg: []const u8, name: []const u8) ?[]const u8 {
     const arg = std.fmt.allocPrint(b.allocator, "--variable={s}", .{name}) catch return null;
     const r = std.process.Child.run(.{
@@ -301,9 +339,11 @@ fn pkgConfigVariable(b: *std.Build, pkg: []const u8, name: []const u8) ?[]const 
 // names icu-uc, icu-i18n. on macos it's keg-only (brew install icu4c) so its
 // pkg-config dir must be on PKG_CONFIG_PATH. on alpine, icu-dev / icu-static
 fn addLibicu(b: *std.Build, mod: *std.Build.Module) void {
-    mod.linkSystemLibrary("icui18n", .{ .use_pkg_config = .no });
-    mod.linkSystemLibrary("icuuc", .{ .use_pkg_config = .no });
-    mod.linkSystemLibrary("icudata", .{ .use_pkg_config = .no });
+    // icu's windows builds spell the libraries icuin, icuuc, icudt
+    const windows = mod.resolved_target.?.result.os.tag == .windows;
+    linkLib(b, mod, "icu-i18n", if (windows) "icuin" else "icui18n", .dynamic, .no);
+    linkLib(b, mod, "icu-uc", "icuuc", .dynamic, .no);
+    linkLib(b, mod, "icu-uc", if (windows) "icudt" else "icudata", .dynamic, .no);
     if (pkgConfigVariable(b, "icu-i18n", "libdir")) |lib| {
         mod.addLibraryPath(.{ .cwd_relative = lib });
     }
@@ -363,7 +403,7 @@ fn addIcuShim(b: *std.Build, mod: *std.Build.Module) void {
 // libgmp ships a clean pkg-config and uses static `mpz_*` -> `__gmpz_*` macros
 // (no per-version renaming). zig's translate-c handles simple macro renames
 fn addLibgmp(b: *std.Build, mod: *std.Build.Module) void {
-    mod.linkSystemLibrary("gmp", .{ .use_pkg_config = .no });
+    linkLib(b, mod, "gmp", "gmp", .dynamic, .no);
     if (pkgConfigCflagsIncludes(b, "gmp")) |inc| {
         mod.addSystemIncludePath(.{ .cwd_relative = inc });
     }
@@ -388,7 +428,7 @@ fn addLibgmp(b: *std.Build, mod: *std.Build.Module) void {
 
 // libgd uses simple unversioned symbols. pkg-config name is "gdlib"
 fn addLibgd(b: *std.Build, mod: *std.Build.Module) void {
-    mod.linkSystemLibrary("gd", .{ .use_pkg_config = .no });
+    linkLib(b, mod, "gdlib", "gd", .dynamic, .no);
     if (pkgConfigCflagsIncludes(b, "gdlib")) |inc| {
         mod.addSystemIncludePath(.{ .cwd_relative = inc });
     }
@@ -398,7 +438,7 @@ fn addLibgd(b: *std.Build, mod: *std.Build.Module) void {
 }
 
 fn addLibsodium(b: *std.Build, mod: *std.Build.Module) void {
-    mod.linkSystemLibrary("sodium", .{ .use_pkg_config = .no });
+    linkLib(b, mod, "libsodium", "sodium", .dynamic, .no);
     if (pkgConfigCflagsIncludes(b, "libsodium")) |inc| {
         mod.addSystemIncludePath(.{ .cwd_relative = inc });
     }
@@ -408,8 +448,8 @@ fn addLibsodium(b: *std.Build, mod: *std.Build.Module) void {
 }
 
 fn addLibldap(b: *std.Build, mod: *std.Build.Module) void {
-    mod.linkSystemLibrary("ldap", .{ .use_pkg_config = .no });
-    mod.linkSystemLibrary("lber", .{ .use_pkg_config = .no });
+    linkLib(b, mod, "ldap", "ldap", .dynamic, .no);
+    linkLib(b, mod, "lber", "lber", .dynamic, .no);
     if (pkgConfigCflagsIncludes(b, "ldap")) |inc| {
         mod.addSystemIncludePath(.{ .cwd_relative = inc });
     }

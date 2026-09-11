@@ -1,6 +1,7 @@
 name: ci
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths-ignore:
@@ -371,6 +372,57 @@ jobs:
       - run: zig build
       - run: ./tests/wordpress/setup
       - run: ./tests/wordpress/run
+
+  windows:
+    needs: changes
+    if: needs.changes.outputs.run-tests == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          path-type: inherit
+          update: true
+          install: >-
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-pcre2
+            mingw-w64-x86_64-sqlite3
+            mingw-w64-x86_64-zlib
+            mingw-w64-x86_64-libmariadbclient
+            mingw-w64-x86_64-postgresql
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-nghttp2
+            mingw-w64-x86_64-curl
+            mingw-w64-x86_64-libxml2
+            mingw-w64-x86_64-icu
+            mingw-w64-x86_64-gmp
+            mingw-w64-x86_64-libgd
+            mingw-w64-x86_64-libsodium
+            mingw-w64-x86_64-openldap
+            mingw-w64-x86_64-python
+            diffutils
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.1
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.5'
+          extensions: mbstring, xml, curl, openssl, sqlite3, pdo_sqlite, intl, gmp, gd, sodium, bcmath, ldap
+      - name: build
+        run: zig build
+      - name: smoke
+        run: |
+          ./zig-out/bin/zphp.exe version
+          ./zig-out/bin/zphp.exe run .github/scripts/release_smoke.php
+      - name: unit tests
+        run: zig build test
+      - name: PHP compat
+        run: ZPHP=./zig-out/bin/zphp.exe ./tests/run
 
   extensions:
     needs: changes

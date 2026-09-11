@@ -1,0 +1,30 @@
+proc_open_live.php: proc_open is not on windows yet
+proc_get_status_running.php: proc_open is not on windows yet
+proc_open_stream_select.php: proc_open is not on windows yet
+shell_exec_proc_open_basic.php: proc_open is not on windows yet
+stream_select.php: stream_socket_pair is not on windows yet
+libxml_collect_errors.php: mingw libxml2 reports one error fewer than the linux build
+missing_constants.php: the runner's php has no sockets extension, so it lacks AF_INET and friends
+strncmp_byte_difference.php: msvcrt memcmp returns -1/1 where glibc returns the byte difference
+regex_offset_sprintf_obj.php: the test writes to a literal /tmp
+filesystem.php: tempnam("/tmp") falls back with a notice whose text names the runner path
+dir_glob_nocheck.php: the test writes under a literal /tmp
+fopen_c_mode.php: the test writes under a literal /tmp
+fopen_warning_stream_supports_lock.php: the test writes under a literal /tmp
+stat_fstat_filemtime_fileperms.php: the test stats a literal /tmp
+directory_iterator_mime_text.php: the runner's php has no fileinfo extension
+ftp.php: the runner's php has no ftp extension
+mysqli_report_modes.php: the runner's php has no mysqli extension
+soap.php: the runner's php has no soap extension
+soap_server.php: the runner's php has no soap extension
+posix.php: neither php nor zphp has the posix extension on windows; the fatal error lines differ
+pcntl_sigprocmask.php: php reports the missing function before evaluating its arguments, zphp the missing constant
+stream_set_blocking.php: the runner's php fails the test itself on windows
+stream_socket_pair.php: stream_socket_pair is not on windows yet
+proc_open_descriptors.php: proc_open is not on windows yet
+process_resource_long_running.php: 10000 process spawns exceed the 60 second bound on the runner
+require_global_scope_live.php: the test interpolates a backslash-t from the windows temp path
+pdo_prepared_bindings_fetchall_modes.php: php on windows cannot unlink a sqlite file it still holds open
+pdo_sqlite_query_prepare_txn.php: php on windows cannot unlink a sqlite file it still holds open
+phar_streams.php: phar archives under a windows temp path do not resolve yet; tracked for the serve port
+phar_streams_gz.php: phar archives under a windows temp path do not resolve yet; tracked for the serve port

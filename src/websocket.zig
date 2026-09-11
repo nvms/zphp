@@ -221,13 +221,19 @@ test "accept key computation" {
     try std.testing.expectEqualStrings("7PUt+8lkGD5HVZbKJuYuOJV1CNA=", result);
 }
 
+// test scaffolding: a connected local pair. windows has no socketpair, and
+// the tests that need one skip there
 fn makeSocketPair() ![2]std.net.Stream {
-    var fds: [2]std.posix.fd_t = undefined;
-    if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds) != 0) return error.IoError;
-    return .{
-        std.net.Stream{ .handle = fds[0] },
-        std.net.Stream{ .handle = fds[1] },
-    };
+    if (@import("platform.zig").is_windows) {
+        return error.SkipZigTest;
+    } else {
+        var fds: [2]std.posix.fd_t = undefined;
+        if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds) != 0) return error.IoError;
+        return .{
+            std.net.Stream{ .handle = fds[0] },
+            std.net.Stream{ .handle = fds[1] },
+        };
+    }
 }
 
 fn writeMaskedFrame(stream: std.net.Stream, opcode: Opcode, payload: []const u8) !void {

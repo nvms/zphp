@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("../platform.zig");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
@@ -46,6 +47,10 @@ pub const entries = .{
     .{ "escapeshellarg", native_escapeshellarg },
     .{ "escapeshellcmd", native_escapeshellcmd },
     .{ "getrusage", native_getrusage },
+};
+
+// php ships no posix extension on windows
+pub const posix_entries = .{
     .{ "posix_getpid", native_posix_getpid },
     .{ "posix_getppid", native_posix_getppid },
     .{ "posix_getuid", native_posix_getuid },
@@ -97,10 +102,10 @@ fn native_posix_getlogin(ctx: *NativeContext, _: []const Value) RuntimeError!Nat
     // try the LOGNAME / USER env vars first, then fall back to the passwd
     // entry for the effective uid via getpwuid. matches PHP's behavior of
     // returning false when neither path resolves
-    if (std.posix.getenv("LOGNAME")) |s| {
+    if (platform.getenv("LOGNAME")) |s| {
         if (s.len > 0) return try NativeResult.copyString(ctx.allocator, s);
     }
-    if (std.posix.getenv("USER")) |s| {
+    if (platform.getenv("USER")) |s| {
         if (s.len > 0) return try NativeResult.copyString(ctx.allocator, s);
     }
     return NativeResult.scalar(.{ .bool = false });
@@ -515,6 +520,11 @@ fn native_time_sleep_until(_: *NativeContext, args: []const Value) RuntimeError!
 extern fn getloadavg(loadavg: [*]f64, nelem: c_int) c_int;
 
 fn native_sys_getloadavg(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    if (platform.is_windows) return NativeResult.scalar(.{ .bool = false });
+    return posixLoadAvg(ctx);
+}
+
+fn posixLoadAvg(ctx: *NativeContext) RuntimeError!NativeResult {
     var samples: [3]f64 = .{ 0, 0, 0 };
     const got = getloadavg(&samples, 3);
     if (got < 0) return NativeResult.scalar(.{ .bool = false });
@@ -550,6 +560,8 @@ fn native_getenv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+// mingw has no setenv; _putenv_s with an empty value removes the variable
+extern "c" fn _putenv_s(name: [*:0]const u8, value: [*:0]const u8) c_int;
 
 fn native_putenv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
@@ -561,11 +573,13 @@ fn native_putenv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         defer ctx.allocator.free(name_z);
         const val_z = ctx.allocator.dupeZ(u8, val) catch return NativeResult.scalar(.{ .bool = false });
         defer ctx.allocator.free(val_z);
-        return NativeResult.scalar(.{ .bool = setenv(name_z.ptr, val_z.ptr, 1) == 0 });
+        const ok = if (platform.is_windows) _putenv_s(name_z.ptr, val_z.ptr) == 0 else setenv(name_z.ptr, val_z.ptr, 1) == 0;
+        return NativeResult.scalar(.{ .bool = ok });
     } else {
         const name_z = ctx.allocator.dupeZ(u8, setting) catch return NativeResult.scalar(.{ .bool = false });
         defer ctx.allocator.free(name_z);
-        return NativeResult.scalar(.{ .bool = unsetenv(name_z.ptr) == 0 });
+        const ok = if (platform.is_windows) _putenv_s(name_z.ptr, "") == 0 else unsetenv(name_z.ptr) == 0;
+        return NativeResult.scalar(.{ .bool = ok });
     }
 }
 
@@ -656,14 +670,16 @@ fn native_php_strip_whitespace(ctx: *NativeContext, args: []const Value) Runtime
 
 fn native_php_uname(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const mode = if (args.len >= 1 and args[0] == .string and args[0].string.len > 0) args[0].string.bytes()[0] else 'a';
-    const is_mac = @import("builtin").os.tag == .macos;
+    const is_mac = platform.is_macos;
     const is_arm = @import("builtin").cpu.arch == .aarch64;
+    const sysname: []const u8 = if (platform.is_windows) "Windows NT" else if (is_mac) "Darwin" else "Linux";
+    const machine: []const u8 = if (platform.is_windows) "AMD64" else if (is_arm) "arm64" else "x86_64";
     return try NativeResult.copyString(ctx.allocator, switch (mode) {
-        's' => if (is_mac) "Darwin" else "Linux",
+        's' => sysname,
         'n' => "localhost",
         'r' => "0.0.0",
-        'm' => if (is_arm) "arm64" else "x86_64",
-        else => if (is_mac) "Darwin localhost 0.0.0 arm64" else "Linux localhost 0.0.0 x86_64",
+        'm' => machine,
+        else => if (platform.is_windows) "Windows NT localhost 0.0.0 AMD64" else if (is_mac) "Darwin localhost 0.0.0 arm64" else "Linux localhost 0.0.0 x86_64",
     });
 }
 
@@ -692,7 +708,7 @@ fn native_sys_get_temp_dir(ctx: *NativeContext, _: []const Value) RuntimeError!N
     // honor TMPDIR / TEMP / TMP env vars like PHP does, fall back to /tmp
     const env_keys = [_][]const u8{ "TMPDIR", "TEMP", "TMP" };
     for (env_keys) |k| {
-        if (std.posix.getenv(k)) |v| {
+        if (platform.getenv(k)) |v| {
             if (v.len > 0) {
                 // strip a trailing slash to match PHP
                 const trimmed = if (v.len > 1 and v[v.len - 1] == '/') v[0 .. v.len - 1] else v;
@@ -700,11 +716,13 @@ fn native_sys_get_temp_dir(ctx: *NativeContext, _: []const Value) RuntimeError!N
             }
         }
     }
-    return NativeResult.literal("/tmp");
+    return NativeResult.copyString(ctx.allocator, platform.tempDir());
 }
 
 fn native_tempnam(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const dir = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else "/tmp";
+    // php falls back to the system temp dir when the requested one is unusable
+    const requested = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else platform.tempDir();
+    const dir = if (std.fs.cwd().access(requested, .{})) |_| requested else |_| platform.tempDir();
     const prefix = if (args.len >= 2 and args[1] == .string) args[1].string.bytes() else "tmp";
     var seed_bytes: [8]u8 = undefined;
     std.crypto.random.bytes(&seed_bytes);
@@ -715,7 +733,7 @@ fn native_tempnam(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         var hex_buf: [16]u8 = undefined;
         const hex = "0123456789abcdef";
         for (&hex_buf) |*b| b.* = hex[r.uintLessThan(u8, 16)];
-        const sep: []const u8 = if (dir.len > 0 and dir[dir.len - 1] == '/') "" else "/";
+        const sep: []const u8 = if (dir.len > 0 and platform.isSep(dir[dir.len - 1])) "" else platform.sep_str;
         const candidate = std.fmt.allocPrint(ctx.allocator, "{s}{s}{s}{s}", .{ dir, sep, prefix, &hex_buf }) catch continue;
         if (std.fs.cwd().createFile(candidate, .{ .exclusive = true, .mode = 0o600 })) |file| {
             file.close();
@@ -962,7 +980,7 @@ fn native_trait_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Na
 }
 
 fn runShell(allocator: std.mem.Allocator, command: []const u8, capture: bool) !std.process.Child.RunResult {
-    const argv = [_][]const u8{ "/bin/sh", "-c", command };
+    const argv = platform.shellArgv(command);
     return std.process.Child.run(.{
         .allocator = allocator,
         .argv = &argv,
@@ -1074,16 +1092,21 @@ fn native_escapeshellarg(ctx: *NativeContext, args: []const Value) RuntimeError!
     if (args.len < 1 or args[0] != .string) return NativeResult.literal("''");
     const s = args[0].string.bytes();
     var buf = std.ArrayListUnmanaged(u8){};
-    try buf.append(ctx.allocator, '\'');
+    // cmd.exe has no single-quote syntax: php wraps in double quotes there
+    // and blanks the characters cmd would interpret
+    const quote: u8 = if (platform.is_windows) '"' else '\'';
+    try buf.append(ctx.allocator, quote);
     for (s) |c| {
         if (c == 0) continue;
-        if (c == '\'') {
+        if (platform.is_windows and (c == '"' or c == '%' or c == '!')) {
+            try buf.append(ctx.allocator, ' ');
+        } else if (!platform.is_windows and c == '\'') {
             try buf.appendSlice(ctx.allocator, "'\\''");
         } else {
             try buf.append(ctx.allocator, c);
         }
     }
-    try buf.append(ctx.allocator, '\'');
+    try buf.append(ctx.allocator, quote);
     const out = try ctx.allocator.dupe(u8, buf.items);
     buf.deinit(ctx.allocator);
     return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));

@@ -412,7 +412,7 @@ test "string interpolation curly array then property" {
 // ==========================================================================
 
 test "predefined constant PHP_EOL" {
-    try expectOutput("<?php echo 'a' . PHP_EOL . 'b';", "a\nb");
+    try expectOutput("<?php echo 'a' . PHP_EOL . 'b';", if (@import("builtin").os.tag == .windows) "a\r\nb" else "a\nb");
 }
 
 test "predefined constant PHP_INT_MAX" {

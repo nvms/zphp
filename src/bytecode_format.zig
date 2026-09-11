@@ -716,7 +716,7 @@ pub fn appendToExecutable(allocator: Allocator, exe_path: []const u8, bc_data: [
     // make executable
     const out_z = try allocator.dupeZ(u8, out_path);
     defer allocator.free(out_z);
-    _ = std.c.chmod(out_z.ptr, 0o755);
+    if (!@import("platform.zig").is_windows) _ = std.c.chmod(out_z.ptr, 0o755);
 }
 
 pub fn detectEmbeddedBytecode(allocator: Allocator) ?[]const u8 {

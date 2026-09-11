@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform.zig");
 const parser = @import("pipeline/parser.zig");
 const compiler = @import("pipeline/compiler.zig");
 const runtime_value = @import("runtime/value.zig");
@@ -7,6 +8,10 @@ const Value = runtime_value.Value;
 const CompileResult = @import("pipeline/compiler.zig").CompileResult;
 const extension = @import("extension.zig");
 const ini_config = @import("ini_config.zig");
+
+comptime {
+    if (platform.is_windows) @export(&platform.fcntlStub, .{ .name = "fcntl" });
+}
 const bytecode_format = @import("bytecode_format.zig");
 const error_format = @import("error_format.zig");
 
@@ -85,7 +90,7 @@ fn loadStartupFlags(allocator: std.mem.Allocator, raw_args: []const []const u8) 
     }
     ini_config.discover(ini_path);
     for (defines.items) |d| ini_config.define(d);
-    if (std.posix.getenv("ZPHP_EXTENSION_DIR")) |dir| extension.loadDirectory(dir);
+    if (platform.getenv("ZPHP_EXTENSION_DIR")) |dir| extension.loadDirectory(dir);
     return args.toOwnedSlice(allocator);
 }
 
@@ -104,30 +109,10 @@ fn dispatch(allocator: std.mem.Allocator, args: []const []const u8) !void {
         try requireArg(args, 3, "usage: zphp run <file>\n");
         try runFile(allocator, args[2], if (args.len > 3) args[3..] else &.{});
     } else if (std.mem.eql(u8, cmd, "serve")) {
-        try requireArg(args, 3, "usage: zphp serve <file> [--port 8080] [--workers N] [--watch] [--tls-cert FILE --tls-key FILE]\n");
-        var config = @import("serve.zig").ServeConfig{ .file = args[2] };
-        var i: usize = 3;
-        while (i < args.len) : (i += 1) {
-            if (std.mem.eql(u8, args[i], "--port") and i + 1 < args.len) {
-                config.port = std.fmt.parseInt(u16, args[i + 1], 10) catch 8080;
-                i += 1;
-            } else if (std.mem.eql(u8, args[i], "--workers") and i + 1 < args.len) {
-                config.workers = std.fmt.parseInt(u16, args[i + 1], 10) catch 0;
-                i += 1;
-            } else if (std.mem.eql(u8, args[i], "--idle-timeout") and i + 1 < args.len) {
-                config.idle_timeout_seconds = std.fmt.parseInt(u32, args[i + 1], 10) catch 60;
-                i += 1;
-            } else if (std.mem.eql(u8, args[i], "--tls-cert") and i + 1 < args.len) {
-                config.tls_cert = args[i + 1];
-                i += 1;
-            } else if (std.mem.eql(u8, args[i], "--tls-key") and i + 1 < args.len) {
-                config.tls_key = args[i + 1];
-                i += 1;
-            } else if (std.mem.eql(u8, args[i], "--watch")) {
-                config.watch = true;
-            }
-        }
-        try @import("serve.zig").serve(allocator, config);
+        if (platform.is_windows) {
+            try writeStderr("zphp serve is not available on Windows yet\n");
+            std.process.exit(1);
+        } else try serveCommand(allocator, args);
     } else if (std.mem.eql(u8, cmd, "test")) {
         try @import("test_runner.zig").run(allocator, if (args.len >= 3) args[2] else null);
     } else if (std.mem.eql(u8, cmd, "install")) {
@@ -154,6 +139,33 @@ fn dispatch(allocator: std.mem.Allocator, args: []const []const u8) !void {
         try writeStderr("\n");
         std.process.exit(1);
     }
+}
+
+fn serveCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    try requireArg(args, 3, "usage: zphp serve <file> [--port 8080] [--workers N] [--watch] [--tls-cert FILE --tls-key FILE]\n");
+    var config = @import("serve.zig").ServeConfig{ .file = args[2] };
+    var i: usize = 3;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--port") and i + 1 < args.len) {
+            config.port = std.fmt.parseInt(u16, args[i + 1], 10) catch 8080;
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--workers") and i + 1 < args.len) {
+            config.workers = std.fmt.parseInt(u16, args[i + 1], 10) catch 0;
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--idle-timeout") and i + 1 < args.len) {
+            config.idle_timeout_seconds = std.fmt.parseInt(u32, args[i + 1], 10) catch 60;
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--tls-cert") and i + 1 < args.len) {
+            config.tls_cert = args[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--tls-key") and i + 1 < args.len) {
+            config.tls_key = args[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--watch")) {
+            config.watch = true;
+        }
+    }
+    try @import("serve.zig").serve(allocator, config);
 }
 
 fn requireArg(args: []const []const u8, min: usize, usage: []const u8) !void {
@@ -210,7 +222,7 @@ fn dumpProfile(vm: *@import("runtime/vm.zig").VM) void {
             return x.count > y.count;
         }
     }.lt);
-    const sfe = std.fs.File{ .handle = 2 };
+    const sfe = std.fs.File.stderr();
     _ = sfe.write("[profile] top callees:\n") catch {};
     const n = @min(list.items.len, 30);
     for (list.items[0..n]) |e| {
@@ -261,7 +273,11 @@ fn resolveSource(allocator: std.mem.Allocator, vm: *VM, path: []const u8) ?Resol
         if (realDir(vm, std.fs.path.dirname(path) orelse ".")) |real_dir| {
             const sep: []const u8 = if (std.mem.endsWith(u8, real_dir, "/")) "" else "/";
             const abs = std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ real_dir, sep, base }) catch return null;
-            if (std.posix.fstatat(std.posix.AT.FDCWD, abs, std.posix.AT.SYMLINK_NOFOLLOW)) |st| {
+            if (platform.is_windows) {
+                if (std.fs.cwd().statFile(abs)) |st| {
+                    if (st.kind == .file) return .{ .abs_path = abs, .stat = st };
+                } else |_| {}
+            } else if (std.posix.fstatat(std.posix.AT.FDCWD, abs, std.posix.AT.SYMLINK_NOFOLLOW)) |st| {
                 const mode: u32 = @intCast(st.mode);
                 if (std.posix.S.ISREG(mode)) return .{ .abs_path = abs, .stat = std.fs.File.Stat.fromPosix(st) };
             } else |_| {}
@@ -598,7 +614,7 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
         std.process.exit(1);
     };
     defer {
-        if (std.posix.getenv("ZPHP_DBG_PROFILE") != null) dumpProfile(vm);
+        if (platform.getenv("ZPHP_DBG_PROFILE") != null) dumpProfile(vm);
         vm.deinit();
         allocator.destroy(vm);
     }
@@ -623,7 +639,7 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
                 vm.releaseValue(handler);
                 vm.runShutdownCallbacks() catch {};
                 if (vm.output.items.len > 0) try writeStdout(vm.output.items);
-                if (std.posix.getenv("ZPHP_DBG_PROFILE") != null) dumpProfile(vm);
+                if (platform.getenv("ZPHP_DBG_PROFILE") != null) dumpProfile(vm);
                 if (vm.exit_requested) std.process.exit(vm.exit_code);
                 if (vm.pending_exception != null) {
                     const fallback = error_format.formatRuntimeError(allocator, vm);
@@ -635,7 +651,7 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
         }
         vm.runShutdownCallbacks() catch {};
         if (vm.output.items.len > 0) try writeStdout(vm.output.items);
-        if (std.posix.getenv("ZPHP_DBG_PROFILE") != null) dumpProfile(vm);
+        if (platform.getenv("ZPHP_DBG_PROFILE") != null) dumpProfile(vm);
         const msg = error_format.formatRuntimeError(allocator, vm);
         if ((vm.error_reporting_level & 1) != 0) {
             if (msg.len > 0) {
@@ -710,11 +726,11 @@ fn buildFile(allocator: std.mem.Allocator, args: []const []const u8) !void {
 }
 
 fn writeStdout(msg: []const u8) !void {
-    _ = try std.posix.write(std.posix.STDOUT_FILENO, msg);
+    try std.fs.File.stdout().writeAll(msg);
 }
 
 fn writeStderr(msg: []const u8) !void {
-    _ = try std.posix.write(std.posix.STDERR_FILENO, msg);
+    try std.fs.File.stderr().writeAll(msg);
 }
 
 test {
@@ -731,7 +747,7 @@ test {
     _ = @import("stdlib/exceptions.zig");
     _ = @import("stdlib/registry.zig");
     _ = @import("stdlib/datetime.zig");
-    _ = @import("serve.zig");
+    if (!platform.is_windows) _ = @import("serve.zig");
     _ = @import("stdlib/pcre.zig");
     _ = @import("pipeline/parser_tests.zig");
     _ = @import("integration_tests.zig");

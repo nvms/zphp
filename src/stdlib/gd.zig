@@ -104,30 +104,32 @@ fn imgDestroy(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     return NativeResult.scalar(.{ .bool = true });
 }
 
+// the whole file, read here rather than by gd
+fn readImageFile(ctx: *NativeContext, path: []const u8) ?[]u8 {
+    return std.fs.cwd().readFileAlloc(ctx.allocator, path, 256 << 20) catch null;
+}
+
 fn imgCreateFromPng(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const path_z = try dupZ(ctx, args[0].string.bytes());
-    const f = c.fopen(path_z.ptr, "rb") orelse return NativeResult.scalar(.{ .bool = false });
-    defer _ = c.fclose(f);
-    const im = c.gdImageCreateFromPng(f);
+    const data = readImageFile(ctx, args[0].string.bytes()) orelse return NativeResult.scalar(.{ .bool = false });
+    defer ctx.allocator.free(data);
+    const im = c.gdImageCreateFromPngPtr(@intCast(data.len), data.ptr);
     return wrapImg(ctx, im);
 }
 
 fn imgCreateFromJpeg(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const path_z = try dupZ(ctx, args[0].string.bytes());
-    const f = c.fopen(path_z.ptr, "rb") orelse return NativeResult.scalar(.{ .bool = false });
-    defer _ = c.fclose(f);
-    const im = c.gdImageCreateFromJpeg(f);
+    const data = readImageFile(ctx, args[0].string.bytes()) orelse return NativeResult.scalar(.{ .bool = false });
+    defer ctx.allocator.free(data);
+    const im = c.gdImageCreateFromJpegPtr(@intCast(data.len), data.ptr);
     return wrapImg(ctx, im);
 }
 
 fn imgCreateFromGif(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const path_z = try dupZ(ctx, args[0].string.bytes());
-    const f = c.fopen(path_z.ptr, "rb") orelse return NativeResult.scalar(.{ .bool = false });
-    defer _ = c.fclose(f);
-    const im = c.gdImageCreateFromGif(f);
+    const data = readImageFile(ctx, args[0].string.bytes()) orelse return NativeResult.scalar(.{ .bool = false });
+    defer ctx.allocator.free(data);
+    const im = c.gdImageCreateFromGifPtr(@intCast(data.len), data.ptr);
     return wrapImg(ctx, im);
 }
 
@@ -153,17 +155,6 @@ fn imgCreateFromString(ctx: *NativeContext, args: []const Value) RuntimeError!Na
 // ---------------- output ----------------
 
 fn writeImageTo(ctx: *NativeContext, im: *c.gdImageStruct, args: []const Value, kind: enum { png, jpeg, gif }, quality: c_int) RuntimeError!NativeResult {
-    if (args.len > 1 and args[1] == .string) {
-        const path_z = try dupZ(ctx, args[1].string.bytes());
-        const f = c.fopen(path_z.ptr, "wb") orelse return NativeResult.scalar(.{ .bool = false });
-        defer _ = c.fclose(f);
-        switch (kind) {
-            .png => c.gdImagePng(im, f),
-            .jpeg => c.gdImageJpeg(im, f, quality),
-            .gif => c.gdImageGif(im, f),
-        }
-        return NativeResult.scalar(.{ .bool = true });
-    }
     var size: c_int = 0;
     const buf = switch (kind) {
         .png => c.gdImagePngPtr(im, &size),
@@ -172,6 +163,13 @@ fn writeImageTo(ctx: *NativeContext, im: *c.gdImageStruct, args: []const Value, 
     };
     if (buf == null) return NativeResult.scalar(.{ .bool = false });
     defer c.gdFree(buf);
+    // a file goes through zig's own io: a FILE* must not cross into the gd
+    // library, whose c runtime can differ from ours (it does on windows)
+    if (args.len > 1 and args[1] == .string) {
+        const bytes: [*]const u8 = @ptrCast(buf.?);
+        std.fs.cwd().writeFile(.{ .sub_path = args[1].string.bytes(), .data = bytes[0..@intCast(size)] }) catch return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.scalar(.{ .bool = true });
+    }
     // when filename is null, PHP writes to the script's output channel - which
     // goes through ob_start buffers, not directly to stdout. append to vm.output
     // so output handlers + ob capture work correctly
@@ -567,29 +565,26 @@ fn imgInterlace(_: *NativeContext, args: []const Value) RuntimeError!NativeResul
 
 fn imgGetSize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const path_z = try dupZ(ctx, args[0].string.bytes());
-    // sniff via fopen + gd helpers (minimal: just open file and check magic, then return dims via libgd)
-    const f = c.fopen(path_z.ptr, "rb") orelse return NativeResult.scalar(.{ .bool = false });
-    defer _ = c.fclose(f);
-    var header: [12]u8 = undefined;
-    const read = c.fread(&header, 1, header.len, f);
-    if (read < 4) return NativeResult.scalar(.{ .bool = false });
-    _ = c.fseek(f, 0, c.SEEK_SET);
-
+    const data = readImageFile(ctx, args[0].string.bytes()) orelse return NativeResult.scalar(.{ .bool = false });
+    defer ctx.allocator.free(data);
+    if (data.len < 4) return NativeResult.scalar(.{ .bool = false });
+    const header = data[0..@min(data.len, 12)];
+    const read = header.len;
     var im: ?*c.gdImageStruct = null;
     var mime: []const u8 = "";
     var typ: i64 = 0;
+    const size: c_int = @intCast(data.len);
 
     if (read >= 4 and header[0] == 0x89 and header[1] == 'P' and header[2] == 'N' and header[3] == 'G') {
-        im = c.gdImageCreateFromPng(f);
+        im = c.gdImageCreateFromPngPtr(size, data.ptr);
         mime = "image/png";
         typ = 3;
     } else if (read >= 3 and header[0] == 0xff and header[1] == 0xd8 and header[2] == 0xff) {
-        im = c.gdImageCreateFromJpeg(f);
+        im = c.gdImageCreateFromJpegPtr(size, data.ptr);
         mime = "image/jpeg";
         typ = 2;
     } else if (read >= 6 and (std.mem.eql(u8, header[0..6], "GIF89a") or std.mem.eql(u8, header[0..6], "GIF87a"))) {
-        im = c.gdImageCreateFromGif(f);
+        im = c.gdImageCreateFromGifPtr(size, data.ptr);
         mime = "image/gif";
         typ = 1;
     } else return NativeResult.scalar(.{ .bool = false });

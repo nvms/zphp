@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("../platform.zig");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
@@ -482,16 +483,22 @@ fn createFileInfoObj(ctx: *NativeContext, pathname: []const u8) !*PhpObject {
     return obj;
 }
 
+fn lastSep(path: []const u8) ?usize {
+    var i = path.len;
+    while (i > 0) : (i -= 1) if (platform.isSep(path[i - 1])) return i - 1;
+    return null;
+}
+
 fn basename(path: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, path, '/')) |idx| {
+    if (lastSep(path)) |idx| {
         return path[idx + 1 ..];
     }
     return path;
 }
 
 fn dirname(path: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, path, '/')) |idx| {
-        if (idx == 0) return "/";
+    if (lastSep(path)) |idx| {
+        if (idx == 0) return platform.sep_str;
         return path[0..idx];
     }
     return ".";
@@ -670,7 +677,7 @@ fn loadDirectoryEntries(ctx: *NativeContext, path: []const u8, flags: i64) Runti
     const skip_dots = (flags & SKIP_DOTS) != 0;
     if (!skip_dots) {
         inline for (.{ ".", ".." }) |dot_name| {
-            const dot_full = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ path, dot_name });
+            const dot_full = try std.fmt.allocPrint(ctx.allocator, "{s}{s}{s}", .{ path, platform.sep_str, dot_name });
             const dot_full_owned = try Value.String.adopt(ctx.allocator, dot_full);
             defer dot_full_owned.release();
             const dot_entry = try ctx.createArray();
@@ -685,7 +692,7 @@ fn loadDirectoryEntries(ctx: *NativeContext, path: []const u8, flags: i64) Runti
     while (iter.next() catch null) |entry| {
         if (skip_dots and (std.mem.eql(u8, entry.name, ".") or std.mem.eql(u8, entry.name, ".."))) continue;
 
-        const full = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ path, entry.name });
+        const full = try std.fmt.allocPrint(ctx.allocator, "{s}{s}{s}", .{ path, platform.sep_str, entry.name });
         const full_owned = try Value.String.adopt(ctx.allocator, full);
         defer full_owned.release();
 
@@ -864,7 +871,7 @@ fn rdiGetSubPathname(ctx: *NativeContext, _: []const Value) RuntimeError!NativeR
         return NativeResult.literal("");
     }
     if (name != .string) return NativeResult.share(sub_path);
-    const result = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ sub_path.string.bytes(), name.string.bytes() });
+    const result = try std.fmt.allocPrint(ctx.allocator, "{s}{s}{s}", .{ sub_path.string.bytes(), platform.sep_str, name.string.bytes() });
     return NativeResult.takeString(try Value.String.adopt(ctx.allocator, result));
 }
 

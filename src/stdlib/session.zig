@@ -47,13 +47,12 @@ fn native_session_set_save_handler(ctx: *NativeContext, args: []const Value) Run
     return NativeResult.scalar(.{ .bool = false });
 }
 
-const default_session_dir = "/tmp";
 const default_name = "PHPSESSID";
 
 fn currentSessionDir(ctx: *NativeContext) []const u8 {
     const v = getSessionVar(ctx, "__session_save_path");
     if (v != null and v.? == .string and v.?.string.bytes().len > 0) return v.?.string.bytes();
-    return default_session_dir;
+    return @import("../platform.zig").tempDir();
 }
 
 fn getSessionVar(ctx: *NativeContext, key: []const u8) ?Value {

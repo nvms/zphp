@@ -1,5 +1,6 @@
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
+const platform = @import("../platform.zig");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
@@ -32,11 +33,11 @@ pub const entries = .{
     .{ "stream_socket_pair", native_stream_socket_pair },
 };
 
-fn streamFd(v: Value) ?i32 {
+fn streamFd(v: Value) ?std.posix.socket_t {
     if (v != .object) return null;
     const fdv = v.object.get("__fd");
     if (fdv != .int or fdv.int < 0) return null;
-    return @intCast(fdv.int);
+    return platform.socketFromInt(fdv.int);
 }
 
 // stream_select(&$read, &$write, &$except, ?int $seconds, int $microseconds = 0): int|false
@@ -102,6 +103,11 @@ extern "c" fn socketpair(domain: c_int, sock_type: c_int, protocol: c_int, sv: *
 // creates a connected pair of sockets (socketpair(2)) returned as two stream
 // objects (each with __fd) usable by fread/fwrite/stream_select/fclose
 fn native_stream_socket_pair(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (platform.is_windows) return NativeResult.scalar(.{ .bool = false });
+    return posixSocketPair(ctx, args);
+}
+
+fn posixSocketPair(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const domain: c_int = if (args.len > 0) @intCast(Value.toInt(args[0])) else @intCast(std.posix.AF.UNIX);
     const sock_type: c_int = if (args.len > 1) @intCast(Value.toInt(args[1])) else @intCast(std.posix.SOCK.STREAM);
     const protocol: c_int = if (args.len > 2) @intCast(Value.toInt(args[2])) else 0;
@@ -263,8 +269,8 @@ fn native_gethostbyaddr(ctx: *NativeContext, args: []const Value) RuntimeError!N
 }
 
 fn native_gethostname(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    var buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
-    const name = std.posix.gethostname(&buf) catch return NativeResult.scalar(.{ .bool = false });
+    var buf: [256]u8 = undefined;
+    const name = platform.hostname(&buf) orelse return NativeResult.scalar(.{ .bool = false });
     return NativeResult.copyString(ctx.allocator, name);
 }
 
@@ -356,7 +362,7 @@ fn openTcpHandle(ctx: *NativeContext, host: []const u8, port: u16) !*PhpObject {
     const obj = try ctx.allocator.create(PhpObject);
     obj.* = .{ .class_name = "FileHandle" };
     try ctx.vm.objects.append(ctx.allocator, obj);
-    try obj.set(ctx.allocator, "__fd", .{ .int = @intCast(stream.handle) });
+    try obj.set(ctx.allocator, "__fd", .{ .int = platform.socketToInt(stream.handle) });
     try obj.set(ctx.allocator, "__open", .{ .bool = true });
     try obj.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed("r+") });
     try obj.set(ctx.allocator, "__net", .{ .bool = true });

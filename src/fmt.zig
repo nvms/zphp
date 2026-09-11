@@ -1652,7 +1652,7 @@ pub fn formatSource(allocator: Allocator, ast: *const Ast, source: []const u8) !
 }
 
 fn writeStderr(msg: []const u8) !void {
-    _ = try std.posix.write(std.posix.STDERR_FILENO, msg);
+    try std.fs.File.stderr().writeAll(msg);
 }
 
 test "format simple echo" {

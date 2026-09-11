@@ -1,5 +1,6 @@
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
+const platform = @import("../platform.zig");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
@@ -1572,17 +1573,17 @@ fn native_php_version(_: *NativeContext, _: []const Value) RuntimeError!NativeRe
 }
 
 fn native_getmypid(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return NativeResult.scalar(.{ .int = @intCast(std.c.getpid()) });
+    return NativeResult.scalar(.{ .int = platform.getpid() });
 }
 
 fn native_getmyuid(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return NativeResult.scalar(.{ .int = @intCast(std.c.getuid()) });
+    return NativeResult.scalar(.{ .int = if (platform.is_windows) 0 else @intCast(std.c.getuid()) });
 }
 
 extern "c" fn getgid() c_uint;
 
 fn native_getmygid(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return NativeResult.scalar(.{ .int = @intCast(getgid()) });
+    return NativeResult.scalar(.{ .int = if (platform.is_windows) 0 else @intCast(getgid()) });
 }
 
 fn native_get_cfg_var(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -1603,7 +1604,7 @@ fn native_get_current_user(ctx: *NativeContext, _: []const Value) RuntimeError!N
         }
     }
     inline for ([_][]const u8{ "USER", "LOGNAME" }) |key| {
-        if (std.posix.getenv(key)) |val| {
+        if (platform.getenv(key)) |val| {
             if (val.len > 0) {
                 return NativeResult.copyString(ctx.allocator, val);
             }
@@ -1753,12 +1754,7 @@ fn native_memory_get_usage(_: *NativeContext, _: []const Value) RuntimeError!Nat
     // call, so we report the OS-level resident-set peak. matches the common
     // "did memory grow?" check and stays monotonic, while giving a value that's
     // proportional to actual usage (unlike the previous 1024-byte stub)
-    var usage: std.c.rusage = undefined;
-    if (std.c.getrusage(std.c.rusage.SELF, &usage) != 0) return NativeResult.scalar(.{ .int = 0 });
-    // ru_maxrss is bytes on macOS, kilobytes on Linux/BSD
-    const builtin = @import("builtin");
-    const mult: i64 = if (builtin.target.os.tag == .macos or builtin.target.os.tag == .ios) 1 else 1024;
-    return NativeResult.scalar(.{ .int = @as(i64, @intCast(usage.maxrss)) * mult });
+    return NativeResult.scalar(.{ .int = platform.peakRss() });
 }
 
 fn native_set_error_handler(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -2194,11 +2190,11 @@ fn native_error_log(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
             // the merged stream order matches PHP's unbuffered CLI stdout
             const vm = ctx.vm;
             if (vm.output.items.len > 0) {
-                const stdout_file = std.fs.File{ .handle = 1 };
+                const stdout_file = std.fs.File.stdout();
                 _ = stdout_file.write(vm.output.items) catch {};
                 vm.output.clearRetainingCapacity();
             }
-            const stderr_file = std.fs.File{ .handle = 2 };
+            const stderr_file = std.fs.File.stderr();
             stderr_file.writeAll(message) catch return NativeResult.scalar(.{ .bool = false });
             stderr_file.writeAll("\n") catch {};
             return NativeResult.scalar(.{ .bool = true });
@@ -2255,13 +2251,13 @@ fn native_trigger_error(ctx: *NativeContext, args: []const Value) RuntimeError!N
         const label = errnoLabel(errno);
         // flush any pending stdout so the merged 2>&1 ordering matches PHP
         if (ctx.vm.output.items.len > 0) {
-            const stdout_file = std.fs.File{ .handle = 1 };
+            const stdout_file = std.fs.File.stdout();
             _ = stdout_file.write(ctx.vm.output.items) catch {};
             ctx.vm.output.clearRetainingCapacity();
         }
         const stderr_text = std.fmt.allocPrint(ctx.allocator, "PHP {s}:  {s} in {s} on line {d}\n", .{ label, message, file, line }) catch return NativeResult.scalar(Value{ .bool = true });
         defer ctx.allocator.free(stderr_text);
-        const stderr_file = std.fs.File{ .handle = 2 };
+        const stderr_file = std.fs.File.stderr();
         _ = stderr_file.write(stderr_text) catch {};
         if (ctx.vm.displayErrorsEnabled()) {
             const stdout_text = std.fmt.allocPrint(ctx.allocator, "\n{s}: {s} in {s} on line {d}\n", .{ label, message, file, line }) catch return NativeResult.scalar(Value{ .bool = true });

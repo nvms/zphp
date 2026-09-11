@@ -3,6 +3,7 @@
 // request-scoped ini_set layer. `extension=` lines load extensions through
 // the same loader as --extension
 const std = @import("std");
+const platform = @import("platform.zig");
 const vm_mod = @import("runtime/vm.zig");
 const VM = vm_mod.VM;
 const RuntimeError = vm_mod.RuntimeError;
@@ -45,7 +46,7 @@ pub fn get(name: []const u8) ?[]const u8 {
 // explicit path must exist; the discovered ones are optional
 pub fn discover(explicit: ?[]const u8) void {
     if (explicit) |path| return load(path, true);
-    if (std.posix.getenv("ZPHP_INI")) |path| return load(path, true);
+    if (platform.getenv("ZPHP_INI")) |path| return load(path, true);
     load("php.ini", false);
 }
 
@@ -124,7 +125,7 @@ fn expandEnv(value: []const u8) []const u8 {
             if (std.mem.indexOfScalarPos(u8, value, i + 2, '}')) |close| {
                 const var_name = value[i + 2 .. close];
                 const name_z = persistent().dupeZ(u8, var_name) catch fail("out of memory", .{});
-                if (std.posix.getenv(name_z)) |env| out.appendSlice(persistent(), env) catch fail("out of memory", .{});
+                if (platform.getenv(name_z)) |env| out.appendSlice(persistent(), env) catch fail("out of memory", .{});
                 i = close + 1;
                 continue;
             }

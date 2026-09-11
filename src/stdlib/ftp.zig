@@ -1,5 +1,6 @@
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
+const platform = @import("../platform.zig");
 const net = std.net;
 const posix = std.posix;
 const Value = @import("../runtime/value.zig").Value;
@@ -40,7 +41,7 @@ pub const entries = .{
 
 fn getFd(obj: *PhpObject) ?posix.socket_t {
     const v = obj.get("__fd");
-    if (v == .int and v.int >= 0) return @intCast(v.int);
+    if (v == .int and v.int >= 0) return platform.socketFromInt(v.int);
     return null;
 }
 
@@ -128,7 +129,7 @@ fn native_ftp_connect(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
         return NativeResult.scalar(.{ .bool = false });
     }
     const obj = try ctx.createObject("FTPHandle");
-    try obj.set(ctx.allocator, "__fd", .{ .int = @intCast(fd) });
+    try obj.set(ctx.allocator, "__fd", .{ .int = platform.socketToInt(fd) });
     try obj.set(ctx.allocator, "__pasv", .{ .bool = true });
     try obj.set(ctx.allocator, "__host", args[0]);
     return NativeResult.borrowed(.{ .object = obj });
@@ -514,7 +515,7 @@ pub fn cleanupResources(objects: std.ArrayListUnmanaged(*PhpObject)) void {
         if (!std.mem.eql(u8, obj.class_name, "FTPHandle")) continue;
         const v = obj.get("__fd");
         if (v == .int and v.int >= 0) {
-            posix.close(@intCast(v.int));
+            platform.closeSocket(v.int);
         }
     }
 }

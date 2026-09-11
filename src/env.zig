@@ -1,5 +1,8 @@
 const std = @import("std");
+const platform = @import("platform.zig");
 const c = @cImport(@cInclude("stdlib.h"));
+// mingw's crt has no setenv; _putenv_s writes both the crt and the win32 environment
+extern "c" fn _putenv_s(name: [*:0]const u8, value: [*:0]const u8) c_int;
 const Value = @import("runtime/value.zig").Value;
 const PhpArray = @import("runtime/value.zig").PhpArray;
 const VM = @import("runtime/vm.zig").VM;
@@ -87,7 +90,11 @@ pub fn loadEnvFile(allocator: std.mem.Allocator) void {
         defer allocator.free(key_z);
         const val_z = allocator.dupeZ(u8, val) catch continue;
         defer allocator.free(val_z);
-        _ = c.setenv(key_z.ptr, val_z.ptr, 0);
+        if (platform.is_windows) {
+            if (platform.getenv(key) == null) _ = _putenv_s(key_z.ptr, val_z.ptr);
+        } else {
+            _ = c.setenv(key_z.ptr, val_z.ptr, 0);
+        }
     }
 }
 
