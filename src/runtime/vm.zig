@@ -1451,6 +1451,7 @@ pub const VM = struct {
         try @import("../stdlib/xml_parser.zig").register(vm, allocator);
         try @import("../stdlib/intl.zig").register(vm, allocator);
         try @import("../stdlib/gmp.zig").register(vm, allocator);
+        try @import("../stdlib/workers.zig").register(vm, allocator);
         try @import("../stdlib/bcmath.zig").register(vm, allocator);
         try @import("../stdlib/gd.zig").register(vm, allocator);
         try @import("../stdlib/soap.zig").register(vm, allocator);
@@ -2430,6 +2431,7 @@ pub const VM = struct {
         @import("../stdlib/xmlwriter.zig").cleanupResources(self.objects);
         @import("../stdlib/intl.zig").cleanupResources(self.objects);
         @import("../stdlib/gmp.zig").cleanupResources(self.objects);
+        @import("../stdlib/workers.zig").cleanupResources(self.objects);
         extension.cleanupResources(self.objects);
         @import("../stdlib/gd.zig").cleanupResources(self.objects);
         @import("../stdlib/ftp.zig").cleanupResources(self.objects);

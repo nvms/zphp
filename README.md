@@ -96,6 +96,29 @@ zig build -Doptimize=ReleaseFast -Dextension=hello.c   # static, compiled into z
 
 `ZPHP_EXTENSION_DIR` names a directory whose libraries load automatically. Extensions get module, worker, and request lifecycle hooks, a request-local and a worker-local data slot, and a destructor per resource type that runs when the PHP value is unset, goes out of scope, unwinds through an exception, or the request ends. Values cross the boundary as opaque handles, so the runtime's internals can change without breaking compiled extensions; an ABI version in the descriptor rejects mismatches at load time. The static musl release binaries cannot load shared libraries and take static extensions only. `tests/extensions/demo.c` exercises the whole API.
 
+## Worker threads
+
+`Zphp\Pool` runs PHP functions on a fixed set of OS threads, each with its own isolated interpreter. A pool takes a bootstrap script that every worker runs once, so functions, classes, and worker-local state are ready before the first task arrives.
+
+```php
+$pool = new Zphp\Pool(workers: 4, bootstrap: __DIR__ . '/worker.php');
+
+$futures = [];
+foreach ($pages as $page) {
+    $futures[] = $pool->submit('render', [$page]);
+}
+foreach ($futures as $future) {
+    echo $future->await();
+}
+$pool->shutdown();
+```
+
+A task is a named callable: a function name, `'Class::method'`, or `[$class, $method]`, defined by the bootstrap or built in. Arguments and results are copied between interpreters, so they must be null, bool, int, float, string, arrays of those, or objects of classes both sides define. Closures, generators, and handle-backed objects such as PDO connections are refused when submitted, with the offending path in the message.
+
+`await()` returns the result, or rethrows the task's exception as the same class when the caller has it. A queued task can be cancelled; a running one sees `Zphp\Task::cancelled()` and stops when it chooses, since nothing is ever killed. The queue is bounded: `submit()` blocks when it is full and `trySubmit()` returns null instead. `collect()` hands back completed futures in completion order, and `readiness()` is a stream that becomes readable when one is waiting, for use with `stream_select()`. `shutdown()` stops accepting work, cancels what is queued, and waits for running tasks; the pool's destructor does the same.
+
+Channels and submitting closures are planned.
+
 ## Related projects
 
 - [zphp-bindings](https://github.com/nexxii04/zphp-bindings): Zig bindings for the extension ABI, so extensions can be written in Zig without C.

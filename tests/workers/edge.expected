@@ -1,0 +1,18 @@
+Zphp\TaskException: WorkerOnly: only the worker knows this class
+int(1)
+int(2)
+NULL
+bool(true)
+bool(false)
+string(7) "stopped"
+bool(false)
+queued task cancelled by shutdown
+bool(true)
+string(9) "slept 200"
+string(9) "slept 200"
+from a worker
+PoolException: LogicException: bootstrap broke
+20 pools
+int(1)
+bool(true)
+end

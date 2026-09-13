@@ -801,6 +801,8 @@ pub const NativeHandle = struct {
         websocket,
         xml_reader,
         xml_writer,
+        pool,
+        future,
         _,
     };
 

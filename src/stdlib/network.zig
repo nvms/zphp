@@ -208,7 +208,7 @@ fn native_stream_socket_pair(ctx: *NativeContext, _: []const Value) RuntimeError
     return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn socketStream(ctx: *NativeContext, sock: std.posix.socket_t) !*PhpObject {
+pub fn socketStream(ctx: *NativeContext, sock: std.posix.socket_t) !*PhpObject {
     const obj = try ctx.allocator.create(PhpObject);
     obj.* = .{ .class_name = "FileHandle" };
     try ctx.vm.objects.append(ctx.allocator, obj);

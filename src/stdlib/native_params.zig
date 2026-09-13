@@ -6,6 +6,12 @@ const std = @import("std");
 
 pub const map = std.StaticStringMap([]const []const u8).initComptime(.{
     .{ "Deprecated::__construct", &.{ "$message", "$since" } },
+    .{ "Zphp\\Pool::__construct", &.{ "$workers", "$bootstrap", "$queue" } },
+    .{ "Zphp\\Pool::submit", &.{ "$callable", "$args" } },
+    .{ "Zphp\\Pool::trySubmit", &.{ "$callable", "$args" } },
+    .{ "Zphp\\Pool::collect", &.{"$timeout"} },
+    .{ "Zphp\\Pool::shutdown", &.{"$timeout"} },
+    .{ "Zphp\\Future::await", &.{"$timeout"} },
     .{ "substr", &.{ "$string", "$offset", "$length" } },
     .{ "str_replace", &.{ "$search", "$replace", "$subject", "$count" } },
     .{ "str_ireplace", &.{ "$search", "$replace", "$subject", "$count" } },

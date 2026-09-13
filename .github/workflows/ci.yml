@@ -169,6 +169,8 @@ jobs:
           sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev libsodium-dev libldap2-dev
       - run: zig build -Doptimize=ReleaseFast
       - run: python3 ./tests/memory_soak
+      - name: worker pool retention
+        run: ./zig-out/bin/zphp run tests/workers/memory.php
 
   php-compat:
     needs: changes
@@ -425,6 +427,8 @@ jobs:
         run: ZPHP=./zig-out/bin/zphp.exe ./tests/run
       - name: serve
         run: unset OPENSSL_CONF; ZPHP=./zig-out/bin/zphp.exe ./tests/serve_test
+      - name: workers
+        run: ZPHP=./zig-out/bin/zphp.exe ./tests/workers/run
 
   extensions:
     needs: changes
@@ -449,6 +453,8 @@ jobs:
         run: STATIC=1 ./tests/extensions/run
       - name: Run ./tests/ini_test
         run: ./tests/ini_test
+      - name: Run ./tests/workers/run
+        run: ./tests/workers/run
 
   compile:
     needs: changes

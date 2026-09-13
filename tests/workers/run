@@ -1,0 +1,39 @@
+#!/bin/bash
+# worker pool suite: behaviour scripts compared against their expected
+# output, then the cpu-bound scaling benchmark as a sanity check
+set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+ZPHP="${ZPHP:-$ROOT/zig-out/bin/zphp}"
+passed=0
+failed=0
+
+check() {
+    local name="$1" expected="$2" actual="$3"
+    if [ "$expected" = "$actual" ]; then
+        passed=$((passed + 1))
+    else
+        failed=$((failed + 1))
+        printf 'FAIL %s\n' "$name"
+        diff <(echo "$expected") <(echo "$actual") | head -20
+    fi
+}
+
+for script in basic edge; do
+    actual="$("$ZPHP" run "$SCRIPT_DIR/$script.php" 2>&1 | tr -d '\r' | grep -v '^error(gpa)' | grep -v '^\s' | grep -v '^/')" || true
+    check "$script.php" "$(tr -d '\r' < "$SCRIPT_DIR/$script.expected")" "$actual"
+done
+
+bench="$("$ZPHP" run "$SCRIPT_DIR/bench.php" 2>&1 | tr -d '\r')" || true
+echo "$bench"
+one=$(echo "$bench" | awk '/^1 workers/ {print $3}')
+four=$(echo "$bench" | awk '/^4 workers/ {print $3}')
+if [ -n "$one" ] && [ -n "$four" ] && [ "$four" -lt "$one" ]; then
+    passed=$((passed + 1))
+else
+    failed=$((failed + 1))
+    echo "FAIL four workers were not faster than one"
+fi
+
+echo "$passed passed, $failed failed"
+[ "$failed" -eq 0 ]
