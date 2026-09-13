@@ -81,5 +81,11 @@ int(4)
 string(4) "stil"
 Trying to clone an uncloneable object of class DemoBuffer
 int(4)
+bool(true)
+bool(true)
+bool(true)
+Cannot instantiate abstract class DemoShape
+int(1)
+Cannot modify readonly property DemoPoint::$x
 done
 shutdown sees 2

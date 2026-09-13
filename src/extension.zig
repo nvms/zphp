@@ -57,7 +57,12 @@ pub const ClassReg = struct {
     constants: std.ArrayListUnmanaged(ConstantReg) = .{},
     properties: std.ArrayListUnmanaged(PropertyReg) = .{},
     resource_type: ?u32 = null,
+    flags: u32 = 0,
 };
+
+const class_flag_final: u32 = 1;
+const class_flag_abstract: u32 = 2;
+const class_flag_readonly: u32 = 4;
 
 const InterfaceReg = struct { name: []const u8, methods: std.ArrayListUnmanaged([]const u8) = .{} };
 
@@ -269,9 +274,12 @@ fn registerClass(vm: *VM, cls: *ClassReg) RuntimeError!void {
     const a = vm.allocator;
     if (vm.classes.contains(cls.name) or vm.interfaces.contains(cls.name)) fail("extension '{s}': class '{s}' is already defined", .{ cls.ext.name, cls.name });
     var def = ClassDef{ .name = cls.name, .parent = cls.parent };
+    def.is_final = cls.flags & class_flag_final != 0;
+    def.is_abstract = cls.flags & class_flag_abstract != 0;
+    def.is_readonly = cls.flags & class_flag_readonly != 0;
     if (cls.resource_type != null) def.native_cleanup = resourceCleanup;
     for (cls.interfaces.items) |iface| try def.interfaces.append(a, iface);
-    for (cls.properties.items) |p| try def.properties.append(a, .{ .name = p.name, .default = p.default, .has_default = true });
+    for (cls.properties.items) |p| try def.properties.append(a, .{ .name = p.name, .default = p.default, .has_default = true, .is_readonly = def.is_readonly });
     for (cls.constants.items) |c| {
         try def.static_props.put(a, c.name, c.value);
         try def.constant_names.put(a, c.name, {});
@@ -476,6 +484,15 @@ fn apiClassAddPropertyInt(cls: ?*ClassReg, name: CStr, value: i64) callconv(.c) 
 fn apiClassAddPropertyString(cls: ?*ClassReg, name: CStr, value: CStr) callconv(.c) c_int {
     const v = cstr(value) orelse return -1;
     return classProperty(cls, name, .{ .string = Value.String.borrowed(dupe(v)) });
+}
+
+fn apiClassSetFlags(cls: ?*ClassReg, flags: u32) callconv(.c) c_int {
+    const c = cls orelse return -1;
+    if (!regOnly(c.ext)) return -1;
+    if (flags & ~(class_flag_final | class_flag_abstract | class_flag_readonly) != 0) return -1;
+    if (flags & class_flag_final != 0 and flags & class_flag_abstract != 0) return -1;
+    c.flags = flags;
+    return 0;
 }
 
 fn apiClassImplements(cls: ?*ClassReg, iface: CStr) callconv(.c) c_int {
@@ -922,6 +939,7 @@ pub const Api = extern struct {
     set_request_data: *const @TypeOf(apiSetRequestData),
     worker_data: *const @TypeOf(apiWorkerData),
     set_worker_data: *const @TypeOf(apiSetWorkerData),
+    class_set_flags: *const @TypeOf(apiClassSetFlags),
 };
 
 pub const api_v1 = Api{
@@ -987,6 +1005,7 @@ pub const api_v1 = Api{
     .set_request_data = apiSetRequestData,
     .worker_data = apiWorkerData,
     .set_worker_data = apiSetWorkerData,
+    .class_set_flags = apiClassSetFlags,
 };
 
 test "the api table matches the header field by field" {

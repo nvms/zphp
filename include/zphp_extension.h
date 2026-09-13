@@ -63,6 +63,13 @@ enum {
     ZPHP_METHOD_STATIC = 1
 };
 
+/* class modifiers for zphp_class_set_flags; final and abstract exclude each other */
+enum {
+    ZPHP_CLASS_FINAL = 1,
+    ZPHP_CLASS_ABSTRACT = 2,
+    ZPHP_CLASS_READONLY = 4
+};
+
 /*
  * Lifecycle. module_init runs once per process when the extension loads and
  * is the only place registration is allowed. worker_init/worker_shutdown run
@@ -170,6 +177,9 @@ typedef struct zphp_api {
     void (*set_request_data)(zphp_ctx *ctx, void *data);
     void *(*worker_data)(zphp_ctx *ctx);
     void (*set_worker_data)(zphp_ctx *ctx, void *data);
+
+    /* appended after abi 1 shipped; older runtimes end the table above */
+    int (*class_set_flags)(zphp_class *cls, uint32_t flags);
 } zphp_api;
 
 typedef const zphp_extension *(*zphp_entry_fn)(const zphp_api *api);
@@ -208,6 +218,7 @@ static inline int zphp_class_add_property(zphp_class *cls, const char *name) { r
 static inline int zphp_class_add_property_int(zphp_class *cls, const char *name, int64_t value) { return zphp_api_v1->class_add_property_int(cls, name, value); }
 static inline int zphp_class_add_property_string(zphp_class *cls, const char *name, const char *value) { return zphp_api_v1->class_add_property_string(cls, name, value); }
 static inline int zphp_class_implements(zphp_class *cls, const char *interface_name) { return zphp_api_v1->class_implements(cls, interface_name); }
+static inline int zphp_class_set_flags(zphp_class *cls, uint32_t flags) { return zphp_api_v1->class_set_flags(cls, flags); }
 static inline int zphp_register_interface(zphp_module *m, const char *name, const char *const *methods, size_t method_count) { return zphp_api_v1->register_interface(m, name, methods, method_count); }
 static inline int zphp_register_constant_int(zphp_module *m, const char *name, int64_t value) { return zphp_api_v1->register_constant_int(m, name, value); }
 static inline int zphp_register_constant_float(zphp_module *m, const char *name, double value) { return zphp_api_v1->register_constant_float(m, name, value); }
