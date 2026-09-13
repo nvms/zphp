@@ -1348,7 +1348,9 @@ pub const Value = union(enum) {
         if (i < s.len and (s[i] == 'e' or s[i] == 'E')) {
             i += 1;
             if (i < s.len and (s[i] == '-' or s[i] == '+')) i += 1;
+            const exponent_start = i;
             while (i < s.len and s[i] >= '0' and s[i] <= '9') i += 1;
+            if (i == exponent_start) return false;
         }
         while (i < s.len and (s[i] == ' ' or s[i] == '\t' or s[i] == '\n' or s[i] == '\r')) i += 1;
         return has_digit and i == s.len;
@@ -1955,6 +1957,22 @@ pub const Value = union(enum) {
         return .{ .int_kind = n };
     }
 };
+
+test "numeric string exponent requires digits" {
+    const invalid = [_][]const u8{
+        "0e", "1e", "1e+", "1e-", "1E", "1E-", " 1e ", "-1e+\t", "1e+ 2",
+    };
+    for (invalid) |s| {
+        try std.testing.expect(!Value.isNumericString(s));
+    }
+
+    const valid = [_][]const u8{
+        "1", "1.5", "1e2", "1E+2", "1e-2", " +1E+2\t", "-1e-2\r\n",
+    };
+    for (valid) |s| {
+        try std.testing.expect(Value.isNumericString(s));
+    }
+}
 
 test "truthiness" {
     try std.testing.expect(!Value.isTruthy(.null));
