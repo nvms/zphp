@@ -46,6 +46,10 @@ var_dump(demo_write($probe, "still mine"), demo_read($probe));
 try { $copy = clone $probe; } catch (Error $e) { echo $e->getMessage(), "\n"; }
 unset($probe);
 var_dump(demo_freed());
+$rc = fn(string $c) => new ReflectionClass($c);
+var_dump($rc("DemoSealed")->isFinal(), $rc("DemoShape")->isAbstract(), $rc("DemoPoint")->isReadOnly());
+try { new DemoShape(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+try { $pt = new DemoPoint(); var_dump($pt->x); $pt->x = 5; } catch (Error $e) { echo $e->getMessage(), "\n"; }
 $keep = demo_open(2);
 register_shutdown_function(function () { echo "shutdown sees ", demo_add(1, 1), "\n"; });
 echo "done\n";

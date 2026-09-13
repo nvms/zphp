@@ -284,6 +284,11 @@ static int module_init(zphp_module *m)
     zphp_class_add_method(counter, "make", counter_make, 1, ZPHP_METHOD_STATIC);
 
     zphp_register_class(m, "DemoException", "Exception");
+    zphp_class_set_flags(zphp_register_class(m, "DemoSealed", NULL), ZPHP_CLASS_FINAL);
+    zphp_class_set_flags(zphp_register_class(m, "DemoShape", NULL), ZPHP_CLASS_ABSTRACT);
+    zphp_class *point = zphp_register_class(m, "DemoPoint", NULL);
+    zphp_class_add_property_int(point, "x", 1);
+    zphp_class_set_flags(point, ZPHP_CLASS_READONLY);
 
     zphp_register_constant_string(m, "DEMO_VERSION", "1.2.3");
     zphp_register_constant_int(m, "DEMO_ANSWER", 42);

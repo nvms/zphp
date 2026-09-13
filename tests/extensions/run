@@ -51,6 +51,7 @@ DEMO="$OUT/demo.$LIB"
 # the script under a dynamic extension
 actual="$("$ZPHP" --extension="$DEMO" run "$SCRIPT_DIR/demo.php" 2>&1)" || true
 check "demo.php output" "$(cat "$SCRIPT_DIR/demo.expected")" "$actual"
+contains "final extension class cannot be extended" "Class DemoSub cannot extend final class DemoSealed" "$("$ZPHP" --extension="$DEMO" run "$SCRIPT_DIR/final.php" 2>&1)"
 actual="$("$ZPHP" --extension "$DEMO" run "$SCRIPT_DIR/demo.php" 2>&1 | head -1)" || true
 check "--extension PATH form" 'bool(true)' "$actual"
 actual="$(ZPHP_EXTENSION_DIR="$OUT" "$ZPHP" run "$SCRIPT_DIR/demo.php" 2>&1 | tail -1)" || true
