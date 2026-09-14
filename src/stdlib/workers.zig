@@ -32,12 +32,14 @@ const transfer_exception = "Zphp\\TransferException";
 
 const default_queue: usize = 1024;
 
-// memory that one thread allocates and another frees. the release build's
-// smp_allocator keeps a freelist per thread and reclaims another thread's
-// list only when its own runs dry, so a producer that allocates on one
-// thread for a consumer that frees on another keeps mapping fresh slabs;
-// libc malloc balances that. the Debug build keeps its leak-checking
-// allocator for everything
+// everything the pool touches, worker VM heaps included. the release build's
+// smp_allocator keeps a freelist per thread slot, reclaims another slot's
+// list only when its own runs dry, and hands every thread slot zero until
+// contention moves it, so a producer that allocates on one thread for a
+// consumer that frees on another keeps mapping fresh slabs, and two busy
+// worker VMs on a four-cpu box scatter their frees across slots and grew
+// rss by up to 90 MB over a soak that other runs finished flat. libc malloc
+// balances both. the Debug build keeps its leak-checking allocator
 pub fn transferAllocator(vm_allocator: std.mem.Allocator) std.mem.Allocator {
     return if (builtin.mode == .Debug) vm_allocator else std.heap.c_allocator;
 }
@@ -198,8 +200,6 @@ const StartState = enum { starting, running, failed };
 
 const Pool = struct {
     allocator: std.mem.Allocator,
-    // the worker VMs allocate and free on their own thread
-    vm_allocator: std.mem.Allocator,
     owner: *VM,
     workers: []Worker,
     queue: Queue,
@@ -244,7 +244,6 @@ const Pool = struct {
         try platform.setNonBlocking(wake[1], true);
         pool.* = .{
             .allocator = allocator,
-            .vm_allocator = vm_allocator,
             .owner = owner,
             .workers = slots,
             .queue = .{ .items = items },
@@ -438,18 +437,18 @@ fn markCancelled(task: *Task) void {
 fn workerMain(w: *Worker) void {
     const pool = w.pool;
     current_worker = @intCast(w.index);
-    const vm = VM.initOnHeap(pool.vm_allocator) catch {
+    const vm = VM.initOnHeap(pool.allocator) catch {
         pool.reportStart("worker: out of memory");
         return;
     };
     var boot_result: ?*@import("../pipeline/compiler.zig").CompileResult = null;
     defer if (boot_result) |r| {
         r.deinit();
-        pool.vm_allocator.destroy(r);
+        pool.allocator.destroy(r);
     };
     defer {
         vm.deinit();
-        pool.vm_allocator.destroy(vm);
+        pool.allocator.destroy(vm);
     }
     vm.file_loader = pool.file_loader;
     vm.installHooks();
@@ -476,7 +475,7 @@ fn bootstrap(vm: *VM, pool: *Pool, path: []const u8) ?*@import("../pipeline/comp
         flushOutput(vm);
         pool.reportStart(msg);
         result.deinit();
-        pool.vm_allocator.destroy(result);
+        pool.allocator.destroy(result);
         return null;
     };
     flushOutput(vm);
