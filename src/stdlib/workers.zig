@@ -236,7 +236,12 @@ const Pool = struct {
         errdefer allocator.free(items);
         const slots = try allocator.alloc(Worker, workers);
         errdefer allocator.free(slots);
+        // the wake is a level: one byte per pending completion, written
+        // without blocking so a backlog nobody collects can never stall a
+        // worker, and read without blocking so a missing byte is not waited on
         const wake = try platform.socketPair();
+        try platform.setNonBlocking(wake[0], true);
+        try platform.setNonBlocking(wake[1], true);
         pool.* = .{
             .allocator = allocator,
             .vm_allocator = vm_allocator,
@@ -287,8 +292,20 @@ const Pool = struct {
         return id;
     }
 
+    // a future awaited directly may take delivery between the task settling
+    // and this call; then the completion list and the wake must not see it,
+    // or the byte nobody reads accumulates until the socket buffer stalls
+    // every worker
     fn complete(pool: *Pool, task: *Task) void {
         pool.mutex.lock();
+        task.mutex.lock();
+        const delivered = task.delivered;
+        task.mutex.unlock();
+        if (delivered) {
+            pool.mutex.unlock();
+            task.release();
+            return;
+        }
         pool.completed.append(pool.allocator, task) catch {};
         pool.changed.broadcast();
         pool.mutex.unlock();

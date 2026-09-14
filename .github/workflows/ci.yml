@@ -170,6 +170,7 @@ jobs:
       - run: zig build -Doptimize=ReleaseFast
       - run: python3 ./tests/memory_soak
       - name: worker pool retention
+        timeout-minutes: 5
         run: ./zig-out/bin/zphp run tests/workers/memory.php
 
   php-compat:
