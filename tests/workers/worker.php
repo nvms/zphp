@@ -30,3 +30,10 @@ function slow_drain(Zphp\Channel $ch): int { $n = 0; foreach ($ch as $v) { uslee
 function forward(Zphp\Channel $in, Zphp\Channel $out): void { foreach ($in as $v) $out->send($v); $out->close(); }
 function bad_result(): Closure { return fn() => 1; }
 function produce_big(Zphp\Channel $out, int $n): void { for ($i = 0; $i < $n; $i++) $out->send(big(100)); }
+class Counter {
+    public function __construct(public int $base = 0) {}
+    public function bump(int $n): int { return $this->base + $n; }
+    private function secret(): string { return "secret " . $this->base; }
+}
+class Maker { public function __construct(private int $k) {} public function job(): Closure { return function (int $x) { return $x * $this->k; }; } }
+function helper(int $x): int { return $x * 3; }

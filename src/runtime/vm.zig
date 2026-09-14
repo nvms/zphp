@@ -534,6 +534,7 @@ pub const VM = struct {
     fiber_suspend_value: Value = .null,
     captures: std.ArrayListUnmanaged(CaptureEntry) = .{},
     capture_index: std.StringHashMapUnmanaged(CaptureRange) = .{},
+    interned_names: std.StringHashMapUnmanaged(void) = .{},
     cycle_closures: std.AutoArrayHashMapUnmanaged(*Value.String.Owner, i64) = .{},
     collecting_cycles: bool = false,
     closure_instance_count: u32 = 0,
@@ -2637,6 +2638,7 @@ pub const VM = struct {
         self.persistent_strings.deinit(self.allocator);
         self.captures.deinit(self.allocator);
         self.capture_index.deinit(self.allocator);
+        self.interned_names.deinit(self.allocator);
         self.free_closure_names.deinit(self.allocator);
         self.php_constants.deinit(self.allocator);
         self.user_constants.deinit(self.allocator);
@@ -2829,6 +2831,7 @@ pub const VM = struct {
         self.cycle_array_candidates.clearRetainingCapacity();
         self.captures.clearRetainingCapacity();
         self.capture_index.clearRetainingCapacity();
+        self.interned_names.clearRetainingCapacity();
         self.ob_stack.clearRetainingCapacity();
         self.request_vars.clearRetainingCapacity();
         self.response_code = 200;
@@ -13130,6 +13133,47 @@ pub const VM = struct {
             .owner = owner,
         });
         return .{ .string = .{ .ptr = name.ptr, .len = name.len, .owner = owner } };
+    }
+
+    // a closure instance for a function this vm knows, with captures given
+    // up front the way closure_use adds them one call at a time; a closure
+    // that arrived from another thread is rebuilt through here
+    pub fn bindClosureInstance(self: *VM, compile_name: []const u8, names: []const []const u8, values: []const Value) !Value {
+        const func = self.functions.get(compile_name) orelse return error.RuntimeError;
+        const instance = try self.newClosureInstance(compile_name, func);
+        const name = instance.string.bytes();
+        for (names, values) |var_name, val| {
+            const kept = try self.internName(var_name);
+            retainValue(val);
+            try self.captures.append(self.allocator, .{ .closure_name = name, .var_name = kept, .value = val });
+            self.capture_index.getPtr(name).?.len += 1;
+        }
+        return instance;
+    }
+
+    // request-lifetime bytes for a name that recurs across calls, kept once
+    pub fn internName(self: *VM, name: []const u8) ![]const u8 {
+        if (self.interned_names.getKey(name)) |kept| return kept;
+        const kept = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(kept);
+        try self.strings.append(self.allocator, kept);
+        try self.interned_names.put(self.allocator, kept, {});
+        return kept;
+    }
+
+    // a variable of the frame below the current one: what a native sees as
+    // its caller's scope. reference cells win, then the slot, then the map
+    pub fn callerVar(self: *VM, name: []const u8) ?Value {
+        if (self.frame_count < 2) return null;
+        const frame = &self.frames[self.frame_count - 2];
+        if (frame.ref_slots.get(name)) |cell| return cell.*;
+        const slot_names = if (frame.slot_names.len > 0) frame.slot_names else if (frame.func) |f| f.slot_names else self.global_slot_names;
+        for (slot_names, 0..) |sn, si| {
+            if (!std.mem.eql(u8, sn, name)) continue;
+            if (si < frame.locals.len and frame.locals[si] != .null) return frame.locals[si];
+            break;
+        }
+        return frame.vars.get(name);
     }
 
     pub fn retainClosureByName(self: *VM, name: []const u8) void {

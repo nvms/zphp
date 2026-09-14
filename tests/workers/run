@@ -19,7 +19,7 @@ check() {
     fi
 }
 
-for script in basic edge channel; do
+for script in basic edge channel closures; do
     actual="$("$ZPHP" run "$SCRIPT_DIR/$script.php" 2>&1 | tr -d '\r' | grep -v '^error(gpa)' | grep -v '^\s' | grep -v '^/')" || true
     check "$script.php" "$(tr -d '\r' < "$SCRIPT_DIR/$script.expected")" "$actual"
 done

@@ -20,6 +20,9 @@ const network = @import("network.zig");
 const platform = @import("../platform.zig");
 const extension = @import("../extension.zig");
 const channel = @import("channel.zig");
+const bytecode_format = @import("../bytecode_format.zig");
+const CompileResult = @import("../pipeline/compiler.zig").CompileResult;
+const ObjFunction = @import("../pipeline/bytecode.zig").ObjFunction;
 
 const pool_class = "Zphp\\Pool";
 const future_class = "Zphp\\Future";
@@ -57,10 +60,26 @@ const Failure = struct {
     line: i64,
 };
 
+// a closure crossing threads: its compiled function, with every closure it
+// creates, as bytecode the receiving vm loads once per compile name, plus
+// its captures as a payload
+const ClosureTransfer = struct {
+    compile_name: []u8,
+    // owned by the pool's closure_code cache, which outlives every task
+    code: []const u8,
+    captures: Payload,
+
+    fn free(t: ClosureTransfer, a: std.mem.Allocator) void {
+        a.free(t.compile_name);
+        t.captures.free(a);
+    }
+};
+
 const Task = struct {
     id: u64,
     pool: *Pool,
     callable: []u8,
+    closure: ?ClosureTransfer = null,
     args: Payload,
     state: TaskState = .queued,
     result: ?Payload = null,
@@ -82,6 +101,7 @@ const Task = struct {
         const pool = t.pool;
         const a = pool.allocator;
         a.free(t.callable);
+        if (t.closure) |c| c.free(a);
         t.args.free(a);
         if (t.result) |r| r.free(a);
         if (t.failure) |f| {
@@ -194,6 +214,20 @@ const Worker = struct {
     pool: *Pool,
     index: usize,
     thread: ?std.Thread = null,
+    // closure code this worker's vm has loaded, by compile name
+    loaded: std.StringHashMapUnmanaged(*CompileResult) = .{},
+
+    // after the vm is gone: nothing references the chunks any more
+    fn freeLoaded(w: *Worker) void {
+        const a = w.pool.allocator;
+        var it = w.loaded.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.*.deinit();
+            a.destroy(entry.value_ptr.*);
+            a.free(entry.key_ptr.*);
+        }
+        w.loaded.deinit(a);
+    }
 };
 
 const StartState = enum { starting, running, failed };
@@ -216,6 +250,8 @@ const Pool = struct {
     next_id: u64 = 1,
     wake: [2]std.posix.socket_t,
     readiness: ?*PhpObject = null,
+    // serialized closure code by compile name, built on first submit
+    closure_code: std.StringHashMapUnmanaged([]u8) = .{},
     // the php object plus every live task hold the pool; a future can outlive
     // the pool that made it
     refs: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
@@ -413,6 +449,12 @@ const Pool = struct {
     }
 
     fn free(pool: *Pool) void {
+        var codes = pool.closure_code.iterator();
+        while (codes.next()) |entry| {
+            pool.allocator.free(entry.key_ptr.*);
+            pool.allocator.free(entry.value_ptr.*);
+        }
+        pool.closure_code.deinit(pool.allocator);
         pool.completed.deinit(pool.allocator);
         if (pool.readiness == null) platform.closeSocket(platform.socketToInt(pool.wake[0]));
         platform.closeSocket(platform.socketToInt(pool.wake[1]));
@@ -446,6 +488,7 @@ fn workerMain(w: *Worker) void {
         r.deinit();
         pool.allocator.destroy(r);
     };
+    defer w.freeLoaded();
     defer {
         vm.deinit();
         pool.allocator.destroy(vm);
@@ -456,7 +499,7 @@ fn workerMain(w: *Worker) void {
         boot_result = bootstrap(vm, pool, path) orelse return;
     }
     pool.reportStart(null);
-    while (pool.queue.pop()) |task| runTask(vm, task);
+    while (pool.queue.pop()) |task| runTask(w, vm, task);
 }
 
 fn bootstrap(vm: *VM, pool: *Pool, path: []const u8) ?*@import("../pipeline/compiler.zig").CompileResult {
@@ -499,7 +542,7 @@ fn flushOutput(vm: *VM) void {
     vm.output.clearRetainingCapacity();
 }
 
-fn runTask(vm: *VM, task: *Task) void {
+fn runTask(w: *Worker, vm: *VM, task: *Task) void {
     const pool = task.pool;
     task.mutex.lock();
     if (task.state == .cancelled) {
@@ -517,7 +560,7 @@ fn runTask(vm: *VM, task: *Task) void {
     defer current_task = null;
     extension.beginRequest(vm) catch {};
     var ctx = vm.makeContext(task_class);
-    execute(&ctx, task);
+    execute(&ctx, w, task);
     extension.endRequest(vm);
     vm.pending_exception = null;
     vm.error_msg = null;
@@ -530,8 +573,14 @@ fn runTask(vm: *VM, task: *Task) void {
     pool.complete(task);
 }
 
-fn execute(ctx: *NativeContext, task: *Task) void {
-    const callable = hold(serialize.unserializeFromString(ctx, task.callable) orelse return settleFatal(task, "the callable did not transfer"));
+fn execute(ctx: *NativeContext, w: *Worker, task: *Task) void {
+    const callable: Value = if (task.closure) |*transfer|
+        materializeClosure(ctx, w, transfer) catch {
+            settleFailure(ctx.vm, task, .null);
+            return;
+        }
+    else
+        hold(serialize.unserializeFromString(ctx, task.callable) orelse return settleFatal(task, "the callable did not transfer"));
     const args_payload = task.args;
     task.args = Payload.empty;
     const args_value = hold(unpack(ctx, args_payload, task.pool.allocator) orelse return settleFatal(task, "the arguments did not transfer"));
@@ -730,6 +779,154 @@ pub fn unpack(ctx: *NativeContext, payload: Payload, allocator: std.mem.Allocato
 }
 
 // ---------------------------------------------------------------------------
+// closures: the function travels as bytecode, the captures as values
+
+fn isCompileName(name: []const u8) bool {
+    if (!std.mem.startsWith(u8, name, "__closure_")) return false;
+    const rest = name["__closure_".len..];
+    if (rest.len == 0) return false;
+    for (rest) |c| if (c < '0' or c > '9') return false;
+    return true;
+}
+
+// every closure function the body can create, transitively, by the compile
+// names its chunks hold as constants
+fn collectClosureFunctions(ctx: *NativeContext, root: *const ObjFunction, out: *std.ArrayListUnmanaged(ObjFunction)) RuntimeError!void {
+    var seen: std.StringHashMapUnmanaged(void) = .{};
+    defer seen.deinit(ctx.allocator);
+    var queue: std.ArrayListUnmanaged(*const ObjFunction) = .{};
+    defer queue.deinit(ctx.allocator);
+    try queue.append(ctx.allocator, root);
+    try seen.put(ctx.allocator, root.name, {});
+    while (queue.items.len > 0) {
+        const func = queue.pop().?;
+        try out.append(ctx.allocator, func.*);
+        for (func.chunk.constants.items) |constant| {
+            if (constant != .string) continue;
+            const name = constant.string.bytes();
+            if (!isCompileName(name) or seen.contains(name)) continue;
+            const nested = ctx.vm.functions.get(name) orelse continue;
+            try seen.put(ctx.allocator, name, {});
+            try queue.append(ctx.allocator, nested);
+        }
+    }
+}
+
+fn serializeClosureCode(ctx: *NativeContext, func: *const ObjFunction, allocator: std.mem.Allocator) RuntimeError![]u8 {
+    const origin = ctx.vm.chunk_to_result.get(@intFromPtr(&func.chunk)) orelse return throwNamed(ctx, transfer_exception, "the closure has no compiled unit to travel with (at callable)", .{});
+    var functions: std.ArrayListUnmanaged(ObjFunction) = .{};
+    defer functions.deinit(ctx.allocator);
+    try collectClosureFunctions(ctx, func, &functions);
+    var unit = CompileResult{
+        .chunk = .{},
+        .functions = functions,
+        .string_allocs = .{},
+        .allocator = ctx.allocator,
+        .new_defaults = origin.new_defaults,
+        .deferred_exprs = origin.deferred_exprs,
+        .source = origin.source,
+        .file_path = origin.file_path,
+        .strict_types = origin.strict_types,
+    };
+    defer unit.type_hints.deinit(ctx.allocator);
+    defer unit.function_attrs.deinit(ctx.allocator);
+    for (functions.items) |f| {
+        for (origin.type_hints.items) |th| if (std.mem.eql(u8, th.name, f.name)) try unit.type_hints.append(ctx.allocator, th);
+        for (origin.function_attrs.items) |fa| if (std.mem.eql(u8, fa.name, f.name)) try unit.function_attrs.append(ctx.allocator, fa);
+    }
+    const bytes = bytecode_format.serialize(ctx.allocator, &unit) catch return throwNamed(ctx, transfer_exception, "the closure could not be serialized (at callable)", .{});
+    defer ctx.allocator.free(bytes);
+    return allocator.dupe(u8, bytes);
+}
+
+fn closureCode(ctx: *NativeContext, pool: *Pool, func: *const ObjFunction) RuntimeError![]const u8 {
+    pool.mutex.lock();
+    const cached = pool.closure_code.get(func.name);
+    pool.mutex.unlock();
+    if (cached) |code| return code;
+    const code = try serializeClosureCode(ctx, func, pool.allocator);
+    errdefer pool.allocator.free(code);
+    const key = try pool.allocator.dupe(u8, func.name);
+    errdefer pool.allocator.free(key);
+    pool.mutex.lock();
+    defer pool.mutex.unlock();
+    try pool.closure_code.put(pool.allocator, key, code);
+    return code;
+}
+
+fn arrayHasKey(arr: *PhpArray, key: []const u8) bool {
+    return arr.get(.{ .string = Value.String.borrowed(key) }) != .null;
+}
+
+// the captures as a php array keyed by variable name: use variables, $this,
+// the scope markers, and for an arrow function the caller's variables its
+// body names, since the vm resolves those at call time from a frame that
+// will not exist on the other thread
+fn captureArray(ctx: *NativeContext, instance: []const u8, func: *const ObjFunction) RuntimeError!*PhpArray {
+    const arr = try ctx.createArray();
+    VM.arrayRetain(arr);
+    errdefer ctx.vm.releaseValue(.{ .array = arr });
+    if (ctx.vm.getCaptureRange(instance)) |range| {
+        if (range.has_refs) return throwNamed(ctx, transfer_exception, "a closure capturing by reference cannot be transferred between threads (at callable)", .{});
+        for (ctx.vm.captures.items[range.start .. range.start + range.len]) |cap| {
+            try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(cap.var_name) }, cap.value);
+        }
+    }
+    if (func.is_arrow) {
+        for (func.slot_names) |name| {
+            var is_param = false;
+            for (func.params) |p| if (std.mem.eql(u8, p, name)) {
+                is_param = true;
+            };
+            if (is_param or arrayHasKey(arr, name)) continue;
+            const v = ctx.vm.callerVar(name) orelse continue;
+            try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(name) }, v);
+        }
+    }
+    return arr;
+}
+
+fn packClosure(ctx: *NativeContext, pool: *Pool, instance: []const u8) RuntimeError!ClosureTransfer {
+    const func = ctx.vm.functions.get(instance) orelse return throwNamed(ctx, transfer_exception, "the closure is not callable (at callable)", .{});
+    const code = try closureCode(ctx, pool, func);
+    const arr = try captureArray(ctx, instance, func);
+    defer ctx.vm.releaseValue(.{ .array = arr });
+    const captures = try pack(ctx, .{ .array = arr }, "closure", pool.allocator);
+    errdefer captures.free(pool.allocator);
+    const compile_name = try pool.allocator.dupe(u8, func.name);
+    return .{ .compile_name = compile_name, .code = code, .captures = captures };
+}
+
+// loads the code once per worker, then binds a fresh instance with the
+// captures; the instance carries one reference the caller releases
+fn materializeClosure(ctx: *NativeContext, w: *Worker, transfer: *ClosureTransfer) RuntimeError!Value {
+    const pool = w.pool;
+    if (!w.loaded.contains(transfer.compile_name)) {
+        const result = try pool.allocator.create(CompileResult);
+        errdefer pool.allocator.destroy(result);
+        result.* = bytecode_format.deserialize(pool.allocator, transfer.code) catch return throwNamed(ctx, transfer_exception, "the closure code did not load in the worker", .{});
+        errdefer result.deinit();
+        try ctx.vm.registerResultFunctions(result);
+        try w.loaded.put(pool.allocator, try pool.allocator.dupe(u8, transfer.compile_name), result);
+    }
+    const payload = transfer.captures;
+    transfer.captures = Payload.empty;
+    const caps = hold(unpack(ctx, payload, pool.allocator) orelse return throwNamed(ctx, transfer_exception, "the closure captures did not transfer", .{}));
+    defer ctx.vm.releaseValue(caps);
+    if (caps != .array) return throwNamed(ctx, transfer_exception, "the closure captures did not transfer", .{});
+    var names: std.ArrayListUnmanaged([]const u8) = .{};
+    defer names.deinit(ctx.allocator);
+    var values: std.ArrayListUnmanaged(Value) = .{};
+    defer values.deinit(ctx.allocator);
+    for (caps.array.entries.items) |entry| {
+        if (entry.key != .string) continue;
+        try names.append(ctx.allocator, entry.key.string.bytes());
+        try values.append(ctx.allocator, if (entry.ref) |cell| cell.* else entry.value);
+    }
+    return ctx.vm.bindClosureInstance(transfer.compile_name, names.items, values.items) catch return throwNamed(ctx, transfer_exception, "the closure could not be bound in the worker", .{});
+}
+
+// ---------------------------------------------------------------------------
 // php surface
 
 fn getThis(ctx: *NativeContext) ?*PhpObject {
@@ -802,12 +999,13 @@ fn submitTask(ctx: *NativeContext, args: []const Value, block: bool) RuntimeErro
     flushOutput(ctx.vm);
     if (args.len < 1) return throwNamed(ctx, pool_exception, "submit() needs a callable", .{});
     const callable = args[0];
-    const valid = switch (callable) {
-        .string => |s| !std.mem.startsWith(u8, s.bytes(), "__closure"),
+    const is_closure = callable == .string and std.mem.startsWith(u8, callable.string.bytes(), "__closure_");
+    const valid = is_closure or switch (callable) {
+        .string => true,
         .array => |arr| arr.entries.items.len == 2 and arr.entries.items[0].value == .string and arr.entries.items[1].value == .string,
         else => false,
     };
-    if (!valid) return throwNamed(ctx, transfer_exception, "tasks are named callables: a function name, 'Class::method', or [class, method]", .{});
+    if (!valid) return throwNamed(ctx, transfer_exception, "tasks are closures or named callables: a function name, 'Class::method', or [class, method]", .{});
     const task_args: Value = if (args.len >= 2) args[1] else .{ .array = try ctx.createArray() };
     if (task_args != .array) return throwNamed(ctx, pool_exception, "arguments must be an array", .{});
     const packed_args = try pack(ctx, task_args, "args", pool.allocator);
@@ -822,23 +1020,22 @@ fn submitTask(ctx: *NativeContext, args: []const Value, block: bool) RuntimeErro
     task.* = .{ .id = pool.nextId(), .pool = pool, .callable = &.{}, .args = packed_args };
     pool.retain();
     errdefer pool.release();
-    task.callable = try serializedCopy(ctx, callable, pool.allocator);
+    if (is_closure) {
+        task.closure = try packClosure(ctx, pool, callable.string.bytes());
+    } else {
+        task.callable = try serializedCopy(ctx, callable, pool.allocator);
+    }
     errdefer pool.allocator.free(task.callable);
+    errdefer if (task.closure) |c| c.free(pool.allocator);
 
     switch (pool.queue.push(task, block)) {
         .ok => {},
         .full => {
-            pool.allocator.free(task.callable);
-            packed_args.free(pool.allocator);
-            pool.allocator.destroy(task);
-            pool.release();
+            discardTask(task);
             return NativeResult.scalar(.null);
         },
         .closed => {
-            pool.allocator.free(task.callable);
-            packed_args.free(pool.allocator);
-            pool.allocator.destroy(task);
-            pool.release();
+            discardTask(task);
             return throwNamed(ctx, pool_exception, "the pool is shutting down", .{});
         },
     }
@@ -846,6 +1043,16 @@ fn submitTask(ctx: *NativeContext, args: []const Value, block: bool) RuntimeErro
     future.native = .{ .kind = .future, .ptr = @intFromPtr(task) };
     task.future = future;
     return NativeResult.borrowed(.{ .object = future });
+}
+
+// a task the queue refused, never seen by a worker or a future
+fn discardTask(task: *Task) void {
+    const pool = task.pool;
+    pool.allocator.free(task.callable);
+    if (task.closure) |c| c.free(pool.allocator);
+    task.args.free(pool.allocator);
+    pool.allocator.destroy(task);
+    pool.release();
 }
 
 fn poolSubmit(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

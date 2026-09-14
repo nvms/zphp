@@ -1,0 +1,16 @@
+int(42)
+int(104)
+bool(true)
+string(14) "15 / secret 10"
+int(44)
+array(3) {
+}
+int(8575)
+DomainException: inside 3
+coerced
+refused: a closure capturing by reference cannot be transferred between threads (at callable)
+result: a Closure cannot be transferred between threads (at result)
+capture: an object backed by a native handle cannot be transferred between threads (at closure[$pdo])
+args: a Closure cannot be transferred between threads (at args[0])
+int(42)
+end

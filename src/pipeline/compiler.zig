@@ -17,14 +17,25 @@ const compiler_class = @import("compiler_class.zig");
 const Allocator = std.mem.Allocator;
 const Error = Allocator.Error || error{CompileError};
 
-var global_closure_counter: u32 = 0;
+// closure and anonymous class names carry a process-wide id: worker threads
+// compile their own scripts and receive closures compiled on other threads,
+// so two compile units must never mint the same name
+var next_closure_id = std.atomic.Value(u32).init(0);
 
 pub fn closureCounter() u32 {
-    return global_closure_counter;
+    return next_closure_id.load(.monotonic);
 }
 
+// raises the counter past ids baked into loaded bytecode; never lowers it
 pub fn setClosureCounter(value: u32) void {
-    global_closure_counter = value;
+    var current = next_closure_id.load(.monotonic);
+    while (value > current) {
+        current = next_closure_id.cmpxchgWeak(current, value, .monotonic, .monotonic) orelse return;
+    }
+}
+
+pub fn allocClosureId() u32 {
+    return next_closure_id.fetchAdd(1, .monotonic);
 }
 
 pub const TypeHint = struct {
@@ -112,7 +123,10 @@ pub fn compileWithPath(ast: *const Ast, allocator: Allocator, file_path: []const
         .break_jumps = .{},
         .continue_jumps = .{},
         .file_path = file_path,
-        .closure_count = global_closure_counter,
+        // seeds the closures-so-far heuristic behind the locals-only frame
+        // fast path exactly as the old process counter did; names come from
+        // allocClosureId
+        .closure_count = closureCounter(),
     };
     errdefer {
         c.chunk.deinit(allocator);
@@ -166,7 +180,6 @@ pub fn compileWithPath(ast: *const Ast, allocator: Allocator, file_path: []const
     const slot_names = try c.buildSlotNames();
     const local_count = c.next_slot;
     c.local_slots.deinit(allocator);
-    global_closure_counter = c.closure_count;
     const strict = detectStrictTypes(ast.source);
     for (c.functions.items) |*f| f.strict_types = strict;
     return .{ .chunk = c.chunk, .functions = c.functions, .string_allocs = c.string_allocs, .allocator = allocator, .local_count = local_count, .slot_names = slot_names, .type_hints = c.type_hints, .function_attrs = c.function_attrs, .new_defaults = c.new_defaults, .deferred_exprs = c.deferred_exprs, .source = ast.source, .file_path = file_path, .strict_types = strict };

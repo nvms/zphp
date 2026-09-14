@@ -113,7 +113,19 @@ foreach ($futures as $future) {
 $pool->shutdown();
 ```
 
-A task is a named callable: a function name, `'Class::method'`, or `[$class, $method]`, defined by the bootstrap or built in. Arguments and results are copied between interpreters, so they must be null, bool, int, float, string, arrays of those, or objects of classes both sides define. Closures, generators, and handle-backed objects such as PDO connections are refused when submitted, with the offending path in the message.
+A task is a closure or a named callable: a function name, `'Class::method'`, or `[$class, $method]`, defined by the bootstrap or built in. Arguments and results are copied between interpreters, so they must be null, bool, int, float, string, arrays of those, or objects of classes both sides define. Generators and handle-backed objects such as PDO connections are refused when submitted, with the offending path in the message.
+
+A closure travels as its compiled code plus its captures: `use` variables, the variables an arrow function reads from the submitting scope, and `$this` when it has one. Each worker loads the code once and runs every later submit of the same closure against it. Captures follow the transfer rules above, and a closure that captures by reference is refused, since nothing can be shared between threads.
+
+```php
+$scale = 0.5;
+$thumbnails = [];
+foreach ($paths as $path) {
+    $thumbnails[] = $pool->submit(function (string $path) use ($scale) {
+        return resize($path, $scale);
+    }, [$path]);
+}
+```
 
 `await()` returns the result, or rethrows the task's exception as the same class when the caller has it. A queued task can be cancelled; a running one sees `Zphp\Task::cancelled()` and stops when it chooses, since nothing is ever killed. The queue is bounded: `submit()` blocks when it is full and `trySubmit()` returns null instead. `collect()` hands back completed futures in completion order, and `readiness()` is a stream that becomes readable when one is waiting, for use with `stream_select()`. `shutdown()` stops accepting work, cancels what is queued, and waits for running tasks; the pool's destructor does the same.
 
@@ -154,7 +166,6 @@ function resize_images(Zphp\Channel $jobs, Zphp\Channel $results): void
 
 `send()` blocks while the channel is full and `recv()` blocks while it is empty; both take an optional timeout in seconds and throw `Zphp\TimeoutException` when it passes. `trySend()` returns false instead of waiting. `close()` lets buffered values drain and then ends every `foreach`, while `send()` and `recv()` on a closed channel throw `Zphp\ChannelException`. Values follow the same transfer rules as task arguments, and a channel can carry other channels. A channel stays alive while any thread holds it or a value in flight names it.
 
-Submitting closures is planned.
 
 ## Related projects
 

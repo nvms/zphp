@@ -1,4 +1,5 @@
 const std = @import("std");
+const compiler = @import("compiler.zig");
 const Compiler = @import("compiler.zig").Compiler;
 const TypeHint = @import("compiler.zig").TypeHint;
 const FunctionAttrEntry = @import("compiler.zig").FunctionAttrEntry;
@@ -891,7 +892,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
-    const id = self.closure_count;
+    const id = compiler.allocClosureId();
     self.closure_count += 1;
 
     var name_buf: [32]u8 = undefined;
@@ -1899,7 +1900,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
-    const anon_name = try std.fmt.allocPrint(self.allocator, "class@anonymous_{d}", .{self.closure_count});
+    const anon_name = try std.fmt.allocPrint(self.allocator, "class@anonymous_{d}", .{compiler.allocClosureId()});
     try self.string_allocs.append(self.allocator, anon_name);
     self.closure_count += 1;
 

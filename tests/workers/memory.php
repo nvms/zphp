@@ -19,6 +19,8 @@ for ($batch = 0; $batch < 10; $batch++) {
     $f->await();
 }
 for ($i = 0; $i < 2000; $i++) { $carrier = new Zphp\Channel(1); $carrier->send(['inner' => new Zphp\Channel(1)]); $carrier->recv()['inner']->trySend("x"); }
+$scale = 3;
+for ($i = 0; $i < 3000; $i++) { $pool->submit(function (int $n) use ($scale) { return big($n * $scale); }, [30])->await(); }
 $growth = memory_get_usage() - $before;
 echo $growth < 16 * 1024 * 1024 ? "memory bounded\n" : "memory grew by $growth\n";
 exit($growth < 16 * 1024 * 1024 ? 0 : 1);

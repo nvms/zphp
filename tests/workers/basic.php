@@ -7,7 +7,7 @@ var_dump($pool->submit('Jobs::sum', [[1, 2, 3]])->await());
 var_dump($pool->submit(['Jobs', 'sum'], [[4, 5]])->await());
 try { $pool->submit('boom', ['bad input'])->await(); } catch (InvalidArgumentException $e) { echo get_class($e), ": ", $e->getMessage(), " ", $e->getCode(), "\n"; }
 try { $pool->submit('missing_fn')->await(); } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
-try { $pool->submit(fn() => 1); } catch (Zphp\TransferException $e) { echo "transfer: ", $e->getMessage(), "\n"; }
+var_dump($pool->submit(fn() => 1)->await());
 try { $pool->submit('square', [new PDO('sqlite::memory:')]); } catch (Zphp\TransferException $e) { echo "transfer: ", $e->getMessage(), "\n"; }
 $futures = [];
 for ($i = 0; $i < 20; $i++) $futures[] = $pool->submit('square', [$i]);
