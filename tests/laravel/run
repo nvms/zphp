@@ -30,18 +30,24 @@ errors=""
 
 for f in "$SCRIPT_DIR"/harness/test-*.php; do
     name="$(basename "$f" .php)"
+    php_start=$SECONDS
     php_out="$(php -d error_reporting=E_ALL\&~E_DEPRECATED\&~E_WARNING "$f" 2>&1)" && php_exit=0 || php_exit=$?
+    php_secs=$((SECONDS - php_start))
+    # a Debug build of the blade harness takes about 110s on the ci runner,
+    # so the limit only has to catch a hang, not pace the slowest test
     TIMEOUT_CMD=""
     if command -v timeout &>/dev/null; then
-        TIMEOUT_CMD="timeout 120"
+        TIMEOUT_CMD="timeout 300"
     elif command -v gtimeout &>/dev/null; then
-        TIMEOUT_CMD="gtimeout 120"
+        TIMEOUT_CMD="gtimeout 300"
     fi
+    zphp_start=$SECONDS
     zphp_out="$($TIMEOUT_CMD "$ZPHP" run "$f" 2>&1)" && zphp_exit=0 || zphp_exit=$?
+    zphp_secs=$((SECONDS - zphp_start))
 
     if [ "$php_exit" -eq 0 ] && [ "$zphp_exit" -eq 0 ] && [ "$php_out" = "$zphp_out" ]; then
         passed=$((passed + 1))
-        echo "  pass  $name"
+        echo "  pass  $name (php ${php_secs}s, zphp ${zphp_secs}s)"
     else
         failed=$((failed + 1))
         if [ $php_exit -ne 0 ]; then
