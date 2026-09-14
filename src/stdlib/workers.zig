@@ -3,6 +3,7 @@
 // Zphp\Future carries the result or the exception back. values cross as
 // serialized bytes and are materialized in the receiving VM
 const std = @import("std");
+const builtin = @import("builtin");
 const value_mod = @import("../runtime/value.zig");
 const Value = value_mod.Value;
 const PhpObject = value_mod.PhpObject;
@@ -18,6 +19,7 @@ const serialize = @import("serialize.zig");
 const network = @import("network.zig");
 const platform = @import("../platform.zig");
 const extension = @import("../extension.zig");
+const channel = @import("channel.zig");
 
 const pool_class = "Zphp\\Pool";
 const future_class = "Zphp\\Future";
@@ -29,6 +31,16 @@ const timeout_exception = "Zphp\\TimeoutException";
 const transfer_exception = "Zphp\\TransferException";
 
 const default_queue: usize = 1024;
+
+// memory that one thread allocates and another frees. the release build's
+// smp_allocator keeps a freelist per thread and reclaims another thread's
+// list only when its own runs dry, so a producer that allocates on one
+// thread for a consumer that frees on another keeps mapping fresh slabs;
+// libc malloc balances that. the Debug build keeps its leak-checking
+// allocator for everything
+pub fn transferAllocator(vm_allocator: std.mem.Allocator) std.mem.Allocator {
+    return if (builtin.mode == .Debug) vm_allocator else std.heap.c_allocator;
+}
 
 // ---------------------------------------------------------------------------
 // tasks
@@ -47,9 +59,9 @@ const Task = struct {
     id: u64,
     pool: *Pool,
     callable: []u8,
-    args: []u8,
+    args: Payload,
     state: TaskState = .queued,
-    result: ?[]u8 = null,
+    result: ?Payload = null,
     failure: ?Failure = null,
     fatal: ?[]u8 = null,
     cancel_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -68,8 +80,8 @@ const Task = struct {
         const pool = t.pool;
         const a = pool.allocator;
         a.free(t.callable);
-        a.free(t.args);
-        if (t.result) |r| a.free(r);
+        t.args.free(a);
+        if (t.result) |r| r.free(a);
         if (t.failure) |f| {
             a.free(f.class_name);
             a.free(f.message);
@@ -186,6 +198,8 @@ const StartState = enum { starting, running, failed };
 
 const Pool = struct {
     allocator: std.mem.Allocator,
+    // the worker VMs allocate and free on their own thread
+    vm_allocator: std.mem.Allocator,
     owner: *VM,
     workers: []Worker,
     queue: Queue,
@@ -214,7 +228,8 @@ const Pool = struct {
         if (pool.refs.fetchSub(1, .acq_rel) == 1) pool.free();
     }
 
-    fn create(allocator: std.mem.Allocator, owner: *VM, workers: usize, bootstrap_path: ?[]const u8, queue_size: usize) !*Pool {
+    fn create(vm_allocator: std.mem.Allocator, owner: *VM, workers: usize, bootstrap_path: ?[]const u8, queue_size: usize) !*Pool {
+        const allocator = transferAllocator(vm_allocator);
         const pool = try allocator.create(Pool);
         errdefer allocator.destroy(pool);
         const items = try allocator.alloc(*Task, queue_size);
@@ -224,6 +239,7 @@ const Pool = struct {
         const wake = try platform.socketPair();
         pool.* = .{
             .allocator = allocator,
+            .vm_allocator = vm_allocator,
             .owner = owner,
             .workers = slots,
             .queue = .{ .items = items },
@@ -405,18 +421,18 @@ fn markCancelled(task: *Task) void {
 fn workerMain(w: *Worker) void {
     const pool = w.pool;
     current_worker = @intCast(w.index);
-    const vm = VM.initOnHeap(pool.allocator) catch {
+    const vm = VM.initOnHeap(pool.vm_allocator) catch {
         pool.reportStart("worker: out of memory");
         return;
     };
     var boot_result: ?*@import("../pipeline/compiler.zig").CompileResult = null;
     defer if (boot_result) |r| {
         r.deinit();
-        pool.allocator.destroy(r);
+        pool.vm_allocator.destroy(r);
     };
     defer {
         vm.deinit();
-        pool.allocator.destroy(vm);
+        pool.vm_allocator.destroy(vm);
     }
     vm.file_loader = pool.file_loader;
     vm.installHooks();
@@ -443,7 +459,7 @@ fn bootstrap(vm: *VM, pool: *Pool, path: []const u8) ?*@import("../pipeline/comp
         flushOutput(vm);
         pool.reportStart(msg);
         result.deinit();
-        pool.allocator.destroy(result);
+        pool.vm_allocator.destroy(result);
         return null;
     };
     flushOutput(vm);
@@ -500,7 +516,9 @@ fn runTask(vm: *VM, task: *Task) void {
 
 fn execute(ctx: *NativeContext, task: *Task) void {
     const callable = hold(serialize.unserializeFromString(ctx, task.callable) orelse return settleFatal(task, "the callable did not transfer"));
-    const args_value = hold(serialize.unserializeFromString(ctx, task.args) orelse return settleFatal(task, "the arguments did not transfer"));
+    const args_payload = task.args;
+    task.args = Payload.empty;
+    const args_value = hold(unpack(ctx, args_payload, task.pool.allocator) orelse return settleFatal(task, "the arguments did not transfer"));
     var args: [64]Value = undefined;
     var count: usize = 0;
     if (args_value == .array) {
@@ -520,15 +538,13 @@ fn execute(ctx: *NativeContext, task: *Task) void {
     // native result: strings need one more retain, containers are ours
     const owned = NativeResult.share(result).value;
     defer ctx.vm.releaseValue(owned);
-    const bytes = serialize.serializeToString(ctx, result) catch {
-        settleFatal(task, "the result could not be transferred back");
+    const payload = pack(ctx, result, "result", task.pool.allocator) catch {
+        settleFailure(ctx.vm, task, callable);
         return;
     };
-    defer bytes.value.string.release();
-    const copy = task.pool.allocator.dupe(u8, bytes.value.string.bytes()) catch return settleFatal(task, "out of memory");
     task.mutex.lock();
     defer task.mutex.unlock();
-    task.result = copy;
+    task.result = payload;
     task.state = .done;
     task.finished.broadcast();
 }
@@ -604,14 +620,31 @@ fn settleFailure(vm: *VM, task: *Task, callable: Value) void {
 }
 
 // ---------------------------------------------------------------------------
-// transfer rules, checked in the caller so the error names the path
+// transfer: a value crosses threads as serialized bytes plus a reference to
+// every channel inside it, so a channel that only the bytes name stays alive
+// until the receiver has bound its own wrapper
 
+pub const Payload = struct {
+    bytes: []u8,
+    channels: []*channel.Channel,
+
+    pub const empty = Payload{ .bytes = &.{}, .channels = &.{} };
+
+    pub fn free(p: Payload, a: std.mem.Allocator) void {
+        for (p.channels) |ch| ch.release();
+        a.free(p.channels);
+        a.free(p.bytes);
+    }
+};
+
+// the transfer rules are checked in the sender so the error names the path
 const TransferCheck = struct {
     ctx: *NativeContext,
     path: std.ArrayListUnmanaged(u8) = .{},
+    channels: std.ArrayListUnmanaged(*channel.Channel) = .{},
 
     fn refuse(self: *TransferCheck, what: []const u8) RuntimeError {
-        const msg = try std.fmt.allocPrint(self.ctx.allocator, "{s} cannot be transferred to a worker (at {s})", .{ what, self.path.items });
+        const msg = try std.fmt.allocPrint(self.ctx.allocator, "{s} cannot be transferred between threads (at {s})", .{ what, self.path.items });
         try self.ctx.vm.strings.append(self.ctx.allocator, msg);
         try self.ctx.vm.setPendingException(transfer_exception, msg);
         return error.RuntimeError;
@@ -635,6 +668,7 @@ const TransferCheck = struct {
                 }
             },
             .object => |obj| {
+                if (obj.native.get(channel.Channel, .channel)) |ch| return self.channels.append(self.ctx.allocator, ch);
                 if (obj.native.kind != .none) return self.refuse("an object backed by a native handle");
                 if (std.mem.eql(u8, obj.class_name, pool_class) or std.mem.eql(u8, obj.class_name, future_class)) return self.refuse("a pool or future");
                 const mark = self.path.items.len;
@@ -653,17 +687,30 @@ const TransferCheck = struct {
     }
 };
 
-fn checkTransferable(ctx: *NativeContext, v: Value, root: []const u8) RuntimeError!void {
-    var tc = TransferCheck{ .ctx = ctx };
-    defer tc.path.deinit(ctx.allocator);
-    try tc.path.appendSlice(ctx.allocator, root);
-    try tc.check(v);
-}
-
 fn serializedCopy(ctx: *NativeContext, v: Value, allocator: std.mem.Allocator) RuntimeError![]u8 {
     const bytes = try serialize.serializeToString(ctx, v);
     defer bytes.value.string.release();
     return allocator.dupe(u8, bytes.value.string.bytes());
+}
+
+pub fn pack(ctx: *NativeContext, v: Value, root: []const u8, allocator: std.mem.Allocator) RuntimeError!Payload {
+    var tc = TransferCheck{ .ctx = ctx };
+    defer tc.path.deinit(ctx.allocator);
+    defer tc.channels.deinit(ctx.allocator);
+    try tc.path.appendSlice(ctx.allocator, root);
+    try tc.check(v);
+    const bytes = try serializedCopy(ctx, v, allocator);
+    errdefer allocator.free(bytes);
+    const channels = try allocator.dupe(*channel.Channel, tc.channels.items);
+    for (channels) |ch| ch.retain();
+    return .{ .bytes = bytes, .channels = channels };
+}
+
+// materializes the value in this vm and drops the payload; the wrappers the
+// unserializer bound hold their own channel references
+pub fn unpack(ctx: *NativeContext, payload: Payload, allocator: std.mem.Allocator) ?Value {
+    defer payload.free(allocator);
+    return serialize.unserializeFromString(ctx, payload.bytes);
 }
 
 // ---------------------------------------------------------------------------
@@ -692,7 +739,7 @@ fn taskOf(obj: *PhpObject) ?*Task {
     return obj.native.get(Task, .future);
 }
 
-fn optionalSeconds(v: Value) ?u64 {
+pub fn optionalSeconds(v: Value) ?u64 {
     return switch (v) {
         .int => |i| if (i < 0) null else @as(u64, @intCast(i)) * std.time.ns_per_s,
         .float => |f| if (f < 0) null else @as(u64, @intFromFloat(f * @as(f64, @floatFromInt(std.time.ns_per_s)))),
@@ -747,7 +794,8 @@ fn submitTask(ctx: *NativeContext, args: []const Value, block: bool) RuntimeErro
     if (!valid) return throwNamed(ctx, transfer_exception, "tasks are named callables: a function name, 'Class::method', or [class, method]", .{});
     const task_args: Value = if (args.len >= 2) args[1] else .{ .array = try ctx.createArray() };
     if (task_args != .array) return throwNamed(ctx, pool_exception, "arguments must be an array", .{});
-    try checkTransferable(ctx, task_args, "args");
+    const packed_args = try pack(ctx, task_args, "args", pool.allocator);
+    errdefer packed_args.free(pool.allocator);
     pool.mutex.lock();
     const closed = pool.shutting_down;
     pool.mutex.unlock();
@@ -755,26 +803,24 @@ fn submitTask(ctx: *NativeContext, args: []const Value, block: bool) RuntimeErro
 
     const task = try pool.allocator.create(Task);
     errdefer pool.allocator.destroy(task);
-    task.* = .{ .id = pool.nextId(), .pool = pool, .callable = &.{}, .args = &.{} };
+    task.* = .{ .id = pool.nextId(), .pool = pool, .callable = &.{}, .args = packed_args };
     pool.retain();
     errdefer pool.release();
     task.callable = try serializedCopy(ctx, callable, pool.allocator);
     errdefer pool.allocator.free(task.callable);
-    task.args = try serializedCopy(ctx, task_args, pool.allocator);
-    errdefer pool.allocator.free(task.args);
 
     switch (pool.queue.push(task, block)) {
         .ok => {},
         .full => {
             pool.allocator.free(task.callable);
-            pool.allocator.free(task.args);
+            packed_args.free(pool.allocator);
             pool.allocator.destroy(task);
             pool.release();
             return NativeResult.scalar(.null);
         },
         .closed => {
             pool.allocator.free(task.callable);
-            pool.allocator.free(task.args);
+            packed_args.free(pool.allocator);
             pool.allocator.destroy(task);
             pool.release();
             return throwNamed(ctx, pool_exception, "the pool is shutting down", .{});
@@ -854,13 +900,12 @@ fn futureAwait(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     switch (state) {
         .done => {
             // materialized once; later awaits read the value kept on the future
-            if (task.result) |bytes| {
-                const v = serialize.unserializeFromString(ctx, bytes) orelse return throwNamed(ctx, task_exception, "the result did not transfer", .{});
+            if (task.result) |payload| {
+                task.result = null;
+                const v = unpack(ctx, payload, task.pool.allocator) orelse return throwNamed(ctx, task_exception, "the result did not transfer", .{});
                 // the store takes its own reference; the one unserialize handed over goes
                 try obj.set(ctx.allocator, "__result", v);
                 if (v == .string) v.string.release();
-                task.pool.allocator.free(bytes);
-                task.result = null;
             }
             return NativeResult.share(obj.get("__result"));
         },

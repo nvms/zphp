@@ -12,3 +12,21 @@ function until_cancelled(): string { while (!Zphp\Task::cancelled()) usleep(1000
 function counter(): int { static $n = 0; return ++$n; }
 function big(int $n): array { return array_fill(0, $n, str_repeat("x", 64)); }
 function echoes(string $s): void { echo $s, "\n"; }
+function consume(Zphp\Channel $jobs, Zphp\Channel $results): int {
+    $n = 0;
+    foreach ($jobs as $job) { $results->send(['job' => $job, 'worker' => Zphp\Task::worker(), 'sq' => $job * $job]); $n++; }
+    return $n;
+}
+function produce(Zphp\Channel $out, int $count): string {
+    for ($i = 1; $i <= $count; $i++) $out->send($i);
+    $out->close();
+    return "produced $count";
+}
+function wait_recv(Zphp\Channel $ch, float $t): string {
+    try { return "got " . $ch->recv($t); } catch (Zphp\TimeoutException $e) { return "timeout"; } catch (Zphp\ChannelException $e) { return "closed"; }
+}
+function make_channel(): array { $c = new Zphp\Channel(3); $c->send("hello from worker"); return ['ch' => $c]; }
+function slow_drain(Zphp\Channel $ch): int { $n = 0; foreach ($ch as $v) { usleep(20000); $n++; } return $n; }
+function forward(Zphp\Channel $in, Zphp\Channel $out): void { foreach ($in as $v) $out->send($v); $out->close(); }
+function bad_result(): Closure { return fn() => 1; }
+function produce_big(Zphp\Channel $out, int $n): void { for ($i = 0; $i < $n; $i++) $out->send(big(100)); }

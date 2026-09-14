@@ -1,0 +1,48 @@
+int(3)
+int(0)
+bool(false)
+bool(true)
+bool(true)
+int(3)
+bool(false)
+string(1) "a"
+array(1) {
+}
+NULL
+recv timeout: no value arrived in time
+bool(true)
+string(4) "last"
+recv closed: the channel is closed
+send closed: the channel is closed
+trySend closed: the channel is closed
+bad capacity: capacity must be a positive integer
+transfer: a Closure cannot be transferred between threads (at value)
+Error: Trying to clone an uncloneable object of class Zphp\Channel
+send timeout: the channel did not accept the value in time
+bool(false)
+string(1) "x"
+bool(true)
+string(1) "y"
+0 => 10
+1 => 20
+2 => 30
+bool(true)
+bool(true)
+stale: channel 999999 does not exist in this process
+string(14) "through a copy"
+int(20)
+int(2870)
+int(2)
+int(50)
+int(1)
+int(50)
+string(11) "produced 50"
+string(5) "x,y,z"
+string(7) "timeout"
+string(8) "got late"
+string(6) "closed"
+bool(true)
+string(17) "hello from worker"
+int(3)
+result: a Closure cannot be transferred between threads (at result)
+end

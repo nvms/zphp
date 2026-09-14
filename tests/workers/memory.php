@@ -12,6 +12,13 @@ for ($batch = 0; $batch < 15; $batch++) {
     for ($i = 0; $i < 200; $i++) { $pool->submit('str_repeat', ['x', 8000]); }
     while ($pool->collect(5.0)) {}
 }
+$stream = new Zphp\Channel(8);
+for ($batch = 0; $batch < 10; $batch++) {
+    $f = $pool->submit('produce_big', [$stream, 300]);
+    for ($i = 0; $i < 300; $i++) { $stream->recv(); }
+    $f->await();
+}
+for ($i = 0; $i < 2000; $i++) { $carrier = new Zphp\Channel(1); $carrier->send(['inner' => new Zphp\Channel(1)]); $carrier->recv()['inner']->trySend("x"); }
 $growth = memory_get_usage() - $before;
 echo $growth < 16 * 1024 * 1024 ? "memory bounded\n" : "memory grew by $growth\n";
 exit($growth < 16 * 1024 * 1024 ? 0 : 1);

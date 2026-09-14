@@ -5,7 +5,7 @@ int(9)
 InvalidArgumentException: bad input 7
 Error: Call to undefined function missing_fn()
 transfer: tasks are named callables: a function name, 'Class::method', or [class, method]
-transfer: an object backed by a native handle cannot be transferred to a worker (at args[0])
+transfer: an object backed by a native handle cannot be transferred between threads (at args[0])
 int(2470)
 timeout
 bool(false)

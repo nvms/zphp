@@ -803,6 +803,7 @@ pub const NativeHandle = struct {
         xml_writer,
         pool,
         future,
+        channel,
         _,
     };
 

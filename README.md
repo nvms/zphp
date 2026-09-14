@@ -117,7 +117,44 @@ A task is a named callable: a function name, `'Class::method'`, or `[$class, $me
 
 `await()` returns the result, or rethrows the task's exception as the same class when the caller has it. A queued task can be cancelled; a running one sees `Zphp\Task::cancelled()` and stops when it chooses, since nothing is ever killed. The queue is bounded: `submit()` blocks when it is full and `trySubmit()` returns null instead. `collect()` hands back completed futures in completion order, and `readiness()` is a stream that becomes readable when one is waiting, for use with `stream_select()`. `shutdown()` stops accepting work, cancels what is queued, and waits for running tasks; the pool's destructor does the same.
 
-Channels and submitting closures are planned.
+### Channels
+
+`Zphp\Channel` is a bounded queue that workers and the main thread share. A channel passed to a task binds to the same queue on the other side, so a producer and its consumers can run on different threads without sharing PHP memory.
+
+```php
+$jobs = new Zphp\Channel(capacity: 16);
+$results = new Zphp\Channel(capacity: 256);
+
+$consumers = [];
+for ($i = 0; $i < 4; $i++) {
+    $consumers[] = $pool->submit('resize_images', [$jobs, $results]);
+}
+foreach (glob('uploads/*.jpg') as $path) {
+    $jobs->send($path);
+}
+$jobs->close();
+foreach ($consumers as $future) {
+    $future->await();
+}
+$results->close();
+foreach ($results as $thumbnail) {
+    echo $thumbnail, "\n";
+}
+```
+
+```php
+// worker.php
+function resize_images(Zphp\Channel $jobs, Zphp\Channel $results): void
+{
+    foreach ($jobs as $path) {
+        $results->send(resize($path));
+    }
+}
+```
+
+`send()` blocks while the channel is full and `recv()` blocks while it is empty; both take an optional timeout in seconds and throw `Zphp\TimeoutException` when it passes. `trySend()` returns false instead of waiting. `close()` lets buffered values drain and then ends every `foreach`, while `send()` and `recv()` on a closed channel throw `Zphp\ChannelException`. Values follow the same transfer rules as task arguments, and a channel can carry other channels. A channel stays alive while any thread holds it or a value in flight names it.
+
+Submitting closures is planned.
 
 ## Related projects
 

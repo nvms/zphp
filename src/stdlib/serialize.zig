@@ -180,6 +180,22 @@ pub fn serializeToString(ctx: *NativeContext, val: Value) RuntimeError!NativeRes
 }
 
 // a string result carries one reference the caller must release or store
+// the object keeps its class name, so it must outlive this call: the class
+// table's own key does, and only an unknown class needs a copy. a script that
+// unserializes objects in a loop would otherwise grow the request arena by a
+// class name per object
+fn keptClassName(ctx: *NativeContext, class_allowed: bool, orig_class: []const u8) ![]const u8 {
+    if (!class_allowed) return "__PHP_Incomplete_Class";
+    return ctx.vm.classes.getKey(orig_class) orelse try ctx.createString(orig_class);
+}
+
+// a declared property is stored by slot and the name is not kept; a dynamic
+// one is stored by name and needs request-lifetime bytes
+fn keptPropertyName(ctx: *NativeContext, obj: *PhpObject, name: []const u8) ![]const u8 {
+    if (obj.getSlotIndex(name) != null) return name;
+    return ctx.createString(name);
+}
+
 pub fn unserializeFromString(ctx: *NativeContext, s: []const u8) ?Value {
     var uctx = UnserCtx{};
     defer uctx.deinit(ctx.allocator);
@@ -540,7 +556,9 @@ fn native_unserialize(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
         if (md == .int and md.int >= 0) uctx.max_depth = @intCast(md.int);
     }
     const result = unserializeValue(ctx, &uctx, s, 0) catch {
-        if (uctx.threw) return error.RuntimeError;
+        // an exception from __unserialize, __wakeup, or Serializable::unserialize
+        // propagates; only a parse failure is a warning
+        if (uctx.threw or ctx.vm.pending_exception != null) return error.RuntimeError;
         // emit PHP's parse-failure warning. depth-exceeded gets its own
         // message that names the option + ini setting; generic parse errors
         // get 'Error at offset N of M bytes'
@@ -711,7 +729,7 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
             if (colon1 + 2 + name_len + 1 >= s.len) return error.RuntimeError;
             const orig_class = s[colon1 + 2 .. colon1 + 2 + name_len];
             const class_allowed = uctx.classAllowed(orig_class) and ctx.vm.classes.contains(orig_class);
-            const class_name = try ctx.createString(if (class_allowed) orig_class else "__PHP_Incomplete_Class");
+            const class_name = try keptClassName(ctx, class_allowed, orig_class);
             var p = colon1 + 2 + name_len + 2;
             const count_end = std.mem.indexOfPos(u8, s, p, ":") orelse return error.RuntimeError;
             const prop_count = std.fmt.parseInt(usize, s[p..count_end], 10) catch return error.RuntimeError;
@@ -787,10 +805,7 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
                 } else if (fixed_data) |arr| {
                     if (key_result.value == .int) try arr.set(ctx.allocator, .{ .int = key_result.value.int }, val_result.value);
                 } else if (key_result.value == .string) {
-                    // property names are kept by the object as given, so
-                    // they need request-lifetime bytes rather than the
-                    // counted key that dies with this iteration
-                    const stripped = try ctx.createString(stripVisibilityPrefix(key_result.value.string.bytes()));
+                    const stripped = try keptPropertyName(ctx, obj, stripVisibilityPrefix(key_result.value.string.bytes()));
                     // when restoring into a kept class, assigning an
                     // __PHP_Incomplete_Class value to a typed property whose
                     // declared type isn't compatible is a TypeError in PHP
@@ -836,7 +851,7 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
             if (colon1 + 2 + name_len + 1 >= s.len) return error.RuntimeError;
             const orig_class = s[colon1 + 2 .. colon1 + 2 + name_len];
             const class_allowed = uctx.classAllowed(orig_class) and ctx.vm.classes.contains(orig_class);
-            const class_name = try ctx.createString(if (class_allowed) orig_class else "__PHP_Incomplete_Class");
+            const class_name = try keptClassName(ctx, class_allowed, orig_class);
             var p = colon1 + 2 + name_len + 2;
             const len_end = std.mem.indexOfPos(u8, s, p, ":") orelse return error.RuntimeError;
             const data_len = std.fmt.parseInt(usize, s[p..len_end], 10) catch return error.RuntimeError;
