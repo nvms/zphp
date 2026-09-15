@@ -1570,7 +1570,8 @@ pub const Value = union(enum) {
             const f = parseLeadingFloat(s[start..]);
             if (!std.math.isFinite(f)) return 0;
             const max_f: f64 = 9.2233720368547758e18;
-            if (f >= max_f or f < -max_f) return 0;
+            if (f >= max_f) return std.math.maxInt(i64);
+            if (f <= -max_f) return std.math.minInt(i64);
             return @intFromFloat(f);
         }
         // saturating parse: matches PHP's "(int)<numeric string>" which clamps
@@ -1978,6 +1979,29 @@ test "numeric string exponent requires digits" {
     for (valid) |s| {
         try std.testing.expect(Value.isNumericString(s));
     }
+}
+
+test "parse leading int float saturation" {
+    // positive overflow
+    try std.testing.expectEqual(std.math.maxInt(i64), Value.toInt(.{ .string = Value.String.borrowed("1e100") }));
+    try std.testing.expectEqual(std.math.maxInt(i64), Value.toInt(.{ .string = Value.String.borrowed("1e19") }));
+    try std.testing.expectEqual(std.math.maxInt(i64), Value.toInt(.{ .string = Value.String.borrowed("9.9e18") }));
+    try std.testing.expectEqual(std.math.maxInt(i64), Value.toInt(.{ .string = Value.String.borrowed("9.223372036854776e18") }));
+    try std.testing.expectEqual(std.math.maxInt(i64), Value.toInt(.{ .string = Value.String.borrowed("9223372036854775807.0") }));
+
+    // negative overflow
+    try std.testing.expectEqual(std.math.minInt(i64), Value.toInt(.{ .string = Value.String.borrowed("-1e100") }));
+    try std.testing.expectEqual(std.math.minInt(i64), Value.toInt(.{ .string = Value.String.borrowed("-1e19") }));
+    try std.testing.expectEqual(std.math.minInt(i64), Value.toInt(.{ .string = Value.String.borrowed("-9.9e18") }));
+    try std.testing.expectEqual(std.math.minInt(i64), Value.toInt(.{ .string = Value.String.borrowed("-9.223372036854776e18") }));
+    try std.testing.expectEqual(std.math.minInt(i64), Value.toInt(.{ .string = Value.String.borrowed("-9223372036854775808.0") }));
+
+    // boundary and in-range cases
+    try std.testing.expectEqual(@as(i64, 9223372036854774784), Value.toInt(.{ .string = Value.String.borrowed("9.223372036854775e18") }));
+    try std.testing.expectEqual(@as(i64, -9223372036854774784), Value.toInt(.{ .string = Value.String.borrowed("-9.223372036854775e18") }));
+    try std.testing.expectEqual(@as(i64, 100000), Value.toInt(.{ .string = Value.String.borrowed("1e5") }));
+    try std.testing.expectEqual(@as(i64, 123), Value.toInt(.{ .string = Value.String.borrowed("123.456") }));
+    try std.testing.expectEqual(@as(i64, -123), Value.toInt(.{ .string = Value.String.borrowed("-123.456") }));
 }
 
 test "truthiness" {
