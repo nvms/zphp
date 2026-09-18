@@ -1240,7 +1240,10 @@ const ArrayCmp = enum { values, keys, assoc };
 fn arraySetOp(comptime cmp: ArrayCmp, comptime keep_matches: bool) fn (*NativeContext, []const Value) RuntimeError!NativeResult {
     return struct {
         fn f(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-            if (args.len < 2 or args[0] != .array) return NativeResult.scalar(.null);
+            // php8 accepts a single array with no other arrays, intersect keeps
+            // every entry (matchesAll over none) and diff drops none (matchesAny
+            // over none) soo both return a key-preserving copy of $array
+            if (args.len == 0 or args[0] != .array) return NativeResult.scalar(.null);
             const src = args[0].array;
             var result = try ctx.createArray();
             for (src.entries.items) |entry| {
@@ -1463,24 +1466,14 @@ fn array_rand(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
         try ctx.vm.setPendingException("ValueError", "array_rand(): Argument #2 ($num) must be between 1 and the number of elements in argument #1 ($array)");
         return error.RuntimeError;
     }
-    if (num == 1 and (args.len < 2 or Value.toInt(args[1]) == 1 and args.len == 1)) {
-        // single-arg form returns scalar
+    // php returns a scalar key whenever num is 1, whether $num was omitted or
+    // passed explicitly, an array of keys only for num > 1
+    if (num == 1) {
         const idx = std.crypto.random.intRangeAtMost(usize, 0, arr.entries.items.len - 1);
         return switch (arr.entries.items[idx].key) {
             .int => |i| NativeResult.scalar(.{ .int = i }),
             .string => |s| NativeResult.shareString(s),
         };
-    }
-    // PHP returns scalar key when num=1 (default), array of keys otherwise.
-    if (num == 1) {
-        const out = try ctx.createArray();
-        const idx = std.crypto.random.intRangeAtMost(usize, 0, arr.entries.items.len - 1);
-        const v: Value = switch (arr.entries.items[idx].key) {
-            .int => |i| .{ .int = i },
-            .string => |s| .{ .string = s },
-        };
-        try out.append(ctx.allocator, v);
-        return NativeResult.borrowed(.{ .array = out });
     }
     // Fisher-Yates partial shuffle for `num` distinct picks
     var pool = try ctx.allocator.alloc(usize, arr.entries.items.len);

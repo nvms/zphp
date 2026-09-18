@@ -44,6 +44,7 @@ pub const entries = .{
     .{ "date_time_set", native_date_time_set },
     .{ "date_parse", native_date_parse },
     .{ "date_parse_from_format", native_date_parse_from_format },
+    .{ "date_get_last_errors", dtGetLastErrors },
     .{ "mktime", native_mktime },
     .{ "gmmktime", native_gmmktime },
     .{ "strtotime", native_strtotime },
