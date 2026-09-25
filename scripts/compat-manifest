@@ -1,0 +1,519 @@
+#!/usr/bin/env python3
+# Keeps compatibility/extensions.json, the record of which built-in php
+# extensions zphp advertises and how compatible each api is, in step with the
+# runtime and with the files generated from it:
+#
+#   src/stdlib/extensions_generated.zig    the extensions extension_loaded(),
+#       get_loaded_extensions() and get_extension_funcs() report
+#   docs/src/compatibility/extensions.md    the published matrix
+#
+#   scripts/compat-manifest --check
+#       validate the manifest, compare it with the built zphp (ZPHP, default
+#       zig-out/bin/zphp) and fail on stale generated files
+#   scripts/compat-manifest --generate
+#       rewrite the manifest canonically and regenerate both files from it
+#   scripts/compat-manifest --generate --php 'php' [--php 'other php' ...]
+#       also refresh the api inventory: each extension's functions, classes
+#       and constants come from the first reference php that loads it, split
+#       into what zphp has and what it lacks. run with the php version zphp
+#       targets (target_php) and every extension it advertises loaded
+#
+# unix_only extensions are built on linux and macos only, as in php; a windows
+# zphp neither reports them nor has their apis, so its --check skips them and
+# --generate keeps their recorded inventory.
+#
+# presence is not compatibility: an api zphp has is recorded with a status,
+# chosen by hand and never raised automatically. new apis get their
+# extension's status but at most partial, apis bound to a no-op native are
+# held at unsupported, and apis zphp lacks are listed under "missing".
+
+import argparse, json, os, re, shlex, subprocess, sys, tempfile
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MANIFEST = os.path.join(REPO, "compatibility", "extensions.json")
+ZIG_OUT = os.path.join(REPO, "src", "stdlib", "extensions_generated.zig")
+DOC_OUT = os.path.join(REPO, "docs", "src", "compatibility", "extensions.md")
+STDLIB = os.path.join(REPO, "src", "stdlib")
+
+STATUSES = ("certified", "supported", "partial", "experimental", "unsupported")
+KINDS = ("functions", "classes", "constants")
+SINGULAR = {"functions": "function", "classes": "class", "constants": "constant"}
+EXTENSION_KEYS = ("available", "unix_only", "status", "notes", "reference_php") + KINDS + ("missing",)
+# a native bound to one of these returns a constant and does nothing else
+STUB_RE = re.compile(r'\.\{ "([^"]+)", native_noop_\w+ \}')
+
+DESCRIPTIONS = {
+    "certified": "Strong parity evidence: differential tests against PHP cover the surface and no meaningful gap is known.",
+    "supported": "Substantially implemented and tested; expected to work normally, without the evidence needed for certified.",
+    "partial": "Useful, but meaningful APIs, options, or edge cases are missing or behave differently.",
+    "experimental": "Present but lightly validated or unstable; do not rely on it.",
+    "unsupported": "Missing, stubbed, or not usable as the PHP API.",
+}
+
+INVENTORY = r'''<?php
+$out = ['version' => PHP_VERSION, 'extensions' => []];
+foreach (get_loaded_extensions() as $name) {
+    $r = new ReflectionExtension($name);
+    $out['extensions'][$name] = [
+        'functions' => array_keys($r->getFunctions()),
+        'classes' => $r->getClassNames(),
+        'constants' => array_keys($r->getConstants()),
+    ];
+}
+echo json_encode($out);
+'''
+
+# which of the named apis exist, what the runtime reports as loaded, and what
+# get_extension_funcs() returns for each extension named
+PROBE = r'''<?php
+$in = json_decode(file_get_contents($argv[1]), true);
+$out = ['functions' => [], 'classes' => [], 'constants' => [], 'funcs' => []];
+foreach ($in['functions'] as $n) if (function_exists($n)) $out['functions'][] = $n;
+foreach ($in['classes'] as $n) {
+    if (class_exists($n, false) || interface_exists($n, false) || trait_exists($n, false) || enum_exists($n, false)) $out['classes'][] = $n;
+}
+foreach ($in['constants'] as $n) if (defined($n)) $out['constants'][] = $n;
+$out['os'] = PHP_OS_FAMILY;
+$out['loaded'] = get_loaded_extensions();
+foreach ($in['extensions'] as $e) $out['funcs'][$e] = get_extension_funcs($e);
+echo json_encode($out);
+'''
+
+
+class ManifestError(Exception):
+    pass
+
+
+def name_key(name):
+    return (name.lower(), name)
+
+
+def canonical(manifest):
+    out = {k: manifest[k] for k in ("schema_version", "target_php") if k in manifest}
+    out["extensions"] = {}
+    for name, ext in manifest.get("extensions", {}).items():
+        entry = {}
+        for key in EXTENSION_KEYS:
+            if key not in ext:
+                continue
+            if key in KINDS:
+                entry[key] = {n: ext[key][n] for n in sorted(ext[key], key=name_key)}
+            elif key == "missing":
+                entry[key] = {k: sorted(ext[key][k], key=name_key) for k in KINDS if k in ext[key]}
+            else:
+                entry[key] = ext[key]
+        for key in ext:
+            if key not in entry:
+                entry[key] = ext[key]
+        out["extensions"][name] = entry
+    for key in manifest:
+        if key not in out:
+            out[key] = manifest[key]
+    return out
+
+
+def dump(manifest):
+    return json.dumps(canonical(manifest), indent=2, ensure_ascii=False) + "\n"
+
+
+def load(path=None):
+    path = path or MANIFEST
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError as e:
+        raise ManifestError("%s: %s" % (path, e))
+    try:
+        return json.loads(text), text
+    except json.JSONDecodeError as e:
+        raise ManifestError("%s: invalid json: %s" % (path, e))
+
+
+def validate(manifest, stubs=frozenset()):
+    errors = []
+    if not isinstance(manifest, dict):
+        return ["manifest: top level must be an object"]
+    for key in manifest:
+        if key not in ("schema_version", "target_php", "extensions"):
+            errors.append("manifest: unknown field %r" % key)
+    if manifest.get("schema_version") != 1:
+        errors.append("manifest: schema_version must be 1")
+    if not isinstance(manifest.get("target_php"), str) or not manifest.get("target_php"):
+        errors.append("manifest: target_php must be a non-empty string")
+    extensions = manifest.get("extensions")
+    if not isinstance(extensions, dict) or not extensions:
+        return errors + ["manifest: extensions must be a non-empty object"]
+    ext_seen = {}
+    api_seen = {k: {} for k in KINDS}
+    for name, ext in extensions.items():
+        where = "extension %s" % name
+        if name.lower() in ext_seen:
+            errors.append("%s: conflicts with extension %s" % (where, ext_seen[name.lower()]))
+        ext_seen[name.lower()] = name
+        if not isinstance(ext, dict):
+            errors.append("%s: must be an object" % where)
+            continue
+        for key in ext:
+            if key not in EXTENSION_KEYS:
+                errors.append("%s: unknown field %r" % (where, key))
+        for key in ("available", "status") + KINDS + ("missing",):
+            if key not in ext:
+                errors.append("%s: missing required field %r" % (where, key))
+        for key in ("available", "unix_only"):
+            if key in ext and not isinstance(ext[key], bool):
+                errors.append("%s: %s must be true or false" % (where, key))
+        status = ext.get("status")
+        if "status" in ext and status not in STATUSES:
+            errors.append("%s: unknown status %r (expected one of %s)" % (where, status, ", ".join(STATUSES)))
+        for key in ("notes", "reference_php"):
+            if key in ext and (not isinstance(ext[key], str) or not ext[key]):
+                errors.append("%s: %s must be a non-empty string" % (where, key))
+        if ext.get("available") is False and status != "unsupported":
+            errors.append("%s: an unavailable extension must be unsupported" % where)
+        missing = ext.get("missing", {})
+        if not isinstance(missing, dict):
+            errors.append("%s: missing must be an object" % where)
+            missing = {}
+        for key in missing:
+            if key not in KINDS:
+                errors.append("%s: unknown missing kind %r" % (where, key))
+        weak = []
+        for kind in KINDS:
+            apis = ext.get(kind, {})
+            if not isinstance(apis, dict):
+                errors.append("%s: %s must be an object of name to status" % (where, kind))
+                apis = {}
+            lacking = missing.get(kind, [])
+            if not isinstance(lacking, list) or not all(isinstance(n, str) for n in lacking):
+                errors.append("%s: missing.%s must be a list of names" % (where, kind))
+                lacking = []
+            singular = SINGULAR[kind]
+            for api, api_status in apis.items():
+                if api_status not in STATUSES:
+                    errors.append("%s: %s %s has unknown status %r" % (where, singular, api, api_status))
+                if api_status in ("experimental", "unsupported"):
+                    weak.append(api)
+                if kind == "functions" and api.lower() in stubs and api_status in ("certified", "supported"):
+                    errors.append("%s: function %s is a no-op stub and cannot be %s" % (where, api, api_status))
+            for api in list(apis) + lacking:
+                # function and class names are case-insensitive in php, constants are not
+                key = api if kind == "constants" else api.lower()
+                if key in api_seen[kind]:
+                    errors.append("%s: %s %s is also recorded under %s" % (where, singular, api, api_seen[kind][key]))
+                api_seen[kind][key] = name
+            if status == "certified" and lacking:
+                errors.append("%s: certified but %s %s is missing" % (where, singular, lacking[0]))
+        if status == "certified" and weak:
+            errors.append("%s: certified but %s is %s" % (where, weak[0], "experimental or unsupported"))
+    return errors
+
+
+def scan_stubs(root=STDLIB):
+    stubs = set()
+    for dirpath, _, files in os.walk(root):
+        for f in files:
+            if f.endswith(".zig"):
+                with open(os.path.join(dirpath, f), encoding="utf-8") as fh:
+                    stubs.update(m.group(1).lower() for m in STUB_RE.finditer(fh.read()))
+    return frozenset(stubs)
+
+
+def compare(manifest, probe):
+    """Errors between what the manifest records and what zphp reports."""
+    errors = []
+    found = {k: set(n if k == "constants" else n.lower() for n in probe[k]) for k in KINDS}
+    skip = {n for n, e in manifest["extensions"].items() if e.get("unix_only") and probe["os"] == "Windows"}
+    for name, ext in manifest["extensions"].items():
+        if name in skip:
+            continue
+        for kind in KINDS:
+            norm = (lambda n: n) if kind == "constants" else str.lower
+            singular = SINGULAR[kind]
+            for api in ext[kind]:
+                if norm(api) not in found[kind]:
+                    errors.append("extension %s: %s %s is recorded as implemented but zphp does not have it" % (name, singular, api))
+            for api in ext["missing"].get(kind, []):
+                if norm(api) in found[kind]:
+                    errors.append("extension %s: %s %s is recorded as missing but zphp has it; run --generate and classify it" % (name, singular, api))
+    available = {n.lower(): n for n, e in manifest["extensions"].items() if e["available"] and n not in skip}
+    loaded = {n.lower(): n for n in probe["loaded"]}
+    for key, name in loaded.items():
+        if key not in available:
+            errors.append("extension %s: zphp reports it loaded but the manifest does not mark it available" % name)
+    for key, name in available.items():
+        if key not in loaded:
+            errors.append("extension %s: marked available but zphp does not report it loaded" % name)
+        elif loaded[key] != name:
+            errors.append("extension %s: zphp reports it as %s" % (name, loaded[key]))
+    for name in available.values():
+        expected = sorted(manifest["extensions"][name]["functions"], key=str.lower)
+        got = probe["funcs"].get(name)
+        got = sorted(got, key=str.lower) if isinstance(got, list) else got
+        if got != (expected or False):
+            errors.append("extension %s: get_extension_funcs() returns %s, manifest records %s" % (name, json.dumps(got)[:200], json.dumps(expected or False)[:200]))
+    return errors
+
+
+def zig_string(s):
+    return json.dumps(s)
+
+
+def render_zig(manifest):
+    lines = [
+        "// generated by scripts/compat-manifest from compatibility/extensions.json; do not edit",
+        "pub const Extension = struct { name: []const u8, functions: []const []const u8, unix_only: bool = false };",
+        "",
+        "// the built-in extensions zphp reports as loaded, in get_loaded_extensions() order,",
+        "// with the functions get_extension_funcs() lists for each",
+        "pub const extensions = [_]Extension{",
+    ]
+    for name, ext in manifest["extensions"].items():
+        if not ext["available"]:
+            continue
+        funcs = sorted(ext["functions"], key=name_key)
+        tail = ", .unix_only = true }," if ext.get("unix_only") else " },"
+        if not funcs:
+            lines.append("    .{ .name = %s, .functions = &.{}%s" % (zig_string(name), tail))
+            continue
+        lines.append("    .{ .name = %s, .functions = &.{" % zig_string(name))
+        lines += ["        %s," % zig_string(f) for f in funcs]
+        lines.append("    }%s" % tail)
+    lines.append("};")
+    return "\n".join(lines) + "\n"
+
+
+def count(ext, kind):
+    present = len(ext[kind])
+    return "%d / %d" % (present, present + len(ext["missing"].get(kind, [])))
+
+
+def md_names(names):
+    return ", ".join("`%s`" % n for n in names)
+
+
+def render_doc(manifest):
+    exts = manifest["extensions"]
+    totals = {s: 0 for s in STATUSES}
+    for ext in exts.values():
+        totals[ext["status"]] += 1
+    out = [
+        "<!-- generated by scripts/compat-manifest from compatibility/extensions.json; do not edit -->",
+        "# Extension Compatibility",
+        "",
+        "This page is generated from [`compatibility/extensions.json`](https://github.com/nvms/zphp/blob/main/compatibility/extensions.json), the machine-readable record of the PHP extensions built into zphp. The API inventory comes from the reflection of the reference PHP release named for each extension; zphp targets PHP %s." % manifest["target_php"],
+        "",
+        "**An extension being loaded does not mean it matches PHP.** `extension_loaded()` and `get_loaded_extensions()` report which extensions are present, as in PHP. The status below records how far each one, and each of its APIs, can be relied on. Extensions loaded with `--extension` are not listed here.",
+        "",
+        "## Statuses",
+        "",
+        "| Status | Meaning |",
+        "| --- | --- |",
+    ]
+    out += ["| `%s` | %s |" % (s, DESCRIPTIONS[s]) for s in STATUSES]
+    out += [
+        "",
+        "## Extensions",
+        "",
+        "%d extensions: %s." % (len(exts), ", ".join("%d %s" % (totals[s], s) for s in STATUSES if totals[s])),
+        "Counts are APIs zphp has out of those the reference PHP defines.",
+        "",
+        "| Extension | Available | Status | Functions | Classes | Constants |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for name, ext in exts.items():
+        out.append("| [%s](#%s) | %s | `%s` | %s | %s | %s |" % (
+            name, anchor(name), "yes" if ext["available"] else "no", ext["status"],
+            count(ext, "functions"), count(ext, "classes"), count(ext, "constants")))
+    out += ["", "## Details", ""]
+    for name, ext in exts.items():
+        out += ["### %s" % name, ""]
+        out.append("Status: `%s`%s." % (ext["status"], "" if ext["available"] else " (not available)"))
+        if ext.get("unix_only"):
+            out[-1] += " Linux and macOS only."
+        if "reference_php" in ext:
+            out[-1] += " Reference: PHP %s." % ext["reference_php"]
+        out.append("")
+        if "notes" in ext:
+            out += [ext["notes"], ""]
+        for kind in KINDS:
+            singular = SINGULAR[kind]
+            differing = {}
+            for api, s in ext[kind].items():
+                if s != ext["status"]:
+                    differing.setdefault(s, []).append(api)
+            for s in STATUSES:
+                if s in differing:
+                    out += ["- %s %s: %s" % (kind.capitalize(), s, md_names(sorted(differing[s], key=name_key)))]
+            lacking = ext["missing"].get(kind, [])
+            if lacking and kind != "constants":
+                out.append("- Missing %s: %s" % (kind, md_names(lacking)))
+            elif lacking:
+                out.append("- Missing constants: %d" % len(lacking))
+        if out[-1] != "":
+            out.append("")
+    return "\n".join(out).rstrip("\n") + "\n"
+
+
+def anchor(name):
+    return re.sub(r"[^a-z0-9_-]", "", name.lower().replace(" ", "-"))
+
+
+def zphp_binary():
+    default = os.path.join(REPO, "zig-out", "bin", "zphp.exe" if os.name == "nt" else "zphp")
+    return os.environ.get("ZPHP", default)
+
+
+def run_zphp(source, data):
+    with tempfile.TemporaryDirectory(prefix="zphp-compat-manifest-") as d:
+        script, arg = os.path.join(d, "probe.php"), os.path.join(d, "input.json")
+        with open(script, "w", encoding="utf-8") as f:
+            f.write(source)
+        with open(arg, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        result = subprocess.run([zphp_binary(), "run", script, arg], capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        raise ManifestError("zphp probe failed (%d): %s" % (result.returncode, result.stderr.strip()[:500]))
+    return json.loads(result.stdout)
+
+
+def probe_zphp(manifest):
+    names = {k: set() for k in KINDS}
+    for ext in manifest["extensions"].values():
+        for kind in KINDS:
+            names[kind].update(ext.get(kind, {}))
+            names[kind].update(ext.get("missing", {}).get(kind, []))
+    data = {k: sorted(v) for k, v in names.items()}
+    data["extensions"] = [n for n, e in manifest["extensions"].items() if e.get("available")]
+    return run_zphp(PROBE, data)
+
+
+def inventory(commands):
+    refs = []
+    for command in commands:
+        result = subprocess.run(shlex.split(command), input=INVENTORY,
+                                capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            raise ManifestError("reference php %r failed: %s" % (command, result.stderr.strip()[:500]))
+        data = json.loads(result.stdout)
+        refs.append((data["version"], {n.lower(): (n, v) for n, v in data["extensions"].items()}))
+    return refs
+
+
+def refresh(manifest, refs, stubs):
+    """Rebuild each extension's api lists from reference php reflection and zphp."""
+    found = {}
+    for name, ext in manifest["extensions"].items():
+        for version, exts in refs:
+            if name.lower() in exts:
+                found[name] = (version,) + exts[name.lower()]
+                break
+        else:
+            print("warning: no reference php loads %s; keeping its recorded inventory" % name, file=sys.stderr)
+    probe_input = {k: set() for k in KINDS}
+    for _, _, api in found.values():
+        for kind in KINDS:
+            probe_input[kind].update(api[kind])
+    data = {k: sorted(v) for k, v in probe_input.items()}
+    data["extensions"] = []
+    probe = run_zphp(PROBE, data)
+    for name in [n for n in found if manifest["extensions"][n].get("unix_only") and probe["os"] == "Windows"]:
+        print("warning: %s is not built on windows; keeping its recorded inventory" % name, file=sys.stderr)
+        del found[name]
+    have = {k: set(n if k == "constants" else n.lower() for n in probe[k]) for k in KINDS}
+    renamed = {}
+    for name, ext in manifest["extensions"].items():
+        if name not in found:
+            renamed[name] = ext
+            continue
+        version, canonical_name, api = found[name]
+        ext["reference_php"] = version
+        ext.setdefault("missing", {})
+        # an api that just appeared has no evidence yet: never above partial
+        default = max(ext.get("status", "unsupported"), "partial", key=STATUSES.index)
+        for kind in KINDS:
+            old = ext.get(kind, {})
+            old_lc = {n if kind == "constants" else n.lower(): s for n, s in old.items()}
+            present, lacking = {}, []
+            for n in api[kind]:
+                key = n if kind == "constants" else n.lower()
+                if key not in have[kind]:
+                    lacking.append(n)
+                    continue
+                s = old_lc.get(key, default)
+                if kind == "functions" and key in stubs and (key not in old_lc or s in ("certified", "supported")):
+                    s = "unsupported"
+                present[n] = s
+            ext[kind] = present
+            ext["missing"][kind] = lacking
+        renamed[canonical_name] = ext
+    manifest["extensions"] = renamed
+
+
+def write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+
+
+def read(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def generate(commands):
+    manifest, _ = load()
+    stubs = scan_stubs()
+    if commands:
+        refresh(manifest, inventory(commands), stubs)
+    errors = validate(manifest, stubs)
+    if errors:
+        raise ManifestError("\n".join(errors))
+    write(MANIFEST, dump(manifest))
+    write(ZIG_OUT, render_zig(manifest))
+    write(DOC_OUT, render_doc(manifest))
+
+
+def check():
+    manifest, text = load()
+    stubs = scan_stubs()
+    errors = validate(manifest, stubs)
+    if errors:
+        return errors
+    if text != dump(manifest):
+        errors.append("%s is not in canonical form; run scripts/compat-manifest --generate" % os.path.relpath(MANIFEST, REPO))
+    for path, render in ((ZIG_OUT, render_zig), (DOC_OUT, render_doc)):
+        expected = render(manifest)
+        if expected != render(json.loads(dump(manifest))):
+            errors.append("%s renders nondeterministically" % os.path.relpath(path, REPO))
+        if read(path) != expected:
+            errors.append("%s is stale; run scripts/compat-manifest --generate" % os.path.relpath(path, REPO))
+    return errors + compare(manifest, probe_zphp(manifest))
+
+
+def main():
+    parser = argparse.ArgumentParser(description="check or regenerate the extension compatibility manifest")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--check", action="store_true")
+    mode.add_argument("--generate", action="store_true")
+    parser.add_argument("--php", action="append", default=[], help="reference php command to take the api inventory from (repeatable, first match wins)")
+    args = parser.parse_args()
+    try:
+        if args.generate:
+            generate(args.php)
+            return 0
+        errors = check()
+    except (ManifestError, subprocess.SubprocessError, OSError, ValueError) as e:
+        print("compat-manifest: %s" % e, file=sys.stderr)
+        return 1
+    for e in errors:
+        print("compat-manifest: %s" % e, file=sys.stderr)
+    if not errors:
+        print("compat-manifest: ok")
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

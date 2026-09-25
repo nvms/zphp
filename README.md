@@ -12,7 +12,7 @@ Read the [documentation](https://nvms.github.io/zphp/) for everything else.
 
 ## Compatibility
 
-Every compatibility test runs under both zphp and PHP and must produce the same output. Laravel, WordPress, PHPUnit, and Composer run under their own harnesses. The extensions most applications need are built in, including PDO for SQLite, MySQL, and PostgreSQL, cURL, and GD. PHP's C extensions do not load; see [what works differently](https://nvms.github.io/zphp/compatibility/different.html).
+Every compatibility test runs under both zphp and PHP and must produce the same output. Laravel, WordPress, PHPUnit, and Composer run under their own harnesses. The extensions most applications need are built in, including PDO for SQLite, MySQL, and PostgreSQL, cURL, and GD, but being loaded does not make an extension complete: the [extension compatibility matrix](https://nvms.github.io/zphp/compatibility/extensions.html) records the status of each extension and API. PHP's C extensions do not load; see [what works differently](https://nvms.github.io/zphp/compatibility/different.html).
 
 ## Threads
 

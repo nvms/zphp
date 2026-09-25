@@ -1,7 +1,7 @@
 <?php
 // exercised by tests/extensions/run against a dynamic build of demo.c and,
 // with STATIC=1, against a zphp built with -Dextension=tests/extensions/demo.c
-var_dump(extension_loaded("demo"), in_array("demo", get_loaded_extensions(), true));
+var_dump(extension_loaded("demo"), in_array("demo", get_loaded_extensions(), true), in_array("demo_add", get_extension_funcs("demo"), true));
 var_dump(interface_exists("Demo\\Tally"), method_exists("Demo\\Counter", "increment"), class_exists("DemoException"), get_parent_class("DemoException"));
 var_dump(demo_add(2, 3));
 var_dump(demo_greet("world"));

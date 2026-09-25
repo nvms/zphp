@@ -44,6 +44,6 @@ Strings, arrays, objects, generators, fibers, and reference cells use reference 
 
 ## Test coverage
 
-CI compares PHP script output with PHP 8.5 and runs multi-file examples. Separate jobs exercise Laravel, WordPress, Symfony, Doctrine, Composer, and PHPUnit, along with server behavior and standalone compilation. These harnesses cover specific scenarios, not full framework or package compatibility.
+CI compares PHP script output with PHP 8.5 and runs multi-file examples. Separate jobs exercise Laravel, WordPress, Symfony, Doctrine, Composer, and PHPUnit, along with server behavior and standalone compilation. These harnesses cover specific scenarios, not full framework or package compatibility. The status of each built-in extension and its APIs is tracked in [Extension Compatibility](extensions.md).
 
 Runtime CI runs on pushes and pull requests to `main`, excluding changes confined to `docs/`. See [What Works Differently](different.md) for compatibility cautions.

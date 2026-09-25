@@ -52,6 +52,14 @@ ext: build ## Run extension API tests (builds tests/extensions/demo.c with zig c
 php-metadata: build ## Regenerate native parameter lists and serialization rules from php's reflection (run with the targeted php on PATH after adding natives or classes)
 	python3 scripts/gen-php-metadata
 
+.PHONY: compatibility-manifest compatibility-manifest-check
+compatibility-manifest: build ## Regenerate the zig extension table and docs from compatibility/extensions.json; PHP='php -n ...' also refreshes the api inventory from that reference php (the targeted version, extensions loaded)
+	python3 scripts/compat-manifest --generate $(if $(PHP),--php "$(PHP)",)
+
+compatibility-manifest-check: build ## Validate compatibility/extensions.json against the build and fail on stale generated files
+	python3 tests/compat_manifest_test
+	python3 scripts/compat-manifest --check
+
 .PHONY: ini
 ini: build ## Run php.ini loading tests (--ini, ZPHP_INI, -d, serve isolation, extension= lines)
 	./tests/ini_test

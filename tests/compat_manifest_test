@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+import copy
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import sys
+import tempfile
+import unittest
+
+sys.dont_write_bytecode = True
+
+REPO = Path(__file__).resolve().parent.parent
+loader = importlib.machinery.SourceFileLoader("compat_manifest", str(REPO / "scripts" / "compat-manifest"))
+spec = importlib.util.spec_from_loader("compat_manifest", loader)
+cm = importlib.util.module_from_spec(spec)
+loader.exec_module(cm)
+
+
+def sample():
+    return {
+        "schema_version": 1,
+        "target_php": "8.5",
+        "extensions": {
+            "json": {
+                "available": True,
+                "status": "supported",
+                "functions": {"json_encode": "supported", "json_decode": "supported"},
+                "classes": {"JsonException": "supported"},
+                "constants": {"JSON_ERROR_NONE": "supported"},
+                "missing": {"functions": [], "classes": [], "constants": ["JSON_ERROR_UTF16"]},
+            },
+            "Reflection": {
+                "available": True,
+                "status": "partial",
+                "functions": {},
+                "classes": {"ReflectionClass": "partial"},
+                "constants": {},
+                "missing": {"functions": [], "classes": [], "constants": []},
+            },
+        },
+    }
+
+
+def probe_for(manifest):
+    """What a zphp build that matches the manifest exactly would report."""
+    out = {"os": "Linux", "loaded": [], "funcs": {}}
+    for kind in cm.KINDS:
+        out[kind] = [n for e in manifest["extensions"].values() for n in e[kind]]
+    for name, ext in manifest["extensions"].items():
+        if ext["available"]:
+            out["loaded"].append(name)
+            out["funcs"][name] = list(ext["functions"]) or False
+    return out
+
+
+class ManifestTest(unittest.TestCase):
+    def test_repository_manifest_is_valid_and_canonical(self):
+        manifest, text = cm.load()
+        self.assertEqual(cm.validate(manifest, cm.scan_stubs()), [])
+        self.assertEqual(text, cm.dump(manifest))
+        self.assertEqual(set(manifest["extensions"]["json"]["functions"]), {"json_decode", "json_encode", "json_last_error", "json_last_error_msg", "json_validate"})
+
+    def test_generated_files_are_current_and_deterministic(self):
+        manifest, _ = cm.load()
+        shuffled = json.loads(cm.dump(manifest))
+        shuffled["extensions"] = dict(reversed(list(shuffled["extensions"].items())))
+        for ext in shuffled["extensions"].values():
+            ext["functions"] = dict(reversed(list(ext["functions"].items())))
+        shuffled["extensions"] = dict(reversed(list(shuffled["extensions"].items())))
+        self.assertEqual(cm.dump(shuffled), cm.dump(manifest))
+        self.assertEqual(cm.render_zig(shuffled), cm.render_zig(manifest))
+        self.assertEqual(cm.render_doc(shuffled), cm.render_doc(manifest))
+        self.assertEqual(Path(cm.ZIG_OUT).read_text(encoding="utf-8"), cm.render_zig(manifest))
+        self.assertEqual(Path(cm.DOC_OUT).read_text(encoding="utf-8"), cm.render_doc(manifest))
+
+    def test_runtime_list_comes_from_the_manifest(self):
+        manifest, _ = cm.load()
+        generated = re.findall(r'^    \.\{ \.name = "([^"]+)"', Path(cm.ZIG_OUT).read_text(encoding="utf-8"), re.M)
+        self.assertEqual(generated, [n for n, e in manifest["extensions"].items() if e["available"]])
+        types = (REPO / "src" / "stdlib" / "types.zig").read_text(encoding="utf-8")
+        self.assertNotIn("SUPPORTED_EXTENSIONS", types)
+        self.assertIn('@import("extensions_generated.zig")', types)
+
+    def test_sample_is_valid(self):
+        self.assertEqual(cm.validate(sample()), [])
+        self.assertEqual(cm.compare(sample(), probe_for(sample())), [])
+
+    def test_only_the_five_statuses_are_accepted(self):
+        m = sample()
+        m["extensions"]["json"]["status"] = "stable"
+        self.assertIn("extension json: unknown status 'stable' (expected one of certified, supported, partial, experimental, unsupported)", cm.validate(m))
+        m = sample()
+        m["extensions"]["json"]["functions"]["json_encode"] = "ok"
+        self.assertIn("extension json: function json_encode has unknown status 'ok'", cm.validate(m))
+
+    def test_missing_fields_and_bad_types_fail(self):
+        m = sample()
+        del m["extensions"]["json"]["available"]
+        self.assertIn("extension json: missing required field 'available'", cm.validate(m))
+        m = sample()
+        m["extensions"]["json"]["functions"] = ["json_encode"]
+        self.assertIn("extension json: functions must be an object of name to status", cm.validate(m))
+        m = sample()
+        m["schema_version"] = 2
+        self.assertIn("manifest: schema_version must be 1", cm.validate(m))
+        self.assertIn("manifest: top level must be an object", cm.validate([]))
+
+    def test_malformed_json_fails_clearly(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "extensions.json")
+            Path(path).write_text('{"schema_version": 1,', encoding="utf-8")
+            with self.assertRaisesRegex(cm.ManifestError, "invalid json"):
+                cm.load(path)
+
+    def test_name_conflicts_fail(self):
+        m = sample()
+        m["extensions"]["JSON"] = copy.deepcopy(m["extensions"]["Reflection"])
+        self.assertIn("extension JSON: conflicts with extension json", cm.validate(m))
+        m = sample()
+        m["extensions"]["Reflection"]["functions"]["JSON_ENCODE"] = "partial"
+        self.assertIn("extension Reflection: function JSON_ENCODE is also recorded under json", cm.validate(m))
+
+    def test_removed_or_renamed_api_fails(self):
+        probe = probe_for(sample())
+        probe["functions"] = ["json_decode", "json_encode_renamed"]
+        errors = cm.compare(sample(), probe)
+        self.assertIn("extension json: function json_encode is recorded as implemented but zphp does not have it", errors)
+        probe = probe_for(sample())
+        probe["classes"] = []
+        self.assertIn("extension Reflection: class ReflectionClass is recorded as implemented but zphp does not have it", cm.compare(sample(), probe))
+
+    def test_newly_implemented_api_must_be_recorded(self):
+        probe = probe_for(sample())
+        probe["constants"].append("JSON_ERROR_UTF16")
+        self.assertIn("extension json: constant JSON_ERROR_UTF16 is recorded as missing but zphp has it; run --generate and classify it", cm.compare(sample(), probe))
+
+    def test_undocumented_or_vanished_extension_fails(self):
+        probe = probe_for(sample())
+        probe["loaded"].append("sockets")
+        self.assertIn("extension sockets: zphp reports it loaded but the manifest does not mark it available", cm.compare(sample(), probe))
+        probe = probe_for(sample())
+        probe["loaded"].remove("json")
+        self.assertIn("extension json: marked available but zphp does not report it loaded", cm.compare(sample(), probe))
+
+    def test_get_extension_funcs_must_match(self):
+        probe = probe_for(sample())
+        probe["funcs"]["json"] = []
+        self.assertTrue(any(e.startswith("extension json: get_extension_funcs() returns []") for e in cm.compare(sample(), probe)))
+
+    def test_windows_build_skips_unix_only_extensions(self):
+        m = sample()
+        m["extensions"]["Reflection"]["unix_only"] = True
+        probe = probe_for(m)
+        probe["os"] = "Windows"
+        probe["loaded"].remove("Reflection")
+        probe["classes"] = ["JsonException"]
+        self.assertEqual(cm.compare(m, probe), [])
+        probe["os"] = "Linux"
+        self.assertNotEqual(cm.compare(m, probe), [])
+
+    def test_stub_cannot_be_certified_or_make_its_extension_certified(self):
+        m = sample()
+        m["extensions"]["json"]["functions"]["json_encode"] = "certified"
+        self.assertIn("extension json: function json_encode is a no-op stub and cannot be certified", cm.validate(m, frozenset({"json_encode"})))
+        m = sample()
+        m["extensions"]["json"]["missing"]["constants"] = []
+        m["extensions"]["json"]["status"] = "certified"
+        m["extensions"]["json"]["functions"]["json_encode"] = "unsupported"
+        self.assertIn("extension json: certified but json_encode is experimental or unsupported", cm.validate(m, frozenset({"json_encode"})))
+
+    def test_known_stubs_are_detected_and_not_advertised(self):
+        stubs = cm.scan_stubs()
+        self.assertIn("ignore_user_abort", stubs)
+        manifest, _ = cm.load()
+        for ext in manifest["extensions"].values():
+            for name, status in ext["functions"].items():
+                if name.lower() in stubs:
+                    self.assertNotIn(status, ("certified", "supported"), name)
+
+    def test_refresh_never_promotes_by_presence(self):
+        m = sample()
+        m["extensions"]["json"]["status"] = "certified"
+        ref = [("8.5.0", {"json": ("json", {
+            "functions": ["json_encode", "json_decode", "json_validate", "json_stubbed", "json_absent"],
+            "classes": ["JsonException"],
+            "constants": ["JSON_ERROR_NONE"],
+        })})]
+        saved = cm.run_zphp
+        cm.run_zphp = lambda source, data: {
+            "os": "Linux",
+            "functions": [n for n in data["functions"] if n != "json_absent"],
+            "classes": data["classes"],
+            "constants": data["constants"],
+        }
+        try:
+            cm.refresh(m, ref, frozenset({"json_stubbed"}))
+        finally:
+            cm.run_zphp = saved
+        ext = m["extensions"]["json"]
+        self.assertEqual(ext["functions"], {"json_encode": "supported", "json_decode": "supported", "json_validate": "partial", "json_stubbed": "unsupported"})
+        self.assertEqual(ext["missing"], {"functions": ["json_absent"], "classes": [], "constants": []})
+        self.assertEqual(ext["reference_php"], "8.5.0")
+        self.assertEqual(m["extensions"]["Reflection"]["classes"], {"ReflectionClass": "partial"})
+
+    def test_certified_requires_the_whole_surface(self):
+        m = sample()
+        m["extensions"]["json"]["status"] = "certified"
+        self.assertIn("extension json: certified but constant JSON_ERROR_UTF16 is missing", cm.validate(m))
+
+    def test_unavailable_extension_must_be_unsupported(self):
+        m = sample()
+        m["extensions"]["json"]["available"] = False
+        self.assertIn("extension json: an unavailable extension must be unsupported", cm.validate(m))
+
+    def test_check_reports_stale_generated_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            paths = {}
+            for attr in ("MANIFEST", "ZIG_OUT", "DOC_OUT"):
+                paths[attr] = os.path.join(d, os.path.basename(getattr(cm, attr)))
+                shutil.copyfile(getattr(cm, attr), paths[attr])
+            saved = {attr: getattr(cm, attr) for attr in paths}
+            saved_probe = cm.probe_zphp
+            try:
+                for attr, path in paths.items():
+                    setattr(cm, attr, path)
+                cm.probe_zphp = probe_for
+                self.assertEqual(cm.check(), [])
+                with open(paths["ZIG_OUT"], "a", encoding="utf-8") as f:
+                    f.write("// edited\n")
+                with open(paths["DOC_OUT"], "a", encoding="utf-8") as f:
+                    f.write("edited\n")
+                errors = cm.check()
+                self.assertTrue(any("extensions_generated.zig is stale" in e for e in errors), errors)
+                self.assertTrue(any("extensions.md is stale" in e for e in errors), errors)
+            finally:
+                for attr, path in saved.items():
+                    setattr(cm, attr, path)
+                cm.probe_zphp = saved_probe
+
+
+if __name__ == "__main__":
+    unittest.main()

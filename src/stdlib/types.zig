@@ -1646,23 +1646,23 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     return NativeResult.copyString(ctx.allocator, previous);
 }
 
-const SUPPORTED_EXTENSIONS = [_][]const u8{
-    "Core",      "standard",   "spl",       "json",      "pcre",
-    "PDO",       "pdo_sqlite", "pdo_mysql", "pdo_pgsql", "session",
-    "mbstring",  "ctype",      "filter",    "hash",      "iconv",
-    "tokenizer", "Reflection", "date",      "openssl",   "curl",
-    "sodium",    "ldap",       "ftp",       "gd",        "gmp",
-    "bcmath",    "libxml",     "dom",       "SimpleXML", "xml",
-    "xmlreader", "xmlwriter",  "intl",      "fileinfo",  "Phar",
-    "soap",      "zlib",       "posix",     "pcntl",     "random",
-};
+// generated from compatibility/extensions.json by scripts/compat-manifest.
+// being listed means present, not php-compatible; the manifest records that
+const BuiltinExtension = @import("extensions_generated.zig").Extension;
+const builtin_extensions = @import("extensions_generated.zig").extensions;
+
+fn builtinExtension(name: []const u8) ?*const BuiltinExtension {
+    for (&builtin_extensions) |*ext| {
+        if (ext.unix_only and platform.is_windows) continue;
+        if (std.ascii.eqlIgnoreCase(name, ext.name)) return ext;
+    }
+    return null;
+}
 
 fn native_extension_loaded(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const name = args[0].string.bytes();
-    for (SUPPORTED_EXTENSIONS) |s| {
-        if (std.ascii.eqlIgnoreCase(name, s)) return NativeResult.scalar(.{ .bool = true });
-    }
+    if (builtinExtension(name) != null) return NativeResult.scalar(.{ .bool = true });
     // also accept the historic "datetime" alias for "date"
     if (std.ascii.eqlIgnoreCase(name, "datetime")) return NativeResult.scalar(.{ .bool = true });
     return NativeResult.scalar(.{ .bool = @import("../extension.zig").isLoaded(name) });
@@ -1670,7 +1670,10 @@ fn native_extension_loaded(_: *NativeContext, args: []const Value) RuntimeError!
 
 fn native_get_loaded_extensions(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
-    for (SUPPORTED_EXTENSIONS) |s| try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(s) });
+    for (&builtin_extensions) |*ext| {
+        if (ext.unix_only and platform.is_windows) continue;
+        try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(ext.name) });
+    }
     for (@import("../extension.zig").loaded()) |ext| try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(ext.name) });
     return NativeResult.borrowed(.{ .array = arr });
 }
@@ -1678,14 +1681,20 @@ fn native_get_loaded_extensions(ctx: *NativeContext, _: []const Value) RuntimeEr
 fn native_get_extension_funcs(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const name = args[0].string.bytes();
-    // not granular about which fn belongs to which extension - PHP code that
-    // calls this typically just checks for non-false. return false for unknown
-    // extensions and an empty array for known ones to mirror "exists but no
-    // functions enumerable" behavior
-    for (SUPPORTED_EXTENSIONS) |s| {
-        if (std.ascii.eqlIgnoreCase(name, s)) {
-            return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-        }
+    // php looks up exactly "zend" as Core, and answers false for an extension
+    // it does not know or that registers no functions
+    if (builtinExtension(if (std.ascii.eqlIgnoreCase(name, "zend")) "Core" else name)) |ext| {
+        if (ext.functions.len == 0) return NativeResult.scalar(.{ .bool = false });
+        const arr = try ctx.createArray();
+        for (ext.functions) |f| try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(f) });
+        return NativeResult.borrowed(.{ .array = arr });
+    }
+    for (@import("../extension.zig").loaded()) |ext| {
+        if (!std.ascii.eqlIgnoreCase(name, ext.name)) continue;
+        if (ext.functions.items.len == 0) return NativeResult.scalar(.{ .bool = false });
+        const arr = try ctx.createArray();
+        for (ext.functions.items) |f| try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(f.name) });
+        return NativeResult.borrowed(.{ .array = arr });
     }
     return NativeResult.scalar(.{ .bool = false });
 }

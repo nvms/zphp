@@ -35,6 +35,7 @@
 
 - [What Works the Same](./compatibility/same.md)
 - [What Works Differently](./compatibility/different.md)
+- [Extension Compatibility](./compatibility/extensions.md)
 
 # Performance
 

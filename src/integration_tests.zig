@@ -1398,7 +1398,20 @@ test "extension_loaded" {
         \\<?php
         \\echo extension_loaded("json") ? "y" : "n";
         \\echo extension_loaded("fake") ? "y" : "n";
-    , "yn");
+        \\echo extension_loaded("CURL") ? "y" : "n";
+    , "yny");
+}
+
+test "get_extension_funcs is per extension" {
+    try expectOutput(
+        \\<?php
+        \\$json = get_extension_funcs("json");
+        \\echo in_array("json_encode", $json) ? "y" : "n", in_array("strlen", $json) ? "y" : "n";
+        \\$curl = get_extension_funcs("curl");
+        \\echo in_array("curl_init", $curl) ? "y" : "n", in_array("json_encode", $curl) ? "y" : "n";
+        \\echo in_array("strlen", get_extension_funcs("ZEND")) ? "y" : "n";
+        \\var_dump(get_extension_funcs("definitely_not_real"), get_extension_funcs("pdo_sqlite"));
+    , "ynyny" ++ "bool(false)\nbool(false)\n");
 }
 
 // ==========================================================================
