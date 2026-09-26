@@ -2298,6 +2298,7 @@ fn rcGetDefaultProperties(ctx: *NativeContext, _: []const Value) RuntimeError!Na
 fn rcGetStaticProperties(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
+    try ctx.vm.resolveClassDefaults(class_name);
     const arr = try ctx.createArray();
     var current: ?[]const u8 = class_name;
     while (current) |name| {
@@ -2316,6 +2317,7 @@ fn rcGetStaticPropertyValue(ctx: *NativeContext, args: []const Value) RuntimeErr
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
     const prop_name = args[0].string.bytes();
+    try ctx.vm.resolveClassDefaults(class_name);
     var current: ?[]const u8 = class_name;
     while (current) |name| {
         const cls = ctx.vm.classes.get(name) orelse break;
@@ -2334,11 +2336,9 @@ fn rcSetStaticPropertyValue(ctx: *NativeContext, args: []const Value) RuntimeErr
     var current: ?[]const u8 = class_name;
     while (current) |name| {
         const cls_ptr = ctx.vm.classes.getPtr(name) orelse break;
-        if (!cls_ptr.constants.contains(prop_name)) {
-            if (cls_ptr.static_props.contains(prop_name)) {
-                try cls_ptr.static_props.put(ctx.vm.allocator, prop_name, args[1]);
-                return NativeResult.scalar(.null);
-            }
+        if (!cls_ptr.constants.contains(prop_name) and cls_ptr.static_props.contains(prop_name)) {
+            try ctx.vm.setStaticPropValue(class_name, prop_name, args[1]);
+            return NativeResult.scalar(.null);
         }
         current = cls_ptr.parent;
     }
@@ -3726,7 +3726,18 @@ fn rpGetValue(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
         try ctx.vm.triggerLazyProperty(args[0].object, prop_name, if (dc == .string) dc.string.bytes() else null);
         return NativeResult.share(args[0].object.getForScope(prop_name, if (dc == .string) dc.string.bytes() else null));
     }
+    if (staticDeclaringClass(this)) |class_name| {
+        return NativeResult.share((try ctx.vm.staticPropertyValue(class_name, prop_name)) orelse .null);
+    }
     return NativeResult.scalar(.null);
+}
+
+// the class of a static property this ReflectionProperty describes
+fn staticDeclaringClass(this: *PhpObject) ?[]const u8 {
+    const static_v = this.get("_is_static");
+    if (static_v != .bool or !static_v.bool) return null;
+    const dc = this.get("_declaring_class");
+    return if (dc == .string) dc.string.bytes() else null;
 }
 
 fn rpSetValue(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -3780,6 +3791,11 @@ fn rpWrite(ctx: *NativeContext, args: []const Value, skip: bool) RuntimeError!Na
         if (try ctx.vm.checkPropertyType(&value, vr.type_str, scope, prop_name)) return error.RuntimeError;
         try target.setForScope(ctx.allocator, prop_name, value, scope);
         if (skip) _ = try rpSkipLazy(ctx, args);
+        return NativeResult.scalar(.null);
+    }
+    if (staticDeclaringClass(this)) |class_name| {
+        const value = if (args.len >= 2) args[1] else if (args.len == 1) args[0] else Value.null;
+        try ctx.vm.setStaticPropValue(class_name, prop_name, value);
     }
     return NativeResult.scalar(.null);
 }

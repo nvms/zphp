@@ -1844,10 +1844,11 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
     // set static-property defaults after the constants block so a default
     // expression like `public static $x = self::CONST` sees the class and
-    // its (already-set) constants
+    // its (already-set) constants. the rest wait with the instance defaults
+    // below for the class's first use
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
-        if (member.tag == .static_class_property and member.data.lhs != 0) {
+        if (member.tag == .static_class_property and member.data.lhs != 0 and defaultExprIsLiteral(self.ast, member.data.lhs)) {
             try self.compileNode(member.data.lhs);
             var sp_name = self.ast.tokenSlice(member.main_token);
             if (sp_name.len > 0 and sp_name[0] == '$') sp_name = sp_name[1..];
@@ -1860,9 +1861,10 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
     // set instance-property defaults after class_decl + constants so a default
     // expression like `public int $x = self::CONST` resolves against the
-    // now-registered class (the prelude pushed null placeholders). defaults
-    // that read another class or a global constant wait for the class's first
-    // use, like php: the class they name may itself extend this one
+    // now-registered class (the prelude pushed null placeholders). defaults,
+    // static or not, that read another class or a global constant wait for
+    // the class's first use, like php: the class they name may itself extend
+    // this one
     if (try compileDeferredPropDefaults(self, class_name, members)) {
         try self.emitOp(.defer_prop_defaults);
         try self.emitU16(cname_idx);
@@ -2880,11 +2882,16 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
 
 // compiles the non-literal instance defaults into the class's hidden
 // initializer; returns whether there were any
+fn isDeferredDefault(ast: *const Ast, member: Ast.Node) bool {
+    if (member.tag != .class_property and member.tag != .static_class_property) return false;
+    return member.data.lhs != 0 and !defaultExprIsLiteral(ast, member.data.lhs);
+}
+
 fn compileDeferredPropDefaults(self: *Compiler, class_name: []const u8, members: []const u32) Error!bool {
     var any = false;
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
-        if (member.tag == .class_property and member.data.lhs != 0 and !defaultExprIsLiteral(self.ast, member.data.lhs)) any = true;
+        if (isDeferredDefault(self.ast, member)) any = true;
     }
     if (!any) return false;
 
@@ -2923,13 +2930,13 @@ fn compileDeferredPropDefaults(self: *Compiler, class_name: []const u8, members:
     var first_tok: u32 = 0;
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
-        if (member.tag != .class_property or member.data.lhs == 0 or defaultExprIsLiteral(self.ast, member.data.lhs)) continue;
+        if (!isDeferredDefault(self.ast, member)) continue;
         if (first_tok == 0) first_tok = member.main_token;
         try sub.compileNode(member.data.lhs);
         var p_name = self.ast.tokenSlice(member.main_token);
         if (p_name.len > 0 and p_name[0] == '$') p_name = p_name[1..];
         const p_idx = try sub.addConstant(.{ .string = Value.String.borrowed(p_name) });
-        try sub.emitOp(.set_prop_default);
+        try sub.emitOp(if (member.tag == .static_class_property) .set_static_prop else .set_prop_default);
         try sub.emitU16(cname_idx);
         try sub.emitU16(p_idx);
         try sub.emitOp(.pop);

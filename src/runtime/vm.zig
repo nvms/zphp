@@ -1387,6 +1387,9 @@ pub const VM = struct {
         // call hands out, and whether request_init has run
         ext_slots: []extension.VmSlot = &.{},
         ext_request_active: bool = false,
+        // classes whose deferred property defaults have not run yet; while it
+        // is zero a static access skips the resolution check
+        pending_defaults: u32 = 0,
         // provenance of the call family opcode being executed, saved across a
         // nested call so a native callback's own calls cannot clobber it
         saved_sources: std.ArrayListUnmanaged(RefSource) = .{},
@@ -3092,6 +3095,7 @@ pub const VM = struct {
         self.global_vars.clearRetainingCapacity();
         if (self.ic) |ic_ptr| {
             ic_ptr.included.clearRetainingCapacity();
+            ic_ptr.pending_defaults = 0;
             self.dropIncludeError(&ic_ptr.include_parse_error);
             self.dropIncludeError(&ic_ptr.include_compile_error);
             ic_ptr.foreach_pins.clearRetainingCapacity();
@@ -5949,6 +5953,10 @@ pub const VM = struct {
                     var class_name = self.currentChunk().constants.items[class_idx].string.bytes();
                     const prop_name = self.currentChunk().constants.items[prop_idx].string.bytes();
                     class_name = self.resolveStaticClassName(class_name);
+                    self.resolveStaticDefaults(class_name) catch {
+                        if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    };
                     if (self.getStaticPropPtr(class_name, prop_name)) |slot| {
                         const cur = slot.*;
                         if (cur == .int or cur == .float or (cur == .bool and cur.bool)) {
@@ -6674,6 +6682,10 @@ pub const VM = struct {
                     const dst_name = self.currentChunk().constants.items[dst_idx].string.bytes();
                     const class_name = self.currentChunk().constants.items[class_idx].string.bytes();
                     const prop_name = self.currentChunk().constants.items[prop_idx].string.bytes();
+                    self.resolveStaticDefaults(class_name) catch {
+                        if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    };
                     const frame = self.currentFrame();
                     self.unbindRefSlot(&frame.ref_slots, dst_name);
                     const cell = blk: {
@@ -10742,27 +10754,16 @@ pub const VM = struct {
                 .get_static_prop => {
                     const class_idx = self.readU16();
                     const prop_idx = self.readU16();
-                    var class_name = self.currentChunk().constants.items[class_idx].string.bytes();
+                    const class_name = self.resolveStaticClassName(self.currentChunk().constants.items[class_idx].string.bytes());
                     const prop_name = self.currentChunk().constants.items[prop_idx].string.bytes();
-
-                    class_name = self.resolveStaticClassName(class_name);
-
                     if (std.mem.eql(u8, prop_name, "class")) {
                         self.push(.{ .string = Value.String.borrowed(class_name) });
-                    } else if (self.getStaticProp(class_name, prop_name)) |val| {
-                        self.push(val);
-                    } else {
-                        if (!self.classes.contains(class_name) and !self.interfaces.contains(class_name)) {
-                            try self.tryAutoload(class_name);
-                            if (self.getStaticProp(class_name, prop_name)) |val| {
-                                self.push(val);
-                            } else {
-                                self.push(.null);
-                            }
-                        } else {
-                            self.push(.null);
-                        }
+                        continue;
                     }
+                    self.push(self.readStaticProp(class_name, prop_name) catch {
+                        if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    });
                 },
 
                 .get_class_const => {
@@ -10829,17 +10830,11 @@ pub const VM = struct {
                         // Class::{'class'} resolves to the class name string,
                         // matching the static `Class::class` form
                         self.push(.{ .string = Value.String.borrowed(class_name) });
-                    } else if (self.getStaticProp(class_name, prop_name)) |val| {
-                        self.push(val);
                     } else {
-                        if (!self.classes.contains(class_name) and !self.interfaces.contains(class_name)) {
-                            try self.tryAutoload(class_name);
-                        }
-                        if (self.getStaticProp(class_name, prop_name)) |val| {
-                            self.push(val);
-                        } else {
-                            self.push(.null);
-                        }
+                        self.push(self.readStaticProp(class_name, prop_name) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        });
                     }
                 },
 
@@ -10849,53 +10844,30 @@ pub const VM = struct {
                     const name_val = self.pop();
                     const class_val = self.pop();
                     const prop_name: []const u8 = if (name_val == .string) name_val.string.bytes() else "";
-                    const raw_class: []const u8 = switch (class_val) {
-                        .string => |s| s.bytes(),
-                        .object => |o| o.class_name,
-                        else => "",
-                    };
-                    const class_name = self.resolveStaticClassName(raw_class);
+                    const class_name = self.resolveStaticClassName(classNameOf(class_val));
                     if (class_name.len == 0 or prop_name.len == 0) {
                         self.push(.null);
                     } else if (std.mem.eql(u8, prop_name, "class")) {
                         self.push(.{ .string = Value.String.borrowed(class_name) });
                     } else {
-                        if (!self.classes.contains(class_name) and !self.interfaces.contains(class_name)) {
-                            try self.tryAutoload(class_name);
-                        }
-                        if (self.getStaticProp(class_name, prop_name)) |val| {
-                            self.push(val);
-                        } else {
-                            self.push(.null);
-                        }
+                        self.push(self.readStaticProp(class_name, prop_name) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        });
                     }
                 },
 
                 .get_static_prop_dynamic => {
                     const prop_idx = self.readU16();
                     const prop_name = self.currentChunk().constants.items[prop_idx].string.bytes();
-                    const class_val = self.pop();
-                    const class_name: []const u8 = switch (class_val) {
-                        .string => |s| s.bytes(),
-                        .object => |o| o.class_name,
-                        else => "",
-                    };
-
+                    const class_name = classNameOf(self.pop());
                     if (class_name.len == 0) {
                         self.push(.null);
-                    } else if (self.getStaticProp(class_name, prop_name)) |val| {
-                        self.push(val);
                     } else {
-                        if (!self.classes.contains(class_name) and !self.interfaces.contains(class_name)) {
-                            try self.tryAutoload(class_name);
-                            if (self.getStaticProp(class_name, prop_name)) |val| {
-                                self.push(val);
-                            } else {
-                                self.push(.null);
-                            }
-                        } else {
-                            self.push(.null);
-                        }
+                        self.push(self.readStaticProp(class_name, prop_name) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        });
                     }
                 },
 
@@ -11100,6 +11072,10 @@ pub const VM = struct {
                     const prop_name = self.currentChunk().constants.items[prop_idx].string.bytes();
 
                     class_name = self.resolveStaticClassName(class_name);
+                    self.resolveStaticDefaults(class_name) catch {
+                        if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    };
 
                     const val = try self.copyValue(self.peek());
                     var target: ?*ClassDef = null;
@@ -11133,6 +11109,7 @@ pub const VM = struct {
                     const class_idx = self.readU16();
                     const class_name = self.currentChunk().constants.items[class_idx].string.bytes();
                     if (self.classes.getPtr(class_name)) |cls| {
+                        if (!cls.defaults_pending) self.ic.?.pending_defaults += 1;
                         cls.defaults_pending = true;
                         if (cls.slot_layout) |layout| layout.defaults_ready = false;
                     }
@@ -11185,6 +11162,11 @@ pub const VM = struct {
                     };
                     class_name = self.resolveStaticClassName(class_name);
                     if (class_name.len > 0 and prop_name.len > 0) {
+                        self.resolveStaticDefaults(class_name) catch {
+                            self.stackRelease(rhs_val);
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                         const stored = try self.copyValue(rhs_val);
                         var target: ?*ClassDef = null;
                         if (self.classes.getPtr(class_name)) |cls| {
@@ -11337,11 +11319,10 @@ pub const VM = struct {
             self.push(val);
             return false;
         }
-        if (!self.classes.contains(class_name) and !self.interfaces.contains(class_name)) {
-            self.push(.null);
-            return false;
-        }
-        const msg = try std.fmt.allocPrint(self.allocator, "Undefined constant {s}::{s}", .{ class_name, const_name });
+        const msg = if (!self.classes.contains(class_name) and !self.interfaces.contains(class_name))
+            try std.fmt.allocPrint(self.allocator, "Class \"{s}\" not found", .{class_name})
+        else
+            try std.fmt.allocPrint(self.allocator, "Undefined constant {s}::{s}", .{ class_name, const_name });
         defer self.allocator.free(msg);
         if (try self.throwBuiltinException("Error", msg)) return true;
         return error.RuntimeError;
@@ -15614,6 +15595,18 @@ pub const VM = struct {
         if (old) |kv| self.releaseValue(kv.value);
     }
 
+    // a static property write from outside the vm's opcodes (reflection)
+    pub fn setStaticPropValue(self: *VM, class_name: []const u8, prop_name: []const u8, val: Value) RuntimeError!void {
+        try self.resolveClassDefaults(class_name);
+        try self.writeStaticProp(class_name, prop_name, val);
+        self.syncStaticPropRefs(class_name, prop_name, val);
+    }
+
+    pub fn staticPropertyValue(self: *VM, class_name: []const u8, prop_name: []const u8) RuntimeError!?Value {
+        try self.resolveClassDefaults(class_name);
+        return self.getStaticProp(class_name, prop_name);
+    }
+
     fn writeStaticProp(self: *VM, class_name: []const u8, prop_name: []const u8, val: Value) !void {
         if (self.classes.getPtr(class_name)) |cls| {
             if (cls.static_props.contains(prop_name)) {
@@ -17457,44 +17450,82 @@ pub const VM = struct {
         return self.isThrowableClass(class_name);
     }
 
-    // the nearest ancestor with a layout carries the chain's state
     fn ancestorDefaultsReady(self: *VM, def: *const ClassDef) bool {
         var name = def.parent;
         while (name) |n| {
             const cls = self.classes.get(n) orelse return true;
-            if (cls.slot_layout) |layout| return layout.defaults_ready;
+            if (cls.defaults_pending) return false;
             name = cls.parent;
         }
         return true;
     }
 
-    // php evaluates property defaults that read other classes or global
-    // constants when the class is first used, so such a default may name a
-    // class that extends this one. runs the hidden initializers root first,
-    // then copies the resolved inherited defaults into this class's layout
+    // php evaluates property defaults, static and instance, that read other
+    // classes or global constants when the class is first used, so such a
+    // default may name a class that extends this one. runs the hidden
+    // initializers root first, then copies the resolved inherited defaults
+    // into this class's layout
     pub fn resolveClassDefaults(self: *VM, class_name: []const u8) RuntimeError!void {
-        const layout = (self.classes.get(class_name) orelse return).slot_layout orelse return;
-        if (layout.defaults_ready) return;
-        layout.defaults_ready = true;
-        if (self.classes.get(class_name).?.parent) |parent| try self.resolveClassDefaults(parent);
-        if (self.classes.getPtr(class_name)) |cls| if (cls.defaults_pending) {
-            cls.defaults_pending = false;
-            const name = try bytecode.propDefaultsInitializerName(self.allocator, class_name);
-            defer self.allocator.free(name);
-            const floor = self.handler_floor;
-            self.handler_floor = self.handler_count;
-            defer self.handler_floor = floor;
-            const instantiating = self.frame_count;
-            _ = self.callByName(name, &.{}) catch |err| {
-                // the defaults belong to the instantiation, not a frame of their own
-                if (self.pending_exception) |exc| if (exc == .object) try self.stampThrowableBelow(exc.object, instantiating);
-                // php evaluates the defaults again on the next attempt
-                if (self.classes.getPtr(class_name)) |retry| retry.defaults_pending = true;
-                layout.defaults_ready = false;
-                return err;
-            };
+        const cls = self.classes.getPtr(class_name) orelse return;
+        const layout = cls.slot_layout;
+        if (layout) |l| {
+            if (l.defaults_ready) return;
+            l.defaults_ready = true;
+        }
+        errdefer if (layout) |l| {
+            l.defaults_ready = false;
         };
-        self.inheritLayoutDefaults(class_name, layout);
+        if (cls.parent) |parent| try self.resolveClassDefaults(parent);
+        try self.runDeferredDefaults(class_name);
+        if (layout) |l| self.inheritLayoutDefaults(class_name, l);
+    }
+
+    fn runDeferredDefaults(self: *VM, class_name: []const u8) RuntimeError!void {
+        const cls = self.classes.getPtr(class_name) orelse return;
+        if (!cls.defaults_pending) return;
+        cls.defaults_pending = false;
+        self.ic.?.pending_defaults -= 1;
+        const name = try bytecode.propDefaultsInitializerName(self.allocator, class_name);
+        defer self.allocator.free(name);
+        const floor = self.handler_floor;
+        self.handler_floor = self.handler_count;
+        defer self.handler_floor = floor;
+        const instantiating = self.frame_count;
+        _ = self.callByName(name, &.{}) catch |err| {
+            // the defaults belong to the instantiation, not a frame of their own
+            if (self.pending_exception) |exc| if (exc == .object) try self.stampThrowableBelow(exc.object, instantiating);
+            // php evaluates the defaults again on the next attempt
+            if (self.classes.getPtr(class_name)) |retry| if (!retry.defaults_pending) {
+                retry.defaults_pending = true;
+                self.ic.?.pending_defaults += 1;
+            };
+            return err;
+        };
+    }
+
+    // a static read: autoloading the class on a miss, null when nothing
+    // declares the property
+    fn readStaticProp(self: *VM, class_name: []const u8, prop_name: []const u8) RuntimeError!Value {
+        if (try self.staticPropValue(class_name, prop_name)) |val| return val;
+        if (self.classes.contains(class_name) or self.interfaces.contains(class_name)) return .null;
+        try self.tryAutoload(class_name);
+        return (try self.staticPropValue(class_name, prop_name)) orelse .null;
+    }
+
+    // a static read autoloads the class, so its deferred defaults can only be
+    // resolved after the lookup; the value is read again once they have run
+    fn staticPropValue(self: *VM, class_name: []const u8, prop_name: []const u8) RuntimeError!?Value {
+        const found = self.getStaticProp(class_name, prop_name);
+        if (self.ic.?.pending_defaults == 0) return found;
+        try self.resolveClassDefaults(class_name);
+        return self.getStaticProp(class_name, prop_name);
+    }
+
+    // a static property read or write uses the class, which resolves its
+    // deferred defaults first
+    pub inline fn resolveStaticDefaults(self: *VM, class_name: []const u8) RuntimeError!void {
+        if (self.ic.?.pending_defaults == 0) return;
+        try self.resolveClassDefaults(class_name);
     }
 
     fn inheritLayoutDefaults(self: *VM, class_name: []const u8, layout: *PhpObject.SlotLayout) void {
