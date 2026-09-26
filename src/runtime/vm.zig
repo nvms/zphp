@@ -785,7 +785,6 @@ pub const VM = struct {
     // by user try/catch. used for execution-deadline timeouts; PHP's
     // `Maximum execution time exceeded` is an uncatchable fatal there too
     uncatchable_fatal: bool = false,
-    exception_dispatched: bool = false,
     run_base_frame: usize = 0,
     allocator: Allocator,
     string_pool: @import("string_pool.zig") = .{ .backing = undefined },
@@ -3010,7 +3009,6 @@ pub const VM = struct {
         // exception_handler_stack holds set_exception_handler callables (closures
         // / array callables) that are likewise per-request and dangle after free
         self.pending_exception = null;
-        self.exception_dispatched = false;
         self.exception_handler_stack.clearRetainingCapacity();
         self.clearPharAliases();
         self.current_fiber = null;
@@ -3645,45 +3643,49 @@ pub const VM = struct {
         return .null;
     }
 
+    // runs the frames above base_frame to completion. an exception one of
+    // those frames catches resumes at its handler; any other leaves with the
+    // error, for the loop that owns the handler
     fn runUntilFrame(self: *VM, base_frame: usize) RuntimeError!void {
-        if (self.frame_count <= base_frame) return;
-        self.runLoop(base_frame) catch |err| {
-            if (self.pending_exception != null) {
-                if (self.dispatchPendingException(self.run_base_frame)) {
-                    self.exception_dispatched = true;
-                    return;
+        while (self.frame_count > base_frame) {
+            self.runLoop(base_frame) catch |err| {
+                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                return self.runFailure(err);
+            };
+            return;
+        }
+    }
+
+    fn runFailure(self: *VM, err: RuntimeError) RuntimeError {
+        // exit() / die() unwinds with error.RuntimeError + exit_requested
+        // set - that's an orderly script exit, not an internal error.
+        // surface the err but don't decorate with a fake "Fatal error"
+        // diagnostic that callers print to users
+        if (self.exit_requested) return err;
+        // surface the Zig error in error_msg so callers (e.g. require's
+        // catch block) don't replace it with a generic "Failed opening"
+        // message. captures the current function name and IP so the user
+        // gets a real diagnostic instead of a bare RuntimeError
+        if (self.error_msg == null and self.pending_exception == null) {
+            // ZPHP_DBG_PANIC_INTERNAL=1 prints the Zig error-return trace
+            // so we can find which native raised error.RuntimeError
+            // without setting an exception or error_msg. invaluable when
+            // bisecting an 'internal RuntimeError' to its source
+            if (platform.getenv("ZPHP_DBG_PANIC_INTERNAL") != null) {
+                std.debug.print("\n[ZPHP_DBG_PANIC_INTERNAL] uncontexted {s}\n", .{@errorName(err)});
+                if (@errorReturnTrace()) |trace| {
+                    std.debug.dumpStackTrace(trace.*);
                 }
             }
-            // exit() / die() unwinds with error.RuntimeError + exit_requested
-            // set - that's an orderly script exit, not an internal error.
-            // surface the err but don't decorate with a fake "Fatal error"
-            // diagnostic that callers print to users
-            if (self.exit_requested) return err;
-            // surface the Zig error in error_msg so callers (e.g. require's
-            // catch block) don't replace it with a generic "Failed opening"
-            // message. captures the current function name and IP so the user
-            // gets a real diagnostic instead of a bare RuntimeError
-            if (self.error_msg == null and self.pending_exception == null) {
-                // ZPHP_DBG_PANIC_INTERNAL=1 prints the Zig error-return trace
-                // so we can find which native raised error.RuntimeError
-                // without setting an exception or error_msg. invaluable when
-                // bisecting an 'internal RuntimeError' to its source
-                if (platform.getenv("ZPHP_DBG_PANIC_INTERNAL") != null) {
-                    std.debug.print("\n[ZPHP_DBG_PANIC_INTERNAL] uncontexted {s}\n", .{@errorName(err)});
-                    if (@errorReturnTrace()) |trace| {
-                        std.debug.dumpStackTrace(trace.*);
-                    }
-                }
-                const cur_frame = if (self.frame_count > 0) &self.frames[self.frame_count - 1] else null;
-                const ip: usize = if (cur_frame) |f| f.ip else 0;
-                const func_name: []const u8 = if (cur_frame) |f|
-                    if (f.func) |fn_def| fn_def.name else "<top>"
-                else
-                    "<no frame>";
-                self.setErrorMsg("Fatal error: internal {s} in {s} at ip {d}", .{ @errorName(err), func_name, ip });
-            }
-            return error.RuntimeError;
-        };
+            const cur_frame = if (self.frame_count > 0) &self.frames[self.frame_count - 1] else null;
+            const ip: usize = if (cur_frame) |f| f.ip else 0;
+            const func_name: []const u8 = if (cur_frame) |f|
+                if (f.func) |fn_def| fn_def.name else "<top>"
+            else
+                "<no frame>";
+            self.setErrorMsg("Fatal error: internal {s} in {s} at ip {d}", .{ @errorName(err), func_name, ip });
+        }
+        return error.RuntimeError;
     }
 
     // A constructor is a nested execution boundary: its caller's handlers
@@ -3702,9 +3704,17 @@ pub const VM = struct {
         _ = self.pop(); // only a normally returned constructor has a result
     }
 
+    // the script's own loop: an exception any frame catches resumes there,
+    // whichever opcode raised it
     pub fn run(self: *VM) RuntimeError!void {
         self.installHooks();
-        return self.runLoop(0);
+        while (true) {
+            self.runLoop(0) catch |err| {
+                if (!self.exit_requested and self.pending_exception != null and self.dispatchPendingException(0)) continue;
+                return err;
+            };
+            return;
+        }
     }
 
     fn runLoop(self: *VM, base_frame: usize) RuntimeError!void {
@@ -12374,6 +12384,13 @@ pub const VM = struct {
     // `at` places the exception somewhere other than the throwing frame, the
     // way a ParseError from an included file reports that file and line
     pub fn throwBuiltinExceptionAt(self: *VM, class_name: []const u8, message: []const u8, at: ?SourcePosition) !bool {
+        // a lookup that cannot fail (a class constant, a static property, a
+        // method) leaves an autoloader's exception pending; php raises that
+        // one, never the miss the lookup then reports
+        if (self.takePending()) |pending| {
+            defer self.stackRelease(pending);
+            if (pending == .object) return self.throwObject(pending.object);
+        }
         return self.throwObject(try self.newBuiltinException(class_name, message, at));
     }
 
@@ -12525,6 +12542,7 @@ pub const VM = struct {
             .ref_slots = gen.ref_slots,
         };
         gen.ref_slots = .{};
+        self.markArgsUnsaved();
         self.frame_count += 1;
         self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
@@ -15371,6 +15389,7 @@ pub const VM = struct {
     }
 
     pub fn deinitFrameSlot(self: *VM, idx: usize) void {
+        self.forgetFrameArgs(idx);
         const frame_generator = self.frames[idx].generator;
         self.deinitRefSlots(&self.frames[idx].ref_slots);
         self.unregFrameBindings(&self.frames[idx]);
@@ -16719,8 +16738,9 @@ pub const VM = struct {
         }
         // not registered as an interface - try autoload then fall back to
         // walking a class's implemented-interface list (for class-as-iface refs)
+        // instanceof never throws, so an autoloader's exception goes nowhere
         if (!self.classes.contains(iface_name)) {
-            self.tryAutoload(iface_name) catch {};
+            self.tryAutoload(iface_name) catch self.discardPending();
         }
         if (self.interfaces.get(iface_name)) |idef| {
             for (idef.parents.items) |p| if (self.implementsInterface(p, target)) return true;
@@ -17507,6 +17527,8 @@ pub const VM = struct {
     // declares the property
     fn readStaticProp(self: *VM, class_name: []const u8, prop_name: []const u8) RuntimeError!Value {
         if (try self.staticPropValue(class_name, prop_name)) |val| return val;
+        // the lookup autoloads and keeps an autoloader's exception pending
+        if (self.pending_exception != null) return error.RuntimeError;
         if (self.classes.contains(class_name) or self.interfaces.contains(class_name)) return .null;
         try self.tryAutoload(class_name);
         return (try self.staticPropValue(class_name, prop_name)) orelse .null;
@@ -19995,6 +20017,17 @@ pub const VM = struct {
         ic.fga_offsets[self.frame_count] = sp;
         for (0..ac) |i| ic.fga_buf[sp + i] = args[i];
         ic.fga_sp = @intCast(sp + ac);
+    }
+
+    // a slot being torn down gives back its saved arguments, so a frame
+    // unwound by an exception leaves nothing behind for the next frame there
+    fn forgetFrameArgs(self: *VM, idx: usize) void {
+        const ic = self.ic orelse return;
+        if (idx >= ic.fga_offsets_room.committed) return;
+        const offset = ic.fga_offsets[idx];
+        if (offset == fga_unsaved) return;
+        if (offset < ic.fga_sp) ic.fga_sp = offset;
+        ic.fga_offsets[idx] = fga_unsaved;
     }
 
     pub fn restoreFrameArgsSp(self: *VM) void {
