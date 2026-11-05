@@ -15,7 +15,9 @@ check() {
     else
         failed=$((failed + 1))
         printf 'FAIL %s\n' "$name"
-        diff <(echo "$expected") <(echo "$actual") | head -20
+        # zphp's side first: a crash often leaves a single line
+        diff <(echo "$expected") <(echo "$actual") | grep '^>' | head -20
+        diff <(echo "$expected") <(echo "$actual") | grep '^<' | head -10
     fi
 }
 
