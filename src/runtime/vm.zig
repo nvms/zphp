@@ -7744,11 +7744,7 @@ pub const VM = struct {
                     if (exception == .object and self.sp > 0) {
                         const below = self.stack[self.sp - 1];
                         if (below == .object and self.isInstanceOf(below.object.class_name, "Throwable")) {
-                            const prev = exception.object.get("previous");
-                            if (prev == .null and below.object != exception.object) {
-                                try exception.object.set(self.allocator, "previous", below);
-                                _ = self.pop();
-                            }
+                            if (try self.chainPrevious(exception.object, below.object)) _ = self.pop();
                         }
                     }
                     if (self.handler_count <= self.handler_floor) {
@@ -21791,6 +21787,27 @@ pub const VM = struct {
         self.pending_array_release.append(self.allocator, arr) catch {
             arr.release_queued = false;
         };
+    }
+
+    // zend_exception_set_previous: hang `add` off the end of the exception's
+    // previous chain, unless it already leads back into that chain, which
+    // would make the chain a loop
+    fn chainPrevious(self: *VM, exception: *PhpObject, add: *PhpObject) !bool {
+        if (exception == add) return false;
+        var ex = exception;
+        while (true) {
+            var ancestor = add.get("previous");
+            while (ancestor == .object) : (ancestor = ancestor.object.get("previous")) {
+                if (ancestor.object == ex) return false;
+            }
+            const prev = ex.get("previous");
+            if (prev != .object) {
+                try ex.set(self.allocator, "previous", .{ .object = add });
+                return true;
+            }
+            ex = prev.object;
+            if (ex == add) return false;
+        }
     }
 
     // the statement-boundary gate. every queue triggers it; in-transit values
