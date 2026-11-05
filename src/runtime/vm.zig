@@ -8232,8 +8232,22 @@ pub const VM = struct {
                     }
                     // Interfaces inherit contracts from every parent, including
                     // diamonds. Keep local declarations authoritative.
-                    for (idef.parents.items) |parent| {
+                    // a parent has to exist when the interface is declared,
+                    // which is also what stops an interface extending itself
+                    const missing_parent: ?[]const u8 = for (idef.parents.items) |parent| {
                         if (!self.interfaces.contains(parent)) try self.tryAutoload(parent);
+                        if (!self.interfaces.contains(parent)) break parent;
+                    } else null;
+                    if (missing_parent) |parent| {
+                        idef.deinit(self.allocator);
+                        def.deinit(self.allocator);
+                        if (self.pending_exception != null) return error.RuntimeError;
+                        const msg = try std.fmt.allocPrint(self.allocator, "Interface \"{s}\" not found", .{parent});
+                        defer self.allocator.free(msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    }
+                    for (idef.parents.items) |parent| {
                         if (self.classes.get(parent)) |base| {
                             _ = base;
                             if (self.interfaces.get(parent)) |parent_iface| {
