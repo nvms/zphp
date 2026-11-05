@@ -2079,6 +2079,14 @@ test "goto labels are checked at compile time" {
     try expectOutput("<?php $i = 0; again: $i++; if ($i < 3) goto again; echo $i; goto done; echo 'skipped'; done: echo '!';", "3!");
 }
 
+test "self, parent, and static cannot be extended or implemented" {
+    try expectCompileFatal("<?php class T extends self {}", "Cannot use \"self\" as class name, as it is reserved");
+    try expectCompileFatal("<?php class T extends PARENT {}", "Cannot use \"PARENT\" as class name, as it is reserved");
+    try expectCompileFatal("<?php class T implements self {}", "Cannot use \"self\" as interface name, as it is reserved");
+    try expectCompileFatal("<?php interface I extends static {}", "Cannot use \"static\" as interface name, as it is reserved");
+    try expectCompileFatal("<?php $o = new class extends self {};", "Cannot use \"self\" as class name, as it is reserved");
+}
+
 test "reading an append target is a compile fatal" {
     try expectCompileFatal("<?php $a = []; echo $a[];", "Cannot use [] for reading");
     try expectCompileFatal("<?php $a = []; isset($a[]);", "Cannot use [] for reading");

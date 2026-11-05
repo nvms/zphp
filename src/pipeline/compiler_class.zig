@@ -1368,12 +1368,14 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     var impl_names: [16][]const u8 = undefined;
     for (0..impl_count) |i| {
         const impl_node = self.ast.nodes[self.ast.extra_data[rhs_base + 3 + i]];
+        try rejectReservedParent(self, impl_node, "interface");
         impl_names[i] = try resolveNodeClassName(self, impl_node);
     }
 
     const prev_parent = self.current_parent;
     self.current_parent = if (parent_node != 0) blk: {
         const pnode = self.ast.nodes[parent_node];
+        try rejectReservedParent(self, pnode, "class");
         break :blk try resolveNodeClassName(self, pnode);
     } else "";
     defer self.current_parent = prev_parent;
@@ -2174,6 +2176,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
 
     if (parent_node != 0) {
         const apnode = self.ast.nodes[parent_node];
+        try rejectReservedParent(self, apnode, "class");
         const parent_name = try resolveNodeClassName(self, apnode);
         const parent_idx = try self.addConstant(.{ .string = Value.String.borrowed(parent_name) });
         try self.emitU16(parent_idx);
@@ -2317,6 +2320,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitByte(@intCast(parent_count));
         for (0..parent_count) |i| {
             const pnode = self.ast.nodes[self.ast.extra_data[node.data.rhs + 1 + i]];
+            try rejectReservedParent(self, pnode, "interface");
             const parent_name = try resolveNodeClassName(self, pnode);
             const pidx = try self.addConstant(.{ .string = Value.String.borrowed(parent_name) });
             try self.emitU16(pidx);
@@ -3289,4 +3293,19 @@ fn closureDisplayName(self: *Compiler, line: u32) ![]const u8 {
         try std.fmt.allocPrint(self.allocator, "{{closure:{s}:{d}}}", .{ self.file_path, line });
     try self.string_allocs.append(self.allocator, name);
     return name;
+}
+
+// self, parent, and static name the class being compiled, never one to
+// extend or implement; php rejects them before anything runs
+fn rejectReservedParent(self: *Compiler, n: Ast.Node, comptime kind: []const u8) !void {
+    var token = n.main_token;
+    if (n.tag == .qualified_name) {
+        const parts = self.ast.extraSlice(n.data.lhs);
+        if (parts.len != 1 or n.data.rhs != 0) return;
+        token = parts[0];
+    }
+    const name = self.ast.tokenSlice(token);
+    for ([_][]const u8{ "self", "parent", "static" }) |reserved| {
+        if (std.ascii.eqlIgnoreCase(name, reserved)) return self.failFmt(token, "Cannot use \"{s}\" as " ++ kind ++ " name, as it is reserved", .{name});
+    }
 }
