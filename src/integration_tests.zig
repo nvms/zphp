@@ -2053,7 +2053,7 @@ fn expectCompileFatal(source: []const u8, expected: []const u8) !void {
         result.deinit();
         return error.TestExpectedCompileFatal;
     } else |err| try std.testing.expectEqual(error.CompileError, err);
-    try std.testing.expectEqualStrings(expected, diag.?.message);
+    try std.testing.expectEqualStrings(expected, diag.?.message());
 }
 
 test "empty array elements are a compile fatal outside destructuring" {
@@ -2069,6 +2069,14 @@ test "destructuring into nothing is a compile fatal" {
     try expectCompileFatal("<?php [,] = [1];", "Cannot use empty list");
     try expectCompileFatal("<?php [[], $a] = [[1], 2];", "Cannot use empty list");
     try expectCompileFatal("<?php foreach ([[1]] as []) {}", "Cannot use empty list");
+}
+
+test "goto labels are checked at compile time" {
+    try expectCompileFatal("<?php foo: foo: goto foo;", "Label 'foo' already defined");
+    try expectCompileFatal("<?php goto nowhere; echo 1;", "'goto' to undefined label 'nowhere'");
+    try expectCompileFatal("<?php function f() { a: a: }", "Label 'a' already defined");
+    try expectCompileFatal("<?php function f() { goto out; }", "'goto' to undefined label 'out'");
+    try expectOutput("<?php $i = 0; again: $i++; if ($i < 3) goto again; echo $i; goto done; echo 'skipped'; done: echo '!';", "3!");
 }
 
 test "reading an append target is a compile fatal" {

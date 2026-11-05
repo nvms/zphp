@@ -3609,7 +3609,7 @@ pub const VM = struct {
                 const caller = self.currentSourcePosition();
                 const where = try std.fmt.allocPrint(self.allocator, "{s}({d}) : eval()'d code", .{ caller.file, caller.line });
                 defer self.allocator.free(where);
-                return self.raiseCompileFatal(d.message, .{ .file = where, .line = line });
+                return self.raiseCompileFatal(d.message(), .{ .file = where, .line = line });
             }
             self.setErrorMsg("eval(): compile error", .{});
             return error.RuntimeError;

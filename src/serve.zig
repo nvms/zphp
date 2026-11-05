@@ -279,7 +279,7 @@ fn loadFile(path: []const u8, allocator: Allocator, vm: *@import("runtime/vm.zig
 
     var diag: ?compiler.Diagnostic = null;
     var result = compiler.compileWithOrigin(&ast, allocator, .{ .file_path = abs_path, .diagnostic = &diag }) catch {
-        if (diag) |d| vm.recordIncludeCompileError(d.message, abs_path, error_format.compileErrorLine(&ast, d));
+        if (diag) |d| vm.recordIncludeCompileError(d.message(), abs_path, error_format.compileErrorLine(&ast, d));
         ast.deinit();
         allocator.free(source);
         allocator.free(abs_path);

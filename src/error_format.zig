@@ -142,7 +142,7 @@ pub fn formatCompileError(alloc: std.mem.Allocator, ast: *const Ast, file_path: 
     var buf: Writer = .empty;
     const tok = ast.tokens[diag.token];
     const loc = Chunk.locationFromOffset(ast.source, tok.start);
-    writeFmt(&buf, alloc, "\nFatal error: {s} in {s} on line {d}\n\n", .{ diag.message, displayPath(file_path), loc.line });
+    writeFmt(&buf, alloc, "\nFatal error: {s} in {s} on line {d}\n\n", .{ diag.message(), displayPath(file_path), loc.line });
     writeSourceSnippet(&buf, alloc, ast.source, loc, tok.end - tok.start);
     return buf.items;
 }

@@ -886,7 +886,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     if (call_attrs.no_discard != null and !gen) try sub.emitOp(.check_nodiscard);
     const body_idx = node.data.rhs & 0x3FFFFFFF;
     try sub.compileNode(body_idx);
-    sub.patchGotos();
+    try sub.patchGotos();
     try sub.emitOp(.op_null);
     try sub.emitOp(if (gen) .generator_return else .return_val);
 
@@ -1079,7 +1079,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     if (call_attrs.deprecated != null and !gen) try sub.emitOp(.check_deprecated);
     if (call_attrs.no_discard != null and !gen) try sub.emitOp(.check_nodiscard);
     try sub.compileNode(body_node);
-    sub.patchGotos();
+    try sub.patchGotos();
     try sub.emitOp(.op_null);
     try sub.emitOp(if (gen) .generator_return else .return_val);
 
@@ -2922,7 +2922,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     // returns_ref (bit 27)
     const body_idx = member.data.rhs & 0x07FFFFFF;
     try sub.compileNode(body_idx);
-    sub.patchGotos();
+    try sub.patchGotos();
     try sub.emitOp(.op_null);
     try sub.emitOp(if (method_gen) .generator_return else .return_val);
 
@@ -3160,7 +3160,7 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
     } else if (body_idx != 0) {
         try sub.compileNode(body_idx);
     }
-    sub.patchGotos();
+    try sub.patchGotos();
     try sub.emitOp(.op_null);
     try sub.emitOp(if (is_generator) .generator_return else .return_val);
 

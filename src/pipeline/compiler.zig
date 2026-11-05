@@ -131,8 +131,13 @@ pub const Origin = struct {
 
 // a php compile-time fatal: the message and the token it is reported at
 pub const Diagnostic = struct {
-    message: []const u8,
+    text: [256]u8 = undefined,
+    len: usize = 0,
     token: u32,
+
+    pub fn message(d: *const Diagnostic) []const u8 {
+        return d.text[0..d.len];
+    }
 };
 
 pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) Error!CompileResult {
@@ -176,7 +181,7 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
     for (ast.extraSlice(root.data.lhs)) |stmt| {
         try c.compileNode(stmt);
     }
-    c.patchGotos();
+    try c.patchGotos();
     try c.emitOp(.halt);
 
     const slot_names = try c.buildSlotNames();
@@ -291,6 +296,7 @@ pub const Compiler = struct {
         offset: usize,
         label: []const u8,
         source_offset: usize,
+        token: u32,
     };
 
     // ==================================================================
@@ -299,8 +305,19 @@ pub const Compiler = struct {
 
     // stop compiling at a php compile-time fatal, recording the first one
     pub fn fail(self: *Compiler, token: u32, message: []const u8) error{CompileError} {
+        return self.failFmt(token, "{s}", .{message});
+    }
+
+    // the diagnostic keeps its own copy, so the message may name things
+    // from the source
+    pub fn failFmt(self: *Compiler, token: u32, comptime fmt: []const u8, args: anytype) error{CompileError} {
         if (self.diagnostic) |slot| {
-            if (slot.* == null) slot.* = .{ .message = message, .token = token };
+            if (slot.* == null) {
+                var d: Diagnostic = .{ .token = token };
+                // a message too long for the buffer keeps what fits
+                d.len = if (std.fmt.bufPrint(&d.text, fmt, args)) |written| written.len else |_| d.text.len;
+                slot.* = d;
+            }
         }
         return error.CompileError;
     }
@@ -587,7 +604,9 @@ pub const Compiler = struct {
             .use_fn_stmt => try compiler_stmt.compileUseFn(self, node),
             .use_const_stmt => try compiler_stmt.compileUseConst(self, node),
             .label_stmt => {
-                try self.labels.put(self.allocator, self.ast.tokenSlice(node.main_token), self.chunk.offset());
+                const label = self.ast.tokenSlice(node.main_token);
+                if (self.labels.contains(label)) return self.failFmt(node.main_token, "Label '{s}' already defined", .{label});
+                try self.labels.put(self.allocator, label, self.chunk.offset());
             },
             // strict_types is read from the file's tokens; ticks and encoding have no effect
             .declare_stmt => if (node.data.rhs != 0) try self.compileNode(node.data.rhs),
@@ -597,7 +616,7 @@ pub const Compiler = struct {
                     try self.emitLoop(target);
                 } else {
                     const j = try self.emitJump(.jump);
-                    try self.pending_gotos.append(self.allocator, .{ .offset = j, .label = label, .source_offset = self.current_source_offset });
+                    try self.pending_gotos.append(self.allocator, .{ .offset = j, .label = label, .source_offset = self.current_source_offset, .token = node.main_token });
                 }
             },
             .qualified_name => {
@@ -1394,9 +1413,10 @@ pub const Compiler = struct {
         out.deferred_exprs.deinit(a);
     }
 
-    pub fn patchGotos(self: *Compiler) void {
+    pub fn patchGotos(self: *Compiler) error{CompileError}!void {
         for (self.pending_gotos.items) |pg| {
-            if (self.labels.get(pg.label)) |target| self.patchJumpTo(pg.offset, target);
+            const target = self.labels.get(pg.label) orelse return self.failFmt(pg.token, "'goto' to undefined label '{s}'", .{pg.label});
+            self.patchJumpTo(pg.offset, target);
         }
     }
 
