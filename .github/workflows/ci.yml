@@ -63,7 +63,7 @@ jobs:
             brew install mysql-client libpq nghttp2 curl icu4c gmp gd libsodium openldap
             echo "PKG_CONFIG_PATH=/opt/homebrew/opt/mysql-client/lib/pkgconfig:/opt/homebrew/opt/libpq/lib/pkgconfig:/opt/homebrew/opt/curl/lib/pkgconfig:/opt/homebrew/opt/icu4c/lib/pkgconfig:/opt/homebrew/opt/gmp/lib/pkgconfig:/opt/homebrew/opt/gd/lib/pkgconfig:/opt/homebrew/opt/libsodium/lib/pkgconfig:/opt/homebrew/opt/openldap/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
           fi
-      - run: zig build test
+      - run: zig build test --test-timeout 120s
       - run: tests/fast_loop_isolation
       - run: zig build
 
@@ -422,7 +422,7 @@ jobs:
           ./zig-out/bin/zphp.exe version
           ./zig-out/bin/zphp.exe run .github/scripts/release_smoke.php
       - name: unit tests
-        run: zig build test
+        run: zig build test --test-timeout 120s
       - name: PHP compat
         run: ZPHP=./zig-out/bin/zphp.exe ./tests/run
       - name: serve
