@@ -21,6 +21,9 @@ export fn zphp_fast_loop(vm_ptr: *anyopaque) callconv(.c) u8 {
 
 fn fastLoopImpl(self: *VM) RuntimeError!void {
     const ic = self.ic.?;
+    // the operand stack is a fixed reservation, so its base never moves;
+    // a local keeps it in a register across stores through it
+    const stack = self.stack;
     const entry_fc = self.frame_count;
 
     reenter: while (true) {
@@ -57,7 +60,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     // an object pushed onto the operand stack takes a reference
                     // (Stage 1); arrays are not stack-owned (refcounting Stage 2)
                     VM.stackRetain(locals[slot]);
-                    self.stack[sp] = locals[slot];
+                    stack[sp] = locals[slot];
                     sp += 1;
                     const _next = code[ip];
                     ip += 1;
@@ -74,7 +77,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     }
                     const slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     ip += 2;
-                    const val = self.stack[sp - 1];
+                    const val = stack[sp - 1];
                     // the slot is a durable holder (Stage 1): retain the new value,
                     // release the object the slot previously held
                     const sl_old = locals[slot];
@@ -109,8 +112,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .add => {
-                    const b = self.stack[sp - 1];
-                    const a = self.stack[sp - 2];
+                    const b = stack[sp - 1];
+                    const a = stack[sp - 2];
                     // arrays (union, TypeError) and strings (numeric warnings) take
                     // runLoop's arithmetic
                     if (!isNumber(a) or !isNumber(b)) {
@@ -121,15 +124,15 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     sp -= 2;
                     self.stackRelease(a);
                     self.stackRelease(b);
-                    self.stack[sp] = if (a == .int and b == .int) Value.intAdd(a.int, b.int) else if (a == .float and b == .float) .{ .float = a.float + b.float } else Value.add(a, b);
+                    stack[sp] = if (a == .int and b == .int) Value.intAdd(a.int, b.int) else if (a == .float and b == .float) .{ .float = a.float + b.float } else Value.add(a, b);
                     sp += 1;
                     const _next = code[ip];
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .subtract => {
-                    const b = self.stack[sp - 1];
-                    const a = self.stack[sp - 2];
+                    const b = stack[sp - 1];
+                    const a = stack[sp - 2];
                     // arrays (union, TypeError) and strings (numeric warnings) take
                     // runLoop's arithmetic
                     if (!isNumber(a) or !isNumber(b)) {
@@ -140,15 +143,15 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     sp -= 2;
                     self.stackRelease(a);
                     self.stackRelease(b);
-                    self.stack[sp] = if (a == .int and b == .int) Value.intSub(a.int, b.int) else if (a == .float and b == .float) .{ .float = a.float - b.float } else Value.subtract(a, b);
+                    stack[sp] = if (a == .int and b == .int) Value.intSub(a.int, b.int) else if (a == .float and b == .float) .{ .float = a.float - b.float } else Value.subtract(a, b);
                     sp += 1;
                     const _next = code[ip];
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .multiply => {
-                    const b = self.stack[sp - 1];
-                    const a = self.stack[sp - 2];
+                    const b = stack[sp - 1];
+                    const a = stack[sp - 2];
                     // arrays (union, TypeError) and strings (numeric warnings) take
                     // runLoop's arithmetic
                     if (!isNumber(a) or !isNumber(b)) {
@@ -159,15 +162,15 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     sp -= 2;
                     self.stackRelease(a);
                     self.stackRelease(b);
-                    self.stack[sp] = if (a == .int and b == .int) Value.intMul(a.int, b.int) else if (a == .float and b == .float) .{ .float = a.float * b.float } else Value.multiply(a, b);
+                    stack[sp] = if (a == .int and b == .int) Value.intMul(a.int, b.int) else if (a == .float and b == .float) .{ .float = a.float * b.float } else Value.multiply(a, b);
                     sp += 1;
                     const _next = code[ip];
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .less => {
-                    const b = self.stack[sp - 1];
-                    const a = self.stack[sp - 2];
+                    const b = stack[sp - 1];
+                    const a = stack[sp - 2];
                     const result = if (a == .int and b == .int) a.int < b.int else if (a == .float and b == .float) a.float < b.float else blk: {
                         if (a == .object or b == .object or a == .resource or b == .resource) {
                             frame.ip = ip - 1;
@@ -179,15 +182,15 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     sp -= 2;
                     self.stackRelease(a);
                     self.stackRelease(b);
-                    self.stack[sp] = .{ .bool = result };
+                    stack[sp] = .{ .bool = result };
                     sp += 1;
                     const _next = code[ip];
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .less_equal => {
-                    const b = self.stack[sp - 1];
-                    const a = self.stack[sp - 2];
+                    const b = stack[sp - 1];
+                    const a = stack[sp - 2];
                     const result = if (a == .int and b == .int) a.int <= b.int else blk: {
                         if (a == .object or b == .object or a == .resource or b == .resource) {
                             frame.ip = ip - 1;
@@ -199,15 +202,15 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     sp -= 2;
                     self.stackRelease(a);
                     self.stackRelease(b);
-                    self.stack[sp] = .{ .bool = result };
+                    stack[sp] = .{ .bool = result };
                     sp += 1;
                     const _next = code[ip];
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .greater => {
-                    const b = self.stack[sp - 1];
-                    const a = self.stack[sp - 2];
+                    const b = stack[sp - 1];
+                    const a = stack[sp - 2];
                     const result = if (a == .int and b == .int) a.int > b.int else blk: {
                         if (a == .object or b == .object or a == .resource or b == .resource) {
                             frame.ip = ip - 1;
@@ -219,15 +222,15 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     sp -= 2;
                     self.stackRelease(a);
                     self.stackRelease(b);
-                    self.stack[sp] = .{ .bool = result };
+                    stack[sp] = .{ .bool = result };
                     sp += 1;
                     const _next = code[ip];
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .greater_equal => {
-                    const b = self.stack[sp - 1];
-                    const a = self.stack[sp - 2];
+                    const b = stack[sp - 1];
+                    const a = stack[sp - 2];
                     const result = if (a == .int and b == .int) a.int >= b.int else blk: {
                         if (a == .object or b == .object or a == .resource or b == .resource) {
                             frame.ip = ip - 1;
@@ -239,7 +242,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     sp -= 2;
                     self.stackRelease(a);
                     self.stackRelease(b);
-                    self.stack[sp] = .{ .bool = result };
+                    stack[sp] = .{ .bool = result };
                     sp += 1;
                     const _next = code[ip];
                     ip += 1;
@@ -256,32 +259,32 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     return;
                 },
                 .identical => {
-                    const b_id = self.stack[sp - 1];
-                    const a_id = self.stack[sp - 2];
+                    const b_id = stack[sp - 1];
+                    const a_id = stack[sp - 2];
                     sp -= 2;
                     self.stackRelease(a_id);
                     self.stackRelease(b_id);
-                    self.stack[sp] = .{ .bool = Value.identical(a_id, b_id) };
+                    stack[sp] = .{ .bool = Value.identical(a_id, b_id) };
                     sp += 1;
                     const _next = code[ip];
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .not_identical => {
-                    const b_ni = self.stack[sp - 1];
-                    const a_ni = self.stack[sp - 2];
+                    const b_ni = stack[sp - 1];
+                    const a_ni = stack[sp - 2];
                     sp -= 2;
                     self.stackRelease(a_ni);
                     self.stackRelease(b_ni);
-                    self.stack[sp] = .{ .bool = !Value.identical(a_ni, b_ni) };
+                    stack[sp] = .{ .bool = !Value.identical(a_ni, b_ni) };
                     sp += 1;
                     const _next = code[ip];
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .modulo => {
-                    const b_mod = self.stack[sp - 1];
-                    const a_mod = self.stack[sp - 2];
+                    const b_mod = stack[sp - 1];
+                    const a_mod = stack[sp - 2];
                     if (a_mod == .object or b_mod == .object or a_mod == .resource or b_mod == .resource) {
                         frame.ip = ip - 1;
                         self.sp = sp;
@@ -290,18 +293,18 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     sp -= 2;
                     self.stackRelease(a_mod);
                     self.stackRelease(b_mod);
-                    self.stack[sp] = Value.modulo(a_mod, b_mod);
+                    stack[sp] = Value.modulo(a_mod, b_mod);
                     sp += 1;
                     const _next = code[ip];
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .bit_and => {
-                    const b_ba = self.stack[sp - 1];
-                    const a_ba = self.stack[sp - 2];
+                    const b_ba = stack[sp - 1];
+                    const a_ba = stack[sp - 2];
                     if (a_ba == .int and b_ba == .int) {
                         sp -= 1;
-                        self.stack[sp - 1] = .{ .int = a_ba.int & b_ba.int };
+                        stack[sp - 1] = .{ .int = a_ba.int & b_ba.int };
                         const _next = code[ip];
                         ip += 1;
                         continue :dispatch @as(OpCode, @enumFromInt(_next));
@@ -311,11 +314,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     return;
                 },
                 .bit_or => {
-                    const b_bo = self.stack[sp - 1];
-                    const a_bo = self.stack[sp - 2];
+                    const b_bo = stack[sp - 1];
+                    const a_bo = stack[sp - 2];
                     if (a_bo == .int and b_bo == .int) {
                         sp -= 1;
-                        self.stack[sp - 1] = .{ .int = a_bo.int | b_bo.int };
+                        stack[sp - 1] = .{ .int = a_bo.int | b_bo.int };
                         const _next = code[ip];
                         ip += 1;
                         continue :dispatch @as(OpCode, @enumFromInt(_next));
@@ -325,11 +328,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     return;
                 },
                 .bit_xor => {
-                    const b_bx = self.stack[sp - 1];
-                    const a_bx = self.stack[sp - 2];
+                    const b_bx = stack[sp - 1];
+                    const a_bx = stack[sp - 2];
                     if (a_bx == .int and b_bx == .int) {
                         sp -= 1;
-                        self.stack[sp - 1] = .{ .int = a_bx.int ^ b_bx.int };
+                        stack[sp - 1] = .{ .int = a_bx.int ^ b_bx.int };
                         const _next = code[ip];
                         ip += 1;
                         continue :dispatch @as(OpCode, @enumFromInt(_next));
@@ -339,11 +342,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     return;
                 },
                 .shift_left => {
-                    const b_sl = self.stack[sp - 1];
-                    const a_sl = self.stack[sp - 2];
+                    const b_sl = stack[sp - 1];
+                    const a_sl = stack[sp - 2];
                     if (a_sl == .int and b_sl == .int and b_sl.int >= 0 and b_sl.int < 64) {
                         sp -= 1;
-                        self.stack[sp - 1] = .{ .int = a_sl.int << @intCast(b_sl.int) };
+                        stack[sp - 1] = .{ .int = a_sl.int << @intCast(b_sl.int) };
                         const _next = code[ip];
                         ip += 1;
                         continue :dispatch @as(OpCode, @enumFromInt(_next));
@@ -353,11 +356,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     return;
                 },
                 .shift_right => {
-                    const b_sr = self.stack[sp - 1];
-                    const a_sr = self.stack[sp - 2];
+                    const b_sr = stack[sp - 1];
+                    const a_sr = stack[sp - 2];
                     if (a_sr == .int and b_sr == .int and b_sr.int >= 0 and b_sr.int < 64) {
                         sp -= 1;
-                        self.stack[sp - 1] = .{ .int = a_sr.int >> @intCast(b_sr.int) };
+                        stack[sp - 1] = .{ .int = a_sr.int >> @intCast(b_sr.int) };
                         const _next = code[ip];
                         ip += 1;
                         continue :dispatch @as(OpCode, @enumFromInt(_next));
@@ -367,13 +370,13 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     return;
                 },
                 .negate => {
-                    const operand = self.stack[sp - 1];
+                    const operand = stack[sp - 1];
                     if (operand != .int and operand != .float) {
                         frame.ip = ip - 1;
                         self.sp = sp;
                         return;
                     }
-                    self.stack[sp - 1] = operand.negate();
+                    stack[sp - 1] = operand.negate();
                     const _next = code[ip];
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
@@ -381,10 +384,10 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .not => {
                     // read before writing: the result location's tag may be
                     // set before its payload is evaluated
-                    const not_operand = self.stack[sp - 1];
+                    const not_operand = stack[sp - 1];
                     const not_result = !not_operand.isTruthy();
                     self.stackRelease(not_operand);
-                    self.stack[sp - 1] = .{ .bool = not_result };
+                    stack[sp - 1] = .{ .bool = not_result };
                     const _next = code[ip];
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
@@ -404,7 +407,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .constant => {
                     const idx = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     ip += 2;
-                    self.stack[sp] = consts[idx];
+                    stack[sp] = consts[idx];
                     sp += 1;
                     const _next = code[ip];
                     ip += 1;
@@ -413,12 +416,12 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .jump_if_false => {
                     const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     ip += 2;
-                    if (!self.stack[sp - 1].isTruthy()) {
+                    if (!stack[sp - 1].isTruthy()) {
                         ip += offset;
                     } else if (code[ip] == @intFromEnum(OpCode.pop) or code[ip] == @intFromEnum(OpCode.pop_boundary)) {
                         ip += 1;
                         sp -= 1;
-                        self.stackRelease(self.stack[sp]);
+                        self.stackRelease(stack[sp]);
                         if (self.hasPendingReleases()) {
                             self.sp = sp;
                             ic.slow.drain_pending_destruct(self);
@@ -432,12 +435,12 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .jump_if_true => {
                     const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     ip += 2;
-                    if (self.stack[sp - 1].isTruthy()) {
+                    if (stack[sp - 1].isTruthy()) {
                         ip += offset;
                     } else if (code[ip] == @intFromEnum(OpCode.pop) or code[ip] == @intFromEnum(OpCode.pop_boundary)) {
                         ip += 1;
                         sp -= 1;
-                        self.stackRelease(self.stack[sp]);
+                        self.stackRelease(stack[sp]);
                         if (self.hasPendingReleases()) {
                             self.sp = sp;
                             ic.slow.drain_pending_destruct(self);
@@ -460,7 +463,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     sp -= 1;
                     // a discarded operand-stack object releases its reference
                     // (Stage 1; arrays are not stack-owned - refcounting Stage 2)
-                    self.stackRelease(self.stack[sp]);
+                    self.stackRelease(stack[sp]);
                     if (self.hasPendingReleases()) {
                         // destructors run nested PHP on the shared operand
                         // stack: publish the local stack pointer first
@@ -474,18 +477,18 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 },
                 .dup => {
                     // a duplicated object is a new operand-stack reference (Stage 1)
-                    VM.stackRetain(self.stack[sp - 1]);
-                    self.stack[sp] = self.stack[sp - 1];
+                    VM.stackRetain(stack[sp - 1]);
+                    stack[sp] = stack[sp - 1];
                     sp += 1;
                     const _next = code[ip];
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .dup2 => {
-                    VM.stackRetain(self.stack[sp - 2]);
-                    VM.stackRetain(self.stack[sp - 1]);
-                    self.stack[sp] = self.stack[sp - 2];
-                    self.stack[sp + 1] = self.stack[sp - 1];
+                    VM.stackRetain(stack[sp - 2]);
+                    VM.stackRetain(stack[sp - 1]);
+                    stack[sp] = stack[sp - 2];
+                    stack[sp + 1] = stack[sp - 1];
                     sp += 2;
                     const _next = code[ip];
                     ip += 1;
@@ -494,37 +497,37 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .bury => {
                     const n = code[ip];
                     ip += 1;
-                    const top = self.stack[sp - 1];
+                    const top = stack[sp - 1];
                     const dest = sp - 1 - n;
-                    std.mem.copyBackwards(Value, self.stack[dest + 1 .. sp], self.stack[dest .. sp - 1]);
-                    self.stack[dest] = top;
+                    std.mem.copyBackwards(Value, stack[dest + 1 .. sp], stack[dest .. sp - 1]);
+                    stack[dest] = top;
                     const _next = code[ip];
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .op_null => {
-                    self.stack[sp] = .null;
+                    stack[sp] = .null;
                     sp += 1;
                     const _next = code[ip];
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .op_true => {
-                    self.stack[sp] = .{ .bool = true };
+                    stack[sp] = .{ .bool = true };
                     sp += 1;
                     const _next = code[ip];
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .op_false => {
-                    self.stack[sp] = .{ .bool = false };
+                    stack[sp] = .{ .bool = false };
                     sp += 1;
                     const _next = code[ip];
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .cast_int => {
-                    const v = self.stack[sp - 1];
+                    const v = stack[sp - 1];
                     if (v == .object) {
                         frame.ip = ip - 1;
                         self.sp = sp;
@@ -532,7 +535,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     }
                     const as_int = Value.toInt(v);
                     self.stackRelease(v);
-                    self.stack[sp - 1] = .{ .int = as_int };
+                    stack[sp - 1] = .{ .int = as_int };
                     const _next = code[ip];
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
@@ -540,7 +543,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .concat_assign_local => {
                     const ca_slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     ip += 2;
-                    const ca_append = self.stack[sp - 1];
+                    const ca_append = stack[sp - 1];
                     const ca_current = locals[ca_slot];
                     if (!direct_slots or ca_append != .string or ca_current != .string) {
                         frame.ip = ip - 3;
@@ -569,7 +572,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     };
                     self.stackRelease(ca_append);
                     VM.stackRetain(ca_result);
-                    self.stack[sp - 1] = ca_result;
+                    stack[sp - 1] = ca_result;
                     if (!names_local) {
                         self.sp = sp;
                         try syncLocalWrite(self, ic, frame, ca_slot, ca_result);
@@ -586,7 +589,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const gc_entry = &ic.class_const[InlineCache.propIndex(@intFromPtr(frame.chunk), gc_site)];
                     if (gc_class_ptr != 0 and gc_entry.key == gc_site and gc_entry.chunk_key == @intFromPtr(frame.chunk) and gc_entry.class_ptr == gc_class_ptr) {
                         VM.stackRetain(gc_entry.value);
-                        self.stack[sp] = gc_entry.value;
+                        stack[sp] = gc_entry.value;
                         sp += 1;
                         const _next = code[ip];
                         ip += 1;
@@ -597,10 +600,10 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     return;
                 },
                 .cast_bool => {
-                    const v = self.stack[sp - 1];
+                    const v = stack[sp - 1];
                     const truthy = v.isTruthy();
                     self.stackRelease(v);
-                    self.stack[sp - 1] = .{ .bool = truthy };
+                    stack[sp - 1] = .{ .bool = truthy };
                     const _next = code[ip];
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
@@ -608,7 +611,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .inc_value, .dec_value => |step_op| {
                     // ints and floats step in place; anything else (strings,
                     // null, overflow) takes runLoop's phpInc/phpDec
-                    const v = self.stack[sp - 1];
+                    const v = stack[sp - 1];
                     const delta: i64 = if (step_op == .inc_value) 1 else -1;
                     if (v == .int) {
                         const r = @addWithOverflow(v.int, delta);
@@ -617,9 +620,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                             self.sp = sp;
                             return;
                         }
-                        self.stack[sp - 1] = .{ .int = r[0] };
+                        stack[sp - 1] = .{ .int = r[0] };
                     } else if (v == .float) {
-                        self.stack[sp - 1] = .{ .float = v.float + @as(f64, @floatFromInt(delta)) };
+                        stack[sp - 1] = .{ .float = v.float + @as(f64, @floatFromInt(delta)) };
                     } else {
                         frame.ip = ip - 1;
                         self.sp = sp;
@@ -633,8 +636,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     // missing keys (a warning), non-scalar keys (a TypeError),
                     // $GLOBALS (global cells) and anything but arrays and
                     // in-range string offsets take runLoop's path
-                    const ag_key = self.stack[sp - 1];
-                    const ag_arr = self.stack[sp - 2];
+                    const ag_key = stack[sp - 1];
+                    const ag_arr = stack[sp - 2];
                     const ag_elem: ?Value = switch (ag_arr) {
                         .array => |arr| if (ag_key == .resource or ag_key == .array or ag_key == .object or arr == self.globals_array)
                             null
@@ -660,22 +663,22 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         // reference (Stage 1); arrays are not stack-owned
                         VM.stackRetain(elem);
                     }
-                    self.stack[sp] = elem;
+                    stack[sp] = elem;
                     sp += 1;
                     const _next = code[ip];
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .array_get_vivify => {
-                    const agv_key = self.stack[sp - 1];
-                    const agv_arr = self.stack[sp - 2];
+                    const agv_key = stack[sp - 1];
+                    const agv_arr = stack[sp - 2];
                     sp -= 2;
                     if (agv_arr == .array and agv_key != .resource) {
                         const agv_arr_key = Value.toArrayKey(agv_key);
                         const agv_existing = agv_arr.array.get(agv_arr_key);
                         if (agv_existing == .array) {
                             self.stackRelease(agv_key);
-                            self.stack[sp] = agv_existing;
+                            stack[sp] = agv_existing;
                             sp += 1;
                             const _next = code[ip];
                             ip += 1;
@@ -692,8 +695,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     }
                 },
                 .array_elem_inc => {
-                    const aei_key = self.stack[sp - 1];
-                    const aei_arr = self.stack[sp - 2];
+                    const aei_key = stack[sp - 1];
+                    const aei_arr = stack[sp - 2];
                     if (aei_arr == .array and aei_key != .resource) {
                         const ak = Value.toArrayKey(aei_key);
                         const old = aei_arr.array.get(ak);
@@ -705,7 +708,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                             };
                             self.stackRelease(aei_key);
                             sp -= 1;
-                            self.stack[sp - 1] = old;
+                            stack[sp - 1] = old;
                             const _next = code[ip];
                             ip += 1;
                             continue :dispatch @as(OpCode, @enumFromInt(_next));
@@ -716,8 +719,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     return;
                 },
                 .array_elem_dec => {
-                    const aei_key = self.stack[sp - 1];
-                    const aei_arr = self.stack[sp - 2];
+                    const aei_key = stack[sp - 1];
+                    const aei_arr = stack[sp - 2];
                     if (aei_arr == .array and aei_key != .resource) {
                         const ak = Value.toArrayKey(aei_key);
                         const old = aei_arr.array.get(ak);
@@ -729,7 +732,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                             };
                             self.stackRelease(aei_key);
                             sp -= 1;
-                            self.stack[sp - 1] = old;
+                            stack[sp - 1] = old;
                             const _next = code[ip];
                             ip += 1;
                             continue :dispatch @as(OpCode, @enumFromInt(_next));
@@ -740,7 +743,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     return;
                 },
                 .echo => {
-                    const echo_val = self.stack[sp - 1];
+                    const echo_val = stack[sp - 1];
                     sp -= 1;
                     if (echo_val == .string) {
                         self.output.appendSlice(self.allocator, echo_val.string.bytes()) catch {
@@ -773,9 +776,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     return;
                 },
                 .array_set => {
-                    const as_val = self.stack[sp - 1];
-                    const as_key = self.stack[sp - 2];
-                    const as_arr = self.stack[sp - 3];
+                    const as_val = stack[sp - 1];
+                    const as_key = stack[sp - 2];
+                    const as_arr = stack[sp - 3];
                     // an object stored into an array element - bail to runLoop's
                     // array_set so the element holder refcounts it (Stage 1)
                     if (as_val == .object or as_val == .resource) {
@@ -791,7 +794,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         };
                         self.stackRelease(as_key);
                         sp -= 2;
-                        self.stack[sp - 1] = as_val;
+                        stack[sp - 1] = as_val;
                         const _next = code[ip];
                         ip += 1;
                         continue :dispatch @as(OpCode, @enumFromInt(_next));
@@ -801,8 +804,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     return;
                 },
                 .array_push => {
-                    const ap_val = self.stack[sp - 1];
-                    const ap_arr = self.stack[sp - 2];
+                    const ap_val = stack[sp - 1];
+                    const ap_arr = stack[sp - 2];
                     if (ap_val == .object or ap_val == .resource) {
                         frame.ip = ip - 1;
                         self.sp = sp;
@@ -825,9 +828,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     return;
                 },
                 .array_set_elem => {
-                    const ase_val = self.stack[sp - 1];
-                    const ase_key = self.stack[sp - 2];
-                    const ase_arr = self.stack[sp - 3];
+                    const ase_val = stack[sp - 1];
+                    const ase_key = stack[sp - 2];
+                    const ase_arr = stack[sp - 3];
                     if (ase_val == .object or ase_val == .resource) {
                         frame.ip = ip - 1;
                         self.sp = sp;
@@ -854,7 +857,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const ci_ac = code[ip];
                     ip += 1;
                     const ci_acn: usize = ci_ac;
-                    const ci_name_val = self.stack[sp - ci_acn - 1];
+                    const ci_name_val = stack[sp - ci_acn - 1];
                     if (ci_name_val != .string) {
                         frame.ip = ip - 2;
                         self.sp = sp;
@@ -886,7 +889,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                             return;
                         }
                     }
-                    if (ci_func.has_param_types and !argsHoldDeclared(self, ic, ci_func, ci_name, self.stack[sp - ci_ac .. sp])) {
+                    if (ci_func.has_param_types and !argsHoldDeclared(self, ic, ci_func, ci_name, stack[sp - ci_ac .. sp])) {
                         self.sp = sp;
                         if (try checkParamTypes(self, ic, ci_name, ci_ac)) {
                             frame.ip = ip;
@@ -904,14 +907,14 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     self.sp = sp;
                     self.clearArgStackFrom(sp - ci_acn - 1);
                     for (0..ci_acn) |i| {
-                        self.stack[sp - ci_acn - 1 + i] = self.stack[sp - ci_acn + i];
+                        stack[sp - ci_acn - 1 + i] = stack[sp - ci_acn + i];
                     }
                     sp -= 1;
                     const ci_locals = ic.locals_buf[ci_lbase .. ci_lbase + ci_lc];
                     @memset(ci_locals, .null);
                     ic.locals_sp = ci_lbase + ci_lc;
                     const ci_bind = @min(ci_acn, ci_func.arity);
-                    for (0..ci_bind) |i| ci_locals[i] = self.stack[sp - ci_acn + i];
+                    for (0..ci_bind) |i| ci_locals[i] = stack[sp - ci_acn + i];
                     // a default can autoload (self::CONST), running nested frames on
                     // the shared operand stack: publish the stack pointer first
                     self.sp = sp;
@@ -959,7 +962,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .get_prop => {
                     const gp_ip = ip;
                     ip += 2;
-                    const gp_obj_val = self.stack[sp - 1];
+                    const gp_obj_val = stack[sp - 1];
                     if (gp_obj_val == .object) {
                         const gp_obj = gp_obj_val.object;
                         const gp_idx = InlineCache.propIndex(@intFromPtr(frame.chunk), gp_ip);
@@ -973,9 +976,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                                     // the receiver slot is replaced by the property
                                     // value: retain the new occupant, release the
                                     // receiver it overwrites (Stage 1)
-                                    const gp_recv = self.stack[sp - 1];
+                                    const gp_recv = stack[sp - 1];
                                     VM.stackRetain(gp_v);
-                                    self.stack[sp - 1] = gp_v;
+                                    stack[sp - 1] = gp_v;
                                     self.stackRelease(gp_recv);
                                     const _next_gp = code[ip];
                                     ip += 1;
@@ -991,8 +994,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .set_prop => {
                     const sp_ip = ip;
                     ip += 2;
-                    const sp_val = self.stack[sp - 1];
-                    const sp_obj_val = self.stack[sp - 2];
+                    const sp_val = stack[sp - 1];
+                    const sp_obj_val = stack[sp - 2];
                     if (sp_obj_val == .object) {
                         const sp_obj = sp_obj_val.object;
                         const sp_idx = InlineCache.propIndex(@intFromPtr(frame.chunk), sp_ip);
@@ -1037,10 +1040,10 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                                 // result slot. stack ops are objects-only - an
                                 // array is owned by the property slot, not the
                                 // stack (refcounting Stage 2)
-                                self.stackRelease(self.stack[sp]);
-                                self.stackRelease(self.stack[sp - 1]);
+                                self.stackRelease(stack[sp]);
+                                self.stackRelease(stack[sp - 1]);
                                 VM.stackRetain(copied);
-                                self.stack[sp - 1] = copied;
+                                stack[sp - 1] = copied;
                                 const _next_sp = code[ip];
                                 ip += 1;
                                 continue :dispatch @as(OpCode, @enumFromInt(_next_sp));
@@ -1055,7 +1058,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const mc_arg_count = code[ip + 2];
                     ip += 3;
                     const mc_ac: usize = mc_arg_count;
-                    const mc_obj_val = self.stack[sp - mc_ac - 1];
+                    const mc_obj_val = stack[sp - mc_ac - 1];
                     if (mc_obj_val != .object) {
                         frame.ip = ip - 4;
                         self.sp = sp;
@@ -1070,7 +1073,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         if (mc_entry.func) |mc_func| {
                             // a method is never a closure instance, so it has no captures
                             if (mc_func.locals_only and self.hasCallRoomAt(sp, 1)) {
-                                if (mc_func.has_param_types and !argsHoldDeclared(self, ic, mc_func, mc_func.name, self.stack[sp - mc_arg_count .. sp])) {
+                                if (mc_func.has_param_types and !argsHoldDeclared(self, ic, mc_func, mc_func.name, stack[sp - mc_arg_count .. sp])) {
                                     self.sp = sp;
                                     if (try checkParamTypes(self, ic, mc_func.name, mc_arg_count)) {
                                         frame.ip = ip;
@@ -1092,7 +1095,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                                 const mc_first: usize = if (mc_func.is_static) 0 else 1;
                                 if (!mc_func.is_static) mc_locals[0] = .{ .object = mc_obj };
                                 for (0..@min(mc_ac, mc_func.arity)) |i| {
-                                    mc_locals[i + mc_first] = self.stack[sp - mc_ac + i];
+                                    mc_locals[i + mc_first] = stack[sp - mc_ac + i];
                                 }
                                 self.sp = sp;
                                 if (try fillDefaults(self, ic, mc_func, mc_locals, @min(mc_ac, mc_func.arity), mc_first)) {
@@ -1167,7 +1170,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         return;
                     }
 
-                    if (func.has_param_types and !argsHoldDeclared(self, ic, func, name, self.stack[sp - arg_count .. sp])) {
+                    if (func.has_param_types and !argsHoldDeclared(self, ic, func, name, stack[sp - arg_count .. sp])) {
                         self.sp = sp;
                         if (try checkParamTypes(self, ic, name, arg_count)) {
                             frame.ip = ip;
@@ -1191,7 +1194,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
 
                     const bind_count = @min(ac, func.arity);
                     for (0..bind_count) |i| {
-                        new_locals[i] = self.stack[sp - ac + i];
+                        new_locals[i] = stack[sp - ac + i];
                     }
                     self.sp = sp;
                     if (try fillDefaults(self, ic, func, new_locals, bind_count, 0)) {
@@ -1224,7 +1227,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     continue :reenter;
                 },
                 .return_val => {
-                    const result = self.stack[sp - 1];
+                    const result = stack[sp - 1];
                     // a declared return type needs runLoop's checkReturnType to
                     // validate + non-strict-coerce. for a plain scalar return type
                     // bail ONLY when the value's tag doesn't already match (so a
@@ -1264,7 +1267,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     self.restoreFrameArgsSp();
 
                     if (self.frame_count < entry_fc) {
-                        self.stack[sp - 1] = result;
+                        stack[sp - 1] = result;
                         self.sp = sp;
                         if (ret_string_pin) |s| s.release();
                         if (ret_arr_pin) |a| VM.arrayUnpin(a);
@@ -1272,7 +1275,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     }
 
                     sp = ic.sp_save[self.frame_count - 1];
-                    self.stack[sp] = result;
+                    stack[sp] = result;
                     sp += 1;
                     self.sp = sp;
                     if (ret_string_pin) |s| s.release();
@@ -1297,13 +1300,13 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     self.restoreFrameArgsSp();
 
                     if (self.frame_count < entry_fc) {
-                        self.stack[sp] = .null;
+                        stack[sp] = .null;
                         self.sp = sp + 1;
                         return;
                     }
 
                     sp = ic.sp_save[self.frame_count - 1];
-                    self.stack[sp] = .null;
+                    stack[sp] = .null;
                     sp += 1;
                     self.sp = sp;
                     continue :reenter;
@@ -1494,8 +1497,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     }
                 },
                 .concat => {
-                    const b = self.stack[sp - 1];
-                    const a = self.stack[sp - 2];
+                    const b = stack[sp - 1];
+                    const a = stack[sp - 2];
                     if (a == .string and b == .string) {
                         const as = a.string.bytes();
                         const bs = b.string.bytes();
@@ -1506,7 +1509,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         self.stackRelease(a);
                         self.stackRelease(b);
                         sp -= 1;
-                        self.stack[sp - 1] = .{ .string = result };
+                        stack[sp - 1] = .{ .string = result };
                         const _next = code[ip];
                         ip += 1;
                         continue :dispatch @as(OpCode, @enumFromInt(_next));
@@ -1524,7 +1527,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         self.stackRelease(a);
                         self.stackRelease(b);
                         sp -= 1;
-                        self.stack[sp - 1] = .{ .string = result };
+                        stack[sp - 1] = .{ .string = result };
                         const _next = code[ip];
                         ip += 1;
                         continue :dispatch @as(OpCode, @enumFromInt(_next));
@@ -1542,7 +1545,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         self.stackRelease(a);
                         self.stackRelease(b);
                         sp -= 1;
-                        self.stack[sp - 1] = .{ .string = result };
+                        stack[sp - 1] = .{ .string = result };
                         const _next = code[ip];
                         ip += 1;
                         continue :dispatch @as(OpCode, @enumFromInt(_next));
