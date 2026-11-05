@@ -1,0 +1,9 @@
+Zend/tests
+tests
+ext/standard/tests
+ext/json/tests
+ext/pcre/tests
+ext/spl/tests
+ext/reflection/tests
+ext/date/tests
+ext/hash/tests

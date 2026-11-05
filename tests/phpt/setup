@@ -1,0 +1,16 @@
+#!/bin/bash
+# fetches php-src's tests at the release zphp reports itself as
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$SCRIPT_DIR/../.."
+version_part() { grep -E "^pub const $1 = " "$ROOT/src/php_version.zig" | grep -oE '[0-9]+'; }
+TAG="php-$(version_part major).$(version_part minor).$(version_part release)"
+DEST="$SCRIPT_DIR/php-src"
+if [ -d "$DEST" ] && [ "$(git -C "$DEST" describe --tags 2>/dev/null)" = "$TAG" ]; then
+    echo "php-src $TAG already present"
+    exit 0
+fi
+rm -rf "$DEST"
+git clone -q --depth 1 --branch "$TAG" --filter=blob:none --sparse https://github.com/php/php-src.git "$DEST"
+git -C "$DEST" sparse-checkout set --no-cone /run-tests.php $(sed 's|^|/|; s|$|/|' "$SCRIPT_DIR/dirs")
+echo "php-src $TAG ready"

@@ -1,0 +1,141 @@
+#!/bin/bash
+# runs php-src's own tests against zphp with php-src's run-tests.php (driven
+# by the system php, so section parsing and EXPECTF matching are upstream's)
+# and checks that every test listed in `passing` still passes
+#
+#   tests/phpt/run                  every directory in `dirs`
+#   tests/phpt/run Zend/tests ...   just these directories
+#   tests/phpt/run --update         also rewrite `passing` from this run
+#   JOBS=n, MEMORY_MAX=size         parallel tests (4) and the memory cap (4G)
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ZPHP="$(realpath "${ZPHP:-$SCRIPT_DIR/../../zig-out/bin/zphp}")"
+SRC="$SCRIPT_DIR/php-src"
+[ -f "$ZPHP" ] || { echo "zphp not found at $ZPHP"; exit 1; }
+[ -f "$SRC/run-tests.php" ] || { echo "run tests/phpt/setup first"; exit 1; }
+command -v php >/dev/null || { echo "php not found in PATH"; exit 1; }
+
+update=0
+dirs=()
+for arg in "$@"; do
+    case "$arg" in
+        --update) update=1 ;;
+        *) dirs+=("$arg") ;;
+    esac
+done
+[ ${#dirs[@]} -gt 0 ] || mapfile -t dirs < "$SCRIPT_DIR/dirs"
+
+# the run is capped as a whole: a test that zphp fails to skip can allocate
+# or write without bound, and php-src has tests that do both on purpose
+MEMORY_MAX="${MEMORY_MAX:-4G}"
+unit="zphp-phpt-$$"
+cap=(systemd-run --user --scope --quiet --unit="$unit" -p MemoryMax="$MEMORY_MAX" -p MemorySwapMax=0 -p OOMPolicy=continue)
+if ! "${cap[@]}" true 2>/dev/null; then
+    # ci runners have no user service manager, and nothing else on them to protect
+    [ -n "${CI:-}" ] || { echo "systemd-run --user is needed to cap the run's memory"; exit 1; }
+    cap=()
+fi
+jobs="${JOBS:-4}"
+
+# temp files go to disk next to the harness, never to a ram-backed /tmp
+work="$(mktemp -d -p "$SCRIPT_DIR" work.XXXXXX)"
+trap 'systemctl --user stop "$unit.scope" 2>/dev/null; rm -rf "$work"' EXIT
+mkdir "$work/tmp"
+
+# every zphp a test starts, and every zphp those start, gets 60 cpu seconds,
+# so a test that loops forever dies instead of spinning after its timeout,
+# and is what the oom killer picks before run-tests.php's own workers.
+cat > "$work/zphp" <<WRAP
+#!/bin/bash
+ulimit -t 60
+echo 1000 > /proc/self/oom_score_adj 2>/dev/null
+# run-tests.php keeps every failing test's output until the run ends; past
+# 1 MB a test has failed anyway, and the pipe closing stops it. a test
+# blocked on a socket uses no cpu, so wall time is capped too
+timeout -k 5 120 "$ZPHP" "\$@" | head -c 1048576
+exit \${PIPESTATUS[0]}
+WRAP
+chmod +x "$work/zphp"
+
+cd "$SRC"
+# tests that zphp fails can leave files behind; start from the checkout
+git clean -fdxq
+git checkout -q -- .
+# no file a test writes may pass 512 MB, and the whole tree stays under
+# MEMORY_MAX with no swap to spill into
+SKIP_SLOW_TESTS=1 SKIP_ONLINE_TESTS=1 NO_INTERACTION=1 \
+    TMPDIR="$work/tmp" TEMP="$work/tmp" TMP="$work/tmp" \
+    TEST_PHP_EXECUTABLE="$work/zphp" \
+    "${cap[@]}" \
+    nice -n 15 bash -c 'ulimit -f 524288; ulimit -c 0; exec "$@"' bash \
+    php run-tests.php -p "$work/zphp" -q "-j$jobs" --no-progress --set-timeout 30 "${dirs[@]}" > "$SCRIPT_DIR/last.log" 2>&1 || true
+# windows path tests that zphp gets wrong create names like "php-src\x" beside it
+rm -rf "$SCRIPT_DIR"/php-src?*
+grep -q "^Number of tests :" "$SCRIPT_DIR/last.log" || { tail -20 "$SCRIPT_DIR/last.log"; echo "run-tests.php did not finish"; exit 1; }
+
+python3 - "$SCRIPT_DIR/last.log" "$SCRIPT_DIR/passing" "$update" "${dirs[@]}" <<'PY'
+import re
+import sys
+from collections import defaultdict
+
+# run-tests.php prints one line per test: a status, the title, and the file
+# in brackets
+log, baseline_path, update, dirs = sys.argv[1], sys.argv[2], sys.argv[3] == "1", sys.argv[4:]
+ansi = re.compile(r"\x1b\[[0-9;]*m")
+line_re = re.compile(r"^(PASS|FAIL|SKIP|BORK|XFAIL|LEAK|WARN|XLEAK)\b.*\[([^\[\]]+\.phpt)\]")
+outcome = {}
+with open(log, errors="replace") as f:
+    for raw in f:
+        m = line_re.match(ansi.sub("", raw))
+        if not m:
+            continue
+        status, name = m.groups()
+        outcome[name] = {"PASS": "pass", "SKIP": "skip", "XFAIL": "skip"}.get(status, "fail")
+
+def dir_of(name):
+    for d in dirs:
+        if name.startswith(d.rstrip("/") + "/"):
+            return d
+    return "other"
+
+stats = defaultdict(lambda: {"pass": 0, "fail": 0, "skip": 0})
+for name, result in outcome.items():
+    stats[dir_of(name)][result] += 1
+
+def line(label, s):
+    ran = s["pass"] + s["fail"]
+    rate = 100.0 * s["pass"] / ran if ran else 0.0
+    print(f"  {label:<24} {s['pass']:>6} pass {s['fail']:>6} fail {s['skip']:>6} skip  {rate:5.1f}%")
+
+total = {"pass": 0, "fail": 0, "skip": 0}
+for d in sorted(stats):
+    line(d, stats[d])
+    for k in total:
+        total[k] += stats[d][k]
+line("total", total)
+
+try:
+    with open(baseline_path) as f:
+        baseline = {l.strip() for l in f if l.strip() and not l.startswith("#")}
+except FileNotFoundError:
+    baseline = set()
+in_scope = {t for t in baseline if dir_of(t) != "other"}
+regressed = sorted(t for t in in_scope if outcome.get(t) != "pass")
+passing = {t for t, r in outcome.items() if r == "pass"}
+gained = sorted(passing - baseline)
+
+if update:
+    kept = {t for t in baseline if t not in in_scope}
+    with open(baseline_path, "w") as f:
+        for t in sorted(kept | passing):
+            f.write(t + "\n")
+    print(f"passing list updated: {len(kept | passing)} tests")
+elif gained:
+    print(f"{len(gained)} tests now pass that the list doesn't have; rerun with --update to record them")
+
+if regressed:
+    print(f"\n{len(regressed)} tests in the passing list no longer pass:")
+    for t in regressed[:50]:
+        print(f"  {t}")
+    sys.exit(1)
+PY

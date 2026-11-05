@@ -8,3 +8,6 @@ test_compress
 docs/book/
 .claude/
 tests/fuzz/findings/
+tests/phpt/php-src/
+tests/phpt/work.*/
+tests/phpt/last.log
