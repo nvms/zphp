@@ -201,7 +201,7 @@ fn xmlParse(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
         .skip_white = parser.get("__skip_white") == .bool and parser.get("__skip_white").bool,
     };
 
-    var text_buf: std.ArrayListUnmanaged(u8) = .{};
+    var text_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer text_buf.deinit(ctx.allocator);
 
     while (st.pos < st.src.len) {
@@ -347,7 +347,7 @@ fn foldName(ctx: *NativeContext, name: []const u8, case_fold: bool) !Value.Strin
 
 fn unescapeEntities(ctx: *NativeContext, s: []const u8) !Value.String {
     if (std.mem.indexOfScalar(u8, s, '&') == null) return ctx.vm.transientBytes(s);
-    var out: std.ArrayListUnmanaged(u8) = .{};
+    var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(ctx.allocator);
     var i: usize = 0;
     while (i < s.len) {

@@ -10,13 +10,10 @@ const ClassDef = vm_mod.ClassDef;
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
-const c = @cImport({
-    @cInclude("libxml/xmlwriter.h");
-    @cInclude("libxml/tree.h");
-});
+const c = @import("c_xmlwriter");
 
 fn dupZ(ctx: *NativeContext, s: []const u8) ![:0]u8 {
-    return ctx.allocator.dupeZ(u8, s);
+    return ctx.allocator.dupeSentinel(u8, s, 0);
 }
 
 fn cstrLen(p: [*c]const u8) usize {

@@ -506,37 +506,39 @@ fn dirname(path: []const u8) []const u8 {
     return ".";
 }
 
-fn statPath(spelled: []const u8) ?std.fs.File.Stat {
+fn statPath(spelled: []const u8) ?std.Io.File.Stat {
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = bundle.osPath(&os_buf, spelled);
     if (bundle.find(path)) |hit| return packedStat(hit);
-    if (!std.fs.path.isAbsolute(path)) return std.fs.cwd().statFile(path) catch null;
-    const file = std.fs.openFileAbsolute(path, .{}) catch {
-        var dir = std.fs.openDirAbsolute(path, .{}) catch return null;
-        defer dir.close();
-        return dir.stat() catch null;
+    if (!std.fs.path.isAbsolute(path)) return std.Io.Dir.cwd().statFile(platform.io, path, .{}) catch null;
+    const file = std.Io.Dir.openFileAbsolute(platform.io, path, .{}) catch {
+        var dir = std.Io.Dir.openDirAbsolute(platform.io, path, .{}) catch return null;
+        defer dir.close(platform.io);
+        return dir.stat(platform.io) catch null;
     };
-    defer file.close();
-    return file.stat() catch null;
+    defer file.close(platform.io);
+    return file.stat(platform.io) catch null;
 }
 
 // a file or directory of the executable's packed application, read-only
-fn packedStat(hit: bundle.Hit) std.fs.File.Stat {
-    const mtime: i128 = switch (hit) {
-        .file => |entry| @as(i128, entry.mtime) * std.time.ns_per_s,
+fn packedStat(hit: bundle.Hit) std.Io.File.Stat {
+    const mtime: std.Io.Timestamp = .{ .nanoseconds = switch (hit) {
+        .file => |entry| @as(i96, entry.mtime) * std.time.ns_per_s,
         .dir => 0,
-    };
+    } };
     return .{
         .inode = 0,
+        .nlink = 1,
         .size = switch (hit) {
             .file => |entry| entry.source.len,
             .dir => 0,
         },
-        .mode = if (hit == .file) 0o100444 else 0o040555,
+        .permissions = platform.permissionsFromMode(if (hit == .file) 0o444 else 0o555),
         .kind = if (hit == .file) .file else .directory,
         .atime = mtime,
         .mtime = mtime,
         .ctime = mtime,
+        .block_size = 1,
     };
 }
 
@@ -593,7 +595,7 @@ fn fiGetRealPath(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
     const path = objGetStr(obj, "__pathname");
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     if (bundle.canonicalPath(&buf, path)) |packed_path| return NativeResult.copyString(ctx.allocator, packed_path);
-    const real = std.fs.cwd().realpath(path, &buf) catch return NativeResult.scalar(.{ .bool = false });
+    const real = platform.realpath(path, &buf) catch return NativeResult.scalar(.{ .bool = false });
     return NativeResult.copyString(ctx.allocator, real);
 }
 
@@ -635,19 +637,19 @@ fn fiIsWritable(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
 fn fiGetMTime(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
     const stat = statPath(objGetStr(obj, "__pathname")) orelse return NativeResult.scalar(.{ .int = 0 });
-    return NativeResult.scalar(.{ .int = @intCast(@divTrunc(stat.mtime, std.time.ns_per_s)) });
+    return NativeResult.scalar(.{ .int = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s)) });
 }
 
 fn fiGetCTime(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
     const stat = statPath(objGetStr(obj, "__pathname")) orelse return NativeResult.scalar(.{ .int = 0 });
-    return NativeResult.scalar(.{ .int = @intCast(@divTrunc(stat.ctime, std.time.ns_per_s)) });
+    return NativeResult.scalar(.{ .int = @intCast(@divTrunc(stat.ctime.nanoseconds, std.time.ns_per_s)) });
 }
 
 fn fiGetATime(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
     const stat = statPath(objGetStr(obj, "__pathname")) orelse return NativeResult.scalar(.{ .int = 0 });
-    return NativeResult.scalar(.{ .int = @intCast(@divTrunc(stat.atime, std.time.ns_per_s)) });
+    return NativeResult.scalar(.{ .int = @intCast(@divTrunc((stat.atime orelse stat.mtime).nanoseconds, std.time.ns_per_s)) });
 }
 
 fn fiGetType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -702,8 +704,8 @@ fn loadDirectoryEntries(ctx: *NativeContext, path: []const u8, flags: i64) Runti
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
     const dir_path = bundle.osPath(&os_buf, path);
     var listing = bundle.listDir(dir_path);
-    var dir_opt: ?std.fs.Dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch null;
-    defer if (dir_opt) |*d| d.close();
+    var dir_opt: ?std.Io.Dir = std.Io.Dir.cwd().openDir(platform.io, dir_path, .{ .iterate = true }) catch null;
+    defer if (dir_opt) |*d| d.close(platform.io);
     if (listing == null and dir_opt == null) return arr;
 
     const skip_dots = (flags & SKIP_DOTS) != 0;
@@ -712,7 +714,7 @@ fn loadDirectoryEntries(ctx: *NativeContext, path: []const u8, flags: i64) Runti
     }
     if (dir_opt) |*dir| {
         var iter = dir.iterate();
-        while (iter.next() catch null) |entry| {
+        while (iter.next(platform.io) catch null) |entry| {
             if (skip_dots and (std.mem.eql(u8, entry.name, ".") or std.mem.eql(u8, entry.name, ".."))) continue;
             try appendDirectoryEntry(ctx, arr, .{ .dir = path, .name = entry.name, .is_dir = entry.kind == .directory });
         }
@@ -1647,7 +1649,7 @@ fn rxSubjectFromInner(ctx: *NativeContext, obj: *PhpObject) RuntimeError!?Value.
         return subject_val.string;
     }
     if (subject_val == .int or subject_val == .float or subject_val == .bool) {
-        var buf: std.ArrayListUnmanaged(u8) = .{};
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
         defer buf.deinit(ctx.allocator);
         try subject_val.format(&buf, ctx.allocator);
         return try Value.String.adopt(ctx.allocator, try buf.toOwnedSlice(ctx.allocator));
@@ -1831,7 +1833,7 @@ fn ciToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
         break :blk try ctx.vm.callMethod(inner, "current", &.{});
     } else obj.get("__ci_current");
     if (target == .string) return NativeResult.shareString(target.string);
-    var buf: std.ArrayListUnmanaged(u8) = .{};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(ctx.allocator);
     try target.format(&buf, ctx.allocator);
     return NativeResult.takeString(try Value.String.adopt(ctx.allocator, try buf.toOwnedSlice(ctx.allocator)));
@@ -2143,7 +2145,7 @@ fn rtiCurrent(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     defer if (entry == .string) entry.string.release();
     const postfix = (try rtiGetPostfix(ctx, args)).value;
     defer if (postfix == .string) postfix.string.release();
-    var buf: std.ArrayListUnmanaged(u8) = .{};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(ctx.allocator);
     if (prefix == .string) try buf.appendSlice(ctx.allocator, prefix.string.bytes());
     if (entry == .string) try buf.appendSlice(ctx.allocator, entry.string.bytes());
@@ -2157,7 +2159,7 @@ fn rtiGetPrefix(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
     const obj = getThis(ctx) orelse return NativeResult.literal("");
     const depth_v = try ctx.vm.callMethod(obj, "getDepth", &.{});
     const depth: i64 = if (depth_v == .int) depth_v.int else 0;
-    var buf: std.ArrayListUnmanaged(u8) = .{};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(ctx.allocator);
     var i: i64 = 0;
     while (i < depth) : (i += 1) {
@@ -2174,7 +2176,7 @@ fn rtiGetEntry(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult 
     const inner = riiCurrentIterator(obj) orelse return NativeResult.literal("");
     const cur = try ctx.vm.callMethod(inner, "current", &.{});
     if (cur == .string) return NativeResult.share(cur);
-    var buf: std.ArrayListUnmanaged(u8) = .{};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(ctx.allocator);
     try cur.format(&buf, ctx.allocator);
     const s = try Value.String.adopt(ctx.allocator, try buf.toOwnedSlice(ctx.allocator));

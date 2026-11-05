@@ -2,9 +2,7 @@ const std = @import("std");
 const tls = @import("tls.zig");
 const Allocator = std.mem.Allocator;
 
-const c = @cImport({
-    @cInclude("nghttp2/nghttp2.h");
-});
+const c = @import("c_nghttp2");
 
 pub const MAX_STREAMS: usize = 64;
 
@@ -23,7 +21,7 @@ pub const H2Stream = struct {
     scheme: []const u8 = "https",
     headers: [64]Header = undefined,
     header_count: usize = 0,
-    body: std.ArrayListUnmanaged(u8) = .{},
+    body: std.ArrayListUnmanaged(u8) = .empty,
     complete: bool = false,
     active: bool = false,
     body_source: ?*BodySource = null,
@@ -31,7 +29,7 @@ pub const H2Stream = struct {
     pub fn resetRequest(self: *H2Stream, allocator: Allocator) void {
         self.freeHeaders(allocator);
         self.body.deinit(allocator);
-        self.body = .{};
+        self.body = .empty;
         self.complete = false;
     }
 
@@ -76,16 +74,16 @@ const SessionConn = struct {
 pub const H2Session = struct {
     session: *c.nghttp2_session,
     allocator: Allocator,
-    streams: [MAX_STREAMS]H2Stream = [_]H2Stream{.{ .stream_id = 0 }} ** MAX_STREAMS,
+    streams: [MAX_STREAMS]H2Stream = @as([MAX_STREAMS]H2Stream, @splat(.{ .stream_id = 0 })),
     io: SessionConn,
-    send_buf: std.ArrayListUnmanaged(u8) = .{},
+    send_buf: std.ArrayListUnmanaged(u8) = .empty,
 
     // call initSession after allocating on heap so user_data pointer is stable
     pub fn initSession(self: *H2Session, allocator: Allocator, ssl: *tls.SSL, fd: std.posix.socket_t) !void {
         self.allocator = allocator;
         self.io = .{ .ssl = ssl, .fd = fd };
-        self.streams = [_]H2Stream{.{ .stream_id = 0 }} ** MAX_STREAMS;
-        self.send_buf = .{};
+        self.streams = @as([MAX_STREAMS]H2Stream, @splat(.{ .stream_id = 0 }));
+        self.send_buf = .empty;
 
         var callbacks: ?*c.nghttp2_session_callbacks = null;
         if (c.nghttp2_session_callbacks_new(&callbacks) != 0) return error.OutOfMemory;

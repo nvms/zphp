@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform.zig");
 const posix = std.posix;
 
 
@@ -19,7 +20,7 @@ const bold_yellow = "\x1b[1;33m";
 const bold_white = "\x1b[1;37m";
 
 pub fn write(msg: []const u8) void {
-    std.fs.File.stderr().writeAll(msg) catch {};
+    platform.writeAll(std.Io.File.stderr(), msg) catch {};
 }
 
 pub fn writeColor(color: []const u8, msg: []const u8) void {

@@ -231,7 +231,7 @@ fn nodeToJsonValue(ctx: *NativeContext, node: *c.xmlNode) RuntimeError!Value {
     if (has_text) {
         // direct text children only; xmlNodeGetContent would recurse into
         // child elements which PHP does not include here
-        var buf: std.ArrayListUnmanaged(u8) = .{};
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
         defer buf.deinit(ctx.allocator);
         var tch: ?*c.xmlNode = @ptrCast(node.children);
         while (tch) |cn| : (tch = @ptrCast(cn.next)) {
@@ -718,7 +718,7 @@ fn sxmlToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
     const node = getNodePtr(obj) orelse return try NativeResult.copyString(ctx.allocator, "");
     // SimpleXML's __toString returns the direct text content of the element
     // (concatenation of immediate text children, not recursive)
-    var out = std.ArrayList(u8){};
+    var out = std.ArrayList(u8).empty;
     defer out.deinit(ctx.allocator);
     var ch = node.children;
     while (ch != null) : (ch = ch.*.next) {

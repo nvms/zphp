@@ -7,7 +7,7 @@ build: ## Build zphp (Debug; ~30x slower than release due to Zig's debug allocat
 
 .PHONY: release
 release: ## Build zphp in ReleaseFast (no debug allocator overhead). prefer for any perf-sensitive run; for testing zphp's actual PHP-execution speed
-	zig build -Doptimize=ReleaseFast $(ZIG_FLAGS)
+	zig build -Doptimize=fast $(ZIG_FLAGS)
 
 .PHONY: test
 test: ## Run zig unit tests
@@ -30,7 +30,7 @@ examples: build ## Run example project tests (requires PHP 8.5)
 
 .PHONY: bench
 bench: ## Run runtime benchmarks (ReleaseFast)
-	zig build -Doptimize=ReleaseFast
+	zig build -Doptimize=fast
 	./benchmarks/runtime/run
 
 .PHONY: bench-compare
@@ -58,12 +58,12 @@ ini: build ## Run php.ini loading tests (--ini, ZPHP_INI, -d, serve isolation, e
 
 .PHONY: soak
 soak: ## Run the memory soak (ReleaseFast): a string-heavy loop must hold a flat RSS
-	zig build -Doptimize=ReleaseFast
+	zig build -Doptimize=fast
 	python3 ./tests/memory_soak
 
 .PHONY: bench-macro
 bench-macro: ## Track real-app perf vs php (WordPress + Laravel harnesses, ReleaseFast)
-	zig build -Doptimize=ReleaseFast
+	zig build -Doptimize=fast
 	./benchmarks/macro/run
 
 .PHONY: laravel

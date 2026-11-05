@@ -1,4 +1,6 @@
 const std = @import("std");
+const sync = @import("../sync.zig");
+const sys = @import("../sys.zig");
 const native_params = @import("../stdlib/native_params.zig");
 const platform = @import("../platform.zig");
 const php_version = @import("../php_version.zig");
@@ -55,7 +57,7 @@ pub const ProcPipe = struct {
 pub const ProcChild = struct {
     pid: platform.Pid,
     reaped: bool,
-    pipe_fds: std.ArrayListUnmanaged(ProcPipe) = .{},
+    pipe_fds: std.ArrayListUnmanaged(ProcPipe) = .empty,
     process: usize = 0,
 };
 const ProcChildMap = std.AutoHashMapUnmanaged(*PhpObject, ProcChild);
@@ -281,10 +283,10 @@ pub const CaptureEntry = struct {
 // PHP_BINARY: the absolute path of the running executable, resolved once
 // per process so a re-launched child (pcntl_exec, proc_open) finds it
 var executable_path: []const u8 = "zphp";
-var executable_path_once = std.once(resolveExecutablePath);
+var executable_path_once = sync.once(resolveExecutablePath);
 
 fn resolveExecutablePath() void {
-    executable_path = std.fs.selfExePathAlloc(std.heap.page_allocator) catch return;
+    executable_path = platform.selfExePathAlloc(std.heap.page_allocator) catch return;
 }
 
 pub fn executablePath() []const u8 {
@@ -320,8 +322,8 @@ pub const AttributeDef = struct {
 pub const ClassDef = struct {
     name: []const u8,
     methods: class_names.MethodMap(MethodInfo) = .{},
-    method_order: std.ArrayListUnmanaged([]const u8) = .{},
-    properties: std.ArrayListUnmanaged(PropertyDef) = .{},
+    method_order: std.ArrayListUnmanaged([]const u8) = .empty,
+    properties: std.ArrayListUnmanaged(PropertyDef) = .empty,
     static_props: std.StringArrayHashMapUnmanaged(Value) = .{},
     static_prop_types: std.StringHashMapUnmanaged([]const u8) = .{},
     file_path: []const u8 = "",
@@ -329,7 +331,7 @@ pub const ClassDef = struct {
     end_line: u32 = 0,
     doc_comment: []const u8 = "",
     parent: ?[]const u8 = null,
-    interfaces: std.ArrayListUnmanaged([]const u8) = .{},
+    interfaces: std.ArrayListUnmanaged([]const u8) = .empty,
     is_enum: bool = false,
     is_internal: bool = true,
     // its hidden initializer still has to install some instance defaults
@@ -362,20 +364,20 @@ pub const ClassDef = struct {
     // account for inherited hooks - hasPropHook walks the parent chain
     has_prop_hooks: bool = false,
     backed_type: enum(u8) { none = 0, int_type = 1, string_type = 2 } = .none,
-    case_order: std.ArrayListUnmanaged([]const u8) = .{},
+    case_order: std.ArrayListUnmanaged([]const u8) = .empty,
     // #[\Deprecated] constants and enum cases: what follows "is deprecated"
     // in the warning (" since 2.0, use X", or "")
     deprecated_constants: std.StringHashMapUnmanaged([]const u8) = .{},
     slot_layout: ?*PhpObject.SlotLayout = null,
-    used_traits: std.ArrayListUnmanaged([]const u8) = .{},
-    attributes: std.ArrayListUnmanaged(AttributeDef) = .{},
+    used_traits: std.ArrayListUnmanaged([]const u8) = .empty,
+    attributes: std.ArrayListUnmanaged(AttributeDef) = .empty,
     method_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
     property_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
     param_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
     // class constants and enum cases, a namespace of their own: php lets
     // `const X` and `static $X` coexist on one class
     constants: std.StringHashMapUnmanaged(Value) = .{},
-    constant_order: std.ArrayListUnmanaged([]const u8) = .{},
+    constant_order: std.ArrayListUnmanaged([]const u8) = .empty,
     constant_docs: std.StringHashMapUnmanaged([]const u8) = .{},
     const_visibility: std.StringHashMapUnmanaged(Visibility) = .{},
     constant_types: std.StringHashMapUnmanaged([]const u8) = .{},
@@ -499,12 +501,12 @@ pub const DeclSite = struct { file: []const u8 = "", start_line: u32 = 0, end_li
 
 pub const InterfaceDef = struct {
     name: []const u8,
-    methods: std.ArrayListUnmanaged([]const u8) = .{},
+    methods: std.ArrayListUnmanaged([]const u8) = .empty,
     parent: ?[]const u8 = null,
     // PHP allows `interface C extends A, B` - all extended interfaces. the
     // single `parent` field is kept for code that walks one parent at a time;
     // new code should iterate `parents` so multi-extension is honored
-    parents: std.ArrayListUnmanaged([]const u8) = .{},
+    parents: std.ArrayListUnmanaged([]const u8) = .empty,
 
     fn deinit(self: *InterfaceDef, allocator: Allocator) void {
         self.methods.deinit(allocator);
@@ -580,20 +582,20 @@ pub const VM = struct {
     functions: std.StringHashMapUnmanaged(*const ObjFunction) = .{},
     function_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
     native_fns: NativeTable = .{},
-    output: std.ArrayListUnmanaged(u8) = .{},
-    strings: std.ArrayListUnmanaged([]const u8) = .{},
+    output: std.ArrayListUnmanaged(u8) = .empty,
+    strings: std.ArrayListUnmanaged([]const u8) = .empty,
     // persistent_strings are heap-allocated keys whose lifetime must outlive
     // a serve-mode reset. anything stored as a key in native_fns (or any
     // other table that survives reset) must be allocated here, NOT in
     // self.strings (which is cleared at reset and would leave dangling
     // pointers behind in the surviving tables)
-    persistent_strings: std.ArrayListUnmanaged([]const u8) = .{},
-    arrays: std.ArrayListUnmanaged(*PhpArray) = .{},
-    free_arrays: std.ArrayListUnmanaged(*PhpArray) = .{},
-    released_arrays: std.ArrayListUnmanaged(*PhpArray) = .{},
-    objects: std.ArrayListUnmanaged(*PhpObject) = .{},
-    free_objects: std.ArrayListUnmanaged(*PhpObject) = .{},
-    released_objects: std.ArrayListUnmanaged(*PhpObject) = .{},
+    persistent_strings: std.ArrayListUnmanaged([]const u8) = .empty,
+    arrays: std.ArrayListUnmanaged(*PhpArray) = .empty,
+    free_arrays: std.ArrayListUnmanaged(*PhpArray) = .empty,
+    released_arrays: std.ArrayListUnmanaged(*PhpArray) = .empty,
+    objects: std.ArrayListUnmanaged(*PhpObject) = .empty,
+    free_objects: std.ArrayListUnmanaged(*PhpObject) = .empty,
+    released_objects: std.ArrayListUnmanaged(*PhpObject) = .empty,
     next_object_id: u32 = 0,
     // the innermost running native call; a user call made at its depth comes
     // from the native itself
@@ -624,31 +626,31 @@ pub const VM = struct {
     // object refcounting (Stage 1): objects whose refcount has hit 0 and are
     // awaiting __destruct. drained at statement boundaries / run end so the
     // destructor never runs while the just-released handle is still in use
-    pending_destruct: std.ArrayListUnmanaged(*PhpObject) = .{},
+    pending_destruct: std.ArrayListUnmanaged(*PhpObject) = .empty,
     destruct_cursor: usize = 0,
     draining_destructors: bool = false,
     // refcounting Stage 2: arrays whose refcount reached 0, awaiting element
     // release. drained alongside pending_destruct at statement boundaries
-    pending_array_release: std.ArrayListUnmanaged(*PhpArray) = .{},
+    pending_array_release: std.ArrayListUnmanaged(*PhpArray) = .empty,
     array_release_cursor: usize = 0,
-    pending_string_release: std.ArrayListUnmanaged(*Value.String.Owner) = .{},
+    pending_string_release: std.ArrayListUnmanaged(*Value.String.Owner) = .empty,
     // Stage 2 finer generator/fiber lifetime: gen/fiber handles dropped to
     // refcount 0 are queued for closeGenerator + releaseGeneratorVars /
     // cleanupFiberFrames at the next drain. queueing (not inline close) lets
     // a transient drop-then-re-retain through a pop-then-store pattern
     // survive - the drain re-checks refcount before closing
-    pending_gen_release: std.ArrayListUnmanaged(*@import("value.zig").Generator) = .{},
+    pending_gen_release: std.ArrayListUnmanaged(*@import("value.zig").Generator) = .empty,
     gen_release_cursor: usize = 0,
-    pending_fiber_release: std.ArrayListUnmanaged(*@import("value.zig").Fiber) = .{},
+    pending_fiber_release: std.ArrayListUnmanaged(*@import("value.zig").Fiber) = .empty,
     fiber_release_cursor: usize = 0,
     // registered WeakMap instances. each WeakMap's wmConstruct appends self
     // here; on object destruct we walk this list to remove entries whose key
     // is the just-destructed object (weak semantics)
-    weakmaps: std.ArrayListUnmanaged(*PhpObject) = .{},
+    weakmaps: std.ArrayListUnmanaged(*PhpObject) = .empty,
     // cycle collector candidate roots whose refcount decremented without
     // hitting 0. arrays need their own roots so pure array cycles are visible
-    cycle_candidates: std.ArrayListUnmanaged(*PhpObject) = .{},
-    cycle_array_candidates: std.ArrayListUnmanaged(*PhpArray) = .{},
+    cycle_candidates: std.ArrayListUnmanaged(*PhpObject) = .empty,
+    cycle_array_candidates: std.ArrayListUnmanaged(*PhpArray) = .empty,
     gc_enabled: bool = true,
     gc_runs: usize = 0,
     gc_collected: usize = 0,
@@ -665,7 +667,7 @@ pub const VM = struct {
     // ref_array_bindings still cover the call-scoped paths (bindRefParams) and
     // the existing `$v = &$arr[$k]` local. propagateCellWrite scans BOTH; an
     // entry is bound in exactly one list. cleared at reset (request lifetime)
-    array_ref_bindings: std.ArrayListUnmanaged(ArrayRefBinding) = .{},
+    array_ref_bindings: std.ArrayListUnmanaged(ArrayRefBinding) = .empty,
     persistent_ref_owner: RefIndex.OwnerId = 0,
     last_return_ref_owner: RefIndex.OwnerId = 0,
     // pointer to the $GLOBALS PhpArray for the current run, used so writes
@@ -676,16 +678,16 @@ pub const VM = struct {
     rng_state: std.Random.DefaultPrng = std.Random.DefaultPrng.init(0),
     mt19937: @import("../stdlib/mt19937.zig").Mt19937 = .{},
     obj_id_base: usize = 0,
-    generators: std.ArrayListUnmanaged(*Generator) = .{},
-    free_generators: std.ArrayListUnmanaged(*Generator) = .{},
-    fibers: std.ArrayListUnmanaged(*Fiber) = .{},
-    free_fibers: std.ArrayListUnmanaged(*Fiber) = .{},
-    ref_cells: std.ArrayListUnmanaged(*RefCell) = .{},
-    free_cells: std.ArrayListUnmanaged(*RefCell) = .{},
+    generators: std.ArrayListUnmanaged(*Generator) = .empty,
+    free_generators: std.ArrayListUnmanaged(*Generator) = .empty,
+    fibers: std.ArrayListUnmanaged(*Fiber) = .empty,
+    free_fibers: std.ArrayListUnmanaged(*Fiber) = .empty,
+    ref_cells: std.ArrayListUnmanaged(*RefCell) = .empty,
+    free_cells: std.ArrayListUnmanaged(*RefCell) = .empty,
     current_fiber: ?*Fiber = null,
     fiber_suspend_pending: bool = false,
     fiber_suspend_value: Value = .null,
-    captures: std.ArrayListUnmanaged(CaptureEntry) = .{},
+    captures: std.ArrayListUnmanaged(CaptureEntry) = .empty,
     capture_index: std.StringHashMapUnmanaged(CaptureRange) = .{},
     interned_names: std.StringHashMapUnmanaged(void) = .{},
     cycle_closures: std.AutoArrayHashMapUnmanaged(*Value.String.Owner, i64) = .{},
@@ -705,12 +707,12 @@ pub const VM = struct {
     // set while freeHeapItems bulk-frees the heap: the deferred queues then
     // reference structures that are already gone, so drains must not run
     heap_teardown: bool = false,
-    free_closure_names: std.ArrayListUnmanaged(struct { compile_name: []const u8, name: []const u8 }) = .{},
+    free_closure_names: std.ArrayListUnmanaged(struct { compile_name: []const u8, name: []const u8 }) = .empty,
     php_constants: std.StringHashMapUnmanaged(Value) = .{},
     user_constants: std.StringHashMapUnmanaged(void) = .{},
     ini_settings: std.StringHashMapUnmanaged([]const u8) = .{},
     ini_callbacks: std.StringHashMapUnmanaged(Value) = .{},
-    shutdown_callbacks: std.ArrayListUnmanaged(Value) = .{},
+    shutdown_callbacks: std.ArrayListUnmanaged(Value) = .empty,
     strtok_state: ?[]const u8 = null,
     strtok_pos: usize = 0,
     classes: class_names.Map(ClassDef) = .{},
@@ -747,8 +749,8 @@ pub const VM = struct {
     // last used this frame slot
     pending_invoke_args: ?[]const Value = null,
     pending_ref_args: ?[]Value = null,
-    static_vars: std.ArrayListUnmanaged(StaticEntry) = .{},
-    global_vars: std.ArrayListUnmanaged(StaticEntry) = .{},
+    static_vars: std.ArrayListUnmanaged(StaticEntry) = .empty,
+    global_vars: std.ArrayListUnmanaged(StaticEntry) = .empty,
     file_loader: ?*const FileLoader = null,
     // canonical directory paths keyed by the spelling a require used, so a
     // file load costs one lstat instead of a realpath per file
@@ -757,13 +759,13 @@ pub const VM = struct {
     stream_wrappers_unregistered: std.StringHashMapUnmanaged(void) = .{},
     // protocol -> user class name registered via stream_wrapper_register
     stream_wrappers_user: std.StringHashMapUnmanaged([]const u8) = .{},
-    compile_results: std.ArrayListUnmanaged(*CompileResult) = .{},
+    compile_results: std.ArrayListUnmanaged(*CompileResult) = .empty,
     error_msg: ?[]const u8 = null,
     exit_requested: bool = false,
     exit_code: u8 = 0,
     source: []const u8 = "",
     file_path: []const u8 = "",
-    autoload_callbacks: std.ArrayListUnmanaged(Value) = .{},
+    autoload_callbacks: std.ArrayListUnmanaged(Value) = .empty,
     autoload_depth: u8 = 0,
     // when a required script does an early `return X` at top level, the
     // return op pops its frame before the require handler runs the merge.
@@ -771,22 +773,22 @@ pub const VM = struct {
     // runUntilFrame; popFrame skips deinit and leaves the slot intact so
     // the require handler can read the include frame's locals/vars
     require_merge_depth: usize = 0,
-    magic_get_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, prop_name: []const u8 }) = .{},
-    magic_call_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, method_name: []const u8 }) = .{},
-    prop_hook_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, prop_name: []const u8 }) = .{},
+    magic_get_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, prop_name: []const u8 }) = .empty,
+    magic_call_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, method_name: []const u8 }) = .empty,
+    prop_hook_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, prop_name: []const u8 }) = .empty,
     user_error_handler: ?Value = null,
     user_error_handler_mask: i64 = -1,
     user_exception_handler: ?Value = null,
     // stack of previously-installed exception handlers. set_exception_handler
     // pushes, restore_exception_handler pops - PHP exposes a real LIFO of
     // installed handlers (mirrors the older error_handler_stack)
-    exception_handler_stack: std.ArrayListUnmanaged(?Value) = .{},
+    exception_handler_stack: std.ArrayListUnmanaged(?Value) = .empty,
     // pool of frame.vars hashmaps. each entry's buckets stay allocated; on
     // recycle we clear() instead of deinit() so the next acquisition skips
     // the initial bucket alloc. recursive-call heavy workloads previously
     // mmap'd a fresh bucket array per call - this turns it into a pop()
-    vars_pool: std.ArrayListUnmanaged(std.StringHashMapUnmanaged(Value)) = .{},
-    error_handler_stack: std.ArrayListUnmanaged(ErrorHandlerEntry) = .{},
+    vars_pool: std.ArrayListUnmanaged(std.StringHashMapUnmanaged(Value)) = .empty,
+    error_handler_stack: std.ArrayListUnmanaged(ErrorHandlerEntry) = .empty,
     error_silenced_depth: u32 = 0,
     last_error_type: i64 = 0,
     last_error_message: []const u8 = "",
@@ -794,7 +796,7 @@ pub const VM = struct {
     last_error_line: i64 = 0,
     prev_error_handler: ?Value = null,
     error_reporting_level: i64 = 30719,
-    ob_stack: std.ArrayListUnmanaged(OutputBufferLevel) = .{},
+    ob_stack: std.ArrayListUnmanaged(OutputBufferLevel) = .empty,
     request_vars: std.StringHashMapUnmanaged(Value) = .{},
     profile_calls: std.StringHashMapUnmanaged(u64) = .{},
     // ZPHP_DBG_PROFILE env check cached at init. previously each native and
@@ -883,7 +885,7 @@ pub const VM = struct {
     execution_limit_seconds: i64 = 0,
     deadline_tick_counter: u32 = 0,
     serve_compile_cache: std.StringHashMapUnmanaged(*CompileResult) = .{},
-    serve_cache_keys: std.ArrayListUnmanaged([]const u8) = .{},
+    serve_cache_keys: std.ArrayListUnmanaged([]const u8) = .empty,
     response_code: i64 = 200,
     response_headers: ?*PhpArray = null,
     last_http_response_headers: ?*PhpArray = null,
@@ -986,7 +988,7 @@ pub const VM = struct {
             } else {
                 if (!entry.reaped) {
                     std.posix.kill(entry.pid, std.posix.SIG.KILL) catch {};
-                    _ = std.posix.waitpid(entry.pid, 0);
+                    _ = sys.waitpid(entry.pid, 0);
                 }
                 for (entry.pipe_fds.items) |*pipe| pipe.close();
             }
@@ -996,14 +998,14 @@ pub const VM = struct {
     }
 
     fn reapWindowsChild(entry: *ProcChild) void {
-        const kernel32 = std.os.windows.kernel32;
+        const win32 = @import("../win32.zig");
         if (entry.process != 0) {
-            const handle: std.os.windows.HANDLE = @ptrFromInt(entry.process);
+            const handle: win32.HANDLE = @ptrFromInt(entry.process);
             if (!entry.reaped) {
-                _ = kernel32.TerminateProcess(handle, 255);
-                _ = kernel32.WaitForSingleObject(handle, std.os.windows.INFINITE);
+                _ = win32.TerminateProcess(handle, 255);
+                _ = win32.WaitForSingleObject(handle, win32.INFINITE);
             }
-            std.os.windows.CloseHandle(handle);
+            _ = win32.CloseHandle(handle);
             entry.process = 0;
         }
         for (entry.pipe_fds.items) |*pipe| pipe.close();
@@ -1438,9 +1440,9 @@ pub const VM = struct {
         pending_defaults: u32 = 0,
         // provenance of the call family opcode being executed, saved across a
         // nested call so a native callback's own calls cannot clobber it
-        saved_sources: std.ArrayListUnmanaged(RefSource) = .{},
-        arg_arrays: std.ArrayListUnmanaged(ArgEntry) = .{},
-        bound_arg_sources: std.ArrayListUnmanaged(struct { owner: RefIndex.OwnerId, source: RefSource }) = .{},
+        saved_sources: std.ArrayListUnmanaged(RefSource) = .empty,
+        arg_arrays: std.ArrayListUnmanaged(ArgEntry) = .empty,
+        bound_arg_sources: std.ArrayListUnmanaged(struct { owner: RefIndex.OwnerId, source: RefSource }) = .empty,
         active_args: []RefSource = &.{},
         active_frame: usize = 0,
         active_arg_count: usize = 0,
@@ -1497,7 +1499,7 @@ pub const VM = struct {
         // the compile-time fatal that made the file loader refuse an include
         include_compile_error: ?SourcePositionMessage = null,
         // class names whose autoload is in progress, innermost last
-        autoloading: std.ArrayListUnmanaged([]const u8) = .{},
+        autoloading: std.ArrayListUnmanaged([]const u8) = .empty,
         // set by initVm, never defaulted: a default would compile these paths
         // into the fast loop object as well
         slow: SlowPaths = undefined,
@@ -1767,7 +1769,7 @@ pub const VM = struct {
         vm.allocator = account.allocator();
         const allocator = vm.allocator;
         vm.string_pool.backing = allocator;
-        if (platform.getenv("ZPHP_HEAP_STATS") != null) vm.debug_closure_owners = .{};
+        if (platform.getenv("ZPHP_HEAP_STATS") != null) vm.debug_closure_owners = .empty;
         if (platform.getenv("ZPHP_NO_POOL") != null) vm.debug_no_pool = true;
         if (platform.getenv("ZPHP_GC_VERIFY") != null) vm.debug_gc_verify = true;
         vm.debug_trace_class = platform.getenv("ZPHP_TRACE_OBJ_CLASS");
@@ -2059,37 +2061,37 @@ pub const VM = struct {
         try c.put(a, "GLOB_ERR", .{ .int = 4 });
         try c.put(a, "GLOB_AVAILABLE_FLAGS", .{ .int = 8 | 32 | 16 | 4096 | 128 | 1073741824 | 4 });
         const posix = std.posix;
-        if (!platform.is_windows) try c.put(a, "SIGHUP", .{ .int = @intCast(posix.SIG.HUP) });
-        if (!platform.is_windows) try c.put(a, "SIGINT", .{ .int = @intCast(posix.SIG.INT) });
-        if (!platform.is_windows) try c.put(a, "SIGQUIT", .{ .int = @intCast(posix.SIG.QUIT) });
-        if (!platform.is_windows) try c.put(a, "SIGILL", .{ .int = @intCast(posix.SIG.ILL) });
-        if (!platform.is_windows) try c.put(a, "SIGTRAP", .{ .int = @intCast(posix.SIG.TRAP) });
-        if (!platform.is_windows) try c.put(a, "SIGABRT", .{ .int = @intCast(posix.SIG.ABRT) });
-        if (!platform.is_windows) try c.put(a, "SIGIOT", .{ .int = @intCast(posix.SIG.ABRT) });
-        if (!platform.is_windows) try c.put(a, "SIGBUS", .{ .int = @intCast(posix.SIG.BUS) });
-        if (!platform.is_windows) try c.put(a, "SIGFPE", .{ .int = @intCast(posix.SIG.FPE) });
-        if (!platform.is_windows) try c.put(a, "SIGKILL", .{ .int = @intCast(posix.SIG.KILL) });
-        if (!platform.is_windows) try c.put(a, "SIGUSR1", .{ .int = @intCast(posix.SIG.USR1) });
-        if (!platform.is_windows) try c.put(a, "SIGSEGV", .{ .int = @intCast(posix.SIG.SEGV) });
-        if (!platform.is_windows) try c.put(a, "SIGUSR2", .{ .int = @intCast(posix.SIG.USR2) });
-        if (!platform.is_windows) try c.put(a, "SIGPIPE", .{ .int = @intCast(posix.SIG.PIPE) });
-        if (!platform.is_windows) try c.put(a, "SIGALRM", .{ .int = @intCast(posix.SIG.ALRM) });
-        if (!platform.is_windows) try c.put(a, "SIGTERM", .{ .int = @intCast(posix.SIG.TERM) });
-        if (!platform.is_windows) try c.put(a, "SIGCHLD", .{ .int = @intCast(posix.SIG.CHLD) });
-        if (!platform.is_windows) try c.put(a, "SIGCLD", .{ .int = @intCast(posix.SIG.CHLD) });
-        if (!platform.is_windows) try c.put(a, "SIGCONT", .{ .int = @intCast(posix.SIG.CONT) });
-        if (!platform.is_windows) try c.put(a, "SIGSTOP", .{ .int = @intCast(posix.SIG.STOP) });
-        if (!platform.is_windows) try c.put(a, "SIGTSTP", .{ .int = @intCast(posix.SIG.TSTP) });
-        if (!platform.is_windows) try c.put(a, "SIGTTIN", .{ .int = @intCast(posix.SIG.TTIN) });
-        if (!platform.is_windows) try c.put(a, "SIGTTOU", .{ .int = @intCast(posix.SIG.TTOU) });
-        if (!platform.is_windows) try c.put(a, "SIGURG", .{ .int = @intCast(posix.SIG.URG) });
-        if (!platform.is_windows) try c.put(a, "SIGXCPU", .{ .int = @intCast(posix.SIG.XCPU) });
-        if (!platform.is_windows) try c.put(a, "SIGXFSZ", .{ .int = @intCast(posix.SIG.XFSZ) });
-        if (!platform.is_windows) try c.put(a, "SIGVTALRM", .{ .int = @intCast(posix.SIG.VTALRM) });
-        if (!platform.is_windows) try c.put(a, "SIGPROF", .{ .int = @intCast(posix.SIG.PROF) });
-        if (!platform.is_windows) try c.put(a, "SIGWINCH", .{ .int = @intCast(posix.SIG.WINCH) });
-        if (!platform.is_windows) try c.put(a, "SIGIO", .{ .int = @intCast(posix.SIG.IO) });
-        if (!platform.is_windows) try c.put(a, "SIGSYS", .{ .int = @intCast(posix.SIG.SYS) });
+        if (!platform.is_windows) try c.put(a, "SIGHUP", .{ .int = @intFromEnum(posix.SIG.HUP) });
+        if (!platform.is_windows) try c.put(a, "SIGINT", .{ .int = @intFromEnum(posix.SIG.INT) });
+        if (!platform.is_windows) try c.put(a, "SIGQUIT", .{ .int = @intFromEnum(posix.SIG.QUIT) });
+        if (!platform.is_windows) try c.put(a, "SIGILL", .{ .int = @intFromEnum(posix.SIG.ILL) });
+        if (!platform.is_windows) try c.put(a, "SIGTRAP", .{ .int = @intFromEnum(posix.SIG.TRAP) });
+        if (!platform.is_windows) try c.put(a, "SIGABRT", .{ .int = @intFromEnum(posix.SIG.ABRT) });
+        if (!platform.is_windows) try c.put(a, "SIGIOT", .{ .int = @intFromEnum(posix.SIG.ABRT) });
+        if (!platform.is_windows) try c.put(a, "SIGBUS", .{ .int = @intFromEnum(posix.SIG.BUS) });
+        if (!platform.is_windows) try c.put(a, "SIGFPE", .{ .int = @intFromEnum(posix.SIG.FPE) });
+        if (!platform.is_windows) try c.put(a, "SIGKILL", .{ .int = @intFromEnum(posix.SIG.KILL) });
+        if (!platform.is_windows) try c.put(a, "SIGUSR1", .{ .int = @intFromEnum(posix.SIG.USR1) });
+        if (!platform.is_windows) try c.put(a, "SIGSEGV", .{ .int = @intFromEnum(posix.SIG.SEGV) });
+        if (!platform.is_windows) try c.put(a, "SIGUSR2", .{ .int = @intFromEnum(posix.SIG.USR2) });
+        if (!platform.is_windows) try c.put(a, "SIGPIPE", .{ .int = @intFromEnum(posix.SIG.PIPE) });
+        if (!platform.is_windows) try c.put(a, "SIGALRM", .{ .int = @intFromEnum(posix.SIG.ALRM) });
+        if (!platform.is_windows) try c.put(a, "SIGTERM", .{ .int = @intFromEnum(posix.SIG.TERM) });
+        if (!platform.is_windows) try c.put(a, "SIGCHLD", .{ .int = @intFromEnum(posix.SIG.CHLD) });
+        if (!platform.is_windows) try c.put(a, "SIGCLD", .{ .int = @intFromEnum(posix.SIG.CHLD) });
+        if (!platform.is_windows) try c.put(a, "SIGCONT", .{ .int = @intFromEnum(posix.SIG.CONT) });
+        if (!platform.is_windows) try c.put(a, "SIGSTOP", .{ .int = @intFromEnum(posix.SIG.STOP) });
+        if (!platform.is_windows) try c.put(a, "SIGTSTP", .{ .int = @intFromEnum(posix.SIG.TSTP) });
+        if (!platform.is_windows) try c.put(a, "SIGTTIN", .{ .int = @intFromEnum(posix.SIG.TTIN) });
+        if (!platform.is_windows) try c.put(a, "SIGTTOU", .{ .int = @intFromEnum(posix.SIG.TTOU) });
+        if (!platform.is_windows) try c.put(a, "SIGURG", .{ .int = @intFromEnum(posix.SIG.URG) });
+        if (!platform.is_windows) try c.put(a, "SIGXCPU", .{ .int = @intFromEnum(posix.SIG.XCPU) });
+        if (!platform.is_windows) try c.put(a, "SIGXFSZ", .{ .int = @intFromEnum(posix.SIG.XFSZ) });
+        if (!platform.is_windows) try c.put(a, "SIGVTALRM", .{ .int = @intFromEnum(posix.SIG.VTALRM) });
+        if (!platform.is_windows) try c.put(a, "SIGPROF", .{ .int = @intFromEnum(posix.SIG.PROF) });
+        if (!platform.is_windows) try c.put(a, "SIGWINCH", .{ .int = @intFromEnum(posix.SIG.WINCH) });
+        if (!platform.is_windows) try c.put(a, "SIGIO", .{ .int = @intFromEnum(posix.SIG.IO) });
+        if (!platform.is_windows) try c.put(a, "SIGSYS", .{ .int = @intFromEnum(posix.SIG.SYS) });
         try c.put(a, "SIG_DFL", .{ .int = 0 });
         try c.put(a, "SIG_IGN", .{ .int = 1 });
         try c.put(a, "SIG_ERR", .{ .int = -1 });
@@ -2766,7 +2768,7 @@ pub const VM = struct {
     // persistent (chunk constants or static literals) so this is safe after the
     // request heap has been freed. value type must have deinit(allocator)
     fn removeNonBuiltin(self: *VM, map: anytype, builtin: *const std.StringHashMapUnmanaged(void)) void {
-        var to_remove: std.ArrayListUnmanaged([]const u8) = .{};
+        var to_remove: std.ArrayListUnmanaged([]const u8) = .empty;
         defer to_remove.deinit(self.allocator);
         var it = map.iterator();
         while (it.next()) |e| {
@@ -3377,7 +3379,7 @@ pub const VM = struct {
     // pooled object structs are reused out of creation order, so order the
     // final sweep by object id (creation order) rather than list position
     pub fn runShutdownDestructors(self: *VM) void {
-        var live: std.ArrayListUnmanaged(*PhpObject) = .{};
+        var live: std.ArrayListUnmanaged(*PhpObject) = .empty;
         defer live.deinit(self.allocator);
         for (self.objects.items) |obj| {
             if (obj.destructed or obj.pooled) continue;
@@ -3451,7 +3453,7 @@ pub const VM = struct {
         }
         try ic.fn_lower.put(self.allocator, lower, name);
         if (std.mem.indexOfScalar(u8, name, '\\') == null) return;
-        var stale: std.ArrayListUnmanaged([]const u8) = .{};
+        var stale: std.ArrayListUnmanaged([]const u8) = .empty;
         defer stale.deinit(self.allocator);
         var it = ic.resolved_calls.keyIterator();
         while (it.next()) |k| if (std.ascii.eqlIgnoreCase(k.*, name)) try stale.append(self.allocator, k.*);
@@ -3539,7 +3541,7 @@ pub const VM = struct {
 
     pub fn indexFunctionByChunk(self: *VM, name: []const u8, chunk: *const Chunk) RuntimeError!void {
         const gop = try self.chunk_to_func_names.getOrPut(self.allocator, @intFromPtr(chunk));
-        if (!gop.found_existing) gop.value_ptr.* = .{};
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
         for (gop.value_ptr.*.items) |existing| if (std.mem.eql(u8, existing, name)) return;
         try gop.value_ptr.*.append(self.allocator, name);
     }
@@ -3761,7 +3763,8 @@ pub const VM = struct {
             if (platform.getenv("ZPHP_DBG_PANIC_INTERNAL") != null) {
                 std.debug.print("\n[ZPHP_DBG_PANIC_INTERNAL] uncontexted {s}\n", .{@errorName(err)});
                 if (@errorReturnTrace()) |trace| {
-                    std.debug.dumpStackTrace(trace.*);
+                    const st: std.debug.StackTrace = .{ .return_addresses = trace.instruction_addresses[0..@min(trace.index, trace.instruction_addresses.len)], .skipped = .none };
+                    std.debug.dumpStackTrace(&st);
                 }
             }
             const cur_frame = if (self.frame_count > 0) &self.frames[self.frame_count - 1] else null;
@@ -4173,7 +4176,7 @@ pub const VM = struct {
                     } else {
                         if (a == .array) self.emitWarning("Array to string conversion") catch if (try self.resumeRaised()) continue;
                         if (b == .array) self.emitWarning("Array to string conversion") catch if (try self.resumeRaised()) continue;
-                        var buf = std.ArrayListUnmanaged(u8){};
+                        var buf = std.ArrayListUnmanaged(u8).empty;
                         defer buf.deinit(self.stringAllocator());
                         if (a == .object) {
                             const s = self.objectToString(a.object) catch {
@@ -4575,11 +4578,11 @@ pub const VM = struct {
                     }
                     if (has_named) {
                         if (self.functions.get(name)) |func| {
-                            var resolved: [256]Value = .{.null} ** 256;
+                            var resolved: [256]Value = @splat(.null);
                             var resolved_sources: [256]RefSource = undefined;
                             @memset(resolved_sources[0..@min(resolved_sources.len, func.params.len + arr.entries.items.len)], .none);
                             if (func.params.len > resolved.len) return error.RuntimeError;
-                            var assigned: [16]bool = .{false} ** 16;
+                            var assigned: [16]bool = @splat(false);
                             var pos: usize = 0;
                             var ok = true;
                             // a variadic function's last param is the catch-all -
@@ -4811,7 +4814,7 @@ pub const VM = struct {
                         }
                         if (has_named_args) {
                             if (self.functions.get(name_val.string.bytes())) |func| {
-                                var resolved: [256]Value = .{.null} ** 256;
+                                var resolved: [256]Value = @splat(.null);
                                 var resolved_sources: [256]RefSource = undefined;
                                 @memset(resolved_sources[0..@min(resolved_sources.len, func.params.len + arr.entries.items.len)], .none);
                                 if (func.params.len > resolved.len) return error.RuntimeError;
@@ -5438,7 +5441,7 @@ pub const VM = struct {
                         if (v == .string) {
                             if (v.string.len > 0) write_byte = v.string.bytes()[0];
                         } else {
-                            var tmp: std.ArrayListUnmanaged(u8) = .{};
+                            var tmp: std.ArrayListUnmanaged(u8) = .empty;
                             defer tmp.deinit(self.allocator);
                             try v.format(&tmp, self.allocator);
                             if (tmp.items.len > 0) write_byte = tmp.items[0];
@@ -5559,7 +5562,7 @@ pub const VM = struct {
                         if (v == .string) {
                             if (v.string.len > 0) write_byte = v.string.bytes()[0];
                         } else {
-                            var tmp: std.ArrayListUnmanaged(u8) = .{};
+                            var tmp: std.ArrayListUnmanaged(u8) = .empty;
                             defer tmp.deinit(self.allocator);
                             try v.format(&tmp, self.allocator);
                             if (tmp.items.len > 0) write_byte = tmp.items[0];
@@ -5756,7 +5759,7 @@ pub const VM = struct {
                         if (val == .string) {
                             if (val.string.len > 0) write_byte = val.string.bytes()[0];
                         } else {
-                            var tmp: std.ArrayListUnmanaged(u8) = .{};
+                            var tmp: std.ArrayListUnmanaged(u8) = .empty;
                             defer tmp.deinit(self.allocator);
                             try val.format(&tmp, self.allocator);
                             if (tmp.items.len > 0) write_byte = tmp.items[0];
@@ -6549,7 +6552,7 @@ pub const VM = struct {
                     const dst_idx = self.readU16();
                     const dst_name = self.currentChunk().constants.items[dst_idx].string.bytes();
                     if (platform.getenv("ZPHP_DBG_REF") != null) {
-                        const sfe = std.fs.File.stderr();
+                        const sfe = std.Io.File.stderr();
                         const f_dbg = self.currentFrame();
                         const fname = if (f_dbg.func) |fn_| fn_.name else "<g>";
                         const cls = f_dbg.called_class orelse "";
@@ -6559,7 +6562,7 @@ pub const VM = struct {
                         else
                             0;
                         const m = std.fmt.allocPrint(self.allocator, "[MVAER] dst={s} at {s}::{s} {s}:{d}\n", .{ dst_name, cls, fname, fp, ln }) catch return error.RuntimeError;
-                        _ = sfe.write(m) catch {};
+                        _ = platform.write(sfe, m) catch {};
                         self.allocator.free(m);
                     }
                     const key_val = self.pop();
@@ -7197,9 +7200,10 @@ pub const VM = struct {
 
                     const frame = self.currentFrame();
                     const current = if (is_ref) |cell| cell.* else (frame.vars.get(name) orelse .null);
-                    var suffix_allocator = std.heap.stackFallback(128, self.allocator);
-                    const temporary_allocator = suffix_allocator.get();
-                    var suffix: std.ArrayListUnmanaged(u8) = .{};
+                    var suffix_buf: [128]u8 = undefined;
+                    var suffix_allocator: std.heap.BufferFirstAllocator = .init(&suffix_buf, self.allocator);
+                    const temporary_allocator = suffix_allocator.allocator();
+                    var suffix: std.ArrayListUnmanaged(u8) = .empty;
                     defer suffix.deinit(temporary_allocator);
                     if (append_val == .string) {
                         try suffix.appendSlice(temporary_allocator, append_val.string.bytes());
@@ -7222,7 +7226,7 @@ pub const VM = struct {
                             }
                         }
                     }
-                    var buffer: std.ArrayListUnmanaged(u8) = .{};
+                    var buffer: std.ArrayListUnmanaged(u8) = .empty;
                     errdefer buffer.deinit(self.stringAllocator());
                     if (current == .string) {
                         try buffer.appendSlice(self.stringAllocator(), current.string.bytes());
@@ -7601,7 +7605,7 @@ pub const VM = struct {
                         self.pushTransfer(.{ .string = try Value.String.create(self.allocator, s) });
                     } else {
                         if (v == .array) self.emitWarning("Array to string conversion") catch if (try self.resumeRaised()) continue;
-                        var buf = std.ArrayListUnmanaged(u8){};
+                        var buf = std.ArrayListUnmanaged(u8).empty;
                         defer buf.deinit(self.allocator);
                         try v.format(&buf, self.allocator);
                         self.pushTransfer(.{ .string = try Value.String.create(self.allocator, buf.items) });
@@ -9792,7 +9796,7 @@ pub const VM = struct {
                         }
                     }
 
-                    var resolved_buf: [256]Value = .{.null} ** 256;
+                    var resolved_buf: [256]Value = @splat(.null);
                     var resolved_sources: [256]RefSource = undefined;
                     var ac = arr.entries.items.len;
 
@@ -10632,7 +10636,7 @@ pub const VM = struct {
                     var resolved_ac = ac;
                     if (has_named_sc) {
                         if (self.functions.get(full_name)) |func2| {
-                            var resolved: [256]Value = .{.null} ** 256;
+                            var resolved: [256]Value = @splat(.null);
                             var resolved_sources: [256]RefSource = undefined;
                             @memset(resolved_sources[0..@min(resolved_sources.len, func2.params.len + arr.entries.items.len)], .none);
                             if (func2.params.len > resolved.len) return error.RuntimeError;
@@ -11597,7 +11601,7 @@ pub const VM = struct {
         if (self.execution_deadline_ns == 0) return false;
         self.deadline_tick_counter +%= 1;
         if (self.deadline_tick_counter & 0xFFF != 0) return false;
-        return std.time.nanoTimestamp() >= self.execution_deadline_ns;
+        return platform.nanoTimestamp() >= self.execution_deadline_ns;
     }
 
     fn expireExecution(self: *VM) RuntimeError!void {
@@ -11620,7 +11624,7 @@ pub const VM = struct {
             self.execution_deadline_ns = 0;
             return;
         }
-        const now_ns = std.time.nanoTimestamp();
+        const now_ns = platform.nanoTimestamp();
         self.execution_deadline_ns = @intCast(now_ns + @as(i128, seconds) * std.time.ns_per_s);
         self.deadline_tick_counter = 0;
     }
@@ -12035,7 +12039,7 @@ pub const VM = struct {
             return .{ .count = entries.len };
         };
         if (self.functions.get(ctn)) |func| {
-            var resolved: [256]Value = .{.null} ** 256;
+            var resolved: [256]Value = @splat(.null);
             var resolved_sources: [256]RefSource = undefined;
             @memset(resolved_sources[0..@min(resolved_sources.len, func.params.len + entries.len)], .none);
             if (func.params.len > resolved.len) return error.RuntimeError;
@@ -12234,7 +12238,7 @@ pub const VM = struct {
     // the canonical path an include names, or null once php's diagnostics
     // for a file it cannot find have been raised
     fn includeTarget(self: *VM, kind: IncludeKind, value: Value) RuntimeError!?[]const u8 {
-        var buf: std.ArrayListUnmanaged(u8) = .{};
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
         defer buf.deinit(self.allocator);
         const path = switch (value) {
             .string => |s| s.bytes(),
@@ -12448,7 +12452,7 @@ pub const VM = struct {
             .stderr => {
                 const display_text = std.fmt.allocPrint(self.allocator, "{s}: {s} in {s} on line {d}\n", .{ label, msg, at.file, at.line }) catch return;
                 defer self.allocator.free(display_text);
-                _ = std.fs.File.stderr().write(display_text) catch {};
+                _ = platform.write(std.Io.File.stderr(), display_text) catch {};
             },
         }
     }
@@ -12486,28 +12490,28 @@ pub const VM = struct {
     pub fn writeLog(self: *VM, line: []const u8) void {
         const path = self.ini_settings.get("error_log") orelse @import("../ini_config.zig").get("error_log") orelse "";
         if (path.len == 0) {
-            _ = std.fs.File.stderr().write(line) catch {};
+            _ = platform.write(std.Io.File.stderr(), line) catch {};
             return;
         }
         var ctx = self.makeContext(null);
-        const stamp = @import("../stdlib/datetime.zig").formatTimestamp(&ctx, std.time.timestamp(), "d-M-Y H:i:s e") catch {
-            _ = std.fs.File.stderr().write(line) catch {};
+        const stamp = @import("../stdlib/datetime.zig").formatTimestamp(&ctx, platform.timestamp(), "d-M-Y H:i:s e") catch {
+            _ = platform.write(std.Io.File.stderr(), line) catch {};
             return;
         };
         defer if (stamp.value == .string) stamp.value.string.release();
-        const file = std.fs.cwd().createFile(path, .{ .truncate = false }) catch {
-            _ = std.fs.File.stderr().write(line) catch {};
+        const file = std.Io.Dir.cwd().createFile(platform.io, path, .{ .truncate = false }) catch {
+            _ = platform.write(std.Io.File.stderr(), line) catch {};
             return;
         };
-        defer file.close();
-        file.seekFromEnd(0) catch {};
+        defer file.close(platform.io);
+        platform.seekFromEnd(file, 0) catch {};
         const text = if (stamp.value == .string) stamp.value.string.bytes() else "";
         // php ends each logged entry with PHP_EOL
-        const body = std.mem.trimRight(u8, line, "\n");
+        const body = std.mem.trimEnd(u8, line, "\n");
         const eol = if (platform.is_windows) "\r\n" else "\n";
         const entry = std.fmt.allocPrint(self.allocator, "[{s}] {s}{s}", .{ text, body, eol }) catch return;
         defer self.allocator.free(entry);
-        file.writeAll(entry) catch {};
+        platform.writeAll(file, entry) catch {};
     }
 
     // stdout carries a CLI script's output, so what is buffered goes out
@@ -13119,9 +13123,10 @@ pub const VM = struct {
     // assigned the way set_local assigns and left on the stack
     fn concatAssignLocal(self: *VM, frame: *CallFrame, slot: u16, append_val: Value) RuntimeError!void {
         const current = self.fusedRead(frame, slot);
-        var suffix_allocator = std.heap.stackFallback(128, self.allocator);
-        const temporary_allocator = suffix_allocator.get();
-        var suffix: std.ArrayListUnmanaged(u8) = .{};
+        var suffix_buf: [128]u8 = undefined;
+        var suffix_allocator: std.heap.BufferFirstAllocator = .init(&suffix_buf, self.allocator);
+        const temporary_allocator = suffix_allocator.allocator();
+        var suffix: std.ArrayListUnmanaged(u8) = .empty;
         defer suffix.deinit(temporary_allocator);
         if (append_val == .string) {
             try suffix.appendSlice(temporary_allocator, append_val.string.bytes());
@@ -13141,7 +13146,7 @@ pub const VM = struct {
                 }
             }
         }
-        var buffer: std.ArrayListUnmanaged(u8) = .{};
+        var buffer: std.ArrayListUnmanaged(u8) = .empty;
         errdefer buffer.deinit(self.stringAllocator());
         if (current == .string) {
             try buffer.appendSlice(self.stringAllocator(), current.string.bytes());
@@ -13455,7 +13460,7 @@ pub const VM = struct {
     fn ownedString(self: *VM, v: Value) RuntimeError!Value.String {
         if (v == .string) return v.string;
         defer self.stackRelease(v);
-        var buf = std.ArrayListUnmanaged(u8){};
+        var buf = std.ArrayListUnmanaged(u8).empty;
         errdefer buf.deinit(self.allocator);
         try v.format(&buf, self.allocator);
         return Value.String.adopt(self.allocator, try buf.toOwnedSlice(self.allocator));
@@ -13525,7 +13530,7 @@ pub const VM = struct {
     }
 
     pub fn transientFormatted(self: *VM, v: Value) RuntimeError!Value.String {
-        var buf = std.ArrayListUnmanaged(u8){};
+        var buf = std.ArrayListUnmanaged(u8).empty;
         errdefer buf.deinit(self.allocator);
         try v.format(&buf, self.allocator);
         return self.transientOwned(try Value.String.adopt(self.allocator, try buf.toOwnedSlice(self.allocator)));
@@ -14437,7 +14442,7 @@ pub const VM = struct {
         // the cache persists across requests (stable bytecode in serve mode)
         const trait_methods = blk: {
             if (self.trait_method_cache.get(trait_name)) |cached| break :blk cached;
-            var list: std.ArrayListUnmanaged(TraitMethodEntry) = .{};
+            var list: std.ArrayListUnmanaged(TraitMethodEntry) = .empty;
             var fn_iter = self.functions.iterator();
             while (fn_iter.next()) |entry| {
                 const fn_name = entry.key_ptr.*;
@@ -14715,10 +14720,9 @@ pub const VM = struct {
             if (prop.declared) return arr.set(self.allocator, .{ .string = Value.String.borrowed(prop.name) }, value);
             return arr.setCopiedKey(self.allocator, prop.name, value);
         }
-        var mangled: std.ArrayListUnmanaged(u8) = .{};
+        var mangled: std.ArrayListUnmanaged(u8) = .empty;
         defer mangled.deinit(self.allocator);
-        const w = mangled.writer(self.allocator);
-        if (vr.visibility == .protected) try w.print("\x00*\x00{s}", .{prop.name}) else try w.print("\x00{s}\x00{s}", .{ vr.defining_class, prop.name });
+        if (vr.visibility == .protected) try mangled.print(self.allocator, "\x00*\x00{s}", .{prop.name}) else try mangled.print(self.allocator, "\x00{s}\x00{s}", .{ vr.defining_class, prop.name });
         if (prop.declared) return arr.set(self.allocator, .{ .string = Value.String.borrowed(try self.internName(mangled.items)) }, value);
         try arr.setCopiedKey(self.allocator, mangled.items, value);
     }
@@ -14841,7 +14845,7 @@ pub const VM = struct {
     }
 
     fn purgeClosureStatics(self: *VM, name: []const u8) void {
-        var dead_keys: std.ArrayListUnmanaged([]const u8) = .{};
+        var dead_keys: std.ArrayListUnmanaged([]const u8) = .empty;
         defer dead_keys.deinit(self.allocator);
         var it = self.statics_cells.iterator();
         while (it.next()) |entry| {
@@ -14862,7 +14866,7 @@ pub const VM = struct {
     // ranges once the holes dominate so a closure-heavy loop stays bounded
     fn compactCapturesIfNeeded(self: *VM) void {
         if (self.captures_dead < 64 or self.captures_dead * 2 < self.captures.items.len) return;
-        var compacted: std.ArrayListUnmanaged(CaptureEntry) = .{};
+        var compacted: std.ArrayListUnmanaged(CaptureEntry) = .empty;
         compacted.ensureTotalCapacity(self.allocator, self.captures.items.len - self.captures_dead) catch return;
         var live = self.capture_index.iterator();
         while (live.next()) |entry| {
@@ -15933,7 +15937,7 @@ pub const VM = struct {
     }
 
     fn scanCallerVarNames(self: *VM, ac: usize) [16]?[]const u8 {
-        var arg_vars: [16]?[]const u8 = .{null} ** 16;
+        var arg_vars: [16]?[]const u8 = @splat(null);
         const chunk = self.currentChunk();
         const ip = self.currentFrame().ip;
         if (ip < 4) return arg_vars;
@@ -16023,7 +16027,7 @@ pub const VM = struct {
     // receiver or callable (1), a receiver plus a name (2), or the calling
     // class for static:: dispatch (3)
     fn guardSlots(code: []const u8, call_ip: usize) u8 {
-        const call_op = std.meta.intToEnum(OpCode, code[call_ip]) catch return 0;
+        const call_op = std.enums.fromInt(OpCode, code[call_ip]) orelse return 0;
         return switch (call_op) {
             .method_call, .method_call_spread, .static_call_dynamic, .new_obj_dynamic, .call_indirect, .static_call_dyn_method => 1,
             .method_call_dynamic, .method_call_dynamic_spread, .static_call_dyn_both, .static_call_dyn_both_spread => 2,
@@ -16082,7 +16086,7 @@ pub const VM = struct {
     fn callSiteByValue(self: *VM, chunk: *const Chunk, call_ip: usize, pos: u8, args_base: usize) ?bool {
         const code = chunk.code.items;
         const consts = chunk.constants.items;
-        const call_op = std.meta.intToEnum(OpCode, code[call_ip]) catch return null;
+        const call_op = std.enums.fromInt(OpCode, code[call_ip]) orelse return null;
         return switch (call_op) {
             .call, .call_spread => self.functionByValue(consts[callOpU16(code, call_ip + 1)].string.bytes(), pos),
             .call_indirect => self.callableByValue(self.stack[args_base - 1], pos),
@@ -17853,10 +17857,10 @@ pub const VM = struct {
         // parent's `private $foo` and child's `private $foo` separate); only
         // public/protected slots merge by name so a child override patches
         // the parent's default
-        var all_names: std.ArrayListUnmanaged([]const u8) = .{};
-        var all_defaults: std.ArrayListUnmanaged(Value) = .{};
-        var all_decl: std.ArrayListUnmanaged([]const u8) = .{};
-        var all_priv: std.ArrayListUnmanaged(bool) = .{};
+        var all_names: std.ArrayListUnmanaged([]const u8) = .empty;
+        var all_defaults: std.ArrayListUnmanaged(Value) = .empty;
+        var all_decl: std.ArrayListUnmanaged([]const u8) = .empty;
+        var all_priv: std.ArrayListUnmanaged(bool) = .empty;
         defer all_names.deinit(self.allocator);
         defer all_defaults.deinit(self.allocator);
         defer all_decl.deinit(self.allocator);
@@ -18216,7 +18220,7 @@ pub const VM = struct {
             } else i += 1;
         }
         if (self.ref_index) |ri| {
-            var matches: std.ArrayListUnmanaged(RefIndex.OwnedBinding) = .{};
+            var matches: std.ArrayListUnmanaged(RefIndex.OwnedBinding) = .empty;
             defer matches.deinit(self.allocator);
             var it = ri.fwd.iterator();
             while (it.next()) |entry| for (entry.value_ptr.items) |target| {
@@ -19647,7 +19651,7 @@ pub const VM = struct {
 
     pub fn dumpProfilePublic(self: *VM) void {
         const Entry = struct { name: []const u8, count: u64 };
-        var list = std.ArrayListUnmanaged(Entry){};
+        var list = std.ArrayListUnmanaged(Entry).empty;
         defer list.deinit(self.allocator);
         var it = self.profile_calls.iterator();
         while (it.next()) |e| {
@@ -19658,7 +19662,7 @@ pub const VM = struct {
                 return x.count > y.count;
             }
         }.lt);
-        const sfe = std.fs.File.stderr();
+        const sfe = std.Io.File.stderr();
         _ = sfe.write("[profile] top callees:\n") catch {};
         const n = @min(list.items.len, 30);
         for (list.items[0..n]) |e| {
@@ -20151,7 +20155,7 @@ pub const VM = struct {
             var ref_slots: std.StringHashMapUnmanaged(*Value) = .{};
             try self.bindClosures(&new_vars, &ref_slots, full_name);
 
-            var cells: [16]?*Value = .{null} ** 16;
+            var cells: [16]?*Value = @splat(null);
             defer for (cells) |maybe| {
                 if (maybe) |cell| self.unbindCell(cell);
             };
@@ -20189,7 +20193,7 @@ pub const VM = struct {
             var ref_slots: std.StringHashMapUnmanaged(*Value) = .{};
             try self.bindClosures(&new_vars, &ref_slots, name);
 
-            var cells: [16]?*Value = .{null} ** 16;
+            var cells: [16]?*Value = @splat(null);
             defer for (cells) |maybe| {
                 if (maybe) |cell| self.unbindCell(cell);
             };
@@ -20757,7 +20761,7 @@ pub const VM = struct {
         if (@import("value.zig").hooks().trace_obj) |obj| self.gcCheckTraced(obj);
         if (self.draining_destructors or self.heap_teardown) return;
         self.draining_destructors = true;
-        var deferred_stack_arrays: std.ArrayListUnmanaged(*PhpArray) = .{};
+        var deferred_stack_arrays: std.ArrayListUnmanaged(*PhpArray) = .empty;
         defer deferred_stack_arrays.deinit(self.allocator);
         defer {
             self.draining_destructors = false;
@@ -21380,7 +21384,7 @@ pub const VM = struct {
             gc_verbose = true;
             self.gcVerifyNode(.{ .obj = obj }, &eo, &ea);
             gc_verbose = false;
-            std.debug.dumpCurrentStackTrace(null);
+            std.debug.dumpCurrentStackTrace(.{});
             @import("value.zig").hooks().trace_obj = null;
         }
     }
@@ -21410,9 +21414,8 @@ pub const VM = struct {
         var line: u32 = 0;
         if (f.ip > 0 and f.ip - 1 < f.chunk.lines.items.len) line = f.chunk.lines.items[f.ip - 1];
         var site = GcZeroSite{ .func = if (f.func) |fd| fd.name else "<top>", .path = f.script_path, .line = line, .addrs = undefined, .depth = 0 };
-        var st = std.builtin.StackTrace{ .instruction_addresses = &site.addrs, .index = 0 };
-        std.debug.captureStackTrace(null, &st);
-        site.depth = @min(st.index, site.addrs.len);
+        const st = std.debug.captureCurrentStackTrace(.{}, &site.addrs);
+        site.depth = st.return_addresses.len;
         for (site.addrs[0..site.depth], 0..) |addr, i| {
             if (addr == 0) {
                 site.depth = i;
@@ -21427,8 +21430,8 @@ pub const VM = struct {
         if (self.gc_zero_sites.get(target)) |site| {
             std.debug.print("== reached zero in {s}@{s}:{d} binding {s} in {s}\n", .{ site.func, site.path, site.line, site.binding, site.binding_func });
             var addrs = site.addrs;
-            const st = std.builtin.StackTrace{ .instruction_addresses = &addrs, .index = site.depth };
-            std.debug.dumpStackTrace(st);
+            const st: std.debug.StackTrace = .{ .return_addresses = addrs[0..site.depth], .skipped = .none };
+            std.debug.dumpStackTrace(&st);
         }
         std.debug.print("== at:", .{});
         var fi: usize = self.frame_count;

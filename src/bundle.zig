@@ -1,4 +1,6 @@
 const std = @import("std");
+const sync = @import("sync.zig");
+const platform = @import("platform.zig");
 const Allocator = std.mem.Allocator;
 const paths = @import("paths.zig");
 const absolute = paths.absolute;
@@ -42,12 +44,12 @@ pub const Bundle = struct {
     // every directory (relative, "" is the root) and the names directly in it
     dirs: std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)) = .{},
     // relative paths built for directories, owned here
-    dir_names: std.ArrayListUnmanaged([]u8) = .{},
+    dir_names: std.ArrayListUnmanaged([]u8) = .empty,
     // packed paths the program removed, owned here; worker threads share the
     // bundle, so the set is locked and the count lets lookups skip it
     hidden: std.StringHashMapUnmanaged(void) = .{},
     hidden_count: std.atomic.Value(usize) = .init(0),
-    hidden_lock: std.Thread.Mutex = .{},
+    hidden_lock: sync.Mutex = .{},
 
     pub fn deinit(self: *Bundle) void {
         var keys = self.hidden.keyIterator();
@@ -124,7 +126,7 @@ pub const Bundle = struct {
                 errdefer self.allocator.free(owned);
                 try self.dir_names.append(self.allocator, owned);
                 gop.key_ptr.* = owned;
-                gop.value_ptr.* = .{};
+                gop.value_ptr.* = .empty;
             }
             try gop.value_ptr.append(self.allocator, name);
             if (existed or parent.len == 0) break;
@@ -183,7 +185,7 @@ fn packedAt(packed_app: *const Bundle, rel: []const u8) ?Hit {
 }
 
 fn onDisk(abs: []const u8) bool {
-    std.fs.cwd().access(abs, .{}) catch |err| return err != error.FileNotFound;
+    std.Io.Dir.cwd().access(platform.io, abs, .{}) catch |err| return err != error.FileNotFound;
     return true;
 }
 
@@ -270,8 +272,8 @@ fn traversable(abs: []const u8) bool {
 fn unionDir(path: []const u8) bool {
     if (path.len == 0) return true;
     if (find(path)) |hit| return hit == .dir;
-    var dir = std.fs.cwd().openDir(path, .{}) catch return false;
-    dir.close();
+    var dir = std.Io.Dir.cwd().openDir(platform.io, path, .{}) catch return false;
+    dir.close(platform.io);
     return true;
 }
 
@@ -305,7 +307,7 @@ pub fn readFileAlloc(allocator: Allocator, spelled: []const u8, max_bytes: usize
         },
         .dir => return error.IsDir,
     };
-    return std.fs.cwd().readFileAlloc(allocator, path, max_bytes);
+    return std.Io.Dir.cwd().readFileAlloc(platform.io, path, allocator, .limited(max_bytes));
 }
 
 pub const WriteMode = enum {
@@ -332,7 +334,7 @@ pub fn ensureDir(path: []const u8) void {
     var bufs: PathBufs = .{};
     const at = locate(&bufs, path) orelse return;
     const hit = visible(at) orelse return;
-    if (hit == .dir) std.fs.cwd().makePath(at.disk) catch {};
+    if (hit == .dir) std.Io.Dir.cwd().createDirPath(platform.io, at.disk) catch {};
 }
 
 fn copyUp(at: Located) void {
@@ -340,7 +342,7 @@ fn copyUp(at: Located) void {
     switch (hit) {
         .file => |entry| writeCopy(at.disk, entry),
         .dir => {
-            std.fs.cwd().makePath(at.disk) catch return;
+            std.Io.Dir.cwd().createDirPath(platform.io, at.disk) catch return;
             var it = at.bundle.files.iterator();
             while (it.next()) |item| {
                 const rel = item.key_ptr.*;
@@ -348,7 +350,7 @@ fn copyUp(at: Located) void {
                 var bufs: PathBufs = .{};
                 const abs = at.bundle.mounted(&bufs.abs, rel) orelse continue;
                 if (at.bundle.isHidden(rel) or onDisk(abs)) continue;
-                if (std.fs.path.dirname(abs)) |parent| std.fs.cwd().makePath(parent) catch continue;
+                if (std.fs.path.dirname(abs)) |parent| std.Io.Dir.cwd().createDirPath(platform.io, parent) catch continue;
                 writeCopy(abs, item.value_ptr.*);
             }
         },
@@ -361,11 +363,11 @@ fn inside(rel: []const u8, dir: []const u8) bool {
 }
 
 fn writeCopy(abs: []const u8, entry: Entry) void {
-    const file = std.fs.cwd().createFile(abs, .{ .exclusive = true }) catch return;
-    defer file.close();
-    file.writeAll(entry.source) catch return;
-    const ns = @as(i128, entry.mtime) * std.time.ns_per_s;
-    file.updateTimes(ns, ns) catch {};
+    const file = std.Io.Dir.cwd().createFile(platform.io, abs, .{ .exclusive = true }) catch return;
+    defer file.close(platform.io);
+    platform.writeAll(file, entry.source) catch return;
+    const ts: std.Io.Timestamp = .{ .nanoseconds = @as(i96, entry.mtime) * std.time.ns_per_s };
+    file.setTimestamps(platform.io, .{ .access_timestamp = .{ .new = ts }, .modify_timestamp = .{ .new = ts } }) catch {};
 }
 
 // hides what the pack holds at a path the program removed; true when the
@@ -388,7 +390,7 @@ fn pathsEqual(a: []const u8, b: []const u8) bool {
 
 pub const Writer = struct {
     allocator: Allocator,
-    out: std.ArrayListUnmanaged(u8) = .{},
+    out: std.ArrayListUnmanaged(u8) = .empty,
     count: u32 = 0,
     count_at: usize = 0,
 
@@ -436,17 +438,17 @@ pub const Writer = struct {
 
 // the executable at exe_path with the pack appended, written to out_path
 pub fn writeExecutable(allocator: Allocator, exe_path: []const u8, pack: []const u8, out_path: []const u8) !void {
-    const exe = try std.fs.cwd().readFileAlloc(allocator, exe_path, 1 << 30);
+    const exe = try std.Io.Dir.cwd().readFileAlloc(platform.io, exe_path, allocator, .limited(1 << 30));
     defer allocator.free(exe);
-    const out = try std.fs.cwd().createFile(out_path, .{ .mode = 0o755 });
-    defer out.close();
-    try out.writeAll(exe);
-    try out.writeAll(pack);
+    const out = try std.Io.Dir.cwd().createFile(platform.io, out_path, .{ .permissions = platform.permissionsFromMode(0o755) });
+    defer out.close(platform.io);
+    try platform.writeAll(out, exe);
+    try platform.writeAll(out, pack);
     var trailer: [trailer_size]u8 = undefined;
     @memcpy(trailer[0..trailer_magic.len], trailer_magic);
     std.mem.writeInt(u64, trailer[trailer_magic.len..][0..8], exe.len, .little);
     std.mem.writeInt(u64, trailer[trailer_magic.len + 8 ..][0..8], pack.len, .little);
-    try out.writeAll(&trailer);
+    try platform.writeAll(out, &trailer);
 }
 
 // ---------------------------------------------------------------------------
@@ -457,21 +459,21 @@ pub const ParseError = error{ InvalidPack, OutOfMemory };
 // the pack appended to the executable at exe_path, mounted at mount; null when
 // there is none
 pub fn load(allocator: Allocator, exe_path: []const u8, mount: []const u8) ParseError!?*Bundle {
-    const file = std.fs.cwd().openFile(exe_path, .{}) catch return null;
-    defer file.close();
-    const size = file.getEndPos() catch return null;
+    const file = std.Io.Dir.cwd().openFile(platform.io, exe_path, .{}) catch return null;
+    defer file.close(platform.io);
+    const size = platform.getEndPos(file) catch return null;
     if (size < trailer_size) return null;
     var trailer: [trailer_size]u8 = undefined;
-    file.seekTo(size - trailer_size) catch return null;
-    if ((file.readAll(&trailer) catch return null) != trailer_size) return null;
+    platform.seekTo(file, size - trailer_size) catch return null;
+    if ((platform.readAll(file, &trailer) catch return null) != trailer_size) return null;
     if (!std.mem.eql(u8, trailer[0..trailer_magic.len], trailer_magic)) return null;
     const offset = std.mem.readInt(u64, trailer[trailer_magic.len..][0..8], .little);
     const len = std.mem.readInt(u64, trailer[trailer_magic.len + 8 ..][0..8], .little);
     if (offset + len + trailer_size > size) return error.InvalidPack;
     const blob = try allocator.alloc(u8, @intCast(len));
     errdefer allocator.free(blob);
-    file.seekTo(offset) catch return error.InvalidPack;
-    if ((file.readAll(blob) catch return error.InvalidPack) != len) return error.InvalidPack;
+    platform.seekTo(file, offset) catch return error.InvalidPack;
+    if ((platform.readAll(file, blob) catch return error.InvalidPack) != len) return error.InvalidPack;
     return try parse(allocator, blob, mount);
 }
 
@@ -497,7 +499,7 @@ pub fn parse(allocator: Allocator, blob: []u8, mount: []const u8) ParseError!*Bu
     self.build_root = try r.bytes();
     self.entry = try r.bytes();
     const count = try r.int(u32);
-    try self.dirs.put(allocator, "", .{});
+    try self.dirs.put(allocator, "", .empty);
     for (0..count) |_| {
         const rel = try r.bytes();
         const kind_byte = (try r.take(1))[0];
@@ -576,7 +578,7 @@ test "the disk shadows the pack and edits copy packed files up" {
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const mount = try tmp.dir.realpathAlloc(a, ".");
+    const mount = try tmp.dir.realPathFileAlloc(platform.io, ".", a);
     defer a.free(mount);
     var w = try Writer.init(a, "/build/app", "main.php");
     defer w.deinit();
@@ -591,18 +593,18 @@ test "the disk shadows the pack and edits copy packed files up" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const log = b.mounted(&path_buf, "logs/app.log").?;
     prepareWrite(log, .edit);
-    const copied = try tmp.dir.readFileAlloc(a, "logs/app.log", 64);
+    const copied = try tmp.dir.readFileAlloc(platform.io, "logs/app.log", a, .limited(64));
     defer a.free(copied);
     try std.testing.expectEqualStrings("packed\n", copied);
-    try std.testing.expectEqual(@as(i128, 1000 * std.time.ns_per_s), (try tmp.dir.statFile("logs/app.log")).mtime);
+    try std.testing.expectEqual(@as(i96, 1000 * std.time.ns_per_s), (try tmp.dir.statFile(platform.io, "logs/app.log", .{})).mtime.nanoseconds);
     try std.testing.expect(find(log) == null);
 
     var view_buf: [std.fs.max_path_bytes]u8 = undefined;
     const view = b.mounted(&view_buf, "cache/views/a.php").?;
     prepareWrite(view, .create);
-    try tmp.dir.writeFile(.{ .sub_path = "cache/views/a.php", .data = "new" });
+    try tmp.dir.writeFile(platform.io, .{ .sub_path = "cache/views/a.php", .data = "new" });
     try std.testing.expect(find(view) == null);
-    try tmp.dir.deleteFile("cache/views/a.php");
+    try tmp.dir.deleteFile(platform.io, "cache/views/a.php");
     try std.testing.expect(find(view) != null);
     try std.testing.expect(remove(view));
     try std.testing.expect(find(view) == null);

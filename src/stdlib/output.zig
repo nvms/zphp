@@ -9,7 +9,7 @@ const RuntimeError = error{ RuntimeError, OutOfMemory };
 // Per-call visited-pointer stack used to detect recursion during dump operations.
 // Single-threaded, so a module-level scratch list is fine. Cleared at the start of
 // each public entry point (var_dump / print_r / var_export).
-var visited_ptrs: std.ArrayListUnmanaged(usize) = .{};
+var visited_ptrs: std.ArrayListUnmanaged(usize) = .empty;
 
 fn visitedContains(p: usize) bool {
     for (visited_ptrs.items) |x| if (x == p) return true;
@@ -24,10 +24,10 @@ pub const entries = .{
 
 fn var_dump(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     visited_ptrs.deinit(ctx.allocator);
-    visited_ptrs = .{};
+    visited_ptrs = .empty;
     defer {
         visited_ptrs.deinit(ctx.allocator);
-        visited_ptrs = .{};
+        visited_ptrs = .empty;
     }
     for (args) |arg| try varDumpValue(ctx, arg, 0);
     return NativeResult.scalar(.null);
@@ -248,7 +248,7 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
         },
         .resource => |r| {
             try appendIndent(out, a, indent);
-            try out.writer(a).print("resource({d}) of type ({s})\n", .{ r.id, value_mod.resourceTypeName(r) });
+            try out.print(a, "resource({d}) of type ({s})\n", .{ r.id, value_mod.resourceTypeName(r) });
         },
     }
 }
@@ -257,13 +257,13 @@ fn print_r(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(.null);
     const return_str = args.len >= 2 and args[1].isTruthy();
     visited_ptrs.deinit(ctx.allocator);
-    visited_ptrs = .{};
+    visited_ptrs = .empty;
     defer {
         visited_ptrs.deinit(ctx.allocator);
-        visited_ptrs = .{};
+        visited_ptrs = .empty;
     }
     if (return_str) {
-        var buf = std.ArrayListUnmanaged(u8){};
+        var buf = std.ArrayListUnmanaged(u8).empty;
         defer buf.deinit(ctx.allocator);
         try printRValueImpl(ctx.allocator, &buf, args[0], 0, ctx.vm);
         const s = try buf.toOwnedSlice(ctx.allocator);
@@ -454,12 +454,12 @@ fn var_export(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     if (args.len == 0) return NativeResult.scalar(.null);
     const return_str = args.len >= 2 and args[1].isTruthy();
     visited_ptrs.deinit(ctx.allocator);
-    visited_ptrs = .{};
+    visited_ptrs = .empty;
     defer {
         visited_ptrs.deinit(ctx.allocator);
-        visited_ptrs = .{};
+        visited_ptrs = .empty;
     }
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     try varExportValue(ctx.allocator, &buf, args[0], 0, ctx);
     if (return_str) {

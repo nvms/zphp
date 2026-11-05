@@ -1,5 +1,6 @@
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
+const platform = @import("../platform.zig");
 
 extern "c" fn snprintf(buf: [*c]u8, size: usize, fmt: [*c]const u8, ...) c_int;
 const Value = @import("../runtime/value.zig").Value;
@@ -208,7 +209,7 @@ const ReplaceResult = struct { str: Value.String, count: i64 };
 
 fn replaceOne(ctx: *NativeContext, subject: []const u8, search: []const u8, replace: []const u8) !ReplaceResult {
     if (search.len == 0) return .{ .str = try Value.String.create(ctx.allocator, subject), .count = 0 };
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     errdefer buf.deinit(ctx.allocator);
     var i: usize = 0;
     var cnt: i64 = 0;
@@ -352,7 +353,7 @@ fn implode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const arr = arr_val.array;
     if (arr.entries.items.len == 0) return NativeResult.literal("");
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     for (arr.entries.items, 0..) |entry, i| {
         if (i > 0) try buf.appendSlice(ctx.allocator, glue);
@@ -372,7 +373,7 @@ const default_trim_chars = " \t\n\r\x0b\x00";
 
 // build the trim char set, expanding `a..b` ranges
 fn buildTrimSet(chars: []const u8) [256]bool {
-    var set: [256]bool = .{false} ** 256;
+    var set: [256]bool = @splat(false);
     var i: usize = 0;
     while (i < chars.len) {
         if (i + 3 < chars.len and chars[i + 1] == '.' and chars[i + 2] == '.') {
@@ -475,7 +476,7 @@ fn str_shuffle(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     const buf = try ctx.allocator.alloc(u8, s.len);
     @memcpy(buf, s);
     // Fisher-Yates with the default PRNG
-    var prng = std.Random.DefaultPrng.init(@bitCast(std.time.timestamp()));
+    var prng = std.Random.DefaultPrng.init(@bitCast(platform.timestamp()));
     var i: usize = buf.len - 1;
     while (i > 0) : (i -= 1) {
         const j = prng.random().intRangeAtMost(usize, 0, i);
@@ -539,7 +540,7 @@ fn str_pad(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     }
     const diff = target_len - s.len;
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     if (pad_type == 0) {
         var i: usize = 0;
@@ -831,7 +832,7 @@ fn substrReplaceOne(ctx: *NativeContext, s: []const u8, replacement: []const u8,
         }
     }
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     try buf.appendSlice(ctx.allocator, s[0..ustart]);
     try buf.appendSlice(ctx.allocator, replacement);
@@ -908,7 +909,7 @@ fn native_nl2br(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     const s = try coerceToString(ctx, args[0]);
     const use_xhtml = if (args.len >= 2) args[1].isTruthy() else true;
     const br = if (use_xhtml) "<br />" else "<br>";
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var i: usize = 0;
     while (i < s.len) {
@@ -937,7 +938,7 @@ fn native_wordwrap(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     const brk = if (args.len >= 3 and args[2] == .string) args[2].string.bytes() else "\n";
     const cut = args.len >= 4 and args[3].isTruthy();
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var line_start: usize = 0;
     var last_space: ?usize = null;
@@ -983,7 +984,7 @@ fn native_chunk_split(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     const chunklen: usize = if (args.len >= 2) @intCast(Value.toInt(args[1])) else 76;
     const end = if (args.len >= 3 and args[2] == .string) args[2].string.bytes() else "\r\n";
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     if (s.len == 0) {
         try buf.appendSlice(ctx.allocator, end);
@@ -1066,7 +1067,7 @@ fn native_number_format(ctx: *NativeContext, args: []const Value) RuntimeError!N
         formatted = try roundFloatToDecimals(ctx.allocator, num, decimals, int_part_buf, frac_part_buf);
     }
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     if (formatted.is_negative) try buf.append(ctx.allocator, '-');
 
@@ -1117,7 +1118,7 @@ fn roundFloatToDecimals(allocator: std.mem.Allocator, num: f64, decimals: usize,
     const short_has_exp = std.mem.indexOfAny(u8, short_src, "eE") != null;
     if (short_has_exp or short_frac_len < decimals + 1) {
         var fmt_buf: [16]u8 = undefined;
-        const fmt_str = std.fmt.bufPrintZ(&fmt_buf, "%.{d}f", .{decimals + 5}) catch unreachable;
+        const fmt_str = std.fmt.bufPrintSentinel(&fmt_buf, "%.{d}f", .{decimals + 5}, 0) catch unreachable;
         const n = snprintf(src_buf.ptr, src_buf.len, fmt_str.ptr, abs_val);
         src = if (n > 0 and @as(usize, @intCast(n)) < src_buf.len) src_buf[0..@intCast(n)] else short_src;
     } else {
@@ -1328,7 +1329,7 @@ fn native_vfprintf(ctx: *NativeContext, args: []const Value) RuntimeError!Native
 }
 
 fn sprintfImpl(ctx: *NativeContext, fmt_str: []const u8, args: []const Value) !Value.String {
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var i: usize = 0;
     var arg_idx: usize = 0;
@@ -1431,7 +1432,7 @@ fn sprintfImpl(ctx: *NativeContext, fmt_str: []const u8, args: []const Value) !V
                 break :blk a;
             };
 
-            var tmp_buf = std.ArrayListUnmanaged(u8){};
+            var tmp_buf = std.ArrayListUnmanaged(u8).empty;
             defer tmp_buf.deinit(ctx.allocator);
             switch (spec) {
                 's' => {
@@ -1582,7 +1583,7 @@ fn formatFixedFloat(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val:
     // matching PHP's printf-derived behaviour for %.Nf (e.g. 1.005 → "1.00",
     // 2.675 → "2.67"). On failure, fall back to Zig's formatter.
     var fmt_buf: [16]u8 = undefined;
-    const fmt_str = std.fmt.bufPrintZ(&fmt_buf, "%.{d}f", .{prec}) catch {
+    const fmt_str = std.fmt.bufPrintSentinel(&fmt_buf, "%.{d}f", .{prec}, 0) catch {
         const s = std.fmt.allocPrint(a, "{d:.[1]}", .{ val, prec }) catch return;
         defer a.free(s);
         try buf.appendSlice(a, s);
@@ -1911,7 +1912,7 @@ fn stripTrailingZeros(buf: *std.ArrayListUnmanaged(u8)) void {
 fn native_addslashes(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.literal("");
     const s = try coerceToString(ctx, args[0]);
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     for (s) |c| {
         if (c == 0) {
@@ -1932,7 +1933,7 @@ fn native_addslashes(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
 fn native_stripslashes(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.literal("");
     const s = if (args[0] == .string) args[0].string.bytes() else return NativeResult.literal("");
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var j: usize = 0;
     while (j < s.len) {
@@ -2156,7 +2157,7 @@ fn native_htmlentities(ctx: *NativeContext, args: []const Value) RuntimeError!Na
     var temporary: ?[]u8 = null;
     defer if (temporary) |bytes| ctx.allocator.free(bytes);
     const s = if (args[0] == .string) args[0].string.bytes() else blk: {
-        var buf = std.ArrayListUnmanaged(u8){};
+        var buf = std.ArrayListUnmanaged(u8).empty;
         defer buf.deinit(ctx.allocator);
         try args[0].format(&buf, ctx.allocator);
         const c = try buf.toOwnedSlice(ctx.allocator);
@@ -2170,7 +2171,7 @@ fn native_htmlentities(ctx: *NativeContext, args: []const Value) RuntimeError!Na
     const utf8 = charset.len == 0 or isUtf8Encoding(charset);
     const latin1 = !utf8 and isLatin1Encoding(charset);
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var i: usize = 0;
     while (i < s.len) {
@@ -2229,7 +2230,7 @@ fn native_htmlspecialchars(ctx: *NativeContext, args: []const Value) RuntimeErro
     // PHP outputs &apos; for single quotes when ENT_HTML5 (or XHTML/XML1) is set
     const html5_mode = (flags & 48) != 0;
     const double_encode: bool = if (args.len >= 4) args[3].isTruthy() else true;
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var i: usize = 0;
     while (i < s.len) : (i += 1) {
@@ -2450,7 +2451,7 @@ fn native_html_entity_decode(ctx: *NativeContext, args: []const Value) RuntimeEr
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 11;
     // HTML5/XHTML/XML1 modes (bits 4-5) recognize &apos;; HTML401 default does not
     const html5_mode = (flags & 48) != 0;
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var j: usize = 0;
     while (j < s.len) {
@@ -2500,7 +2501,7 @@ fn native_htmlspecialchars_decode(ctx: *NativeContext, args: []const Value) Runt
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 3; // default ENT_QUOTES | ENT_HTML401
     const decode_double = (flags & 2) != 0;
     const decode_single = (flags & 1) != 0;
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var j: usize = 0;
     while (j < s.len) {
@@ -2693,7 +2694,7 @@ fn native_mb_convert_case(ctx: *NativeContext, args: []const Value) RuntimeError
 // unless the last character that is not case-ignorable was cased, in which
 // case it is lower-cased
 fn utfTitleCase(ctx: *NativeContext, s: []const u8) !Value.String {
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var i: usize = 0;
     var in_word = false;
@@ -2808,7 +2809,7 @@ fn native_mb_check_encoding(_: *NativeContext, args: []const Value) RuntimeError
 }
 
 fn utfCaseConvert(ctx: *NativeContext, s: []const u8, to_upper: bool) !Value.String {
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var i: usize = 0;
     while (i < s.len) {
@@ -3046,7 +3047,7 @@ fn isUtf32LE(name: []const u8) bool {
 }
 
 fn convertUtf8ToUtf16(allocator: std.mem.Allocator, input: []const u8, little_endian: bool) ![]u8 {
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8).empty;
     errdefer out.deinit(allocator);
     var i: usize = 0;
     while (i < input.len) {
@@ -3086,7 +3087,7 @@ fn appendU16(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, val
 }
 
 fn convertUtf16ToUtf8(allocator: std.mem.Allocator, input: []const u8, little_endian: bool) ![]u8 {
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8).empty;
     errdefer out.deinit(allocator);
     var i: usize = 0;
     while (i + 1 < input.len) : (i += 2) {
@@ -3129,7 +3130,7 @@ fn appendUtf8(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, cp
 }
 
 fn convertUtf8ToUtf32(allocator: std.mem.Allocator, input: []const u8, little_endian: bool) ![]u8 {
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8).empty;
     errdefer out.deinit(allocator);
     var i: usize = 0;
     while (i < input.len) {
@@ -3167,7 +3168,7 @@ fn appendU32(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, val
 }
 
 fn convertUtf32ToUtf8(allocator: std.mem.Allocator, input: []const u8, little_endian: bool) ![]u8 {
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8).empty;
     errdefer out.deinit(allocator);
     var i: usize = 0;
     while (i + 3 < input.len) : (i += 4) {
@@ -3185,7 +3186,7 @@ fn convertUtf32ToUtf8(allocator: std.mem.Allocator, input: []const u8, little_en
 }
 
 fn convertUtf8ToLatin1(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8).empty;
     errdefer out.deinit(allocator);
     var i: usize = 0;
     while (i < input.len) {
@@ -3207,7 +3208,7 @@ fn convertUtf8ToLatin1(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
 }
 
 fn convertLatin1ToUtf8(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8).empty;
     errdefer out.deinit(allocator);
     for (input) |b| {
         if (b < 0x80) {
@@ -3307,7 +3308,7 @@ fn native_mb_convert_encoding(ctx: *NativeContext, args: []const Value) RuntimeE
     }
     if ((isUtf8Encoding(from) or isLatin1Encoding(from)) and isAsciiEncoding(to)) {
         // strip non-ascii bytes
-        var out = std.ArrayListUnmanaged(u8){};
+        var out = std.ArrayListUnmanaged(u8).empty;
         errdefer out.deinit(ctx.allocator);
         var i: usize = 0;
         while (i < input.len) {
@@ -3379,7 +3380,7 @@ fn native_iconv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
 
     // ill-formed UTF-8 input fails the conversion; //IGNORE skips an illegal
     // sequence but never one cut short by the end of the input
-    var cleaned: std.ArrayListUnmanaged(u8) = .{};
+    var cleaned: std.ArrayListUnmanaged(u8) = .empty;
     defer cleaned.deinit(ctx.allocator);
     var source = args[2];
     if (isUtf8Encoding(from) and !std.unicode.utf8ValidateSlice(args[2].string.bytes())) {
@@ -3404,7 +3405,7 @@ fn native_iconv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
 
     // a character the target cannot hold fails the conversion unless
     // //TRANSLIT approximates it or //IGNORE drops it
-    var representable: std.ArrayListUnmanaged(u8) = .{};
+    var representable: std.ArrayListUnmanaged(u8) = .empty;
     defer representable.deinit(ctx.allocator);
     if (!translit and isUtf8Encoding(from) and (isLatin1Encoding(to) or isAsciiEncoding(to))) {
         const limit: u21 = if (isAsciiEncoding(to)) 0x7F else 0xFF;
@@ -3428,7 +3429,7 @@ fn native_iconv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     // directly so callers don't get the '?' substitutions
     if ((ignore or translit) and isAsciiEncoding(to) and (isUtf8Encoding(from) or isLatin1Encoding(from))) {
         const input = source.string.bytes();
-        var out = std.ArrayListUnmanaged(u8){};
+        var out = std.ArrayListUnmanaged(u8).empty;
         errdefer out.deinit(ctx.allocator);
         var i: usize = 0;
         while (i < input.len) {
@@ -3577,7 +3578,7 @@ fn native_mb_encode_numericentity(ctx: *NativeContext, args: []const Value) Runt
     const map = parseEntityMap(args[1].array) orelse return NativeResult.share(args[0]);
     const hex = args.len >= 4 and args[3].isTruthy();
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var i: usize = 0;
     while (i < s.len) {
@@ -3621,7 +3622,7 @@ fn native_mb_decode_numericentity(ctx: *NativeContext, args: []const Value) Runt
     const s = args[0].string.bytes();
     const map = parseEntityMap(args[1].array) orelse return NativeResult.share(args[0]);
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var i: usize = 0;
     while (i < s.len) {
@@ -3882,7 +3883,7 @@ fn native_mb_strimwidth(ctx: *NativeContext, args: []const Value) RuntimeError!N
         }
     }
 
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8).empty;
     defer out.deinit(ctx.allocator);
     const target = max_width - marker_w;
     // first try to fit without the marker
@@ -4011,7 +4012,7 @@ fn native_mb_str_pad(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
     };
     const right_chars: i64 = pad_needed - left_chars;
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
 
     try appendPadChars(ctx, &buf, pad_str, left_chars);
@@ -4054,7 +4055,7 @@ fn native_str_getcsv(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
         return NativeResult.borrowed(.{ .array = arr });
     }
 
-    var field = std.ArrayListUnmanaged(u8){};
+    var field = std.ArrayListUnmanaged(u8).empty;
     defer field.deinit(ctx.allocator);
     var in_quotes = false;
     var at_field_start = true;
@@ -4147,7 +4148,7 @@ fn native_base64_decode(ctx: *NativeContext, args: []const Value) RuntimeError!N
 
     const strict = args.len >= 2 and args[1] == .bool and args[1].bool;
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var accum: u24 = 0;
     var bits: u5 = 0;
@@ -4185,7 +4186,7 @@ fn native_convert_uuencode(ctx: *NativeContext, args: []const Value) RuntimeErro
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const s = args[0].string.bytes();
     if (s.len == 0) return NativeResult.scalar(.{ .bool = false });
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var i: usize = 0;
     while (i < s.len) {
@@ -4221,7 +4222,7 @@ fn native_convert_uudecode(ctx: *NativeContext, args: []const Value) RuntimeErro
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const s = args[0].string.bytes();
     if (s.len == 0) return NativeResult.scalar(.{ .bool = false });
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var p: usize = 0;
     while (p < s.len) {
@@ -4276,7 +4277,7 @@ fn decodeUuChar(c: u8) u8 {
 fn native_urlencode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.literal("");
     const s = if (args[0] == .string) args[0].string.bytes() else return NativeResult.literal("");
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     const hex = "0123456789ABCDEF";
     for (s) |c| {
@@ -4297,7 +4298,7 @@ fn native_urlencode(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
 fn native_urldecode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.literal("");
     const s = if (args[0] == .string) args[0].string.bytes() else return NativeResult.literal("");
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var i: usize = 0;
     while (i < s.len) {
@@ -4329,7 +4330,7 @@ fn native_urldecode(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
 fn native_rawurlencode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.literal("");
     const s = if (args[0] == .string) args[0].string.bytes() else return NativeResult.literal("");
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     const hex = "0123456789ABCDEF";
     for (s) |c| {
@@ -4348,7 +4349,7 @@ fn native_rawurlencode(ctx: *NativeContext, args: []const Value) RuntimeError!Na
 fn native_rawurldecode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.literal("");
     const s = if (args[0] == .string) args[0].string.bytes() else return NativeResult.literal("");
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var i: usize = 0;
     while (i < s.len) {
@@ -4468,7 +4469,7 @@ fn native_mb_substr(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     while (bi < s.len and ci < start) : (ci += 1) bi += utf8Step(s, bi).len;
 
     // php decodes the input: an ill-formed sequence comes out as '?'
-    var out: std.ArrayListUnmanaged(u8) = .{};
+    var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(ctx.allocator);
     var remaining = length;
     while (bi < s.len and remaining > 0) : (remaining -= 1) {
@@ -4497,7 +4498,7 @@ const Utf8Step = struct {
 // it; null when s is already well formed
 fn sanitizeUtf8(allocator: std.mem.Allocator, s: []const u8) !?[]u8 {
     if (std.unicode.utf8ValidateSlice(s)) return null;
-    var out: std.ArrayListUnmanaged(u8) = .{};
+    var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
     var i: usize = 0;
     while (i < s.len) {
@@ -4661,7 +4662,7 @@ fn strIreplaceOne(ctx: *NativeContext, subject: []const u8, search: []const u8, 
     const n_lower = try toLowerBuf(ctx.allocator, search);
     defer ctx.allocator.free(n_lower);
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var i: usize = 0;
     while (i < subject.len) {
@@ -4732,7 +4733,7 @@ fn isDelimiter(c: u8, delimiters: []const u8) bool {
 fn native_crc32(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(.{ .int = 0 });
     const s = if (args[0] == .string) args[0].string.bytes() else return NativeResult.scalar(Value{ .int = 0 });
-    const result = std.hash.crc.Crc32IsoHdlc.hash(s);
+    const result = std.hash.Crc32.hash(s);
     // PHP returns the unsigned 32-bit value (zero-extended into signed 64-bit)
     return NativeResult.scalar(.{ .int = @as(i64, result) });
 }
@@ -4789,7 +4790,7 @@ fn prevUtf8Len(s: []const u8, pos: usize) u3 {
 
 fn buildMbTrimSet(allocator: std.mem.Allocator, arg: ?[]const u8) ![]u21 {
     if (arg) |a| {
-        var list: std.ArrayListUnmanaged(u21) = .{};
+        var list: std.ArrayListUnmanaged(u21) = .empty;
         var i: usize = 0;
         while (i < a.len) {
             const d = decodeUtf8At(a, i);
@@ -4861,7 +4862,7 @@ fn native_quotemeta(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     if (args.len == 0) return NativeResult.literal("");
     const s = if (args[0] == .string) args[0].string.bytes() else return NativeResult.literal("");
     if (s.len == 0) return NativeResult.literal("");
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     for (s) |c| {
         if (c == '.' or c == '\\' or c == '+' or c == '*' or c == '?' or
@@ -4962,7 +4963,7 @@ fn native_strip_tags(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
         }
     }
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var i: usize = 0;
     while (i < s.len) {
@@ -5016,7 +5017,7 @@ fn native_http_build_query(ctx: *NativeContext, args: []const Value) RuntimeErro
     const enc_type: i64 = if (args.len >= 4) Value.toInt(args[3]) else 1;
     const rfc3986 = enc_type == 2;
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var first = true;
     for (arr.entries.items) |entry| {
@@ -5048,7 +5049,7 @@ fn buildQueryPairs(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, prefi
                 .string => |s| s.bytes(),
                 .int => |n| std.fmt.bufPrint(&key_buf, "{d}", .{n}) catch "",
             };
-            var nested_key = std.ArrayListUnmanaged(u8){};
+            var nested_key = std.ArrayListUnmanaged(u8).empty;
             defer nested_key.deinit(a);
             try nested_key.appendSlice(a, prefix);
             try nested_key.appendSlice(a, "[");
@@ -5061,7 +5062,7 @@ fn buildQueryPairs(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, prefi
         if (obj.slot_layout) |layout| {
             if (obj.slots) |slots| {
                 for (layout.names, 0..) |name, i| {
-                    var nested_key = std.ArrayListUnmanaged(u8){};
+                    var nested_key = std.ArrayListUnmanaged(u8).empty;
                     defer nested_key.deinit(a);
                     try nested_key.appendSlice(a, prefix);
                     try nested_key.appendSlice(a, "[");
@@ -5075,7 +5076,7 @@ fn buildQueryPairs(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, prefi
         while (it.next()) |kv| {
             const name = kv.key_ptr.*;
             if (name.len > 0 and name[0] == '_' and name.len > 1 and name[1] == '_') continue;
-            var nested_key = std.ArrayListUnmanaged(u8){};
+            var nested_key = std.ArrayListUnmanaged(u8).empty;
             defer nested_key.deinit(a);
             try nested_key.appendSlice(a, prefix);
             try nested_key.appendSlice(a, "[");
@@ -5092,7 +5093,7 @@ fn buildQueryPairs(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, prefi
             .string => |s| try appendUrlEncodedMode(buf, a, s.bytes(), rfc3986),
             .bool => |b| try buf.append(a, if (b) '1' else '0'),
             else => {
-                var tmp = std.ArrayListUnmanaged(u8){};
+                var tmp = std.ArrayListUnmanaged(u8).empty;
                 try value.format(&tmp, a);
                 const s = try tmp.toOwnedSlice(a);
                 defer a.free(s);
@@ -5124,7 +5125,7 @@ fn appendUrlEncodedMode(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, 
 fn native_qp_encode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.literal("");
     const s = args[0].string.bytes();
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     const hex = "0123456789ABCDEF";
     var line_len: usize = 0;
@@ -5159,7 +5160,7 @@ fn native_qp_encode(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
 fn native_qp_decode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.literal("");
     const s = args[0].string.bytes();
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var i: usize = 0;
     while (i < s.len) {
@@ -5350,7 +5351,7 @@ fn native_parse_url(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
 }
 
 fn urlDecodeSlice(ctx: *NativeContext, s: []const u8) !Value.String {
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var i: usize = 0;
     while (i < s.len) {
@@ -5498,7 +5499,7 @@ fn native_addcslashes(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     const s = args[0].string.bytes();
     const charset = args[1].string.bytes();
     // expand "a..z" ranges
-    var mask = [_]bool{false} ** 256;
+    var mask = @as([256]bool, @splat(false));
     var i: usize = 0;
     while (i < charset.len) : (i += 1) {
         if (i + 3 < charset.len and charset[i + 1] == '.' and charset[i + 2] == '.') {
@@ -5513,7 +5514,7 @@ fn native_addcslashes(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
         }
         mask[charset[i]] = true;
     }
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     errdefer buf.deinit(ctx.allocator);
     for (s) |c| {
         if (mask[c]) {
@@ -5550,7 +5551,7 @@ fn native_addcslashes(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
 fn native_stripcslashes(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
     const s = args[0].string.bytes();
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     errdefer buf.deinit(ctx.allocator);
     var i: usize = 0;
     while (i < s.len) : (i += 1) {
@@ -5852,7 +5853,7 @@ fn native_fscanf(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     line.string.retain();
     defer line.string.release();
     // delegate to sscanf with the line as input
-    var sscanf_args = std.ArrayListUnmanaged(Value){};
+    var sscanf_args = std.ArrayListUnmanaged(Value).empty;
     defer sscanf_args.deinit(ctx.allocator);
     try sscanf_args.append(ctx.allocator, line);
     for (args[1..]) |a| try sscanf_args.append(ctx.allocator, a);
@@ -5864,7 +5865,7 @@ fn native_sscanf(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     const input = args[0].string.bytes();
     const fmt = args[1].string.bytes();
 
-    var captures = std.ArrayListUnmanaged(Value){};
+    var captures = std.ArrayListUnmanaged(Value).empty;
     defer {
         for (captures.items) |value| if (value == .string) value.string.release();
         captures.deinit(ctx.allocator);
@@ -6009,7 +6010,7 @@ fn native_sscanf(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
                     negate = true;
                     fp += 1;
                 }
-                var class_set: [256]bool = .{false} ** 256;
+                var class_set: [256]bool = @splat(false);
                 var first = true;
                 while (fp < fmt.len) {
                     const cc = fmt[fp];
@@ -6239,7 +6240,7 @@ fn native_metaphone(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     const max_phonemes: usize = if (args.len >= 2) @intCast(@max(Value.toInt(args[1]), 0)) else 32;
     if (input.len == 0) return NativeResult.literal("");
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var upper = try ctx.allocator.alloc(u8, input.len);
     defer ctx.allocator.free(upper);
@@ -6458,11 +6459,11 @@ fn native_count_chars(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     const s = args[0].string.bytes();
     const mode: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
 
-    var freq: [256]i64 = [_]i64{0} ** 256;
+    var freq: [256]i64 = @as([256]i64, @splat(0));
     for (s) |c| freq[c] += 1;
 
     if (mode == 3) {
-        var buf2 = std.ArrayListUnmanaged(u8){};
+        var buf2 = std.ArrayListUnmanaged(u8).empty;
         defer buf2.deinit(ctx.allocator);
         for (0..256) |i| {
             if (freq[i] > 0) try buf2.append(ctx.allocator, @intCast(i));
@@ -6472,7 +6473,7 @@ fn native_count_chars(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     }
 
     if (mode == 4) {
-        var buf2 = std.ArrayListUnmanaged(u8){};
+        var buf2 = std.ArrayListUnmanaged(u8).empty;
         defer buf2.deinit(ctx.allocator);
         for (0..256) |i| {
             if (freq[i] == 0) try buf2.append(ctx.allocator, @intCast(i));
@@ -6754,7 +6755,7 @@ fn native_mb_strrichr(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
 fn native_mb_scrub(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.literal("");
     const s = args[0].string.bytes();
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var i: usize = 0;
     while (i < s.len) {

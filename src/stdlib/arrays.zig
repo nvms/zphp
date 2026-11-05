@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("../platform.zig");
 const Value = @import("../runtime/value.zig").Value;
 const phpTypeName = @import("types.zig").phpTypeName;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
@@ -354,7 +355,7 @@ fn valueAsStringForCompare(ctx: *NativeContext, v: Value) RuntimeError!Value.Str
         try ctx.vm.setPendingException("Error", msg);
         return error.RuntimeError;
     }
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     try v.format(&buf, ctx.allocator);
     const owned = try buf.toOwnedSlice(ctx.allocator);
@@ -919,7 +920,7 @@ fn array_splice(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         break :blk values;
     } else if (args.len >= 4 and args[3] == .object) blk: {
         const object = args[3].object.storage();
-        var values: std.ArrayListUnmanaged(Value) = .{};
+        var values: std.ArrayListUnmanaged(Value) = .empty;
         errdefer {
             for (values.items) |value| ctx.vm.releaseValue(value);
             values.deinit(ctx.allocator);
@@ -1015,7 +1016,7 @@ fn array_combine(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
             .int => |i| .{ .int = i },
             .string => |s| PhpArray.normalizeKey(.{ .string = s }),
             else => blk: {
-                var buf = std.ArrayListUnmanaged(u8){};
+                var buf = std.ArrayListUnmanaged(u8).empty;
                 defer buf.deinit(ctx.allocator);
                 try k.value.format(&buf, ctx.allocator);
                 const owned = try buf.toOwnedSlice(ctx.allocator);
@@ -1200,7 +1201,7 @@ fn arrayFillKeysKey(ctx: *NativeContext, v: Value) !PhpArray.Key {
         .bool => |b| if (b) PhpArray.Key{ .int = 1 } else PhpArray.Key{ .string = Value.String.borrowed("") },
         .null => .{ .string = Value.String.borrowed("") },
         .float => |f| blk: {
-            var buf = std.ArrayListUnmanaged(u8){};
+            var buf = std.ArrayListUnmanaged(u8).empty;
             defer buf.deinit(ctx.allocator);
             try (Value{ .float = f }).format(&buf, ctx.allocator);
             const s = try buf.toOwnedSlice(ctx.allocator);
@@ -1228,8 +1229,8 @@ fn valuesEqualAsString(a: Value, b: Value) bool {
     var sb: [256]u8 = undefined;
     var fba_a = std.heap.FixedBufferAllocator.init(&sa);
     var fba_b = std.heap.FixedBufferAllocator.init(&sb);
-    var ba = std.ArrayListUnmanaged(u8){};
-    var bb = std.ArrayListUnmanaged(u8){};
+    var ba = std.ArrayListUnmanaged(u8).empty;
+    var bb = std.ArrayListUnmanaged(u8).empty;
     a.format(&ba, fba_a.allocator()) catch return Value.equal(a, b);
     b.format(&bb, fba_b.allocator()) catch return Value.equal(a, b);
     return std.mem.eql(u8, ba.items, bb.items);
@@ -1482,7 +1483,7 @@ fn native_shuffle(_: *NativeContext, args: []const Value) RuntimeError!NativeRes
     var i: usize = arr.entries.items.len;
     while (i > 1) {
         i -= 1;
-        const j = std.crypto.random.intRangeAtMost(usize, 0, i);
+        const j = platform.random.intRangeAtMost(usize, 0, i);
         const tmp = arr.entries.items[i];
         arr.entries.items[i] = arr.entries.items[j];
         arr.entries.items[j] = tmp;
@@ -1503,7 +1504,7 @@ fn array_rand(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     // php returns a scalar key whenever num is 1, whether $num was omitted or
     // passed explicitly, an array of keys only for num > 1
     if (num == 1) {
-        const idx = std.crypto.random.intRangeAtMost(usize, 0, arr.entries.items.len - 1);
+        const idx = platform.random.intRangeAtMost(usize, 0, arr.entries.items.len - 1);
         return switch (arr.entries.items[idx].key) {
             .int => |i| NativeResult.scalar(.{ .int = i }),
             .string => |s| NativeResult.shareString(s),
@@ -1516,7 +1517,7 @@ fn array_rand(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     var i: usize = 0;
     const n: usize = @intCast(num);
     while (i < n) : (i += 1) {
-        const j = std.crypto.random.intRangeAtMost(usize, i, pool.len - 1);
+        const j = platform.random.intRangeAtMost(usize, i, pool.len - 1);
         const tmp = pool[i];
         pool[i] = pool[j];
         pool[j] = tmp;

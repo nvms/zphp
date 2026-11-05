@@ -56,7 +56,7 @@ fn setRes(obj: *PhpObject, res: ?*pg.PGresult) void {
 pub fn connect(ctx: *NativeContext, obj: *PhpObject, rest: []const u8, args: []const Value) RuntimeError!NativeResult {
     // build libpq connection string from DSN params
     // pgsql:host=localhost;port=5432;dbname=test -> "host=localhost port=5432 dbname=test user=X password=Y"
-    var conninfo = std.ArrayListUnmanaged(u8){};
+    var conninfo = std.ArrayListUnmanaged(u8).empty;
     defer conninfo.deinit(ctx.allocator);
 
     var iter = std.mem.splitScalar(u8, rest, ';');
@@ -133,9 +133,9 @@ pub fn prepare(ctx: *NativeContext, obj: *PhpObject, sql: []const u8) RuntimeErr
     const conn = getConn(obj) orelse return pdo.throwPdo(ctx, "Database not connected");
 
     // rewrite ? and :name to $1, $2, ... for postgres
-    var rewritten = std.ArrayListUnmanaged(u8){};
+    var rewritten = std.ArrayListUnmanaged(u8).empty;
     defer rewritten.deinit(ctx.allocator);
-    var param_names = std.ArrayListUnmanaged([]const u8){};
+    var param_names = std.ArrayListUnmanaged([]const u8).empty;
     var param_count: usize = 0;
     var i: usize = 0;
     var in_string = false;

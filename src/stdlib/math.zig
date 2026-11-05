@@ -1,5 +1,6 @@
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
+const platform = @import("../platform.zig");
 const Value = @import("../runtime/value.zig").Value;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
@@ -213,14 +214,14 @@ fn native_max(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
 }
 
 fn native_lcg_value(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return NativeResult.scalar(.{ .float = std.crypto.random.float(f64) });
+    return NativeResult.scalar(.{ .float = platform.random.float(f64) });
 }
 
 fn native_srand_noop(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const seed: u32 = if (args.len >= 1) blk: {
         const v = Value.toInt(args[0]);
         break :blk @as(u32, @truncate(@as(u64, @bitCast(v))));
-    } else @truncate(@as(u64, @intCast(std.time.timestamp())));
+    } else @truncate(@as(u64, @intCast(platform.timestamp())));
     ctx.vm.mt19937.seed(seed);
     ctx.vm.rng_seeded = true;
     return NativeResult.scalar(.null);
@@ -233,7 +234,7 @@ fn native_getrandmax(_: *NativeContext, _: []const Value) RuntimeError!NativeRes
 fn native_rand(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (!ctx.vm.rng_seeded) {
         var entropy: [4]u8 = undefined;
-        std.crypto.random.bytes(&entropy);
+        platform.random.bytes(&entropy);
         const sd: u32 = std.mem.readInt(u32, &entropy, .little);
         ctx.vm.mt19937.seed(sd);
         ctx.vm.rng_seeded = true;

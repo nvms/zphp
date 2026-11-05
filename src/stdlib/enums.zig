@@ -43,7 +43,7 @@ fn coerceForLookup(ctx: *NativeContext, def_backed: anytype, arg: Value) !Value 
             .float => |f| blk: {
                 // the int|string parameter takes an integral-range float as
                 // an int (truncating), anything else as its string form
-                var buf: std.ArrayListUnmanaged(u8) = .{};
+                var buf: std.ArrayListUnmanaged(u8) = .empty;
                 defer buf.deinit(ctx.allocator);
                 if (Value.floatFitsInt(f)) {
                     try buf.print(ctx.allocator, "{d}", .{@as(i64, @intFromFloat(f))});

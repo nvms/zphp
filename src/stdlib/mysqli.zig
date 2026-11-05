@@ -19,9 +19,7 @@ const ClassDef = vm_mod.ClassDef;
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
-const mysql_headers = @cImport({
-    @cInclude("mysql.h");
-});
+const mysql_headers = @import("c_mysql");
 
 const mysql = struct {
     const MYSQL = opaque {};
@@ -390,7 +388,7 @@ fn mysqliRealEscapeString(ctx: *NativeContext, args: []const Value) RuntimeError
 }
 
 fn fallbackEscape(ctx: *NativeContext, src: []const u8) RuntimeError!NativeResult {
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     for (src) |c| {
         switch (c) {

@@ -1824,7 +1824,8 @@ test "hash raw output length" {
 }
 
 test "discarded concatenations release allocations between batches" {
-    var gpa = std.heap.DebugAllocator(.{ .enable_memory_limit = true }){};
+    // these count bytes; per-allocation stack traces make macOS minutes slower
+    var gpa = std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = 0 }){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("string batch leak");
     const alloc = gpa.allocator();
     const source =
@@ -1875,7 +1876,8 @@ test "discarded concatenations release allocations between batches" {
 }
 
 test "discarded split strings release allocations between batches" {
-    var gpa = std.heap.DebugAllocator(.{ .enable_memory_limit = true }){};
+    // these count bytes; per-allocation stack traces make macOS minutes slower
+    var gpa = std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = 0 }){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("string batch leak");
     const alloc = gpa.allocator();
     const source =
@@ -1930,7 +1932,8 @@ test "discarded split strings release allocations between batches" {
 }
 
 test "discarded replacement strings release allocations between batches" {
-    var gpa = std.heap.DebugAllocator(.{ .enable_memory_limit = true }){};
+    // these count bytes; per-allocation stack traces make macOS minutes slower
+    var gpa = std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = 0 }){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("string batch leak");
     const alloc = gpa.allocator();
     const source =
@@ -1974,7 +1977,8 @@ test "discarded replacement strings release allocations between batches" {
 }
 
 test "discarded regex captures release allocations between batches" {
-    var gpa = std.heap.DebugAllocator(.{ .enable_memory_limit = true }){};
+    // these count bytes; per-allocation stack traces make macOS minutes slower
+    var gpa = std.heap.DebugAllocator(.{ .enable_memory_limit = true, .stack_trace_frames = 0 }){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("string batch leak");
     const alloc = gpa.allocator();
     const source =

@@ -67,7 +67,7 @@ extern fn zphp_mpz_perfect_square_p(a: *const ZphpMpz) c_int;
 
 // a null-terminated copy for gmp; the caller frees it
 fn dupZ(ctx: *NativeContext, s: []const u8) ![:0]u8 {
-    return ctx.allocator.dupeZ(u8, s);
+    return ctx.allocator.dupeSentinel(u8, s, 0);
 }
 
 fn cstrLen(p: [*c]const u8) usize {
@@ -582,7 +582,7 @@ fn gmpUnserialize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     const data = if (args.len > 0 and args[0] == .array) args[0].array else return unserializeFailed(ctx);
     const num = data.get(.{ .int = 0 });
     if (num != .string or num.string.bytes().len == 0) return unserializeFailed(ctx);
-    const z = try ctx.allocator.dupeZ(u8, num.string.bytes());
+    const z = try ctx.allocator.dupeSentinel(u8, num.string.bytes(), 0);
     defer ctx.allocator.free(z);
     const p = zphp_mpz_create() orelse return error.OutOfMemory;
     if (zphp_mpz_set_str(p, z.ptr, 16) != 0) {

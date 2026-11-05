@@ -44,7 +44,7 @@ fn zero(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
 
 fn native_is_link(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const st = std.fs.cwd().statFile(args[0].string.bytes()) catch return NativeResult.scalar(.{ .bool = false });
+    const st = std.Io.Dir.cwd().statFile(platform.io, args[0].string.bytes(), .{}) catch return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = st.kind == .sym_link });
 }
 
@@ -55,9 +55,9 @@ fn native_stat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     const st = @import("../platform.zig").statPath(args[0].string.bytes()) catch return NativeResult.scalar(.{ .bool = false });
     const mode: i64 = @intCast(@import("../platform.zig").modeOf(st));
     const size: i64 = @intCast(st.size);
-    const atime: i64 = @intCast(@divTrunc(st.atime, std.time.ns_per_s));
-    const mtime: i64 = @intCast(@divTrunc(st.mtime, std.time.ns_per_s));
-    const ctime: i64 = @intCast(@divTrunc(st.ctime, std.time.ns_per_s));
+    const atime: i64 = @intCast(@divTrunc((st.atime orelse st.mtime).nanoseconds, std.time.ns_per_s));
+    const mtime: i64 = @intCast(@divTrunc(st.mtime.nanoseconds, std.time.ns_per_s));
+    const ctime: i64 = @intCast(@divTrunc(st.ctime.nanoseconds, std.time.ns_per_s));
     const pairs = [_]struct { name: []const u8, val: i64 }{
         .{ .name = "dev", .val = 0 },       .{ .name = "ino", .val = 0 },
         .{ .name = "mode", .val = mode },   .{ .name = "nlink", .val = 1 },
@@ -88,12 +88,12 @@ fn native_flock(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
             // std's tryLock does not compile for windows in zig 0.15.1, so a
             // non-blocking request waits like a blocking one
             _ = non_block;
-            const lock: std.fs.File.Lock = if (op == 1) .shared else .exclusive;
-            file.lock(lock) catch return NativeResult.scalar(.{ .bool = false });
+            const lock: std.Io.File.Lock = if (op == 1) .shared else .exclusive;
+            file.lock(platform.io, lock) catch return NativeResult.scalar(.{ .bool = false });
             return NativeResult.scalar(.{ .bool = true });
         },
         3 => {
-            file.unlock();
+            file.unlock(platform.io);
             return NativeResult.scalar(.{ .bool = true });
         },
         else => return NativeResult.scalar(.{ .bool = false }),

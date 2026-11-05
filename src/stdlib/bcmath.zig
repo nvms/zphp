@@ -1,4 +1,5 @@
 const std = @import("std");
+const sync = @import("../sync.zig");
 const Value = @import("../runtime/value.zig").Value;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
 const vm_mod = @import("../runtime/vm.zig");
@@ -17,7 +18,7 @@ const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 const BcNum = struct {
     sign: i8 = 1, // +1 or -1
-    digits: std.ArrayListUnmanaged(u8) = .{},
+    digits: std.ArrayListUnmanaged(u8) = .empty,
     scale: usize = 0,
 
     fn deinit(self: *BcNum, allocator: Allocator) void {
@@ -46,9 +47,9 @@ fn parseBc(allocator: Allocator, s: []const u8) !BcNum {
         if (s[i] == '-') n.sign = -1;
         i += 1;
     }
-    var int_digits = std.ArrayListUnmanaged(u8){};
+    var int_digits = std.ArrayListUnmanaged(u8).empty;
     defer int_digits.deinit(allocator);
-    var frac_digits = std.ArrayListUnmanaged(u8){};
+    var frac_digits = std.ArrayListUnmanaged(u8).empty;
     defer frac_digits.deinit(allocator);
 
     var saw_dot = false;
@@ -75,7 +76,7 @@ fn parseBc(allocator: Allocator, s: []const u8) !BcNum {
 }
 
 fn formatBc(allocator: Allocator, n: BcNum, target_scale: usize) ![]u8 {
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8).empty;
     errdefer out.deinit(allocator);
 
     // truncate / extend fractional part to target_scale (PHP truncates, not rounds)
@@ -254,7 +255,7 @@ fn bcAddInternal(allocator: Allocator, a: BcNum, b: BcNum) !BcNum {
     }
     const cmp = cmpAbs(a, b);
     if (cmp == 0) return BcNum{ .sign = 1, .scale = @max(a.scale, b.scale), .digits = blk: {
-        var d = std.ArrayListUnmanaged(u8){};
+        var d = std.ArrayListUnmanaged(u8).empty;
         const total = 1 + @max(a.scale, b.scale);
         try d.resize(allocator, total);
         @memset(d.items, 0);
@@ -332,7 +333,7 @@ fn bcDivInternal(allocator: Allocator, a: BcNum, b: BcNum, target_scale: usize) 
     // at the same place
     const shift: i64 = @as(i64, @intCast(target_scale + b.scale + 1)) - @as(i64, @intCast(a.scale));
 
-    var num_digits = std.ArrayListUnmanaged(u8){};
+    var num_digits = std.ArrayListUnmanaged(u8).empty;
     defer num_digits.deinit(allocator);
     if (shift >= 0) {
         try num_digits.appendSlice(allocator, a.digits.items);
@@ -345,7 +346,7 @@ fn bcDivInternal(allocator: Allocator, a: BcNum, b: BcNum, target_scale: usize) 
         if (num_digits.items.len == 0) try num_digits.append(allocator, 0);
     }
 
-    var div_digits = std.ArrayListUnmanaged(u8){};
+    var div_digits = std.ArrayListUnmanaged(u8).empty;
     defer div_digits.deinit(allocator);
     try div_digits.appendSlice(allocator, b.digits.items);
 
@@ -353,9 +354,9 @@ fn bcDivInternal(allocator: Allocator, a: BcNum, b: BcNum, target_scale: usize) 
     while (div_digits.items.len > 1 and div_digits.items[0] == 0) _ = div_digits.orderedRemove(0);
 
     // long division: produce quotient digit-by-digit
-    var quot = std.ArrayListUnmanaged(u8){};
+    var quot = std.ArrayListUnmanaged(u8).empty;
     errdefer quot.deinit(allocator);
-    var rem = std.ArrayListUnmanaged(u8){};
+    var rem = std.ArrayListUnmanaged(u8).empty;
     defer rem.deinit(allocator);
 
     for (num_digits.items) |d| {
@@ -367,7 +368,7 @@ fn bcDivInternal(allocator: Allocator, a: BcNum, b: BcNum, target_scale: usize) 
         while (q < 9) {
             // multiply div by (q+1) and compare to rem
             const test_q = q + 1;
-            var prod = std.ArrayListUnmanaged(u8){};
+            var prod = std.ArrayListUnmanaged(u8).empty;
             defer prod.deinit(allocator);
             var carry: u8 = 0;
             var j: usize = div_digits.items.len;
@@ -388,7 +389,7 @@ fn bcDivInternal(allocator: Allocator, a: BcNum, b: BcNum, target_scale: usize) 
 
         if (q > 0) {
             // subtract q*div from rem
-            var prod = std.ArrayListUnmanaged(u8){};
+            var prod = std.ArrayListUnmanaged(u8).empty;
             defer prod.deinit(allocator);
             var carry: u8 = 0;
             try prod.resize(allocator, div_digits.items.len);
@@ -455,7 +456,7 @@ fn cmpDigits(a: []const u8, b: []const u8) i32 {
 
 // ---------------- bcscale state ----------------
 
-var global_scale_lock = std.Thread.Mutex{};
+var global_scale_lock = sync.Mutex{};
 var global_scale: usize = 0;
 
 fn currentScale() usize {
@@ -820,7 +821,7 @@ fn bcSqrt(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
 }
 
 fn makeZeroString(allocator: Allocator, scale: usize) ![]u8 {
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8).empty;
     errdefer out.deinit(allocator);
     try out.append(allocator, '0');
     if (scale > 0) {
@@ -979,7 +980,7 @@ fn bcRound(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     // build combined digit stream (int_part ++ frac_part) and remember the
     // decimal position. the result keeps `precision` digits after the point.
     // half-away-from-zero rounding: inspect the digit immediately past the cut
-    var combined_buf: std.ArrayListUnmanaged(u8) = .{};
+    var combined_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer combined_buf.deinit(ctx.allocator);
     try combined_buf.appendSlice(ctx.allocator, p.int_part);
     try combined_buf.appendSlice(ctx.allocator, p.frac_part);
@@ -987,7 +988,7 @@ fn bcRound(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const dec_pos: i64 = @intCast(p.int_part.len);
     const want_len: i64 = dec_pos + precision;
 
-    var result_buf: std.ArrayListUnmanaged(u8) = .{};
+    var result_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer result_buf.deinit(ctx.allocator);
 
     if (want_len <= 0) {
@@ -1150,7 +1151,7 @@ fn canonical(allocator: Allocator, raw: []const u8) ![]u8 {
     for (frac_part) |c| if (c != '0') {
         nonzero = true;
     };
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8).empty;
     errdefer out.deinit(allocator);
     if (neg and nonzero) try out.append(allocator, '-');
     try out.appendSlice(allocator, int_part);
@@ -1429,14 +1430,14 @@ fn roundDecimal(allocator: Allocator, s: []const u8, precision: i64, mode: Round
     const dot = std.mem.indexOfScalar(u8, body, '.');
     const int_part = if (dot) |d| body[0..d] else body;
     const frac_part = if (dot) |d| body[d + 1 ..] else "";
-    var digits = std.ArrayListUnmanaged(u8){};
+    var digits = std.ArrayListUnmanaged(u8).empty;
     defer digits.deinit(allocator);
     try digits.appendSlice(allocator, int_part);
     try digits.appendSlice(allocator, frac_part);
     // cut is the count of digits kept from the front; it may run past either end
     const cut_signed: i64 = @as(i64, @intCast(int_part.len)) + precision;
     const cut: usize = @intCast(@max(cut_signed, 0));
-    var kept = std.ArrayListUnmanaged(u8){};
+    var kept = std.ArrayListUnmanaged(u8).empty;
     defer kept.deinit(allocator);
     if (cut <= digits.items.len) {
         try kept.appendSlice(allocator, digits.items[0..cut]);
@@ -1483,7 +1484,7 @@ fn roundDecimal(allocator: Allocator, s: []const u8, precision: i64, mode: Round
         if (carry) try kept.insert(allocator, 0, '1');
     }
     // kept digits end `precision` places after the point; rebuild the string
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8).empty;
     errdefer out.deinit(allocator);
     if (neg) try out.append(allocator, '-');
     if (precision <= 0) {

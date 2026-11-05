@@ -5,9 +5,7 @@ const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
-const c = @cImport({
-    @cInclude("sodium.h");
-});
+const c = @import("c_sodium");
 
 pub const entries = .{
     .{ "sodium_bin2hex", native_bin2hex },
@@ -113,7 +111,7 @@ fn native_hex2bin(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const hex = args[0].string.bytes();
     const ignore: ?[*:0]const u8 = if (args.len > 1 and args[1] == .string)
-        (try ctx.allocator.dupeZ(u8, args[1].string.bytes())).ptr
+        (try ctx.allocator.dupeSentinel(u8, args[1].string.bytes(), 0)).ptr
     else
         null;
     const out = try ctx.allocator.alloc(u8, hex.len / 2 + 1);
@@ -144,7 +142,7 @@ fn native_base642bin(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const variant: c_int = if (args.len > 1 and args[1] == .int) @intCast(args[1].int) else 1;
     const ignore: ?[*:0]const u8 = if (args.len > 2 and args[2] == .string)
-        (try ctx.allocator.dupeZ(u8, args[2].string.bytes())).ptr
+        (try ctx.allocator.dupeSentinel(u8, args[2].string.bytes(), 0)).ptr
     else
         null;
     const src = args[0].string.bytes();
@@ -518,7 +516,7 @@ fn native_pwhash_str(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
 fn native_pwhash_str_verify(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     ensureInit();
     if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
-    const hash_z = try ctx.allocator.dupeZ(u8, args[0].string.bytes());
+    const hash_z = try ctx.allocator.dupeSentinel(u8, args[0].string.bytes(), 0);
     defer ctx.allocator.free(hash_z);
     const pass = args[1].string.bytes();
     return NativeResult.scalar(.{ .bool = c.crypto_pwhash_str_verify(hash_z.ptr, pass.ptr, pass.len) == 0 });
@@ -527,7 +525,7 @@ fn native_pwhash_str_verify(ctx: *NativeContext, args: []const Value) RuntimeErr
 fn native_pwhash_str_needs_rehash(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     ensureInit();
     if (args.len < 3 or args[0] != .string or args[1] != .int or args[2] != .int) return NativeResult.scalar(.{ .bool = true });
-    const hash_z = try ctx.allocator.dupeZ(u8, args[0].string.bytes());
+    const hash_z = try ctx.allocator.dupeSentinel(u8, args[0].string.bytes(), 0);
     defer ctx.allocator.free(hash_z);
     const ops: c_ulonglong = @intCast(args[1].int);
     const mem: usize = @intCast(args[2].int);

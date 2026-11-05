@@ -8,10 +8,7 @@ const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const VM = @import("../runtime/vm.zig").VM;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
-const c = @cImport({
-    @cDefine("LDAP_DEPRECATED", "1");
-    @cInclude("ldap.h");
-});
+const c = @import("c_ldap");
 
 pub const entries = .{
     .{ "ldap_connect", native_connect },
@@ -81,7 +78,7 @@ fn native_connect(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         }
     }
 
-    const uri_z = try ctx.allocator.dupeZ(u8, uri_slice);
+    const uri_z = try ctx.allocator.dupeSentinel(u8, uri_slice, 0);
     defer ctx.allocator.free(uri_z);
     var ldap_ptr: ?*c.LDAP = null;
     if (c.ldap_initialize(&ldap_ptr, uri_z.ptr) != c.LDAP_SUCCESS or ldap_ptr == null) return NativeResult.scalar(.{ .bool = false });
@@ -99,11 +96,11 @@ fn native_bind(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     const o = getHandle(args, "LDAP\\Connection") orelse return NativeResult.scalar(.{ .bool = false });
     const ld = getLdap(o) orelse return NativeResult.scalar(.{ .bool = false });
     const dn: [*:0]const u8 = if (args.len > 1 and args[1] == .string)
-        (try ctx.allocator.dupeZ(u8, args[1].string.bytes())).ptr
+        (try ctx.allocator.dupeSentinel(u8, args[1].string.bytes(), 0)).ptr
     else
         "";
     const pw: [*:0]const u8 = if (args.len > 2 and args[2] == .string)
-        (try ctx.allocator.dupeZ(u8, args[2].string.bytes())).ptr
+        (try ctx.allocator.dupeSentinel(u8, args[2].string.bytes(), 0)).ptr
     else
         "";
     const rc = c.ldap_simple_bind_s(ld, dn, pw);
@@ -128,12 +125,12 @@ fn doSearch(ctx: *NativeContext, args: []const Value, scope: c_int) RuntimeError
     if (args.len < 3) return NativeResult.scalar(.{ .bool = false });
     const base = if (args[1] == .string) args[1].string.bytes() else "";
     const filter = if (args[2] == .string) args[2].string.bytes() else "(objectClass=*)";
-    const base_z = try ctx.allocator.dupeZ(u8, base);
+    const base_z = try ctx.allocator.dupeSentinel(u8, base, 0);
     defer ctx.allocator.free(base_z);
-    const filter_z = try ctx.allocator.dupeZ(u8, filter);
+    const filter_z = try ctx.allocator.dupeSentinel(u8, filter, 0);
     defer ctx.allocator.free(filter_z);
 
-    var attrs_storage = std.ArrayListUnmanaged([*c]u8){};
+    var attrs_storage = std.ArrayListUnmanaged([*c]u8).empty;
     defer {
         for (attrs_storage.items) |p| if (p) |pp| ctx.allocator.free(std.mem.span(pp));
         attrs_storage.deinit(ctx.allocator);
@@ -141,7 +138,7 @@ fn doSearch(ctx: *NativeContext, args: []const Value, scope: c_int) RuntimeError
     if (args.len > 3 and args[3] == .array) {
         for (args[3].array.entries.items) |entry| {
             if (entry.value != .string) continue;
-            const s = try ctx.allocator.dupeZ(u8, entry.value.string.bytes());
+            const s = try ctx.allocator.dupeSentinel(u8, entry.value.string.bytes(), 0);
             errdefer ctx.allocator.free(s);
             try attrs_storage.append(ctx.allocator, s.ptr);
         }
@@ -251,28 +248,28 @@ fn native_get_entries(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
 }
 
 fn buildLDAPMods(allocator: std.mem.Allocator, dict: *const PhpArray, op: c_int) ![]?*c.LDAPMod {
-    var list = std.ArrayListUnmanaged(?*c.LDAPMod){};
+    var list = std.ArrayListUnmanaged(?*c.LDAPMod).empty;
     errdefer list.deinit(allocator);
     for (dict.entries.items) |entry| {
         const attr_name = switch (entry.key) {
             .string => |s| s.bytes(),
             else => continue,
         };
-        const attr_z = try allocator.dupeZ(u8, attr_name);
+        const attr_z = try allocator.dupeSentinel(u8, attr_name, 0);
 
-        var vals_storage = std.ArrayListUnmanaged([*c]u8){};
+        var vals_storage = std.ArrayListUnmanaged([*c]u8).empty;
         errdefer vals_storage.deinit(allocator);
 
         switch (entry.value) {
             .array => |inner| {
                 for (inner.entries.items) |ie| {
                     if (ie.value != .string) continue;
-                    const sz = try allocator.dupeZ(u8, ie.value.string.bytes());
+                    const sz = try allocator.dupeSentinel(u8, ie.value.string.bytes(), 0);
                     try vals_storage.append(allocator, sz.ptr);
                 }
             },
             .string => |s| {
-                const sz = try allocator.dupeZ(u8, s.bytes());
+                const sz = try allocator.dupeSentinel(u8, s.bytes(), 0);
                 try vals_storage.append(allocator, sz.ptr);
             },
             else => {},
@@ -295,7 +292,7 @@ fn doMod(ctx: *NativeContext, args: []const Value, op: c_int) RuntimeError!Nativ
     const o = getHandle(args, "LDAP\\Connection") orelse return NativeResult.scalar(.{ .bool = false });
     const ld = getLdap(o) orelse return NativeResult.scalar(.{ .bool = false });
     if (args.len < 3 or args[1] != .string or args[2] != .array) return NativeResult.scalar(.{ .bool = false });
-    const dn_z = try ctx.allocator.dupeZ(u8, args[1].string.bytes());
+    const dn_z = try ctx.allocator.dupeSentinel(u8, args[1].string.bytes(), 0);
     defer ctx.allocator.free(dn_z);
     var temporary = std.heap.ArenaAllocator.init(ctx.allocator);
     defer temporary.deinit();
@@ -312,7 +309,7 @@ fn native_add(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     const o = getHandle(args, "LDAP\\Connection") orelse return NativeResult.scalar(.{ .bool = false });
     const ld = getLdap(o) orelse return NativeResult.scalar(.{ .bool = false });
     if (args.len < 3 or args[1] != .string or args[2] != .array) return NativeResult.scalar(.{ .bool = false });
-    const dn_z = try ctx.allocator.dupeZ(u8, args[1].string.bytes());
+    const dn_z = try ctx.allocator.dupeSentinel(u8, args[1].string.bytes(), 0);
     defer ctx.allocator.free(dn_z);
     var temporary = std.heap.ArenaAllocator.init(ctx.allocator);
     defer temporary.deinit();
@@ -339,7 +336,7 @@ fn native_delete(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     const o = getHandle(args, "LDAP\\Connection") orelse return NativeResult.scalar(.{ .bool = false });
     const ld = getLdap(o) orelse return NativeResult.scalar(.{ .bool = false });
     if (args.len < 2 or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
-    const dn_z = try ctx.allocator.dupeZ(u8, args[1].string.bytes());
+    const dn_z = try ctx.allocator.dupeSentinel(u8, args[1].string.bytes(), 0);
     defer ctx.allocator.free(dn_z);
     const rc = c.ldap_delete_ext_s(ld, dn_z.ptr, null, null);
     if (rc != c.LDAP_SUCCESS) {
@@ -355,11 +352,11 @@ fn native_rename(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     if (args.len < 5) return NativeResult.scalar(.{ .bool = false });
     const dn = if (args[1] == .string) args[1].string.bytes() else return NativeResult.scalar(.{ .bool = false });
     const newrdn = if (args[2] == .string) args[2].string.bytes() else return NativeResult.scalar(.{ .bool = false });
-    const newparent: ?[*:0]const u8 = if (args[3] == .string) (try ctx.allocator.dupeZ(u8, args[3].string.bytes())).ptr else null;
+    const newparent: ?[*:0]const u8 = if (args[3] == .string) (try ctx.allocator.dupeSentinel(u8, args[3].string.bytes(), 0)).ptr else null;
     const delete_old: c_int = if (args[4] == .bool) (if (args[4].bool) 1 else 0) else 0;
-    const dn_z = try ctx.allocator.dupeZ(u8, dn);
+    const dn_z = try ctx.allocator.dupeSentinel(u8, dn, 0);
     defer ctx.allocator.free(dn_z);
-    const new_z = try ctx.allocator.dupeZ(u8, newrdn);
+    const new_z = try ctx.allocator.dupeSentinel(u8, newrdn, 0);
     defer ctx.allocator.free(new_z);
     const rc = c.ldap_rename_s(ld, dn_z.ptr, new_z.ptr, newparent, delete_old, null, null);
     if (rc != c.LDAP_SUCCESS) {
@@ -373,9 +370,9 @@ fn native_compare(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     const o = getHandle(args, "LDAP\\Connection") orelse return NativeResult.scalar(.{ .int = -1 });
     const ld = getLdap(o) orelse return NativeResult.scalar(.{ .int = -1 });
     if (args.len < 4 or args[1] != .string or args[2] != .string or args[3] != .string) return NativeResult.scalar(.{ .int = -1 });
-    const dn_z = try ctx.allocator.dupeZ(u8, args[1].string.bytes());
+    const dn_z = try ctx.allocator.dupeSentinel(u8, args[1].string.bytes(), 0);
     defer ctx.allocator.free(dn_z);
-    const attr_z = try ctx.allocator.dupeZ(u8, args[2].string.bytes());
+    const attr_z = try ctx.allocator.dupeSentinel(u8, args[2].string.bytes(), 0);
     defer ctx.allocator.free(attr_z);
     var bval = c.berval{ .bv_len = @intCast(args[3].string.bytes().len), .bv_val = @constCast(args[3].string.bytes().ptr) };
     const rc = c.ldap_compare_ext_s(ld, dn_z.ptr, attr_z.ptr, &bval, null, null);
@@ -395,7 +392,7 @@ fn native_set_option(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
             return NativeResult.scalar(.{ .bool = c.ldap_set_option(ld, opt, &v) == c.LDAP_OPT_SUCCESS });
         },
         .string => {
-            const sz = try ctx.allocator.dupeZ(u8, args[2].string.bytes());
+            const sz = try ctx.allocator.dupeSentinel(u8, args[2].string.bytes(), 0);
             defer ctx.allocator.free(sz);
             return NativeResult.scalar(.{ .bool = c.ldap_set_option(ld, opt, sz.ptr) == c.LDAP_OPT_SUCCESS });
         },
@@ -450,7 +447,7 @@ fn native_escape(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     const flags: i64 = if (args.len > 2 and args[2] == .int) args[2].int else 0;
     const flag_filter: bool = (flags & 1) != 0;
     const flag_dn: bool = (flags & 2) != 0;
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8).empty;
     defer out.deinit(ctx.allocator);
     for (v) |ch| {
         var must_escape = false;
@@ -486,7 +483,7 @@ fn native_free_result(_: *NativeContext, args: []const Value) RuntimeError!Nativ
 fn native_explode_dn(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const with_attrib: c_int = if (args.len > 1 and args[1] == .int) @intCast(args[1].int) else 1;
-    const dn_z = try ctx.allocator.dupeZ(u8, args[0].string.bytes());
+    const dn_z = try ctx.allocator.dupeSentinel(u8, args[0].string.bytes(), 0);
     defer ctx.allocator.free(dn_z);
     const parts = c.ldap_explode_dn(dn_z.ptr, with_attrib);
     if (parts == null) return NativeResult.scalar(.{ .bool = false });
@@ -505,7 +502,7 @@ fn native_explode_dn(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
 
 fn native_dn2ufn(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const dn_z = try ctx.allocator.dupeZ(u8, args[0].string.bytes());
+    const dn_z = try ctx.allocator.dupeSentinel(u8, args[0].string.bytes(), 0);
     defer ctx.allocator.free(dn_z);
     const ufn = c.ldap_dn2ufn(dn_z.ptr);
     if (ufn == null) return NativeResult.scalar(.{ .bool = false });

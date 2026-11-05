@@ -61,11 +61,11 @@ fn nativeCompare(a: Value, b: Value) ?i64 {
 
 // ZPHP_TRACE_OBJ_CLASS: stack trace at every retain/release of one object
 pub fn traceObjRc(obj: *PhpObject, what: []const u8) void {
-    if (@import("builtin").mode != .Debug) return;
+    if (@import("builtin").mode != .debug) return;
     const h = hooks();
     if (h.trace_obj != obj or !h.trace_rc_verbose) return;
     std.debug.print("== trace {s} {s}#{d} refcount now {d}\n", .{ what, obj.class_name, obj.id, obj.refcount });
-    std.debug.dumpCurrentStackTrace(null);
+    std.debug.dumpCurrentStackTrace(.{});
 }
 
 fn releaseReplaced(old: Value) void {
@@ -84,7 +84,7 @@ fn retainStored(value: Value) void {
 }
 
 pub const PhpArray = struct {
-    entries: std.ArrayListUnmanaged(Entry) = .{},
+    entries: std.ArrayListUnmanaged(Entry) = .empty,
     string_index: std.StringHashMapUnmanaged(usize) = .{},
     next_int_key: i64 = 0,
     has_int_keys: bool = false,
@@ -499,7 +499,7 @@ pub const RefIndex = struct {
             .array, .capture => given,
         };
         const gop = try self.by_owner.getOrPut(a, owner);
-        if (!gop.found_existing) gop.value_ptr.* = .{};
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
         for (gop.value_ptr.items) |existing| {
             if (existing.cell == cell and targetEql(existing.target, target)) return;
         }
@@ -534,7 +534,7 @@ pub const RefIndex = struct {
 
     pub fn transferCell(self: *RefIndex, a: std.mem.Allocator, from: OwnerId, to: OwnerId, cell: *Value) !void {
         const source = self.by_owner.getPtr(from) orelse return;
-        var moving: std.ArrayListUnmanaged(BindingTarget) = .{};
+        var moving: std.ArrayListUnmanaged(BindingTarget) = .empty;
         defer moving.deinit(a);
         for (source.items) |binding| if (binding.cell == cell) try moving.append(a, binding.target);
         for (moving.items) |target| try self.addOwned(a, to, cell, target);
@@ -565,7 +565,7 @@ pub const RefIndex = struct {
     }
 
     pub fn removeTargetAllOwners(self: *RefIndex, a: std.mem.Allocator, cell: *Value, target: BindingTarget) void {
-        var empty_owners: std.ArrayListUnmanaged(OwnerId) = .{};
+        var empty_owners: std.ArrayListUnmanaged(OwnerId) = .empty;
         defer empty_owners.deinit(a);
         var owner_it = self.by_owner.iterator();
         while (owner_it.next()) |entry| {
@@ -600,7 +600,7 @@ pub const RefIndex = struct {
 
     pub fn addForward(self: *RefIndex, a: std.mem.Allocator, cell: *Value, target: BindingTarget) !void {
         const gop = try self.fwd.getOrPut(a, cell);
-        if (!gop.found_existing) gop.value_ptr.* = .{};
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
         for (gop.value_ptr.items) |existing| {
             if (targetEql(existing, target)) return;
         }
@@ -610,7 +610,7 @@ pub const RefIndex = struct {
 
     pub fn addPropRev(self: *RefIndex, a: std.mem.Allocator, key: PropRefKey, cell: *Value) !void {
         const gop = try self.prop_rev.getOrPut(a, key);
-        if (!gop.found_existing) gop.value_ptr.* = .{};
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
         for (gop.value_ptr.items) |existing| {
             if (existing == cell) return;
         }
@@ -659,7 +659,7 @@ pub const RefIndex = struct {
     // generator suspend). O(targets-for-this-cell), never a global scan
     pub fn removeCell(self: *RefIndex, a: std.mem.Allocator, cell: *Value) void {
         var owners = self.by_owner.iterator();
-        var empty_owners: std.ArrayListUnmanaged(OwnerId) = .{};
+        var empty_owners: std.ArrayListUnmanaged(OwnerId) = .empty;
         defer empty_owners.deinit(a);
         while (owners.next()) |entry| {
             var i: usize = 0;
@@ -740,8 +740,8 @@ pub const Generator = struct {
     func: *const ObjFunction,
     ip: usize = 0,
     vars: std.StringHashMapUnmanaged(Value) = .{},
-    locals: std.ArrayListUnmanaged(Value) = .{},
-    stack: std.ArrayListUnmanaged(Value) = .{},
+    locals: std.ArrayListUnmanaged(Value) = .empty,
+    stack: std.ArrayListUnmanaged(Value) = .empty,
     ref_slots: std.StringHashMapUnmanaged(*Value) = .{},
     base_sp: usize = 0,
     current_value: Value = .null,
@@ -749,7 +749,7 @@ pub const Generator = struct {
     return_value: Value = .null,
     implicit_key: i64 = 0,
     handler_count: usize = 0,
-    saved_handlers: std.ArrayListUnmanaged(SavedHandler) = .{},
+    saved_handlers: std.ArrayListUnmanaged(SavedHandler) = .empty,
     delegate: ?DelegateState = null,
     pending_throw: ?Value = null,
     pooled: bool = false,
@@ -792,9 +792,9 @@ pub const Fiber = struct {
     state: State = .created,
     callable: Value = .null,
 
-    saved_frames: std.ArrayListUnmanaged(SavedFrame) = .{},
-    saved_stack: std.ArrayListUnmanaged(Value) = .{},
-    saved_handlers: std.ArrayListUnmanaged(SavedHandler) = .{},
+    saved_frames: std.ArrayListUnmanaged(SavedFrame) = .empty,
+    saved_stack: std.ArrayListUnmanaged(Value) = .empty,
+    saved_handlers: std.ArrayListUnmanaged(SavedHandler) = .empty,
 
     suspend_value: Value = .null,
     return_value: Value = .null,

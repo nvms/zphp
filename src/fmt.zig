@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform.zig");
 const parser = @import("pipeline/parser.zig");
 const Ast = @import("pipeline/ast.zig").Ast;
 const Token = @import("pipeline/token.zig").Token;
@@ -10,7 +11,7 @@ const Allocator = std.mem.Allocator;
 
 pub fn run(allocator: Allocator, args: []const []const u8) !void {
     var check_mode = false;
-    var paths = std.ArrayListUnmanaged([]const u8){};
+    var paths = std.ArrayListUnmanaged([]const u8).empty;
     defer paths.deinit(allocator);
 
     for (args) |arg| {
@@ -30,7 +31,7 @@ pub fn run(allocator: Allocator, args: []const []const u8) !void {
     var any_error = false;
 
     for (paths.items) |path| {
-        const source = std.fs.cwd().readFileAlloc(allocator, path, 10 * 1024 * 1024) catch {
+        const source = std.Io.Dir.cwd().readFileAlloc(platform.io, path, allocator, .limited(10 * 1024 * 1024)) catch {
             tui.err(path);
             any_error = true;
             continue;
@@ -66,7 +67,7 @@ pub fn run(allocator: Allocator, args: []const []const u8) !void {
         if (check_mode) {
             tui.step("would reformat", path);
         } else {
-            std.fs.cwd().writeFile(.{ .sub_path = path, .data = formatted }) catch {
+            std.Io.Dir.cwd().writeFile(platform.io, .{ .sub_path = path, .data = formatted }) catch {
                 tui.err(path);
                 any_error = true;
                 continue;
@@ -92,7 +93,7 @@ const Trivia = struct {
 
 fn extractTrivia(allocator: Allocator, tokens: []const Token, source: []const u8) ![]const Trivia {
     var result = try allocator.alloc(Trivia, tokens.len);
-    var comment_buf = std.ArrayListUnmanaged(Trivia.Comment){};
+    var comment_buf = std.ArrayListUnmanaged(Trivia.Comment).empty;
     defer comment_buf.deinit(allocator);
 
     for (tokens, 0..) |tok, i| {
@@ -174,7 +175,7 @@ const Formatter = struct {
             .ast = ast,
             .source = source,
             .trivia = trivia,
-            .out = .{},
+            .out = .empty,
             .indent = 0,
             .allocator = allocator,
             .last_was_newline = false,
@@ -1756,7 +1757,7 @@ fn haltStatementStart(source: []const u8, offset: usize) usize {
 }
 
 fn writeStderr(msg: []const u8) !void {
-    try std.fs.File.stderr().writeAll(msg);
+    try platform.writeAll(std.Io.File.stderr(), msg);
 }
 
 test "format simple echo" {

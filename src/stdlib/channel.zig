@@ -2,6 +2,7 @@
 // threads by identity: every VM that holds one binds its own wrapper object
 // to the same Channel, and a wrapper crosses to a worker as the channel's id
 const std = @import("std");
+const sync = @import("../sync.zig");
 const value_mod = @import("../runtime/value.zig");
 const Value = value_mod.Value;
 const PhpObject = value_mod.PhpObject;
@@ -24,7 +25,7 @@ const timeout_exception = "Zphp\\TimeoutException";
 
 pub const Wait = union(enum) { none, forever, until: i128 };
 
-fn waitFor(cond: *std.Thread.Condition, mutex: *std.Thread.Mutex, wait: Wait) bool {
+fn waitFor(cond: *sync.Condition, mutex: *sync.Mutex, wait: Wait) bool {
     switch (wait) {
         .none => return false,
         .forever => {
@@ -32,7 +33,7 @@ fn waitFor(cond: *std.Thread.Condition, mutex: *std.Thread.Mutex, wait: Wait) bo
             return true;
         },
         .until => |deadline| {
-            const now = std.time.nanoTimestamp();
+            const now = platform.nanoTimestamp();
             if (now >= deadline) return false;
             cond.timedWait(mutex, @intCast(deadline - now)) catch {};
             return true;
@@ -47,9 +48,9 @@ pub const Channel = struct {
     head: usize = 0,
     len: usize = 0,
     closed: bool = false,
-    mutex: std.Thread.Mutex = .{},
-    not_empty: std.Thread.Condition = .{},
-    not_full: std.Thread.Condition = .{},
+    mutex: sync.Mutex = .{},
+    not_empty: sync.Condition = .{},
+    not_full: sync.Condition = .{},
     // one reference per wrapper object, across every vm in the process
     refs: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
     // selectors waiting for a value or the close
@@ -149,7 +150,7 @@ pub const Channel = struct {
 // ---------------------------------------------------------------------------
 // the process-wide registry that resolves an id back to its channel
 
-var registry_mutex: std.Thread.Mutex = .{};
+var registry_mutex: sync.Mutex = .{};
 var registry: std.AutoHashMapUnmanaged(u64, *Channel) = .{};
 var next_id: u64 = 1;
 const registry_allocator = std.heap.page_allocator;
@@ -202,7 +203,7 @@ fn bind(obj: *PhpObject, ch: *Channel) void {
 fn waitArg(args: []const Value, index: usize) Wait {
     if (index >= args.len or args[index] == .null) return .forever;
     const ns = workers.optionalSeconds(args[index]) orelse return .forever;
-    return .{ .until = std.time.nanoTimestamp() + @as(i128, ns) };
+    return .{ .until = platform.nanoTimestamp() + @as(i128, ns) };
 }
 
 fn flushOutput(vm: *VM) void {

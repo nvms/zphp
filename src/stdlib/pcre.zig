@@ -238,7 +238,7 @@ fn normalizeOpenBoundQuantifier(pattern: []const u8) ?[]u8 {
             var j = i + 3;
             while (j < pattern.len and std.ascii.isDigit(pattern[j])) j += 1;
             if (j < pattern.len and pattern[j] == '}') {
-                if (out == null) out = .{};
+                if (out == null) out = .empty;
                 out.?.appendSlice(std.heap.c_allocator, pattern[copied .. i + 1]) catch return null;
                 out.?.append(std.heap.c_allocator, '0') catch return null;
                 copied = i + 1;
@@ -560,7 +560,7 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
 
     var group_arrays: ?std.ArrayListUnmanaged(*PhpArray) = null;
     if (!set_order) {
-        var ga = std.ArrayListUnmanaged(*PhpArray){};
+        var ga = std.ArrayListUnmanaged(*PhpArray).empty;
         for (0..group_count) |_| {
             try ga.append(ctx.allocator, try ctx.createArray());
         }
@@ -794,7 +794,7 @@ fn insertNamedMatch(ctx: *NativeContext, arr: *PhpArray, position: usize, entry:
 }
 
 fn translateReplacement(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8).empty;
     defer out.deinit(allocator);
     var i: usize = 0;
     while (i < src.len) {
@@ -868,7 +868,7 @@ fn preg_filter(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
 // always comes back as a string even when nothing matched
 fn replaceWithCoercedSubject(ctx: *NativeContext, args: []const Value, comptime idx: usize, comptime native: anytype) RuntimeError!?NativeResult {
     if (args.len <= idx or args[idx] == .string or args[idx] == .array or args[idx] == .object) return null;
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     try args[idx].format(&buf, ctx.allocator);
     const subject = try Value.String.create(ctx.allocator, buf.items);
@@ -1051,7 +1051,7 @@ fn pregReplaceArrayPattern(ctx: *NativeContext, args: []const Value) RuntimeErro
 }
 
 fn pregReplaceLimited(ctx: *NativeContext, code: *pcre2.Code, match_data: *pcre2.MatchData, subject: []const u8, replacement: []const u8, limit: usize, args: []const Value) RuntimeError!NativeResult {
-    var parts = std.ArrayListUnmanaged(u8){};
+    var parts = std.ArrayListUnmanaged(u8).empty;
     defer parts.deinit(ctx.allocator);
     var offset: usize = 0;
     var count: usize = 0;
@@ -1176,7 +1176,7 @@ fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!
     var name_table_ptr: [*]const u8 = undefined;
     if (name_count > 0) _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMETABLE, @ptrCast(&name_table_ptr));
 
-    var result = std.ArrayListUnmanaged(u8){};
+    var result = std.ArrayListUnmanaged(u8).empty;
     defer result.deinit(ctx.allocator);
     var offset: usize = 0;
     var replace_count: i64 = 0;
@@ -1225,7 +1225,7 @@ fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!
         if (cb_result == .string) {
             try result.appendSlice(ctx.allocator, cb_result.string.bytes());
         } else {
-            var buf = std.ArrayListUnmanaged(u8){};
+            var buf = std.ArrayListUnmanaged(u8).empty;
             try cb_result.format(&buf, ctx.allocator);
             defer buf.deinit(ctx.allocator);
             try result.appendSlice(ctx.allocator, buf.items);
@@ -1465,7 +1465,7 @@ fn preg_quote(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     // pcre special chars: . \ + * ? [ ^ ] $ ( ) { } = ! < > | : - #
     const specials = ".\\+*?[^]$(){}=!<>|:-#";
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     for (input) |c| {
         if (delimiter != null and c == delimiter.?) {
             try buf.append(ctx.allocator, '\\');

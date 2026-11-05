@@ -5,11 +5,19 @@ const parse = @import("parser.zig").parse;
 const Allocator = std.mem.Allocator;
 
 const Buf = struct {
-    inner: std.ArrayListUnmanaged(u8) = .{},
+    inner: std.ArrayListUnmanaged(u8) = .empty,
     gpa: Allocator,
 
-    fn writer(self: *Buf) std.ArrayListUnmanaged(u8).Writer {
-        return self.inner.writer(self.gpa);
+    fn append(self: *Buf, byte: u8) !void {
+        try self.inner.append(self.gpa, byte);
+    }
+
+    fn appendSlice(self: *Buf, bytes: []const u8) !void {
+        try self.inner.appendSlice(self.gpa, bytes);
+    }
+
+    fn print(self: *Buf, comptime fmt: []const u8, args: anytype) !void {
+        try self.inner.print(self.gpa, fmt, args);
     }
 
     fn deinit(self: *Buf) void {
@@ -26,7 +34,7 @@ fn expectParse(source: []const u8, expected: []const u8) !void {
     defer buf.deinit();
 
     for (stmts, 0..) |stmt, i| {
-        if (i > 0) try buf.writer().writeByte(' ');
+        if (i > 0) try buf.append(' ');
         try renderNode(&ast, stmt, &buf);
     }
 
@@ -42,511 +50,510 @@ fn expectError(source: []const u8) !void {
 
 fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
     const node = ast.nodes[idx];
-    const w = buf.writer();
     switch (node.tag) {
-        .integer_literal, .float_literal, .string_literal, .variable, .identifier => try w.writeAll(ast.tokenSlice(node.main_token)),
+        .integer_literal, .float_literal, .string_literal, .variable, .identifier => try buf.appendSlice(ast.tokenSlice(node.main_token)),
         .variable_variable => {
-            try w.writeAll("($$");
+            try buf.appendSlice("($$");
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
-        .true_literal => try w.writeAll("true"),
-        .false_literal => try w.writeAll("false"),
-        .null_literal => try w.writeAll("null"),
-        .empty_stmt => try w.writeAll("(empty)"),
+        .true_literal => try buf.appendSlice("true"),
+        .false_literal => try buf.appendSlice("false"),
+        .null_literal => try buf.appendSlice("null"),
+        .empty_stmt => try buf.appendSlice("(empty)"),
         .expression_stmt => try renderNode(ast, node.data.lhs, buf),
         .echo_stmt => {
-            try w.writeAll("(echo");
+            try buf.appendSlice("(echo");
             for (ast.extraSlice(node.data.lhs)) |expr| {
-                try w.writeByte(' ');
+                try buf.append(' ');
                 try renderNode(ast, expr, buf);
             }
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .return_stmt => {
-            try w.writeAll("(return");
+            try buf.appendSlice("(return");
             if (node.data.lhs != 0) {
-                try w.writeByte(' ');
+                try buf.append(' ');
                 try renderNode(ast, node.data.lhs, buf);
             }
-            try w.writeByte(')');
+            try buf.append(')');
         },
-        .break_stmt => try w.writeAll("(break)"),
-        .continue_stmt => try w.writeAll("(continue)"),
+        .break_stmt => try buf.appendSlice("(break)"),
+        .continue_stmt => try buf.appendSlice("(continue)"),
         .pipe_expr, .binary_op, .logical_and, .logical_or, .null_coalesce => {
-            try w.writeByte('(');
-            try w.writeAll(ast.tokenSlice(node.main_token));
-            try w.writeByte(' ');
+            try buf.append('(');
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
+            try buf.append(' ');
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(' ');
+            try buf.append(' ');
             try renderNode(ast, node.data.rhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .assign => {
-            try w.writeByte('(');
-            try w.writeAll(ast.tokenSlice(node.main_token));
-            try w.writeByte(' ');
+            try buf.append('(');
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
+            try buf.append(' ');
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(' ');
+            try buf.append(' ');
             try renderNode(ast, node.data.rhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .prefix_op => {
-            try w.writeByte('(');
-            try w.writeAll(ast.tokenSlice(node.main_token));
+            try buf.append('(');
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .postfix_op => {
-            try w.writeByte('(');
+            try buf.append('(');
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeAll(ast.tokenSlice(node.main_token));
-            try w.writeByte(')');
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
+            try buf.append(')');
         },
         .grouped_expr => try renderNode(ast, node.data.lhs, buf),
         .cast_expr => {
-            try w.writeAll("(cast ");
-            try w.writeAll(ast.tokenSlice(node.main_token));
-            try w.writeByte(' ');
+            try buf.appendSlice("(cast ");
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
+            try buf.append(' ');
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .closure_expr => {
-            try w.writeAll("(closure");
+            try buf.appendSlice("(closure");
             for (ast.extraSlice(node.data.lhs)) |param| {
-                try w.writeByte(' ');
+                try buf.append(' ');
                 try renderNode(ast, param, buf);
             }
-            try w.writeAll(" ...)");
+            try buf.appendSlice(" ...)");
         },
         .call => {
-            try w.writeAll("(call ");
+            try buf.appendSlice("(call ");
             try renderNode(ast, node.data.lhs, buf);
             for (ast.extraSlice(node.data.rhs)) |arg| {
-                try w.writeByte(' ');
+                try buf.append(' ');
                 try renderNode(ast, arg, buf);
             }
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .callable_ref => {
-            try w.writeAll("(callable_ref ");
+            try buf.appendSlice("(callable_ref ");
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .array_access => {
-            try w.writeAll("(idx ");
+            try buf.appendSlice("(idx ");
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(' ');
+            try buf.append(' ');
             try renderNode(ast, node.data.rhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .array_push_target => {
-            try w.writeAll("(push ");
+            try buf.appendSlice("(push ");
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .list_destructure => {
-            try w.writeAll("(list");
+            try buf.appendSlice("(list");
             for (ast.extraSlice(node.data.lhs)) |slot| {
-                try w.writeByte(' ');
+                try buf.append(' ');
                 if (slot == 0) {
-                    try w.writeByte('_');
+                    try buf.append('_');
                 } else {
                     try renderNode(ast, slot, buf);
                 }
             }
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .ref_target => {
-            try w.writeAll("(ref ");
+            try buf.appendSlice("(ref ");
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .named_arg => {
-            try w.writeAll("(named ");
-            try w.writeAll(ast.tokenSlice(node.main_token));
-            try w.writeByte(' ');
+            try buf.appendSlice("(named ");
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
+            try buf.append(' ');
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .property_access, .nullsafe_property_access => {
-            try w.writeAll(if (node.tag == .nullsafe_property_access) "(?-> " else "(-> ");
+            try buf.appendSlice(if (node.tag == .nullsafe_property_access) "(?-> " else "(-> ");
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(' ');
+            try buf.append(' ');
             try renderNode(ast, node.data.rhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .ternary => {
             const then_n = ast.extra_data[node.data.rhs];
             const else_n = ast.extra_data[node.data.rhs + 1];
-            try w.writeAll("(? ");
+            try buf.appendSlice("(? ");
             try renderNode(ast, node.data.lhs, buf);
             if (then_n != 0) {
-                try w.writeByte(' ');
+                try buf.append(' ');
                 try renderNode(ast, then_n, buf);
             }
-            try w.writeAll(" : ");
+            try buf.appendSlice(" : ");
             try renderNode(ast, else_n, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .array_literal => {
-            try w.writeByte('[');
+            try buf.append('[');
             for (ast.extraSlice(node.data.lhs), 0..) |elem, i| {
-                if (i > 0) try w.writeAll(", ");
+                if (i > 0) try buf.appendSlice(", ");
                 try renderNode(ast, elem, buf);
             }
-            try w.writeByte(']');
+            try buf.append(']');
         },
         .array_element => {
             if (node.data.rhs != 0) {
                 try renderNode(ast, node.data.rhs, buf);
-                try w.writeAll(" => ");
+                try buf.appendSlice(" => ");
             }
             try renderNode(ast, node.data.lhs, buf);
         },
         .if_simple => {
-            try w.writeAll("(if ");
+            try buf.appendSlice("(if ");
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(' ');
+            try buf.append(' ');
             try renderNode(ast, node.data.rhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .if_else => {
-            try w.writeAll("(if ");
+            try buf.appendSlice("(if ");
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(' ');
+            try buf.append(' ');
             try renderNode(ast, ast.extra_data[node.data.rhs], buf);
-            try w.writeAll(" else ");
+            try buf.appendSlice(" else ");
             try renderNode(ast, ast.extra_data[node.data.rhs + 1], buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .while_stmt => {
-            try w.writeAll("(while ");
+            try buf.appendSlice("(while ");
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(' ');
+            try buf.append(' ');
             try renderNode(ast, node.data.rhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .do_while => {
-            try w.writeAll("(do ");
+            try buf.appendSlice("(do ");
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeAll(" while ");
+            try buf.appendSlice(" while ");
             try renderNode(ast, node.data.rhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
-        .for_stmt => try w.writeAll("(for)"),
-        .foreach_stmt => try w.writeAll("(foreach)"),
+        .for_stmt => try buf.appendSlice("(for)"),
+        .foreach_stmt => try buf.appendSlice("(foreach)"),
         .block => {
-            try w.writeByte('{');
+            try buf.append('{');
             for (ast.extraSlice(node.data.lhs)) |stmt| {
-                try w.writeByte(' ');
+                try buf.append(' ');
                 try renderNode(ast, stmt, buf);
             }
-            try w.writeAll(" }");
+            try buf.appendSlice(" }");
         },
         .function_decl => {
-            try w.writeAll("(fn ");
-            try w.writeAll(ast.tokenSlice(node.main_token));
-            try w.writeByte('(');
+            try buf.appendSlice("(fn ");
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
+            try buf.append('(');
             for (ast.extraSlice(node.data.lhs), 0..) |param, i| {
-                if (i > 0) try w.writeAll(", ");
+                if (i > 0) try buf.appendSlice(", ");
                 try renderNode(ast, param, buf);
             }
-            try w.writeAll(") ");
+            try buf.appendSlice(") ");
             try renderNode(ast, node.data.rhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .switch_stmt => {
-            try w.writeAll("(switch ");
+            try buf.appendSlice("(switch ");
             try renderNode(ast, node.data.lhs, buf);
             for (ast.extraSlice(node.data.rhs)) |c| {
-                try w.writeByte(' ');
+                try buf.append(' ');
                 try renderNode(ast, c, buf);
             }
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .switch_case => {
-            try w.writeAll("(case");
+            try buf.appendSlice("(case");
             for (ast.extraSlice(node.data.lhs)) |v| {
-                try w.writeByte(' ');
+                try buf.append(' ');
                 try renderNode(ast, v, buf);
             }
-            try w.writeAll(": ...");
-            try w.writeByte(')');
+            try buf.appendSlice(": ...");
+            try buf.append(')');
         },
-        .switch_default => try w.writeAll("(default: ...)"),
+        .switch_default => try buf.appendSlice("(default: ...)"),
         .match_expr => {
-            try w.writeAll("(match ");
+            try buf.appendSlice("(match ");
             try renderNode(ast, node.data.lhs, buf);
             for (ast.extraSlice(node.data.rhs)) |a| {
-                try w.writeByte(' ');
+                try buf.append(' ');
                 try renderNode(ast, a, buf);
             }
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .match_arm => {
             const vals = ast.extraSlice(node.data.lhs);
             if (vals.len == 0) {
-                try w.writeAll("(default => ");
+                try buf.appendSlice("(default => ");
             } else {
-                try w.writeByte('(');
+                try buf.append('(');
                 for (vals, 0..) |v, i| {
-                    if (i > 0) try w.writeAll(", ");
+                    if (i > 0) try buf.appendSlice(", ");
                     try renderNode(ast, v, buf);
                 }
-                try w.writeAll(" => ");
+                try buf.appendSlice(" => ");
             }
             try renderNode(ast, node.data.rhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .const_decl => {
-            try w.writeAll("(const ");
-            try w.writeAll(ast.tokenSlice(node.main_token));
-            try w.writeAll(" = ");
+            try buf.appendSlice("(const ");
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
+            try buf.appendSlice(" = ");
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
-        .inline_html => try w.writeAll("(html)"),
+        .inline_html => try buf.appendSlice("(html)"),
         .throw_expr => {
-            try w.writeAll("(throw ");
+            try buf.appendSlice("(throw ");
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .print_expr => {
-            try w.writeAll("(print ");
+            try buf.appendSlice("(print ");
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
-        .try_catch => try w.writeAll("(try/catch)"),
-        .catch_clause => try w.writeAll("(catch)"),
+        .try_catch => try buf.appendSlice("(try/catch)"),
+        .catch_clause => try buf.appendSlice("(catch)"),
         .class_decl => {
-            try w.writeAll("(class ");
-            try w.writeAll(ast.tokenSlice(node.main_token));
-            try w.writeByte(')');
+            try buf.appendSlice("(class ");
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
+            try buf.append(')');
         },
         .class_method => {
-            try w.writeAll("(method ");
-            try w.writeAll(ast.tokenSlice(node.main_token));
-            try w.writeByte(')');
+            try buf.appendSlice("(method ");
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
+            try buf.append(')');
         },
         .static_class_method => {
-            try w.writeAll("(static-method ");
-            try w.writeAll(ast.tokenSlice(node.main_token));
-            try w.writeByte(')');
+            try buf.appendSlice("(static-method ");
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
+            try buf.append(')');
         },
         .class_property, .class_property_hooks => {
-            try w.writeAll("(prop ");
-            try w.writeAll(ast.tokenSlice(node.main_token));
-            try w.writeByte(')');
+            try buf.appendSlice("(prop ");
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
+            try buf.append(')');
         },
         .static_class_property => {
-            try w.writeAll("(static-prop ");
-            try w.writeAll(ast.tokenSlice(node.main_token));
-            try w.writeByte(')');
+            try buf.appendSlice("(static-prop ");
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
+            try buf.append(')');
         },
         .new_expr => {
-            try w.writeAll("(new ");
-            try w.writeAll(ast.tokenSlice(node.main_token));
+            try buf.appendSlice("(new ");
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
             for (ast.extraSlice(node.data.lhs)) |arg| {
-                try w.writeByte(' ');
+                try buf.append(' ');
                 try renderNode(ast, arg, buf);
             }
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .new_expr_dynamic => {
-            try w.writeAll("(new-dynamic ");
+            try buf.appendSlice("(new-dynamic ");
             try renderNode(ast, node.data.lhs, buf);
             for (ast.extraSlice(node.data.rhs)) |arg| {
-                try w.writeByte(' ');
+                try buf.append(' ');
                 try renderNode(ast, arg, buf);
             }
-            try w.writeByte(')');
+            try buf.append(')');
         },
-        .anonymous_class => try w.writeAll("(new-anon-class)"),
+        .anonymous_class => try buf.appendSlice("(new-anon-class)"),
         .method_call, .nullsafe_method_call => {
-            try w.writeAll(if (node.tag == .nullsafe_method_call) "(?-> " else "(-> ");
+            try buf.appendSlice(if (node.tag == .nullsafe_method_call) "(?-> " else "(-> ");
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(' ');
-            try w.writeAll(ast.tokenSlice(node.main_token));
+            try buf.append(' ');
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
             for (ast.extraSlice(node.data.rhs)) |arg| {
-                try w.writeByte(' ');
+                try buf.append(' ');
                 try renderNode(ast, arg, buf);
             }
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .static_call => {
-            try w.writeAll("(:: ");
+            try buf.appendSlice("(:: ");
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(' ');
-            try w.writeAll(ast.tokenSlice(node.main_token));
+            try buf.append(' ');
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
             for (ast.extraSlice(node.data.rhs)) |arg| {
-                try w.writeByte(' ');
+                try buf.append(' ');
                 try renderNode(ast, arg, buf);
             }
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .dynamic_static_call => {
-            try w.writeAll("(::{} ");
+            try buf.appendSlice("(::{} ");
             try renderNode(ast, node.data.lhs, buf);
             const extra = ast.extraSlice(node.data.rhs);
-            try w.writeByte(' ');
+            try buf.append(' ');
             try renderNode(ast, extra[0], buf);
             for (extra[1..]) |arg| {
-                try w.writeByte(' ');
+                try buf.append(' ');
                 try renderNode(ast, arg, buf);
             }
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .clone_with => {
-            try w.writeAll("(clone-with ");
+            try buf.appendSlice("(clone-with ");
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(' ');
+            try buf.append(' ');
             try renderNode(ast, node.data.rhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .dynamic_class_const => {
-            try w.writeAll("(::{} ");
+            try buf.appendSlice("(::{} ");
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(' ');
+            try buf.append(' ');
             try renderNode(ast, node.data.rhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .static_prop_access => {
-            try w.writeAll("(::$ ");
+            try buf.appendSlice("(::$ ");
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(' ');
-            try w.writeAll(ast.tokenSlice(node.main_token));
-            try w.writeByte(')');
+            try buf.append(' ');
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
+            try buf.append(')');
         },
         .interface_decl => {
-            try w.writeAll("(interface ");
-            try w.writeAll(ast.tokenSlice(node.main_token));
-            try w.writeByte(')');
+            try buf.appendSlice("(interface ");
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
+            try buf.append(')');
         },
         .interface_method => {
-            try w.writeAll("(imethod ");
-            try w.writeAll(ast.tokenSlice(node.main_token));
-            try w.writeByte(')');
+            try buf.appendSlice("(imethod ");
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
+            try buf.append(')');
         },
         .trait_decl => {
-            try w.writeAll("(trait ");
-            try w.writeAll(ast.tokenSlice(node.main_token));
-            try w.writeByte(')');
+            try buf.appendSlice("(trait ");
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
+            try buf.append(')');
         },
-        .trait_use => try w.writeAll("(use-trait)"),
-        .trait_insteadof => try w.writeAll("(insteadof)"),
-        .trait_as => try w.writeAll("(as)"),
+        .trait_use => try buf.appendSlice("(use-trait)"),
+        .trait_insteadof => try buf.appendSlice("(insteadof)"),
+        .trait_as => try buf.appendSlice("(as)"),
         .yield_expr => {
-            try w.writeAll("(yield");
+            try buf.appendSlice("(yield");
             if (node.data.lhs != 0) {
-                try w.writeByte(' ');
+                try buf.append(' ');
                 try renderNode(ast, node.data.lhs, buf);
             }
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .yield_from_expr => {
-            try w.writeAll("(yield-from ");
+            try buf.appendSlice("(yield-from ");
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .yield_pair_expr => {
-            try w.writeAll("(yield ");
+            try buf.appendSlice("(yield ");
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeAll(" => ");
+            try buf.appendSlice(" => ");
             try renderNode(ast, node.data.rhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .expr_list => {
             for (ast.extraSlice(node.data.lhs), 0..) |expr, i| {
-                if (i > 0) try w.writeAll(", ");
+                if (i > 0) try buf.appendSlice(", ");
                 try renderNode(ast, expr, buf);
             }
         },
         .global_stmt => {
-            try w.writeAll("(global");
+            try buf.appendSlice("(global");
             for (ast.extraSlice(node.data.lhs)) |v| {
-                try w.writeByte(' ');
+                try buf.append(' ');
                 try renderNode(ast, v, buf);
             }
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .static_var => {
-            try w.writeAll("(static ");
-            try w.writeAll(ast.tokenSlice(node.main_token));
+            try buf.appendSlice("(static ");
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
             if (node.data.lhs != 0) {
-                try w.writeAll(" = ");
+                try buf.appendSlice(" = ");
                 try renderNode(ast, node.data.lhs, buf);
             }
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .array_spread, .splat_expr => {
-            try w.writeAll("(...");
+            try buf.appendSlice("(...");
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .require_expr => {
-            try w.writeAll("(");
-            try w.writeAll(ast.tokenSlice(node.main_token));
-            try w.writeByte(' ');
+            try buf.appendSlice("(");
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
+            try buf.append(' ');
             try renderNode(ast, node.data.lhs, buf);
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .namespace_decl => {
-            try w.writeAll("(namespace ");
+            try buf.appendSlice("(namespace ");
             for (ast.extraSlice(node.data.lhs), 0..) |tok_idx, i| {
-                if (i > 0) try w.writeByte('\\');
-                try w.writeAll(ast.tokenSlice(tok_idx));
+                if (i > 0) try buf.append('\\');
+                try buf.appendSlice(ast.tokenSlice(tok_idx));
             }
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .use_stmt, .use_fn_stmt, .use_const_stmt => {
-            if (node.tag == .use_fn_stmt) try w.writeAll("(use function ") else if (node.tag == .use_const_stmt) try w.writeAll("(use const ") else try w.writeAll("(use ");
+            if (node.tag == .use_fn_stmt) try buf.appendSlice("(use function ") else if (node.tag == .use_const_stmt) try buf.appendSlice("(use const ") else try buf.appendSlice("(use ");
             for (ast.extraSlice(node.data.lhs), 0..) |tok_idx, i| {
-                if (i > 0) try w.writeByte('\\');
-                try w.writeAll(ast.tokenSlice(tok_idx));
+                if (i > 0) try buf.append('\\');
+                try buf.appendSlice(ast.tokenSlice(tok_idx));
             }
             if (node.tag == .use_stmt and node.data.rhs != 0) {
-                try w.writeAll(" as ");
-                try w.writeAll(ast.tokenSlice(node.data.rhs));
+                try buf.appendSlice(" as ");
+                try buf.appendSlice(ast.tokenSlice(node.data.rhs));
             }
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .declare_stmt => {
-            try w.writeAll("(declare");
+            try buf.appendSlice("(declare");
             if (node.data.rhs != 0) {
-                try w.writeByte(' ');
+                try buf.append(' ');
                 try renderNode(ast, node.data.rhs, buf);
             }
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .goto_stmt => {
-            try w.writeAll("(goto ");
-            try w.writeAll(ast.tokenSlice(node.main_token));
-            try w.writeByte(')');
+            try buf.appendSlice("(goto ");
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
+            try buf.append(')');
         },
         .label_stmt => {
-            try w.writeAll("(label ");
-            try w.writeAll(ast.tokenSlice(node.main_token));
-            try w.writeByte(')');
+            try buf.appendSlice("(label ");
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
+            try buf.append(')');
         },
         .enum_decl => {
-            try w.writeAll("(enum ");
-            try w.writeAll(ast.tokenSlice(node.main_token));
-            try w.writeByte(')');
+            try buf.appendSlice("(enum ");
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
+            try buf.append(')');
         },
         .enum_case => {
-            try w.writeAll("(case ");
-            try w.writeAll(ast.tokenSlice(node.main_token));
+            try buf.appendSlice("(case ");
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
             if (node.data.lhs != 0) {
-                try w.writeAll(" = ");
+                try buf.appendSlice(" = ");
                 try renderNode(ast, node.data.lhs, buf);
             }
-            try w.writeByte(')');
+            try buf.append(')');
         },
         .qualified_name => {
             for (ast.extraSlice(node.data.lhs), 0..) |tok_idx, i| {
-                if (i > 0) try w.writeByte('\\');
-                try w.writeAll(ast.tokenSlice(tok_idx));
+                if (i > 0) try buf.append('\\');
+                try buf.appendSlice(ast.tokenSlice(tok_idx));
             }
         },
         .root => {},

@@ -1,5 +1,6 @@
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
+const platform = @import("../platform.zig");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
@@ -254,7 +255,7 @@ fn native_setcookie(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     const name = args[0].string.bytes();
     const value = if (args.len >= 2 and args[1] == .string) args[1].string.bytes() else "";
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     try buf.appendSlice(ctx.allocator, "Set-Cookie: ");
     try buf.appendSlice(ctx.allocator, name);
@@ -350,7 +351,7 @@ fn appendCookieOptionsPositional(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Al
 
 fn appendMaxAge(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, expires: i64) !void {
     try buf.appendSlice(a, "; Max-Age=");
-    const now: i64 = @intCast(@divFloor(std.time.milliTimestamp(), 1000));
+    const now: i64 = @intCast(@divFloor(platform.milliTimestamp(), 1000));
     var tmp: [20]u8 = undefined;
     const s = std.fmt.bufPrint(&tmp, "{d}", .{expires - now}) catch "0";
     try buf.appendSlice(a, s);

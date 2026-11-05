@@ -138,9 +138,9 @@ pub fn prepare(ctx: *NativeContext, obj: *PhpObject, sql: []const u8) RuntimeErr
     const conn = getConn(obj) orelse return pdo.throwPdo(ctx, "Database not connected");
 
     // rewrite named params to positional ? and build param map
-    var rewritten = std.ArrayListUnmanaged(u8){};
+    var rewritten = std.ArrayListUnmanaged(u8).empty;
     defer rewritten.deinit(ctx.allocator);
-    var param_names = std.ArrayListUnmanaged([]const u8){};
+    var param_names = std.ArrayListUnmanaged([]const u8).empty;
     var i: usize = 0;
     var in_string = false;
     while (i < sql.len) {
@@ -233,7 +233,7 @@ fn cPtr(z: ?[:0]u8) ?[*:0]const u8 {
 // the statement's sql with each ? replaced by its escaped parameter, owned
 // by the caller
 fn interpolateParams(ctx: *NativeContext, conn: *mysql.MYSQL, sql: []const u8, params: *PhpArray, param_map: ?*PhpArray) ![]u8 {
-    var positional = std.ArrayListUnmanaged(Value){};
+    var positional = std.ArrayListUnmanaged(Value).empty;
     defer positional.deinit(ctx.allocator);
 
     if (param_map) |pm| {
@@ -255,7 +255,7 @@ fn interpolateParams(ctx: *NativeContext, conn: *mysql.MYSQL, sql: []const u8, p
         for (params.entries.items) |entry| try positional.append(ctx.allocator, entry.value);
     }
 
-    var result = std.ArrayListUnmanaged(u8){};
+    var result = std.ArrayListUnmanaged(u8).empty;
     errdefer result.deinit(ctx.allocator);
     var param_idx: usize = 0;
     for (sql) |ch| {
@@ -270,11 +270,10 @@ fn interpolateParams(ctx: *NativeContext, conn: *mysql.MYSQL, sql: []const u8, p
 }
 
 fn appendSqlValue(ctx: *NativeContext, conn: *mysql.MYSQL, out: *std.ArrayListUnmanaged(u8), val: Value) !void {
-    const w = out.writer(ctx.allocator);
     switch (val) {
-        .bool => |b| try w.writeAll(if (b) "1" else "0"),
-        .int => |i| try w.print("{d}", .{i}),
-        .float => |f| try w.print("{d}", .{f}),
+        .bool => |b| try out.appendSlice(ctx.allocator, if (b) "1" else "0"),
+        .int => |i| try out.print(ctx.allocator, "{d}", .{i}),
+        .float => |f| try out.print(ctx.allocator, "{d}", .{f}),
         .string => |php_s| {
             const s = php_s.bytes();
             try out.ensureUnusedCapacity(ctx.allocator, s.len * 2 + 3);
@@ -284,7 +283,7 @@ fn appendSqlValue(ctx: *NativeContext, conn: *mysql.MYSQL, out: *std.ArrayListUn
             out.items.len += elen;
             out.appendAssumeCapacity('\'');
         },
-        else => try w.writeAll("NULL"),
+        else => try out.appendSlice(ctx.allocator, "NULL"),
     }
 }
 

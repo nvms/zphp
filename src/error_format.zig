@@ -14,7 +14,7 @@ fn write(buf: *Writer, alloc: std.mem.Allocator, data: []const u8) void {
 }
 
 fn writeFmt(buf: *Writer, alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) void {
-    std.fmt.format(buf.writer(alloc), fmt, args) catch {};
+    buf.print(alloc, fmt, args) catch {};
 }
 
 fn writeSourceSnippet(buf: *Writer, alloc: std.mem.Allocator, source: []const u8, loc: SourceLocation, highlight_len: u32) void {
@@ -94,7 +94,7 @@ fn displayPath(file_path: []const u8) []const u8 {
 }
 
 pub fn formatParseErrors(alloc: std.mem.Allocator, ast: *const Ast, file_path: []const u8) []const u8 {
-    var buf: Writer = .{};
+    var buf: Writer = .empty;
     const path = displayPath(file_path);
 
     for (ast.errors) |err| {
@@ -139,7 +139,7 @@ pub fn parseErrorSummary(alloc: std.mem.Allocator, ast: *const Ast) ![]u8 {
 
 // a compile-time fatal in the script being run, reported like a parse error
 pub fn formatCompileError(alloc: std.mem.Allocator, ast: *const Ast, file_path: []const u8, diag: Diagnostic) []const u8 {
-    var buf: Writer = .{};
+    var buf: Writer = .empty;
     const tok = ast.tokens[diag.token];
     const loc = Chunk.locationFromOffset(ast.source, tok.start);
     writeFmt(&buf, alloc, "\nFatal error: {s} in {s} on line {d}\n\n", .{ diag.message, displayPath(file_path), loc.line });
@@ -173,7 +173,7 @@ fn errorTagMessage(tag: Ast.Error.Tag) []const u8 {
 }
 
 pub fn formatRuntimeError(alloc: std.mem.Allocator, vm: *const VM) []const u8 {
-    var buf: Writer = .{};
+    var buf: Writer = .empty;
 
     if (vm.error_msg) |msg| {
         // some error_msg values already have a leading 'Fatal error:' or
@@ -222,7 +222,7 @@ pub const Copy = enum { log, display };
 // throwable's __toString (exceptions.uncaughtDescription), which runs php and
 // so is computed by the caller. the caller owns the result
 pub fn formatUncaught(alloc: std.mem.Allocator, vm: *const VM, copy: Copy, description: ?[]const u8) []const u8 {
-    var buf: Writer = .{};
+    var buf: Writer = .empty;
     if (vm.pending_exception) |exc| formatUncaughtException(&buf, alloc, vm, exc, .{ .copy = copy, .description = description });
     return buf.toOwnedSlice(alloc) catch "";
 }

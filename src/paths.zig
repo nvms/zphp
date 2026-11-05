@@ -1,10 +1,11 @@
 const std = @import("std");
+const platform = @import("platform.zig");
 
 // a path against the working directory when it is relative
 pub fn absolute(buf: []u8, path: []const u8) ?[]const u8 {
     if (std.fs.path.isAbsolute(path)) return path;
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd = std.process.getCwd(&cwd_buf) catch return null;
+    const cwd = platform.getCwd(&cwd_buf) catch return null;
     return std.fmt.bufPrint(buf, "{s}{s}{s}", .{ cwd, std.fs.path.sep_str, path }) catch null;
 }
 

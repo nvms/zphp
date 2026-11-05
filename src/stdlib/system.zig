@@ -224,7 +224,7 @@ fn native_posix_getgrgid(ctx: *NativeContext, args: []const Value) RuntimeError!
 
 fn native_posix_getpwnam(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const name_z = try ctx.allocator.dupeZ(u8, args[0].string.bytes());
+    const name_z = try ctx.allocator.dupeSentinel(u8, args[0].string.bytes(), 0);
     defer ctx.allocator.free(name_z);
     const pw = getpwnam(name_z) orelse return NativeResult.scalar(.{ .bool = false });
     const arr = try ctx.createArray();
@@ -240,7 +240,7 @@ fn native_posix_getpwnam(ctx: *NativeContext, args: []const Value) RuntimeError!
 
 fn native_posix_getgrnam(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const name_z = try ctx.allocator.dupeZ(u8, args[0].string.bytes());
+    const name_z = try ctx.allocator.dupeSentinel(u8, args[0].string.bytes(), 0);
     defer ctx.allocator.free(name_z);
     const g = getgrnam(name_z) orelse return NativeResult.scalar(.{ .bool = false });
     const arr = try ctx.createArray();
@@ -465,14 +465,14 @@ fn native_getopt(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
 fn native_sleep(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(.{ .int = 0 });
     const secs = Value.toInt(args[0]);
-    if (secs > 0) std.Thread.sleep(@intCast(secs * 1_000_000_000));
+    if (secs > 0) platform.sleep(@intCast(secs * 1_000_000_000));
     return NativeResult.scalar(.{ .int = 0 });
 }
 
 fn native_usleep(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(.null);
     const usecs = Value.toInt(args[0]);
-    if (usecs > 0) std.Thread.sleep(@intCast(usecs * 1_000));
+    if (usecs > 0) platform.sleep(@intCast(usecs * 1_000));
     return NativeResult.scalar(.null);
 }
 
@@ -482,18 +482,18 @@ fn native_time_nanosleep(_: *NativeContext, args: []const Value) RuntimeError!Na
     const nsecs = Value.toInt(args[1]);
     if (secs < 0 or nsecs < 0) return NativeResult.scalar(.{ .bool = false });
     const total_ns: u64 = @intCast(secs * 1_000_000_000 + nsecs);
-    std.Thread.sleep(total_ns);
+    platform.sleep(total_ns);
     return NativeResult.scalar(.{ .bool = true });
 }
 
 fn native_time_sleep_until(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     const target = Value.toFloat(args[0]);
-    const now: f64 = @floatFromInt(std.time.timestamp());
+    const now: f64 = @floatFromInt(platform.timestamp());
     if (target <= now) return NativeResult.scalar(.{ .bool = true });
     const delta: f64 = (target - now) * 1e9;
     const delta_ns: u64 = if (!(delta < 18446744073709549568.0)) std.math.maxInt(u64) else @intFromFloat(delta);
-    std.Thread.sleep(delta_ns);
+    platform.sleep(delta_ns);
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -522,7 +522,7 @@ fn native_getenv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     if (args.len == 0) {
         const arr = try ctx.createArray();
         if (platform.is_windows) {
-            var em = std.process.getEnvMap(ctx.allocator) catch return NativeResult.borrowed(.{ .array = arr });
+            var em = platform.getEnvMap(ctx.allocator) catch return NativeResult.borrowed(.{ .array = arr });
             defer em.deinit();
             var it = em.iterator();
             while (it.next()) |e| try putEnvEntry(ctx, arr, e.key_ptr.*, e.value_ptr.*);
@@ -537,7 +537,7 @@ fn native_getenv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         return NativeResult.borrowed(.{ .array = arr });
     }
     if (args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const val = std.process.getEnvVarOwned(ctx.allocator, args[0].string.bytes()) catch return NativeResult.scalar(.{ .bool = false });
+    const val = platform.getenvOwned(ctx.allocator, args[0].string.bytes()) catch return NativeResult.scalar(.{ .bool = false });
     return NativeResult.takeString(try Value.String.adopt(ctx.allocator, val));
 }
 
@@ -558,14 +558,14 @@ fn native_putenv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     if (std.mem.indexOfScalar(u8, setting, '=')) |eq| {
         const name = setting[0..eq];
         const val = setting[eq + 1 ..];
-        const name_z = ctx.allocator.dupeZ(u8, name) catch return NativeResult.scalar(.{ .bool = false });
+        const name_z = ctx.allocator.dupeSentinel(u8, name, 0) catch return NativeResult.scalar(.{ .bool = false });
         defer ctx.allocator.free(name_z);
-        const val_z = ctx.allocator.dupeZ(u8, val) catch return NativeResult.scalar(.{ .bool = false });
+        const val_z = ctx.allocator.dupeSentinel(u8, val, 0) catch return NativeResult.scalar(.{ .bool = false });
         defer ctx.allocator.free(val_z);
         const ok = if (platform.is_windows) _putenv_s(name_z.ptr, val_z.ptr) == 0 else setenv(name_z.ptr, val_z.ptr, 1) == 0;
         return NativeResult.scalar(.{ .bool = ok });
     } else {
-        const name_z = ctx.allocator.dupeZ(u8, setting) catch return NativeResult.scalar(.{ .bool = false });
+        const name_z = ctx.allocator.dupeSentinel(u8, setting, 0) catch return NativeResult.scalar(.{ .bool = false });
         defer ctx.allocator.free(name_z);
         const ok = if (platform.is_windows) _putenv_s(name_z.ptr, "") == 0 else unsetenv(name_z.ptr) == 0;
         return NativeResult.scalar(.{ .bool = ok });
@@ -577,15 +577,15 @@ threadlocal var previous_uniqid_microsecond: i128 = -1;
 fn native_uniqid(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const prefix = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else "";
     const more_entropy = args.len >= 2 and args[1].isTruthy();
-    var ns = std.time.nanoTimestamp();
-    while (@divFloor(ns, 1_000) == previous_uniqid_microsecond) ns = std.time.nanoTimestamp();
+    var ns = platform.nanoTimestamp();
+    while (@divFloor(ns, 1_000) == previous_uniqid_microsecond) ns = platform.nanoTimestamp();
     previous_uniqid_microsecond = @divFloor(ns, 1_000);
     const abs_ns: u64 = @intCast(if (ns < 0) -ns else ns);
     const usec: u64 = @divTrunc(@mod(abs_ns, 1_000_000_000), 1_000);
     const sec: u64 = @divTrunc(abs_ns, 1_000_000_000);
     var buf: [128]u8 = undefined;
     const hex = if (more_entropy)
-        std.fmt.bufPrint(&buf, "{s}{x:0>8}{x:0>5}.{d:0>8}", .{ prefix, sec, usec, std.crypto.random.intRangeAtMost(u32, 0, 99999999) }) catch return NativeResult.literal("")
+        std.fmt.bufPrint(&buf, "{s}{x:0>8}{x:0>5}.{d:0>8}", .{ prefix, sec, usec, platform.random.intRangeAtMost(u32, 0, 99999999) }) catch return NativeResult.literal("")
     else
         std.fmt.bufPrint(&buf, "{s}{x:0>8}{x:0>5}", .{ prefix, sec, usec }) catch return NativeResult.literal("");
     return try NativeResult.copyString(ctx.allocator, hex);
@@ -593,7 +593,7 @@ fn native_uniqid(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
 
 fn native_getcwd(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd = std.fs.cwd().realpath(".", &buf) catch return NativeResult.scalar(.{ .bool = false });
+    const cwd = platform.realpath(".", &buf) catch return NativeResult.scalar(.{ .bool = false });
     return try NativeResult.copyString(ctx.allocator, cwd);
 }
 
@@ -630,8 +630,8 @@ fn native_getlastmod(ctx: *NativeContext, _: []const Value) RuntimeError!NativeR
     // the running file path; stat it to produce a real mtime
     const path = ctx.vm.file_path;
     if (path.len == 0) return NativeResult.scalar(.{ .bool = false });
-    const stat = std.fs.cwd().statFile(path) catch return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.scalar(.{ .int = @intCast(@divTrunc(stat.mtime, std.time.ns_per_s)) });
+    const stat = std.Io.Dir.cwd().statFile(platform.io, path, .{}) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .int = @intCast(@divTrunc(stat.mtime.nanoseconds, std.time.ns_per_s)) });
 }
 
 fn native_cli_get_process_title(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -676,11 +676,11 @@ fn native_move_uploaded_file(_: *NativeContext, args: []const Value) RuntimeErro
     const to = args[1].string.bytes();
     if (!std.mem.startsWith(u8, from, "/tmp/zphp_upload_")) return NativeResult.scalar(.{ .bool = false });
     bundle.prepareWrite(to, .create);
-    std.fs.cwd().rename(from, to) catch {
-        const data = std.fs.cwd().readFileAlloc(std.heap.page_allocator, from, 1024 * 1024 * 64) catch return NativeResult.scalar(.{ .bool = false });
+    std.Io.Dir.cwd().rename(from, std.Io.Dir.cwd(), to, platform.io) catch {
+        const data = std.Io.Dir.cwd().readFileAlloc(platform.io, from, std.heap.page_allocator, .limited(1024 * 1024 * 64)) catch return NativeResult.scalar(.{ .bool = false });
         defer std.heap.page_allocator.free(data);
-        std.fs.cwd().writeFile(.{ .sub_path = to, .data = data }) catch return NativeResult.scalar(.{ .bool = false });
-        std.fs.cwd().deleteFile(from) catch {};
+        std.Io.Dir.cwd().writeFile(platform.io, .{ .sub_path = to, .data = data }) catch return NativeResult.scalar(.{ .bool = false });
+        std.Io.Dir.cwd().deleteFile(platform.io, from) catch {};
     };
     return NativeResult.scalar(.{ .bool = true });
 }
@@ -688,7 +688,7 @@ fn native_move_uploaded_file(_: *NativeContext, args: []const Value) RuntimeErro
 fn native_is_uploaded_file(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     if (!std.mem.startsWith(u8, args[0].string.bytes(), "/tmp/zphp_upload_")) return NativeResult.scalar(.{ .bool = false });
-    std.fs.cwd().access(args[0].string.bytes(), .{}) catch return NativeResult.scalar(.{ .bool = false });
+    std.Io.Dir.cwd().access(platform.io, args[0].string.bytes(), .{}) catch return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -711,13 +711,13 @@ fn native_tempnam(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     // php falls back to the system temp dir when the requested one is unusable
     const requested = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else platform.tempDir();
     bundle.ensureDir(requested);
-    const dir = if (std.fs.cwd().access(requested, .{})) |_| requested else |_| blk: {
+    const dir = if (std.Io.Dir.cwd().access(platform.io, requested, .{})) |_| requested else |_| blk: {
         try ctx.vm.raiseError(8, "tempnam(): file created in the system's temporary directory");
         break :blk platform.tempDir();
     };
     const prefix = if (args.len >= 2 and args[1] == .string) args[1].string.bytes() else "tmp";
     var seed_bytes: [8]u8 = undefined;
-    std.crypto.random.bytes(&seed_bytes);
+    platform.random.bytes(&seed_bytes);
     var rng = std.Random.DefaultPrng.init(std.mem.readInt(u64, &seed_bytes, .little));
     const r = rng.random();
     var attempt: u8 = 0;
@@ -727,10 +727,10 @@ fn native_tempnam(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         for (&hex_buf) |*b| b.* = hex[r.uintLessThan(u8, 16)];
         const sep: []const u8 = if (dir.len > 0 and platform.isSep(dir[dir.len - 1])) "" else platform.sep_str;
         const candidate = std.fmt.allocPrint(ctx.allocator, "{s}{s}{s}{s}", .{ dir, sep, prefix, &hex_buf }) catch continue;
-        if (std.fs.cwd().createFile(candidate, .{ .exclusive = true, .mode = 0o600 })) |file| {
-            file.close();
+        if (std.Io.Dir.cwd().createFile(platform.io, candidate, .{ .exclusive = true, .permissions = platform.permissionsFromMode(0o600) })) |file| {
+            file.close(platform.io);
             var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const resolved = std.fs.cwd().realpath(candidate, &path_buf) catch {
+            const resolved = platform.realpath(candidate, &path_buf) catch {
                 return NativeResult.takeString(try Value.String.adopt(ctx.allocator, candidate));
             };
             const dup = ctx.allocator.dupe(u8, resolved) catch {
@@ -986,17 +986,8 @@ const ShellResult = struct { stdout: []u8, term: std.process.Child.Term };
 // stay attached to zphp's, as in php: a command's errors reach the terminal
 fn runShell(allocator: std.mem.Allocator, command: []const u8) !ShellResult {
     const argv = platform.shellArgv(command);
-    var child = std.process.Child.init(&argv, allocator);
-    child.stdin_behavior = .Inherit;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Inherit;
-    try child.spawn();
-    const stdout = child.stdout.?.readToEndAlloc(allocator, 64 * 1024 * 1024) catch |err| {
-        _ = child.kill() catch {};
-        return err;
-    };
-    errdefer allocator.free(stdout);
-    return .{ .stdout = stdout, .term = try child.wait() };
+    const result = try platform.runChild(allocator, &argv, .{});
+    return .{ .stdout = result.stdout, .term = result.term };
 }
 
 fn requireCommand(ctx: *NativeContext, comptime func: []const u8, command: Value) RuntimeError!void {
@@ -1022,7 +1013,7 @@ fn native_exec(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     const result = runShell(ctx.allocator, args[0].string.bytes()) catch return NativeResult.scalar(.{ .bool = false });
     defer ctx.allocator.free(result.stdout);
 
-    var lines = std.ArrayListUnmanaged([]const u8){};
+    var lines = std.ArrayListUnmanaged([]const u8).empty;
     defer lines.deinit(ctx.allocator);
     var iter = std.mem.splitScalar(u8, result.stdout, '\n');
     while (iter.next()) |raw| {
@@ -1044,11 +1035,7 @@ fn native_exec(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
         if (args[1] != .array) ctx.setCallerVar(1, args.len, .{ .array = arr });
     }
     // optional result_code (param 3, by-ref)
-    const exit_code: i64 = switch (result.term) {
-        .Exited => |c| @intCast(c),
-        .Signal => |c| @as(i64, @intCast(c)) + 128,
-        else => -1,
-    };
+    const exit_code: i64 = platform.exitStatus(result.term);
     if (args.len >= 3) ctx.setCallerVar(2, args.len, .{ .int = exit_code });
 
     if (lines.items.len == 0) return NativeResult.literal("");
@@ -1064,11 +1051,7 @@ fn native_system(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
 
     try ctx.vm.output.appendSlice(ctx.allocator, result.stdout);
 
-    const exit_code: i64 = switch (result.term) {
-        .Exited => |c| @intCast(c),
-        .Signal => |c| @as(i64, @intCast(c)) + 128,
-        else => -1,
-    };
+    const exit_code: i64 = platform.exitStatus(result.term);
     if (args.len >= 2) ctx.setCallerVar(1, args.len, .{ .int = exit_code });
 
     // last line of output
@@ -1088,11 +1071,7 @@ fn native_passthru(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     const result = runShell(ctx.allocator, args[0].string.bytes()) catch return NativeResult.scalar(.{ .bool = false });
     defer ctx.allocator.free(result.stdout);
     try ctx.vm.output.appendSlice(ctx.allocator, result.stdout);
-    const exit_code: i64 = switch (result.term) {
-        .Exited => |c| @intCast(c),
-        .Signal => |c| @as(i64, @intCast(c)) + 128,
-        else => -1,
-    };
+    const exit_code: i64 = platform.exitStatus(result.term);
     if (args.len >= 2 and args[1] == .array) {
         try args[1].array.append(ctx.allocator, .{ .int = exit_code });
     }
@@ -1102,7 +1081,7 @@ fn native_passthru(ctx: *NativeContext, args: []const Value) RuntimeError!Native
 fn native_escapeshellarg(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .string) return NativeResult.literal("''");
     const s = args[0].string.bytes();
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     // cmd.exe has no single-quote syntax: php wraps in double quotes there
     // and blanks the characters cmd would interpret
     const quote: u8 = if (platform.is_windows) '"' else '\'';
@@ -1126,7 +1105,7 @@ fn native_escapeshellarg(ctx: *NativeContext, args: []const Value) RuntimeError!
 fn native_escapeshellcmd(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .string) return NativeResult.literal("");
     const s = args[0].string.bytes();
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     var in_squote = false;
     var in_dquote = false;
     for (s) |c| {

@@ -4,15 +4,6 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // fastLoop compiled as a separate object so LLVM optimizes it
-    // independently of runLoop (prevents codegen perturbation)
-    const fast_loop_mod = b.createModule(.{
-        .root_source_file = b.path("src/fast_loop.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    fast_loop_mod.link_libc = true;
-
     // the fast loop object compiles the runtime too; this tells that copy to
     // reach shared per-thread state through the main object's exports
     const fast_loop_role = b.addOptions();
@@ -23,13 +14,6 @@ pub fn build(b: *std.Build) void {
     main_role.addOption(bool, "fast_loop_object", false);
     main_role.addOption([]const u8, "compiler_hash", compilerHash(b));
     main_role.addOption(i64, "build_epoch", build_epoch);
-    fast_loop_mod.addOptions("build_role", fast_loop_role);
-
-    const fast_loop_obj = b.addObject(.{
-        .name = "fast_loop",
-        .root_module = fast_loop_mod,
-        .use_llvm = true,
-    });
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -43,11 +27,17 @@ pub fn build(b: *std.Build) void {
     const static_extensions = staticExtensionsModule(b, extension_sources);
     exe_mod.addImport("static_extensions", static_extensions);
     exe_mod.addOptions("build_role", main_role);
-    fast_loop_mod.addImport("static_extensions", static_extensions);
     for (extension_sources) |source| {
         exe_mod.addCSourceFile(.{ .file = .{ .cwd_relative = source }, .flags = &.{ "-std=c11", "-DZPHP_STATIC_EXTENSION" } });
     }
     exe_mod.addIncludePath(b.path("include"));
+
+    const fast_loop_mod = fastLoopModule(b, target, optimize, fast_loop_role, static_extensions);
+    const fast_loop_obj = b.addObject(.{
+        .name = "fast_loop",
+        .root_module = fast_loop_mod,
+        .use_llvm = true,
+    });
 
     linkLib(b, exe_mod, "libpcre2-8", "pcre2-8", .static, .yes);
     linkLib(b, exe_mod, "sqlite3", "sqlite3", .static, .yes);
@@ -68,6 +58,13 @@ pub fn build(b: *std.Build) void {
     addFsSpaceShim(b, exe_mod);
     exe_mod.link_libc = true;
     exe_mod.addObject(fast_loop_obj);
+
+    // the C headers the runtime binds, translated with the include paths the
+    // executable's libraries resolved to. every module compiling the runtime
+    // imports the same translations, so their types agree
+    const c_imports = cImportModules(b, target, optimize, exe_mod);
+    addCImports(exe_mod, c_imports);
+    addCImports(fast_loop_mod, c_imports);
 
     // musl release binaries are fully static so they run on any linux. every
     // system library becomes the path of its archive, the archives behind
@@ -97,9 +94,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     const fast_loop_object_step = b.step("fast-loop-object", "Install the fast loop object for inspection");
     fast_loop_object_step.dependOn(&b.addInstallFile(fast_loop_obj.getEmittedBin(), "fast_loop.o").step);
@@ -107,9 +102,13 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run zphp");
     run_step.dependOn(&run_cmd.step);
 
+    // a module belongs to one compilation, so the test build's fast loop
+    // object gets its own copy of the fast loop module
+    const fast_loop_test_mod = fastLoopModule(b, target, optimize, fast_loop_role, static_extensions);
+    addCImports(fast_loop_test_mod, c_imports);
     const fast_loop_test_obj = b.addObject(.{
         .name = "fast_loop_test",
-        .root_module = fast_loop_mod,
+        .root_module = fast_loop_test_mod,
         .use_llvm = true,
     });
 
@@ -117,6 +116,8 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        // a failing test prints its stack trace
+        .strip = false,
     });
     test_mod.addImport("static_extensions", static_extensions);
     test_mod.addOptions("build_role", main_role);
@@ -140,6 +141,7 @@ pub fn build(b: *std.Build) void {
     addFsSpaceShim(b, test_mod);
     test_mod.link_libc = true;
     test_mod.addObject(fast_loop_test_obj);
+    addCImports(test_mod, c_imports);
 
     const unit_tests = b.addTest(.{
         .root_module = test_mod,
@@ -150,6 +152,85 @@ pub fn build(b: *std.Build) void {
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
+}
+
+// fastLoop compiled as a separate object so LLVM optimizes it
+// independently of runLoop (prevents codegen perturbation)
+fn fastLoopModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, role: *std.Build.Step.Options, static_extensions: *std.Build.Module) *std.Build.Module {
+    const mod = b.createModule(.{
+        .root_source_file = b.path("src/fast_loop.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    mod.addOptions("build_role", role);
+    mod.addImport("static_extensions", static_extensions);
+    return mod;
+}
+
+const CImport = struct {
+    // module name, also src/c/<name without the c_ prefix>.h
+    name: []const u8,
+    // pkg-config packages whose cflags the header needs
+    pkgs: []const []const u8,
+};
+
+const c_import_specs = [_]CImport{
+    .{ .name = "c_zlib", .pkgs = &.{"zlib"} },
+    .{ .name = "c_stdlib", .pkgs = &.{} },
+    .{ .name = "c_curl", .pkgs = &.{"libcurl"} },
+    .{ .name = "c_nghttp2", .pkgs = &.{"libnghttp2"} },
+    .{ .name = "c_soap", .pkgs = &.{ "libcurl", "libxml-2.0" } },
+    .{ .name = "c_gd", .pkgs = &.{"gdlib"} },
+    .{ .name = "c_ldap", .pkgs = &.{"ldap"} },
+    .{ .name = "c_libxml_tree", .pkgs = &.{"libxml-2.0"} },
+    .{ .name = "c_mysql", .pkgs = &.{ "mysqlclient", "libmariadb" } },
+    .{ .name = "c_openssl", .pkgs = &.{"openssl"} },
+    .{ .name = "c_tls", .pkgs = &.{"openssl"} },
+    .{ .name = "c_sodium", .pkgs = &.{"libsodium"} },
+    .{ .name = "c_xmlreader", .pkgs = &.{"libxml-2.0"} },
+    .{ .name = "c_xmlwriter", .pkgs = &.{"libxml-2.0"} },
+};
+
+const CImports = [c_import_specs.len]*std.Build.Module;
+
+fn cImportModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, from: *std.Build.Module) CImports {
+    var mods: CImports = undefined;
+    for (c_import_specs, 0..) |spec, i| {
+        const tc = b.addTranslateC(.{
+            .root_source_file = b.path(b.fmt("src/c/{s}.h", .{spec.name[2..]})),
+            .target = target,
+            .optimize = optimize,
+        });
+        for (from.include_dirs.items) |dir| switch (dir) {
+            // every directory as a system path, so one that pkg-config also
+            // reports doesn't arrive both ways
+            .path, .path_system => |path| tc.addSystemIncludePath(path),
+            .path_after => |path| tc.addAfterIncludePath(path),
+            .framework_path => |path| tc.addFrameworkPath(path),
+            .framework_path_system => |path| tc.addSystemFrameworkPath(path),
+            .other_step, .config_header_step, .embed_path => {},
+        };
+        for (spec.pkgs) |pkg| {
+            const out = capture(b, &.{ "pkg-config", "--cflags", pkg }) orelse continue;
+            var it = std.mem.tokenizeAny(u8, out, " \t\r\n");
+            while (it.next()) |flag| {
+                // as system paths, like the ones the modules carry, so a
+                // directory named both ways doesn't conflict
+                if (std.mem.startsWith(u8, flag, "-I")) {
+                    tc.addSystemIncludePath(.{ .cwd_relative = b.dupe(flag[2..]) });
+                } else {
+                    tc.addCFlags(&.{b.dupe(flag)});
+                }
+            }
+        }
+        mods[i] = tc.createModule();
+    }
+    return mods;
+}
+
+fn addCImports(mod: *std.Build.Module, mods: CImports) void {
+    for (c_import_specs, mods) |spec, m| mod.addImport(spec.name, m);
 }
 
 // libxml2 ships its headers under a libxml2/ subdirectory. pkg-config name is
@@ -186,12 +267,8 @@ fn addOpenSsl(b: *std.Build, mod: *std.Build.Module) void {
 // older builds only zlib and dl
 fn linkCryptoDependencies(b: *std.Build, mod: *std.Build.Module) void {
     const target = mod.resolved_target.?.result;
-    const r = std.process.Child.run(.{
-        .allocator = b.allocator,
-        .argv = &.{ "pkg-config", "--static", "--libs-only-l", "libcrypto" },
-    }) catch return;
-    if (r.term != .Exited or r.term.Exited != 0) return;
-    var it = std.mem.tokenizeAny(u8, r.stdout, " \t\r\n");
+    const out = capture(b, &.{ "pkg-config", "--static", "--libs-only-l", "libcrypto" }) orelse return;
+    var it = std.mem.tokenizeAny(u8, out, " \t\r\n");
     while (it.next()) |flag| {
         const name = libFlagName(flag) orelse continue;
         if (std.mem.eql(u8, name, "crypto") or std.zig.target.isLibCLibName(&target, name)) continue;
@@ -245,12 +322,8 @@ fn addStaticDependencies(b: *std.Build, mod: *std.Build.Module) void {
     const pkgs = [_][]const u8{ "libpcre2-8", "sqlite3", "zlib", "libmariadb", "libpq", "openssl", "libnghttp2", "libcurl", "libxml-2.0", "icu-i18n", "icu-uc", "gmp", "gdlib", "libsodium", "ldap", "lber" };
     const target = mod.resolved_target.?.result;
     for (pkgs) |pkg| {
-        const r = std.process.Child.run(.{
-            .allocator = b.allocator,
-            .argv = &.{ "pkg-config", "--static", "--libs", pkg },
-        }) catch continue;
-        if (r.term != .Exited or r.term.Exited != 0) continue;
-        var it = std.mem.tokenizeAny(u8, r.stdout, " \t\r\n");
+        const out = capture(b, &.{ "pkg-config", "--static", "--libs", pkg }) orelse continue;
+        var it = std.mem.tokenizeAny(u8, out, " \t\r\n");
         while (it.next()) |flag| {
             if (libFlagName(flag)) |lib| {
                 const name = staticArchiveName(lib);
@@ -276,12 +349,8 @@ fn staticArchiveName(name: []const u8) []const u8 {
 // gcc's libstdc++.a is linked alongside the libc++ zig links for the icu shim.
 // zig treats -lstdc++ as a request for its own libc++, hence the archive path
 fn addGccLibstdcxx(b: *std.Build, mod: *std.Build.Module) void {
-    const r = std.process.Child.run(.{
-        .allocator = b.allocator,
-        .argv = &.{ "cc", "-print-file-name=libstdc++.a" },
-    }) catch return;
-    if (r.term != .Exited or r.term.Exited != 0) return;
-    const path = std.mem.trim(u8, r.stdout, " \r\n");
+    const out = capture(b, &.{ "cc", "-print-file-name=libstdc++.a" }) orelse return;
+    const path = std.mem.trim(u8, out, " \r\n");
     if (!std.fs.path.isAbsolute(path)) return;
     mod.addObjectFile(.{ .cwd_relative = path });
 }
@@ -313,13 +382,13 @@ fn findStaticArchive(b: *std.Build, mod: *std.Build.Module, name: []const u8) []
 
 fn archiveIn(b: *std.Build, dir: []const u8, file: []const u8) ?[]const u8 {
     const path = b.pathJoin(&.{ dir, file });
-    std.fs.cwd().access(path, .{}) catch return null;
+    std.Io.Dir.cwd().access(b.graph.io, path, .{}) catch return null;
     return path;
 }
 
 fn staticExtensionsModule(b: *std.Build, sources: []const []const u8) *std.Build.Module {
-    var code = std.ArrayListUnmanaged(u8){};
-    const w = code.writer(b.allocator);
+    var code: std.Io.Writer.Allocating = .init(b.allocator);
+    const w = &code.writer;
     w.writeAll("pub const Entry = *const fn (*const anyopaque) callconv(.c) ?*const anyopaque;\n") catch @panic("OOM");
     w.writeAll("pub const StaticExtension = struct { name: []const u8, entry: Entry };\n") catch @panic("OOM");
     for (sources) |source| {
@@ -334,7 +403,7 @@ fn staticExtensionsModule(b: *std.Build, sources: []const []const u8) *std.Build
     }
     w.writeAll(" };\n") catch @panic("OOM");
     const files = b.addWriteFiles();
-    const path = files.add("static_extensions.zig", code.items);
+    const path = files.add("static_extensions.zig", code.written());
     return b.createModule(.{ .root_source_file = path });
 }
 
@@ -373,14 +442,17 @@ fn linkWindowsImport(b: *std.Build, mod: *std.Build.Module, pkg: []const u8, nam
     if (pkgConfigVariable(b, pkg, "includedir")) |inc| mod.addSystemIncludePath(.{ .cwd_relative = inc });
 }
 
+// stdout of a command that exited 0, null when it can't run or fails
+fn capture(b: *std.Build, argv: []const []const u8) ?[]const u8 {
+    const r = std.process.run(b.allocator, b.graph.io, .{ .argv = argv }) catch return null;
+    if (r.term != .exited or r.term.exited != 0) return null;
+    return r.stdout;
+}
+
 fn pkgConfigVariable(b: *std.Build, pkg: []const u8, name: []const u8) ?[]const u8 {
     const arg = std.fmt.allocPrint(b.allocator, "--variable={s}", .{name}) catch return null;
-    const r = std.process.Child.run(.{
-        .allocator = b.allocator,
-        .argv = &.{ "pkg-config", arg, pkg },
-    }) catch return null;
-    if (r.term != .Exited or r.term.Exited != 0) return null;
-    return std.mem.trim(u8, r.stdout, " \t\r\n");
+    const out = capture(b, &.{ "pkg-config", arg, pkg }) orelse return null;
+    return std.mem.trim(u8, out, " \t\r\n");
 }
 
 // libicu is split across three libraries (icuuc, icui18n, icudata) with pkg-config
@@ -420,7 +492,7 @@ fn addXxhashShim(b: *std.Build, mod: *std.Build.Module) void {
 }
 
 fn addIcuShim(b: *std.Build, mod: *std.Build.Module) void {
-    var flags = std.ArrayList([]const u8){};
+    var flags = std.ArrayList([]const u8).empty;
     defer flags.deinit(b.allocator);
     flags.append(b.allocator, "-std=c11") catch {};
     if (pkgConfigCflagsIncludes(b, "icu-i18n")) |inc| {
@@ -434,7 +506,7 @@ fn addIcuShim(b: *std.Build, mod: *std.Build.Module) void {
 
     // MessageFormat shim is C++ since ICU's named-arg MessageFormat is only
     // exposed in the C++ API. link libc++ once for the whole module
-    var cpp_flags = std.ArrayList([]const u8){};
+    var cpp_flags = std.ArrayList([]const u8).empty;
     defer cpp_flags.deinit(b.allocator);
     cpp_flags.append(b.allocator, "-std=c++17") catch {};
     if (pkgConfigCflagsIncludes(b, "icu-i18n")) |inc| {
@@ -461,7 +533,7 @@ fn addLibgmp(b: *std.Build, mod: *std.Build.Module) void {
 
     // shim file: compiled by C compiler so the `mpz_*` -> `__gmpz_*` macros
     // resolve correctly. zig then links against the unversioned zphp_mpz_*
-    var flags = std.ArrayList([]const u8){};
+    var flags = std.ArrayList([]const u8).empty;
     defer flags.deinit(b.allocator);
     flags.append(b.allocator, "-std=c11") catch return;
     if (pkgConfigCflagsIncludes(b, "gmp")) |inc| {
@@ -507,12 +579,8 @@ fn addLibldap(b: *std.Build, mod: *std.Build.Module) void {
 }
 
 fn pkgConfigCflagsIncludes(b: *std.Build, pkg: []const u8) ?[]const u8 {
-    const r = std.process.Child.run(.{
-        .allocator = b.allocator,
-        .argv = &.{ "pkg-config", "--cflags-only-I", pkg },
-    }) catch return null;
-    if (r.term != .Exited or r.term.Exited != 0) return null;
-    var it = std.mem.tokenizeAny(u8, r.stdout, " \t\r\n");
+    const out = capture(b, &.{ "pkg-config", "--cflags-only-I", pkg }) orelse return null;
+    var it = std.mem.tokenizeAny(u8, out, " \t\r\n");
     while (it.next()) |tok| {
         if (std.mem.startsWith(u8, tok, "-I")) return tok[2..];
     }
@@ -520,12 +588,8 @@ fn pkgConfigCflagsIncludes(b: *std.Build, pkg: []const u8) ?[]const u8 {
 }
 
 fn xml2ConfigIncludeDir(b: *std.Build) ?[]const u8 {
-    const r = std.process.Child.run(.{
-        .allocator = b.allocator,
-        .argv = &.{ "xml2-config", "--cflags" },
-    }) catch return null;
-    if (r.term != .Exited or r.term.Exited != 0) return null;
-    var it = std.mem.tokenizeAny(u8, r.stdout, " \t\r\n");
+    const out = capture(b, &.{ "xml2-config", "--cflags" }) orelse return null;
+    var it = std.mem.tokenizeAny(u8, out, " \t\r\n");
     while (it.next()) |tok| {
         if (std.mem.startsWith(u8, tok, "-I")) return tok[2..];
     }
@@ -538,24 +602,21 @@ fn xml2ConfigIncludeDir(b: *std.Build) ?[]const u8 {
 // builds, else the commit being built, so a rebuild of the same tree doesn't
 // invalidate the cache. 0 when neither is known
 fn buildEpoch(b: *std.Build) i64 {
-    if (std.process.getEnvVarOwned(b.allocator, "SOURCE_DATE_EPOCH")) |v| {
+    if (b.graph.environ_map.get("SOURCE_DATE_EPOCH")) |v| {
         return std.fmt.parseInt(i64, std.mem.trim(u8, v, " \n"), 10) catch 0;
-    } else |_| {}
-    const r = std.process.Child.run(.{
-        .allocator = b.allocator,
-        .argv = &.{ "git", "-C", b.build_root.path orelse ".", "log", "-1", "--format=%ct" },
-    }) catch return 0;
-    if (r.term != .Exited or r.term.Exited != 0) return 0;
-    return std.fmt.parseInt(i64, std.mem.trim(u8, r.stdout, " \r\n"), 10) catch 0;
+    }
+    const out = capture(b, &.{ "git", "-C", b.root.root_dir.path orelse ".", "log", "-1", "--format=%ct" }) orelse return 0;
+    return std.fmt.parseInt(i64, std.mem.trim(u8, out, " \r\n"), 10) catch 0;
 }
 
 fn compilerHash(b: *std.Build) []const u8 {
     var hasher = std.hash.Wyhash.init(0);
-    var dir = b.build_root.handle.openDir("src/pipeline", .{ .iterate = true }) catch @panic("src/pipeline");
-    defer dir.close();
-    var names: std.ArrayListUnmanaged([]const u8) = .{};
+    const io = b.graph.io;
+    var dir = b.root.root_dir.handle.openDir(io, "src/pipeline", .{ .iterate = true }) catch @panic("src/pipeline");
+    defer dir.close(io);
+    var names: std.ArrayList([]const u8) = .empty;
     var it = dir.iterate();
-    while (it.next() catch @panic("src/pipeline")) |entry| {
+    while (it.next(io) catch @panic("src/pipeline")) |entry| {
         if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".zig")) names.append(b.allocator, b.dupe(entry.name)) catch @panic("OOM");
     }
     std.mem.sort([]const u8, names.items, {}, struct {
@@ -564,11 +625,11 @@ fn compilerHash(b: *std.Build) []const u8 {
         }
     }.lessThan);
     for (names.items) |name| {
-        const bytes = dir.readFileAlloc(b.allocator, name, 1 << 24) catch @panic("src/pipeline");
+        const bytes = dir.readFileAlloc(io, name, b.allocator, .limited(1 << 24)) catch @panic("src/pipeline");
         hasher.update(name);
         hasher.update(bytes);
     }
-    const format = b.build_root.handle.readFileAlloc(b.allocator, "src/bytecode_format.zig", 1 << 24) catch @panic("src/bytecode_format.zig");
+    const format = b.root.root_dir.handle.readFileAlloc(io, "src/bytecode_format.zig", b.allocator, .limited(1 << 24)) catch @panic("src/bytecode_format.zig");
     hasher.update(format);
     return b.fmt("{x:0>16}", .{hasher.final()});
 }

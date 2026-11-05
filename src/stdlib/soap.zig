@@ -11,11 +11,7 @@ const ClassDef = vm_mod.ClassDef;
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
-const c = @cImport({
-    @cInclude("curl/curl.h");
-    @cInclude("libxml/parser.h");
-    @cInclude("libxml/tree.h");
-});
+const c = @import("c_soap");
 
 pub fn register(vm: *VM, a: Allocator) !void {
     // SoapClient
@@ -195,7 +191,7 @@ fn parseWsdl(ctx: *NativeContext, obj: *PhpObject, source: []const u8) RuntimeEr
                     const name = try attrValue(ctx.allocator, tn, "name");
                     defer if (name) |v| ctx.allocator.free(v);
                     if (name) |v| {
-                        var decl = std.ArrayListUnmanaged(u8){};
+                        var decl = std.ArrayListUnmanaged(u8).empty;
                         errdefer decl.deinit(ctx.allocator);
                         try decl.appendSlice(ctx.allocator, "struct ");
                         try decl.appendSlice(ctx.allocator, v);
@@ -275,7 +271,7 @@ fn soapClientConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Na
 }
 
 fn xmlEscape(allocator: Allocator, s: []const u8) ![]u8 {
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8).empty;
     errdefer out.deinit(allocator);
     for (s) |ch| switch (ch) {
         '<' => try out.appendSlice(allocator, "&lt;"),
@@ -374,7 +370,7 @@ fn appendSoapHeader(ctx: *NativeContext, out: *std.ArrayListUnmanaged(u8), heade
 }
 
 fn buildEnvelope(ctx: *NativeContext, client: *PhpObject, method: []const u8, uri: []const u8, args_array: *PhpArray) ![]u8 {
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8).empty;
     errdefer out.deinit(ctx.allocator);
     try out.appendSlice(ctx.allocator,
         \\<?xml version="1.0" encoding="UTF-8"?>
@@ -425,7 +421,7 @@ fn httpPostSoap(allocator: Allocator, location: []const u8, action: []const u8, 
     const handle = c.curl_easy_init() orelse return error.CurlInit;
     defer c.curl_easy_cleanup(handle);
 
-    const loc_z = try allocator.dupeZ(u8, location);
+    const loc_z = try allocator.dupeSentinel(u8, location, 0);
     defer allocator.free(loc_z);
     _ = c.curl_easy_setopt(handle, c.CURLOPT_URL, loc_z.ptr);
     _ = c.curl_easy_setopt(handle, c.CURLOPT_POST, @as(c_long, 1));
@@ -433,8 +429,8 @@ fn httpPostSoap(allocator: Allocator, location: []const u8, action: []const u8, 
     _ = c.curl_easy_setopt(handle, c.CURLOPT_POSTFIELDSIZE, @as(c_long, @intCast(body.len)));
     _ = c.curl_easy_setopt(handle, c.CURLOPT_TIMEOUT, @as(c_long, 30));
 
-    var resp_buf = std.ArrayListUnmanaged(u8){};
-    var hdr_buf = std.ArrayListUnmanaged(u8){};
+    var resp_buf = std.ArrayListUnmanaged(u8).empty;
+    var hdr_buf = std.ArrayListUnmanaged(u8).empty;
     errdefer resp_buf.deinit(std.heap.c_allocator);
     errdefer hdr_buf.deinit(std.heap.c_allocator);
 
@@ -444,7 +440,7 @@ fn httpPostSoap(allocator: Allocator, location: []const u8, action: []const u8, 
     _ = c.curl_easy_setopt(handle, c.CURLOPT_HEADERDATA, &hdr_buf);
 
     var headers: ?*c.curl_slist = null;
-    const ct = try allocator.dupeZ(u8, "Content-Type: text/xml; charset=utf-8");
+    const ct = try allocator.dupeSentinel(u8, "Content-Type: text/xml; charset=utf-8", 0);
     defer allocator.free(ct);
     headers = c.curl_slist_append(headers, ct.ptr);
     const action_hdr = try std.fmt.allocPrintSentinel(allocator, "SOAPAction: \"{s}\"", .{action}, 0);
@@ -709,7 +705,7 @@ fn soapServerSetClass(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     return NativeResult.scalar(.{ .bool = true });
 }
 fn xmlUnescape(allocator: Allocator, s: []const u8) ![]u8 {
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8).empty;
     errdefer out.deinit(allocator);
     var i: usize = 0;
     while (i < s.len) {
@@ -921,14 +917,14 @@ fn soapServerHandle(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     while (st_end < req.len and req[st_end] != '>') : (st_end += 1) {}
     const self_closing = st_end > 0 and req[st_end - 1] == '/';
 
-    var arg_vals = std.ArrayListUnmanaged(Value){};
+    var arg_vals = std.ArrayListUnmanaged(Value).empty;
     defer {
         for (arg_vals.items) |v| v.string.release();
         arg_vals.deinit(ctx.allocator);
     }
     if (!self_closing and st_end < req.len) {
         const content_start = st_end + 1;
-        var close_marker = std.ArrayListUnmanaged(u8){};
+        var close_marker = std.ArrayListUnmanaged(u8).empty;
         defer close_marker.deinit(ctx.allocator);
         try close_marker.appendSlice(ctx.allocator, "</");
         try close_marker.appendSlice(ctx.allocator, mtag_full);
@@ -962,7 +958,7 @@ fn soapServerHandle(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     const uri = if (uri_v == .string) uri_v.string.bytes() else "";
     const uri_esc = try xmlEscape(ctx.allocator, uri);
     defer ctx.allocator.free(uri_esc);
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8).empty;
     defer out.deinit(ctx.allocator);
     try out.appendSlice(ctx.allocator, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<SOAP-ENV:Envelope xmlns:SOAP-ENV=\"http://schemas.xmlsoap.org/soap/envelope/\" xmlns:ns1=\"");
     try out.appendSlice(ctx.allocator, uri_esc);

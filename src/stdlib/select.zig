@@ -4,6 +4,8 @@
 // waiter on all of its sources, polls them, and sleeps on the waiter until
 // one of them fires
 const std = @import("std");
+const sync = @import("../sync.zig");
+const platform = @import("../platform.zig");
 const value_mod = @import("../runtime/value.zig");
 const Value = value_mod.Value;
 const PhpObject = value_mod.PhpObject;
@@ -17,8 +19,8 @@ const workers = @import("workers.zig");
 const channel = @import("channel.zig");
 
 pub const Waiter = struct {
-    mutex: std.Thread.Mutex = .{},
-    changed: std.Thread.Condition = .{},
+    mutex: sync.Mutex = .{},
+    changed: sync.Condition = .{},
     fired: bool = false,
 
     // sources call this with their own lock held; the waiter lock is always
@@ -45,7 +47,7 @@ pub const Waiter = struct {
                 w.changed.wait(&w.mutex);
                 continue;
             };
-            const now = std.time.nanoTimestamp();
+            const now = platform.nanoTimestamp();
             if (now >= until) return false;
             w.changed.timedWait(&w.mutex, @intCast(until - now)) catch {};
         }
@@ -55,7 +57,7 @@ pub const Waiter = struct {
 
 // guarded by the owning source's mutex
 pub const WaitList = struct {
-    waiters: std.ArrayListUnmanaged(*Waiter) = .{},
+    waiters: std.ArrayListUnmanaged(*Waiter) = .empty,
 
     pub fn add(self: *WaitList, a: std.mem.Allocator, w: *Waiter) !void {
         try self.waiters.append(a, w);
@@ -162,19 +164,19 @@ fn pair(ctx: *NativeContext, key: PhpArray.Key, v: Value) RuntimeError!NativeRes
 fn deadlineArg(ctx: *NativeContext, args: []const Value) RuntimeError!?i128 {
     if (args.len < 2 or args[1] == .null) return null;
     const ns = workers.optionalSeconds(args[1]) orelse return throwNamed(ctx, "ValueError", "Zphp\\select(): Argument #2 ($timeout) must be a number of seconds greater than or equal to 0", .{});
-    return std.time.nanoTimestamp() + @as(i128, ns);
+    return platform.nanoTimestamp() + @as(i128, ns);
 }
 
 fn nativeSelect(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .array) return throwNamed(ctx, "TypeError", "Zphp\\select(): Argument #1 ($sources) must be of type array, {s} given", .{Value.typeName(if (args.len > 0) args[0] else .null)});
     if (args[0].array.entries.items.len == 0) return throwNamed(ctx, "ValueError", "Zphp\\select(): Argument #1 ($sources) must not be empty", .{});
     const deadline = try deadlineArg(ctx, args);
-    var sources: std.ArrayListUnmanaged(Source) = .{};
+    var sources: std.ArrayListUnmanaged(Source) = .empty;
     defer sources.deinit(ctx.allocator);
     try collectSources(ctx, args[0].array, &sources);
 
     if (try readyIndex(ctx, sources.items)) |hit| return pair(ctx, sources.items[hit.index].key, hit.value);
-    if (deadline) |d| if (std.time.nanoTimestamp() >= d) return NativeResult.scalar(.null);
+    if (deadline) |d| if (platform.nanoTimestamp() >= d) return NativeResult.scalar(.null);
 
     workers.flushOutput(ctx.vm);
     var waiter = Waiter{};

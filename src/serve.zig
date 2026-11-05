@@ -1,4 +1,7 @@
 const std = @import("std");
+const sys = @import("sys.zig");
+const net = @import("net.zig");
+const sync = @import("sync.zig");
 const error_format = @import("error_format.zig");
 const parser = @import("pipeline/parser.zig");
 const compiler = @import("pipeline/compiler.zig");
@@ -16,7 +19,7 @@ const env = @import("env.zig");
 
 const Allocator = std.mem.Allocator;
 const posix = std.posix;
-const zlib = @cImport(@cInclude("zlib.h"));
+const zlib = @import("c_zlib");
 const ws_proto = @import("websocket.zig");
 const http = @import("stdlib/http.zig");
 
@@ -24,7 +27,7 @@ const http = @import("stdlib/http.zig");
 // poll set next to the connections, which is the only thing poll can wait on
 // everywhere
 const WakePair = [2]posix.socket_t;
-const no_socket: posix.socket_t = if (platform.is_windows) std.os.windows.ws2_32.INVALID_SOCKET else -1;
+const no_socket: posix.socket_t = if (platform.is_windows) sys.ws2.INVALID_SOCKET else -1;
 
 var signal_socket: WakePair = .{ no_socket, no_socket };
 
@@ -44,16 +47,16 @@ fn closeWakePair(pair: WakePair) void {
 
 fn maxPhpMtime(dir_path: []const u8) i128 {
     var max: i128 = 0;
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return 0;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(platform.io, dir_path, .{ .iterate = true }) catch return 0;
+    defer dir.close(platform.io);
     var walker = dir.walk(std.heap.page_allocator) catch return 0;
     defer walker.deinit();
-    while (walker.next() catch null) |entry| {
+    while (walker.next(platform.io) catch null) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".php")) continue;
         if (std.mem.indexOf(u8, entry.path, "vendor/") != null) continue;
-        const stat = entry.dir.statFile(entry.basename) catch continue;
-        if (stat.mtime > max) max = stat.mtime;
+        const stat = entry.dir.statFile(platform.io, entry.basename, .{}) catch continue;
+        if (stat.mtime.nanoseconds > max) max = stat.mtime.nanoseconds;
     }
     return max;
 }
@@ -104,7 +107,7 @@ const ConnState = enum { tls_handshaking, http_reading, h2_active, ws_idle, clos
 
 const Connection = struct {
     fd: posix.socket_t,
-    stream: std.net.Stream,
+    stream: net.Stream,
     ssl: ?*tls.SSL,
     addr_bytes: u32,
     state: ConnState,
@@ -115,7 +118,7 @@ const Connection = struct {
     h2_session: ?*h2.H2Session,
     last_activity_ms: i64,
 
-    fn init(allocator: Allocator, server_conn: std.net.Server.Connection, ssl_ptr: ?*tls.SSL) !Connection {
+    fn init(allocator: Allocator, server_conn: net.Server.Connection, ssl_ptr: ?*tls.SSL) !Connection {
         return .{
             .fd = server_conn.stream.handle,
             .stream = server_conn.stream,
@@ -127,7 +130,7 @@ const Connection = struct {
             .keep_alive = true,
             .ws_obj = null,
             .h2_session = null,
-            .last_activity_ms = std.time.milliTimestamp(),
+            .last_activity_ms = platform.milliTimestamp(),
         };
     }
 
@@ -158,7 +161,7 @@ const Connection = struct {
 
 // work queue (shared between main thread and workers)
 
-const WorkItem = struct { conn: std.net.Server.Connection };
+const WorkItem = struct { conn: net.Server.Connection };
 
 fn WorkQueue(comptime capacity: usize) type {
     return struct {
@@ -166,9 +169,9 @@ fn WorkQueue(comptime capacity: usize) type {
         head: usize = 0,
         tail: usize = 0,
         count: usize = 0,
-        mutex: std.Thread.Mutex = .{},
-        not_empty: std.Thread.Condition = .{},
-        not_full: std.Thread.Condition = .{},
+        mutex: sync.Mutex = .{},
+        not_empty: sync.Condition = .{},
+        not_full: sync.Condition = .{},
         shutdown: bool = false,
 
         const Self = @This();
@@ -234,7 +237,7 @@ const Worker = struct {
     tls_ctx: ?*tls.SSL_CTX,
     env_snapshot: ?env.EnvSnapshot,
     wake_socket: WakePair,
-    poll_fds: [MAX_CONNS + 1]posix.pollfd,
+    poll_fds: [MAX_CONNS + 1]sys.pollfd,
     conns: [MAX_CONNS + 1]?Connection,
     n_fds: usize,
     // php-fpm dispatch: a request that maps to an existing .php file on disk
@@ -255,8 +258,8 @@ const Dispatch = struct {
 };
 
 fn loadFile(path: []const u8, allocator: Allocator, vm: *@import("runtime/vm.zig").VM) ?*CompileResult {
-    const abs_path = std.fs.cwd().realpathAlloc(allocator, path) catch allocator.dupe(u8, path) catch return null;
-    const source = std.fs.cwd().readFileAlloc(allocator, abs_path, 1024 * 1024 * 10) catch {
+    const abs_path = platform.realpathAlloc(allocator, path) catch allocator.dupe(u8, path) catch return null;
+    const source = std.Io.Dir.cwd().readFileAlloc(platform.io, abs_path, allocator, .limited(1024 * 1024 * 10)) catch {
         allocator.free(abs_path);
         return null;
     };
@@ -328,8 +331,8 @@ fn initWorker(allocator: Allocator, result: *const CompileResult, doc_root: []co
         .tls_ctx = tls_ctx,
         .env_snapshot = env.EnvSnapshot.capture(allocator),
         .wake_socket = wake_socket,
-        .poll_fds = [_]posix.pollfd{.{ .fd = no_socket, .events = 0, .revents = 0 }} ** (MAX_CONNS + 1),
-        .conns = [_]?Connection{null} ** (MAX_CONNS + 1),
+        .poll_fds = @as([(MAX_CONNS + 1)]sys.pollfd, @splat(.{ .fd = no_socket, .events = 0, .revents = 0 })),
+        .conns = @as([(MAX_CONNS + 1)]?Connection, @splat(null)),
         .n_fds = 1,
         .script_cache = .{},
         .umask = Umask.current(),
@@ -364,7 +367,7 @@ fn startWorkers(allocator: Allocator, workers: []Worker, threads: []std.Thread, 
             reportWorkerFailure(err);
             continue;
         };
-        wd.poll_fds[0] = .{ .fd = wd.wake_socket[0], .events = posix.POLL.IN, .revents = 0 };
+        wd.poll_fds[0] = .{ .fd = wd.wake_socket[0], .events = sys.POLL.IN, .revents = 0 };
         threads[active] = std.Thread.spawn(.{}, eventLoop, .{wd}) catch |err| {
             deinitWorker(wd);
             reportWorkerFailure(err);
@@ -430,11 +433,11 @@ fn resolveDispatch(w: *Worker, req: *const Request) Dispatch {
 
     const candidate = std.fmt.allocPrint(w.allocator, "{s}{s}", .{ w.doc_root, url_path }) catch return fc;
     defer w.allocator.free(candidate);
-    const st = std.fs.cwd().statFile(candidate) catch return fc;
+    const st = std.Io.Dir.cwd().statFile(platform.io, candidate, .{}) catch return fc;
     if (st.kind != .file) return fc;
 
     // containment: the resolved real path must stay under the document root
-    const real = std.fs.cwd().realpathAlloc(w.allocator, candidate) catch return fc;
+    const real = platform.realpathAlloc(w.allocator, candidate) catch return fc;
     defer w.allocator.free(real);
     if (!std.mem.startsWith(u8, real, w.doc_root)) return fc;
     if (real.len <= w.doc_root.len or real[w.doc_root.len] != '/') return fc;
@@ -460,10 +463,10 @@ fn resolveDispatch(w: *Worker, req: *const Request) Dispatch {
 }
 
 fn certMtime(path: []const u8) i128 {
-    const f = std.fs.cwd().openFile(path, .{}) catch return 0;
-    defer f.close();
-    const stat = f.stat() catch return 0;
-    return stat.mtime;
+    const f = std.Io.Dir.cwd().openFile(platform.io, path, .{}) catch return 0;
+    defer f.close(platform.io);
+    const stat = f.stat(platform.io) catch return 0;
+    return stat.mtime.nanoseconds;
 }
 
 // main serve entry point
@@ -491,8 +494,8 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
             try writeStderr("error: --tls-key required when --tls-cert is specified\n");
             std.process.exit(1);
         };
-        tls_cert_z = try allocator.dupeZ(u8, cert);
-        tls_key_z = try allocator.dupeZ(u8, key);
+        tls_cert_z = try allocator.dupeSentinel(u8, cert, 0);
+        tls_key_z = try allocator.dupeSentinel(u8, key, 0);
         tls_ctx = tls.initContext(tls_cert_z.?, tls_key_z.?) orelse {
             try writeStderr("error: failed to initialize TLS (check cert/key paths)\n");
             std.process.exit(1);
@@ -504,11 +507,11 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
         if (tls_key_z) |z| allocator.free(z);
     }
 
-    const addr = std.net.Address.parseIp4("0.0.0.0", config.port) catch unreachable;
+    const addr = net.Address.parseIp4("0.0.0.0", config.port) catch unreachable;
     var server = try platform.tcpListen(addr, true);
     defer server.deinit();
 
-    const abs_path = std.fs.cwd().realpathAlloc(allocator, config.file) catch
+    const abs_path = platform.realpathAlloc(allocator, config.file) catch
         try allocator.dupe(u8, config.file);
     defer allocator.free(abs_path);
 
@@ -533,7 +536,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
     var first_run = true;
 
     while (true) {
-        const source = std.fs.cwd().readFileAlloc(allocator, config.file, 1024 * 1024 * 10) catch |err| {
+        const source = std.Io.Dir.cwd().readFileAlloc(platform.io, config.file, allocator, .limited(1024 * 1024 * 10)) catch |err| {
             try writeStderr("error: could not read '");
             try writeStderr(config.file);
             try writeStderr("'\n");
@@ -544,7 +547,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
             allocator.free(source);
             if (config.watch) {
                 try writeStderr("parse error, waiting for fix...\n");
-                std.Thread.sleep(1_000_000_000);
+                platform.sleep(1_000_000_000);
                 continue;
             }
             std.process.exit(1);
@@ -555,7 +558,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
             allocator.free(source);
             if (config.watch) {
                 try writeStderr("parse error, waiting for fix...\n");
-                std.Thread.sleep(1_000_000_000);
+                platform.sleep(1_000_000_000);
                 continue;
             }
             try writeStderr("parse error in ");
@@ -571,7 +574,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
             allocator.free(source);
             if (config.watch) {
                 try writeStderr("compile error, waiting for fix...\n");
-                std.Thread.sleep(1_000_000_000);
+                platform.sleep(1_000_000_000);
                 continue;
             }
             try writeStderr("compile error\n");
@@ -617,23 +620,23 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
             try writeStderr(" workers\n");
         }
 
-        var main_poll: [2]posix.pollfd = .{
-            .{ .fd = server.stream.handle, .events = posix.POLL.IN, .revents = 0 },
-            .{ .fd = signal_socket[0], .events = posix.POLL.IN, .revents = 0 },
+        var main_poll: [2]sys.pollfd = .{
+            .{ .fd = server.stream.handle, .events = sys.POLL.IN, .revents = 0 },
+            .{ .fd = signal_socket[0], .events = sys.POLL.IN, .revents = 0 },
         };
 
         const poll_timeout: i32 = if (config.watch or tls_ctx != null) 1000 else -1;
         var robin: usize = 0;
         var needs_restart = false;
         while (true) {
-            _ = posix.poll(&main_poll, poll_timeout) catch continue;
+            _ = sys.poll(&main_poll, poll_timeout) catch continue;
 
-            if (main_poll[1].revents & posix.POLL.IN != 0) {
+            if (main_poll[1].revents & sys.POLL.IN != 0) {
                 try writeStderr("\nshutting down...\n");
                 break;
             }
 
-            if (main_poll[0].revents & posix.POLL.IN != 0) {
+            if (main_poll[0].revents & sys.POLL.IN != 0) {
                 const conn = server.accept() catch continue;
                 queue.push(.{ .conn = conn });
                 wake(workers_data[robin].wake_socket);
@@ -677,9 +680,9 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
 
 fn eventLoop(w: *Worker) void {
     while (!queue.shutdown) {
-        _ = posix.poll(w.poll_fds[0..w.n_fds], 1000) catch continue;
+        _ = sys.poll(w.poll_fds[0..w.n_fds], 1000) catch continue;
 
-        if (w.poll_fds[0].revents & posix.POLL.IN != 0) {
+        if (w.poll_fds[0].revents & sys.POLL.IN != 0) {
             drainWake(w.wake_socket);
             while (queue.tryPop()) |item| {
                 registerConnection(w, item.conn);
@@ -692,12 +695,12 @@ fn eventLoop(w: *Worker) void {
             const revents = w.poll_fds[i].revents;
             if (revents == 0) continue;
 
-            if (revents & (posix.POLL.ERR | posix.POLL.HUP) != 0) {
+            if (revents & (sys.POLL.ERR | sys.POLL.HUP) != 0) {
                 if (w.conns[i]) |*c| c.state = .closing;
                 continue;
             }
 
-            if (revents & (posix.POLL.IN | posix.POLL.OUT) != 0) {
+            if (revents & (sys.POLL.IN | sys.POLL.OUT) != 0) {
                 if (w.conns[i]) |*c| {
                     switch (c.state) {
                         .tls_handshaking => processTlsHandshake(w, c, i),
@@ -720,7 +723,7 @@ fn eventLoop(w: *Worker) void {
 // HTTP/2 sessions are the application's business and are left alone
 fn closeIdleConnections(w: *Worker) void {
     if (w.idle_timeout_ms <= 0) return;
-    const now = std.time.milliTimestamp();
+    const now = platform.milliTimestamp();
     var i: usize = 1;
     while (i < w.n_fds) : (i += 1) {
         if (w.conns[i]) |*c| {
@@ -730,7 +733,7 @@ fn closeIdleConnections(w: *Worker) void {
     }
 }
 
-fn registerConnection(w: *Worker, server_conn: std.net.Server.Connection) void {
+fn registerConnection(w: *Worker, server_conn: net.Server.Connection) void {
     if (w.n_fds >= MAX_CONNS + 1) {
         server_conn.stream.close();
         return;
@@ -741,7 +744,7 @@ fn registerConnection(w: *Worker, server_conn: std.net.Server.Connection) void {
     };
     var ssl_ptr: ?*tls.SSL = null;
     var initial_state: ConnState = .http_reading;
-    var poll_events: i16 = posix.POLL.IN;
+    var poll_events: i16 = sys.POLL.IN;
     if (w.tls_ctx) |ctx| {
         ssl_ptr = tls.beginAccept(ctx, server_conn.stream.handle) orelse {
             server_conn.stream.close();
@@ -751,11 +754,11 @@ fn registerConnection(w: *Worker, server_conn: std.net.Server.Connection) void {
             .complete => {},
             .want_read => {
                 initial_state = .tls_handshaking;
-                poll_events = posix.POLL.IN;
+                poll_events = sys.POLL.IN;
             },
             .want_write => {
                 initial_state = .tls_handshaking;
-                poll_events = posix.POLL.OUT;
+                poll_events = sys.POLL.OUT;
             },
             .failed => {
                 tls.shutdown(ssl_ptr.?);
@@ -904,10 +907,10 @@ fn processTlsHandshake(w: *Worker, conn: *Connection, poll_idx: usize) void {
             } else {
                 conn.state = .http_reading;
             }
-            w.poll_fds[poll_idx].events = posix.POLL.IN;
+            w.poll_fds[poll_idx].events = sys.POLL.IN;
         },
-        .want_read => w.poll_fds[poll_idx].events = posix.POLL.IN,
-        .want_write => w.poll_fds[poll_idx].events = posix.POLL.OUT,
+        .want_read => w.poll_fds[poll_idx].events = sys.POLL.IN,
+        .want_write => w.poll_fds[poll_idx].events = sys.POLL.OUT,
         .failed => conn.state = .closing,
     }
 }
@@ -925,7 +928,7 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
         return;
     }
     c.buffered += n;
-    c.last_activity_ms = std.time.milliTimestamp();
+    c.last_activity_ms = platform.milliTimestamp();
 
     const raw = c.buf[0..c.buffered];
     const hdr_end_pos = std.mem.indexOf(u8, raw, "\r\n\r\n") orelse return;
@@ -991,9 +994,9 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
     const dispatch = resolveDispatch(w, &req);
     Umask.restore(w.umask);
     w.vm.reset();
-    const mock_conn = std.net.Server.Connection{
+    const mock_conn = net.Server.Connection{
         .stream = c.stream,
-        .address = std.net.Address{ .in = .{ .sa = .{ .port = 0, .addr = c.addr_bytes, .zero = [_]u8{0} ** 8 } } },
+        .address = net.Address{ .in = .{ .sa = .{ .port = 0, .addr = c.addr_bytes, .zero = @as([8]u8, @splat(0)) } } },
     };
     populateSuperglobals(&w.vm, &req, mock_conn, w.port, if (w.env_snapshot) |*s| s else null, w.doc_root, dispatch.script_filename, dispatch.front_controller) catch {
         c.state = .closing;
@@ -1078,7 +1081,7 @@ fn reportUncaught(w: *Worker) void {
             .stderr => {
                 const display_copy = error_format.formatUncaught(w.allocator, vm, .display, description);
                 defer w.allocator.free(display_copy);
-                _ = std.fs.File.stderr().write(display_copy) catch {};
+                _ = platform.write(std.Io.File.stderr(), display_copy) catch {};
             },
         }
     }
@@ -1158,9 +1161,9 @@ fn handleH2Request(w: *Worker, conn: *Connection, session: *h2.H2Session, stream
     const dispatch = resolveDispatch(w, &req);
     Umask.restore(w.umask);
     w.vm.reset();
-    const mock_conn = std.net.Server.Connection{
+    const mock_conn = net.Server.Connection{
         .stream = conn.stream,
-        .address = std.net.Address{ .in = .{ .sa = .{ .port = 0, .addr = conn.addr_bytes, .zero = [_]u8{0} ** 8 } } },
+        .address = net.Address{ .in = .{ .sa = .{ .port = 0, .addr = conn.addr_bytes, .zero = @as([8]u8, @splat(0)) } } },
     };
     populateSuperglobals(&w.vm, &req, mock_conn, w.port, if (w.env_snapshot) |*s| s else null, w.doc_root, dispatch.script_filename, dispatch.front_controller) catch {
         session.submitResponse(stream_id, 500, "text/plain", "Internal Server Error");
@@ -1209,9 +1212,9 @@ fn tryServeStaticH2(allocator: Allocator, session: *h2.H2Session, stream_id: i32
 
     const file_path = std.fs.path.join(allocator, &.{ doc_root, rel }) catch return false;
     defer allocator.free(file_path);
-    const file = std.fs.cwd().openFile(file_path, .{}) catch return false;
-    defer file.close();
-    const stat = file.stat() catch return false;
+    const file = std.Io.Dir.cwd().openFile(platform.io, file_path, .{}) catch return false;
+    defer file.close(platform.io);
+    const stat = file.stat(platform.io) catch return false;
     if (stat.kind != .file) return false;
 
     const size: usize = @intCast(stat.size);
@@ -1219,7 +1222,7 @@ fn tryServeStaticH2(allocator: Allocator, session: *h2.H2Session, stream_id: i32
 
     const body = allocator.alloc(u8, size) catch return false;
     defer allocator.free(body);
-    const bytes_read = file.readAll(body) catch return false;
+    const bytes_read = platform.readAll(file, body) catch return false;
 
     const mime = mimeType(rel);
     session.submitResponse(stream_id, 200, mime, body[0..bytes_read]);
@@ -1368,7 +1371,7 @@ fn parseRequest(raw: []const u8) Request {
     return req;
 }
 
-fn populateSuperglobals(vm: *VM, req: *const Request, conn: std.net.Server.Connection, port: u16, env_snapshot: ?*const env.EnvSnapshot, doc_root: []const u8, script_filename: []const u8, front_controller: bool) !void {
+fn populateSuperglobals(vm: *VM, req: *const Request, conn: net.Server.Connection, port: u16, env_snapshot: ?*const env.EnvSnapshot, doc_root: []const u8, script_filename: []const u8, front_controller: bool) !void {
     const a = vm.allocator;
     const server_arr = try vm.allocArray();
 
@@ -1523,7 +1526,7 @@ fn extractBoundary(ct: []const u8) ?[]const u8 {
         return rest[1..end];
     }
     if (std.mem.indexOfScalar(u8, rest, ';')) |end| return rest[0..end];
-    return std.mem.trimRight(u8, rest, " \t\r\n");
+    return std.mem.trimEnd(u8, rest, " \t\r\n");
 }
 
 fn parseMultipart(a: Allocator, vm: *VM, body: []const u8, boundary: []const u8, post_arr: *PhpArray, files_arr: *PhpArray) !void {
@@ -1621,16 +1624,16 @@ fn extractParam(header: []const u8, name: []const u8) ?[]const u8 {
 fn uploadTempPath(a: Allocator) ![]const u8 {
     const dir = platform.tempDir();
     const sep = if (dir.len > 0 and platform.isSep(dir[dir.len - 1])) "" else platform.sep_str;
-    return std.fmt.allocPrint(a, "{s}{s}zphp_upload_{x:0>16}", .{ dir, sep, std.crypto.random.int(u64) });
+    return std.fmt.allocPrint(a, "{s}{s}zphp_upload_{x:0>16}", .{ dir, sep, platform.random.int(u64) });
 }
 
-const UploadTempFile = struct { path: []const u8, file: std.fs.File };
+const UploadTempFile = struct { path: []const u8, file: std.Io.File };
 
 fn createUploadTempFile(a: Allocator) !UploadTempFile {
     var attempts: usize = 0;
     while (attempts < 64) : (attempts += 1) {
         const path = try uploadTempPath(a);
-        const file = std.fs.cwd().createFile(path, .{ .exclusive = true, .mode = 0o600 }) catch |err| {
+        const file = std.Io.Dir.cwd().createFile(platform.io, path, .{ .exclusive = true, .permissions = platform.permissionsFromMode(0o600) }) catch |err| {
             a.free(path);
             if (err == error.PathAlreadyExists) continue;
             return error.TempFileCreation;
@@ -1642,10 +1645,10 @@ fn createUploadTempFile(a: Allocator) !UploadTempFile {
 
 fn writeTempFile(a: Allocator, data: []const u8) ![]const u8 {
     const temp = try createUploadTempFile(a);
-    const written = temp.file.writeAll(data);
-    temp.file.close();
+    const written = platform.writeAll(temp.file, data);
+    temp.file.close(platform.io);
     written catch {
-        std.fs.cwd().deleteFile(temp.path) catch {};
+        std.Io.Dir.cwd().deleteFile(platform.io, temp.path) catch {};
         a.free(temp.path);
         return error.TempFileWrite;
     };
@@ -1653,7 +1656,7 @@ fn writeTempFile(a: Allocator, data: []const u8) ![]const u8 {
 }
 
 fn urlDecode(a: Allocator, input: []const u8) ![]const u8 {
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     var i: usize = 0;
     while (i < input.len) {
         if (input[i] == '%' and i + 2 < input.len) {
@@ -1690,16 +1693,16 @@ fn tryServeStatic(allocator: Allocator, conn: *Connection, doc_root: []const u8,
 
     const file_path = std.fs.path.join(allocator, &.{ doc_root, rel }) catch return false;
     defer allocator.free(file_path);
-    const file = std.fs.cwd().openFile(file_path, .{}) catch return false;
-    defer file.close();
-    const stat = file.stat() catch return false;
+    const file = std.Io.Dir.cwd().openFile(platform.io, file_path, .{}) catch return false;
+    defer file.close(platform.io);
+    const stat = file.stat(platform.io) catch return false;
     if (stat.kind != .file) return false;
 
     const size = stat.size;
     const mime = mimeType(rel);
 
     var etag_buf: [64]u8 = undefined;
-    const mtime_s: u64 = @intCast(@divFloor(stat.mtime, 1_000_000_000));
+    const mtime_s: u64 = @intCast(@divFloor(stat.mtime.nanoseconds, 1_000_000_000));
     const etag = std.fmt.bufPrint(&etag_buf, "\"{x}-{x}\"", .{ size, mtime_s }) catch return false;
 
     if (req.getHeader("If-None-Match")) |inm| {
@@ -1718,7 +1721,7 @@ fn tryServeStatic(allocator: Allocator, conn: *Connection, doc_root: []const u8,
     if (use_gzip) {
         const raw = allocator.alloc(u8, size) catch return false;
         defer allocator.free(raw);
-        const bytes_read = file.readAll(raw) catch return false;
+        const bytes_read = platform.readAll(file, raw) catch return false;
         if (gzipCompress(allocator, raw[0..bytes_read])) |compressed| {
             defer allocator.free(compressed);
             var hdr_buf: [512]u8 = undefined;
@@ -1737,7 +1740,7 @@ fn tryServeStatic(allocator: Allocator, conn: *Connection, doc_root: []const u8,
     var remaining: u64 = size;
     while (remaining > 0) {
         const to_read = @min(remaining, fbuf.len);
-        const nr = file.read(fbuf[0..to_read]) catch return true;
+        const nr = platform.read(file, fbuf[0..to_read]) catch return true;
         if (nr == 0) break;
         _ = conn.ioWrite(fbuf[0..nr]) catch return true;
         remaining -= nr;
@@ -1912,7 +1915,7 @@ fn gzipCompress(allocator: Allocator, input: []const u8) ?[]u8 {
 }
 
 fn writeStderr(msg: []const u8) !void {
-    try std.fs.File.stderr().writeAll(msg);
+    try platform.writeAll(std.Io.File.stderr(), msg);
 }
 
 test "worker startup keeps only the workers that came up and stops cleanly" {

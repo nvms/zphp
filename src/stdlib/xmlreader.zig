@@ -13,9 +13,7 @@ const ClassDef = vm_mod.ClassDef;
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
-const c = @cImport({
-    @cInclude("libxml/xmlreader.h");
-});
+const c = @import("c_xmlreader");
 
 // a packed file is read in place: its bytes outlive every reader
 fn readerForFile(path_z: [:0]const u8, enc: [*c]const u8, opts: c_int) ?*c.xmlTextReader {

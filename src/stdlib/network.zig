@@ -1,5 +1,7 @@
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
+const net = @import("../net.zig");
+const sys = @import("../sys.zig");
 const platform = @import("../platform.zig");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
@@ -50,11 +52,11 @@ fn objectFd(obj: *PhpObject) ?i64 {
 }
 
 fn isNetStream(v: Value) bool {
-    const net = v.resource.get("__net");
-    return net == .bool and net.bool;
+    const flag = v.resource.get("__net");
+    return flag == .bool and flag.bool;
 }
 
-const poll_events = [_]i16{ std.posix.POLL.IN, std.posix.POLL.OUT, std.posix.POLL.PRI };
+const poll_events = [_]i16{ sys.POLL.IN, sys.POLL.OUT, sys.POLL.PRI };
 
 // one stream from one of the three select sets. sockets sit in the poll
 // list; on windows every other descriptor is a crt handle that WSAPoll
@@ -68,15 +70,15 @@ const Watched = struct {
 };
 
 const WatchList = std.ArrayListUnmanaged(Watched);
-const PollList = std.ArrayListUnmanaged(std.posix.pollfd);
+const PollList = std.ArrayListUnmanaged(sys.pollfd);
 
 // stream_select(&$read, &$write, &$except, ?int $seconds, int $microseconds = 0): int|false
 // waits on the streams in each (by-ref) array and rewrites each array to the
 // ready subset, returning the number ready (false on error). null $seconds blocks
 fn native_stream_select(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    var watched: WatchList = .{};
+    var watched: WatchList = .empty;
     defer watched.deinit(ctx.allocator);
-    var pollfds: PollList = .{};
+    var pollfds: PollList = .empty;
     defer pollfds.deinit(ctx.allocator);
 
     const total_streams = try watchStreams(ctx, args, &watched, &pollfds);
@@ -142,7 +144,7 @@ fn anyReady(watched: []const Watched) bool {
 // sockets wait in poll. with crt handles in the mix (windows only) the wait
 // is sliced: each slice peeks the handles, then polls or sleeps for the
 // slice, until something is ready or the timeout runs out
-fn awaitReady(watched: []Watched, pollfds: []std.posix.pollfd, timeout_ms: i32) !void {
+fn awaitReady(watched: []Watched, pollfds: []sys.pollfd, timeout_ms: i32) !void {
     if (!platform.is_windows or !hasHandles(watched)) {
         try pollSockets(pollfds, timeout_ms);
         markSocketsReady(watched, pollfds);
@@ -156,20 +158,20 @@ fn awaitReady(watched: []Watched, pollfds: []std.posix.pollfd, timeout_ms: i32) 
         try pollSockets(pollfds, wait_ms);
         markSocketsReady(watched, pollfds);
         if (anyReady(watched) or remaining == 0) return;
-        if (pollfds.len == 0) std.Thread.sleep(@as(u64, @intCast(wait_ms)) * std.time.ns_per_ms);
+        if (pollfds.len == 0) platform.sleep(@as(u64, @intCast(wait_ms)) * std.time.ns_per_ms);
         if (remaining > 0) remaining -= wait_ms;
     }
 }
 
-fn pollSockets(pollfds: []std.posix.pollfd, timeout_ms: i32) !void {
+fn pollSockets(pollfds: []sys.pollfd, timeout_ms: i32) !void {
     if (pollfds.len == 0) return;
-    _ = std.posix.poll(pollfds, timeout_ms) catch return error.PollFailed;
+    _ = sys.poll(pollfds, timeout_ms) catch return error.PollFailed;
 }
 
-fn markSocketsReady(watched: []Watched, pollfds: []const std.posix.pollfd) void {
+fn markSocketsReady(watched: []Watched, pollfds: []const sys.pollfd) void {
     for (watched) |*w| {
         const idx = w.poll_index orelse continue;
-        const mask = poll_events[w.slot] | std.posix.POLL.ERR | std.posix.POLL.HUP;
+        const mask = poll_events[w.slot] | sys.POLL.ERR | sys.POLL.HUP;
         if ((pollfds[idx].revents & mask) != 0) w.ready = true;
     }
 }
@@ -188,20 +190,17 @@ fn markHandlesReady(watched: []Watched) bool {
     return any;
 }
 
-const win = std.os.windows;
-const FILE_TYPE_PIPE: u32 = 3;
-extern "kernel32" fn GetFileType(handle: win.HANDLE) callconv(.winapi) u32;
-extern "kernel32" fn PeekNamedPipe(pipe: win.HANDLE, buffer: ?*anyopaque, size: u32, read: ?*u32, available: ?*u32, left: ?*u32) callconv(.winapi) win.BOOL;
+const win32 = @import("../win32.zig");
 
 // a pipe is readable once bytes are pending or its writer is gone; a disk
 // file or console reads without waiting, which is what php's own select
 // emulation on windows reports
 fn handleReadable(fd: i64) bool {
     const file = platform.fileFromFd(fd) orelse return true;
-    if (GetFileType(file.handle) != FILE_TYPE_PIPE) return true;
+    if (win32.GetFileType(file.handle) != win32.FILE_TYPE_PIPE) return true;
     var available: u32 = 0;
-    if (PeekNamedPipe(file.handle, null, 0, null, &available, null) != 0) return available > 0;
-    return win.GetLastError() == .BROKEN_PIPE;
+    if (win32.PeekNamedPipe(file.handle, null, 0, null, &available, null) != 0) return available > 0;
+    return win32.GetLastError() == win32.ERROR_BROKEN_PIPE;
 }
 
 // stream_socket_pair(int $domain, int $type, int $protocol): array|false
@@ -372,7 +371,7 @@ fn applyContextParams(ctx: *NativeContext, context: *PhpObject, params: *PhpArra
 fn native_gethostbyname(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const host = args[0].string.bytes();
-    var list = std.net.getAddressList(ctx.allocator, host, 0) catch return NativeResult.share(args[0]);
+    var list = net.getAddressList(ctx.allocator, host, 0) catch return NativeResult.share(args[0]);
     defer list.deinit();
     if (list.addrs.len == 0) return NativeResult.share(args[0]);
     for (list.addrs) |addr| {
@@ -392,7 +391,7 @@ fn native_gethostbyname(ctx: *NativeContext, args: []const Value) RuntimeError!N
 fn native_gethostbynamel(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const host = args[0].string.bytes();
-    var list = std.net.getAddressList(ctx.allocator, host, 0) catch return NativeResult.scalar(.{ .bool = false });
+    var list = net.getAddressList(ctx.allocator, host, 0) catch return NativeResult.scalar(.{ .bool = false });
     defer list.deinit();
     if (list.addrs.len == 0) return NativeResult.scalar(.{ .bool = false });
     const arr = try ctx.createArray();
@@ -431,12 +430,12 @@ fn native_inet_pton(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const s = args[0].string.bytes();
     // try IPv4
-    if (std.net.Address.parseIp4(s, 0)) |addr| {
+    if (net.Address.parseIp4(s, 0)) |addr| {
         const bytes = std.mem.toBytes(addr.in.sa.addr);
         return NativeResult.copyString(ctx.allocator, &bytes);
     } else |_| {}
     // try IPv6
-    if (std.net.Address.parseIp6(s, 0)) |addr| {
+    if (net.Address.parseIp6(s, 0)) |addr| {
         return NativeResult.copyString(ctx.allocator, &addr.in6.sa.addr);
     } else |_| {}
     return NativeResult.scalar(.{ .bool = false });
@@ -453,7 +452,7 @@ fn native_inet_ntop(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     if (bytes.len == 16) {
         var addr: [16]u8 = undefined;
         @memcpy(&addr, bytes);
-        const ip = std.net.Address.initIp6(addr, 0, 0, 0);
+        const ip = net.Address.initIp6(addr, 0, 0, 0);
         var buf: [64]u8 = undefined;
         const out = std.fmt.bufPrint(&buf, "{f}", .{ip}) catch return NativeResult.scalar(.{ .bool = false });
         // strip [...]:port wrapping
@@ -493,7 +492,7 @@ fn native_long2ip(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
 
 // a transport address as stream_socket_client/server take it
 const Endpoint = union(enum) {
-    tcp: std.net.Address,
+    tcp: net.Address,
     unix: []const u8,
 };
 
@@ -530,42 +529,42 @@ fn parseEndpoint(allocator: std.mem.Allocator, target: []const u8) !Endpoint {
     var host = rest[0..colon];
     const port = std.fmt.parseUnsigned(u16, rest[colon + 1 ..], 10) catch return error.MissingPort;
     if (host.len >= 2 and host[0] == '[' and host[host.len - 1] == ']') host = host[1 .. host.len - 1];
-    if (std.net.Address.parseIp(host, port)) |addr| return .{ .tcp = addr } else |_| {}
-    const list = try std.net.getAddressList(allocator, host, port);
+    if (net.Address.parseIp(host, port)) |addr| return .{ .tcp = addr } else |_| {}
+    const list = try net.getAddressList(allocator, host, port);
     defer list.deinit();
     if (list.addrs.len == 0) return error.UnknownHostName;
     return .{ .tcp = list.addrs[0] };
 }
 
-fn endpointAddress(endpoint: Endpoint) !std.net.Address {
+fn endpointAddress(endpoint: Endpoint) !net.Address {
     return switch (endpoint) {
         .tcp => |addr| addr,
-        .unix => |path| std.net.Address.initUnix(path),
+        .unix => |path| net.Address.initUnix(path),
     };
 }
 
 fn newSocket(family: u32) !std.posix.socket_t {
-    if (family == std.posix.AF.UNIX) return std.posix.socket(family, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, 0);
+    if (family == std.posix.AF.UNIX) return sys.socket(family, if (platform.is_windows) std.posix.SOCK.STREAM else std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, 0);
     return platform.tcpSocket(family);
 }
 
 // connects, waiting at most timeout_ms (null blocks); async leaves the
 // connection in progress on a non-blocking socket, as STREAM_CLIENT_ASYNC_CONNECT does
-fn connectSocket(addr: std.net.Address, timeout_ms: ?i32, async_connect: bool) !std.posix.socket_t {
+fn connectSocket(addr: net.Address, timeout_ms: ?i32, async_connect: bool) !std.posix.socket_t {
     const sock = try newSocket(addr.any.family);
     errdefer platform.closeSocket(platform.socketToInt(sock));
     if (!async_connect and timeout_ms == null) {
-        try std.posix.connect(sock, &addr.any, addr.getOsSockLen());
+        try sys.connect(sock, &addr.any, addr.getOsSockLen());
         return sock;
     }
     try platform.setNonBlocking(sock, true);
-    std.posix.connect(sock, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
+    sys.connect(sock, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
         error.WouldBlock, error.ConnectionPending => {},
         else => return err,
     };
     if (async_connect) return sock;
-    var fds = [_]std.posix.pollfd{.{ .fd = sock, .events = std.posix.POLL.OUT, .revents = 0 }};
-    if (try std.posix.poll(&fds, timeout_ms.?) == 0) return error.ConnectionTimedOut;
+    var fds = [_]sys.pollfd{.{ .fd = sock, .events = sys.POLL.OUT, .revents = 0 }};
+    if (try sys.poll(&fds, timeout_ms.?) == 0) return error.ConnectionTimedOut;
     try platform.connectResult(sock);
     try platform.setNonBlocking(sock, false);
     return sock;
@@ -659,9 +658,9 @@ fn listenSocket(endpoint: Endpoint, flags: i64, backlog: u31) !std.posix.socket_
     errdefer platform.closeSocket(platform.socketToInt(sock));
     // php sets it on every platform; on windows that lets a second server
     // take a port that is already bound, which php allows there too
-    if (endpoint == .tcp) try std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
-    if ((flags & 4) != 0) try std.posix.bind(sock, &addr.any, addr.getOsSockLen());
-    if ((flags & 8) != 0) try std.posix.listen(sock, backlog);
+    if (endpoint == .tcp) try sys.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
+    if ((flags & 4) != 0) try sys.bind(sock, &addr.any, addr.getOsSockLen());
+    if ((flags & 8) != 0) try sys.listen(sock, backlog);
     return sock;
 }
 
@@ -681,15 +680,15 @@ fn contextBacklog(context: *PhpObject) u31 {
 fn native_stream_socket_accept(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const listener = try filesystem.streamArg(ctx, args, .{ .func = "stream_socket_accept", .param = "socket" });
     const server = platform.socketFromInt(objectFd(listener) orelse return NativeResult.scalar(.{ .bool = false })) orelse return NativeResult.scalar(.{ .bool = false });
-    var fds = [_]std.posix.pollfd{.{ .fd = server, .events = std.posix.POLL.IN, .revents = 0 }};
-    const ready = std.posix.poll(&fds, timeoutMs(ctx, if (args.len > 1) args[1] else null) orelse -1) catch 0;
+    var fds = [_]sys.pollfd{.{ .fd = server, .events = sys.POLL.IN, .revents = 0 }};
+    const ready = sys.poll(&fds, timeoutMs(ctx, if (args.len > 1) args[1] else null) orelse -1) catch 0;
     if (ready == 0) {
         try ctx.vm.emitWarning("stream_socket_accept(): Accept failed: " ++ comptime socketError(error.Timeout).message);
         return NativeResult.scalar(.{ .bool = false });
     }
-    var peer: std.net.Address = undefined;
-    var len: std.posix.socklen_t = @sizeOf(std.net.Address);
-    const sock = std.posix.accept(server, &peer.any, &len, std.posix.SOCK.CLOEXEC) catch |err| {
+    var peer: net.Address = undefined;
+    var len: std.posix.socklen_t = @sizeOf(net.Address);
+    const sock = sys.accept(server, &peer.any, &len, if (platform.is_windows) 0 else std.posix.SOCK.CLOEXEC) catch |err| {
         const msg = try std.fmt.allocPrint(ctx.allocator, "stream_socket_accept(): Accept failed: {s}", .{socketError(err).message});
         defer ctx.allocator.free(msg);
         try ctx.vm.emitWarning(msg);
@@ -716,8 +715,8 @@ fn native_stream_socket_get_name(ctx: *NativeContext, args: []const Value) Runti
     const stream = try filesystem.streamArg(ctx, args, .{ .func = "stream_socket_get_name", .param = "socket" });
     const sock = platform.socketFromInt(objectFd(stream) orelse return NativeResult.scalar(.{ .bool = false })) orelse return NativeResult.scalar(.{ .bool = false });
     const remote = args.len > 1 and args[1].isTruthy();
-    var addr: std.net.Address = undefined;
-    var len: std.posix.socklen_t = @sizeOf(std.net.Address);
+    var addr: net.Address = undefined;
+    var len: std.posix.socklen_t = @sizeOf(net.Address);
     // not connected (a listener asked for its peer) is an answer, not a fault
     const rc = if (remote) std.c.getpeername(sock, &addr.any, &len) else std.c.getsockname(sock, &addr.any, &len);
     if (rc != 0) return NativeResult.scalar(.{ .bool = false });
@@ -725,7 +724,7 @@ fn native_stream_socket_get_name(ctx: *NativeContext, args: []const Value) Runti
     return NativeResult.copyString(ctx.allocator, addressName(&buf, addr, len));
 }
 
-fn addressName(buf: []u8, addr: std.net.Address, len: std.posix.socklen_t) []const u8 {
+fn addressName(buf: []u8, addr: net.Address, len: std.posix.socklen_t) []const u8 {
     if (addr.any.family == std.posix.AF.UNIX) {
         const path_len = @as(usize, len) -| @offsetOf(std.posix.sockaddr.un, "path");
         return std.mem.sliceTo(addr.un.path[0..@min(path_len, addr.un.path.len)], 0);
@@ -737,18 +736,18 @@ fn addressName(buf: []u8, addr: std.net.Address, len: std.posix.socklen_t) []con
 fn native_stream_socket_shutdown(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const stream = try filesystem.streamArg(ctx, args, .{ .func = "stream_socket_shutdown" });
     const sock = platform.socketFromInt(objectFd(stream) orelse return NativeResult.scalar(.{ .bool = false })) orelse return NativeResult.scalar(.{ .bool = false });
-    const how: std.posix.ShutdownHow = switch (if (args.len > 1) Value.toInt(args[1]) else 2) {
+    const how: sys.ShutdownHow = switch (if (args.len > 1) Value.toInt(args[1]) else 2) {
         0 => .recv,
         1 => .send,
         else => .both,
     };
-    std.posix.shutdown(sock, how) catch return NativeResult.scalar(.{ .bool = false });
+    sys.shutdown(sock, how) catch return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = true });
 }
 
 fn native_checkdnsrr(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    var list = std.net.getAddressList(ctx.allocator, args[0].string.bytes(), 0) catch return NativeResult.scalar(.{ .bool = false });
+    var list = net.getAddressList(ctx.allocator, args[0].string.bytes(), 0) catch return NativeResult.scalar(.{ .bool = false });
     defer list.deinit();
     return NativeResult.scalar(.{ .bool = list.addrs.len > 0 });
 }
@@ -756,7 +755,7 @@ fn native_checkdnsrr(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
 fn native_dns_get_record(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const result = try ctx.createArray();
-    var list = std.net.getAddressList(ctx.allocator, args[0].string.bytes(), 0) catch return NativeResult.borrowed(.{ .array = result });
+    var list = net.getAddressList(ctx.allocator, args[0].string.bytes(), 0) catch return NativeResult.borrowed(.{ .array = result });
     defer list.deinit();
     for (list.addrs) |addr| {
         const entry = try ctx.createArray();

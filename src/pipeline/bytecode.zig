@@ -462,7 +462,7 @@ pub const OpCode = enum(u8) {
     }
 
     pub fn widthFromByte(b: u8) usize {
-        const op: OpCode = std.meta.intToEnum(OpCode, b) catch return 1;
+        const op: OpCode = std.enums.fromInt(OpCode, b) orelse return 1;
         return op.width();
     }
 
@@ -568,9 +568,9 @@ pub const SourceLocation = struct {
 };
 
 pub const Chunk = struct {
-    code: std.ArrayListUnmanaged(u8) = .{},
-    constants: std.ArrayListUnmanaged(Value) = .{},
-    lines: std.ArrayListUnmanaged(u32) = .{},
+    code: std.ArrayListUnmanaged(u8) = .empty,
+    constants: std.ArrayListUnmanaged(Value) = .empty,
+    lines: std.ArrayListUnmanaged(u32) = .empty,
 
     pub fn deinit(self: *Chunk, allocator: std.mem.Allocator) void {
         self.code.deinit(allocator);

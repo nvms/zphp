@@ -1,5 +1,6 @@
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
+const sys = @import("../sys.zig");
 const paths = @import("../paths.zig");
 const platform = @import("../platform.zig");
 const Value = @import("../runtime/value.zig").Value;
@@ -15,7 +16,7 @@ const phar = @import("phar.zig");
 const phar_path = @import("phar_path.zig");
 const includes = @import("../runtime/includes.zig");
 const bundle = @import("../bundle.zig");
-const zlib = @cImport(@cInclude("zlib.h"));
+const zlib = @import("c_zlib");
 
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
@@ -225,10 +226,10 @@ fn isNetStream(obj: *PhpObject) bool {
 }
 
 // a socket is a handle of its own on windows, not a crt descriptor
-fn getFileHandle(obj: *PhpObject) ?std.fs.File {
+fn getFileHandle(obj: *PhpObject) ?std.Io.File {
     const v = obj.get("__fd");
     if (v != .int or v.int < 0) return null;
-    if (platform.is_windows and isNetStream(obj)) return .{ .handle = platform.socketFromInt(v.int) orelse return null };
+    if (platform.is_windows and isNetStream(obj)) return platform.fileFromHandle(platform.socketFromInt(v.int) orelse return null);
     return platform.fileFromFd(v.int);
 }
 
@@ -236,17 +237,17 @@ fn getFileHandle(obj: *PhpObject) ?std.fs.File {
 // socket read with ReadFile ignores the socket's non-blocking mode, so a
 // non-blocking read with nothing pending would never return
 const StreamIo = struct {
-    file: std.fs.File,
+    file: std.Io.File,
     socket: bool,
 
     fn read(self: StreamIo, dest: []u8) anyerror!usize {
-        if (self.socket) return std.posix.recv(self.sock(), dest, 0);
-        return self.file.read(dest);
+        if (self.socket) return sys.recv(self.sock(), dest, 0);
+        return platform.read(self.file, dest);
     }
 
     fn write(self: StreamIo, data: []const u8) anyerror!usize {
-        if (self.socket) return std.posix.send(self.sock(), data, 0);
-        return self.file.write(data);
+        if (self.socket) return sys.send(self.sock(), data, 0);
+        return platform.write(self.file, data);
     }
 
     fn sock(self: StreamIo) std.posix.socket_t {
@@ -288,7 +289,7 @@ fn hexNibble(c: u8) ?u8 {
 }
 
 fn percentDecode(a: Allocator, s: []const u8) ![]u8 {
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     errdefer buf.deinit(a);
     var i: usize = 0;
     while (i < s.len) {
@@ -308,7 +309,7 @@ fn percentDecode(a: Allocator, s: []const u8) ![]u8 {
 }
 
 fn base64DecodeBytes(a: Allocator, s: []const u8) !?[]u8 {
-    var clean = std.ArrayListUnmanaged(u8){};
+    var clean = std.ArrayListUnmanaged(u8).empty;
     defer clean.deinit(a);
     for (s) |c| {
         if (c == ' ' or c == '\n' or c == '\r' or c == '\t') continue;
@@ -450,9 +451,7 @@ fn throwStreamArg(ctx: *NativeContext, comptime fmt: []const u8, args: anytype) 
 
 // file read/write
 
-const c_curl = @cImport({
-    @cInclude("curl/curl.h");
-});
+const c_curl = @import("c_curl");
 
 var curl_global_init_done: bool = false;
 
@@ -530,7 +529,7 @@ fn fetchUrl(ctx: *NativeContext, url: []const u8) RuntimeError!NativeResult {
 
     var wd = CurlWriteData{
         .allocator = ctx.allocator,
-        .buffer = .{},
+        .buffer = .empty,
     };
     defer wd.buffer.deinit(wd.allocator);
 
@@ -592,7 +591,7 @@ pub fn readPath(ctx: *NativeContext, raw_path: []const u8) RuntimeError!?Value.S
         const opened = (try dispatchUserOpen(ctx, class_name, path, "rb")) orelse return null;
         const fh = opened.resource;
         const wrapper = fileHandleWrapper(fh) orelse return null;
-        var buf = std.ArrayListUnmanaged(u8){};
+        var buf = std.ArrayListUnmanaged(u8).empty;
         defer buf.deinit(ctx.allocator);
         while (true) {
             const chunk = try ctx.callMethod(wrapper, "stream_read", &[_]Value{.{ .int = 8192 }});
@@ -616,7 +615,7 @@ pub fn readPath(ctx: *NativeContext, raw_path: []const u8) RuntimeError!?Value.S
         return body_val.string;
     }
     if (std.mem.eql(u8, path, "php://stdin")) {
-        const data = std.fs.File.stdin().readToEndAlloc(ctx.allocator, std.math.maxInt(usize)) catch return null;
+        const data = platform.readToEndAlloc(std.Io.File.stdin(), ctx.allocator, std.math.maxInt(usize)) catch return null;
         return try Value.String.adopt(ctx.allocator, data);
     }
     if (std.mem.eql(u8, path, "php://stdout") or std.mem.eql(u8, path, "php://output") or std.mem.eql(u8, path, "php://stderr")) {
@@ -659,7 +658,7 @@ fn native_file_put_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
 
 fn putContents(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const spelled_path = args[0].string.bytes();
-    var formatted = std.ArrayListUnmanaged(u8){};
+    var formatted = std.ArrayListUnmanaged(u8).empty;
     defer formatted.deinit(ctx.allocator);
     const data = if (args[1] == .string) args[1].string.bytes() else if (args[1] == .array) blk: {
         // PHP writes an array argument as its elements concatenated, like
@@ -689,8 +688,8 @@ fn putContents(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     }
     if (std.mem.eql(u8, spelled_path, "php://stderr")) {
         ctx.vm.flushOutputToStdout();
-        const stderr = std.fs.File.stderr();
-        const n = stderr.write(data) catch return NativeResult.scalar(.{ .bool = false });
+        const stderr = std.Io.File.stderr();
+        const n = platform.write(stderr, data) catch return NativeResult.scalar(.{ .bool = false });
         return NativeResult.scalar(.{ .int = @intCast(n) });
     }
     if (std.mem.startsWith(u8, spelled_path, ZLIB_PREFIX)) {
@@ -703,15 +702,15 @@ fn putContents(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     const path = paths.streamPath(&path_buf, spelled_path);
     bundle.prepareWrite(path, if (append) .edit else .create);
     if (append) {
-        const file = std.fs.cwd().openFile(path, .{ .mode = .write_only }) catch {
-            std.fs.cwd().writeFile(.{ .sub_path = path, .data = data }) catch return NativeResult.scalar(.{ .bool = false });
+        const file = std.Io.Dir.cwd().openFile(platform.io, path, .{ .mode = .write_only }) catch {
+            std.Io.Dir.cwd().writeFile(platform.io, .{ .sub_path = path, .data = data }) catch return NativeResult.scalar(.{ .bool = false });
             return NativeResult.scalar(.{ .int = @intCast(data.len) });
         };
-        defer file.close();
-        file.seekFromEnd(0) catch return NativeResult.scalar(.{ .bool = false });
-        _ = file.write(data) catch return NativeResult.scalar(.{ .bool = false });
+        defer file.close(platform.io);
+        platform.seekFromEnd(file, 0) catch return NativeResult.scalar(.{ .bool = false });
+        _ = platform.write(file, data) catch return NativeResult.scalar(.{ .bool = false });
     } else {
-        std.fs.cwd().writeFile(.{ .sub_path = path, .data = data }) catch return NativeResult.scalar(.{ .bool = false });
+        std.Io.Dir.cwd().writeFile(platform.io, .{ .sub_path = path, .data = data }) catch return NativeResult.scalar(.{ .bool = false });
     }
     return NativeResult.scalar(.{ .int = @intCast(data.len) });
 }
@@ -738,11 +737,11 @@ fn native_file_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
         return NativeResult.scalar(.{ .bool = loaded.parsed.isDir(normalized) });
     }
     if (std.mem.startsWith(u8, path, ZLIB_PREFIX)) {
-        std.fs.cwd().access(path[ZLIB_PREFIX.len..], .{}) catch return NativeResult.scalar(Value{ .bool = false });
+        std.Io.Dir.cwd().access(platform.io, path[ZLIB_PREFIX.len..], .{}) catch return NativeResult.scalar(Value{ .bool = false });
         return NativeResult.scalar(.{ .bool = true });
     }
     if (bundle.find(path) != null) return NativeResult.scalar(.{ .bool = true });
-    std.fs.cwd().access(path, .{}) catch return NativeResult.scalar(Value{ .bool = false });
+    std.Io.Dir.cwd().access(platform.io, path, .{}) catch return NativeResult.scalar(Value{ .bool = false });
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -770,11 +769,11 @@ fn native_is_file(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         return NativeResult.scalar(.{ .bool = loaded.parsed.lookup(normalized) != null });
     }
     if (std.mem.startsWith(u8, path, ZLIB_PREFIX)) {
-        const stat = std.fs.cwd().statFile(path[ZLIB_PREFIX.len..]) catch return NativeResult.scalar(Value{ .bool = false });
+        const stat = std.Io.Dir.cwd().statFile(platform.io, path[ZLIB_PREFIX.len..], .{}) catch return NativeResult.scalar(Value{ .bool = false });
         return NativeResult.scalar(.{ .bool = stat.kind == .file });
     }
     if (bundle.find(path)) |hit| return NativeResult.scalar(.{ .bool = hit == .file });
-    const stat = std.fs.cwd().statFile(path) catch return NativeResult.scalar(Value{ .bool = false });
+    const stat = std.Io.Dir.cwd().statFile(platform.io, path, .{}) catch return NativeResult.scalar(Value{ .bool = false });
     return NativeResult.scalar(.{ .bool = stat.kind == .file });
 }
 
@@ -802,8 +801,8 @@ fn native_is_dir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         return NativeResult.scalar(.{ .bool = loaded.parsed.isDir(normalized) });
     }
     if (bundle.find(path)) |hit| if (hit == .dir) return NativeResult.scalar(.{ .bool = true });
-    var dir = std.fs.cwd().openDir(path, .{}) catch return NativeResult.scalar(Value{ .bool = false });
-    dir.close();
+    var dir = std.Io.Dir.cwd().openDir(platform.io, path, .{}) catch return NativeResult.scalar(Value{ .bool = false });
+    dir.close(platform.io);
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -896,7 +895,7 @@ fn native_realpath(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = bundle.osPath(&os_buf, args[0].string.bytes());
     if (bundle.canonicalPath(&buf, path)) |packed_path| return NativeResult.copyString(ctx.allocator, packed_path);
-    const resolved = std.fs.cwd().realpath(args[0].string.bytes(), &buf) catch return NativeResult.scalar(Value{ .bool = false });
+    const resolved = platform.realpath(args[0].string.bytes(), &buf) catch return NativeResult.scalar(Value{ .bool = false });
     return NativeResult.copyString(ctx.allocator, resolved);
 }
 
@@ -913,10 +912,10 @@ fn native_mkdir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     if (platform.is_windows) {
         if (recursive) {
             // makePath succeeds on an existing directory; php's mkdir fails
-            if (std.fs.cwd().access(path, .{})) |_| return NativeResult.scalar(Value{ .bool = false }) else |_| {}
-            std.fs.cwd().makePath(path) catch return NativeResult.scalar(Value{ .bool = false });
+            if (std.Io.Dir.cwd().access(platform.io, path, .{})) |_| return NativeResult.scalar(Value{ .bool = false }) else |_| {}
+            std.Io.Dir.cwd().createDirPath(platform.io, path) catch return NativeResult.scalar(Value{ .bool = false });
         } else {
-            std.fs.cwd().makeDir(path) catch return NativeResult.scalar(Value{ .bool = false });
+            std.Io.Dir.cwd().createDir(platform.io, path, .default_dir) catch return NativeResult.scalar(Value{ .bool = false });
         }
         return NativeResult.scalar(.{ .bool = true });
     }
@@ -926,7 +925,7 @@ fn native_mkdir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     if (recursive) {
         makePathMode(path, mode) catch return NativeResult.scalar(Value{ .bool = false });
     } else {
-        std.posix.mkdir(path, mode) catch return NativeResult.scalar(Value{ .bool = false });
+        sys.mkdir(path, mode) catch return NativeResult.scalar(Value{ .bool = false });
     }
     return NativeResult.scalar(.{ .bool = true });
 }
@@ -934,12 +933,12 @@ fn native_mkdir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
 // every missing directory along the path gets the same mode, as in php. an
 // existing parent is fine, an existing final directory fails like mkdir(2)
 fn makePathMode(path: []const u8, mode: std.posix.mode_t) !void {
-    const full = std.mem.trimRight(u8, path, "/");
+    const full = std.mem.trimEnd(u8, path, "/");
     if (full.len == 0) return error.PathAlreadyExists;
     var end: usize = 0;
     while (end < full.len) {
         end = std.mem.indexOfScalarPos(u8, full, end + 1, '/') orelse full.len;
-        std.posix.mkdir(full[0..end], mode) catch |err| switch (err) {
+        sys.mkdir(full[0..end], mode) catch |err| switch (err) {
             error.PathAlreadyExists => if (end == full.len) return err,
             else => return err,
         };
@@ -955,7 +954,7 @@ fn native_rmdir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         var packed_names = listing;
         if (packed_names.next() != null) return NativeResult.scalar(.{ .bool = false });
     }
-    std.fs.cwd().deleteDir(path) catch |err| {
+    std.Io.Dir.cwd().deleteDir(platform.io, path) catch |err| {
         if (err == error.FileNotFound and bundle.find(path) != null and bundle.remove(path)) return NativeResult.scalar(.{ .bool = true });
         return NativeResult.scalar(.{ .bool = false });
     };
@@ -985,7 +984,7 @@ fn native_unlink(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
 
 // deletes a file, hiding a packed copy the executable's application holds
 pub fn unlinkPath(path: []const u8) NativeResult {
-    std.fs.cwd().deleteFile(path) catch |err| {
+    std.Io.Dir.cwd().deleteFile(platform.io, path) catch |err| {
         if (err == error.FileNotFound and packedFileAt(path) and bundle.remove(path)) return NativeResult.scalar(.{ .bool = true });
         return NativeResult.scalar(.{ .bool = false });
     };
@@ -1008,9 +1007,9 @@ fn native_copy(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     const dest = paths.streamPath(&dest_buf, args[1].string.bytes());
     bundle.prepareWrite(dest, .create);
     if (bundle.find(source)) |hit| switch (hit) {
-        .file => |entry| std.fs.cwd().writeFile(.{ .sub_path = dest, .data = entry.source }) catch return NativeResult.scalar(.{ .bool = false }),
+        .file => |entry| std.Io.Dir.cwd().writeFile(platform.io, .{ .sub_path = dest, .data = entry.source }) catch return NativeResult.scalar(.{ .bool = false }),
         .dir => return NativeResult.scalar(.{ .bool = false }),
-    } else std.fs.cwd().copyFile(source, std.fs.cwd(), dest, .{}) catch return NativeResult.scalar(Value{ .bool = false });
+    } else std.Io.Dir.cwd().copyFile(source, std.Io.Dir.cwd(), dest, platform.io, .{}) catch return NativeResult.scalar(Value{ .bool = false });
     transientStreams(ctx, 2);
     return NativeResult.scalar(.{ .bool = true });
 }
@@ -1024,7 +1023,7 @@ fn native_rename(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     const to = bundle.osPath(&to_buf, args[1].string.bytes());
     bundle.prepareWrite(to, .create);
     bundle.prepareWrite(from, .edit);
-    std.fs.cwd().rename(from, to) catch return NativeResult.scalar(.{ .bool = false });
+    std.Io.Dir.cwd().rename(from, std.Io.Dir.cwd(), to, platform.io) catch return NativeResult.scalar(.{ .bool = false });
     _ = bundle.remove(from);
     return NativeResult.scalar(.{ .bool = true });
 }
@@ -1035,7 +1034,7 @@ fn native_scandir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     // SCANDIR_SORT_ASCENDING=0, _DESCENDING=1, _NONE=2
     const order: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
-    var names = std.ArrayListUnmanaged(Value.String){};
+    var names = std.ArrayListUnmanaged(Value.String).empty;
     defer names.deinit(ctx.allocator);
     defer for (names.items) |name| name.release();
     if (!try directoryNames(ctx, args[0].string.bytes(), &names)) return NativeResult.scalar(.{ .bool = false });
@@ -1067,14 +1066,14 @@ fn directoryNames(ctx: *NativeContext, path: []const u8, names: *std.ArrayListUn
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
     const dir_path = bundle.osPath(&os_buf, path);
     var listing = bundle.listDir(dir_path);
-    var dir_opt: ?std.fs.Dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch null;
-    defer if (dir_opt) |*d| d.close();
+    var dir_opt: ?std.Io.Dir = std.Io.Dir.cwd().openDir(platform.io, dir_path, .{ .iterate = true }) catch null;
+    defer if (dir_opt) |*d| d.close(platform.io);
     if (listing == null and dir_opt == null) return false;
     try names.append(ctx.allocator, Value.String.borrowed("."));
     try names.append(ctx.allocator, Value.String.borrowed(".."));
     if (dir_opt) |*dir| {
         var iter = dir.iterate();
-        while (iter.next() catch null) |entry| try appendName(ctx, names, entry.name);
+        while (iter.next(platform.io) catch null) |entry| try appendName(ctx, names, entry.name);
     }
     if (listing) |*packed_names| while (packed_names.next()) |child| {
         if (dir_opt) |dir| if (dirHas(dir, child.name)) continue;
@@ -1083,8 +1082,8 @@ fn directoryNames(ctx: *NativeContext, path: []const u8, names: *std.ArrayListUn
     return true;
 }
 
-pub fn dirHas(dir: std.fs.Dir, name: []const u8) bool {
-    dir.access(name, .{}) catch |err| return err != error.FileNotFound;
+pub fn dirHas(dir: std.Io.Dir, name: []const u8) bool {
+    dir.access(platform.io, name, .{}) catch |err| return err != error.FileNotFound;
     return true;
 }
 
@@ -1141,7 +1140,7 @@ fn directoryClose(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
 fn native_opendir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     try useContext(ctx, args, 1);
-    var names = std.ArrayListUnmanaged(Value.String){};
+    var names = std.ArrayListUnmanaged(Value.String).empty;
     defer names.deinit(ctx.allocator);
     defer for (names.items) |name| name.release();
     if (!try directoryNames(ctx, args[0].string.bytes(), &names)) return NativeResult.scalar(.{ .bool = false });
@@ -1241,11 +1240,11 @@ fn globAppend(ctx: *NativeContext, result: *PhpArray, pattern: []const u8, flags
     const file_pattern = if (std.mem.lastIndexOf(u8, pattern, "/")) |pos| pattern[pos + 1 ..] else pattern;
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
     const os_dir = bundle.osPath(&os_buf, dir_path);
-    var dir_opt: ?std.fs.Dir = std.fs.cwd().openDir(os_dir, .{ .iterate = true }) catch null;
-    defer if (dir_opt) |*d| d.close();
+    var dir_opt: ?std.Io.Dir = std.Io.Dir.cwd().openDir(platform.io, os_dir, .{ .iterate = true }) catch null;
+    defer if (dir_opt) |*d| d.close(platform.io);
     if (dir_opt) |*dir| {
         var iter = dir.iterate();
-        while (iter.next() catch null) |entry| {
+        while (iter.next(platform.io) catch null) |entry| {
             try globAppendEntry(ctx, result, .{ .dir_path = dir_path, .pattern = file_pattern, .name = entry.name, .is_dir = entry.kind == .directory, .flags = flags });
         }
     }
@@ -1385,7 +1384,7 @@ fn native_is_readable(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = bundle.osPath(&os_buf, args[0].string.bytes());
     if (bundle.find(path) != null) return NativeResult.scalar(.{ .bool = true });
-    std.fs.cwd().access(path, .{ .mode = .read_only }) catch return NativeResult.scalar(.{ .bool = false });
+    std.Io.Dir.cwd().access(platform.io, path, .{ .read = true }) catch return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -1394,7 +1393,7 @@ fn native_is_writable(_: *NativeContext, args: []const Value) RuntimeError!Nativ
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = bundle.osPath(&os_buf, args[0].string.bytes());
     if (bundle.find(path) != null) return NativeResult.scalar(.{ .bool = writableAncestor(path) });
-    std.fs.cwd().access(path, .{ .mode = .write_only }) catch return NativeResult.scalar(.{ .bool = false });
+    std.Io.Dir.cwd().access(platform.io, path, .{ .write = true }) catch return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = !platform.isReadOnly(path) });
 }
 
@@ -1403,7 +1402,7 @@ fn native_is_writable(_: *NativeContext, args: []const Value) RuntimeError!Nativ
 fn writableAncestor(path: []const u8) bool {
     var dir = std.fs.path.dirname(path) orelse ".";
     while (true) {
-        std.fs.cwd().access(dir, .{ .mode = .write_only }) catch |err| {
+        std.Io.Dir.cwd().access(platform.io, dir, .{ .write = true }) catch |err| {
             if (err != error.FileNotFound) return false;
             dir = std.fs.path.dirname(dir) orelse return false;
             continue;
@@ -1416,12 +1415,12 @@ fn native_is_executable(_: *NativeContext, args: []const Value) RuntimeError!Nat
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
     if (platform.is_windows) {
-        std.fs.cwd().access(path, .{}) catch return NativeResult.scalar(.{ .bool = false });
+        std.Io.Dir.cwd().access(platform.io, path, .{}) catch return NativeResult.scalar(.{ .bool = false });
         const ext = std.fs.path.extension(path);
         inline for (.{ ".exe", ".bat", ".cmd", ".com" }) |e| if (std.ascii.eqlIgnoreCase(ext, e)) return NativeResult.scalar(.{ .bool = true });
         return NativeResult.scalar(.{ .bool = false });
     }
-    std.posix.access(path, std.posix.X_OK) catch return NativeResult.scalar(.{ .bool = false });
+    sys.access(path, std.posix.X_OK) catch return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -1485,7 +1484,7 @@ fn statWrapped(ctx: *NativeContext, path: []const u8) RuntimeError!StatLookup {
     if (std.mem.startsWith(u8, path, "phar://")) {
         const r = resolvePharPathWithCtx(path, ctx) orelse return .missing;
         const archive = platform.statPath(r.archive_path) catch return .missing;
-        const archive_mtime: i64 = @intCast(@divFloor(archive.mtime, 1_000_000_000));
+        const archive_mtime: i64 = @intCast(@divFloor(archive.mtime.nanoseconds, 1_000_000_000));
         const dir = WrapperStat{ .mode = 0o040555, .size = 0, .atime = archive_mtime, .mtime = archive_mtime, .ctime = archive_mtime };
         if (r.internal_path.len == 0) return .{ .found = dir };
         var loaded = loadPhar(ctx.allocator, r.archive_path) catch return .missing;
@@ -1503,11 +1502,11 @@ fn statWrapped(ctx: *NativeContext, path: []const u8) RuntimeError!StatLookup {
     if (std.mem.startsWith(u8, path, ZLIB_PREFIX)) {
         const st = platform.statPath(path[ZLIB_PREFIX.len..]) catch return .missing;
         const sec = struct {
-            fn of(ns: i128) i64 {
-                return @intCast(@divFloor(ns, 1_000_000_000));
+            fn of(ts: std.Io.Timestamp) i64 {
+                return @intCast(@divFloor(ts.nanoseconds, 1_000_000_000));
             }
         }.of;
-        return .{ .found = .{ .mode = 0o100644, .size = @intCast(st.size), .atime = sec(st.atime), .mtime = sec(st.mtime), .ctime = sec(st.ctime) } };
+        return .{ .found = .{ .mode = 0o100644, .size = @intCast(st.size), .atime = sec(st.atime orelse st.mtime), .mtime = sec(st.mtime), .ctime = sec(st.ctime) } };
     }
     return .not_wrapped;
 }
@@ -1528,9 +1527,9 @@ fn statOne(ctx: *NativeContext, args: []const Value, comptime field: StatField, 
             const st = platform.statPath(path) catch break :blk null;
             break :blk switch (field) {
                 .size => @intCast(st.size),
-                .atime => @intCast(@divFloor(st.atime, 1_000_000_000)),
-                .mtime => @intCast(@divFloor(st.mtime, 1_000_000_000)),
-                .ctime => @intCast(@divFloor(st.ctime, 1_000_000_000)),
+                .atime => @intCast(@divFloor((st.atime orelse st.mtime).nanoseconds, 1_000_000_000)),
+                .mtime => @intCast(@divFloor(st.mtime.nanoseconds, 1_000_000_000)),
+                .ctime => @intCast(@divFloor(st.ctime.nanoseconds, 1_000_000_000)),
             };
         },
     };
@@ -1567,8 +1566,8 @@ fn native_filetype(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const stat = platform.statPath(args[0].string.bytes()) catch {
         // might be a directory
-        var dir = std.fs.cwd().openDir(args[0].string.bytes(), .{}) catch return NativeResult.scalar(.{ .bool = false });
-        dir.close();
+        var dir = std.Io.Dir.cwd().openDir(platform.io, args[0].string.bytes(), .{}) catch return NativeResult.scalar(.{ .bool = false });
+        dir.close(platform.io);
         return NativeResult.literal("dir");
     };
     return try NativeResult.copyString(ctx.allocator, switch (stat.kind) {
@@ -1803,7 +1802,7 @@ fn openErrorReason(err: anyerror) []const u8 {
     };
 }
 
-pub fn openWithMode(spelled: []const u8, mode: []const u8) !std.fs.File {
+pub fn openWithMode(spelled: []const u8, mode: []const u8) !std.Io.File {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = paths.streamPath(&path_buf, spelled);
     if (mode.len == 0) return error.RuntimeError;
@@ -1818,21 +1817,21 @@ pub fn openWithMode(spelled: []const u8, mode: []const u8) !std.fs.File {
         bundle.prepareWrite(path, if (mode[0] == 'w' or mode[0] == 'x') .create else .edit);
     }
     return switch (mode[0]) {
-        'r' => std.fs.cwd().openFile(path, .{ .mode = if (has_plus) .read_write else .read_only }),
+        'r' => std.Io.Dir.cwd().openFile(platform.io, path, .{ .mode = if (has_plus) .read_write else .read_only }),
         'w' => blk: {
-            const file = std.fs.cwd().createFile(path, .{ .truncate = true, .read = has_plus }) catch |err| break :blk err;
+            const file = std.Io.Dir.cwd().createFile(platform.io, path, .{ .truncate = true, .read = has_plus }) catch |err| break :blk err;
             break :blk file;
         },
         'a' => blk: {
             break :blk platform.openAppend(path, has_plus);
         },
-        'x' => std.fs.cwd().createFile(path, .{ .exclusive = true, .read = has_plus }),
+        'x' => std.Io.Dir.cwd().createFile(platform.io, path, .{ .exclusive = true, .read = has_plus }),
         'c' => blk: {
             // PHP 'c'/'c+' mode: open for writing without truncating; create
             // if it doesn't exist. position is at 0 regardless of existing
             // content (so a subsequent fwrite overwrites from the start)
-            const file = std.fs.cwd().openFile(path, .{ .mode = if (has_plus) .read_write else .write_only }) catch
-                std.fs.cwd().createFile(path, .{ .read = has_plus, .truncate = false }) catch |err| break :blk err;
+            const file = std.Io.Dir.cwd().openFile(platform.io, path, .{ .mode = if (has_plus) .read_write else .write_only }) catch
+                std.Io.Dir.cwd().createFile(platform.io, path, .{ .read = has_plus, .truncate = false }) catch |err| break :blk err;
             break :blk file;
         },
         else => error.RuntimeError,
@@ -1948,8 +1947,8 @@ fn native_fread(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
 
 // one read into dest: the byte count (0 at eof or when a non-blocking stream
 // has nothing yet), or null when the stream cannot be read
-fn isRegularFd(file: std.fs.File) bool {
-    const stat = file.stat() catch return false;
+fn isRegularFd(file: std.Io.File) bool {
+    const stat = file.stat(platform.io) catch return false;
     return stat.kind == .file;
 }
 
@@ -2013,7 +2012,7 @@ pub fn streamWrite(ctx: *NativeContext, obj: *PhpObject, data: []const u8) Runti
     // 'a' / 'a+' modes: writes always append, regardless of where the read cursor is
     const mode_v = obj.get("__mode");
     if (mode_v == .string and mode_v.string.bytes().len > 0 and mode_v.string.bytes()[0] == 'a') {
-        file.seekFromEnd(0) catch {};
+        platform.seekFromEnd(file, 0) catch {};
     }
     // route php://stdout and php://output through the VM output buffer so the order
     // matches echo. for php://stderr, flush the buffer first so anything echo'd before
@@ -2056,7 +2055,7 @@ fn native_fgets(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     }
     const io = streamIo(obj) orelse return NativeResult.scalar(.{ .bool = false });
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     var byte: [1]u8 = undefined;
     var hit_eof = false;
     while (buf.items.len < max_len) {
@@ -2103,7 +2102,7 @@ fn native_stream_get_line(ctx: *NativeContext, args: []const Value) RuntimeError
     }
     const io = streamIo(obj) orelse return NativeResult.scalar(.{ .bool = false });
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     var byte: [1]u8 = undefined;
     var matched: usize = 0;
     while (buf.items.len + matched < cap) {
@@ -2162,7 +2161,7 @@ fn native_feof(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
         var byte: [1]u8 = undefined;
         const n = io.read(&byte) catch return NativeResult.scalar(.{ .bool = true });
         if (n == 0) return NativeResult.scalar(.{ .bool = true });
-        io.file.seekBy(-1) catch {};
+        platform.seekBy(io.file, -1) catch {};
         return NativeResult.scalar(.{ .bool = false });
     }
     // PHP file semantics: feof becomes true only after a read attempt returned 0
@@ -2199,9 +2198,9 @@ fn native_fseek(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     }
     const file = getFileHandle(obj) orelse return NativeResult.scalar(.{ .int = -1 });
     switch (whence) {
-        0 => file.seekTo(@intCast(offset)) catch return NativeResult.scalar(.{ .int = -1 }),
-        1 => file.seekBy(offset) catch return NativeResult.scalar(.{ .int = -1 }),
-        2 => file.seekFromEnd(offset) catch return NativeResult.scalar(.{ .int = -1 }),
+        0 => platform.seekTo(file, @intCast(offset)) catch return NativeResult.scalar(.{ .int = -1 }),
+        1 => platform.seekBy(file, offset) catch return NativeResult.scalar(.{ .int = -1 }),
+        2 => platform.seekFromEnd(file, offset) catch return NativeResult.scalar(.{ .int = -1 }),
         else => return NativeResult.scalar(.{ .int = -1 }),
     }
     try obj.set(ctx.allocator, "__eof", .{ .bool = false });
@@ -2220,7 +2219,7 @@ fn native_ftell(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         return NativeResult.scalar(.{ .int = @intCast(getBufferPos(obj)) });
     }
     const file = getFileHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
-    const pos = file.getPos() catch return NativeResult.scalar(.{ .bool = false });
+    const pos = platform.getPos(file) catch return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .int = @intCast(pos) });
 }
 
@@ -2236,7 +2235,7 @@ fn native_rewind(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         return NativeResult.scalar(.{ .bool = true });
     }
     const file = getFileHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
-    file.seekTo(0) catch return NativeResult.scalar(.{ .bool = false });
+    platform.seekTo(file, 0) catch return NativeResult.scalar(.{ .bool = false });
     try obj.set(ctx.allocator, "__eof", .{ .bool = false });
     return NativeResult.scalar(.{ .bool = true });
 }
@@ -2253,13 +2252,13 @@ fn native_ftruncate(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     if (args.len < 2 or args[1] != .int) return NativeResult.scalar(.{ .bool = false });
     const file = getFileHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
     const size: u64 = @intCast(@max(args[1].int, 0));
-    file.setEndPos(size) catch return NativeResult.scalar(.{ .bool = false });
+    file.setLength(platform.io, size) catch return NativeResult.scalar(.{ .bool = false });
     // for php://memory / php://temp, snap the cursor to the new end rather than
     // leaving it past EOF where subsequent writes would create null-padded holes
     const path = obj.get("__path");
     if (path == .string and (std.mem.startsWith(u8, path.string.bytes(), "php://memory") or std.mem.startsWith(u8, path.string.bytes(), "php://temp"))) {
-        const cur = file.getPos() catch 0;
-        if (cur > size) file.seekTo(size) catch {};
+        const cur = platform.getPos(file) catch 0;
+        if (cur > size) platform.seekTo(file, size) catch {};
     }
     return NativeResult.scalar(.{ .bool = true });
 }
@@ -2280,7 +2279,7 @@ fn native_flock(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         3 => 8, // LOCK_UN
         else => 0,
     };
-    std.posix.flock(file.handle, os_base | non_block) catch return NativeResult.scalar(.{ .bool = false });
+    sys.flock(file.handle, os_base | non_block) catch return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -2288,7 +2287,7 @@ fn native_flock(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
 fn isSeekable(obj: *PhpObject) bool {
     if (getBufferBacking(obj) != null) return true;
     const file = getFileHandle(obj) orelse return false;
-    const stat = file.stat() catch return false;
+    const stat = file.stat(platform.io) catch return false;
     return stat.kind == .file;
 }
 
@@ -2360,7 +2359,7 @@ fn zlibDecodeWindow(a: Allocator, input: []const u8, window_bits: c_int) ![]u8 {
         return error.InflateInitFailed;
     }
     defer _ = zlib.inflateEnd(&stream);
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8).empty;
     errdefer out.deinit(a);
     stream.next_in = @constCast(input.ptr);
     stream.avail_in = @intCast(input.len);
@@ -2449,7 +2448,7 @@ fn gzipDecode(a: Allocator, input: []const u8) ![]u8 {
     }
     defer _ = zlib.inflateEnd(&stream);
 
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8).empty;
     errdefer out.deinit(a);
 
     stream.next_in = @constCast(input.ptr);
@@ -2516,7 +2515,7 @@ fn writeZlibFile(a: Allocator, path: []const u8, data: []const u8) !void {
     const inner = path[ZLIB_PREFIX.len..];
     const encoded = try gzipEncode(a, data);
     defer a.free(encoded);
-    try std.fs.cwd().writeFile(.{ .sub_path = inner, .data = encoded });
+    try std.Io.Dir.cwd().writeFile(platform.io, .{ .sub_path = inner, .data = encoded });
 }
 
 fn isBuiltinWrapper(p: []const u8) bool {
@@ -2709,10 +2708,10 @@ fn stream_get_contents(ctx: *NativeContext, args: []const Value) RuntimeError!Na
     }
     const io = streamIo(obj) orelse return NativeResult.scalar(.{ .bool = false });
     if (offset >= 0) {
-        io.file.seekTo(@intCast(offset)) catch return NativeResult.scalar(.{ .bool = false });
+        platform.seekTo(io.file, @intCast(offset)) catch return NativeResult.scalar(.{ .bool = false });
     }
     // until the length, the end, or (non-blocking) nothing more for now
-    var out: std.ArrayListUnmanaged(u8) = .{};
+    var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(ctx.allocator);
     var chunk: [8192]u8 = undefined;
     while (length < 0 or out.items.len < @as(usize, @intCast(length))) {
@@ -2734,7 +2733,7 @@ fn stream_get_contents(ctx: *NativeContext, args: []const Value) RuntimeError!Na
 fn native_fstat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = try streamArg(ctx, args, .{ .func = "fstat" });
     const file = getFileHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
-    const stat = file.stat() catch return NativeResult.scalar(.{ .bool = false });
+    const stat = file.stat(platform.io) catch return NativeResult.scalar(.{ .bool = false });
     const result = try ctx.createArray();
     const mode: i64 = @intCast(platform.modeOf(stat));
     const size: i64 = @intCast(stat.size);
@@ -2752,7 +2751,7 @@ fn native_fgetcsv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     const enclosure: u8 = if (args.len >= 4 and args[3] == .string and args[3].string.bytes().len > 0) args[3].string.bytes()[0] else '"';
 
     // read a CSV record, honoring quoted-field embedded newlines
-    var line = std.ArrayListUnmanaged(u8){};
+    var line = std.ArrayListUnmanaged(u8).empty;
     var byte: [1]u8 = undefined;
     var in_quotes = false;
     var got_any = false;
@@ -2802,7 +2801,7 @@ fn native_fgetcsv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
 fn parseCsvRecord(ctx: *NativeContext, raw: []const u8, delimiter: u8, enclosure: u8) !NativeResult {
     var result = try ctx.createArray();
     errdefer ctx.vm.discardOrphan(.{ .array = result });
-    var field = std.ArrayListUnmanaged(u8){};
+    var field = std.ArrayListUnmanaged(u8).empty;
     defer field.deinit(ctx.allocator);
     var in_quotes = false;
     var at_field_start = true;
@@ -2847,10 +2846,10 @@ fn native_fputcsv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     const enclosure: u8 = if (args.len >= 4 and args[3] == .string and args[3].string.bytes().len > 0) args[3].string.bytes()[0] else '"';
     const escape: ?u8 = if (args.len >= 5 and args[4] == .string and args[4].string.bytes().len > 0) args[4].string.bytes()[0] else null;
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     for (arr.entries.items, 0..) |entry, i| {
         if (i > 0) try buf.append(ctx.allocator, delimiter);
-        var tmp_buf = std.ArrayListUnmanaged(u8){};
+        var tmp_buf = std.ArrayListUnmanaged(u8).empty;
         defer tmp_buf.deinit(ctx.allocator);
         try entry.value.format(&tmp_buf, ctx.allocator);
         const val = tmp_buf.items;
@@ -2890,24 +2889,24 @@ fn native_touch(_: *NativeContext, args: []const Value) RuntimeError!NativeResul
     // create the file if it doesn't already exist, then fall through to the
     // timestamp-application path so explicit mtime/atime args take effect
     // regardless of whether the file pre-existed
-    const created = std.fs.cwd().createFile(path, .{ .exclusive = true }) catch |err| switch (err) {
+    const created = std.Io.Dir.cwd().createFile(platform.io, path, .{ .exclusive = true }) catch |err| switch (err) {
         error.PathAlreadyExists => null,
         else => return NativeResult.scalar(.{ .bool = false }),
     };
-    if (created) |c| c.close();
+    if (created) |c| c.close(platform.io);
 
-    const f = std.fs.cwd().openFile(path, .{ .mode = .write_only }) catch return NativeResult.scalar(.{ .bool = false });
-    defer f.close();
-    const now: i128 = std.time.nanoTimestamp();
-    const mtime: i128 = if (args.len >= 2 and args[1] != .null)
-        @as(i128, Value.toInt(args[1])) * 1_000_000_000
+    const f = std.Io.Dir.cwd().openFile(platform.io, path, .{ .mode = .write_only }) catch return NativeResult.scalar(.{ .bool = false });
+    defer f.close(platform.io);
+    const now: i96 = @intCast(platform.nanoTimestamp());
+    const mtime: i96 = if (args.len >= 2 and args[1] != .null)
+        @as(i96, Value.toInt(args[1])) * 1_000_000_000
     else
         now;
-    const atime: i128 = if (args.len >= 3 and args[2] != .null)
-        @as(i128, Value.toInt(args[2])) * 1_000_000_000
+    const atime: i96 = if (args.len >= 3 and args[2] != .null)
+        @as(i96, Value.toInt(args[2])) * 1_000_000_000
     else
         mtime;
-    f.updateTimes(atime, mtime) catch return NativeResult.scalar(.{ .bool = true });
+    f.setTimestamps(platform.io, .{ .access_timestamp = .{ .new = .{ .nanoseconds = atime } }, .modify_timestamp = .{ .new = .{ .nanoseconds = mtime } } }) catch return NativeResult.scalar(.{ .bool = true });
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -2933,10 +2932,10 @@ fn posixChmod(_: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     if (mode_val < 0) return NativeResult.scalar(.{ .bool = false });
     const mode: std.posix.mode_t = @intCast(mode_val);
 
-    const file = std.fs.cwd().openFile(path, .{ .mode = .read_write }) catch
+    const file = std.Io.Dir.cwd().openFile(platform.io, path, .{ .mode = .read_write }) catch
         return NativeResult.scalar(.{ .bool = false });
-    defer file.close();
-    file.chmod(mode) catch return NativeResult.scalar(.{ .bool = false });
+    defer file.close(platform.io);
+    file.setPermissions(platform.io, platform.permissionsFromMode(mode)) catch return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -2954,7 +2953,7 @@ fn native_chown(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     path_z[path.len] = 0;
     const uid: std.c.uid_t = if (args[1] == .int) @intCast(args[1].int) else blk: {
         if (args[1] != .string) return NativeResult.scalar(.{ .bool = false });
-        const name_z = try ctx.allocator.dupeZ(u8, args[1].string.bytes());
+        const name_z = try ctx.allocator.dupeSentinel(u8, args[1].string.bytes(), 0);
         defer ctx.allocator.free(name_z);
         const pw = std.c.getpwnam(name_z.ptr) orelse return NativeResult.scalar(.{ .bool = false });
         break :blk pw.uid;
@@ -2974,7 +2973,7 @@ fn native_chgrp(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     path_z[path.len] = 0;
     const gid: std.c.gid_t = if (args[1] == .int) @intCast(args[1].int) else blk: {
         if (args[1] != .string) return NativeResult.scalar(.{ .bool = false });
-        const name_z = try ctx.allocator.dupeZ(u8, args[1].string.bytes());
+        const name_z = try ctx.allocator.dupeSentinel(u8, args[1].string.bytes(), 0);
         defer ctx.allocator.free(name_z);
         const gr = std.c.getgrnam(name_z.ptr) orelse return NativeResult.scalar(.{ .bool = false });
         break :blk gr.gid;
@@ -3003,12 +3002,7 @@ fn native_stat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
         },
         .not_wrapped => {},
     }
-    var pbuf: [std.fs.max_path_bytes:0]u8 = undefined;
-    if (path.len >= pbuf.len) return NativeResult.scalar(.{ .bool = false });
-    @memcpy(pbuf[0..path.len], path);
-    pbuf[path.len] = 0;
-    var st: std.c.Stat = undefined;
-    if (std.c.stat(&pbuf, &st) != 0) return NativeResult.scalar(.{ .bool = false });
+    const st = sys.stat(path) catch return NativeResult.scalar(.{ .bool = false });
     return NativeResult.borrowed(.{ .array = try buildStatArray(ctx, &st) });
 }
 
@@ -3017,9 +3011,9 @@ fn native_chdir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = bundle.osPath(&os_buf, args[0].string.bytes());
     bundle.ensureDir(path);
-    var dir = std.fs.cwd().openDir(path, .{}) catch return NativeResult.scalar(.{ .bool = false });
-    defer dir.close();
-    dir.setAsCwd() catch return NativeResult.scalar(.{ .bool = false });
+    var dir = std.Io.Dir.cwd().openDir(platform.io, path, .{}) catch return NativeResult.scalar(.{ .bool = false });
+    defer dir.close(platform.io);
+    std.process.setCurrentDir(platform.io, dir) catch return NativeResult.scalar(.{ .bool = false });
     ctx.vm.clearRealDirCache();
     return NativeResult.scalar(.{ .bool = true });
 }
@@ -3091,41 +3085,24 @@ fn native_fileperms(_: *NativeContext, args: []const Value) RuntimeError!NativeR
     return NativeResult.scalar(.{ .int = @intCast(platform.modeOf(stat)) });
 }
 
-extern "c" fn lstat(noalias path: [*:0]const u8, noalias buf: *std.c.Stat) c_int;
-
 fn native_fileowner(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
-    var pbuf: [std.fs.max_path_bytes:0]u8 = undefined;
-    if (path.len >= pbuf.len) return NativeResult.scalar(.{ .bool = false });
-    @memcpy(pbuf[0..path.len], path);
-    pbuf[path.len] = 0;
-    var st: std.c.Stat = undefined;
-    if (std.c.stat(&pbuf, &st) != 0) return NativeResult.scalar(.{ .bool = false });
+    const st = sys.stat(path) catch return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .int = @intCast(st.uid) });
 }
 
 fn native_filegroup(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
-    var pbuf: [std.fs.max_path_bytes:0]u8 = undefined;
-    if (path.len >= pbuf.len) return NativeResult.scalar(.{ .bool = false });
-    @memcpy(pbuf[0..path.len], path);
-    pbuf[path.len] = 0;
-    var st: std.c.Stat = undefined;
-    if (std.c.stat(&pbuf, &st) != 0) return NativeResult.scalar(.{ .bool = false });
+    const st = sys.stat(path) catch return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .int = @intCast(st.gid) });
 }
 
 fn native_is_link(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const path = args[0].string.bytes();
-    var pbuf: [std.fs.max_path_bytes:0]u8 = undefined;
-    if (path.len >= pbuf.len) return NativeResult.scalar(.{ .bool = false });
-    @memcpy(pbuf[0..path.len], path);
-    pbuf[path.len] = 0;
-    var st: std.c.Stat = undefined;
-    if (lstat(&pbuf, &st) != 0) return NativeResult.scalar(.{ .bool = false });
+    const st = sys.lstat(path) catch return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = (st.mode & 0o170000) == 0o120000 });
 }
 
@@ -3171,7 +3148,7 @@ fn wrapperStatArray(ctx: *NativeContext, st: WrapperStat) !*PhpArray {
     return arr;
 }
 
-fn buildStatArray(ctx: *NativeContext, st: *const std.c.Stat) !*PhpArray {
+fn buildStatArray(ctx: *NativeContext, st: *const sys.Stat) !*PhpArray {
     var arr = try ctx.createArray();
     const dev: i64 = @intCast(st.dev);
     const ino: i64 = @intCast(st.ino);
@@ -3180,9 +3157,9 @@ fn buildStatArray(ctx: *NativeContext, st: *const std.c.Stat) !*PhpArray {
     const uid: i64 = @intCast(st.uid);
     const gid: i64 = @intCast(st.gid);
     const size: i64 = @intCast(st.size);
-    const atime: i64 = @intCast(st.atime().sec);
-    const mtime: i64 = @intCast(st.mtime().sec);
-    const ctime: i64 = @intCast(st.ctime().sec);
+    const atime: i64 = st.atime;
+    const mtime: i64 = st.mtime;
+    const ctime: i64 = st.ctime;
     const blksize: i64 = @intCast(st.blksize);
     const blocks: i64 = @intCast(st.blocks);
     const pairs = [_]struct { name: []const u8, val: i64 }{
@@ -3206,19 +3183,15 @@ fn native_lstat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = bundle.osPath(&os_buf, args[0].string.bytes());
     if (bundle.find(path)) |hit| return NativeResult.borrowed(.{ .array = try wrapperStatArray(ctx, packedStat(hit)) });
-    var pbuf: [std.fs.max_path_bytes:0]u8 = undefined;
-    if (path.len >= pbuf.len) return NativeResult.scalar(.{ .bool = false });
-    @memcpy(pbuf[0..path.len], path);
-    pbuf[path.len] = 0;
-    var st: std.c.Stat = undefined;
-    if (lstat(&pbuf, &st) != 0) return NativeResult.scalar(.{ .bool = false });
+    const st = sys.lstat(path) catch return NativeResult.scalar(.{ .bool = false });
     return NativeResult.borrowed(.{ .array = try buildStatArray(ctx, &st) });
 }
 
 fn native_readlink(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const target = std.fs.cwd().readLink(args[0].string.bytes(), &buf) catch return NativeResult.scalar(.{ .bool = false });
+    const len = std.Io.Dir.cwd().readLink(platform.io, args[0].string.bytes(), &buf) catch return NativeResult.scalar(.{ .bool = false });
+    const target = buf[0..len];
     return try NativeResult.copyString(ctx.allocator, target);
 }
 
@@ -3233,14 +3206,14 @@ fn native_tmpfile(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
 
 // a file of the executable's packed application, opened for reading: an
 // anonymous file holding its bytes, so every stream function works on it
-fn packedFile(bytes: []const u8) ?std.fs.File {
+fn packedFile(bytes: []const u8) ?std.Io.File {
     const file = anonymousFile() orelse return null;
-    file.writeAll(bytes) catch {
-        file.close();
+    platform.writeAll(file, bytes) catch {
+        file.close(platform.io);
         return null;
     };
-    file.seekTo(0) catch {
-        file.close();
+    platform.seekTo(file, 0) catch {
+        file.close(platform.io);
         return null;
     };
     return file;
@@ -3248,11 +3221,11 @@ fn packedFile(bytes: []const u8) ?std.fs.File {
 
 // a read-write file with no name left on disk, so it vanishes with its fd;
 // backs tmpfile() and php://memory and php://temp
-fn anonymousFile() ?std.fs.File {
+fn anonymousFile() ?std.Io.File {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const tmp = std.fmt.bufPrint(&buf, "{s}{c}zphp_{d}_{d}", .{ platform.tempDir(), std.fs.path.sep, @as(u64, @truncate(@as(u128, @bitCast(std.time.nanoTimestamp())))), std.crypto.random.int(u32) }) catch return null;
-    const file = std.fs.cwd().createFile(tmp, .{ .read = true, .truncate = true, .exclusive = true }) catch return null;
-    std.fs.cwd().deleteFile(tmp) catch {};
+    const tmp = std.fmt.bufPrint(&buf, "{s}{c}zphp_{d}_{d}", .{ platform.tempDir(), std.fs.path.sep, @as(u64, @truncate(@as(u128, @bitCast(platform.nanoTimestamp())))), platform.random.int(u32) }) catch return null;
+    const file = std.Io.Dir.cwd().createFile(platform.io, tmp, .{ .read = true, .truncate = true, .exclusive = true }) catch return null;
+    std.Io.Dir.cwd().deleteFile(platform.io, tmp) catch {};
     return file;
 }
 
@@ -3283,31 +3256,15 @@ fn runShellWith(
     stderr_b: StdioBehavior,
 ) !ShellResult {
     const argv = platform.shellArgv(command);
-    var child = std.process.Child.init(&argv, allocator);
-    child.stdin_behavior = if (stdin_data != null) .Pipe else .Ignore;
-    child.stdout_behavior = if (stdout_b == .capture) .Pipe else .Inherit;
-    child.stderr_behavior = if (stderr_b == .capture) .Pipe else .Inherit;
-    try child.spawn();
-    if (stdin_data) |data| {
-        if (child.stdin) |*stdin_file| {
-            _ = stdin_file.writeAll(data) catch {};
-            stdin_file.close();
-            child.stdin = null;
-        }
-    }
-    var stdout_buf = std.ArrayListUnmanaged(u8){};
-    var stderr_buf = std.ArrayListUnmanaged(u8){};
-    if (stdout_b == .capture or stderr_b == .capture) {
-        try child.collectOutput(allocator, &stdout_buf, &stderr_buf, 64 * 1024 * 1024);
-    }
-    const term = try child.wait();
-    const stdout = try stdout_buf.toOwnedSlice(allocator);
-    const stderr = try stderr_buf.toOwnedSlice(allocator);
-    const exit: i64 = switch (term) {
-        .Exited => |c| @intCast(c),
-        .Signal => |c| @as(i64, @intCast(c)) + 128,
-        else => -1,
-    };
+    const result = try platform.runChild(allocator, &argv, .{
+        .stdin_data = stdin_data,
+        .stdin = .ignore,
+        .stdout = if (stdout_b == .capture) .pipe else .inherit,
+        .stderr = if (stderr_b == .capture) .pipe else .inherit,
+    });
+    const stdout = result.stdout;
+    const stderr = result.stderr;
+    const exit = platform.exitStatus(result.term);
     return .{ .stdout = stdout, .stderr = stderr, .exit = exit };
 }
 
@@ -3409,12 +3366,12 @@ const ProcSpawn = struct {
 extern fn openpty(master: *c_int, slave: *c_int, name: ?[*]u8, termp: ?*anyopaque, winp: ?*anyopaque) c_int;
 
 fn setCloexec(fd: std.posix.fd_t) void {
-    const flags = std.posix.fcntl(fd, 1, 0) catch return;
-    _ = std.posix.fcntl(fd, 2, flags | 1) catch {};
+    const flags = sys.fcntl(fd, 1, 0) catch return;
+    _ = sys.fcntl(fd, 2, flags | 1) catch {};
 }
 
 fn procChildDup(src: std.posix.fd_t, target: std.posix.fd_t, err_fd: std.posix.fd_t) void {
-    std.posix.dup2(src, target) catch |e| procChildFail(err_fd, e);
+    sys.dup2(src, target) catch |e| procChildFail(err_fd, e);
 }
 
 // the child reports why exec failed as an error code; errors outside the
@@ -3422,7 +3379,7 @@ fn procChildDup(src: std.posix.fd_t, target: std.posix.fd_t, err_fd: std.posix.f
 const SpawnError = error{ FileNotFound, AccessDenied, NotDir, InvalidExe, IsDir, NameTooLong, ProcSpawnFailed };
 
 fn spawnFailure(code: u64) SpawnError {
-    const err = @errorFromInt(@as(std.meta.Int(.unsigned, @bitSizeOf(anyerror)), @intCast(code)));
+    const err = @errorFromInt(@as(@Int(.unsigned, @bitSizeOf(anyerror)), @intCast(code)));
     return switch (err) {
         error.FileNotFound => error.FileNotFound,
         error.AccessDenied => error.AccessDenied,
@@ -3449,15 +3406,15 @@ fn spawnFailureMessage(err: anyerror) []const u8 {
 fn procChildFail(err_fd: std.posix.fd_t, err: anyerror) noreturn {
     var buf: [8]u8 = undefined;
     std.mem.writeInt(u64, &buf, @intFromError(err), .little);
-    _ = std.posix.write(err_fd, &buf) catch {};
+    _ = sys.write(err_fd, &buf) catch {};
     std.c._exit(1);
 }
 
 fn closePrepared(descs: []PreparedDesc) void {
     for (descs) |*d| {
-        if (d.parent_fd != -1) std.posix.close(d.parent_fd);
-        if (d.child_fd != -1) std.posix.close(d.child_fd);
-        if (d.aux_fd != -1) std.posix.close(d.aux_fd);
+        if (d.parent_fd != -1) sys.close(d.parent_fd);
+        if (d.child_fd != -1) sys.close(d.child_fd);
+        if (d.aux_fd != -1) sys.close(d.aux_fd);
         d.parent_fd = -1;
         d.child_fd = -1;
         d.aux_fd = -1;
@@ -3469,7 +3426,6 @@ fn closePrepared(descs: []PreparedDesc) void {
 const ProcCommand = union(enum) { shell: []const u8, argv: []const []const u8 };
 
 fn forkExecDesc(allocator: std.mem.Allocator, command: ProcCommand, specs: []const ProcDesc, cwd: ?[]const u8, env: ?[]const []const u8) !ProcSpawn {
-    const cloexec: std.posix.O = .{ .CLOEXEC = true };
     const prepared = try allocator.alloc(PreparedDesc, specs.len);
     defer allocator.free(prepared);
     for (specs, 0..) |spec, i| prepared[i] = .{ .role = spec.role, .action = spec.action };
@@ -3477,7 +3433,7 @@ fn forkExecDesc(allocator: std.mem.Allocator, command: ProcCommand, specs: []con
 
     for (prepared) |*d| switch (d.action) {
         .pipe_r, .pipe_w => {
-            const pair = try std.posix.pipe2(cloexec);
+            const pair = try sys.pipeCloexec();
             if (d.action == .pipe_r) {
                 d.child_fd = pair[0];
                 d.parent_fd = pair[1];
@@ -3511,11 +3467,11 @@ fn forkExecDesc(allocator: std.mem.Allocator, command: ProcCommand, specs: []con
         .inherit, .redirect => {},
     };
 
-    const xrep = try std.posix.pipe2(cloexec);
+    const xrep = try sys.pipeCloexec();
     var xrep_open = true;
     errdefer if (xrep_open) {
-        std.posix.close(xrep[0]);
-        std.posix.close(xrep[1]);
+        sys.close(xrep[0]);
+        sys.close(xrep[1]);
     };
     // everything the child needs is built before fork: allocating after it
     // is unsafe in a threaded process
@@ -3527,28 +3483,28 @@ fn forkExecDesc(allocator: std.mem.Allocator, command: ProcCommand, specs: []con
             const list = try a.allocSentinel(?[*:0]const u8, 3, null);
             list[0] = "/bin/sh";
             list[1] = "-c";
-            list[2] = (try a.dupeZ(u8, cmd)).ptr;
+            list[2] = (try a.dupeSentinel(u8, cmd, 0)).ptr;
             break :blk list;
         },
         .argv => |words| blk: {
             const list = try a.allocSentinel(?[*:0]const u8, words.len, null);
-            for (words, 0..) |word, i| list[i] = (try a.dupeZ(u8, word)).ptr;
+            for (words, 0..) |word, i| list[i] = (try a.dupeSentinel(u8, word, 0)).ptr;
             break :blk list;
         },
     };
     const envp: [*:null]const ?[*:0]const u8 = if (env) |vars| blk: {
         const list = try a.allocSentinel(?[*:0]const u8, vars.len, null);
-        for (vars, 0..) |v, i| list[i] = (try a.dupeZ(u8, v)).ptr;
+        for (vars, 0..) |v, i| list[i] = (try a.dupeSentinel(u8, v, 0)).ptr;
         break :blk list.ptr;
     } else @ptrCast(std.c.environ);
-    const cwdz: ?[:0]const u8 = if (cwd) |dir| try a.dupeZ(u8, dir) else null;
+    const cwdz: ?[:0]const u8 = if (cwd) |dir| try a.dupeSentinel(u8, dir, 0) else null;
 
-    const pid = try std.posix.fork();
+    const pid = try sys.fork();
     if (pid == 0) {
         if (cwdz) |dirz| {
-            std.posix.chdirZ(dirz.ptr) catch |err| procChildFail(xrep[1], err);
+            sys.chdir(dirz.ptr) catch |err| procChildFail(xrep[1], err);
         }
-        for (prepared) |d| if (d.parent_fd != -1) std.posix.close(d.parent_fd);
+        for (prepared) |d| if (d.parent_fd != -1) sys.close(d.parent_fd);
         for (prepared) |d| {
             const target: std.posix.fd_t = @intCast(d.role);
             switch (d.action) {
@@ -3564,30 +3520,30 @@ fn forkExecDesc(allocator: std.mem.Allocator, command: ProcCommand, specs: []con
                 is_target = true;
                 break;
             };
-            if (!is_target) std.posix.close(d.child_fd);
+            if (!is_target) sys.close(d.child_fd);
         }
         const e = switch (command) {
-            .shell => std.posix.execveZ("/bin/sh", argv.ptr, envp),
-            .argv => std.posix.execvpeZ(argv[0].?, argv.ptr, envp),
+            .shell => sys.execve("/bin/sh", argv.ptr, envp),
+            .argv => sys.execvpe(argv[0].?, argv.ptr, envp),
         };
         procChildFail(xrep[1], e);
     }
 
     xrep_open = false;
-    std.posix.close(xrep[1]);
+    sys.close(xrep[1]);
     for (prepared) |*d| {
-        if (d.child_fd != -1) std.posix.close(d.child_fd);
+        if (d.child_fd != -1) sys.close(d.child_fd);
         d.child_fd = -1;
     }
     var buf: [8]u8 = undefined;
     const got = std.posix.read(xrep[0], &buf) catch 0;
-    std.posix.close(xrep[0]);
+    sys.close(xrep[0]);
     if (got == buf.len) {
-        _ = std.posix.waitpid(pid, 0);
+        _ = sys.waitpid(pid, 0);
         return spawnFailure(std.mem.readInt(u64, &buf, .little));
     }
 
-    var pipes: std.ArrayListUnmanaged(@import("../runtime/vm.zig").ProcPipe) = .{};
+    var pipes: std.ArrayListUnmanaged(@import("../runtime/vm.zig").ProcPipe) = .empty;
     errdefer pipes.deinit(allocator);
     for (prepared) |*d| if (d.parent_fd != -1) {
         try pipes.append(allocator, .{ .role = d.role, .fd = d.parent_fd });
@@ -3604,7 +3560,7 @@ pub fn ownedText(ctx: *NativeContext, v: Value) RuntimeError![]const u8 {
 
 fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 3 or (args[0] != .string and args[0] != .array)) return NativeResult.scalar(.{ .bool = false });
-    var words: std.ArrayListUnmanaged([]const u8) = .{};
+    var words: std.ArrayListUnmanaged([]const u8) = .empty;
     defer words.deinit(ctx.allocator);
     if (args[0] == .array) {
         for (args[0].array.entries.items) |entry| try words.append(ctx.allocator, try ownedText(ctx, entry.value));
@@ -3615,7 +3571,7 @@ fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     }
     const cmd = if (args[0] == .string) args[0].string.bytes() else try std.mem.join(ctx.allocator, " ", words.items);
     defer if (args[0] == .array) ctx.allocator.free(cmd);
-    var env_vars: std.ArrayListUnmanaged([]const u8) = .{};
+    var env_vars: std.ArrayListUnmanaged([]const u8) = .empty;
     defer {
         for (env_vars.items) |v| ctx.allocator.free(v);
         env_vars.deinit(ctx.allocator);
@@ -3638,7 +3594,7 @@ fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     try proc.set(ctx.allocator, "__exit", .{ .int = 0 });
     try proc.set(ctx.allocator, "__running", .{ .bool = true });
 
-    var descs: std.ArrayListUnmanaged(ProcDesc) = .{};
+    var descs: std.ArrayListUnmanaged(ProcDesc) = .empty;
     defer descs.deinit(ctx.allocator);
     if (args[1] == .array) {
         for (args[1].array.entries.items) |entry| {
@@ -3752,7 +3708,7 @@ fn cacheProcTerm(ctx: *NativeContext, proc: *PhpObject, status: u32) void {
     if (PosixW.IFEXITED(status)) {
         proc.set(ctx.allocator, "__exit", .{ .int = @intCast(PosixW.EXITSTATUS(status)) }) catch {};
     } else if (PosixW.IFSIGNALED(status)) {
-        const sig: i64 = @intCast(PosixW.TERMSIG(status));
+        const sig: i64 = @intFromEnum(PosixW.TERMSIG(status));
         proc.set(ctx.allocator, "__exit", .{ .int = sig + 128 }) catch {};
         proc.set(ctx.allocator, "__termsig", .{ .int = sig }) catch {};
         proc.set(ctx.allocator, "__signaled", .{ .bool = true }) catch {};
@@ -3774,7 +3730,7 @@ fn native_proc_close(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
     if (!pc.reaped) {
         // a prior proc_get_status may have already reaped via WNOHANG; if not, do a
         // blocking wait now (exactly one waitpid per pid - ECHILD is unreachable)
-        const res = std.posix.waitpid(pc.pid, 0);
+        const res = sys.waitpid(pc.pid, 0);
         cacheProcTerm(ctx, obj, res.status);
     }
     ctx.vm.closeProcChild(obj);
@@ -3791,7 +3747,7 @@ fn native_proc_get_status(ctx: *NativeContext, args: []const Value) RuntimeError
     var running = false;
     if (ctx.vm.lookupProcChild(obj)) |pc| {
         if (!pc.reaped) {
-            const res = std.posix.waitpid(pc.pid, PosixW.NOHANG);
+            const res = sys.waitpid(pc.pid, PosixW.NOHANG);
             if (res.pid == 0) {
                 running = true;
             } else {
@@ -3820,7 +3776,7 @@ fn native_proc_get_status(ctx: *NativeContext, args: []const Value) RuntimeError
 
 fn native_proc_terminate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const proc = try processArg(ctx, args, "proc_terminate");
-    const sig: u8 = if (args.len >= 2 and args[1] == .int) @intCast(args[1].int) else std.posix.SIG.TERM;
+    const sig: std.posix.SIG = if (args.len >= 2 and args[1] == .int) @enumFromInt(args[1].int) else .TERM;
     if (ctx.vm.lookupProcChild(proc)) |pc| {
         std.posix.kill(pc.pid, sig) catch return NativeResult.scalar(.{ .bool = false });
     }
@@ -3943,9 +3899,9 @@ fn native_mime_content_type(ctx: *NativeContext, args: []const Value) RuntimeErr
     const file = openWithMode(path, "r") catch {
         return try NativeResult.copyString(ctx.allocator, mimeFromExt(path));
     };
-    defer file.close();
+    defer file.close(platform.io);
     var buf: [16]u8 = undefined;
-    const n = file.read(&buf) catch return try NativeResult.copyString(ctx.allocator, mimeFromExt(path));
+    const n = platform.read(file, &buf) catch return try NativeResult.copyString(ctx.allocator, mimeFromExt(path));
     if (detectMimeFromBytes(buf[0..n])) |m| return try NativeResult.copyString(ctx.allocator, m);
     return try NativeResult.copyString(ctx.allocator, mimeFromExt(path));
 }

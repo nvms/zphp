@@ -1,9 +1,11 @@
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
+const sys = @import("../sys.zig");
+const net = @import("../net.zig");
 const bundle = @import("../bundle.zig");
 const filesystem = @import("filesystem.zig");
 const platform = @import("../platform.zig");
-const net = std.net;
+
 const posix = std.posix;
 const Value = @import("../runtime/value.zig").Value;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
@@ -58,7 +60,7 @@ fn readLine(fd: posix.socket_t, buf: []u8) !usize {
     var i: usize = 0;
     while (i < buf.len) {
         var b: [1]u8 = undefined;
-        const n = posix.recv(fd, &b, 0) catch return error.IoError;
+        const n = sys.recv(fd, &b, 0) catch return error.IoError;
         if (n == 0) break;
         buf[i] = b[0];
         i += 1;
@@ -72,7 +74,7 @@ const Reply = struct { code: u16, body: []u8 };
 // reads a full server reply, handling multi-line responses where the first
 // line starts with "NNN-" and continues until a line begins with "NNN "
 fn readReply(allocator: std.mem.Allocator, fd: posix.socket_t) !Reply {
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     errdefer buf.deinit(allocator);
     var line: [4096]u8 = undefined;
     const first_n = try readLine(fd, &line);
@@ -93,8 +95,8 @@ fn readReply(allocator: std.mem.Allocator, fd: posix.socket_t) !Reply {
 }
 
 fn sendCmd(fd: posix.socket_t, line: []const u8) !void {
-    _ = try posix.send(fd, line, 0);
-    _ = try posix.send(fd, "\r\n", 0);
+    _ = try sys.send(fd, line, 0);
+    _ = try sys.send(fd, "\r\n", 0);
 }
 
 fn runCmd(allocator: std.mem.Allocator, fd: posix.socket_t, line: []const u8) !Reply {
@@ -107,8 +109,8 @@ fn connectTcp(host: []const u8, port: u16, allocator: std.mem.Allocator) !posix.
     defer list.deinit();
     for (list.addrs) |addr| {
         const sock = platform.tcpSocket(addr.any.family) catch continue;
-        posix.connect(sock, &addr.any, addr.getOsSockLen()) catch {
-            posix.close(sock);
+        sys.connect(sock, &addr.any, addr.getOsSockLen()) catch {
+            sys.close(sock);
             continue;
         };
         return sock;
@@ -122,12 +124,12 @@ fn native_ftp_connect(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     const port: u16 = if (args.len > 1 and args[1] == .int) @intCast(args[1].int) else 21;
     const fd = connectTcp(host, port, ctx.allocator) catch return NativeResult.scalar(.{ .bool = false });
     const reply = readReply(ctx.allocator, fd) catch {
-        posix.close(fd);
+        sys.close(fd);
         return NativeResult.scalar(.{ .bool = false });
     };
     ctx.allocator.free(reply.body);
     if (reply.code != 220) {
-        posix.close(fd);
+        sys.close(fd);
         return NativeResult.scalar(.{ .bool = false });
     }
     const obj = try ctx.createObject("FTPHandle");
@@ -163,7 +165,7 @@ fn native_ftp_close(_: *NativeContext, args: []const Value) RuntimeError!NativeR
     const o = getHandle(args) orelse return NativeResult.scalar(.{ .bool = false });
     const fd = getFd(o) orelse return NativeResult.scalar(.{ .bool = true });
     sendCmd(fd, "QUIT") catch {};
-    posix.close(fd);
+    sys.close(fd);
     o.set(@import("std").heap.page_allocator, "__fd", .{ .int = -1 }) catch {};
     return NativeResult.scalar(.{ .bool = true });
 }
@@ -326,11 +328,11 @@ fn enterPasv(allocator: std.mem.Allocator, ctrl: posix.socket_t) !posix.socket_t
 }
 
 fn readAll(allocator: std.mem.Allocator, fd: posix.socket_t) ![]u8 {
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     errdefer buf.deinit(allocator);
     var tmp: [8192]u8 = undefined;
     while (true) {
-        const n = posix.recv(fd, &tmp, 0) catch return error.IoError;
+        const n = sys.recv(fd, &tmp, 0) catch return error.IoError;
         if (n == 0) break;
         try buf.appendSlice(allocator, tmp[0..n]);
     }
@@ -341,7 +343,7 @@ fn dataTransfer(ctx: *NativeContext, ctrl: posix.socket_t, list_cmd: []const u8,
     const type_reply = try runCmd(ctx.allocator, ctrl, type_cmd);
     defer ctx.allocator.free(type_reply.body);
     const data_fd = try enterPasv(ctx.allocator, ctrl);
-    defer posix.close(data_fd);
+    defer sys.close(data_fd);
     try sendCmd(ctrl, list_cmd);
     const r1 = try readReply(ctx.allocator, ctrl);
     defer ctx.allocator.free(r1.body);
@@ -419,9 +421,9 @@ fn native_ftp_get(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     const data = dataTransfer(ctx, fd, line, tcmd) catch return NativeResult.scalar(.{ .bool = false });
     defer ctx.allocator.free(data);
     bundle.prepareWrite(args[1].string.bytes(), .create);
-    var f = std.fs.cwd().createFile(args[1].string.bytes(), .{ .truncate = true }) catch return NativeResult.scalar(.{ .bool = false });
-    defer f.close();
-    f.writeAll(data) catch return NativeResult.scalar(.{ .bool = false });
+    var f = std.Io.Dir.cwd().createFile(platform.io, args[1].string.bytes(), .{ .truncate = true }) catch return NativeResult.scalar(.{ .bool = false });
+    defer f.close(platform.io);
+    platform.writeAll(f, data) catch return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -434,7 +436,7 @@ fn native_ftp_put(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     const type_reply = runCmd(ctx.allocator, fd, tcmd) catch return NativeResult.scalar(.{ .bool = false });
     defer ctx.allocator.free(type_reply.body);
     const data_fd = enterPasv(ctx.allocator, fd) catch return NativeResult.scalar(.{ .bool = false });
-    defer posix.close(data_fd);
+    defer sys.close(data_fd);
     const line = try std.fmt.allocPrint(ctx.allocator, "STOR {s}", .{args[1].string.bytes()});
     defer ctx.allocator.free(line);
     sendCmd(fd, line) catch return NativeResult.scalar(.{ .bool = false });
@@ -443,14 +445,14 @@ fn native_ftp_put(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     if (r1.code != 150 and r1.code != 125) return NativeResult.scalar(.{ .bool = false });
 
     var f = filesystem.openWithMode(args[2].string.bytes(), "r") catch return NativeResult.scalar(.{ .bool = false });
-    defer f.close();
+    defer f.close(platform.io);
     var buf: [8192]u8 = undefined;
     while (true) {
-        const n = f.read(&buf) catch return NativeResult.scalar(.{ .bool = false });
+        const n = platform.read(f, &buf) catch return NativeResult.scalar(.{ .bool = false });
         if (n == 0) break;
-        _ = posix.send(data_fd, buf[0..n], 0) catch return NativeResult.scalar(.{ .bool = false });
+        _ = sys.send(data_fd, buf[0..n], 0) catch return NativeResult.scalar(.{ .bool = false });
     }
-    posix.shutdown(data_fd, .both) catch {};
+    sys.shutdown(data_fd, .both) catch {};
     const r2 = readReply(ctx.allocator, fd) catch return NativeResult.scalar(.{ .bool = false });
     defer ctx.allocator.free(r2.body);
     return NativeResult.scalar(.{ .bool = r2.code == 226 or r2.code == 250 });
@@ -472,8 +474,8 @@ fn native_ftp_systype(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     if (r.code != 215) return NativeResult.scalar(.{ .bool = false });
     var iter = std.mem.tokenizeAny(u8, r.body, " \r\n");
     _ = iter.next();
-    const sys = iter.next() orelse return NativeResult.scalar(.{ .bool = false });
-    const s = try ctx.allocator.dupe(u8, sys);
+    const system_type = iter.next() orelse return NativeResult.scalar(.{ .bool = false });
+    const s = try ctx.allocator.dupe(u8, system_type);
     return NativeResult.takeString(try Value.String.adopt(ctx.allocator, s));
 }
 

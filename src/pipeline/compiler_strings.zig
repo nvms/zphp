@@ -131,7 +131,7 @@ pub fn extractHeredocBody(self: *Compiler, token_idx: u32) (Allocator.Error || e
 
     if (indent == 0) return raw_body;
 
-    var result = std.ArrayListUnmanaged(u8){};
+    var result = std.ArrayListUnmanaged(u8).empty;
     var line_begin: usize = 0;
     var line_idx: usize = 0;
     while (line_begin <= raw_body.len) {
@@ -517,7 +517,7 @@ fn isVarChar(c: u8) bool {
 
 pub fn processSingleQuoteEscapes(allocator: Allocator, s: []const u8) Allocator.Error!?[]const u8 {
     if (std.mem.indexOf(u8, s, "\\") == null) return null;
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     var i: usize = 0;
     while (i < s.len) {
         if (s[i] == '\\' and i + 1 < s.len) {
@@ -548,7 +548,7 @@ pub fn processSingleQuoteEscapes(allocator: Allocator, s: []const u8) Allocator.
 // quote is the delimiter (`"` or '`'), or 0 for a heredoc: an escaped quote
 // character only loses its backslash inside its own kind of string
 pub fn processEscapes(allocator: Allocator, s: []const u8, quote: u8) ![]const u8 {
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     var i: usize = 0;
     while (i < s.len) {
         if (s[i] == '\\' and i + 1 < s.len) {

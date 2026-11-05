@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("../platform.zig");
 const bundle = @import("../bundle.zig");
 const filesystem = @import("filesystem.zig");
 const phar = @import("phar.zig");
@@ -158,16 +159,16 @@ fn phConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     _ = try ensureEntries(ctx, obj);
 
     // if file exists, parse it and load entries
-    const cwd = std.fs.cwd();
-    const file = cwd.openFile(filename, .{}) catch |e| switch (e) {
+    const cwd = std.Io.Dir.cwd();
+    const file = cwd.openFile(platform.io, filename, .{}) catch |e| switch (e) {
         error.FileNotFound => return NativeResult.scalar(.null),
         else => return NativeResult.scalar(.null),
     };
-    defer file.close();
-    const stat = file.stat() catch return NativeResult.scalar(.null);
+    defer file.close(platform.io);
+    const stat = file.stat(platform.io) catch return NativeResult.scalar(.null);
     const bytes = ctx.allocator.alloc(u8, @intCast(stat.size)) catch return NativeResult.scalar(.null);
     defer ctx.allocator.free(bytes);
-    _ = file.readAll(bytes) catch return NativeResult.scalar(.null);
+    _ = platform.readAll(file, bytes) catch return NativeResult.scalar(.null);
 
     var parsed = phar.parse(ctx.allocator, bytes) catch return NativeResult.scalar(.null);
     defer parsed.deinit(ctx.allocator);
@@ -209,12 +210,12 @@ fn phAddFile(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
     const path = args[0].string.bytes();
     const local_name = if (args.len >= 2 and args[1] == .string) args[1].string.bytes() else std.fs.path.basename(path);
 
-    const cwd = std.fs.cwd();
-    const file = cwd.openFile(path, .{}) catch return NativeResult.scalar(.null);
-    defer file.close();
-    const stat = file.stat() catch return NativeResult.scalar(.null);
+    const cwd = std.Io.Dir.cwd();
+    const file = cwd.openFile(platform.io, path, .{}) catch return NativeResult.scalar(.null);
+    defer file.close(platform.io);
+    const stat = file.stat(platform.io) catch return NativeResult.scalar(.null);
     const buf = ctx.allocator.alloc(u8, @intCast(stat.size)) catch return NativeResult.scalar(.null);
-    _ = file.readAll(buf) catch {
+    _ = platform.readAll(file, buf) catch {
         ctx.allocator.free(buf);
         return NativeResult.scalar(.null);
     };
@@ -443,7 +444,7 @@ fn phMapPhar(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
     const alias = args[0].string.bytes();
     const fp = ctx.vm.file_path;
     if (fp.len == 0) return NativeResult.scalar(.{ .bool = true });
-    const resolved_fp = std.fs.cwd().realpathAlloc(ctx.allocator, fp) catch try ctx.allocator.dupe(u8, fp);
+    const resolved_fp = platform.realpathAlloc(ctx.allocator, fp) catch try ctx.allocator.dupe(u8, fp);
     defer ctx.allocator.free(resolved_fp);
     try ctx.vm.mapPharAlias(alias, resolved_fp);
     return NativeResult.scalar(.{ .bool = true });
@@ -464,7 +465,7 @@ fn saveAll(ctx: *NativeContext, obj: *PhpObject) !void {
     const alias: []const u8 = if (alias_v == .string) alias_v.string.bytes() else "";
 
     const arr = getEntries(obj) orelse return;
-    var entries = std.ArrayListUnmanaged(phar.WriteEntry){};
+    var entries = std.ArrayListUnmanaged(phar.WriteEntry).empty;
     defer entries.deinit(ctx.allocator);
     for (arr.entries.items) |entry| {
         const name = switch (entry.key) {
@@ -475,18 +476,18 @@ fn saveAll(ctx: *NativeContext, obj: *PhpObject) !void {
         try entries.append(ctx.allocator, .{
             .name = name,
             .contents = content,
-            .timestamp = @intCast(@as(u64, @intCast(std.time.timestamp())) & 0xFFFFFFFF),
+            .timestamp = @intCast(@as(u64, @intCast(platform.timestamp())) & 0xFFFFFFFF),
         });
     }
 
     const bytes = phar.write(ctx.allocator, stub, alias, entries.items) catch return;
     defer ctx.allocator.free(bytes);
 
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     bundle.prepareWrite(filename_v.string.bytes(), .create);
-    const file = cwd.createFile(filename_v.string.bytes(), .{ .truncate = true }) catch return;
-    defer file.close();
-    file.writeAll(bytes) catch return;
+    const file = cwd.createFile(platform.io, filename_v.string.bytes(), .{ .truncate = true }) catch return;
+    defer file.close(platform.io);
+    platform.writeAll(file, bytes) catch return;
 }
 
 test "phar write and parse roundtrip" {

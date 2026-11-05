@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("../platform.zig");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
@@ -97,7 +98,7 @@ fn getThis(ctx: *NativeContext) ?*PhpObject {
 
 fn freshU64FromCrypto() u64 {
     var b: [8]u8 = undefined;
-    std.crypto.random.bytes(&b);
+    platform.random.bytes(&b);
     return std.mem.readInt(u64, &b, .little);
 }
 
@@ -209,7 +210,7 @@ fn xoshGenerate(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
 
 fn secureGenerate(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     var bytes: [8]u8 = undefined;
-    std.crypto.random.bytes(&bytes);
+    platform.random.bytes(&bytes);
     return try NativeResult.copyString(ctx.allocator, &bytes);
 }
 

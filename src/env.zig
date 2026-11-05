@@ -1,6 +1,6 @@
 const std = @import("std");
 const platform = @import("platform.zig");
-const c = @cImport(@cInclude("stdlib.h"));
+const c = @import("c_stdlib");
 // mingw's crt has no setenv; _putenv_s writes both the crt and the win32 environment
 extern "c" fn _putenv_s(name: [*:0]const u8, value: [*:0]const u8) c_int;
 const Value = @import("runtime/value.zig").Value;
@@ -8,7 +8,7 @@ const PhpArray = @import("runtime/value.zig").PhpArray;
 const VM = @import("runtime/vm.zig").VM;
 
 pub fn loadEnvFile(allocator: std.mem.Allocator) void {
-    const content = std.fs.cwd().readFileAlloc(allocator, ".env", 1024 * 1024) catch return;
+    const content = std.Io.Dir.cwd().readFileAlloc(platform.io, ".env", allocator, .limited(1024 * 1024)) catch return;
     defer allocator.free(content);
 
     var i: usize = 0;
@@ -36,7 +36,7 @@ pub fn loadEnvFile(allocator: std.mem.Allocator) void {
             if (i < content.len) i += 1;
             continue;
         }
-        const key = std.mem.trimRight(u8, content[key_start..i], " \t");
+        const key = std.mem.trimEnd(u8, content[key_start..i], " \t");
         i += 1; // skip =
         if (key.len == 0) {
             while (i < content.len and content[i] != '\n') i += 1;
@@ -86,9 +86,9 @@ pub fn loadEnvFile(allocator: std.mem.Allocator) void {
 
         const val = content[val_start..val_end];
 
-        const key_z = allocator.dupeZ(u8, key) catch continue;
+        const key_z = allocator.dupeSentinel(u8, key, 0) catch continue;
         defer allocator.free(key_z);
-        const val_z = allocator.dupeZ(u8, val) catch continue;
+        const val_z = allocator.dupeSentinel(u8, val, 0) catch continue;
         defer allocator.free(val_z);
         if (platform.is_windows) {
             if (platform.getenv(key) == null) _ = _putenv_s(key_z.ptr, val_z.ptr);
@@ -105,7 +105,7 @@ pub const EnvSnapshot = struct {
     pub fn capture(a: std.mem.Allocator) ?EnvSnapshot {
         const arr = a.create(PhpArray) catch return null;
         arr.* = .{};
-        const env_map = std.process.getEnvMap(a) catch return .{ .env_arr = arr, .allocator = a };
+        const env_map = platform.getEnvMap(a) catch return .{ .env_arr = arr, .allocator = a };
         defer @constCast(&env_map).deinit();
         var iter = env_map.iterator();
         while (iter.next()) |entry| {
@@ -139,7 +139,7 @@ pub fn populateEnvSuperglobal(vm: *VM, a: std.mem.Allocator, snapshot: ?*const E
 
     const env_arr = try vm.allocArray();
 
-    const env_map = std.process.getEnvMap(a) catch {
+    const env_map = platform.getEnvMap(a) catch {
         try vm.putRequestVar("$_ENV", .{ .array = env_arr });
         return;
     };

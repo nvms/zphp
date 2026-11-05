@@ -1,8 +1,9 @@
 const std = @import("std");
+const sys = @import("../sys.zig");
 const builtin = @import("builtin");
 
 const is_windows = builtin.os.tag == .windows;
-const windows = std.os.windows;
+const win32 = @import("../win32.zig");
 
 // address space for up to `capacity` items, made usable a prefix at a time.
 // the base never moves, so pointers and slices into the committed part stay
@@ -18,10 +19,10 @@ pub fn Region(comptime T: type) type {
         pub fn reserve(capacity: usize) !Self {
             const bytes = std.mem.alignForward(usize, capacity * @sizeOf(T), std.heap.pageSize());
             const base: [*]align(@alignOf(T)) u8 = if (is_windows) blk: {
-                const addr = try windows.VirtualAlloc(null, bytes, windows.MEM_RESERVE, windows.PAGE_NOACCESS);
+                const addr = win32.VirtualAlloc(null, bytes, win32.MEM_RESERVE, win32.PAGE_NOACCESS) orelse return error.OutOfMemory;
                 break :blk @ptrCast(@alignCast(addr));
             } else blk: {
-                const mapped = try std.posix.mmap(null, bytes, std.posix.PROT.NONE, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
+                const mapped = try std.posix.mmap(null, bytes, .{}, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
                 break :blk @ptrCast(@alignCast(mapped.ptr));
             };
             return .{ .items = @as([*]T, @ptrCast(base))[0 .. bytes / @sizeOf(T)] };
@@ -37,10 +38,10 @@ pub fn Region(comptime T: type) type {
             const end = @min(std.mem.alignForward(usize, count * @sizeOf(T), page), self.items.len * @sizeOf(T));
             const base: [*]u8 = @ptrCast(self.items.ptr);
             if (is_windows) {
-                _ = try windows.VirtualAlloc(base + start, end - start, windows.MEM_COMMIT, windows.PAGE_READWRITE);
+                _ = win32.VirtualAlloc(@ptrCast(base + start), end - start, win32.MEM_COMMIT, win32.PAGE_READWRITE) orelse return error.OutOfMemory;
             } else {
                 const span: []align(std.heap.page_size_min) u8 = @alignCast(base[start..end]);
-                try std.posix.mprotect(span, std.posix.PROT.READ | std.posix.PROT.WRITE);
+                try sys.mprotect(span, .{ .READ = true, .WRITE = true });
             }
             self.committed = end / @sizeOf(T);
             return true;
@@ -59,7 +60,7 @@ pub fn Region(comptime T: type) type {
             const base: [*]align(std.heap.page_size_min) u8 = @ptrCast(@alignCast(self.items.ptr));
             const bytes = std.mem.alignForward(usize, self.items.len * @sizeOf(T), std.heap.pageSize());
             if (is_windows) {
-                windows.VirtualFree(base, 0, windows.MEM_RELEASE);
+                _ = win32.VirtualFree(@ptrCast(base), 0, win32.MEM_RELEASE);
             } else {
                 std.posix.munmap(base[0..bytes]);
             }

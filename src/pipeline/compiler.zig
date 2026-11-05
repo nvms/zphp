@@ -56,10 +56,10 @@ pub const CompileResult = struct {
     allocator: Allocator,
     local_count: u16 = 0,
     slot_names: []const []const u8 = &.{},
-    type_hints: std.ArrayListUnmanaged(TypeHint) = .{},
-    function_attrs: std.ArrayListUnmanaged(FunctionAttrEntry) = .{},
-    new_defaults: std.ArrayListUnmanaged(*bytecode.NewDefault) = .{},
-    deferred_exprs: std.ArrayListUnmanaged(*bytecode.DeferredExpr) = .{},
+    type_hints: std.ArrayListUnmanaged(TypeHint) = .empty,
+    function_attrs: std.ArrayListUnmanaged(FunctionAttrEntry) = .empty,
+    new_defaults: std.ArrayListUnmanaged(*bytecode.NewDefault) = .empty,
+    deferred_exprs: std.ArrayListUnmanaged(*bytecode.DeferredExpr) = .empty,
     source: []const u8 = "",
     file_path: []const u8 = "",
     strict_types: bool = false,
@@ -140,13 +140,13 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
     var c = Compiler{
         .ast = ast,
         .chunk = .{},
-        .functions = .{},
-        .string_allocs = .{},
+        .functions = .empty,
+        .string_allocs = .empty,
         .allocator = allocator,
         .scope_depth = 0,
         .loop_start = null,
-        .break_jumps = .{},
-        .continue_jumps = .{},
+        .break_jumps = .empty,
+        .continue_jumps = .empty,
         .file_path = file_path,
         .file_dir = origin.dir,
         .diagnostic = origin.diagnostic,
@@ -232,11 +232,11 @@ pub const Compiler = struct {
     nullsafe_chain_jumps: ?*std.ArrayListUnmanaged(usize) = null,
     loop_depth: u32 = 0,
     foreach_depth: u32 = 0,
-    loop_is_foreach: [32]bool = [_]bool{false} ** 32,
+    loop_is_foreach: [32]bool = @as([32]bool, @splat(false)),
     // per-foreach: true when the iterable is anonymous (e.g. `gen()`) and
     // therefore should be closed when the loop exits. `break` uses this to
     // pick iter_end_close vs iter_end
-    loop_foreach_close: [32]bool = [_]bool{false} ** 32,
+    loop_foreach_close: [32]bool = @as([32]bool, @splat(false)),
     closure_count: u32 = 0,
     // PHP hoists (early-binds) only function declarations that are direct
     // top-level statements of a file - reachable through bare blocks and
@@ -258,7 +258,7 @@ pub const Compiler = struct {
     use_fn_aliases: std.StringHashMapUnmanaged([]const u8) = .{},
     use_const_aliases: std.StringHashMapUnmanaged([]const u8) = .{},
     labels: std.StringHashMapUnmanaged(usize) = .{},
-    pending_gotos: std.ArrayListUnmanaged(PendingGoto) = .{},
+    pending_gotos: std.ArrayListUnmanaged(PendingGoto) = .empty,
     file_path: []const u8 = "",
     file_dir: ?[]const u8 = null,
     trait_properties: std.StringHashMapUnmanaged([]const u32) = .{},
@@ -269,17 +269,17 @@ pub const Compiler = struct {
     // its body references one - so only the variables the body actually uses
     // are captured (PHP semantics), not the whole enclosing scope
     arrow_parent: ?*Compiler = null,
-    type_hints: std.ArrayListUnmanaged(TypeHint) = .{},
-    function_attrs: std.ArrayListUnmanaged(FunctionAttrEntry) = .{},
-    new_defaults: std.ArrayListUnmanaged(*bytecode.NewDefault) = .{},
-    deferred_exprs: std.ArrayListUnmanaged(*bytecode.DeferredExpr) = .{},
+    type_hints: std.ArrayListUnmanaged(TypeHint) = .empty,
+    function_attrs: std.ArrayListUnmanaged(FunctionAttrEntry) = .empty,
+    new_defaults: std.ArrayListUnmanaged(*bytecode.NewDefault) = .empty,
+    deferred_exprs: std.ArrayListUnmanaged(*bytecode.DeferredExpr) = .empty,
     current_source_offset: u32 = 0,
     current_class: []const u8 = "",
     current_parent: []const u8 = "",
     current_function: []const u8 = "",
     in_trait: bool = false,
-    finally_nodes: [8]u32 = [_]u32{0} ** 8,
-    finally_loop_depth: [8]u32 = [_]u32{0} ** 8,
+    finally_nodes: [8]u32 = @as([8]u32, @splat(0)),
+    finally_loop_depth: [8]u32 = @as([8]u32, @splat(0)),
     finally_depth: u32 = 0,
 
     pub const LoopJump = struct {
@@ -1234,7 +1234,7 @@ pub const Compiler = struct {
 
     pub fn buildQualifiedString(self: *Compiler, parts: []const u32) Error![]const u8 {
         if (parts.len == 1) return self.ast.tokenSlice(parts[0]);
-        var buf = std.ArrayListUnmanaged(u8){};
+        var buf = std.ArrayListUnmanaged(u8).empty;
         defer buf.deinit(self.allocator);
         for (parts, 0..) |tok_idx, i| {
             if (i > 0) try buf.append(self.allocator, '\\');
@@ -1348,12 +1348,12 @@ pub const Compiler = struct {
             .deferred_exprs = self.deferred_exprs,
         };
         self.chunk = .{};
-        self.functions = .{};
-        self.string_allocs = .{};
-        self.type_hints = .{};
-        self.function_attrs = .{};
-        self.new_defaults = .{};
-        self.deferred_exprs = .{};
+        self.functions = .empty;
+        self.string_allocs = .empty;
+        self.type_hints = .empty;
+        self.function_attrs = .empty;
+        self.new_defaults = .empty;
+        self.deferred_exprs = .empty;
         return out;
     }
 

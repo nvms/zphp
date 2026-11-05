@@ -1,4 +1,5 @@
 const std = @import("std");
+const sys = @import("../sys.zig");
 const paths = @import("../paths.zig");
 const platform = @import("../platform.zig");
 const VM = @import("vm.zig").VM;
@@ -56,7 +57,7 @@ fn existing(vm: *VM, path: []const u8) error{OutOfMemory}!?[]const u8 {
         }
     }
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const real = std.fs.cwd().realpath(path, &buf) catch return null;
+    const real = platform.realpath(path, &buf) catch return null;
     if (entryKind(real) != .file) return null;
     return try intern(vm, real);
 }
@@ -93,21 +94,21 @@ const EntryKind = enum { file, symlink, other };
 
 fn entryKind(path: []const u8) EntryKind {
     if (platform.is_windows) {
-        const st = std.fs.cwd().statFile(path) catch return .other;
+        const st = std.Io.Dir.cwd().statFile(platform.io, path, .{}) catch return .other;
         return if (st.kind == .file) .file else .other;
     }
-    const st = std.posix.fstatat(std.posix.AT.FDCWD, path, std.posix.AT.SYMLINK_NOFOLLOW) catch return .other;
-    const mode: u32 = @intCast(st.mode);
-    if (std.posix.S.ISREG(mode)) return .file;
-    if (std.posix.S.ISLNK(mode)) return .symlink;
-    return .other;
+    return switch (sys.lstatKind(path) catch return .other) {
+        .file => .file,
+        .sym_link => .symlink,
+        else => .other,
+    };
 }
 
 // directories are canonicalized once per VM; chdir clears the cache because
 // relative keys name a different directory afterwards
 pub fn realDir(vm: *VM, dir: []const u8) ?[]const u8 {
     if (vm.realdir_cache.get(dir)) |real| return real;
-    const real = std.fs.cwd().realpathAlloc(vm.allocator, dir) catch return null;
+    const real = platform.realpathAlloc(vm.allocator, dir) catch return null;
     const key = vm.allocator.dupe(u8, dir) catch {
         vm.allocator.free(real);
         return null;

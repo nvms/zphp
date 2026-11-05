@@ -364,7 +364,7 @@ fn strval(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
             if (r == .string) return NativeResult.share(r);
         }
     }
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     try args[0].format(&buf, ctx.allocator);
     const s = try buf.toOwnedSlice(ctx.allocator);
@@ -642,7 +642,7 @@ fn ctype_graph(_: *NativeContext, args: []const Value) RuntimeError!NativeResult
 // with intl/ICU), but applications use the return value to detect whether a
 // locale was accepted. return the requested locale string verbatim, or the
 // previous locale when querying with "0"
-var current_locale: [128]u8 = [_]u8{0} ** 128;
+var current_locale: [128]u8 = @as([128]u8, @splat(0));
 var current_locale_len: usize = 1;
 var current_locale_initialized: bool = false;
 
@@ -978,7 +978,7 @@ fn native_settype(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     if (std.mem.eql(u8, type_name, "string")) {
         if (val == .string) return NativeResult.share(val);
         if (val == .array) try ctx.vm.emitWarning("Array to string conversion");
-        var buf = std.ArrayListUnmanaged(u8){};
+        var buf = std.ArrayListUnmanaged(u8).empty;
         defer buf.deinit(ctx.allocator);
         try val.format(&buf, ctx.allocator);
         const s = try buf.toOwnedSlice(ctx.allocator);
@@ -1608,7 +1608,7 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     const previous: []const u8 = if (ctx.vm.ini_settings.get(name)) |s| s else if (iniDefault(name)) |d| d else return NativeResult.scalar(Value{ .bool = false });
     // max_memory_limit can only be set at startup
     if (std.mem.eql(u8, name, "max_memory_limit")) return NativeResult.scalar(Value{ .bool = false });
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     try args[1].format(&buf, ctx.allocator);
     if (std.mem.eql(u8, name, "memory_limit")) {
@@ -1987,7 +1987,7 @@ fn native_strftime(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const fmt = args[0].string.bytes();
     const ts: Value = if (args.len >= 2) args[1] else try ctx.vm.callByName("time", &.{});
-    var buf: std.ArrayListUnmanaged(u8) = .{};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(ctx.allocator);
     var i: usize = 0;
     while (i < fmt.len) : (i += 1) {
@@ -2095,7 +2095,7 @@ fn native_get_include_path(ctx: *NativeContext, _: []const Value) RuntimeError!N
 
 fn native_set_include_path(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
-    var buf: std.ArrayListUnmanaged(u8) = .{};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(ctx.allocator);
     try args[0].format(&buf, ctx.allocator);
     if (buf.items.len == 0) return NativeResult.scalar(.{ .bool = false });
@@ -2119,11 +2119,11 @@ fn native_error_reporting(ctx: *NativeContext, args: []const Value) RuntimeError
 //   array/object         -> "Unhandled match case of type array" / "...stdClass"
 fn native_match_unhandled_msg(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const v = if (args.len > 0) args[0] else Value{ .null = {} };
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     try buf.appendSlice(ctx.allocator, "Unhandled match case ");
     switch (v) {
-        .int => |i| try std.fmt.format(buf.writer(ctx.allocator), "{d}", .{i}),
+        .int => |i| try buf.print(ctx.allocator, "{d}", .{i}),
         .float => try v.format(&buf, ctx.allocator),
         .bool => |b| try buf.appendSlice(ctx.allocator, if (b) "true" else "false"),
         .null => try buf.appendSlice(ctx.allocator, "null"),
@@ -2161,10 +2161,10 @@ fn native_error_log(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
             var path_buf: [std.fs.max_path_bytes]u8 = undefined;
             const path = paths.streamPath(&path_buf, args[2].string.bytes());
             bundle.prepareWrite(path, .edit);
-            const f = std.fs.cwd().createFile(path, .{ .truncate = false }) catch return NativeResult.scalar(.{ .bool = false });
-            defer f.close();
-            f.seekFromEnd(0) catch {};
-            f.writeAll(message) catch return NativeResult.scalar(.{ .bool = false });
+            const f = std.Io.Dir.cwd().createFile(platform.io, path, .{ .truncate = false }) catch return NativeResult.scalar(.{ .bool = false });
+            defer f.close(platform.io);
+            platform.seekFromEnd(f, 0) catch {};
+            platform.writeAll(f, message) catch return NativeResult.scalar(.{ .bool = false });
             return NativeResult.scalar(.{ .bool = true });
         },
         else => {
@@ -2429,7 +2429,7 @@ fn native_class_implements(ctx: *NativeContext, args: []const Value) RuntimeErro
     if (cls == null and interface == null and !ctx.vm.traits.contains(class_name)) return NativeResult.scalar(.{ .bool = false });
 
     var result = try ctx.createArray();
-    var queue = std.ArrayListUnmanaged([]const u8){};
+    var queue = std.ArrayListUnmanaged([]const u8).empty;
     defer queue.deinit(ctx.allocator);
     if (interface) |def| {
         for (def.parents.items) |parent| try queue.append(ctx.allocator, parent);
@@ -2929,7 +2929,7 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Nat
         257 => { // FILTER_VALIDATE_INT
             const allow_octal = (eff_flags & 1) != 0; // FILTER_FLAG_ALLOW_OCTAL
             const allow_hex = (eff_flags & 2) != 0; // FILTER_FLAG_ALLOW_HEX
-            var str_buf = std.ArrayListUnmanaged(u8){};
+            var str_buf = std.ArrayListUnmanaged(u8).empty;
             defer str_buf.deinit(_ctx.allocator);
             const n: i64 = blk: {
                 if (value == .int) break :blk value.int;
@@ -2988,7 +2988,7 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Nat
             const s = if (value == .string) value.string.bytes() else return NativeResult.scalar(.{ .bool = false });
             const trimmed = std.mem.trim(u8, s, " ");
             var parse_src: []const u8 = trimmed;
-            var cleaned = std.ArrayListUnmanaged(u8){};
+            var cleaned = std.ArrayListUnmanaged(u8).empty;
             defer cleaned.deinit(_ctx.allocator);
             if (std.mem.indexOfScalar(u8, trimmed, ',') != null) {
                 // a ',' is only valid with FILTER_FLAG_ALLOW_THOUSAND, and only
@@ -3073,7 +3073,7 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Nat
         },
         519 => { // FILTER_SANITIZE_NUMBER_INT
             const s = if (value == .string) value.string.bytes() else return NativeResult.share(fail_default);
-            var buf = std.ArrayListUnmanaged(u8){};
+            var buf = std.ArrayListUnmanaged(u8).empty;
             defer buf.deinit(_ctx.allocator);
             for (s) |c| {
                 if (std.ascii.isDigit(c) or c == '+' or c == '-') try buf.append(_ctx.allocator, c);
@@ -3086,7 +3086,7 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Nat
             const allow_frac = (eff_flags & 4096) != 0;
             const allow_thou = (eff_flags & 8192) != 0;
             const allow_sci = (eff_flags & 16384) != 0;
-            var buf = std.ArrayListUnmanaged(u8){};
+            var buf = std.ArrayListUnmanaged(u8).empty;
             defer buf.deinit(_ctx.allocator);
             for (s) |c| {
                 if (std.ascii.isDigit(c) or c == '+' or c == '-') {
@@ -3108,7 +3108,7 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Nat
         },
         522 => { // FILTER_SANITIZE_FULL_SPECIAL_CHARS
             const s = if (value == .string) value.string.bytes() else return NativeResult.scalar(.{ .bool = false });
-            var buf = std.ArrayListUnmanaged(u8){};
+            var buf = std.ArrayListUnmanaged(u8).empty;
             defer buf.deinit(_ctx.allocator);
             for (s) |c| {
                 switch (c) {
@@ -3125,7 +3125,7 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Nat
         },
         518 => { // FILTER_SANITIZE_URL
             const s = if (value == .string) value.string.bytes() else return NativeResult.scalar(.{ .bool = false });
-            var buf = std.ArrayListUnmanaged(u8){};
+            var buf = std.ArrayListUnmanaged(u8).empty;
             defer buf.deinit(_ctx.allocator);
             for (s) |c| {
                 // PHP strips all chars except a-zA-Z0-9 and the URL-reserved set
@@ -3143,7 +3143,7 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Nat
         },
         517 => { // FILTER_SANITIZE_EMAIL
             const s = if (value == .string) value.string.bytes() else return NativeResult.scalar(.{ .bool = false });
-            var buf = std.ArrayListUnmanaged(u8){};
+            var buf = std.ArrayListUnmanaged(u8).empty;
             defer buf.deinit(_ctx.allocator);
             for (s) |c| {
                 if (std.ascii.isAlphanumeric(c) or c == '@' or c == '.' or c == '!' or c == '#' or
@@ -3176,7 +3176,7 @@ fn native_filter_var(_ctx: *NativeContext, args: []const Value) RuntimeError!Nat
 }
 
 fn sanitizeSpecialChars(ctx: *NativeContext, s: []const u8) !Value.String {
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     for (s) |c| {
         switch (c) {

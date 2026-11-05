@@ -38,9 +38,9 @@ fn json_encode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     const flags = if (args.len >= 2) Value.toInt(args[1]) else 0;
     const depth: usize = if (args.len >= 3) @intCast(@max(1, Value.toInt(args[2]))) else 512;
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
-    var visited = std.ArrayListUnmanaged(usize){};
+    var visited = std.ArrayListUnmanaged(usize).empty;
     defer visited.deinit(ctx.allocator);
     last_error = 0;
     last_error_msg = "No error";
@@ -582,7 +582,7 @@ fn parseValue(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max_
 
 fn parseString(ctx: *NativeContext, s: []const u8, pos: *usize) !Value {
     pos.* += 1;
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     errdefer buf.deinit(ctx.allocator);
     while (pos.* < s.len and s[pos.*] != '"') {
         if (s[pos.*] == '\\') {

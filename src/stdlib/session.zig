@@ -1,5 +1,6 @@
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
+const platform = @import("../platform.zig");
 const paths = @import("../paths.zig");
 const bundle = @import("../bundle.zig");
 const Value = @import("../runtime/value.zig").Value;
@@ -71,7 +72,7 @@ const session_id_len = 26;
 
 fn generateId(ctx: *NativeContext) !Value.String {
     var raw: [session_id_len]u8 = undefined;
-    std.crypto.random.bytes(&raw);
+    platform.random.bytes(&raw);
     // map each byte into the alphabet; modulo bias is negligible for this use
     for (&raw) |*b| b.* = session_id_alphabet[b.* % session_id_alphabet.len];
     return Value.String.create(ctx.allocator, &raw);
@@ -130,7 +131,7 @@ fn saveSessionData(ctx: *NativeContext, sid: []const u8) !void {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const target = paths.streamPath(&path_buf, path);
     bundle.prepareWrite(target, .create);
-    std.fs.cwd().writeFile(.{ .sub_path = target, .data = serialized.string.bytes() }) catch return;
+    std.Io.Dir.cwd().writeFile(platform.io, .{ .sub_path = target, .data = serialized.string.bytes() }) catch return;
 }
 
 fn getCookieSessionId(ctx: *NativeContext) ?[]const u8 {
@@ -220,7 +221,7 @@ fn native_session_destroy(ctx: *NativeContext, _: []const Value) RuntimeError!Na
 
     const path = try sessionPath(ctx, sid_val.string.bytes());
     defer ctx.allocator.free(path);
-    std.fs.cwd().deleteFile(path) catch {};
+    std.Io.Dir.cwd().deleteFile(platform.io, path) catch {};
 
     try setSessionVar(ctx, "__session_active", .{ .bool = false });
     return NativeResult.scalar(.{ .bool = true });
@@ -244,7 +245,7 @@ fn native_session_regenerate_id(ctx: *NativeContext, args: []const Value) Runtim
     if (delete_old) {
         const path = try sessionPath(ctx, old_sid_val.string.bytes());
         defer ctx.allocator.free(path);
-        std.fs.cwd().deleteFile(path) catch {};
+        std.Io.Dir.cwd().deleteFile(platform.io, path) catch {};
     }
 
     try setSessionCookie(ctx, new_sid.bytes());

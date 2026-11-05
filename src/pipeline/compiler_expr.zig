@@ -891,7 +891,7 @@ fn compileArgLvalue(self: *Compiler, arg_idx: u32, guard: ArgGuard) Error!void {
 }
 
 fn compileArgs(self: *Compiler, args: []const u32) Error!ArgGuards {
-    var guards: ArgGuards = .{};
+    var guards: ArgGuards = .empty;
     errdefer guards.deinit(self.allocator);
     for (args, 0..) |arg, i| {
         const pos: u8 = if (i <= ArgPos.max) @intCast(i) else ArgPos.spread;
@@ -1090,7 +1090,7 @@ pub fn hasSplatOrNamed(ast: *const Ast, args: []const u32) bool {
 }
 
 pub fn emitSpreadArgs(self: *Compiler, args: []const u32) Error!ArgGuards {
-    var guards: ArgGuards = .{};
+    var guards: ArgGuards = .empty;
     errdefer guards.deinit(self.allocator);
     try self.emitOp(.array_new);
     for (args) |arg_idx| {
@@ -1404,7 +1404,7 @@ fn compilePropertyFetch(self: *Compiler, node: Ast.Node, guard: ?ArgGuard) Error
     // outermost chain link sets up the nullsafe-jump collection. inner nullsafe
     // links append their short-circuit jumps to this list so a `$x?->y()->z`
     // chain skips both `y()` and `z` when $x is null
-    var local_jumps: std.ArrayListUnmanaged(usize) = .{};
+    var local_jumps: std.ArrayListUnmanaged(usize) = .empty;
     const owns_chain = self.nullsafe_chain_jumps == null and lhsIsChainLink(self.ast, node);
     if (owns_chain) self.nullsafe_chain_jumps = &local_jumps;
     defer if (owns_chain) {
@@ -1443,7 +1443,7 @@ fn lhsIsChainLink(ast: anytype, node: Ast.Node) bool {
 }
 
 pub fn compileMethodCall(self: *Compiler, node: Ast.Node) Error!void {
-    var local_jumps: std.ArrayListUnmanaged(usize) = .{};
+    var local_jumps: std.ArrayListUnmanaged(usize) = .empty;
     const owns_chain = self.nullsafe_chain_jumps == null and lhsIsChainLink(self.ast, node);
     if (owns_chain) self.nullsafe_chain_jumps = &local_jumps;
     defer if (owns_chain) {
@@ -1483,7 +1483,7 @@ pub fn compileMethodCall(self: *Compiler, node: Ast.Node) Error!void {
 pub fn compileNullsafePropertyAccess(self: *Compiler, node: Ast.Node) Error!void {
     // create or reuse the chain jump-list. when an outer chain link is
     // collecting, append our short-circuit jump there; otherwise patch locally
-    var local_jumps: std.ArrayListUnmanaged(usize) = .{};
+    var local_jumps: std.ArrayListUnmanaged(usize) = .empty;
     const owns_chain = self.nullsafe_chain_jumps == null;
     if (owns_chain) self.nullsafe_chain_jumps = &local_jumps;
     defer if (owns_chain) {
@@ -1503,7 +1503,7 @@ pub fn compileNullsafePropertyAccess(self: *Compiler, node: Ast.Node) Error!void
 }
 
 pub fn compileNullsafeMethodCall(self: *Compiler, node: Ast.Node) Error!void {
-    var local_jumps: std.ArrayListUnmanaged(usize) = .{};
+    var local_jumps: std.ArrayListUnmanaged(usize) = .empty;
     const owns_chain = self.nullsafe_chain_jumps == null;
     if (owns_chain) self.nullsafe_chain_jumps = &local_jumps;
     defer if (owns_chain) {
@@ -1721,7 +1721,7 @@ pub fn resolveQualifiedNewName(self: *Compiler, node: Ast.Node) !struct { name: 
     const ns_relative = (node.data.rhs & (1 << 30)) != 0;
     if (rhs_raw == 0) return .{ .name = first, .is_absolute = is_absolute, .ns_relative = ns_relative };
     const parts = self.ast.extraSlice(rhs_raw);
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     try buf.appendSlice(self.allocator, first);
     for (parts[1..]) |part_tok| {
         try buf.append(self.allocator, '\\');

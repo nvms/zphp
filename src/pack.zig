@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform.zig");
 const Allocator = std.mem.Allocator;
 const bundle = @import("bundle.zig");
 const parser = @import("pipeline/parser.zig");
@@ -33,9 +34,9 @@ pub const Summary = struct {
 const skipped_dirs = [_][]const u8{ ".git", "node_modules" };
 
 pub fn build(allocator: Allocator, options: Options) !Summary {
-    const entry = try std.fs.cwd().realpathAlloc(allocator, options.entry);
+    const entry = try platform.realpathAlloc(allocator, options.entry);
     defer allocator.free(entry);
-    const root = if (options.root) |r| try std.fs.cwd().realpathAlloc(allocator, r) else try projectRoot(allocator, entry);
+    const root = if (options.root) |r| try platform.realpathAlloc(allocator, r) else try projectRoot(allocator, entry);
     errdefer allocator.free(root);
     const entry_rel = relativeTo(root, entry) orelse return error.EntryOutsideRoot;
 
@@ -49,8 +50,8 @@ pub fn build(allocator: Allocator, options: Options) !Summary {
     var writer = try bundle.Writer.init(allocator, root, entry_portable);
     defer writer.deinit();
 
-    var dir = try std.fs.openDirAbsolute(root, .{ .iterate = true });
-    defer dir.close();
+    var dir = try std.Io.Dir.openDirAbsolute(platform.io, root, .{ .iterate = true });
+    defer dir.close(platform.io);
     var walker = try dir.walk(allocator);
     defer walker.deinit();
     var files: usize = 0;
@@ -60,19 +61,19 @@ pub fn build(allocator: Allocator, options: Options) !Summary {
     // it shares with a top-level entry would hide that entry
     var top_level = std.BufSet.init(allocator);
     defer top_level.deinit();
-    while (try walker.next()) |item| {
+    while (try walker.next(platform.io)) |item| {
         if (skipped(item.path, options.excludes)) continue;
-        const kind = if (item.kind == .sym_link) (item.dir.statFile(item.basename) catch continue).kind else item.kind;
+        const kind = if (item.kind == .sym_link) (item.dir.statFile(platform.io, item.basename, .{}) catch continue).kind else item.kind;
         if (kind != .file) continue;
         const abs = try std.fs.path.join(allocator, &.{ root, item.path });
         defer allocator.free(abs);
         if (std.mem.eql(u8, abs, out_abs)) continue;
-        const stat = try item.dir.statFile(item.basename);
-        const source = try item.dir.readFileAlloc(allocator, item.basename, std.math.maxInt(u32));
+        const stat = try item.dir.statFile(platform.io, item.basename, .{});
+        const source = try item.dir.readFileAlloc(platform.io, item.basename, allocator, .limited(std.math.maxInt(u32)));
         defer allocator.free(source);
         const rel = try portable(allocator, item.path);
         defer allocator.free(rel);
-        const mtime: i64 = @intCast(@divFloor(stat.mtime, std.time.ns_per_s));
+        const mtime: i64 = @intCast(@divFloor(stat.mtime.nanoseconds, std.time.ns_per_s));
         if (std.mem.eql(u8, std.fs.path.extension(item.basename), ".php")) {
             const code = try compileFile(allocator, source, abs);
             defer if (code) |c| allocator.free(c);
@@ -88,7 +89,7 @@ pub fn build(allocator: Allocator, options: Options) !Summary {
     }
     if (top_level.contains(std.fs.path.basename(out_abs))) return error.OutputShadowsPack;
 
-    const exe = try std.fs.selfExePathAlloc(allocator);
+    const exe = try platform.selfExePathAlloc(allocator);
     defer allocator.free(exe);
     try bundle.writeExecutable(allocator, exe, writer.finish(), out);
     return .{ .out = out, .root = root, .files = files, .compiled = compiled, .bytes = bytes };
@@ -118,7 +119,7 @@ fn projectRoot(allocator: Allocator, entry: []const u8) ![]u8 {
     while (dir) |d| : (dir = std.fs.path.dirname(d)) {
         const manifest = try std.fs.path.join(allocator, &.{ d, "composer.json" });
         defer allocator.free(manifest);
-        std.fs.accessAbsolute(manifest, .{}) catch continue;
+        std.Io.Dir.accessAbsolute(platform.io, manifest, .{}) catch continue;
         return allocator.dupe(u8, d);
     }
     return allocator.dupe(u8, start);

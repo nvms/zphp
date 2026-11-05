@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform.zig");
 const tui = @import("tui.zig");
 
 const Allocator = std.mem.Allocator;
@@ -40,7 +41,7 @@ pub const LockEntry = struct {
     dist_url: []const u8,
     dist_sha: []const u8 = "",
     autoload_psr4: std.StringHashMapUnmanaged([]const u8) = .{},
-    autoload_files: std.ArrayListUnmanaged([]const u8) = .{},
+    autoload_files: std.ArrayListUnmanaged([]const u8) = .empty,
     requires: std.StringHashMapUnmanaged([]const u8) = .{},
 };
 
@@ -122,24 +123,24 @@ pub fn parseComposerJson(allocator: Allocator, source: []const u8) !ComposerJson
 }
 
 fn writeComposerValue(allocator: Allocator, value: std.json.Value) !void {
-    var aw: std.io.Writer.Allocating = .init(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     try std.json.Stringify.value(value, .{ .whitespace = .indent_2 }, &aw.writer);
     try aw.writer.writeByte('\n');
-    try std.fs.cwd().writeFile(.{ .sub_path = "composer.json", .data = aw.written() });
+    try std.Io.Dir.cwd().writeFile(platform.io, .{ .sub_path = "composer.json", .data = aw.written() });
 }
 
 fn upsertComposerRequire(allocator: Allocator, pkg_name: []const u8, version_constraint: []const u8) !void {
-    const source = std.fs.cwd().readFileAlloc(allocator, "composer.json", 1024 * 1024) catch {
+    const source = std.Io.Dir.cwd().readFileAlloc(platform.io, "composer.json", allocator, .limited(1024 * 1024)) catch {
         // no composer.json - create a minimal one
-        var buf = std.ArrayListUnmanaged(u8){};
+        var buf = std.ArrayListUnmanaged(u8).empty;
         defer buf.deinit(allocator);
         try buf.appendSlice(allocator, "{\n  \"require\": {\n    \"");
         try buf.appendSlice(allocator, pkg_name);
         try buf.appendSlice(allocator, "\": \"");
         try buf.appendSlice(allocator, version_constraint);
         try buf.appendSlice(allocator, "\"\n  }\n}\n");
-        try std.fs.cwd().writeFile(.{ .sub_path = "composer.json", .data = buf.items });
+        try std.Io.Dir.cwd().writeFile(platform.io, .{ .sub_path = "composer.json", .data = buf.items });
         return;
     };
     defer allocator.free(source);
@@ -152,22 +153,22 @@ fn upsertComposerRequire(allocator: Allocator, pkg_name: []const u8, version_con
     const arena_alloc = parsed.arena.allocator();
 
     const req_ptr = root.getPtr("require") orelse blk: {
-        try root.put("require", .{ .object = std.json.ObjectMap.init(arena_alloc) });
+        try root.put(arena_alloc, "require", .{ .object = .empty });
         break :blk root.getPtr("require").?;
     };
     if (req_ptr.* != .object) {
-        req_ptr.* = .{ .object = std.json.ObjectMap.init(arena_alloc) };
+        req_ptr.* = .{ .object = .empty };
     }
 
     const name_arena = try arena_alloc.dupe(u8, pkg_name);
     const ver_arena = try arena_alloc.dupe(u8, version_constraint);
-    try req_ptr.object.put(name_arena, .{ .string = ver_arena });
+    try req_ptr.object.put(arena_alloc, name_arena, .{ .string = ver_arena });
 
     try writeComposerValue(allocator, parsed.value);
 }
 
 fn removeComposerRequire(allocator: Allocator, pkg_name: []const u8) !bool {
-    const source = std.fs.cwd().readFileAlloc(allocator, "composer.json", 1024 * 1024) catch return false;
+    const source = std.Io.Dir.cwd().readFileAlloc(platform.io, "composer.json", allocator, .limited(1024 * 1024)) catch return false;
     defer allocator.free(source);
 
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, source, .{}) catch return false;
@@ -199,7 +200,7 @@ pub fn downloadPackage(allocator: Allocator, entry: *LockEntry) !void {
     const vendor_dir = try std.fmt.allocPrint(allocator, "vendor/{s}", .{entry.name});
     defer allocator.free(vendor_dir);
 
-    try std.fs.cwd().makePath(vendor_dir);
+    try std.Io.Dir.cwd().createDirPath(platform.io, vendor_dir);
 
     const zip_data = try httpGet(allocator, entry.dist_url);
     defer allocator.free(zip_data);
@@ -209,26 +210,25 @@ pub fn downloadPackage(allocator: Allocator, entry: *LockEntry) !void {
     const zip_path = try std.fmt.allocPrint(allocator, "vendor/{s}.zip", .{safe_name});
     defer allocator.free(zip_path);
 
-    try std.fs.cwd().writeFile(.{ .sub_path = zip_path, .data = zip_data });
+    try std.Io.Dir.cwd().writeFile(platform.io, .{ .sub_path = zip_path, .data = zip_data });
 
-    var child = std.process.Child.init(&.{ "unzip", "-o", "-q", zip_path, "-d", vendor_dir }, allocator);
-    const term = try child.spawnAndWait();
-    if (term.Exited != 0) return error.RuntimeError;
+    const result = try platform.runChild(allocator, &.{ "unzip", "-o", "-q", zip_path, "-d", vendor_dir }, .{ .stdout = .inherit });
+    if (result.term != .exited or result.term.exited != 0) return error.RuntimeError;
 
     // clean up zip (non-critical, ok to ignore)
-    std.fs.cwd().deleteFile(zip_path) catch {};
+    std.Io.Dir.cwd().deleteFile(platform.io, zip_path) catch {};
 
     try moveNestedDir(allocator, vendor_dir);
 }
 
 fn moveNestedDir(allocator: Allocator, vendor_dir: []const u8) !void {
-    var dir = std.fs.cwd().openDir(vendor_dir, .{ .iterate = true }) catch return;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(platform.io, vendor_dir, .{ .iterate = true }) catch return;
+    defer dir.close(platform.io);
 
     var iter = dir.iterate();
     var subdir_name: ?[]const u8 = null;
     var count: usize = 0;
-    while (try iter.next()) |entry| {
+    while (try iter.next(platform.io)) |entry| {
         count += 1;
         if (entry.kind == .directory and count == 1) {
             subdir_name = try allocator.dupe(u8, entry.name);
@@ -242,18 +242,18 @@ fn moveNestedDir(allocator: Allocator, vendor_dir: []const u8) !void {
             const src = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ vendor_dir, sub });
             defer allocator.free(src);
 
-            var sub_dir = std.fs.cwd().openDir(src, .{ .iterate = true }) catch return error.RuntimeError;
-            defer sub_dir.close();
+            var sub_dir = std.Io.Dir.cwd().openDir(platform.io, src, .{ .iterate = true }) catch return error.RuntimeError;
+            defer sub_dir.close(platform.io);
 
             var sub_iter = sub_dir.iterate();
-            while (try sub_iter.next()) |file_entry| {
+            while (try sub_iter.next(platform.io)) |file_entry| {
                 const old_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ src, file_entry.name });
                 defer allocator.free(old_path);
                 const new_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ vendor_dir, file_entry.name });
                 defer allocator.free(new_path);
-                std.fs.cwd().rename(old_path, new_path) catch continue;
+                std.Io.Dir.cwd().rename(old_path, std.Io.Dir.cwd(), new_path, platform.io) catch continue;
             }
-            std.fs.cwd().deleteDir(src) catch {};
+            std.Io.Dir.cwd().deleteDir(platform.io, src) catch {};
         }
     }
 }
@@ -261,7 +261,7 @@ fn moveNestedDir(allocator: Allocator, vendor_dir: []const u8) !void {
 fn readLocalAutoload(allocator: Allocator, entry: *LockEntry) !void {
     const path = try std.fmt.allocPrint(allocator, "vendor/{s}/composer.json", .{entry.name});
     defer allocator.free(path);
-    const data = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch return;
+    const data = std.Io.Dir.cwd().readFileAlloc(platform.io, path, allocator, .limited(1024 * 1024)) catch return;
     defer allocator.free(data);
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch return;
     defer parsed.deinit();
@@ -304,9 +304,9 @@ fn appendPhpEscaped(buf: *std.ArrayListUnmanaged(u8), allocator: Allocator, s: [
 }
 
 pub fn generateAutoloader(allocator: Allocator, entries: []const LockEntry, project_psr4: *std.StringHashMapUnmanaged([]const u8)) !void {
-    std.fs.cwd().makePath("vendor") catch {};
+    std.Io.Dir.cwd().createDirPath(platform.io, "vendor") catch {};
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(allocator);
 
     try buf.appendSlice(allocator, "<?php\n");
@@ -338,7 +338,7 @@ pub fn generateAutoloader(allocator: Allocator, entries: []const LockEntry, proj
         while (it.next()) |e| {
             const dir = try std.fmt.allocPrint(allocator, "vendor/{s}/{s}", .{ entry.name, e.value_ptr.* });
             const gop = try ns_dirs.getOrPut(allocator, e.key_ptr.*);
-            if (!gop.found_existing) gop.value_ptr.* = .{};
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
             try gop.value_ptr.append(allocator, dir);
         }
     }
@@ -387,11 +387,11 @@ pub fn generateAutoloader(allocator: Allocator, entries: []const LockEntry, proj
         }
     }
 
-    std.fs.cwd().writeFile(.{ .sub_path = "vendor/autoload.php", .data = buf.items }) catch {};
+    std.Io.Dir.cwd().writeFile(platform.io, .{ .sub_path = "vendor/autoload.php", .data = buf.items }) catch {};
 }
 
 pub fn writeLockFile(allocator: Allocator, entries: []const LockEntry) !void {
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(allocator);
 
     try buf.appendSlice(allocator, "{\n  \"packages\": [\n");
@@ -424,11 +424,11 @@ pub fn writeLockFile(allocator: Allocator, entries: []const LockEntry) !void {
     }
 
     try buf.appendSlice(allocator, "\n  ]\n}\n");
-    std.fs.cwd().writeFile(.{ .sub_path = "zphp.lock", .data = buf.items }) catch {};
+    std.Io.Dir.cwd().writeFile(platform.io, .{ .sub_path = "zphp.lock", .data = buf.items }) catch {};
 }
 
 pub fn readLockFile(allocator: Allocator) !?[]LockEntry {
-    const source = std.fs.cwd().readFileAlloc(allocator, "zphp.lock", 1024 * 1024) catch return null;
+    const source = std.Io.Dir.cwd().readFileAlloc(platform.io, "zphp.lock", allocator, .limited(1024 * 1024)) catch return null;
     defer allocator.free(source);
 
     const parsed = json.parseFromSlice(json.Value, allocator, source, .{}) catch return null;
@@ -439,7 +439,7 @@ pub fn readLockFile(allocator: Allocator) !?[]LockEntry {
     const pkgs = root.get("packages") orelse return null;
     if (pkgs != .array) return null;
 
-    var entries = std.ArrayListUnmanaged(LockEntry){};
+    var entries = std.ArrayListUnmanaged(LockEntry).empty;
     for (pkgs.array.items) |item| {
         if (item != .object) continue;
         var entry = LockEntry{
@@ -473,13 +473,12 @@ pub fn readLockFile(allocator: Allocator) !?[]LockEntry {
 }
 
 fn httpGet(allocator: Allocator, url: []const u8) ![]u8 {
-    const result = try std.process.Child.run(.{
-        .allocator = allocator,
+    const result = try std.process.run(allocator, platform.io, .{
         .argv = &.{ "curl", "-sfL", url },
-        .max_output_bytes = 50 * 1024 * 1024,
+        .stdout_limit = .limited(50 * 1024 * 1024),
     });
     defer allocator.free(result.stderr);
-    if (result.term.Exited != 0) {
+    if (result.term != .exited or result.term.exited != 0) {
         allocator.free(result.stdout);
         return error.HttpError;
     }
@@ -777,7 +776,7 @@ fn resolveAll(
 
     // stack for BFS: (name, constraint, required_by)
     const QueueItem = struct { name: []const u8, constraint: []const u8, required_by: []const u8 };
-    var queue = std.ArrayListUnmanaged(QueueItem){};
+    var queue = std.ArrayListUnmanaged(QueueItem).empty;
     defer queue.deinit(allocator);
 
     // seed with direct deps
@@ -836,9 +835,9 @@ fn resolveAll(
 // commands
 
 pub fn install(allocator: Allocator) !void {
-    const start = std.time.milliTimestamp();
+    const start = platform.milliTimestamp();
 
-    const source = std.fs.cwd().readFileAlloc(allocator, "composer.json", 1024 * 1024) catch {
+    const source = std.Io.Dir.cwd().readFileAlloc(platform.io, "composer.json", allocator, .limited(1024 * 1024)) catch {
         tui.err("no composer.json found");
         return;
     };
@@ -852,7 +851,7 @@ pub fn install(allocator: Allocator) !void {
         allocator.free(removed.key);
         allocator.free(removed.value);
     }
-    var skip_keys = std.ArrayListUnmanaged([]const u8){};
+    var skip_keys = std.ArrayListUnmanaged([]const u8).empty;
     defer skip_keys.deinit(allocator);
     {
         var kit = composer.require.iterator();
@@ -878,13 +877,13 @@ pub fn install(allocator: Allocator) !void {
     tui.blank();
     tui.header("resolving dependencies");
 
-    var entries = std.ArrayListUnmanaged(LockEntry){};
+    var entries = std.ArrayListUnmanaged(LockEntry).empty;
     defer {
         for (entries.items) |*e| freeLockEntry(allocator, e);
         entries.deinit(allocator);
     }
 
-    var conflicts = std.ArrayListUnmanaged(ResolveError){};
+    var conflicts = std.ArrayListUnmanaged(ResolveError).empty;
     defer {
         for (conflicts.items) |*c| {
             allocator.free(c.package);
@@ -925,7 +924,7 @@ pub fn install(allocator: Allocator) !void {
     try writeLockFile(allocator, entries.items);
     tui.success("vendor/autoload.php");
 
-    const elapsed: u64 = @intCast(std.time.milliTimestamp() - start);
+    const elapsed: u64 = @intCast(platform.milliTimestamp() - start);
     tui.blank();
     tui.timing("installed", elapsed);
     tui.blank();
@@ -970,13 +969,13 @@ pub fn add(allocator: Allocator, name: []const u8) !void {
     const star = try allocator.dupe(u8, "*");
     try deps.put(allocator, name_dupe, star);
 
-    var all_entries = std.ArrayListUnmanaged(LockEntry){};
+    var all_entries = std.ArrayListUnmanaged(LockEntry).empty;
     defer {
         for (all_entries.items) |*e| freeLockEntry(allocator, e);
         all_entries.deinit(allocator);
     }
 
-    var conflicts = std.ArrayListUnmanaged(ResolveError){};
+    var conflicts = std.ArrayListUnmanaged(ResolveError).empty;
     defer {
         for (conflicts.items) |*c| {
             allocator.free(c.package);
@@ -1047,7 +1046,7 @@ pub fn add(allocator: Allocator, name: []const u8) !void {
     try upsertComposerRequire(allocator, name, constraint);
 
     // regenerate autoloader from updated composer.json
-    const source = std.fs.cwd().readFileAlloc(allocator, "composer.json", 1024 * 1024) catch "";
+    const source = std.Io.Dir.cwd().readFileAlloc(platform.io, "composer.json", allocator, .limited(1024 * 1024)) catch "";
     defer if (source.len > 0) allocator.free(source);
 
     if (source.len > 0) {
@@ -1073,7 +1072,7 @@ pub fn remove(allocator: Allocator, name: []const u8) !void {
     _ = removeComposerRequire(allocator, name) catch false;
 
     // read updated composer.json for psr-4 info (autoloader generation)
-    const composer_source = std.fs.cwd().readFileAlloc(allocator, "composer.json", 1024 * 1024) catch "";
+    const composer_source = std.Io.Dir.cwd().readFileAlloc(platform.io, "composer.json", allocator, .limited(1024 * 1024)) catch "";
     defer if (composer_source.len > 0) allocator.free(composer_source);
 
     var composer = if (composer_source.len > 0)
@@ -1104,7 +1103,7 @@ pub fn remove(allocator: Allocator, name: []const u8) !void {
     var reachable = std.StringHashMapUnmanaged(void){};
     defer reachable.deinit(allocator);
 
-    var queue = std.ArrayListUnmanaged([]const u8){};
+    var queue = std.ArrayListUnmanaged([]const u8).empty;
     defer queue.deinit(allocator);
 
     var rit = composer.require.iterator();
@@ -1129,7 +1128,7 @@ pub fn remove(allocator: Allocator, name: []const u8) !void {
     }
 
     // partition: kept stays in lock, orphans get deleted from vendor/
-    var kept = std.ArrayListUnmanaged(LockEntry){};
+    var kept = std.ArrayListUnmanaged(LockEntry).empty;
     defer kept.deinit(allocator);
 
     var orphan_count: usize = 0;
@@ -1140,7 +1139,7 @@ pub fn remove(allocator: Allocator, name: []const u8) !void {
             orphan_count += 1;
             const vendor_dir = try std.fmt.allocPrint(allocator, "vendor/{s}", .{e.name});
             defer allocator.free(vendor_dir);
-            std.fs.cwd().deleteTree(vendor_dir) catch {};
+            std.Io.Dir.cwd().deleteTree(platform.io, vendor_dir) catch {};
         }
     }
 

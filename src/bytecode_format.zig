@@ -33,7 +33,7 @@ const TAG_ARRAY: u8 = 8;
 const TAG_DEFERRED_EXPR: u8 = 9;
 
 const StringTable = struct {
-    entries: std.ArrayListUnmanaged([]const u8) = .{},
+    entries: std.ArrayListUnmanaged([]const u8) = .empty,
     map: std.StringHashMapUnmanaged(u32) = .{},
 
     fn intern(self: *StringTable, allocator: Allocator, s: []const u8) !u32 {
@@ -55,7 +55,7 @@ const StringTable = struct {
 // =========================================================
 
 pub fn serialize(allocator: Allocator, result: *const CompileResult) ![]u8 {
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     var strtab = StringTable{};
     defer strtab.deinit(allocator);
 
@@ -197,7 +197,7 @@ const LineIndex = struct {
 
     fn init(allocator: Allocator, source: []const u8) !LineIndex {
         if (source.len == 0) return .{ .starts = &.{} };
-        var starts: std.ArrayListUnmanaged(u32) = .{};
+        var starts: std.ArrayListUnmanaged(u32) = .empty;
         errdefer starts.deinit(allocator);
         try starts.append(allocator, 0);
         for (source, 0..) |c, i| {
@@ -451,7 +451,7 @@ pub fn deserializeRelocated(allocator: Allocator, data: []const u8, relocation: 
     // string table
     const str_count = r.readU32() catch return error.InvalidFormat;
     var strings = try allocator.alloc([]const u8, str_count);
-    var string_allocs = std.ArrayListUnmanaged([]const u8){};
+    var string_allocs = std.ArrayListUnmanaged([]const u8).empty;
     errdefer {
         for (string_allocs.items) |s| allocator.free(s);
         string_allocs.deinit(allocator);
@@ -480,7 +480,7 @@ pub fn deserializeRelocated(allocator: Allocator, data: []const u8, relocation: 
     const closure_counter = r.readU32() catch return error.InvalidFormat;
     if (closure_counter > compiler.closureCounter()) compiler.setClosureCounter(closure_counter);
 
-    var new_defaults = std.ArrayListUnmanaged(*bytecode.NewDefault){};
+    var new_defaults = std.ArrayListUnmanaged(*bytecode.NewDefault).empty;
     errdefer {
         for (new_defaults.items) |nd| {
             allocator.free(nd.args);
@@ -488,7 +488,7 @@ pub fn deserializeRelocated(allocator: Allocator, data: []const u8, relocation: 
         }
         new_defaults.deinit(allocator);
     }
-    var deferred_exprs = std.ArrayListUnmanaged(*bytecode.DeferredExpr){};
+    var deferred_exprs = std.ArrayListUnmanaged(*bytecode.DeferredExpr).empty;
     errdefer {
         for (deferred_exprs.items) |de| allocator.destroy(de);
         deferred_exprs.deinit(allocator);
@@ -507,7 +507,7 @@ pub fn deserializeRelocated(allocator: Allocator, data: []const u8, relocation: 
 
     // functions
     const func_count = r.readU32() catch return error.InvalidFormat;
-    var functions = std.ArrayListUnmanaged(ObjFunction){};
+    var functions = std.ArrayListUnmanaged(ObjFunction).empty;
     errdefer {
         for (functions.items) |*f| {
             f.chunk.deinit(allocator);
@@ -525,7 +525,7 @@ pub fn deserializeRelocated(allocator: Allocator, data: []const u8, relocation: 
     }
 
     // type hints
-    var type_hints = std.ArrayListUnmanaged(TypeHint){};
+    var type_hints = std.ArrayListUnmanaged(TypeHint).empty;
     errdefer {
         for (type_hints.items) |th| if (th.param_types.len > 0) allocator.free(th.param_types);
         type_hints.deinit(allocator);
@@ -546,7 +546,7 @@ pub fn deserializeRelocated(allocator: Allocator, data: []const u8, relocation: 
         });
     }
 
-    var function_attrs = std.ArrayListUnmanaged(@import("pipeline/compiler.zig").FunctionAttrEntry){};
+    var function_attrs = std.ArrayListUnmanaged(@import("pipeline/compiler.zig").FunctionAttrEntry).empty;
     const function_attr_count = r.readU32() catch return error.InvalidFormat;
     for (0..function_attr_count) |_| {
         const fn_name = strings[try readStringIndex(&r, strings)];
@@ -623,7 +623,7 @@ fn deserializeFunction(r: *Reader, ctx: *DeserCtx) !ObjFunction {
     const required = try r.readByte();
     const flags = try r.readByte();
     const cond_id = try r.readU16();
-    const return_type_kind = std.meta.intToEnum(bytecode.ReturnTypeKind, try r.readByte()) catch return error.InvalidFormat;
+    const return_type_kind = std.enums.fromInt(bytecode.ReturnTypeKind, try r.readByte()) orelse return error.InvalidFormat;
     const file_path_idx = try r.readU32();
     const start_line = try r.readU32();
     const end_line = try r.readU32();
@@ -733,7 +733,7 @@ fn deserializeValue(r: *Reader, ctx: *DeserCtx) !Value {
             break :blk .{ .string = Value.String.borrowed(sentinel) };
         },
         TAG_DEFERRED_EXPR => blk: {
-            const op = std.meta.intToEnum(bytecode.DeferredExpr.Op, try r.readByte()) catch return error.InvalidFormat;
+            const op = std.enums.fromInt(bytecode.DeferredExpr.Op, try r.readByte()) orelse return error.InvalidFormat;
             const lhs = try deserializeValue(r, ctx);
             const rhs = try deserializeValue(r, ctx);
             const de = try ctx.allocator.create(bytecode.DeferredExpr);

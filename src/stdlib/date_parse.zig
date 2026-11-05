@@ -5,6 +5,7 @@
 //! match wins, and the earlier rule wins a tie
 
 const std = @import("std");
+const sync = @import("../sync.zig");
 const Allocator = std.mem.Allocator;
 const abbr_table = @import("tz_abbr_table.zig");
 
@@ -461,7 +462,7 @@ const Builder = struct {
             },
             '[' => {
                 b.pos += 1;
-                var set = ByteSet.initEmpty();
+                var set: ByteSet = .empty;
                 var first = true;
                 while (b.peek() != ']' or first) {
                     if (b.pos >= b.src.len) return error.BadPattern;
@@ -490,7 +491,7 @@ const Builder = struct {
                     var ch = b.peek();
                     b.pos += 1;
                     if (ch == '\\') ch = b.escape();
-                    var set = ByteSet.initEmpty();
+                    var set: ByteSet = .empty;
                     set.set(ch);
                     // single quotes match ascii letters in either case
                     if (c == '\'' and std.ascii.isAlphabetic(ch)) {
@@ -589,7 +590,7 @@ fn buildMachine() Builder.Error!Machine {
 }
 
 var machine: Machine = undefined;
-var machine_once = std.once(initMachine);
+var machine_once = sync.once(initMachine);
 
 fn initMachine() void {
     machine = buildMachine() catch @panic("date parser rules failed to compile");
@@ -641,7 +642,7 @@ const SetContext = struct {
 
 var dfa: Dfa = undefined;
 var dfa_ready = false;
-var dfa_mutex: std.Thread.Mutex = .{};
+var dfa_mutex: sync.Mutex = .{};
 
 const Match = struct { len: usize, rule: u16 };
 
@@ -650,10 +651,10 @@ fn initDfa(m: *const Machine) !void {
     arena.* = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     dfa = .{ .a = arena.allocator() };
     // bytes that every byte set treats alike share a class
-    var class_of = [_]u16{0} ** 256;
+    var class_of = @as([256]u16, @splat(0));
     var count: u16 = 1;
     for (m.sets) |set| {
-        var remap: [512]u16 = [_]u16{0xffff} ** 512;
+        var remap: [512]u16 = @as([512]u16, @splat(0xffff));
         var next: u16 = 0;
         for (0..256) |b| {
             const key = @as(usize, class_of[b]) * 2 + @intFromBool(set.isSet(b));

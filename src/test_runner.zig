@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("platform.zig");
 const parser = @import("pipeline/parser.zig");
 const compiler = @import("pipeline/compiler.zig");
 const CompileResult = compiler.CompileResult;
@@ -10,9 +11,9 @@ const tui = @import("tui.zig");
 const Allocator = std.mem.Allocator;
 
 pub fn run(allocator: Allocator, path: ?[]const u8) !void {
-    const start = std.time.milliTimestamp();
+    const start = platform.milliTimestamp();
 
-    var files = std.ArrayListUnmanaged([]const u8){};
+    var files = std.ArrayListUnmanaged([]const u8).empty;
     defer {
         for (files.items) |f| allocator.free(f);
         files.deinit(allocator);
@@ -43,7 +44,7 @@ pub fn run(allocator: Allocator, path: ?[]const u8) !void {
     }
 
     tui.blank();
-    const elapsed: u64 = @intCast(std.time.milliTimestamp() - start);
+    const elapsed: u64 = @intCast(platform.milliTimestamp() - start);
 
     if (total_failed == 0) {
         var buf: [64]u8 = undefined;
@@ -65,14 +66,14 @@ const TestResult = struct { passed: usize, failed: usize };
 fn runTestFile(allocator: Allocator, path: []const u8) TestResult {
     var result = TestResult{ .passed = 0, .failed = 0 };
 
-    const source = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024 * 10) catch {
+    const source = std.Io.Dir.cwd().readFileAlloc(platform.io, path, allocator, .limited(1024 * 1024 * 10)) catch {
         tui.err(path);
         result.failed = 1;
         return result;
     };
     defer allocator.free(source);
 
-    const abs_path = std.fs.cwd().realpathAlloc(allocator, path) catch allocator.dupe(u8, path) catch {
+    const abs_path = platform.realpathAlloc(allocator, path) catch allocator.dupe(u8, path) catch {
         result.failed = 1;
         return result;
     };
@@ -99,7 +100,7 @@ fn runTestFile(allocator: Allocator, path: []const u8) TestResult {
     defer compile_result.deinit();
 
     // find test_ functions
-    var test_fns = std.ArrayListUnmanaged(*const ObjFunction){};
+    var test_fns = std.ArrayListUnmanaged(*const ObjFunction).empty;
     defer test_fns.deinit(allocator);
     for (compile_result.functions.items) |*func| {
         if (func.name.len > 5 and std.mem.startsWith(u8, func.name, "test_")) {
@@ -205,22 +206,22 @@ fn printFail(name: []const u8, msg: []const u8) void {
 fn discoverTests(allocator: Allocator, files: *std.ArrayListUnmanaged([]const u8)) !void {
     const dirs = [_][]const u8{ "tests", "test" };
     for (dirs) |dir_name| {
-        var dir = std.fs.cwd().openDir(dir_name, .{ .iterate = true }) catch continue;
-        defer dir.close();
+        var dir = std.Io.Dir.cwd().openDir(platform.io, dir_name, .{ .iterate = true }) catch continue;
+        defer dir.close(platform.io);
         try walkDir(allocator, files, dir, dir_name);
     }
 }
 
-fn walkDir(allocator: Allocator, files: *std.ArrayListUnmanaged([]const u8), dir: std.fs.Dir, prefix: []const u8) !void {
+fn walkDir(allocator: Allocator, files: *std.ArrayListUnmanaged([]const u8), dir: std.Io.Dir, prefix: []const u8) !void {
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(platform.io)) |entry| {
         const full = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, entry.name });
         if (entry.kind == .directory) {
-            var sub = dir.openDir(entry.name, .{ .iterate = true }) catch {
+            var sub = dir.openDir(platform.io, entry.name, .{ .iterate = true }) catch {
                 allocator.free(full);
                 continue;
             };
-            defer sub.close();
+            defer sub.close(platform.io);
             try walkDir(allocator, files, sub, full);
             allocator.free(full);
         } else if (entry.kind == .file) {

@@ -34,7 +34,7 @@ const AllowedClasses = union(enum) {
 const ArrayTarget = struct { array: *PhpArray, key: PhpArray.Key };
 
 const UnserCtx = struct {
-    slots: std.ArrayListUnmanaged(Value) = .{},
+    slots: std.ArrayListUnmanaged(Value) = .empty,
     array_targets: std.AutoHashMapUnmanaged(usize, ArrayTarget) = .{},
     allowed: AllowedClasses = .all,
     // set when we threw a user-visible exception (e.g. TypeError on a typed
@@ -212,7 +212,7 @@ fn refuseNotSerializable(ctx: *NativeContext, class_name: []const u8, direction:
 }
 
 pub fn serializeToString(ctx: *NativeContext, val: Value) RuntimeError!NativeResult {
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     errdefer buf.deinit(ctx.allocator);
     var sctx = SerCtx{};
     defer sctx.deinit(ctx.allocator);
@@ -572,7 +572,7 @@ fn native_unserialize(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     if (s.len == 0) return NativeResult.scalar(.{ .bool = false });
     var uctx = UnserCtx{};
     defer uctx.deinit(ctx.allocator);
-    var name_storage: std.ArrayListUnmanaged([]const u8) = .{};
+    var name_storage: std.ArrayListUnmanaged([]const u8) = .empty;
     defer name_storage.deinit(ctx.allocator);
     if (args.len >= 2 and args[1] == .array) {
         const opts = args[1].array;
@@ -947,7 +947,7 @@ fn parseString(s: []const u8, pos: usize) !StringResult {
 // SPL's legacy Serializable stream has one reference table spanning flags,
 // storage, and members (the separators themselves consume no reference IDs).
 pub fn serializeSplArray(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeResult {
-    var buf: std.ArrayListUnmanaged(u8) = .{};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(ctx.allocator);
     var refs: SerCtx = .{};
     defer refs.deinit(ctx.allocator);

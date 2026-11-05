@@ -304,7 +304,7 @@ fn detached(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
 // fixed-width numbers
 
 fn Bits(comptime T: type) type {
-    return std.meta.Int(.unsigned, @bitSizeOf(T));
+    return @Int(.unsigned, @bitSizeOf(T));
 }
 
 fn reader(comptime T: type, comptime endian: std.builtin.Endian, comptime method: []const u8) vm_mod.NativeFn {

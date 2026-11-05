@@ -1,4 +1,6 @@
 const std = @import("std");
+const net = @import("net.zig");
+const platform = @import("platform.zig");
 
 const ws_guid = "258EAFA5-E914-47DA-95CA-5AB9DC76B45E";
 
@@ -48,7 +50,7 @@ pub fn writeHandshakeResponse(writer: anytype, accept_key: []const u8) !void {
     try writeAllTo(writer, hdr);
 }
 
-fn readExact(stream: std.net.Stream, buf: []u8) ReadError!void {
+fn readExact(stream: net.Stream, buf: []u8) ReadError!void {
     var total: usize = 0;
     while (total < buf.len) {
         const n = stream.read(buf[total..]) catch return ReadError.IoError;
@@ -85,7 +87,7 @@ fn isControlOpcode(opcode: Opcode) bool {
     return @intFromEnum(opcode) & 0x8 != 0;
 }
 
-pub fn readFrame(stream: std.net.Stream, buf: []u8, max_size: usize) ReadError!Frame {
+pub fn readFrame(stream: net.Stream, buf: []u8, max_size: usize) ReadError!Frame {
     var hdr: [2]u8 = undefined;
     try readExact(stream, &hdr);
 
@@ -221,12 +223,12 @@ test "accept key computation" {
     try std.testing.expectEqualStrings("7PUt+8lkGD5HVZbKJuYuOJV1CNA=", result);
 }
 
-fn makeSocketPair() ![2]std.net.Stream {
+fn makeSocketPair() ![2]net.Stream {
     const pair = try @import("platform.zig").socketPair();
-    return .{ std.net.Stream{ .handle = pair[0] }, std.net.Stream{ .handle = pair[1] } };
+    return .{ net.Stream{ .handle = pair[0] }, net.Stream{ .handle = pair[1] } };
 }
 
-fn writeMaskedFrame(stream: std.net.Stream, opcode: Opcode, payload: []const u8) !void {
+fn writeMaskedFrame(stream: net.Stream, opcode: Opcode, payload: []const u8) !void {
     var hdr: [14]u8 = undefined;
     var hdr_len: usize = 2;
     hdr[0] = 0x80 | @as(u8, @intFromEnum(opcode));

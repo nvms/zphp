@@ -1,4 +1,5 @@
 const std = @import("std");
+const sync = @import("../sync.zig");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
@@ -9,9 +10,7 @@ const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
-const c = @cImport({
-    @cInclude("curl/curl.h");
-});
+const c = @import("c_curl");
 
 pub const entries = .{
     .{ "curl_init", curlInit },
@@ -49,7 +48,7 @@ pub const entries = .{
     .{ "curl_file_create", curlFileCreate },
 };
 
-var global_init = std.once(globalInit);
+var global_init = sync.once(globalInit);
 
 fn ensureGlobalInit() void {
     global_init.call();
@@ -384,7 +383,7 @@ fn curlExec(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
 
     var cb_data = WriteCallbackData{
         .allocator = ctx.allocator,
-        .buffer = .{},
+        .buffer = .empty,
     };
     defer cb_data.buffer.deinit(cb_data.allocator);
 
@@ -845,7 +844,7 @@ fn curlShareStrerror(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
 // PhpObject property maps instead belong to the VM allocator.
 
 var multi_wcb_table: std.AutoHashMapUnmanaged(usize, *WriteCallbackData) = .{};
-var multi_wcb_mutex: std.Thread.Mutex = .{};
+var multi_wcb_mutex: sync.Mutex = .{};
 
 fn getMultiHandle(obj: *PhpObject) ?*c.CURLM {
     return obj.native.get(c.CURLM, .curl_multi);
@@ -893,7 +892,7 @@ fn curlMultiAddHandle(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     const return_transfer_v = args[1].object.get("__return_transfer");
     if (return_transfer_v == .bool and return_transfer_v.bool) {
         const wcb = std.heap.page_allocator.create(WriteCallbackData) catch return NativeResult.scalar(.{ .int = 1 });
-        wcb.* = .{ .allocator = std.heap.page_allocator, .buffer = .{} };
+        wcb.* = .{ .allocator = std.heap.page_allocator, .buffer = .empty };
         multi_wcb_mutex.lock();
         defer multi_wcb_mutex.unlock();
         multi_wcb_table.put(std.heap.page_allocator, @intFromPtr(easy), wcb) catch {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const sync = @import("../sync.zig");
 const paths = @import("../paths.zig");
 const bundle = @import("../bundle.zig");
 const Value = @import("../runtime/value.zig").Value;
@@ -17,7 +18,7 @@ const NativeFn = *const fn (*NativeContext, []const Value) RuntimeError!NativeRe
 pub const tree = @import("libxml_tree.zig");
 pub const c = tree.c;
 
-var global_init = std.once(globalInit);
+var global_init = sync.once(globalInit);
 
 fn ensureGlobalInit() void {
     global_init.call();
@@ -44,7 +45,7 @@ const CapturedError = struct {
     file: ?[]u8,
 };
 
-var captured_errors: std.ArrayListUnmanaged(CapturedError) = .{};
+var captured_errors: std.ArrayListUnmanaged(CapturedError) = .empty;
 // allocator for the captured-error buffers - shared global since libxml's
 // callback fires from C with no zphp context. uses page_allocator which is
 // always-available and doesn't depend on the per-script arena being live
@@ -534,7 +535,7 @@ fn domDocGetElementsByTagName(ctx: *NativeContext, args: []const Value) RuntimeE
     const name = args[0].string.bytes();
 
     const root = c.xmlDocGetRootElement(doc);
-    var list = std.ArrayList(*c.xmlNode){};
+    var list = std.ArrayList(*c.xmlNode).empty;
     defer list.deinit(ctx.allocator);
     if (root) |r| {
         try collectByName(ctx.allocator, r, name, &list);
@@ -789,7 +790,7 @@ fn readProperty(ctx: *NativeContext, obj: *PhpObject, prop: []const u8) RuntimeE
         return NativeResult.scalar(.{ .int = count });
     }
     if (std.mem.eql(u8, prop, "childNodes")) {
-        var list = std.ArrayList(*c.xmlNode){};
+        var list = std.ArrayList(*c.xmlNode).empty;
         defer list.deinit(ctx.allocator);
         var child = node.children;
         while (child != null) : (child = child.*.next) try list.append(ctx.allocator, child);
@@ -1209,7 +1210,7 @@ fn domElementGetElementsByTagName(ctx: *NativeContext, args: []const Value) Runt
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const node = getNodePtr(obj) orelse return NativeResult.scalar(.{ .bool = false });
-    var list = std.ArrayList(*c.xmlNode){};
+    var list = std.ArrayList(*c.xmlNode).empty;
     defer list.deinit(ctx.allocator);
     var child = node.children;
     while (child != null) : (child = child.*.next) try collectByName(ctx.allocator, child, args[0].string.bytes(), &list);
@@ -1229,7 +1230,7 @@ fn domGetElementsByTagNameNS(ctx: *NativeContext, args: []const Value) RuntimeEr
         if (root == null) return try makeNodeList(ctx, &.{});
         node = root;
     }
-    var list = std.ArrayList(*c.xmlNode){};
+    var list = std.ArrayList(*c.xmlNode).empty;
     defer list.deinit(ctx.allocator);
     try collectByNameNS(ctx.allocator, node, ns, name, &list);
     return try makeNodeList(ctx, list.items);

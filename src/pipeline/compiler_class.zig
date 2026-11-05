@@ -345,7 +345,7 @@ fn freeParsedAttrValue(allocator: Allocator, value: Value) void {
 fn extractAttributes(self: *Compiler, main_token: u32) []const ParsedAttr {
     const ar = findAttrRangeForToken(self.ast.attr_ranges, self.ast.tokens, main_token) orelse return &.{};
 
-    var all_attrs = std.ArrayListUnmanaged(ParsedAttr){};
+    var all_attrs = std.ArrayListUnmanaged(ParsedAttr).empty;
     var pos: usize = ar.start;
     const end: usize = ar.end;
     while (pos < end) {
@@ -363,7 +363,7 @@ fn extractAttributes(self: *Compiler, main_token: u32) []const ParsedAttr {
 
         var inner: usize = pos;
         while (inner < rb_pos) {
-            var name_parts = std.ArrayListUnmanaged(u8){};
+            var name_parts = std.ArrayListUnmanaged(u8).empty;
             while (inner < rb_pos and (self.ast.tokens[inner].tag == .identifier or self.ast.tokens[inner].tag == .backslash)) {
                 if (self.ast.tokens[inner].tag == .backslash) {
                     // emit a backslash separator only if one isn't already at
@@ -390,8 +390,8 @@ fn extractAttributes(self: *Compiler, main_token: u32) []const ParsedAttr {
             // inside `use ... as Assert` becomes the fully-qualified class name
             const owned_name = self.resolveClassName(raw_name);
 
-            var args = std.ArrayListUnmanaged(Value){};
-            var arg_names = std.ArrayListUnmanaged(?[]const u8){};
+            var args = std.ArrayListUnmanaged(Value).empty;
+            var arg_names = std.ArrayListUnmanaged(?[]const u8).empty;
             if (inner < rb_pos and self.ast.tokens[inner].tag == .l_paren) {
                 inner += 1;
                 while (inner < rb_pos and self.ast.tokens[inner].tag != .r_paren) {
@@ -534,7 +534,7 @@ fn buildTypeString(self: *Compiler, start_tok: u32, end_tok: u32) Error![]const 
     // (`\A\B\C`), or a relative name (`A\B\C`) that needs its first segment
     // namespace-resolved exactly once. Process the token stream piecewise so
     // each side of a union/intersection gets resolved independently
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     var i: u32 = start_tok;
     var at_segment_start: bool = true; // true between separators/parens/`?`
     var segment_first_ident_done: bool = false;
@@ -815,7 +815,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     errdefer if (!handed_over) self.allocator.free(param_names);
     const ref_flags = try self.allocator.alloc(bool, param_nodes.len);
     errdefer if (!handed_over) self.allocator.free(ref_flags);
-    var defaults = std.ArrayListUnmanaged(Value){};
+    var defaults = std.ArrayListUnmanaged(Value).empty;
     defer defaults.deinit(self.allocator);
     var required: u8 = 0;
     var seen_default = false;
@@ -851,13 +851,13 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
         .ast = self.ast,
         .diagnostic = self.diagnostic,
         .chunk = .{},
-        .functions = .{},
-        .string_allocs = .{},
+        .functions = .empty,
+        .string_allocs = .empty,
         .allocator = self.allocator,
         .scope_depth = self.scope_depth + 1,
         .loop_start = null,
-        .break_jumps = .{},
-        .continue_jumps = .{},
+        .break_jumps = .empty,
+        .continue_jumps = .empty,
         .is_generator = gen,
         .returns_ref = returns_ref,
         .closure_count = self.closure_count,
@@ -976,9 +976,9 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     var handed_over = false;
     const param_names = try self.allocator.alloc([]const u8, param_nodes.len);
     errdefer if (!handed_over) self.allocator.free(param_names);
-    var ref_flags_buf: [16]bool = .{false} ** 16;
+    var ref_flags_buf: [16]bool = @splat(false);
     var has_any_ref = false;
-    var defaults = std.ArrayListUnmanaged(Value){};
+    var defaults = std.ArrayListUnmanaged(Value).empty;
     defer defaults.deinit(self.allocator);
     var required: u8 = 0;
     var seen_default = false;
@@ -1027,13 +1027,13 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         .ast = self.ast,
         .diagnostic = self.diagnostic,
         .chunk = .{},
-        .functions = .{},
-        .string_allocs = .{},
+        .functions = .empty,
+        .string_allocs = .empty,
         .allocator = self.allocator,
         .scope_depth = self.scope_depth + 1,
         .loop_start = null,
-        .break_jumps = .{},
-        .continue_jumps = .{},
+        .break_jumps = .empty,
+        .continue_jumps = .empty,
         .is_generator = gen,
         .returns_ref = false,
         .closure_count = self.closure_count,
@@ -1423,9 +1423,9 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     // collect trait property indices for this class
-    var trait_prop_members = std.ArrayListUnmanaged(u32){};
+    var trait_prop_members = std.ArrayListUnmanaged(u32).empty;
     defer trait_prop_members.deinit(self.allocator);
-    var trait_hook_members = std.ArrayListUnmanaged(u32){};
+    var trait_hook_members = std.ArrayListUnmanaged(u32).empty;
     defer trait_hook_members.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -1715,7 +1715,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     // collect all trait names from trait_use statements
-    var all_traits = std.ArrayListUnmanaged([]const u8){};
+    var all_traits = std.ArrayListUnmanaged([]const u8).empty;
     defer all_traits.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -1741,7 +1741,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
 
     // collect conflict resolution rules from trait_use statements
     const ConflictRule = struct { node: Ast.Node };
-    var all_conflicts = std.ArrayListUnmanaged(ConflictRule){};
+    var all_conflicts = std.ArrayListUnmanaged(ConflictRule).empty;
     defer all_conflicts.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -1786,7 +1786,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
 
     // method attributes: count of methods that have attrs, then for each: name_idx + attr data
     const MemberAttr = struct { name: []const u8, attrs: []const ParsedAttr };
-    var methods_with_attrs = std.ArrayListUnmanaged(MemberAttr){};
+    var methods_with_attrs = std.ArrayListUnmanaged(MemberAttr).empty;
     defer methods_with_attrs.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -1810,7 +1810,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
 
     // property attributes (includes promoted constructor params - PHP exposes
     // their attributes via ReflectionProperty as well as ReflectionParameter)
-    var props_with_attrs = std.ArrayListUnmanaged(MemberAttr){};
+    var props_with_attrs = std.ArrayListUnmanaged(MemberAttr).empty;
     defer props_with_attrs.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -1848,7 +1848,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (props_with_attrs.items) |pa| freeAttrSlice(self.allocator, pa.attrs);
 
     // constant attributes
-    var consts_with_attrs = std.ArrayListUnmanaged(MemberAttr){};
+    var consts_with_attrs = std.ArrayListUnmanaged(MemberAttr).empty;
     defer consts_with_attrs.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -1873,13 +1873,13 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     // parameter attributes: methods that have params with attrs
     const ParamAttr = struct { name: []const u8, attrs: []const ParsedAttr };
     const MethodParamAttrs = struct { method_name: []const u8, params: []const ParamAttr };
-    var methods_with_param_attrs = std.ArrayListUnmanaged(MethodParamAttrs){};
+    var methods_with_param_attrs = std.ArrayListUnmanaged(MethodParamAttrs).empty;
     defer methods_with_param_attrs.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_method or member.tag == .static_class_method) {
             const param_nodes = self.ast.extraSlice(member.data.lhs);
-            var params_with_attrs = std.ArrayListUnmanaged(ParamAttr){};
+            var params_with_attrs = std.ArrayListUnmanaged(ParamAttr).empty;
             for (param_nodes) |pn| {
                 const pnode = self.ast.nodes[pn];
                 const pattrs = extractAttributes(self, pnode.main_token);
@@ -2013,7 +2013,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
 
-    var trait_prop_members = std.ArrayListUnmanaged(u32){};
+    var trait_prop_members = std.ArrayListUnmanaged(u32).empty;
     defer trait_prop_members.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -2187,7 +2187,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitU16(iname_idx);
     }
 
-    var all_traits = std.ArrayListUnmanaged([]const u8){};
+    var all_traits = std.ArrayListUnmanaged([]const u8).empty;
     defer all_traits.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -2212,7 +2212,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     const ConflictRule = struct { cnode: Ast.Node };
-    var all_conflicts = std.ArrayListUnmanaged(ConflictRule){};
+    var all_conflicts = std.ArrayListUnmanaged(ConflictRule).empty;
     defer all_conflicts.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -2343,7 +2343,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
 
     // method attributes
     const MemberAttr = struct { name: []const u8, attrs: []const ParsedAttr };
-    var methods_with_attrs = std.ArrayListUnmanaged(MemberAttr){};
+    var methods_with_attrs = std.ArrayListUnmanaged(MemberAttr).empty;
     defer methods_with_attrs.deinit(self.allocator);
     for (members) |m| {
         const member = self.ast.nodes[m];
@@ -2437,7 +2437,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     // collect sub-trait names from trait_use members
-    var sub_traits = std.ArrayListUnmanaged([]const u8){};
+    var sub_traits = std.ArrayListUnmanaged([]const u8).empty;
     defer sub_traits.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -2450,7 +2450,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     // store property member indices (own + sub-trait properties)
-    var prop_indices = std.ArrayListUnmanaged(u32){};
+    var prop_indices = std.ArrayListUnmanaged(u32).empty;
     for (sub_traits.items) |st| {
         if (self.trait_properties.get(st)) |sub_props| {
             for (sub_props) |pi| try prop_indices.append(self.allocator, pi);
@@ -2470,7 +2470,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     // collect own property members (not sub-trait props)
-    var own_props = std.ArrayListUnmanaged(u32){};
+    var own_props = std.ArrayListUnmanaged(u32).empty;
     defer own_props.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -2480,7 +2480,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     // collect static property members
-    var static_props = std.ArrayListUnmanaged(u32){};
+    var static_props = std.ArrayListUnmanaged(u32).empty;
     defer static_props.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -2490,7 +2490,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     // collect const_decl members (PHP 8.2+ trait constants)
-    var const_decls = std.ArrayListUnmanaged(u32){};
+    var const_decls = std.ArrayListUnmanaged(u32).empty;
     defer const_decls.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -2569,7 +2569,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
 
     // method attributes
     const MemberAttr = struct { name: []const u8, attrs: []const ParsedAttr };
-    var methods_with_attrs = std.ArrayListUnmanaged(MemberAttr){};
+    var methods_with_attrs = std.ArrayListUnmanaged(MemberAttr).empty;
     defer methods_with_attrs.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -2592,7 +2592,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (methods_with_attrs.items) |ma| freeAttrSlice(self.allocator, ma.attrs);
 
     // property attributes
-    var props_with_attrs = std.ArrayListUnmanaged(MemberAttr){};
+    var props_with_attrs = std.ArrayListUnmanaged(MemberAttr).empty;
     defer props_with_attrs.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -2700,7 +2700,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     // trait names
-    var enum_traits = std.ArrayListUnmanaged([]const u8){};
+    var enum_traits = std.ArrayListUnmanaged([]const u8).empty;
     defer enum_traits.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -2728,7 +2728,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
 
     // method attributes
     const MemberAttr = struct { name: []const u8, attrs: []const ParsedAttr };
-    var methods_with_attrs = std.ArrayListUnmanaged(MemberAttr){};
+    var methods_with_attrs = std.ArrayListUnmanaged(MemberAttr).empty;
     defer methods_with_attrs.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -2754,7 +2754,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
     // these end up as constant_attributes so ReflectionClassConstant of an
     // enum case can find them
     const CaseAttr = struct { name: []const u8, attrs: []const ParsedAttr };
-    var cases_with_attrs = std.ArrayListUnmanaged(CaseAttr){};
+    var cases_with_attrs = std.ArrayListUnmanaged(CaseAttr).empty;
     defer cases_with_attrs.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -2831,7 +2831,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
         ref_flags[i] = (pnode.data.rhs & 2) != 0;
     }
 
-    var defaults = std.ArrayListUnmanaged(Value){};
+    var defaults = std.ArrayListUnmanaged(Value).empty;
     defer defaults.deinit(self.allocator);
     var required: u8 = 0;
     var seen_default = false;
@@ -2863,13 +2863,13 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
         .ast = self.ast,
         .diagnostic = self.diagnostic,
         .chunk = .{},
-        .functions = .{},
-        .string_allocs = .{},
+        .functions = .empty,
+        .string_allocs = .empty,
         .allocator = self.allocator,
         .scope_depth = self.scope_depth + 1,
         .loop_start = null,
-        .break_jumps = .{},
-        .continue_jumps = .{},
+        .break_jumps = .empty,
+        .continue_jumps = .empty,
         .is_generator = method_gen,
         .returns_ref = method_returns_ref,
         .closure_count = self.closure_count,
@@ -2995,13 +2995,13 @@ fn compileDeferredPropDefaults(self: *Compiler, class_name: []const u8, members:
         .ast = self.ast,
         .diagnostic = self.diagnostic,
         .chunk = .{},
-        .functions = .{},
-        .string_allocs = .{},
+        .functions = .empty,
+        .string_allocs = .empty,
         .allocator = self.allocator,
         .scope_depth = self.scope_depth + 1,
         .loop_start = null,
-        .break_jumps = .{},
-        .continue_jumps = .{},
+        .break_jumps = .empty,
+        .continue_jumps = .empty,
         .closure_count = self.closure_count,
         .cond_fn_count = self.cond_fn_count,
         .hoistable = false,
@@ -3090,7 +3090,7 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
     }
     try self.type_hints.append(self.allocator, .{ .name = full_name, .param_types = param_types, .return_type = if (kind == .get) prop_type else "void" });
 
-    var param_names_list = std.ArrayListUnmanaged([]const u8){};
+    var param_names_list = std.ArrayListUnmanaged([]const u8).empty;
     defer param_names_list.deinit(self.allocator);
     if (kind == .set) {
         const pname = if (set_param_tok != 0) self.ast.tokenSlice(set_param_tok) else "$value";
@@ -3113,13 +3113,13 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
         .ast = self.ast,
         .diagnostic = self.diagnostic,
         .chunk = .{},
-        .functions = .{},
-        .string_allocs = .{},
+        .functions = .empty,
+        .string_allocs = .empty,
         .allocator = self.allocator,
         .scope_depth = self.scope_depth + 1,
         .loop_start = null,
-        .break_jumps = .{},
-        .continue_jumps = .{},
+        .break_jumps = .empty,
+        .continue_jumps = .empty,
         .closure_count = self.closure_count,
         .cond_fn_count = self.cond_fn_count,
         .hoistable = false,
@@ -3208,7 +3208,7 @@ fn compileInterfaceMethodStub(self: *Compiler, owner_name: []const u8, member: A
         ref_flags[i] = (pnode.data.rhs & 2) != 0;
     }
 
-    var defaults = std.ArrayListUnmanaged(Value){};
+    var defaults = std.ArrayListUnmanaged(Value).empty;
     defer defaults.deinit(self.allocator);
     var required: u8 = 0;
     var seen_default = false;

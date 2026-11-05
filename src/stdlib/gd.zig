@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("../platform.zig");
 const paths = @import("../paths.zig");
 const bundle = @import("../bundle.zig");
 const Value = @import("../runtime/value.zig").Value;
@@ -12,16 +13,7 @@ const ClassDef = vm_mod.ClassDef;
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
-const c = @cImport({
-    @cInclude("gd.h");
-    @cInclude("gdfontt.h");
-    @cInclude("gdfonts.h");
-    @cInclude("gdfontmb.h");
-    @cInclude("gdfontl.h");
-    @cInclude("gdfontg.h");
-    @cInclude("stdio.h");
-    @cInclude("unistd.h");
-});
+const c = @import("c_gd");
 
 fn getImg(obj: *const PhpObject) ?*c.gdImageStruct {
     return obj.native.get(c.gdImageStruct, .gd);
@@ -155,7 +147,7 @@ fn writeImageTo(ctx: *NativeContext, im: *c.gdImageStruct, args: []const Value, 
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const path = paths.streamPath(&path_buf, args[1].string.bytes());
         bundle.prepareWrite(path, .create);
-        std.fs.cwd().writeFile(.{ .sub_path = path, .data = bytes[0..@intCast(size)] }) catch return NativeResult.scalar(.{ .bool = false });
+        std.Io.Dir.cwd().writeFile(platform.io, .{ .sub_path = path, .data = bytes[0..@intCast(size)] }) catch return NativeResult.scalar(.{ .bool = false });
         return NativeResult.scalar(.{ .bool = true });
     }
     // when filename is null, PHP writes to the script's output channel - which
@@ -384,7 +376,7 @@ fn imgTtfText(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     const font_z = try dupZ(ctx, args[6].string.bytes());
     const text_z = try dupZ(ctx, args[7].string.bytes());
 
-    var brect: [8]c_int = .{0} ** 8;
+    var brect: [8]c_int = @splat(0);
     const err = c.gdImageStringFT(im, &brect, @intCast(col), font_z.ptr, size, angle, @intCast(x), @intCast(y), text_z.ptr);
     if (err != null) return NativeResult.scalar(.{ .bool = false });
     // return the bounding box as a PHP array (8 ints)

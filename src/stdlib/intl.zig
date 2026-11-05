@@ -858,7 +858,7 @@ fn msgFormatCommon(ctx: *NativeContext, locale: []const u8, pattern: []const u8,
     const pat_u16 = try utf8ToU16(ctx, pattern);
     defer ctx.allocator.free(pat_u16);
 
-    var owned_u16 = std.ArrayListUnmanaged([]u16){};
+    var owned_u16 = std.ArrayListUnmanaged([]u16).empty;
     defer {
         for (owned_u16.items) |b| ctx.allocator.free(b);
         owned_u16.deinit(ctx.allocator);
@@ -1562,7 +1562,7 @@ fn graphemeSubstr(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     if (intlRecord(ctx.vm, status)) return NativeResult.scalar(.{ .bool = false });
 
     // collect grapheme byte offsets
-    var offsets = std.ArrayListUnmanaged(i32){};
+    var offsets = std.ArrayListUnmanaged(i32).empty;
     defer offsets.deinit(ctx.allocator);
     var pos = zphp_ubrk_first(w);
     while (pos != -1) : (pos = zphp_ubrk_next(w)) {
@@ -1611,7 +1611,7 @@ fn graphemeExtract(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     zphp_ubrk_setText(w, s.ptr, @intCast(s.len), &status);
     if (intlRecord(ctx.vm, status)) return NativeResult.scalar(.{ .bool = false });
 
-    var offsets = std.ArrayListUnmanaged(i32){};
+    var offsets = std.ArrayListUnmanaged(i32).empty;
     defer offsets.deinit(ctx.allocator);
     var pos = zphp_ubrk_first(w);
     while (pos != -1) : (pos = zphp_ubrk_next(w)) {
@@ -1654,7 +1654,7 @@ fn collectGraphemeBounds(ctx: *NativeContext, s: []const u8) !?std.ArrayListUnma
     var status: UErrorCode = U_ZERO_ERROR;
     zphp_ubrk_setText(w, s.ptr, @intCast(s.len), &status);
     if (intlRecord(ctx.vm, status)) return null;
-    var list = std.ArrayListUnmanaged(i32){};
+    var list = std.ArrayListUnmanaged(i32).empty;
     errdefer list.deinit(ctx.allocator);
     var pos = zphp_ubrk_first(w);
     while (pos != -1) : (pos = zphp_ubrk_next(w)) {
@@ -1985,7 +1985,7 @@ fn listFmtFormat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     }
     for (items, 0..) |entry, i| {
         // elements are converted like any string conversion, arrays with a warning
-        var text = std.ArrayListUnmanaged(u8){};
+        var text = std.ArrayListUnmanaged(u8).empty;
         defer text.deinit(ctx.allocator);
         if (entry.value == .array) try ctx.vm.emitWarning("Array to string conversion");
         try entry.value.format(&text, ctx.allocator);
@@ -2502,7 +2502,7 @@ fn registerLocaleClass(vm: *VM, a: Allocator) !void {
 fn localeComposeLocale(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .array) return NativeResult.scalar(.{ .bool = false });
     const arr = args[0].array;
-    var buf: std.ArrayListUnmanaged(u8) = .{};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(ctx.allocator);
     // PHP's composeLocale stitches subtags in order: language[_script]_region[_variants]@keyword=value;...
     const lang = arr.get(.{ .string = Value.String.borrowed("language") });

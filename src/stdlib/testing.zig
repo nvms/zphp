@@ -24,13 +24,13 @@ fn assertEq(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     if (Value.identical(args[0], args[1])) return NativeResult.scalar(.null);
 
     // build error message
-    var buf1 = std.ArrayListUnmanaged(u8){};
+    var buf1 = std.ArrayListUnmanaged(u8).empty;
     defer buf1.deinit(ctx.allocator);
     try args[0].format(&buf1, ctx.allocator);
     const s1 = try buf1.toOwnedSlice(ctx.allocator);
     defer ctx.allocator.free(s1);
 
-    var buf2 = std.ArrayListUnmanaged(u8){};
+    var buf2 = std.ArrayListUnmanaged(u8).empty;
     defer buf2.deinit(ctx.allocator);
     try args[1].format(&buf2, ctx.allocator);
     const s2 = try buf2.toOwnedSlice(ctx.allocator);

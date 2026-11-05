@@ -1,16 +1,7 @@
 const std = @import("std");
 const PhpObject = @import("../runtime/value.zig").PhpObject;
 
-pub const c = @cImport({
-    @cInclude("libxml/parser.h");
-    @cInclude("libxml/tree.h");
-    @cInclude("libxml/xpath.h");
-    @cInclude("libxml/xpathInternals.h");
-    @cInclude("libxml/HTMLparser.h");
-    @cInclude("libxml/HTMLtree.h");
-    @cInclude("libxml/xmlerror.h");
-    @cInclude("libxml/xmlschemas.h");
-});
+pub const c = @import("c_libxml_tree");
 
 // php objects point into libxml trees. every wrapper, DOM or SimpleXML, holds
 // one reference on its document and, unless it wraps the document itself, one

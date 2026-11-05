@@ -1204,7 +1204,7 @@ fn rcImplementsInterface(ctx: *NativeContext, args: []const Value) RuntimeError!
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
 
-    var queue = std.ArrayListUnmanaged([]const u8){};
+    var queue = std.ArrayListUnmanaged([]const u8).empty;
     defer queue.deinit(ctx.allocator);
     var current: ?[]const u8 = class_name;
     while (current) |name| {
@@ -1529,7 +1529,7 @@ fn rcGetInterfaces(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
     const arr = try ctx.createArray();
     var seen = std.StringHashMapUnmanaged(void){};
     defer seen.deinit(ctx.allocator);
-    var queue = std.ArrayListUnmanaged([]const u8){};
+    var queue = std.ArrayListUnmanaged([]const u8).empty;
     defer queue.deinit(ctx.allocator);
 
     var current: ?[]const u8 = class_name;
@@ -1587,13 +1587,13 @@ fn rcGetInterfaceNames(ctx: *NativeContext, _: []const Value) RuntimeError!Nativ
     const arr = try ctx.createArray();
     var seen = std.StringHashMapUnmanaged(void){};
     defer seen.deinit(ctx.allocator);
-    var queue = std.ArrayListUnmanaged([]const u8){};
+    var queue = std.ArrayListUnmanaged([]const u8).empty;
     defer queue.deinit(ctx.allocator);
 
     // PHP's order: parent class interfaces first, then own, with each interface
     // immediately followed by its transitively-extended parents
     // (IteratorAggregate -> Traversable). collect parent->child chain first
-    var chain = std.ArrayListUnmanaged([]const u8){};
+    var chain = std.ArrayListUnmanaged([]const u8).empty;
     defer chain.deinit(ctx.allocator);
     var current: ?[]const u8 = class_name;
     while (current) |cn| {
@@ -1949,7 +1949,7 @@ const VisibleConstant = struct { declaring: []const u8, name: []const u8, value:
 // interfaces'. an override hides the inherited one and a parent's private
 // constant is not inherited
 fn visibleConstants(ctx: *NativeContext, class_name: []const u8, out: *std.ArrayListUnmanaged(VisibleConstant)) RuntimeError!void {
-    var chain: std.ArrayListUnmanaged([]const u8) = .{};
+    var chain: std.ArrayListUnmanaged([]const u8) = .empty;
     defer chain.deinit(ctx.allocator);
     var current: ?[]const u8 = class_name;
     while (current) |name| {
@@ -1987,7 +1987,7 @@ fn appendConstant(ctx: *NativeContext, cls: ClassDef, declaring: []const u8, cna
 fn rcGetConstants(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
-    var constants: std.ArrayListUnmanaged(VisibleConstant) = .{};
+    var constants: std.ArrayListUnmanaged(VisibleConstant) = .empty;
     defer constants.deinit(ctx.allocator);
     try visibleConstants(ctx, class_name, &constants);
     const arr = try ctx.createArray();
@@ -1998,7 +1998,7 @@ fn rcGetConstants(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
 fn rcGetReflectionConstants(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
-    var constants: std.ArrayListUnmanaged(VisibleConstant) = .{};
+    var constants: std.ArrayListUnmanaged(VisibleConstant) = .empty;
     defer constants.deinit(ctx.allocator);
     try visibleConstants(ctx, class_name, &constants);
     const arr = try ctx.createArray();
@@ -4467,7 +4467,7 @@ fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
         const flags = getAttributeFlags(ctx.vm, attr_name);
         if (flags != 127 and (flags & target) == 0) {
             const used = targetName(target);
-            var allowed_buf: std.ArrayListUnmanaged(u8) = .{};
+            var allowed_buf: std.ArrayListUnmanaged(u8) = .empty;
             defer allowed_buf.deinit(ctx.allocator);
             const bits = [_]i64{ 1, 2, 4, 8, 16, 32 };
             for (bits) |b| {
@@ -4519,7 +4519,7 @@ fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
             var buf: [256]u8 = undefined;
             const ctor_key = std.fmt.bufPrint(&buf, "{s}::__construct", .{attr_name}) catch "";
             if (ctx.vm.functions.get(ctor_key)) |func| {
-                var resolved: [16]Value = .{.null} ** 16;
+                var resolved: [16]Value = @splat(.null);
                 var pos: usize = 0;
                 for (arr.entries.items) |entry| {
                     if (entry.key == .string) {
@@ -4861,7 +4861,7 @@ fn rfibGetTrace(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
 
 fn hasDeprecatedAttribute(attrs: []const AttributeDef) bool {
     for (attrs) |attr| {
-        const name = std.mem.trimLeft(u8, attr.name, "\\");
+        const name = std.mem.trimStart(u8, attr.name, "\\");
         if (std.ascii.eqlIgnoreCase(name, "Deprecated")) return true;
     }
     return false;
@@ -4910,7 +4910,7 @@ fn rccIsDeprecated(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
 fn rconstConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len < 1 or args[0] != .string) return throwReflection(ctx, "ReflectionConstant::__construct() expects a constant name");
-    const name = std.mem.trimLeft(u8, args[0].string.bytes(), "\\");
+    const name = std.mem.trimStart(u8, args[0].string.bytes(), "\\");
     if (!ctx.vm.php_constants.contains(name)) {
         const msg = std.fmt.allocPrint(ctx.allocator, "Constant \"{s}\" does not exist", .{name}) catch return throwReflection(ctx, "Constant does not exist");
         defer ctx.allocator.free(msg);
@@ -4957,7 +4957,7 @@ fn rconstToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
     const name_v = this.get("name");
     if (name_v != .string) return NativeResult.literal("");
     const value = ctx.vm.php_constants.get(name_v.string.bytes()) orelse Value.null;
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     try buf.appendSlice(ctx.allocator, "Constant [ ");
     try buf.appendSlice(ctx.allocator, @tagName(value));

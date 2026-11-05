@@ -263,7 +263,7 @@ pub fn throwPdo(ctx: *NativeContext, msg: []const u8) RuntimeError!NativeResult 
 
 // a null-terminated copy for a C call; the caller frees it
 pub fn dupeZ(ctx: *NativeContext, s: []const u8) ![:0]u8 {
-    return ctx.allocator.dupeZ(u8, s);
+    return ctx.allocator.dupeSentinel(u8, s, 0);
 }
 
 pub fn register(vm: *VM, a: Allocator) !void {
@@ -793,7 +793,7 @@ fn pdoSqliteCreateAggregate(ctx: *NativeContext, args: []const Value) RuntimeErr
     const db = getDbPtr(this) orelse return NativeResult.scalar(.{ .bool = false });
     const count = if (args.len > 3) args[3].toInt() else -1;
     const num_args = std.math.cast(c_int, count) orelse return NativeResult.scalar(.{ .bool = false });
-    const name = try ctx.allocator.dupeZ(u8, args[0].string.bytes());
+    const name = try ctx.allocator.dupeSentinel(u8, args[0].string.bytes(), 0);
     defer ctx.allocator.free(name);
     const reg = try ctx.allocator.create(UserSqlAggregate);
     reg.* = .{ .vm = ctx.vm, .step = args[1], .final = args[2] };

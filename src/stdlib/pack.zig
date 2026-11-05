@@ -96,7 +96,7 @@ fn native_pack(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
         else => return NativeResult.scalar(.{ .bool = false }),
     };
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
 
     var parser = parseFormat(fmt, false);

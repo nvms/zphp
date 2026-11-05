@@ -1,10 +1,9 @@
-// proc_open on windows. the descriptor spec becomes inheritable child ends
+// proc_open on win32. the descriptor spec becomes inheritable child ends
 // (CreatePipe pairs, opened files, duplicated stream handles), cmd.exe runs
 // the command through CreateProcessW, and the parent pipe ends turn into
 // crt descriptors so the FileHandle natives use them like any other stream
 const std = @import("std");
-const windows = std.os.windows;
-const kernel32 = windows.kernel32;
+const win32 = @import("../win32.zig");
 const platform = @import("../platform.zig");
 const filesystem = @import("filesystem.zig");
 const vm_mod = @import("../runtime/vm.zig");
@@ -18,21 +17,13 @@ const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 extern "c" fn _get_osfhandle(fd: c_int) isize;
-extern "kernel32" fn PeekNamedPipe(
-    pipe: windows.HANDLE,
-    buffer: ?*anyopaque,
-    size: u32,
-    bytes_read: ?*u32,
-    available: ?*u32,
-    left: ?*u32,
-) callconv(.winapi) windows.BOOL;
 
 const terminate_exit_code: u32 = 255;
 
-const inheritable: windows.SECURITY_ATTRIBUTES = .{
-    .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
+const inheritable: win32.SECURITY_ATTRIBUTES = .{
+    .nLength = @sizeOf(win32.SECURITY_ATTRIBUTES),
     .lpSecurityDescriptor = null,
-    .bInheritHandle = windows.TRUE,
+    .bInheritHandle = win32.TRUE,
 };
 
 const Spec = union(enum) {
@@ -49,12 +40,12 @@ const Desc = struct { role: i64, spec: Spec };
 // the child holds its own copy, the parent end outlives the call as a pipe
 const Slot = struct {
     role: i64,
-    child: ?windows.HANDLE = null,
-    parent: ?windows.HANDLE = null,
+    child: ?win32.HANDLE = null,
+    parent: ?win32.HANDLE = null,
 
     fn closeAll(self: *Slot) void {
-        if (self.child) |h| windows.CloseHandle(h);
-        if (self.parent) |h| windows.CloseHandle(h);
+        if (self.child) |h| _ = win32.CloseHandle(h);
+        if (self.parent) |h| _ = win32.CloseHandle(h);
         self.child = null;
         self.parent = null;
     }
@@ -112,39 +103,39 @@ fn parseDescriptors(ctx: *NativeContext, spec: Value, out: *std.ArrayListUnmanag
     }
 }
 
-fn setInherit(handle: windows.HANDLE, inherit: bool) !void {
-    const flag: u32 = if (inherit) windows.HANDLE_FLAG_INHERIT else 0;
-    if (kernel32.SetHandleInformation(handle, windows.HANDLE_FLAG_INHERIT, flag) == 0) return error.ProcSpawnFailed;
+fn setInherit(handle: win32.HANDLE, inherit: bool) !void {
+    const flag: u32 = if (inherit) win32.HANDLE_FLAG_INHERIT else 0;
+    if (win32.SetHandleInformation(handle, win32.HANDLE_FLAG_INHERIT, flag) == 0) return error.ProcSpawnFailed;
 }
 
 fn makePipe(slot: *Slot, child_reads: bool) !void {
-    var rd: windows.HANDLE = undefined;
-    var wr: windows.HANDLE = undefined;
-    windows.CreatePipe(&rd, &wr, &inheritable) catch return error.ProcSpawnFailed;
+    var rd: win32.HANDLE = undefined;
+    var wr: win32.HANDLE = undefined;
+    if (win32.CreatePipe(&rd, &wr, &inheritable, 0) == 0) return error.ProcSpawnFailed;
     slot.child = if (child_reads) rd else wr;
     slot.parent = if (child_reads) wr else rd;
     try setInherit(slot.parent.?, false);
 }
 
-fn duplicateInheritable(source: windows.HANDLE) !windows.HANDLE {
-    const me = kernel32.GetCurrentProcess();
-    var dup: windows.HANDLE = undefined;
-    if (kernel32.DuplicateHandle(me, source, me, &dup, 0, windows.TRUE, windows.DUPLICATE_SAME_ACCESS) == 0) return error.ProcSpawnFailed;
+fn duplicateInheritable(source: win32.HANDLE) !win32.HANDLE {
+    const me = win32.GetCurrentProcess();
+    var dup: win32.HANDLE = undefined;
+    if (win32.DuplicateHandle(me, source, me, &dup, 0, win32.TRUE, win32.DUPLICATE_SAME_ACCESS) == 0) return error.ProcSpawnFailed;
     return dup;
 }
 
-fn openBlackhole() !windows.HANDLE {
+fn openBlackhole() !win32.HANDLE {
     const nul = std.unicode.utf8ToUtf16LeStringLiteral("nul");
-    const handle = kernel32.CreateFileW(
+    const handle = win32.CreateFileW(
         nul,
-        windows.GENERIC_READ | windows.GENERIC_WRITE,
-        windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE,
+        win32.GENERIC_READ | win32.GENERIC_WRITE,
+        win32.FILE_SHARE_READ | win32.FILE_SHARE_WRITE,
         @constCast(&inheritable),
-        windows.OPEN_EXISTING,
+        win32.OPEN_EXISTING,
         0,
         null,
     );
-    if (handle == windows.INVALID_HANDLE_VALUE) return error.ProcSpawnFailed;
+    if (handle == win32.INVALID_HANDLE_VALUE) return error.ProcSpawnFailed;
     return handle;
 }
 
@@ -166,17 +157,18 @@ fn prepareSlot(slot: *Slot, spec: Spec) !void {
     }
 }
 
-fn stdHandle(id: u32) ?windows.HANDLE {
-    return windows.GetStdHandle(id) catch null;
+fn stdHandle(id: u32) ?win32.HANDLE {
+    const h = win32.GetStdHandle(id) orelse return null;
+    return if (h == win32.INVALID_HANDLE_VALUE) null else h;
 }
 
-fn startupInfo(slots: []const Slot) windows.STARTUPINFOW {
-    var si: windows.STARTUPINFOW = std.mem.zeroes(windows.STARTUPINFOW);
-    si.cb = @sizeOf(windows.STARTUPINFOW);
-    si.dwFlags = windows.STARTF_USESTDHANDLES;
-    si.hStdInput = stdHandle(windows.STD_INPUT_HANDLE);
-    si.hStdOutput = stdHandle(windows.STD_OUTPUT_HANDLE);
-    si.hStdError = stdHandle(windows.STD_ERROR_HANDLE);
+fn startupInfo(slots: []const Slot) win32.STARTUPINFOW {
+    var si: win32.STARTUPINFOW = std.mem.zeroes(win32.STARTUPINFOW);
+    si.cb = @sizeOf(win32.STARTUPINFOW);
+    si.dwFlags = win32.STARTF_USESTDHANDLES;
+    si.hStdInput = stdHandle(win32.STD_INPUT_HANDLE);
+    si.hStdOutput = stdHandle(win32.STD_OUTPUT_HANDLE);
+    si.hStdError = stdHandle(win32.STD_ERROR_HANDLE);
     for (slots) |slot| switch (slot.role) {
         0 => si.hStdInput = slot.child,
         1 => si.hStdOutput = slot.child,
@@ -204,7 +196,7 @@ fn commandLine(allocator: std.mem.Allocator, command: Command) ![:0]u16 {
 const Command = union(enum) { shell: []const u8, argv: []const []const u8 };
 
 fn argvLine(allocator: std.mem.Allocator, words: []const []const u8) ![]u8 {
-    var line: std.ArrayListUnmanaged(u8) = .{};
+    var line: std.ArrayListUnmanaged(u8) = .empty;
     errdefer line.deinit(allocator);
     for (words, 0..) |word, i| {
         if (i > 0) try line.append(allocator, ' ');
@@ -255,7 +247,7 @@ fn envValueText(allocator: std.mem.Allocator, v: Value) !?[]const u8 {
 // second NUL at the end, which an empty block still needs
 fn envBlock(allocator: std.mem.Allocator, env: Value) !?[]u16 {
     if (env != .array) return null;
-    var block: std.ArrayListUnmanaged(u16) = .{};
+    var block: std.ArrayListUnmanaged(u16) = .empty;
     errdefer block.deinit(allocator);
     for (env.array.entries.items) |entry| {
         const text = try envValueText(allocator, entry.value) orelse continue;
@@ -278,7 +270,7 @@ fn envBlock(allocator: std.mem.Allocator, env: Value) !?[]u16 {
 }
 
 const Spawned = struct {
-    process: windows.HANDLE,
+    process: win32.HANDLE,
     pid: u32,
     pipes: std.ArrayListUnmanaged(ProcPipe),
 };
@@ -290,7 +282,7 @@ const SpawnOptions = struct {
     env: Value,
 };
 
-fn createProcess(allocator: std.mem.Allocator, opts: SpawnOptions, slots: []Slot) !windows.PROCESS_INFORMATION {
+fn createProcess(allocator: std.mem.Allocator, opts: SpawnOptions, slots: []Slot) !win32.PROCESS_INFORMATION {
     const cmdline = try commandLine(allocator, opts.command);
     defer allocator.free(cmdline);
     const env = try envBlock(allocator, opts.env);
@@ -299,17 +291,14 @@ fn createProcess(allocator: std.mem.Allocator, opts: SpawnOptions, slots: []Slot
     defer if (cwd_w) |w| allocator.free(w);
 
     var si = startupInfo(slots);
-    var pi: windows.PROCESS_INFORMATION = undefined;
-    const flags: windows.CreateProcessFlags = .{
-        .normal_priority_class = true,
-        .create_unicode_environment = env != null,
-    };
-    const ok = kernel32.CreateProcessW(
+    var pi: win32.PROCESS_INFORMATION = undefined;
+    const flags: win32.DWORD = win32.NORMAL_PRIORITY_CLASS | (if (env != null) win32.CREATE_UNICODE_ENVIRONMENT else 0);
+    const ok = win32.CreateProcessW(
         null,
         cmdline.ptr,
         null,
         null,
-        windows.TRUE,
+        win32.TRUE,
         flags,
         if (env) |e| @ptrCast(e.ptr) else null,
         if (cwd_w) |w| w.ptr else null,
@@ -328,16 +317,16 @@ fn spawn(allocator: std.mem.Allocator, opts: SpawnOptions) !Spawned {
     for (opts.descs, 0..) |desc, i| try prepareSlot(&slots[i], desc.spec);
 
     const pi = try createProcess(allocator, opts, slots);
-    windows.CloseHandle(pi.hThread);
+    _ = win32.CloseHandle(pi.hThread);
     for (slots) |*slot| if (slot.child) |h| {
-        windows.CloseHandle(h);
+        _ = win32.CloseHandle(h);
         slot.child = null;
     };
 
-    var pipes: std.ArrayListUnmanaged(ProcPipe) = .{};
+    var pipes: std.ArrayListUnmanaged(ProcPipe) = .empty;
     errdefer pipes.deinit(allocator);
     for (slots) |*slot| if (slot.parent) |h| {
-        try pipes.append(allocator, .{ .role = slot.role, .fd = @intCast(platform.fdFromFile(.{ .handle = h })) });
+        try pipes.append(allocator, .{ .role = slot.role, .fd = @intCast(platform.fdFromFile(platform.fileFromHandle(h))) });
         slot.parent = null;
     };
     return .{ .process = pi.hProcess, .pid = pi.dwProcessId, .pipes = pipes };
@@ -398,7 +387,7 @@ fn markSpawnFailed(ctx: *NativeContext, proc: *PhpObject) RuntimeError!void {
 
 pub fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 3 or (args[0] != .string and args[0] != .array)) return NativeResult.scalar(.{ .bool = false });
-    var words: std.ArrayListUnmanaged([]const u8) = .{};
+    var words: std.ArrayListUnmanaged([]const u8) = .empty;
     defer words.deinit(ctx.allocator);
     if (args[0] == .array) {
         for (args[0].array.entries.items) |entry| try words.append(ctx.allocator, try filesystem.ownedText(ctx, entry.value));
@@ -419,7 +408,7 @@ pub fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!N
     try proc.set(ctx.allocator, "__exit", .{ .int = 0 });
     try proc.set(ctx.allocator, "__running", .{ .bool = true });
 
-    var descs: std.ArrayListUnmanaged(Desc) = .{};
+    var descs: std.ArrayListUnmanaged(Desc) = .empty;
     defer descs.deinit(ctx.allocator);
     parseDescriptors(ctx, args[1], &descs) catch |err| {
         if (err == error.OutOfMemory) return err;
@@ -435,7 +424,7 @@ pub fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!N
         .env = if (args.len >= 5) args[4] else .null,
     };
     const spawned = spawn(ctx.vm.allocator, opts) catch |err| {
-        const code = @intFromEnum(windows.GetLastError());
+        const code = win32.GetLastError();
         if (err == error.OutOfMemory) return error.OutOfMemory;
         try markSpawnFailed(ctx, proc);
         try warn(ctx, "CreateProcess failed: error code {d}", .{code});
@@ -452,25 +441,25 @@ pub fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!N
     return NativeResult.borrowed(.{ .resource = proc });
 }
 
-fn processHandle(pc: *const ProcChild) ?windows.HANDLE {
+fn processHandle(pc: *const ProcChild) ?win32.HANDLE {
     if (pc.process == 0) return null;
     return @ptrFromInt(pc.process);
 }
 
-fn exitCodeOf(handle: windows.HANDLE) i64 {
+fn exitCodeOf(handle: win32.HANDLE) i64 {
     var code: u32 = 0;
-    if (kernel32.GetExitCodeProcess(handle, &code) == 0) return -1;
+    if (win32.GetExitCodeProcess(handle, &code) == 0) return -1;
     return @intCast(code);
 }
 
 // the exit code once the process has ended, null while it still runs
-fn pollExit(handle: windows.HANDLE) ?i64 {
-    if (kernel32.WaitForSingleObject(handle, 0) != windows.WAIT_OBJECT_0) return null;
+fn pollExit(handle: win32.HANDLE) ?i64 {
+    if (win32.WaitForSingleObject(handle, 0) != win32.WAIT_OBJECT_0) return null;
     return exitCodeOf(handle);
 }
 
-fn waitExit(handle: windows.HANDLE) i64 {
-    _ = kernel32.WaitForSingleObject(handle, windows.INFINITE);
+fn waitExit(handle: win32.HANDLE) i64 {
+    _ = win32.WaitForSingleObject(handle, win32.INFINITE);
     return exitCodeOf(handle);
 }
 
@@ -493,7 +482,7 @@ pub fn native_proc_close(ctx: *NativeContext, args: []const Value) RuntimeError!
     for (pc.pipe_fds.items) |*pipe| if (pipe.role == 0) pipe.close();
     if (processHandle(pc)) |handle| {
         if (!pc.reaped) cacheExit(ctx, proc, pc, waitExit(handle));
-        windows.CloseHandle(handle);
+        _ = win32.CloseHandle(handle);
         pc.process = 0;
     }
     ctx.vm.closeProcChild(proc);
@@ -530,7 +519,7 @@ pub fn native_proc_terminate(ctx: *NativeContext, args: []const Value) RuntimeEr
     const proc = try filesystem.processArg(ctx, args, "proc_terminate");
     const pc = ctx.vm.lookupProcChild(proc) orelse return NativeResult.scalar(.{ .bool = false });
     const handle = processHandle(pc) orelse return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.scalar(.{ .bool = kernel32.TerminateProcess(handle, terminate_exit_code) != 0 });
+    return NativeResult.scalar(.{ .bool = win32.TerminateProcess(handle, terminate_exit_code) != 0 });
 }
 
 // whether a read on the crt descriptor would return without blocking: data
@@ -539,8 +528,8 @@ pub fn pipeReadable(fd: i64) bool {
     if (fd < 0) return true;
     const raw = _get_osfhandle(@intCast(fd));
     if (raw == -1 or raw == -2) return true;
-    const handle: windows.HANDLE = @ptrFromInt(@as(usize, @intCast(raw)));
+    const handle: win32.HANDLE = @ptrFromInt(@as(usize, @intCast(raw)));
     var available: u32 = 0;
-    if (PeekNamedPipe(handle, null, 0, null, &available, null) == 0) return true;
+    if (win32.PeekNamedPipe(handle, null, 0, null, &available, null) == 0) return true;
     return available > 0;
 }

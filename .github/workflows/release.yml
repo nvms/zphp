@@ -24,8 +24,7 @@ jobs:
             name: linux-x86_64
           - os: ubuntu-24.04-arm
             name: linux-aarch64
-          # pinned to 15: macos-latest = macOS 26 whose SDK zig 0.15.1 can't link
-          - os: macos-15
+          - os: macos-latest
             name: macos-aarch64
           - os: ubuntu-24.04
             name: linux-x86_64-musl
@@ -42,7 +41,7 @@ jobs:
       - uses: mlugg/setup-zig@v2
         if: ${{ !matrix.alpine }}
         with:
-          version: 0.15.1
+          version: 0.17.1
 
       - name: install system libs (ubuntu glibc)
         if: runner.os == 'Linux' && !matrix.alpine
@@ -82,14 +81,14 @@ jobs:
         shell: alpine.sh --root {0}
         run: |
           cd /tmp
-          curl -sSL https://ziglang.org/download/0.15.1/zig-${{ matrix.alpine }}-linux-0.15.1.tar.xz | tar -xJ
-          mv zig-${{ matrix.alpine }}-linux-0.15.1 /opt/zig
+          curl -sSL https://ziglang.org/download/0.17.1/zig-${{ matrix.alpine }}-linux-0.17.1.tar.xz | tar -xJ
+          mv zig-${{ matrix.alpine }}-linux-0.17.1 /opt/zig
           ln -s /opt/zig/zig /usr/local/bin/zig
           zig version
 
       - name: build (glibc/macos)
         if: ${{ !matrix.alpine }}
-        run: zig build -Doptimize=ReleaseFast
+        run: zig build -Doptimize=fast
         env:
           PKG_CONFIG_PATH: ${{ runner.os == 'macOS' && '/opt/homebrew/opt/mysql-client/lib/pkgconfig:/opt/homebrew/opt/libpq/lib/pkgconfig:/opt/homebrew/opt/curl/lib/pkgconfig:/opt/homebrew/opt/icu4c/lib/pkgconfig:/opt/homebrew/opt/gmp/lib/pkgconfig:/opt/homebrew/opt/gd/lib/pkgconfig:/opt/homebrew/opt/libsodium/lib/pkgconfig:/opt/homebrew/opt/openldap/lib/pkgconfig:/usr/local/opt/mysql-client/lib/pkgconfig:/usr/local/opt/libpq/lib/pkgconfig:/usr/local/opt/icu4c/lib/pkgconfig:/usr/local/opt/gmp/lib/pkgconfig:/usr/local/opt/gd/lib/pkgconfig:/usr/local/opt/libsodium/lib/pkgconfig:/usr/local/opt/openldap/lib/pkgconfig' || '' }}
 
@@ -98,7 +97,7 @@ jobs:
         shell: alpine.sh {0}
         env:
           PKG_CONFIG_PATH: /usr/local/lib/pkgconfig
-        run: zig build -Doptimize=ReleaseFast -Dcpu=baseline
+        run: zig build -Doptimize=fast -Dcpu=baseline
 
       - name: smoke test (musl)
         if: matrix.alpine
@@ -143,7 +142,7 @@ jobs:
         shell: alpine.sh {0}
         run: |
           {
-            echo "zphp-${{ matrix.name }} built on ${{ matrix.os }} in alpine v3.22 with zig 0.15.1"
+            echo "zphp-${{ matrix.name }} built on ${{ matrix.os }} in alpine v3.22 with zig 0.17.1"
             echo "statically linked; no runtime library dependencies. archives linked in:"
             echo
             echo "built from source by .github/scripts/musl_static_deps.sh:"
@@ -158,7 +157,7 @@ jobs:
         if: ${{ !matrix.alpine }}
         run: |
           {
-            echo "zphp-${{ matrix.name }} built on ${{ matrix.os }} with zig 0.15.1"
+            echo "zphp-${{ matrix.name }} built on ${{ matrix.os }} with zig 0.17.1"
             echo
             if [ "${{ runner.os }}" = "macOS" ]; then
               otool -L zphp-${{ matrix.name }}
@@ -220,10 +219,10 @@ jobs:
             unzip
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.1
+          version: 0.17.1
 
       - name: build
-        run: zig build -Doptimize=ReleaseFast
+        run: zig build -Doptimize=fast
 
       # the exe links the mingw dlls dynamically; ldd resolves the whole
       # closure, and everything it finds under /mingw64 ships next to the exe
@@ -250,7 +249,7 @@ jobs:
       - name: record linked libraries
         run: |
           {
-            echo "zphp-windows-x86_64 built on windows-latest with zig 0.15.1 and msys2 mingw-w64"
+            echo "zphp-windows-x86_64 built on windows-latest with zig 0.17.1 and msys2 mingw-w64"
             echo
             ldd zig-out/bin/zphp.exe
             echo

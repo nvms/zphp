@@ -48,8 +48,8 @@ const Lexer = struct {
     pos: usize = 0,
     line: u32 = 1,
     allocator: Allocator,
-    tokens: std.ArrayListUnmanaged(Token) = .{},
-    states: std.ArrayListUnmanaged(State) = .{},
+    tokens: std.ArrayListUnmanaged(Token) = .empty,
+    states: std.ArrayListUnmanaged(State) = .empty,
     short_open_tag: bool,
 
     fn state(self: *Lexer) State {

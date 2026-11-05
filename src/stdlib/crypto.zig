@@ -1,5 +1,6 @@
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
+const platform = @import("../platform.zig");
 const filesystem = @import("filesystem.zig");
 
 extern fn zphp_xxh3_128(data: ?[*]const u8, len: usize, out: [*]u8) void;
@@ -61,7 +62,7 @@ fn native_crypt(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         var salt_b64_buf: [22]u8 = undefined;
         bcryptB64Encode(&salt_b64_buf, &salt_bytes);
 
-        const hash = std.crypto.pwhash.bcrypt.bcrypt(password, salt_bytes, .{
+        const hash = std.crypto.pwhash.bcrypt.bcrypt(password, &salt_bytes, .{
             .rounds_log = rounds_log,
             .silently_truncate_password = true,
         });
@@ -180,7 +181,7 @@ fn native_password_hash(ctx: *NativeContext, args: []const Value) RuntimeError!N
     const hash = std.crypto.pwhash.bcrypt.strHash(password, .{
         .params = .{ .rounds_log = rounds_log, .silently_truncate_password = true },
         .encoding = .crypt,
-    }, &buf) catch return NativeResult.scalar(Value{ .bool = false });
+    }, &buf, platform.io) catch return NativeResult.scalar(Value{ .bool = false });
 
     // PHP uses the $2y$ prefix variant; std.crypto produces $2b$. Both are
     // verifiable by any compliant bcrypt impl, but cross-runtime hash exchange
@@ -301,7 +302,7 @@ fn native_random_bytes(ctx: *NativeContext, args: []const Value) RuntimeError!Na
 
     const len: usize = @intCast(length);
     const buf = try ctx.allocator.alloc(u8, len);
-    std.crypto.random.bytes(buf);
+    platform.random.bytes(buf);
     return NativeResult.takeString(try Value.String.adopt(ctx.allocator, buf));
 }
 
@@ -320,9 +321,9 @@ fn native_random_int(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
     const umax: u64 = @bitCast(max);
     const range: u64 = umax -% umin;
     const random = if (range == std.math.maxInt(u64))
-        std.crypto.random.int(u64)
+        platform.random.int(u64)
     else
-        std.crypto.random.intRangeAtMost(u64, 0, range);
+        platform.random.intRangeAtMost(u64, 0, range);
     const result_u: u64 = umin +% random;
     return NativeResult.scalar(Value{ .int = @bitCast(result_u) });
 }
@@ -414,21 +415,21 @@ fn computeHash(algo: HashAlgo, data: []const u8, out: []u8) void {
         .sha3_512 => std.crypto.hash.sha3.Sha3_512.hash(data, out[0..64], .{}),
         .crc32 => {
             // PHP "crc32" uses CRC-32/BZIP2 polynomial with bytes in little-endian order
-            const c = std.hash.crc.Crc32Bzip2.hash(data);
+            const c = std.hash.crc.@"CRC-32/BZIP2".hash(data);
             out[0] = @intCast(c & 0xff);
             out[1] = @intCast((c >> 8) & 0xff);
             out[2] = @intCast((c >> 16) & 0xff);
             out[3] = @intCast((c >> 24) & 0xff);
         },
         .crc32b => {
-            const c = std.hash.crc.Crc32IsoHdlc.hash(data);
+            const c = std.hash.Crc32.hash(data);
             out[0] = @intCast((c >> 24) & 0xff);
             out[1] = @intCast((c >> 16) & 0xff);
             out[2] = @intCast((c >> 8) & 0xff);
             out[3] = @intCast(c & 0xff);
         },
         .crc32c => {
-            const c = std.hash.crc.Crc32Iscsi.hash(data);
+            const c = std.hash.crc.@"CRC-32/ISCSI".hash(data);
             out[0] = @intCast((c >> 24) & 0xff);
             out[1] = @intCast((c >> 16) & 0xff);
             out[2] = @intCast((c >> 8) & 0xff);
@@ -612,7 +613,7 @@ fn native_hash_hkdf(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     if (out_len > 255 * hlen) return NativeResult.scalar(.{ .bool = false });
 
     // Extract: PRK = HMAC(salt, IKM)
-    const zero_salt = [_]u8{0} ** 64;
+    const zero_salt = @as([64]u8, @splat(0));
     const effective_salt: []const u8 = if (salt.len > 0) salt else zero_salt[0..hlen];
     var prk: [64]u8 = undefined;
     computeHmac(algo, ikm, effective_salt, prk[0..hlen]);
@@ -626,7 +627,7 @@ fn native_hash_hkdf(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     var written: usize = 0;
     var counter: u8 = 1;
     while (written < out_len) : (counter += 1) {
-        var input = std.ArrayListUnmanaged(u8){};
+        var input = std.ArrayListUnmanaged(u8).empty;
         defer input.deinit(ctx.allocator);
         try input.appendSlice(ctx.allocator, t_prev[0..t_prev_len]);
         try input.appendSlice(ctx.allocator, info);

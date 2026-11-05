@@ -38,8 +38,8 @@ pub fn compileWhile(self: *Compiler, node: Ast.Node) Error!void {
     const prev_start = self.loop_start;
     var prev_breaks = self.break_jumps;
     var prev_continues = self.continue_jumps;
-    self.break_jumps = .{};
-    self.continue_jumps = .{};
+    self.break_jumps = .empty;
+    self.continue_jumps = .empty;
     self.loop_depth += 1;
 
     const loop_top = self.chunk.offset();
@@ -71,8 +71,8 @@ pub fn compileDoWhile(self: *Compiler, node: Ast.Node) Error!void {
     const prev_start = self.loop_start;
     var prev_breaks = self.break_jumps;
     var prev_continues = self.continue_jumps;
-    self.break_jumps = .{};
-    self.continue_jumps = .{};
+    self.break_jumps = .empty;
+    self.continue_jumps = .empty;
     self.loop_depth += 1;
 
     const loop_top = self.chunk.offset();
@@ -144,8 +144,8 @@ pub fn compileFor(self: *Compiler, node: Ast.Node) Error!void {
     var prev_breaks = self.break_jumps;
     var prev_continues = self.continue_jumps;
     const prev_use_cj = self.use_continue_jumps;
-    self.break_jumps = .{};
-    self.continue_jumps = .{};
+    self.break_jumps = .empty;
+    self.continue_jumps = .empty;
     self.use_continue_jumps = (update_n != 0);
     self.loop_depth += 1;
 
@@ -217,8 +217,8 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     var prev_breaks = self.break_jumps;
     var prev_continues = self.continue_jumps;
     const prev_use_cj = self.use_continue_jumps;
-    self.break_jumps = .{};
-    self.continue_jumps = .{};
+    self.break_jumps = .empty;
+    self.continue_jumps = .empty;
     self.use_continue_jumps = true;
     // generators only need close-on-exit when the foreach owns the only
     // reference (anonymous iterable like gen() or new Foo()). when the
@@ -328,8 +328,8 @@ pub fn compileSwitch(self: *Compiler, node: Ast.Node) Error!void {
     var prev_breaks = self.break_jumps;
     var prev_continue_jumps = self.continue_jumps;
     const prev_use_continue = self.use_continue_jumps;
-    self.break_jumps = .{};
-    self.continue_jumps = .{};
+    self.break_jumps = .empty;
+    self.continue_jumps = .empty;
     self.use_continue_jumps = true;
     // set loop_start to current position so continue is recognized
     // (continue 1 in a switch acts like break, continue N targets outer loop)
@@ -347,7 +347,7 @@ pub fn compileSwitch(self: *Compiler, node: Ast.Node) Error!void {
     const case_nodes = self.ast.extraSlice(node.data.rhs);
 
     // phase 1: emit comparison chain, collect jumps to bodies
-    var body_jumps = std.ArrayListUnmanaged(usize){};
+    var body_jumps = std.ArrayListUnmanaged(usize).empty;
     defer body_jumps.deinit(self.allocator);
     var default_jump: ?usize = null;
 
@@ -359,7 +359,7 @@ pub fn compileSwitch(self: *Compiler, node: Ast.Node) Error!void {
         }
 
         const values = self.ast.extraSlice(case_node.data.lhs);
-        var hit_jumps = std.ArrayListUnmanaged(usize){};
+        var hit_jumps = std.ArrayListUnmanaged(usize).empty;
         defer hit_jumps.deinit(self.allocator);
 
         for (values, 0..) |val, vi| {
@@ -440,7 +440,7 @@ pub fn compileMatch(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitOp(.pop);
 
     const arm_nodes = self.ast.extraSlice(node.data.rhs);
-    var end_jumps = std.ArrayListUnmanaged(usize){};
+    var end_jumps = std.ArrayListUnmanaged(usize).empty;
     defer end_jumps.deinit(self.allocator);
     var default_arm: ?u32 = null;
 
@@ -453,7 +453,7 @@ pub fn compileMatch(self: *Compiler, node: Ast.Node) Error!void {
             continue;
         }
 
-        var hit_jumps = std.ArrayListUnmanaged(usize){};
+        var hit_jumps = std.ArrayListUnmanaged(usize).empty;
         defer hit_jumps.deinit(self.allocator);
 
         for (values, 0..) |val, vi| {
@@ -530,7 +530,7 @@ fn resolveCatchClassName(self: *Compiler, node_idx: u32) Error![]const u8 {
         end += 2;
     }
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     var first = true;
     var i = start;
     while (i < end) : (i += 1) {
@@ -586,7 +586,7 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
     self.patchJump(handler_offset_pos);
 
     // exception is on the stack when we arrive here
-    var end_jumps = std.ArrayListUnmanaged(usize){};
+    var end_jumps = std.ArrayListUnmanaged(usize).empty;
     defer end_jumps.deinit(self.allocator);
 
     // when there's a finally block, push a handler around catch bodies
@@ -609,7 +609,7 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
             const type_nodes = self.ast.extra_data[types_extra + 1 .. types_extra + 1 + type_count];
 
             // for each type: dup exc, check instanceof, if true jump to match
-            var match_jumps = std.ArrayListUnmanaged(usize){};
+            var match_jumps = std.ArrayListUnmanaged(usize).empty;
             defer match_jumps.deinit(self.allocator);
 
             for (type_nodes) |tn| {

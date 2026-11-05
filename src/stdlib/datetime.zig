@@ -1,4 +1,6 @@
 const std = @import("std");
+const sync = @import("../sync.zig");
+const platform = @import("../platform.zig");
 const Value = @import("../runtime/value.zig").Value;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
 const vm_mod = @import("../runtime/vm.zig");
@@ -8,7 +10,7 @@ const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
-const zlib = @cImport(@cInclude("zlib.h"));
+const zlib = @import("c_zlib");
 
 const DT_FORMAT_CONSTS = .{
     .{ "ATOM", "Y-m-d\\TH:i:sP" },
@@ -540,7 +542,7 @@ pub fn formatTimestampTzMicros(ctx: *NativeContext, timestamp: i64, format: []co
     const month_day = FmtMonthDay{ .month = .{ .v = @intCast(dc.month) }, .day_index = @intCast(dc.day - 1) };
     const a = ctx.allocator;
 
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(a);
     var fi: usize = 0;
     while (fi < format.len) : (fi += 1) {
@@ -548,7 +550,7 @@ pub fn formatTimestampTzMicros(ctx: *NativeContext, timestamp: i64, format: []co
         switch (c) {
             'Y' => {
                 // at least four digits, with the sign outside the padding
-                try buf.writer(a).print("{s}{d:0>4}", .{ if (year_day.year < 0) "-" else "", @abs(year_day.year) });
+                try buf.print(a, "{s}{d:0>4}", .{ if (year_day.year < 0) "-" else "", @abs(year_day.year) });
             },
             'm' => {
                 var tmp: [4]u8 = undefined;
@@ -644,7 +646,7 @@ pub fn formatTimestampTzMicros(ctx: *NativeContext, timestamp: i64, format: []co
                 try buf.appendSlice(a, s);
             },
             't' => {
-                try buf.writer(a).print("{d}", .{daysInMonth(month_day.month.numeric(), year_day.year)});
+                try buf.print(a, "{d}", .{daysInMonth(month_day.month.numeric(), year_day.year)});
             },
             'c' => {
                 // ISO 8601: YYYY-MM-DDTHH:MM:SS+00:00
@@ -684,7 +686,7 @@ pub fn formatTimestampTzMicros(ctx: *NativeContext, timestamp: i64, format: []co
             },
             'z' => {
                 const jan1_day = @divFloor(dateToTimestamp(year_day.year, 1, 1, 0, 0, 0), 86400);
-                try buf.writer(a).print("{d}", .{@as(i64, epoch_day.day) - jan1_day});
+                try buf.print(a, "{d}", .{@as(i64, epoch_day.day) - jan1_day});
             },
             'W' => {
                 const week = isoWeek(@intCast(epoch_day.day));
@@ -768,7 +770,7 @@ pub fn formatTimestampTzMicros(ctx: *NativeContext, timestamp: i64, format: []co
                 // a fixed-offset zone has no abbreviation; php spells it GMT+hhmm
                 if (parseFixedOffset(tz_name)) |off| {
                     const abs: u32 = @intCast(if (off < 0) -off else off);
-                    try buf.writer(a).print("GMT{c}{d:0>2}{d:0>2}", .{ @as(u8, if (off < 0) '-' else '+'), abs / 3600, (abs % 3600) / 60 });
+                    try buf.print(a, "GMT{c}{d:0>2}{d:0>2}", .{ @as(u8, if (off < 0) '-' else '+'), abs / 3600, (abs % 3600) / 60 });
                 } else if (tzAbbrevForName(a, tz_name, timestamp)) |ab| {
                     defer a.free(ab);
                     try buf.appendSlice(a, ab);
@@ -1605,7 +1607,7 @@ fn dtzGetOffset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     const tz_name = if (tz_val == .string) tz_val.string.bytes() else "UTC";
 
     // getOffset takes a DateTime argument for DST calculation
-    var ref_ts: i64 = std.time.timestamp();
+    var ref_ts: i64 = platform.timestamp();
     if (args.len >= 1 and args[0] == .object) {
         ref_ts = getTimestamp(args[0].object);
     }
@@ -1666,7 +1668,7 @@ fn appendOffsetCompact(buf: *std.ArrayListUnmanaged(u8), a: Allocator, offset: i
 fn native_date(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.literal("");
     const format = args[0].string.bytes();
-    const timestamp: i64 = if (args.len >= 2) Value.toInt(args[1]) else std.time.timestamp();
+    const timestamp: i64 = if (args.len >= 2) Value.toInt(args[1]) else platform.timestamp();
     return formatTimestamp(ctx, timestamp, format);
 }
 
@@ -1696,13 +1698,13 @@ fn native_strtotime(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const input = args[0].string.bytes();
     if (input.len == 0) return NativeResult.scalar(.{ .bool = false });
-    const base: i64 = if (args.len >= 2 and args[1] != .null) Value.toInt(args[1]) else std.time.timestamp();
+    const base: i64 = if (args.len >= 2 and args[1] != .null) Value.toInt(args[1]) else platform.timestamp();
     const ts = (try strtotimeIn(ctx, input, base)) orelse return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .int = ts });
 }
 
 fn native_time(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return NativeResult.scalar(.{ .int = std.time.timestamp() });
+    return NativeResult.scalar(.{ .int = platform.timestamp() });
 }
 
 fn native_checkdate(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -1749,7 +1751,7 @@ fn native_date_parse_from_format(ctx: *NativeContext, args: []const Value) Runti
 }
 
 fn native_getdate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const timestamp: i64 = if (args.len >= 1 and args[0] != .null) Value.toInt(args[0]) else std.time.timestamp();
+    const timestamp: i64 = if (args.len >= 1 and args[0] != .null) Value.toInt(args[0]) else platform.timestamp();
     const lp = localParts(ctx.allocator, timestamp, ctx.vm.default_tz_name);
     const weekdays = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
     const months = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
@@ -1774,7 +1776,7 @@ fn native_getdate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
 
 fn native_hrtime(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const as_int = args.len >= 1 and args[0].isTruthy();
-    const ns = std.time.nanoTimestamp();
+    const ns = platform.nanoTimestamp();
     if (as_int) {
         return NativeResult.scalar(.{ .int = @intCast(ns) });
     }
@@ -1788,14 +1790,14 @@ fn native_hrtime(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
 
 fn native_microtime(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const as_float = args.len >= 1 and args[0].isTruthy();
-    const ns = std.time.nanoTimestamp();
+    const ns = platform.nanoTimestamp();
     if (as_float) {
         const secs: f64 = @as(f64, @floatFromInt(ns)) / 1_000_000_000.0;
         return NativeResult.scalar(.{ .float = secs });
     }
     const ts: i64 = @intCast(@divTrunc(ns, 1_000_000_000));
     const usec: i64 = @intCast(@divTrunc(@mod(ns, 1_000_000_000), 1_000));
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     var tmp: [32]u8 = undefined;
     try buf.appendSlice(ctx.allocator, "0.");
@@ -2042,9 +2044,9 @@ fn readZoneInfo(allocator: Allocator, name: []const u8) ?[]u8 {
     for (dirs) |dir| {
         var pathbuf: [320]u8 = undefined;
         const path = std.fmt.bufPrint(&pathbuf, "{s}{s}", .{ dir, name }) catch continue;
-        const file = std.fs.openFileAbsolute(path, .{}) catch continue;
-        defer file.close();
-        const data = file.readToEndAlloc(allocator, 1 << 20) catch continue;
+        const file = std.Io.Dir.openFileAbsolute(platform.io, path, .{}) catch continue;
+        defer file.close(platform.io);
+        const data = platform.readToEndAlloc(file, allocator, 1 << 20) catch continue;
         return data;
     }
     return null;
@@ -2060,7 +2062,7 @@ const tzdata_gz = @embedFile("tzdata.bin.gz");
 // so it's allocated from the page allocator rather than a request arena and
 // never freed. guarded so concurrent first-touch in threaded serve workers
 // can't double-decompress
-var g_tz_mutex: std.Thread.Mutex = .{};
+var g_tz_mutex: sync.Mutex = .{};
 var g_tz_blob: ?[]const u8 = null;
 var g_tz_init = false;
 
@@ -2070,7 +2072,7 @@ fn inflateGzipPage(input: []const u8) ?[]u8 {
     if (zlib.inflateInit2_(&stream, 15 + 16, zlib.zlibVersion(), @sizeOf(zlib.z_stream)) != zlib.Z_OK) return null;
     defer _ = zlib.inflateEnd(&stream);
     const a = std.heap.page_allocator;
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8).empty;
     errdefer out.deinit(a);
     stream.next_in = @constCast(input.ptr);
     stream.avail_in = @intCast(input.len);
@@ -2148,7 +2150,7 @@ const TzBytes = struct {
 // /usr/share/zoneinfo/<name>. entries are keyed by the requested name and
 // never freed (a few KB per distinct zone); the mutex covers threaded serve
 var zone_cache: std.StringHashMapUnmanaged([]const u8) = .{};
-var zone_cache_mutex: std.Thread.Mutex = .{};
+var zone_cache_mutex: sync.Mutex = .{};
 
 // the zone this thread resolved last; cached bytes are never freed, so a hit
 // skips the shared lock and hash lookup that date code repeats per call
@@ -2803,7 +2805,7 @@ fn parseTimezoneOffset(s: []const u8) ?i64 {
 fn native_gmdate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.literal("");
     const format = args[0].string.bytes();
-    const timestamp: i64 = if (args.len >= 2) Value.toInt(args[1]) else std.time.timestamp();
+    const timestamp: i64 = if (args.len >= 2) Value.toInt(args[1]) else platform.timestamp();
     return formatTimestampTz(ctx, timestamp, format, 0, "UTC");
 }
 
@@ -2900,7 +2902,7 @@ fn localParts(a: Allocator, timestamp: i64, tz_name: []const u8) LocalParts {
 }
 
 fn native_localtime(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const timestamp: i64 = if (args.len >= 1 and args[0] != .null) Value.toInt(args[0]) else std.time.timestamp();
+    const timestamp: i64 = if (args.len >= 1 and args[0] != .null) Value.toInt(args[0]) else platform.timestamp();
     const assoc = args.len >= 2 and args[1].isTruthy();
     const lp = localParts(ctx.allocator, timestamp, ctx.vm.default_tz_name);
     const fields = [_]struct { []const u8, i64 }{
@@ -2928,7 +2930,7 @@ fn native_localtime(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
 fn native_idate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string or args[0].string.bytes().len == 0) return NativeResult.scalar(.{ .bool = false });
     const fmt = args[0].string.bytes()[0];
-    const timestamp: i64 = if (args.len >= 2 and args[1] != .null) Value.toInt(args[1]) else std.time.timestamp();
+    const timestamp: i64 = if (args.len >= 2 and args[1] != .null) Value.toInt(args[1]) else platform.timestamp();
     const lp = localParts(ctx.allocator, timestamp, ctx.vm.default_tz_name);
     const dc = lp.dc;
 
@@ -3112,38 +3114,37 @@ fn diFormat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
 
     var buf = std.array_list.Managed(u8).init(ctx.allocator);
     defer buf.deinit();
-    const w = buf.writer();
 
     var i: usize = 0;
     while (i < fmt.len) : (i += 1) {
         const c = fmt[i];
         if (c != '%' or i + 1 >= fmt.len) {
-            try w.writeByte(c);
+            try buf.append(c);
             continue;
         }
         i += 1;
         switch (fmt[i]) {
-            'Y' => try w.print("{d:0>2}", .{y}),
-            'y' => try w.print("{d}", .{y_signed}),
-            'M' => try w.print("{d:0>2}", .{m}),
-            'm' => try w.print("{d}", .{m_signed}),
-            'D' => try w.print("{d:0>2}", .{d}),
-            'd' => try w.print("{d}", .{d_signed}),
-            'a' => if (has_days) try w.print("{d}", .{days_total}) else try w.writeAll("(unknown)"),
-            'H' => try w.print("{d:0>2}", .{h}),
-            'h' => try w.print("{d}", .{h_signed}),
-            'I' => try w.print("{d:0>2}", .{mi}),
-            'i' => try w.print("{d}", .{i_signed}),
-            'S' => try w.print("{d:0>2}", .{s}),
-            's' => try w.print("{d}", .{s_signed}),
-            'F' => try w.print("{d:0>6}", .{f_us}),
-            'f' => try w.print("{d}", .{f_us}),
-            'R' => try w.writeByte(if (invert) '-' else '+'),
-            'r' => if (invert) try w.writeByte('-'),
-            '%' => try w.writeByte('%'),
+            'Y' => try buf.print("{d:0>2}", .{y}),
+            'y' => try buf.print("{d}", .{y_signed}),
+            'M' => try buf.print("{d:0>2}", .{m}),
+            'm' => try buf.print("{d}", .{m_signed}),
+            'D' => try buf.print("{d:0>2}", .{d}),
+            'd' => try buf.print("{d}", .{d_signed}),
+            'a' => if (has_days) try buf.print("{d}", .{days_total}) else try buf.appendSlice("(unknown)"),
+            'H' => try buf.print("{d:0>2}", .{h}),
+            'h' => try buf.print("{d}", .{h_signed}),
+            'I' => try buf.print("{d:0>2}", .{mi}),
+            'i' => try buf.print("{d}", .{i_signed}),
+            'S' => try buf.print("{d:0>2}", .{s}),
+            's' => try buf.print("{d}", .{s_signed}),
+            'F' => try buf.print("{d:0>6}", .{f_us}),
+            'f' => try buf.print("{d}", .{f_us}),
+            'R' => try buf.append(if (invert) '-' else '+'),
+            'r' => if (invert) try buf.append('-'),
+            '%' => try buf.append('%'),
             else => {
-                try w.writeByte('%');
-                try w.writeByte(fmt[i]);
+                try buf.append('%');
+                try buf.append(fmt[i]);
             },
         }
     }
@@ -3387,14 +3388,14 @@ fn parseFailure(ctx: *NativeContext, prefix: []const u8, input: []const u8, p: *
 }
 
 fn currentTimeMicros() struct { ts: i64, us: i64 } {
-    const ns = std.time.nanoTimestamp();
+    const ns = platform.nanoTimestamp();
     return .{ .ts = @intCast(@divFloor(ns, 1_000_000_000)), .us = @intCast(@divFloor(@mod(ns, 1_000_000_000), 1_000)) };
 }
 
 // zone names live for the process: there are few distinct ones, and date
 // objects then share one borrowed string instead of copying it per object
 var zone_names: std.StringHashMapUnmanaged(void) = .{};
-var zone_names_mutex: std.Thread.Mutex = .{};
+var zone_names_mutex: sync.Mutex = .{};
 threadlocal var last_zone_name_interned: []const u8 = "";
 
 fn internZoneName(name: []const u8) []const u8 {

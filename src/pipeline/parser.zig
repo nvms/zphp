@@ -14,7 +14,7 @@ const Allocator = std.mem.Allocator;
 const Error = Allocator.Error || error{ParseError};
 
 pub fn parse(allocator: Allocator, source: []const u8) Allocator.Error!Ast {
-    var tok_buf = std.ArrayListUnmanaged(Token){};
+    var tok_buf = std.ArrayListUnmanaged(Token).empty;
     errdefer tok_buf.deinit(allocator);
 
     var lexer = Lexer.init(source);
@@ -28,10 +28,10 @@ pub fn parse(allocator: Allocator, source: []const u8) Allocator.Error!Ast {
         .source = source,
         .tokens = tok_buf.items,
         .pos = 0,
-        .nodes = .{},
-        .extra_data = .{},
-        .errors = .{},
-        .attr_ranges = .{},
+        .nodes = .empty,
+        .extra_data = .empty,
+        .errors = .empty,
+        .attr_ranges = .empty,
         .allocator = allocator,
     };
     errdefer {
@@ -75,17 +75,17 @@ const Parser = struct {
     nodes: std.ArrayListUnmanaged(Ast.Node),
     extra_data: std.ArrayListUnmanaged(u32),
     errors: std.ArrayListUnmanaged(Ast.Error),
-    attr_ranges: std.ArrayListUnmanaged(AttrRange) = .{},
+    attr_ranges: std.ArrayListUnmanaged(AttrRange) = .empty,
     allocator: Allocator,
     found_yield: bool = false,
-    pending_top_stmts: std.ArrayListUnmanaged(u32) = .{},
+    pending_top_stmts: std.ArrayListUnmanaged(u32) = .empty,
 
     // root
 
     fn parseRoot(self: *Parser) Error!void {
         _ = try self.addNode(.{ .tag = .root, .main_token = 0, .data = .{} });
 
-        var stmts = std.ArrayListUnmanaged(u32){};
+        var stmts = std.ArrayListUnmanaged(u32).empty;
         defer stmts.deinit(self.allocator);
 
         while (self.peek() != .eof or self.pending_top_stmts.items.len > 0) {
@@ -210,7 +210,7 @@ const Parser = struct {
 
     fn parseAltBlock(self: *Parser, terminators: []const Tag) Error!u32 {
         const colon_tok = try self.expect(.colon);
-        var stmts = std.ArrayListUnmanaged(u32){};
+        var stmts = std.ArrayListUnmanaged(u32).empty;
         defer stmts.deinit(self.allocator);
 
         while (!self.isTerminator(terminators) and self.peek() != .eof) {
@@ -292,7 +292,7 @@ const Parser = struct {
 
     fn parseGlobalStmt(self: *Parser) Error!u32 {
         const tok = self.advance(); // global
-        var vars = std.ArrayListUnmanaged(u32){};
+        var vars = std.ArrayListUnmanaged(u32).empty;
         defer vars.deinit(self.allocator);
         try vars.append(self.allocator, try self.addNode(.{
             .tag = .variable,
@@ -326,7 +326,7 @@ const Parser = struct {
             return self.addNode(.{ .tag = .static_var, .main_token = var_tok, .data = .{ .lhs = default } });
         }
         // multi-variable: static $a = x, $b = y;
-        var stmts = std.ArrayListUnmanaged(u32){};
+        var stmts = std.ArrayListUnmanaged(u32).empty;
         defer stmts.deinit(self.allocator);
         try stmts.append(self.allocator, try self.addNode(.{ .tag = .static_var, .main_token = var_tok, .data = .{ .lhs = default } }));
         while (self.peek() == .comma) {
@@ -346,7 +346,7 @@ const Parser = struct {
 
     fn parseNamespaceDecl(self: *Parser) Error!u32 {
         const tok = self.advance(); // namespace
-        var parts = std.ArrayListUnmanaged(u32){};
+        var parts = std.ArrayListUnmanaged(u32).empty;
         defer parts.deinit(self.allocator);
 
         // namespace App\Models\User;  or  namespace App\Models { ... }
@@ -408,7 +408,7 @@ const Parser = struct {
         const outer_is_const = self.peek() == .kw_const;
         if (outer_is_fn or outer_is_const) _ = self.advance();
 
-        var prefix = std.ArrayListUnmanaged(u32){};
+        var prefix = std.ArrayListUnmanaged(u32).empty;
         defer prefix.deinit(self.allocator);
 
         // an imported name is always fully qualified, so a leading `\` changes nothing
@@ -433,7 +433,7 @@ const Parser = struct {
         // group use: use Prefix\{Name [as Alias], ...};
         if (self.peek() == .l_brace) {
             _ = self.advance();
-            var stmts = std.ArrayListUnmanaged(u32){};
+            var stmts = std.ArrayListUnmanaged(u32).empty;
             defer stmts.deinit(self.allocator);
 
             while (self.peek() != .r_brace and self.peek() != .eof) {
@@ -448,7 +448,7 @@ const Parser = struct {
                     item_is_const = true;
                     item_is_fn = false;
                 }
-                var item_parts = std.ArrayListUnmanaged(u32){};
+                var item_parts = std.ArrayListUnmanaged(u32).empty;
                 defer item_parts.deinit(self.allocator);
                 try item_parts.appendSlice(self.allocator, prefix.items);
                 try item_parts.append(self.allocator, self.pos);
@@ -484,14 +484,14 @@ const Parser = struct {
         }
 
         if (self.peek() == .comma) {
-            var stmts = std.ArrayListUnmanaged(u32){};
+            var stmts = std.ArrayListUnmanaged(u32).empty;
             defer stmts.deinit(self.allocator);
             const first_extra = try self.addExtraList(prefix.items);
             const tag: Ast.Node.Tag = if (outer_is_fn) .use_fn_stmt else if (outer_is_const) .use_const_stmt else .use_stmt;
             try stmts.append(self.allocator, try self.addNode(.{ .tag = tag, .main_token = tok, .data = .{ .lhs = first_extra } }));
             while (self.peek() == .comma) {
                 _ = self.advance();
-                var parts = std.ArrayListUnmanaged(u32){};
+                var parts = std.ArrayListUnmanaged(u32).empty;
                 defer parts.deinit(self.allocator);
                 if (self.peek() == .backslash) _ = self.advance();
                 try parts.append(self.allocator, self.pos);
@@ -556,7 +556,7 @@ const Parser = struct {
 
     fn parseEchoStmt(self: *Parser) Error!u32 {
         const echo_tok = self.advance();
-        var exprs = std.ArrayListUnmanaged(u32){};
+        var exprs = std.ArrayListUnmanaged(u32).empty;
         defer exprs.deinit(self.allocator);
 
         try exprs.append(self.allocator, try self.parseExpression());
@@ -608,7 +608,7 @@ const Parser = struct {
 
     fn parseBlock(self: *Parser) Error!u32 {
         const brace_tok = try self.expect(.l_brace);
-        var stmts = std.ArrayListUnmanaged(u32){};
+        var stmts = std.ArrayListUnmanaged(u32).empty;
         defer stmts.deinit(self.allocator);
 
         while (self.peek() != .r_brace and self.peek() != .eof) {
@@ -762,7 +762,7 @@ const Parser = struct {
     fn parseForExprList(self: *Parser) Error!u32 {
         const first = try self.parseVoidableExpression();
         if (self.peek() != .comma) return first;
-        var exprs = std.ArrayListUnmanaged(u32){};
+        var exprs = std.ArrayListUnmanaged(u32).empty;
         defer exprs.deinit(self.allocator);
         try exprs.append(self.allocator, first);
         while (self.peek() == .comma) {
@@ -817,7 +817,7 @@ const Parser = struct {
     // `const A = 1, B = 2;` as a statement: one declaration, or a block of them
     fn parseConstDecl(self: *Parser) Error!u32 {
         const const_tok = self.pos;
-        var decls = std.ArrayListUnmanaged(u32){};
+        var decls = std.ArrayListUnmanaged(u32).empty;
         defer decls.deinit(self.allocator);
         try self.parseConstList(&decls);
         if (decls.items.len == 1) return decls.items[0];
@@ -893,7 +893,7 @@ const Parser = struct {
         // php's grammar allows one stray `;` before the first case
         if (self.peek() == .semicolon) _ = self.advance();
 
-        var cases = std.ArrayListUnmanaged(u32){};
+        var cases = std.ArrayListUnmanaged(u32).empty;
         defer cases.deinit(self.allocator);
 
         while (self.peek() != end_tag and self.peek() != .eof) {
@@ -933,7 +933,7 @@ const Parser = struct {
     fn parseSwitchCase(self: *Parser, is_alt: bool) Error!u32 {
         const case_tok = self.advance(); // case
 
-        var values = std.ArrayListUnmanaged(u32){};
+        var values = std.ArrayListUnmanaged(u32).empty;
         defer values.deinit(self.allocator);
 
         try values.append(self.allocator, try self.parseExpression());
@@ -946,7 +946,7 @@ const Parser = struct {
             try self.expectCaseSeparator();
         }
 
-        var stmts = std.ArrayListUnmanaged(u32){};
+        var stmts = std.ArrayListUnmanaged(u32).empty;
         defer stmts.deinit(self.allocator);
 
         const end_tag: Tag = if (is_alt) .kw_endswitch else .r_brace;
@@ -977,7 +977,7 @@ const Parser = struct {
         const def_tok = self.advance(); // default
         try self.expectCaseSeparator();
 
-        var stmts = std.ArrayListUnmanaged(u32){};
+        var stmts = std.ArrayListUnmanaged(u32).empty;
         defer stmts.deinit(self.allocator);
 
         const end_tag: Tag = if (is_alt) .kw_endswitch else .r_brace;
@@ -1007,7 +1007,7 @@ const Parser = struct {
         _ = try self.expect(.r_paren);
         _ = try self.expect(.l_brace);
 
-        var arms = std.ArrayListUnmanaged(u32){};
+        var arms = std.ArrayListUnmanaged(u32).empty;
         defer arms.deinit(self.allocator);
 
         while (self.peek() != .r_brace and self.peek() != .eof) {
@@ -1029,7 +1029,7 @@ const Parser = struct {
             return self.addNode(.{ .tag = .match_arm, .main_token = 0, .data = .{ .lhs = vals_extra, .rhs = result } });
         }
 
-        var values = std.ArrayListUnmanaged(u32){};
+        var values = std.ArrayListUnmanaged(u32).empty;
         defer values.deinit(self.allocator);
 
         try values.append(self.allocator, try self.parseExpression());
@@ -1054,7 +1054,7 @@ const Parser = struct {
         const name_tok = try self.expectFunctionName();
         _ = try self.expect(.l_paren);
 
-        var params = std.ArrayListUnmanaged(u32){};
+        var params = std.ArrayListUnmanaged(u32).empty;
         defer params.deinit(self.allocator);
 
         if (self.peek() != .r_paren) {
@@ -1099,7 +1099,7 @@ const Parser = struct {
         const try_tok = self.advance(); // try
         const try_body = try self.parseBlock();
 
-        var catches = std.ArrayListUnmanaged(u32){};
+        var catches = std.ArrayListUnmanaged(u32).empty;
         defer catches.deinit(self.allocator);
 
         while (self.peek() == .kw_catch) {
@@ -1113,7 +1113,7 @@ const Parser = struct {
         }
 
         // rhs = extra -> {catch_count, catch_nodes..., finally_node}
-        var extra_data = std.ArrayListUnmanaged(u32){};
+        var extra_data = std.ArrayListUnmanaged(u32).empty;
         defer extra_data.deinit(self.allocator);
         try extra_data.append(self.allocator, @intCast(catches.items.len));
         try extra_data.appendSlice(self.allocator, catches.items);
@@ -1127,7 +1127,7 @@ const Parser = struct {
         _ = self.advance(); // catch
         _ = try self.expect(.l_paren);
 
-        var types = std.ArrayListUnmanaged(u32){};
+        var types = std.ArrayListUnmanaged(u32).empty;
         defer types.deinit(self.allocator);
 
         if (self.peek() == .identifier or self.peek() == .backslash) {
@@ -1148,7 +1148,7 @@ const Parser = struct {
         const body = try self.parseBlock();
 
         // lhs = extra -> {type_count, type_nodes...}
-        var extra = std.ArrayListUnmanaged(u32){};
+        var extra = std.ArrayListUnmanaged(u32).empty;
         defer extra.deinit(self.allocator);
         try extra.append(self.allocator, @intCast(types.items.len));
         try extra.appendSlice(self.allocator, types.items);
@@ -1212,7 +1212,7 @@ const Parser = struct {
                 break;
             }
 
-            var args = std.ArrayListUnmanaged(u32){};
+            var args = std.ArrayListUnmanaged(u32).empty;
             defer args.deinit(self.allocator);
             if (self.peek() == .l_paren) {
                 _ = self.advance();
@@ -1258,7 +1258,7 @@ const Parser = struct {
                 _ = try self.expect(.r_bracket);
                 class_expr = try self.addNode(.{ .tag = .array_access, .main_token = 0, .data = .{ .lhs = class_expr, .rhs = idx } });
             }
-            var dyn_args = std.ArrayListUnmanaged(u32){};
+            var dyn_args = std.ArrayListUnmanaged(u32).empty;
             defer dyn_args.deinit(self.allocator);
             if (self.peek() == .l_paren) {
                 _ = self.advance();
@@ -1278,7 +1278,7 @@ const Parser = struct {
 
         // consume qualified name parts: \Identifier\Identifier...
         // PHP allows reserved words as namespace segments (Default, Use, Catch, ...)
-        var name_parts = std.ArrayListUnmanaged(u32){};
+        var name_parts = std.ArrayListUnmanaged(u32).empty;
         defer name_parts.deinit(self.allocator);
         try name_parts.append(self.allocator, name_tok);
         while (self.peek() == .backslash) {
@@ -1290,7 +1290,7 @@ const Parser = struct {
             try name_parts.append(self.allocator, seg);
         }
 
-        var args = std.ArrayListUnmanaged(u32){};
+        var args = std.ArrayListUnmanaged(u32).empty;
         defer args.deinit(self.allocator);
 
         if (self.peek() == .l_paren) {
@@ -1336,7 +1336,7 @@ const Parser = struct {
     fn parseAnonymousClass(self: *Parser, new_tok: u32) Error!u32 {
         _ = self.advance(); // class
 
-        var ctor_args = std.ArrayListUnmanaged(u32){};
+        var ctor_args = std.ArrayListUnmanaged(u32).empty;
         defer ctor_args.deinit(self.allocator);
         if (self.peek() == .l_paren) {
             _ = self.advance();
@@ -1357,7 +1357,7 @@ const Parser = struct {
             parent = try self.parseQualifiedName();
         }
 
-        var implements = std.ArrayListUnmanaged(u32){};
+        var implements = std.ArrayListUnmanaged(u32).empty;
         defer implements.deinit(self.allocator);
         if (self.peek() == .kw_implements) {
             _ = self.advance();
@@ -1370,7 +1370,7 @@ const Parser = struct {
 
         _ = try self.expect(.l_brace);
 
-        var members = std.ArrayListUnmanaged(u32){};
+        var members = std.ArrayListUnmanaged(u32).empty;
         defer members.deinit(self.allocator);
         while (self.peek() != .r_brace and self.peek() != .eof) {
             var is_static = false;
@@ -1492,7 +1492,7 @@ const Parser = struct {
         const members_extra = try self.addExtraList(members.items);
 
         // rhs: {ctor_arg_count, ctor_args..., parent, impl_count, impls...}
-        var rhs_data = std.ArrayListUnmanaged(u32){};
+        var rhs_data = std.ArrayListUnmanaged(u32).empty;
         defer rhs_data.deinit(self.allocator);
         try rhs_data.append(self.allocator, @intCast(ctor_args.items.len));
         for (ctor_args.items) |a| try rhs_data.append(self.allocator, a);
@@ -1552,7 +1552,7 @@ const Parser = struct {
             parent = try self.parseQualifiedName();
         }
 
-        var implements = std.ArrayListUnmanaged(u32){};
+        var implements = std.ArrayListUnmanaged(u32).empty;
         defer implements.deinit(self.allocator);
         if (self.peek() == .kw_implements) {
             _ = self.advance();
@@ -1565,7 +1565,7 @@ const Parser = struct {
 
         _ = try self.expect(.l_brace);
 
-        var members = std.ArrayListUnmanaged(u32){};
+        var members = std.ArrayListUnmanaged(u32).empty;
         defer members.deinit(self.allocator);
 
         while (self.peek() != .r_brace and self.peek() != .eof) {
@@ -1694,7 +1694,7 @@ const Parser = struct {
         const extra = try self.addExtraList(members.items);
 
         // rhs encodes flags + parent + implements: {class_modifiers, parent_node, implements_count, impl_nodes...}
-        var rhs_data = std.ArrayListUnmanaged(u32){};
+        var rhs_data = std.ArrayListUnmanaged(u32).empty;
         defer rhs_data.deinit(self.allocator);
         try rhs_data.append(self.allocator, class_modifiers);
         try rhs_data.append(self.allocator, parent);
@@ -1710,7 +1710,7 @@ const Parser = struct {
         _ = self.advance(); // interface
         const name_tok = try self.expect(.identifier);
 
-        var parents = std.ArrayListUnmanaged(u32){};
+        var parents = std.ArrayListUnmanaged(u32).empty;
         defer parents.deinit(self.allocator);
         if (self.peek() == .kw_extends) {
             _ = self.advance();
@@ -1723,7 +1723,7 @@ const Parser = struct {
 
         _ = try self.expect(.l_brace);
 
-        var methods = std.ArrayListUnmanaged(u32){};
+        var methods = std.ArrayListUnmanaged(u32).empty;
         defer methods.deinit(self.allocator);
 
         while (self.peek() != .r_brace and self.peek() != .eof) {
@@ -1775,7 +1775,7 @@ const Parser = struct {
         const name_tok = try self.expectFunctionName();
         _ = try self.expect(.l_paren);
 
-        var params = std.ArrayListUnmanaged(u32){};
+        var params = std.ArrayListUnmanaged(u32).empty;
         defer params.deinit(self.allocator);
 
         if (self.peek() != .r_paren) {
@@ -1804,7 +1804,7 @@ const Parser = struct {
         const name_tok = try self.expect(.identifier);
         _ = try self.expect(.l_brace);
 
-        var members = std.ArrayListUnmanaged(u32){};
+        var members = std.ArrayListUnmanaged(u32).empty;
         defer members.deinit(self.allocator);
 
         while (self.peek() != .r_brace and self.peek() != .eof) {
@@ -1972,7 +1972,7 @@ const Parser = struct {
             backed_type_token = self.advance();
         }
 
-        var implements = std.ArrayListUnmanaged(u32){};
+        var implements = std.ArrayListUnmanaged(u32).empty;
         defer implements.deinit(self.allocator);
         if (self.peek() == .kw_implements) {
             _ = self.advance();
@@ -1985,7 +1985,7 @@ const Parser = struct {
 
         _ = try self.expect(.l_brace);
 
-        var members = std.ArrayListUnmanaged(u32){};
+        var members = std.ArrayListUnmanaged(u32).empty;
         defer members.deinit(self.allocator);
 
         while (self.peek() != .r_brace and self.peek() != .eof) {
@@ -2042,7 +2042,7 @@ const Parser = struct {
 
         const extra = try self.addExtraList(members.items);
 
-        var rhs_data = std.ArrayListUnmanaged(u32){};
+        var rhs_data = std.ArrayListUnmanaged(u32).empty;
         defer rhs_data.deinit(self.allocator);
         try rhs_data.append(self.allocator, backed_type_token);
         try rhs_data.append(self.allocator, @intCast(implements.items.len));
@@ -2055,7 +2055,7 @@ const Parser = struct {
 
     fn parseTraitUse(self: *Parser) Error!u32 {
         const use_tok = self.advance(); // use
-        var traits = std.ArrayListUnmanaged(u32){};
+        var traits = std.ArrayListUnmanaged(u32).empty;
         defer traits.deinit(self.allocator);
 
         try traits.append(self.allocator, try self.parseQualifiedName());
@@ -2064,7 +2064,7 @@ const Parser = struct {
             try traits.append(self.allocator, try self.parseQualifiedName());
         }
 
-        var conflicts = std.ArrayListUnmanaged(u32){};
+        var conflicts = std.ArrayListUnmanaged(u32).empty;
         defer conflicts.deinit(self.allocator);
 
         if (self.peek() == .l_brace) {
@@ -2089,7 +2089,7 @@ const Parser = struct {
 
                 if (self.peek() == .kw_insteadof) {
                     _ = self.advance();
-                    var excluded = std.ArrayListUnmanaged(u32){};
+                    var excluded = std.ArrayListUnmanaged(u32).empty;
                     defer excluded.deinit(self.allocator);
                     try excluded.append(self.allocator, try self.parseQualifiedName());
                     while (self.peek() == .comma) {
@@ -2151,7 +2151,7 @@ const Parser = struct {
         const name_tok = try self.expectFunctionName();
         _ = try self.expect(.l_paren);
 
-        var params = std.ArrayListUnmanaged(u32){};
+        var params = std.ArrayListUnmanaged(u32).empty;
         defer params.deinit(self.allocator);
 
         if (self.peek() != .r_paren) {
@@ -2315,7 +2315,7 @@ const Parser = struct {
         const fn_tok = self.advance(); // function
         _ = try self.expect(.l_paren);
 
-        var params = std.ArrayListUnmanaged(u32){};
+        var params = std.ArrayListUnmanaged(u32).empty;
         defer params.deinit(self.allocator);
 
         if (self.peek() != .r_paren) {
@@ -2328,7 +2328,7 @@ const Parser = struct {
         }
         _ = try self.expect(.r_paren);
 
-        var use_vars = std.ArrayListUnmanaged(u32){};
+        var use_vars = std.ArrayListUnmanaged(u32).empty;
         defer use_vars.deinit(self.allocator);
 
         if (self.peek() == .kw_use) {
@@ -2372,7 +2372,7 @@ const Parser = struct {
         const param_extra = try self.addExtraListWithReturnType(params.items, ret_range);
 
         // rhs = extra -> {body (bit 31 = generator), use_count, use_vars...}
-        var rhs_data = std.ArrayListUnmanaged(u32){};
+        var rhs_data = std.ArrayListUnmanaged(u32).empty;
         defer rhs_data.deinit(self.allocator);
         try rhs_data.append(self.allocator, body | (if (is_gen) @as(u32, 1) << 31 else 0) | (if (is_static) @as(u32, 1) << 30 else 0));
         try rhs_data.append(self.allocator, @intCast(use_vars.items.len));
@@ -2386,7 +2386,7 @@ const Parser = struct {
         const fn_tok = self.advance(); // fn
         _ = try self.expect(.l_paren);
 
-        var params = std.ArrayListUnmanaged(u32){};
+        var params = std.ArrayListUnmanaged(u32).empty;
         defer params.deinit(self.allocator);
 
         if (self.peek() != .r_paren) {
@@ -2449,7 +2449,7 @@ const Parser = struct {
             try self.expect(.identifier);
         if (self.peek() != .backslash) {
             if (has_leading or ns_relative) {
-                var parts = std.ArrayListUnmanaged(u32){};
+                var parts = std.ArrayListUnmanaged(u32).empty;
                 defer parts.deinit(self.allocator);
                 try parts.append(self.allocator, first_tok);
                 const extra = try self.addExtraList(parts.items);
@@ -2459,7 +2459,7 @@ const Parser = struct {
             return self.addNode(.{ .tag = .identifier, .main_token = first_tok, .data = .{} });
         }
 
-        var parts = std.ArrayListUnmanaged(u32){};
+        var parts = std.ArrayListUnmanaged(u32).empty;
         defer parts.deinit(self.allocator);
         try parts.append(self.allocator, first_tok);
         while (self.peek() == .backslash) {
@@ -2988,7 +2988,7 @@ const Parser = struct {
     fn parseListDestructure(self: *Parser) Error!u32 {
         const list_tok = self.advance(); // list
         _ = try self.expect(.l_paren);
-        var targets = std.ArrayListUnmanaged(u32){};
+        var targets = std.ArrayListUnmanaged(u32).empty;
         defer targets.deinit(self.allocator);
         while (self.peek() != .r_paren) {
             if (self.peek() == .comma) {
@@ -3048,7 +3048,7 @@ const Parser = struct {
     }
 
     fn parseArrayElements(self: *Parser, start_tok: u32, end: Tag) Error!u32 {
-        var elements = std.ArrayListUnmanaged(u32){};
+        var elements = std.ArrayListUnmanaged(u32).empty;
         defer elements.deinit(self.allocator);
 
         if (self.peek() != end) {
@@ -3121,7 +3121,7 @@ const Parser = struct {
             return self.addNode(.{ .tag = .callable_ref, .main_token = paren_tok, .data = .{ .lhs = callee } });
         }
 
-        var args = std.ArrayListUnmanaged(u32){};
+        var args = std.ArrayListUnmanaged(u32).empty;
         defer args.deinit(self.allocator);
 
         if (self.peek() != .r_paren) {
@@ -3193,7 +3193,7 @@ const Parser = struct {
                 return self.addNode(.{ .tag = .callable_ref, .main_token = name_tok, .data = .{ .lhs = method_node } });
             }
 
-            var args = std.ArrayListUnmanaged(u32){};
+            var args = std.ArrayListUnmanaged(u32).empty;
             defer args.deinit(self.allocator);
 
             if (self.peek() != .r_paren) {
@@ -3237,7 +3237,7 @@ const Parser = struct {
             } else try self.parsePrimaryExpr();
             if (self.peek() == .l_paren) {
                 _ = self.advance(); // (
-                var args = std.ArrayListUnmanaged(u32){};
+                var args = std.ArrayListUnmanaged(u32).empty;
                 defer args.deinit(self.allocator);
                 try args.append(self.allocator, name_expr);
                 if (self.peek() != .r_paren) {
@@ -3267,7 +3267,7 @@ const Parser = struct {
             _ = try self.expect(.r_brace);
             if (self.peek() == .l_paren) {
                 _ = self.advance(); // (
-                var args = std.ArrayListUnmanaged(u32){};
+                var args = std.ArrayListUnmanaged(u32).empty;
                 defer args.deinit(self.allocator);
                 try args.append(self.allocator, method_expr);
                 if (self.peek() != .r_paren) {
@@ -3301,7 +3301,7 @@ const Parser = struct {
                 return self.addNode(.{ .tag = .callable_ref, .main_token = name_tok, .data = .{ .lhs = static_node } });
             }
 
-            var args = std.ArrayListUnmanaged(u32){};
+            var args = std.ArrayListUnmanaged(u32).empty;
             defer args.deinit(self.allocator);
 
             if (self.peek() != .r_paren) {

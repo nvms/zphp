@@ -4,6 +4,7 @@
 // applies that registry when it starts, and each PHP call reaches the
 // extension through a comptime trampoline that carries its slot index
 const std = @import("std");
+const platform = @import("platform.zig");
 const builtin = @import("builtin");
 const vm_mod = @import("runtime/vm.zig");
 const VM = vm_mod.VM;
@@ -52,10 +53,10 @@ pub const ClassReg = struct {
     ext: *Extension,
     name: []const u8,
     parent: ?[]const u8,
-    interfaces: std.ArrayListUnmanaged([]const u8) = .{},
-    methods: std.ArrayListUnmanaged(MethodReg) = .{},
-    constants: std.ArrayListUnmanaged(ConstantReg) = .{},
-    properties: std.ArrayListUnmanaged(PropertyReg) = .{},
+    interfaces: std.ArrayListUnmanaged([]const u8) = .empty,
+    methods: std.ArrayListUnmanaged(MethodReg) = .empty,
+    constants: std.ArrayListUnmanaged(ConstantReg) = .empty,
+    properties: std.ArrayListUnmanaged(PropertyReg) = .empty,
     resource_type: ?u32 = null,
     flags: u32 = 0,
 };
@@ -64,7 +65,7 @@ const class_flag_final: u32 = 1;
 const class_flag_abstract: u32 = 2;
 const class_flag_readonly: u32 = 4;
 
-const InterfaceReg = struct { name: []const u8, methods: std.ArrayListUnmanaged([]const u8) = .{} };
+const InterfaceReg = struct { name: []const u8, methods: std.ArrayListUnmanaged([]const u8) = .empty };
 
 // the zphp_module handle: one loaded extension and everything it registered
 pub const Extension = struct {
@@ -72,14 +73,14 @@ pub const Extension = struct {
     desc: *const Descriptor,
     name: []const u8,
     version: []const u8,
-    lib: ?std.DynLib = null,
+    lib: ?platform.DynLib = null,
     registering: bool = false,
-    functions: std.ArrayListUnmanaged(FunctionReg) = .{},
-    classes: std.ArrayListUnmanaged(*ClassReg) = .{},
-    interfaces: std.ArrayListUnmanaged(InterfaceReg) = .{},
-    constants: std.ArrayListUnmanaged(ConstantReg) = .{},
-    inis: std.ArrayListUnmanaged(IniReg) = .{},
-    resources: std.ArrayListUnmanaged(ResourceReg) = .{},
+    functions: std.ArrayListUnmanaged(FunctionReg) = .empty,
+    classes: std.ArrayListUnmanaged(*ClassReg) = .empty,
+    interfaces: std.ArrayListUnmanaged(InterfaceReg) = .empty,
+    constants: std.ArrayListUnmanaged(ConstantReg) = .empty,
+    inis: std.ArrayListUnmanaged(IniReg) = .empty,
+    resources: std.ArrayListUnmanaged(ResourceReg) = .empty,
 };
 
 // the zphp_ctx handle: one native call or lifecycle hook on one VM
@@ -91,7 +92,7 @@ pub const Call = struct {
     threw: bool = false,
     // value handles and the strings the call made live until it returns
     arena: std.heap.ArenaAllocator,
-    strings: std.ArrayListUnmanaged(Value.String) = .{},
+    strings: std.ArrayListUnmanaged(Value.String) = .empty,
 
     fn init(ctx: *NativeContext, ext: *Extension, args: []const Value) Call {
         return .{ .ctx = ctx, .ext = ext, .args = args, .arena = std.heap.ArenaAllocator.init(ctx.allocator) };
@@ -121,10 +122,10 @@ pub const VmSlot = struct { request: ?*anyopaque = null, worker: ?*anyopaque = n
 const Slot = struct { ext: *Extension, func: ExtFn };
 
 var registry_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-var extensions: std.ArrayListUnmanaged(*Extension) = .{};
+var extensions: std.ArrayListUnmanaged(*Extension) = .empty;
 var slots: [max_functions]Slot = undefined;
 var slot_count: u32 = 0;
-var resource_types: std.ArrayListUnmanaged(ResourceReg) = .{};
+var resource_types: std.ArrayListUnmanaged(ResourceReg) = .empty;
 var shutdown_registered = false;
 
 fn trampoline(comptime i: usize) NativeFn {
@@ -190,18 +191,18 @@ pub fn loadDynamic(path: []const u8) void {
     if (builtin.abi.isMusl() and builtin.link_mode == .static) {
         fail("extension '{s}': this zphp binary is static and cannot load dynamic extensions; compile it in with -Dextension", .{path});
     }
-    var lib = std.DynLib.open(path) catch |err| fail("extension '{s}': cannot load ({s})", .{ path, @errorName(err) });
+    var lib = platform.DynLib.open(path) catch |err| fail("extension '{s}': cannot load ({s})", .{ path, @errorName(err) });
     const entry = lib.lookup(EntryFn, "zphp_extension_entry") orelse fail("extension '{s}': no zphp_extension_entry symbol; is ZPHP_EXTENSION() used?", .{path});
     adopt(path, entry(&api_v1), lib);
 }
 
 pub fn loadDirectory(dir_path: []const u8) void {
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch |err| fail("extension directory '{s}': {s}", .{ dir_path, @errorName(err) });
-    defer dir.close();
-    var names: std.ArrayListUnmanaged([]const u8) = .{};
+    var dir = std.Io.Dir.cwd().openDir(platform.io, dir_path, .{ .iterate = true }) catch |err| fail("extension directory '{s}': {s}", .{ dir_path, @errorName(err) });
+    defer dir.close(platform.io);
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer names.deinit(persistent());
     var it = dir.iterate();
-    while (it.next() catch null) |entry| {
+    while (it.next(platform.io) catch null) |entry| {
         if (entry.kind != .file and entry.kind != .sym_link) continue;
         if (!isLibraryName(entry.name)) continue;
         names.append(persistent(), dupe(entry.name)) catch fail("extension registry out of memory", .{});
@@ -226,7 +227,7 @@ fn isLibraryName(name: []const u8) bool {
     return std.mem.endsWith(u8, name, suffix);
 }
 
-fn adopt(origin: []const u8, desc_ptr: ?*const Descriptor, lib: ?std.DynLib) void {
+fn adopt(origin: []const u8, desc_ptr: ?*const Descriptor, lib: ?platform.DynLib) void {
     const desc = desc_ptr orelse fail("extension '{s}': entry point returned no descriptor", .{origin});
     if (desc.abi != abi_version) fail("extension '{s}': built for ABI {d}, this zphp provides ABI {d}", .{ origin, desc.abi, abi_version });
     const name = cstr(desc.name) orelse fail("extension '{s}': descriptor has no name", .{origin});
@@ -640,7 +641,7 @@ fn apiGetString(call: *Call, v: ?*const Value, len: ?*usize) callconv(.c) ?[*]co
         .string => |s| s.bytes(),
         .array, .object, .generator, .fiber => return null,
         else => blk: {
-            var buf = std.ArrayListUnmanaged(u8){};
+            var buf = std.ArrayListUnmanaged(u8).empty;
             defer buf.deinit(call.ctx.allocator);
             value.format(&buf, call.ctx.allocator) catch return null;
             break :blk (call.ownCopy(buf.items) orelse return null).bytes();
@@ -1031,14 +1032,14 @@ pub const api_v1 = Api{
 };
 
 test "the api table matches the header field by field" {
-    const header = std.fs.cwd().readFileAlloc(std.testing.allocator, "include/zphp_extension.h", 1 << 20) catch return error.SkipZigTest;
+    const header = std.Io.Dir.cwd().readFileAlloc(platform.io, "include/zphp_extension.h", std.testing.allocator, .limited(1 << 20)) catch return error.SkipZigTest;
     defer std.testing.allocator.free(header);
-    const fields = @typeInfo(Api).@"struct".fields;
+    const names = @typeInfo(Api).@"struct".field_names;
     var pos: usize = std.mem.indexOf(u8, header, "typedef struct zphp_api {").?;
-    inline for (fields[1..]) |field| {
-        const needle = "(*" ++ field.name ++ ")(";
+    inline for (names[1..]) |name| {
+        const needle = "(*" ++ name ++ ")(";
         const at = std.mem.indexOfPos(u8, header, pos, needle) orelse {
-            std.debug.print("api field '{s}' missing from the header, or out of order\n", .{field.name});
+            std.debug.print("api field '{s}' missing from the header, or out of order\n", .{name});
             return error.TestUnexpectedResult;
         };
         pos = at + needle.len;

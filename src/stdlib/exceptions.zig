@@ -289,7 +289,7 @@ fn exceptionGetTraceAsString(ctx: *NativeContext, _: []const Value) RuntimeError
 
 fn traceString(ctx: *NativeContext, throwable: *PhpObject) RuntimeError![]u8 {
     const t = throwable.getForScope("trace", ctx.vm.exceptionTraceScope(throwable));
-    var buf: std.ArrayListUnmanaged(u8) = .{};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(ctx.allocator);
     if (t == .array) {
         for (t.array.entries.items, 0..) |entry, i| {
@@ -309,9 +309,9 @@ fn traceString(ctx: *NativeContext, throwable: *PhpObject) RuntimeError![]u8 {
             // (a native dispatched the user callback) - PHP renders these as
             // `[internal function]` instead of the synthesized `(0)` location
             if (file_s.len == 0 and line_n == 0) {
-                try buf.writer(ctx.allocator).print("#{d} [internal function]: {s}{s}{s}(", .{ i, class_s, type_s, fn_s });
+                try buf.print(ctx.allocator, "#{d} [internal function]: {s}{s}{s}(", .{ i, class_s, type_s, fn_s });
             } else {
-                try buf.writer(ctx.allocator).print("#{d} {s}({d}): {s}{s}{s}(", .{ i, file_s, line_n, class_s, type_s, fn_s });
+                try buf.print(ctx.allocator, "#{d} {s}({d}): {s}{s}{s}(", .{ i, file_s, line_n, class_s, type_s, fn_s });
             }
             const args_v = e.get(.{ .string = Value.String.borrowed("args") });
             if (args_v == .array) {
@@ -323,7 +323,7 @@ fn traceString(ctx: *NativeContext, throwable: *PhpObject) RuntimeError![]u8 {
             try buf.appendSlice(ctx.allocator, ")\n");
         }
         const n = t.array.entries.items.len;
-        try buf.writer(ctx.allocator).print("#{d} {{main}}", .{n});
+        try buf.print(ctx.allocator, "#{d} {{main}}", .{n});
     } else {
         try buf.appendSlice(ctx.allocator, "#0 {main}");
     }

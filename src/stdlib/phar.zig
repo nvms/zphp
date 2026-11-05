@@ -1,5 +1,5 @@
 const std = @import("std");
-const zlib = @cImport(@cInclude("zlib.h"));
+const zlib = @import("c_zlib");
 
 const Allocator = std.mem.Allocator;
 
@@ -119,7 +119,7 @@ pub fn parse(a: Allocator, raw: []const u8) ParseError!Phar {
         crc32: u32,
         flags: u32,
     };
-    var entry_list = std.ArrayListUnmanaged(EntryRaw){};
+    var entry_list = std.ArrayListUnmanaged(EntryRaw).empty;
     defer entry_list.deinit(a);
 
     var i: u32 = 0;
@@ -209,7 +209,7 @@ pub const WriteEntry = struct {
 // builds a complete phar byte stream: stub, manifest, file data, signature.
 // caller owns returned bytes
 pub fn write(a: Allocator, stub: []const u8, alias: []const u8, entries: []const WriteEntry) ![]u8 {
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8).empty;
     errdefer buf.deinit(a);
 
     // stub must contain __HALT_COMPILER();. if it doesn't, fall back to default
@@ -234,7 +234,7 @@ pub fn write(a: Allocator, stub: []const u8, alias: []const u8, entries: []const
     }
 
     // build manifest body (everything after the 4-byte length prefix, up through per-file entries)
-    var mbody = std.ArrayListUnmanaged(u8){};
+    var mbody = std.ArrayListUnmanaged(u8).empty;
     defer mbody.deinit(a);
 
     try writeU32LE(a, &mbody, @intCast(entries.len));

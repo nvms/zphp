@@ -12,7 +12,7 @@ const extension = @import("extension.zig");
 pub const Directive = struct { name: []const u8, value: []const u8 };
 
 var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-var directives: std.ArrayListUnmanaged(Directive) = .{};
+var directives: std.ArrayListUnmanaged(Directive) = .empty;
 var loaded_file: ?[]const u8 = null;
 var extension_dir: ?[]const u8 = null;
 
@@ -51,11 +51,11 @@ pub fn discover(explicit: ?[]const u8) void {
 }
 
 pub fn load(path: []const u8, required: bool) void {
-    const bytes = std.fs.cwd().readFileAlloc(persistent(), path, 16 << 20) catch |err| {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(platform.io, path, persistent(), .limited(16 << 20)) catch |err| {
         if (required) fail("ini file '{s}': {s}", .{ path, @errorName(err) });
         return;
     };
-    loaded_file = std.fs.cwd().realpathAlloc(persistent(), path) catch persistent().dupe(u8, path) catch fail("out of memory", .{});
+    loaded_file = platform.realpathAlloc(persistent(), path) catch persistent().dupe(u8, path) catch fail("out of memory", .{});
     parse(bytes, path);
 }
 
@@ -118,13 +118,13 @@ fn cook(raw: []const u8) []const u8 {
 
 fn expandEnv(value: []const u8) []const u8 {
     if (std.mem.indexOf(u8, value, "${") == null) return persistent().dupe(u8, value) catch fail("out of memory", .{});
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8).empty;
     var i: usize = 0;
     while (i < value.len) {
         if (value[i] == '$' and i + 1 < value.len and value[i + 1] == '{') {
             if (std.mem.indexOfScalarPos(u8, value, i + 2, '}')) |close| {
                 const var_name = value[i + 2 .. close];
-                const name_z = persistent().dupeZ(u8, var_name) catch fail("out of memory", .{});
+                const name_z = persistent().dupeSentinel(u8, var_name, 0) catch fail("out of memory", .{});
                 if (platform.getenv(name_z)) |env| out.appendSlice(persistent(), env) catch fail("out of memory", .{});
                 i = close + 1;
                 continue;

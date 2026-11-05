@@ -50,8 +50,8 @@ var signal_handlers: [MAX_SIG]Value = blk: {
 var async_enabled: bool = false;
 var last_errno: c_int = 0;
 
-fn cHandler(sig: c_int) callconv(.c) void {
-    const idx: usize = @intCast(sig);
+fn cHandler(sig: posix.SIG) callconv(.c) void {
+    const idx: usize = @intFromEnum(sig);
     if (idx < MAX_SIG) _ = pending_signals[idx].fetchAdd(1, .seq_cst);
 }
 
@@ -92,27 +92,27 @@ fn native_pcntl_waitpid(ctx: *NativeContext, args: []const Value) RuntimeError!N
 
 fn native_pcntl_exec(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const path_z = try ctx.allocator.dupeZ(u8, args[0].string.bytes());
+    const path_z = try ctx.allocator.dupeSentinel(u8, args[0].string.bytes(), 0);
     defer ctx.allocator.free(path_z);
 
-    var argv = std.ArrayListUnmanaged(?[*:0]const u8){};
+    var argv = std.ArrayListUnmanaged(?[*:0]const u8).empty;
     defer {
         for (argv.items) |a| if (a) |s| ctx.allocator.free(std.mem.span(s));
         argv.deinit(ctx.allocator);
     }
-    try argv.append(ctx.allocator, (try ctx.allocator.dupeZ(u8, args[0].string.bytes())).ptr);
+    try argv.append(ctx.allocator, (try ctx.allocator.dupeSentinel(u8, args[0].string.bytes(), 0)).ptr);
     if (args.len > 1 and args[1] == .array) {
         for (args[1].array.entries.items) |entry| {
             const s = switch (entry.value) {
                 .string => |str| str.bytes(),
                 else => continue,
             };
-            try argv.append(ctx.allocator, (try ctx.allocator.dupeZ(u8, s)).ptr);
+            try argv.append(ctx.allocator, (try ctx.allocator.dupeSentinel(u8, s, 0)).ptr);
         }
     }
     try argv.append(ctx.allocator, null);
 
-    var envp = std.ArrayListUnmanaged(?[*:0]const u8){};
+    var envp = std.ArrayListUnmanaged(?[*:0]const u8).empty;
     defer {
         for (envp.items) |e| if (e) |s| ctx.allocator.free(std.mem.span(s));
         envp.deinit(ctx.allocator);
@@ -130,7 +130,7 @@ fn native_pcntl_exec(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
             };
             const tmp = try std.fmt.allocPrint(ctx.allocator, "{s}={s}", .{ k, v });
             defer ctx.allocator.free(tmp);
-            const ev = try ctx.allocator.dupeZ(u8, tmp);
+            const ev = try ctx.allocator.dupeSentinel(u8, tmp, 0);
             try envp.append(ctx.allocator, ev.ptr);
         }
         try envp.append(ctx.allocator, null);
@@ -173,7 +173,7 @@ fn native_pcntl_signal(ctx: *NativeContext, args: []const Value) RuntimeError!Na
             .mask = posix.sigemptyset(),
             .flags = 0,
         };
-        posix.sigaction(@intCast(sig), &sa, null);
+        posix.sigaction(@enumFromInt(sig), &sa, null);
         ctx.vm.releaseValue(signal_handlers[sig]);
         signal_handlers[sig] = .null;
         return NativeResult.scalar(.{ .bool = true });
@@ -189,7 +189,7 @@ fn native_pcntl_signal(ctx: *NativeContext, args: []const Value) RuntimeError!Na
         .mask = posix.sigemptyset(),
         .flags = 0,
     };
-    posix.sigaction(@intCast(sig), &sa, null);
+    posix.sigaction(@enumFromInt(sig), &sa, null);
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -310,7 +310,7 @@ fn native_pcntl_sigprocmask(ctx: *NativeContext, args: []const Value) RuntimeErr
             last_errno = @intFromEnum(posix.E.INVAL);
             return NativeResult.scalar(.{ .bool = false });
         }
-        if (std.c.sigaddset(&set, sig) != 0) return NativeResult.scalar(maskFailure());
+        if (std.c.sigaddset(&set, @enumFromInt(sig)) != 0) return NativeResult.scalar(maskFailure());
     }
     var old: std.c.sigset_t = undefined;
     if (std.c.sigprocmask(how, &set, &old) != 0) return NativeResult.scalar(maskFailure());
@@ -318,7 +318,7 @@ fn native_pcntl_sigprocmask(ctx: *NativeContext, args: []const Value) RuntimeErr
         const result = try ctx.createArray();
         var sig: c_int = 1;
         while (sig < std.c.NSIG) : (sig += 1) {
-            if (std.c.sigismember(&old, sig) == 1)
+            if (std.c.sigismember(&old, @enumFromInt(sig)) == 1)
                 try result.append(ctx.allocator, .{ .int = sig });
         }
         ctx.setCallerVar(2, args.len, .{ .array = result });

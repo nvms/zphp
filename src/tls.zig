@@ -1,10 +1,7 @@
 const std = @import("std");
 const platform = @import("platform.zig");
 
-const c = @cImport({
-    @cInclude("openssl/ssl.h");
-    @cInclude("openssl/err.h");
-});
+const c = @import("c_tls");
 
 pub const SSL = c.SSL;
 pub const SSL_CTX = c.SSL_CTX;

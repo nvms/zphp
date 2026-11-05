@@ -3,6 +3,7 @@
 // Zphp\Future carries the result or the exception back. values cross as
 // serialized bytes and are materialized in the receiving VM
 const std = @import("std");
+const sync = @import("../sync.zig");
 const builtin = @import("builtin");
 const value_mod = @import("../runtime/value.zig");
 const Value = value_mod.Value;
@@ -51,7 +52,7 @@ const default_queue: usize = 1024;
 // balances both. the Debug build keeps its leak-checking allocator, below
 // every VM's account since what crosses threads outlives the VM that made it
 pub fn transferAllocator(vm_allocator: std.mem.Allocator) std.mem.Allocator {
-    return if (builtin.mode == .Debug) memory.root(vm_allocator) else std.heap.c_allocator;
+    return if (builtin.mode == .debug) memory.root(vm_allocator) else std.heap.c_allocator;
 }
 
 // ---------------------------------------------------------------------------
@@ -97,8 +98,8 @@ pub const Task = struct {
     refs: std.atomic.Value(u32) = std.atomic.Value(u32).init(2),
     future: ?*PhpObject = null,
     delivered: bool = false,
-    mutex: std.Thread.Mutex = .{},
-    finished: std.Thread.Condition = .{},
+    mutex: sync.Mutex = .{},
+    finished: sync.Condition = .{},
     // selectors waiting for this task to settle
     waiters: select.WaitList = .{},
 
@@ -157,9 +158,9 @@ pub const Task = struct {
         t.mutex.lock();
         defer t.mutex.unlock();
         if (timeout_ns) |total| {
-            const deadline = std.time.nanoTimestamp() + @as(i128, total);
+            const deadline = platform.nanoTimestamp() + @as(i128, total);
             while (!t.settled()) {
-                const now = std.time.nanoTimestamp();
+                const now = platform.nanoTimestamp();
                 if (now >= deadline) return false;
                 t.finished.timedWait(&t.mutex, @intCast(deadline - now)) catch return t.settled();
             }
@@ -181,9 +182,9 @@ const Queue = struct {
     head: usize = 0,
     len: usize = 0,
     closed: bool = false,
-    mutex: std.Thread.Mutex = .{},
-    not_empty: std.Thread.Condition = .{},
-    not_full: std.Thread.Condition = .{},
+    mutex: sync.Mutex = .{},
+    not_empty: sync.Condition = .{},
+    not_full: sync.Condition = .{},
 
     const PushResult = enum { ok, full, closed };
 
@@ -273,14 +274,14 @@ const Pool = struct {
     queue: Queue,
     bootstrap: ?[]u8,
     file_loader: ?*const vm_mod.FileLoader,
-    mutex: std.Thread.Mutex = .{},
-    changed: std.Thread.Condition = .{},
+    mutex: sync.Mutex = .{},
+    changed: sync.Condition = .{},
     start_state: StartState = .starting,
     started: usize = 0,
     start_error: ?[]u8 = null,
     shutting_down: bool = false,
     running_tasks: usize = 0,
-    completed: std.ArrayListUnmanaged(*Task) = .{},
+    completed: std.ArrayListUnmanaged(*Task) = .empty,
     next_id: u64 = 1,
     wake: [2]std.posix.socket_t,
     readiness: ?*PhpObject = null,
@@ -401,12 +402,12 @@ const Pool = struct {
     fn collect(pool: *Pool, timeout_ns: ?u64) ?*Task {
         pool.mutex.lock();
         defer pool.mutex.unlock();
-        const deadline: ?i128 = if (timeout_ns) |t| std.time.nanoTimestamp() + @as(i128, t) else null;
+        const deadline: ?i128 = if (timeout_ns) |t| platform.nanoTimestamp() + @as(i128, t) else null;
         while (true) {
             while (pool.completed.items.len == 0) {
                 if (pool.queue.len == 0 and pool.running_tasks == 0) return null;
                 if (deadline) |d| {
-                    const now = std.time.nanoTimestamp();
+                    const now = platform.nanoTimestamp();
                     if (now >= d) return null;
                     pool.changed.timedWait(&pool.mutex, @intCast(d - now)) catch {};
                 } else pool.changed.wait(&pool.mutex);
@@ -452,9 +453,9 @@ const Pool = struct {
         if (timeout_ns) |t| {
             pool.mutex.lock();
             defer pool.mutex.unlock();
-            const deadline = std.time.nanoTimestamp() + @as(i128, t);
+            const deadline = platform.nanoTimestamp() + @as(i128, t);
             while (pool.running_tasks > 0) {
-                const now = std.time.nanoTimestamp();
+                const now = platform.nanoTimestamp();
                 if (now >= deadline) return false;
                 pool.changed.timedWait(&pool.mutex, @intCast(deadline - now)) catch {};
             }
@@ -768,8 +769,8 @@ pub const Payload = struct {
 // the transfer rules are checked in the sender so the error names the path
 const TransferCheck = struct {
     ctx: *NativeContext,
-    path: std.ArrayListUnmanaged(u8) = .{},
-    channels: std.ArrayListUnmanaged(*channel.Channel) = .{},
+    path: std.ArrayListUnmanaged(u8) = .empty,
+    channels: std.ArrayListUnmanaged(*channel.Channel) = .empty,
     // containers already checked, so a cycle is walked once
     seen: std.AutoHashMapUnmanaged(usize, void) = .{},
 
@@ -800,7 +801,7 @@ const TransferCheck = struct {
                 for (arr.entries.items) |entry| {
                     try self.path.append(self.ctx.allocator, '[');
                     switch (entry.key) {
-                        .int => |i| try self.path.writer(self.ctx.allocator).print("{d}", .{i}),
+                        .int => |i| try self.path.print(self.ctx.allocator, "{d}", .{i}),
                         .string => |k| try self.path.appendSlice(self.ctx.allocator, k.bytes()),
                     }
                     try self.path.append(self.ctx.allocator, ']');
@@ -885,7 +886,7 @@ fn isCompileName(name: []const u8) bool {
 fn collectClosureFunctions(ctx: *NativeContext, root: *const ObjFunction, out: *std.ArrayListUnmanaged(ObjFunction)) RuntimeError!void {
     var seen: std.StringHashMapUnmanaged(void) = .{};
     defer seen.deinit(ctx.allocator);
-    var queue: std.ArrayListUnmanaged(*const ObjFunction) = .{};
+    var queue: std.ArrayListUnmanaged(*const ObjFunction) = .empty;
     defer queue.deinit(ctx.allocator);
     try queue.append(ctx.allocator, root);
     try seen.put(ctx.allocator, root.name, {});
@@ -905,13 +906,13 @@ fn collectClosureFunctions(ctx: *NativeContext, root: *const ObjFunction, out: *
 
 fn serializeClosureCode(ctx: *NativeContext, func: *const ObjFunction, allocator: std.mem.Allocator) RuntimeError![]u8 {
     const origin = ctx.vm.chunk_to_result.get(@intFromPtr(&func.chunk)) orelse return throwNamed(ctx, transfer_exception, "the closure has no compiled unit to travel with (at callable)", .{});
-    var functions: std.ArrayListUnmanaged(ObjFunction) = .{};
+    var functions: std.ArrayListUnmanaged(ObjFunction) = .empty;
     defer functions.deinit(ctx.allocator);
     try collectClosureFunctions(ctx, func, &functions);
     var unit = CompileResult{
         .chunk = .{},
         .functions = functions,
-        .string_allocs = .{},
+        .string_allocs = .empty,
         .allocator = ctx.allocator,
         .new_defaults = origin.new_defaults,
         .deferred_exprs = origin.deferred_exprs,
@@ -1005,9 +1006,9 @@ fn materializeClosure(ctx: *NativeContext, w: *Worker, transfer: *ClosureTransfe
     const caps = hold(unpack(ctx, payload, pool.allocator) orelse return throwNamed(ctx, transfer_exception, "the closure captures did not transfer", .{}));
     defer ctx.vm.releaseValue(caps);
     if (caps != .array) return throwNamed(ctx, transfer_exception, "the closure captures did not transfer", .{});
-    var names: std.ArrayListUnmanaged([]const u8) = .{};
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer names.deinit(ctx.allocator);
-    var values: std.ArrayListUnmanaged(Value) = .{};
+    var values: std.ArrayListUnmanaged(Value) = .empty;
     defer values.deinit(ctx.allocator);
     for (caps.array.entries.items) |entry| {
         if (entry.key != .string) continue;
@@ -1071,7 +1072,7 @@ fn poolConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     if (args.len >= 2 and args[1] != .null) {
         if (args[1] != .string) return throwNamed(ctx, pool_exception, "bootstrap must be a file path", .{});
         bootstrap_path = args[1].string.bytes();
-        std.fs.cwd().access(bootstrap_path.?, .{}) catch return throwNamed(ctx, pool_exception, "bootstrap script {s} does not exist", .{bootstrap_path.?});
+        std.Io.Dir.cwd().access(platform.io, bootstrap_path.?, .{}) catch return throwNamed(ctx, pool_exception, "bootstrap script {s} does not exist", .{bootstrap_path.?});
     }
     var queue_size: usize = default_queue;
     if (args.len >= 3 and args[2] != .null) {

@@ -51,7 +51,7 @@ fn lastSepBefore(s: []const u8, end: usize) ?usize {
 }
 
 fn isFile(path: []const u8) bool {
-    const stat = std.fs.cwd().statFile(path) catch return false;
+    const stat = std.Io.Dir.cwd().statFile(platform.io, path, .{}) catch return false;
     return stat.kind == .file;
 }
 
@@ -59,7 +59,7 @@ fn isFile(path: []const u8) bool {
 // against the archive root, so "lib/../data/x" and a backslash path both
 // map to their canonical entry
 pub fn normalizeInternal(a: std.mem.Allocator, internal: []const u8) ![]u8 {
-    var segments: std.ArrayListUnmanaged([]const u8) = .{};
+    var segments: std.ArrayListUnmanaged([]const u8) = .empty;
     defer segments.deinit(a);
     var start: usize = 0;
     var i: usize = 0;
@@ -99,9 +99,9 @@ test "normalizeInternal resolves dot segments against the root" {
 test "resolve splits on the longest prefix that is a file" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "a.phar", .data = "x" });
+    try tmp.dir.writeFile(platform.io, .{ .sub_path = "a.phar", .data = "x" });
     const a = std.testing.allocator;
-    const base = try tmp.dir.realpathAlloc(a, "a.phar");
+    const base = try tmp.dir.realPathFileAlloc(platform.io, "a.phar", a);
     defer a.free(base);
     const path = try std.mem.concat(a, u8, &.{ prefix, base, "/lib/util.php" });
     defer a.free(path);

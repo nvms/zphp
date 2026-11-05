@@ -4,10 +4,7 @@ const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
-const c = @cImport({
-    @cInclude("openssl/evp.h");
-    @cInclude("openssl/rand.h");
-});
+const c = @import("c_openssl");
 
 pub const entries = .{
     .{ "openssl_cipher_iv_length", cipherIvLength },
