@@ -18411,6 +18411,8 @@ pub const VM = struct {
 
     fn markOwnedArrayArgs(self: *VM, frame_idx: usize, frame: *CallFrame) RuntimeError!void {
         const func = frame.func orelse return;
+        // arguments living only in slots have no named entry to own
+        if (frame.vars.count() == 0) return;
         const count = if (self.ic) |ic| blk: {
             const raw = ic.arg_counts[frame_idx];
             break :blk if (raw == 0xFF) func.arity else @min(@as(usize, raw), func.arity);
