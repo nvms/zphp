@@ -107,6 +107,8 @@ fn loadStartupFlags(allocator: std.mem.Allocator, raw_args: []const []const u8) 
             ini_path = arg[2..];
         } else if (std.mem.eql(u8, arg, "-n")) {
             skip_ini = true;
+        } else if (std.mem.eql(u8, arg, "-q")) {
+            // php's quiet mode drops cgi headers, which the cli never prints
         } else if (std.mem.eql(u8, arg, "-f")) {
             i += 1;
             try args.append(allocator, "run");

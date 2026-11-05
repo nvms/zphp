@@ -39,6 +39,7 @@ check "php.ini in the working directory" "$expected" "$(cd "$OUT" && "$ZPHP" run
 contains "no ini file" '"loaded":false,"tz":"UTC"' "$("$ZPHP" run "$SCRIPT_DIR/ini/probe.php")"
 contains "-d overrides the file" '"tz":"Europe\/Paris","tz_default":"Europe\/Paris"' "$("$ZPHP" --ini="$INI" -d date.timezone=Europe/Paris run "$SCRIPT_DIR/ini/probe.php")"
 contains "-d name=value form" '"memory_limit":"1G"' "$("$ZPHP" --ini="$INI" -d memory_limit=1G run "$SCRIPT_DIR/ini/probe.php")"
+contains "-q is accepted, as php's test runner passes it" '"loaded":false,"tz":"Asia\/Tokyo"' "$("$ZPHP" -q -d date.timezone=Asia/Tokyo "$SCRIPT_DIR/ini/probe.php")"
 contains "-d without a file" '"loaded":false,"tz":"Asia\/Tokyo"' "$("$ZPHP" -d date.timezone=Asia/Tokyo run "$SCRIPT_DIR/ini/probe.php")"
 contains "max_memory_limit caps a startup memory_limit" 'Failed to set memory_limit to 536870912 bytes. Setting to max_memory_limit instead (currently: 268435456 bytes) in Unknown on line 0' "$("$ZPHP" -d max_memory_limit=256M -d memory_limit=512M run "$SCRIPT_DIR/ini/max_memory.php" 2>&1)"
 contains "max_memory_limit caps ini_set" '256M|256M|256M|256M|256M' "$("$ZPHP" -d max_memory_limit=256M -d memory_limit=512M run "$SCRIPT_DIR/ini/max_memory.php" 2>/dev/null)"
