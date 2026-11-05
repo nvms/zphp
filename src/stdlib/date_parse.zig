@@ -1230,10 +1230,12 @@ const Scanner = struct {
     db: TzDb,
 
     fn addError(s: *Scanner, msg: []const u8) !void {
+        if (s.p.errors.items.len >= max_errors) return;
         try s.p.errors.append(s.a, .{ .pos = s.tok, .char = s.buf[s.tok], .msg = msg });
     }
 
     fn addWarning(s: *Scanner, msg: []const u8) !void {
+        if (s.p.warnings.items.len >= max_errors) return;
         try s.p.warnings.append(s.a, .{ .pos = s.tok, .char = s.buf[s.tok], .msg = msg });
     }
 
@@ -1882,6 +1884,9 @@ fn isTrimSpace(c: u8) bool {
 
 // timelib_strtotime: scan a date string into fields, a zone, and a relative
 // part. errors and warnings carry the byte position in the trimmed string
+// timelib stops recording errors and warnings past this many of each
+const max_errors = 1000;
+
 pub fn parse(a: Allocator, input: []const u8, db: TzDb) !Parsed {
     var out = Parsed{};
     errdefer out.deinit(a);
@@ -1889,11 +1894,12 @@ pub fn parse(a: Allocator, input: []const u8, db: TzDb) !Parsed {
     var end: usize = input.len; // exclusive
     if (input.len > 0) {
         var e = input.len - 1;
-        while (isTrimSpace(input[start]) and start < e) start += 1;
-        while (isTrimSpace(input[e]) and e > start) e -= 1;
+        while (start <= e and isTrimSpace(input[start])) start += 1;
+        while (start <= e and e > start and isTrimSpace(input[e])) e -= 1;
         end = e + 1;
     }
-    if (input.len == 0) {
+    // nothing left once the whitespace is trimmed
+    if (start >= end) {
         try out.errors.append(a, .{ .pos = 0, .char = 0, .msg = "Empty string" });
         out.time.is_localtime = false;
         out.time.zone_type = 0;
@@ -2074,9 +2080,11 @@ pub fn parseFromFormat(a: Allocator, format: []const u8, input: []const u8, db: 
 
     const at = struct {
         fn err(o: *Parsed, al: Allocator, in: *const Ptr, pos: usize, msg: []const u8) !void {
+            if (o.errors.items.len >= max_errors) return;
             try o.errors.append(al, .{ .pos = pos, .char = if (pos < in.s.len) in.s[pos] else 0, .msg = msg });
         }
         fn warn(o: *Parsed, al: Allocator, in: *const Ptr, pos: usize, msg: []const u8) !void {
+            if (o.warnings.items.len >= max_errors) return;
             try o.warnings.append(al, .{ .pos = pos, .char = if (pos < in.s.len) in.s[pos] else 0, .msg = msg });
         }
     };

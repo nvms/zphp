@@ -10,7 +10,7 @@
 #
 # --php is the reference command, split on spaces. to check against a newer php
 # than the system one, run it in docker with the temp dir mounted at its own path:
-#   TMPDIR=/tmp/df scripts/date-fuzz --php 'docker run --rm -v /tmp/df:/tmp/df php:8.5.11-cli php'
+#   TMPDIR=/tmp/df scripts/date-fuzz --php 'docker run --rm -v /tmp/df:/tmp/df php:8.5.12-cli php'
 #
 # zones default to America/New_York and Europe/Paris. exit status is 1 when
 # any input differs.
