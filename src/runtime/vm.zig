@@ -9020,6 +9020,9 @@ pub const VM = struct {
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
                     } else {
+                        const msg = try std.fmt.allocPrint(self.allocator, "Attempt to read property \"{s}\" on {s}", .{ prop_name, obj_val.valueName() });
+                        defer self.allocator.free(msg);
+                        self.emitWarning(msg) catch if (try self.resumeRaised()) continue;
                         self.push(.null);
                     }
                 },
