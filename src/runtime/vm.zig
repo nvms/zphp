@@ -17851,6 +17851,7 @@ pub const VM = struct {
             }
             obj.slots = slots;
             obj.slot_layout = layout;
+            try self.initBuiltinAncestorDefaults(obj, cls.parent);
             return layout.throwable;
         }
         // fallback for classes without slot layout
@@ -17859,6 +17860,20 @@ pub const VM = struct {
             try obj.set(self.allocator, prop.name, try self.copyDefault(prop.default));
         }
         return self.isThrowableClass(class_name);
+    }
+
+    // a built-in ancestor without a layout (DateInterval, DatePeriod) keeps
+    // its declared properties out of a subclass's slots, after the subclass's
+    // own, as php's property handlers list them; they are set here, root first
+    fn initBuiltinAncestorDefaults(self: *VM, obj: *PhpObject, first: ?[]const u8) RuntimeError!void {
+        const name = first orelse return;
+        const cls = self.classes.get(name) orelse return;
+        if (cls.slot_layout != null) return;
+        try self.initBuiltinAncestorDefaults(obj, cls.parent);
+        for (cls.properties.items) |prop| {
+            if (obj.getSlotIndex(prop.name) != null or obj.properties.contains(prop.name)) continue;
+            try obj.set(self.allocator, prop.name, try self.copyDefault(prop.default));
+        }
     }
 
     fn ancestorDefaultsReady(self: *VM, def: *const ClassDef) bool {

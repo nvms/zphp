@@ -513,11 +513,13 @@ fn dpiNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     return NativeResult.scalar(.null);
 }
 
+// the seven fields first, then the object's other properties
 fn periodSerialize(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const out = try ctx.createArray();
+    for (period_fields) |name| try out.set(ctx.allocator, .{ .string = Value.String.borrowed(name) }, obj.get(name));
     const own = try object_properties.ownTable(ctx.vm, obj);
-    for (own.entries.items) |entry| try out.set(ctx.allocator, entry.key, entry.value);
+    for (own.entries.items) |entry| if (!out.contains(entry.key)) try out.set(ctx.allocator, entry.key, entry.value);
     return NativeResult.borrowed(.{ .array = out });
 }
 
@@ -591,7 +593,7 @@ fn putDateFields(ctx: *NativeContext, obj: *PhpObject, table: *PhpArray) Runtime
     const zone_v = obj.get("__timezone");
     const zone = if (zone_v == .string) ParseZone.of(zone_v.string.bytes(), false) else ParseZone.of(ctx.vm.default_tz_name, true);
     const us_v = obj.get("__microseconds");
-    const formatted = try formatTimestampTzMicros(ctx, ts, "Y-m-d H:i:s.u", @intCast(zone.totalOffset(ctx.allocator, ts)), zone.name(), if (us_v == .int) us_v.int else 0);
+    const formatted = try formatTimestampTzMicros(ctx, ts, "x-m-d H:i:s.u", @intCast(zone.totalOffset(ctx.allocator, ts)), zone.name(), if (us_v == .int) us_v.int else 0);
     defer if (formatted.value == .string) formatted.value.string.release();
     try table.set(ctx.allocator, .{ .string = Value.String.borrowed("date") }, formatted.value);
     try putZoneFields(ctx, &zone, table);
