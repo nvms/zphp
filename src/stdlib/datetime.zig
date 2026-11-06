@@ -1,5 +1,6 @@
 const std = @import("std");
 const object_properties = @import("../runtime/object_properties.zig");
+const iso_interval = @import("date_iso_interval.zig");
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const sync = @import("../sync.zig");
 const platform = @import("../platform.zig");
@@ -317,29 +318,13 @@ pub fn register(vm: *VM, a: Allocator) !void {
 // parse a "YYYY-MM-DD" or "YYYY-MM-DDTHH:MM:SS" (optional trailing Z) date
 // string to a unix timestamp interpreted as UTC. used by the ISO 8601
 // DatePeriod string form
-fn parseIsoDateToTs(s: []const u8) ?i64 {
-    if (s.len < 10 or s[4] != '-' or s[7] != '-') return null;
-    const year = std.fmt.parseInt(i64, s[0..4], 10) catch return null;
-    const month = std.fmt.parseInt(i64, s[5..7], 10) catch return null;
-    const day = std.fmt.parseInt(i64, s[8..10], 10) catch return null;
-    var hour: i64 = 0;
-    var min: i64 = 0;
-    var sec: i64 = 0;
-    if (s.len >= 19 and (s[10] == 'T' or s[10] == ' ') and s[13] == ':' and s[16] == ':') {
-        hour = std.fmt.parseInt(i64, s[11..13], 10) catch 0;
-        min = std.fmt.parseInt(i64, s[14..16], 10) catch 0;
-        sec = std.fmt.parseInt(i64, s[17..19], 10) catch 0;
-    }
-    return dateToTimestamp(year, month, day, hour, min, sec);
-}
-
 const period_fields = [_][]const u8{ "start", "current", "end", "interval", "recurrences", "include_start_date", "include_end_date" };
 
 fn dpConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len >= 1 and args[0] == .string) {
         try ctx.vm.raiseError(VM.E_DEPRECATED, "Calling DatePeriod::__construct(string $isostr, int $options = 0) is deprecated, use DatePeriod::createFromISO8601String() instead");
-        try initializePeriodFromIso(ctx, obj, args[0].string.bytes(), if (args.len >= 2) Value.toInt(args[1]) else 0, "DatePeriod::__construct(): ");
+        try initializePeriodFromIso(ctx, obj, args[0].string.bytes(), if (args.len >= 2) Value.toInt(args[1]) else 0, "DatePeriod::__construct", "DateTime");
         return NativeResult.scalar(.null);
     }
     if (args.len < 3 or args[0] != .object or args[1] != .object) return NativeResult.scalar(.null);
@@ -349,14 +334,10 @@ fn dpConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
         try obj.set(ctx.allocator, "end", .{ .object = try cloneDateObject(ctx, args[2].object) });
     } else {
         recurrences = Value.toInt(args[2]);
-        if (recurrences < 1 or recurrences > max_recurrences) {
-            try ctx.vm.setPendingException("DateMalformedPeriodStringException", "DatePeriod::__construct(): Recurrence count must be greater or equal to 1 and lower than 2147483640");
-            return error.RuntimeError;
-        }
     }
     try obj.set(ctx.allocator, "start", .{ .object = try cloneDateObject(ctx, args[0].object) });
     try obj.set(ctx.allocator, "interval", .{ .object = try cloneDateObject(ctx, args[1].object) });
-    try setPeriodCount(ctx, obj, recurrences, options);
+    try finishPeriod(ctx, obj, recurrences, options, "DatePeriod::__construct");
     return NativeResult.scalar(.null);
 }
 
@@ -371,47 +352,53 @@ fn setPeriodCount(ctx: *NativeContext, obj: *PhpObject, recurrences: i64, option
     try obj.set(ctx.allocator, "recurrences", .{ .int = recurrences + @intFromBool(include_start) + @intFromBool(include_end) });
 }
 
-// "R<n>/<start>/<interval>"
-fn initializePeriodFromIso(ctx: *NativeContext, obj: *PhpObject, spec: []const u8, options: i64, prefix: []const u8) RuntimeError!void {
-    var it = std.mem.splitScalar(u8, spec, '/');
-    const p0 = it.next() orelse "";
-    const p1 = it.next() orelse "";
-    const p2 = it.next() orelse "";
-    const start_ts = parseIsoDateToTs(p1);
-    if (p0.len < 2 or (p0[0] != 'R' and p0[0] != 'r') or start_ts == null or p2.len == 0) {
-        const msg = try std.fmt.allocPrint(ctx.allocator, "{s}Unknown or bad format ({s})", .{ prefix, spec });
-        defer ctx.allocator.free(msg);
-        try ctx.vm.setPendingException("DateMalformedPeriodStringException", msg);
-        return error.RuntimeError;
+// date_period_init_iso8601_string: start, end, interval and recurrences
+// from an ISO 8601 interval string; the dates are UTC, made as base_class
+fn initializePeriodFromIso(ctx: *NativeContext, obj: *PhpObject, spec: []const u8, options: i64, func: []const u8, base_class: []const u8) RuntimeError!void {
+    const parsed = iso_interval.parse(spec);
+    if (parsed.errors > 0) return malformedPeriod(ctx, "Unknown or bad format ({s})", .{spec});
+    const begin = parsed.begin orelse return malformedPeriod(ctx, "{s}(): ISO interval must contain a start date, \"{s}\" given", .{ func, spec });
+    const period = parsed.period orelse return malformedPeriod(ctx, "{s}(): ISO interval must contain an interval, \"{s}\" given", .{ func, spec });
+    if (parsed.end == null and parsed.recurrences == 0) return malformedPeriod(ctx, "{s}(): ISO interval must contain an end date or a recurrence count, \"{s}\" given", .{ func, spec });
+    try obj.set(ctx.allocator, "start", .{ .object = try isoDate(ctx, base_class, begin) });
+    if (parsed.end) |end| try obj.set(ctx.allocator, "end", .{ .object = try isoDate(ctx, base_class, end) });
+    const interval = try ctx.createObject("DateInterval");
+    try interval.set(ctx.allocator, "y", .{ .int = period.y });
+    try interval.set(ctx.allocator, "m", .{ .int = period.m });
+    try interval.set(ctx.allocator, "d", .{ .int = period.d });
+    try interval.set(ctx.allocator, "h", .{ .int = period.h });
+    try interval.set(ctx.allocator, "i", .{ .int = period.i });
+    try interval.set(ctx.allocator, "s", .{ .int = period.s });
+    try obj.set(ctx.allocator, "interval", .{ .object = interval });
+    try finishPeriod(ctx, obj, parsed.recurrences, options, func);
+}
+
+fn isoDate(ctx: *NativeContext, class: []const u8, d: iso_interval.Date) RuntimeError!*PhpObject {
+    const date = try ctx.createObject(class);
+    try date.set(ctx.allocator, "__timestamp", .{ .int = dateToTimestamp(d.y, d.m, d.d, d.h, d.i, d.s) });
+    try date.set(ctx.allocator, "__timezone", .{ .string = Value.String.borrowed("+00:00") });
+    return date;
+}
+
+// date_period_init_finish
+fn finishPeriod(ctx: *NativeContext, obj: *PhpObject, recurrences: i64, options: i64, func: []const u8) RuntimeError!void {
+    if (obj.get("end") == .null and (recurrences < 1 or recurrences > max_recurrences)) {
+        return malformedPeriod(ctx, "{s}(): Recurrence count must be greater or equal to 1 and lower than 2147483640", .{func});
     }
-    const recurrences = std.fmt.parseInt(i64, p0[1..], 10) catch 0;
-    if (recurrences < 1 or recurrences > max_recurrences) {
-        const msg = try std.fmt.allocPrint(ctx.allocator, "{s}Recurrence count must be greater or equal to 1 and lower than 2147483640", .{prefix});
-        defer ctx.allocator.free(msg);
-        try ctx.vm.setPendingException("DateMalformedPeriodStringException", msg);
-        return error.RuntimeError;
-    }
-    const start_obj = try ctx.createObject("DateTime");
-    try start_obj.set(ctx.allocator, "__timestamp", .{ .int = start_ts.? });
-    try start_obj.set(ctx.allocator, "__timezone", .{ .string = Value.String.borrowed("+00:00") });
-    try obj.set(ctx.allocator, "start", .{ .object = start_obj });
-    const dur = parseIsoDuration(p2);
-    const di_obj = try ctx.createObject("DateInterval");
-    try di_obj.set(ctx.allocator, "y", .{ .int = dur.y });
-    try di_obj.set(ctx.allocator, "m", .{ .int = dur.m });
-    try di_obj.set(ctx.allocator, "d", .{ .int = dur.d });
-    try di_obj.set(ctx.allocator, "h", .{ .int = dur.h });
-    try di_obj.set(ctx.allocator, "i", .{ .int = dur.mi });
-    try di_obj.set(ctx.allocator, "s", .{ .int = dur.s });
-    try di_obj.set(ctx.allocator, "f", .{ .float = dur.f });
-    try obj.set(ctx.allocator, "interval", .{ .object = di_obj });
     try setPeriodCount(ctx, obj, recurrences, options);
 }
 
+fn malformedPeriod(ctx: *NativeContext, comptime fmt: []const u8, args: anytype) RuntimeError {
+    const msg = try std.fmt.allocPrint(ctx.allocator, fmt, args);
+    defer ctx.allocator.free(msg);
+    try ctx.vm.setPendingException("DateMalformedPeriodStringException", msg);
+    return error.RuntimeError;
+}
+
 fn periodFromIsoString(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = try ctx.createObject("DatePeriod");
+    const obj = try ctx.createObject(staticClass(ctx, "DatePeriod"));
     const spec = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else "";
-    try initializePeriodFromIso(ctx, obj, spec, if (args.len >= 2) Value.toInt(args[1]) else 0, "DatePeriod::createFromISO8601String(): ");
+    try initializePeriodFromIso(ctx, obj, spec, if (args.len >= 2) Value.toInt(args[1]) else 0, "DatePeriod::createFromISO8601String", "DateTimeImmutable");
     return NativeResult.borrowed(.{ .object = obj });
 }
 
@@ -1542,21 +1529,20 @@ fn dtiCreateFromFormat(ctx: *NativeContext, args: []const Value) RuntimeError!Na
     return createFromFormatImpl(ctx, args, "DateTimeImmutable", "DateTimeImmutable::createFromFormat");
 }
 
+// the class a static factory was called on (Carbon::createFromFormat makes a
+// Carbon): the static call leaves it on the calling frame, and anything that
+// isn't a subclass of the factory's own class is not it
+fn staticClass(ctx: *NativeContext, base: []const u8) []const u8 {
+    if (ctx.vm.frame_count == 0) return base;
+    const called = ctx.vm.currentFrame().called_class orelse return base;
+    return if (ctx.vm.isInstanceOf(called, base)) ctx.vm.declaredClassName(called) else base;
+}
+
 fn createFromFormatImpl(ctx: *NativeContext, args: []const Value, default_class: []const u8, fn_name: []const u8) RuntimeError!NativeResult {
     if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     try rejectNulBytes(ctx, fn_name, 2, "datetime", args[1].string.bytes());
 
-    // late static binding: if called from a subclass (e.g. Carbon), create that class
-    const class_name = blk: {
-        var fi: usize = ctx.vm.frame_count;
-        while (fi > 0) {
-            fi -= 1;
-            if (ctx.vm.frames[fi].called_class) |cc| {
-                if (ctx.vm.classes.contains(cc)) break :blk cc;
-            }
-        }
-        break :blk default_class;
-    };
+    const class_name = staticClass(ctx, default_class);
 
     const instant = (try resolveDateWith(ctx, args[1].string.bytes(), args[0].string.bytes(), tzArgName(args, 2), false)) orelse return NativeResult.scalar(.{ .bool = false });
     const obj = try ctx.createObject(class_name);
