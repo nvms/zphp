@@ -97,7 +97,7 @@ pub fn table(vm: *VM, obj: *PhpObject, purpose: Purpose) RuntimeError!?*PhpArray
 // the object's declared properties in declaration order, then its dynamic
 // ones, leaving out unset properties and built-in state. only the debug view
 // lists a typed property that was never initialized (one whose type forbids
-// null; a nullable one reads as null, roadmap item 6)
+// null; zphp stores a nullable one unset as null, so it reads as null)
 pub fn appendOwn(vm: *VM, obj: *PhpObject, purpose: Purpose, listing: *Listing, allocator: std.mem.Allocator) RuntimeError!void {
     if (obj.slot_layout) |layout| if (obj.slots) |slots| {
         for (layout.names, 0..) |name, i| {
