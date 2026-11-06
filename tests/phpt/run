@@ -7,6 +7,9 @@
 #   tests/phpt/run Zend/tests ...   just these directories
 #   tests/phpt/run --update         also rewrite `passing` from this run
 #   JOBS=n, MEMORY_MAX=size         parallel tests (4) and the memory cap (4G)
+#
+# run it against a release build (`make release`): a debug build reports
+# leaks on stderr, which fails tests that otherwise pass
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ZPHP="$(realpath "${ZPHP:-$SCRIPT_DIR/../../zig-out/bin/zphp}")"
