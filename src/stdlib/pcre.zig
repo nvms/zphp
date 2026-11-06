@@ -15,21 +15,34 @@ const RuntimeError = error{ RuntimeError, OutOfMemory };
 const UtfCheck = struct {
     valid: bool,
     subject: []const u8,
+    utf: bool = false,
 
     fn init(code: *pcre2.Code, subject: []const u8, holder: ?Value) UtfCheck {
         var all: u32 = 0;
         _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_ALLOPTIONS, @ptrCast(&all));
         if (all & pcre2.UTF == 0) return .{ .valid = false, .subject = subject };
+        if (initUtf(subject, holder)) return .{ .valid = true, .subject = subject, .utf = true };
+        return .{ .valid = false, .subject = subject, .utf = true };
+    }
+
+    fn initUtf(subject: []const u8, holder: ?Value) bool {
         const owner: ?*Value.String.Owner = if (holder) |h| switch (h) {
             .string => |str| if (str.owner) |o| (if (!o.closure and str.ptr == o.bytes.ptr and str.len == o.bytes.len) o else null) else null,
             else => null,
         } else null;
-        if (owner) |o| if (o.utf8_valid) return .{ .valid = true, .subject = subject };
+        if (owner) |o| if (o.utf8_valid) return true;
         const valid = std.unicode.utf8ValidateSlice(subject);
         if (valid) if (owner) |o| {
             o.utf8_valid = true;
         };
-        return .{ .valid = valid, .subject = subject };
+        return valid;
+    }
+
+    // how far past an empty match the next attempt starts: one character
+    fn step(self: UtfCheck, at: usize) usize {
+        if (!self.utf or at >= self.subject.len) return 1;
+        const len = utf8SeqLen(self.subject[at]);
+        return if (at + len > self.subject.len) 1 else len;
     }
 
     // the check may be skipped only from the start of a code point
@@ -756,7 +769,7 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         total_matches += 1;
         const match_end = ovector[1];
         if (match_end == offset) {
-            offset += 1;
+            offset += utf.step(offset);
         } else {
             offset = match_end;
         }
@@ -1155,7 +1168,7 @@ fn pregReplaceArrayPattern(ctx: *NativeContext, args: []const Value) RuntimeErro
                             const ov = pcre2.pcre2_get_ovector_pointer_8(md);
                             const me = ov[1];
                             matched += 1;
-                            if (me == off) off += 1 else off = me;
+                            if (me == off) off += utf.step(off) else off = me;
                         }
                         total_count += matched;
                     }
@@ -1238,10 +1251,11 @@ fn pregReplaceLimited(ctx: *NativeContext, code: *pcre2.Code, match_data: *pcre2
 
         count += 1;
         if (me == offset) {
+            const step = utf.step(offset);
             if (offset < subject.len) {
-                try parts.append(ctx.allocator, subject[offset]);
+                try parts.appendSlice(ctx.allocator, subject[offset..@min(offset + step, subject.len)]);
             }
-            offset += 1;
+            offset += step;
         } else {
             offset = me;
         }
@@ -1376,10 +1390,11 @@ fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!
 
         replace_count += 1;
         if (match_end == offset) {
+            const step = utf.step(offset);
             if (offset < subject.len) {
-                try result.append(ctx.allocator, subject[offset]);
+                try result.appendSlice(ctx.allocator, subject[offset..@min(offset + step, subject.len)]);
             }
-            offset += 1;
+            offset += step;
         } else {
             offset = match_end;
         }
@@ -1440,7 +1455,7 @@ fn preg_replace_callback_array(ctx: *NativeContext, args: []const Value) Runtime
                             const ov = pcre2.pcre2_get_ovector_pointer_8(md);
                             const me = ov[1];
                             matched += 1;
-                            if (me == off) off += 1 else off = me;
+                            if (me == off) off += utf.step(off) else off = me;
                         }
                         total_count += matched;
                     }
@@ -1717,10 +1732,11 @@ fn mb_split(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
         splits += 1;
 
         if (match_end == offset) {
+            const step = utf.step(offset);
             if (offset < subject.len) {
-                try result.appendCopiedString(ctx.allocator, subject[offset .. offset + 1]);
+                try result.appendCopiedString(ctx.allocator, subject[offset..@min(offset + step, subject.len)]);
             }
-            offset += 1;
+            offset += step;
         } else {
             offset = match_end;
         }
