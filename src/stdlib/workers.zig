@@ -22,6 +22,7 @@ const platform = @import("../platform.zig");
 const memory = @import("../runtime/memory.zig");
 const extension = @import("../extension.zig");
 const channel = @import("channel.zig");
+const callables = @import("../runtime/callables.zig");
 const select = @import("select.zig");
 const buffer = @import("buffer.zig");
 const types = @import("types.zig");
@@ -636,7 +637,7 @@ fn runTask(w: *Worker, vm: *VM, task: *Task) void {
 fn execute(ctx: *NativeContext, w: *Worker, task: *Task) void {
     const callable: Value = if (task.closure) |*transfer|
         materializeClosure(ctx, w, transfer) catch {
-            settleFailure(ctx.vm, task, .null);
+            settleFailure(ctx.vm, task);
             return;
         }
     else
@@ -644,19 +645,14 @@ fn execute(ctx: *NativeContext, w: *Worker, task: *Task) void {
     const args_payload = task.args;
     task.args = Payload.empty;
     const args_value = hold(unpack(ctx, args_payload, task.pool.allocator) orelse return settleFatal(task, "the arguments did not transfer"));
-    var args: [64]Value = undefined;
-    var count: usize = 0;
-    if (args_value == .array) {
-        for (args_value.array.entries.items) |entry| {
-            if (count == args.len) break;
-            args[count] = entry.value;
-            count += 1;
-        }
-    }
     defer ctx.vm.releaseValue(callable);
     defer ctx.vm.releaseValue(args_value);
-    const result = ctx.invokeCallable(callable, args[0..count]) catch {
-        settleFailure(ctx.vm, task, callable);
+    const entries = if (args_value == .array) args_value.array.entries.items else &.{};
+    const args = task.pool.allocator.alloc(Value, entries.len) catch return settleFatal(task, "out of memory");
+    defer task.pool.allocator.free(args);
+    for (entries, args) |entry, *arg| arg.* = entry.value;
+    const result = callTask(ctx.vm, callable, args) catch {
+        settleFailure(ctx.vm, task);
         return;
     };
     // the call hands back its reference the way the interpreter receives a
@@ -664,7 +660,7 @@ fn execute(ctx: *NativeContext, w: *Worker, task: *Task) void {
     const owned = NativeResult.share(result).value;
     defer ctx.vm.releaseValue(owned);
     const payload = pack(ctx, result, "result", task.pool.allocator) catch {
-        settleFailure(ctx.vm, task, callable);
+        settleFailure(ctx.vm, task);
         return;
     };
     task.mutex.lock();
@@ -694,35 +690,23 @@ fn settleFatal(task: *Task, msg: []const u8) void {
     task.wake();
 }
 
-// callByName fails without an exception when the name resolves to nothing
-fn settleUndefined(task: *Task, callable: Value) void {
-    const a = task.pool.allocator;
-    var buf: [600]u8 = undefined;
-    const message = switch (callable) {
-        .string => |s| std.fmt.bufPrint(&buf, "Call to undefined function {s}()", .{s.bytes()}) catch "Call to undefined function",
-        .array => |arr| std.fmt.bufPrint(&buf, "Call to undefined method {s}::{s}()", .{ arr.entries.items[0].value.string.bytes(), arr.entries.items[1].value.string.bytes() }) catch "Call to undefined method",
-        else => "the task failed",
-    };
-    const failure = Failure{
-        .class_name = a.dupe(u8, "Error") catch return settleFatal(task, "out of memory"),
-        .message = a.dupe(u8, message) catch return settleFatal(task, "out of memory"),
-        .code = 0,
-        .file = a.dupe(u8, "") catch return settleFatal(task, "out of memory"),
-        .line = 0,
-    };
-    task.mutex.lock();
-    defer task.mutex.unlock();
-    task.failure = failure;
-    task.state = .failed;
-    task.wake();
+// a task runs its callable the way `$callable(...$args)` would in the worker
+fn callTask(vm: *VM, callable: Value, args: []const Value) RuntimeError!Value {
+    switch (try callables.resolveDynamic(vm, callable)) {
+        .callee => |callee| return callables.invoke(vm, callee, args),
+        .failure => |failure| {
+            _ = try callables.throwDynamicFailure(vm, failure);
+            return error.RuntimeError;
+        },
+    }
 }
 
 // the thrown object stays in the worker; its identity crosses as text
-fn settleFailure(vm: *VM, task: *Task, callable: Value) void {
+fn settleFailure(vm: *VM, task: *Task) void {
     const a = task.pool.allocator;
     const exc = vm.pending_exception orelse {
         if (vm.error_msg) |msg| return settleFatal(task, msg);
-        return settleUndefined(task, callable);
+        return settleFatal(task, "the task failed");
     };
     if (exc != .object) return settleFatal(task, "the task failed");
     const obj = exc.object;

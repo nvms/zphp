@@ -29,6 +29,7 @@ const CompileResult = @import("../pipeline/compiler.zig").CompileResult;
 const parser_mod = @import("../pipeline/parser.zig");
 const compiler_mod = @import("../pipeline/compiler.zig");
 const enums = @import("../stdlib/enums.zig");
+const callables = @import("callables.zig");
 
 const Allocator = std.mem.Allocator;
 pub const RuntimeError = error{ RuntimeError, OutOfMemory };
@@ -218,37 +219,7 @@ pub const NativeContext = struct {
     }
 
     fn invokeCallableAsCaller(self: *NativeContext, callable: Value, args: []const Value) RuntimeError!Value {
-        if (callable == .string) return self.vm.callByName(callable.string.bytes(), args);
-        if (callable == .object) {
-            if (std.mem.eql(u8, callable.object.class_name, "Closure")) {
-                return self.vm.callValueCallable(callable.object.get("__callable"), args);
-            }
-            if (self.vm.hasMethod(callable.object.class_name, "__invoke")) {
-                return self.vm.callMethod(callable.object, "__invoke", args);
-            }
-            return error.RuntimeError;
-        }
-        if (callable != .array) return error.RuntimeError;
-        const arr = callable.array;
-        if (arr.entries.items.len != 2) return error.RuntimeError;
-        const target = arr.entries.items[0].value;
-        const method_val = arr.entries.items[1].value;
-        if (method_val != .string) return error.RuntimeError;
-        const method = method_val.string.bytes();
-        if (target == .object) return self.vm.callMethod(target.object, method, args);
-        if (target == .string) {
-            var buf: [512]u8 = undefined;
-            const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ target.string.bytes(), method }) catch return error.RuntimeError;
-            return self.vm.callByName(full, args) catch |err| {
-                if (err == error.RuntimeError and self.vm.autoload_callbacks.items.len > 0) {
-                    try self.vm.tryAutoload(target.string.bytes());
-                    const full2 = std.fmt.bufPrint(&buf, "{s}::{s}", .{ target.string.bytes(), method }) catch return error.RuntimeError;
-                    return self.vm.callByName(full2, args);
-                }
-                return err;
-            };
-        }
-        return error.RuntimeError;
+        return callables.invoke(self.vm, try self.vm.callbackCallee(callable), args);
     }
 
     pub fn invokeCallableRef(self: *NativeContext, callable: Value, args: []Value) RuntimeError!Value {
@@ -259,33 +230,7 @@ pub const NativeContext = struct {
     }
 
     fn invokeCallableRefAsCaller(self: *NativeContext, callable: Value, args: []Value) RuntimeError!Value {
-        if (callable == .string) return self.vm.callByNameRef(callable.string.bytes(), args);
-        if (callable == .object) {
-            if (std.mem.eql(u8, callable.object.class_name, "Closure")) {
-                return self.vm.callValueCallable(callable.object.get("__callable"), args);
-            }
-            if (self.vm.hasMethod(callable.object.class_name, "__invoke")) {
-                return self.vm.callMethodRef(callable.object, "__invoke", args);
-            }
-            return error.RuntimeError;
-        }
-        // [target, 'method'] callable - target may be an instance or a class name
-        if (callable == .array) {
-            const arr = callable.array;
-            if (arr.entries.items.len == 2) {
-                const target = arr.entries.items[0].value;
-                const method_val = arr.entries.items[1].value;
-                if (method_val == .string) {
-                    if (target == .object) return self.vm.callMethodRef(target.object, method_val.string.bytes(), args);
-                    if (target == .string) {
-                        var buf: [512]u8 = undefined;
-                        const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ target.string.bytes(), method_val.string.bytes() }) catch return error.RuntimeError;
-                        return self.vm.callByNameRef(full, args);
-                    }
-                }
-            }
-        }
-        return self.invokeCallable(callable, args);
+        return callables.invokeRef(self.vm, try self.vm.callbackCallee(callable), args);
     }
 };
 
@@ -1578,6 +1523,7 @@ pub const VM = struct {
             func: ?*const ObjFunction = null,
             native: ?NativeFn = null,
             native_arity: @import("natives.zig").Arity = .{},
+            native_callbacks: u32 = 0,
             full_name: []const u8 = "",
         };
 
@@ -3511,7 +3457,7 @@ pub const VM = struct {
         return ic.native_lower.get(lower);
     }
 
-    fn functionNamedIgnoringCase(self: *VM, name: []const u8) ?[]const u8 {
+    pub fn functionNamedIgnoringCase(self: *VM, name: []const u8) ?[]const u8 {
         var buf: [256]u8 = undefined;
         if (name.len > buf.len) return null;
         const lower = std.ascii.lowerString(buf[0..name.len], name);
@@ -4513,7 +4459,7 @@ pub const VM = struct {
                     const arg_count = self.readByte();
                     const ac: usize = arg_count;
                     const name_val = self.stack[self.sp - ac - 1];
-                    if (name_val == .string) {
+                    if (name_val == .string and std.mem.indexOf(u8, name_val.string.bytes(), "::") == null) {
                         const name = name_val.string.bytes();
                         var i: usize = 0;
                         while (i < ac) : (i += 1) {
@@ -4530,57 +4476,21 @@ pub const VM = struct {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
-                    } else if (name_val == .object) {
-                        var args_buf: [16]Value = undefined;
-                        for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
-                        self.dropN(ac + 1);
-                        const result = if (std.mem.eql(u8, name_val.object.class_name, "Closure")) blk: {
-                            const callable = name_val.object.get("__callable");
-                            break :blk (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callValueCallable(callable, args_buf[0..ac]) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
-                        } else (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMethod(name_val.object, "__invoke", args_buf[0..ac]) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
-                        self.pushCallResult(result);
-                    } else if (name_val == .array) {
-                        const arr = name_val.array;
-                        if (arr.entries.items.len != 2) {
-                            self.setErrorMsg("Fatal error: Uncaught TypeError: Array callback must have exactly two elements", .{});
-                            return error.RuntimeError;
-                        }
-                        const target = arr.entries.items[0].value;
-                        const method_val = arr.entries.items[1].value;
-                        if (method_val != .string) {
-                            self.setErrorMsg("Fatal error: Uncaught TypeError: Method name must be a string", .{});
-                            return error.RuntimeError;
-                        }
-                        const method = method_val.string.bytes();
-                        var args_buf: [16]Value = undefined;
-                        for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
-                        self.dropN(ac + 1);
-                        var ctx = self.makeContext(null);
-                        const result = if (target == .object)
-                            try ctx.vm.callMethod(target.object, method, args_buf[0..ac])
-                        else if (target == .string) blk: {
-                            var buf: [512]u8 = undefined;
-                            const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ target.string.bytes(), method }) catch return error.RuntimeError;
-                            break :blk ctx.vm.callByName(full, args_buf[0..ac]) catch |err| {
-                                if (err == error.RuntimeError and self.autoload_callbacks.items.len > 0) {
-                                    try self.tryAutoload(target.string.bytes());
-                                    const full2 = std.fmt.bufPrint(&buf, "{s}::{s}", .{ target.string.bytes(), method }) catch return error.RuntimeError;
-                                    break :blk try ctx.vm.callByName(full2, args_buf[0..ac]);
-                                }
-                                return err;
-                            };
-                        } else {
-                            var buf2: [256]u8 = undefined;
-                            const msg = std.fmt.bufPrint(&buf2, "Value of type {s} is not callable", .{valueTypeName(target)}) catch "Value is not callable";
-                            if (try self.throwBuiltinException("TypeError", msg)) continue;
-                            return error.RuntimeError;
-                        };
-                        self.pushCallResult(result);
                     } else {
-                        var buf2: [256]u8 = undefined;
-                        const msg = std.fmt.bufPrint(&buf2, "Value of type {s} is not callable", .{valueTypeName(name_val)}) catch "Value is not callable";
-                        if (try self.throwBuiltinException("TypeError", msg)) continue;
-                        return error.RuntimeError;
+                        // the value stays alive across the call; its stack slot goes
+                        retainValue(name_val);
+                        defer self.releaseValue(name_val);
+                        var args_buf: [16]Value = undefined;
+                        const args = if (ac <= args_buf.len) args_buf[0..ac] else try self.allocator.alloc(Value, ac);
+                        defer if (args.ptr != &args_buf) self.allocator.free(args);
+                        for (args, 0..) |*arg, i| {
+                            arg.* = self.stack[self.sp - ac + i];
+                            retainValue(arg.*);
+                        }
+                        defer for (args) |arg| self.releaseValue(arg);
+                        self.dropN(ac + 1);
+                        const result = (try self.invokeDynamic(name_val, args, base_frame)) orelse continue;
+                        self.pushCallResult(result);
                     }
                 },
                 .call_spread => {
@@ -4807,7 +4717,7 @@ pub const VM = struct {
                         arrayUnpin(arr);
                         if (arr.refcount == 0) self.queueArrayRelease(arr);
                     }
-                    if (name_val == .string) {
+                    if (name_val == .string and std.mem.indexOf(u8, name_val.string.bytes(), "::") == null) {
                         const ref_func = self.functions.get(name_val.string.bytes());
                         var function_needs_refs = false;
                         if (ref_func) |func| {
@@ -4895,53 +4805,14 @@ pub const VM = struct {
                                 return error.RuntimeError;
                             };
                         }
-                    } else if (name_val == .array) {
-                        const cb_arr = name_val.array;
-                        if (cb_arr.entries.items.len == 2) {
-                            const target = cb_arr.entries.items[0].value;
-                            const method_val = cb_arr.entries.items[1].value;
-                            if (method_val == .string) {
-                                var args_buf: [32]Value = undefined;
-                                const ac = arr.entries.items.len;
-                                for (0..ac) |i| args_buf[i] = arr.entries.items[i].value;
-                                const result = if (target == .object)
-                                    try self.callMethod(target.object, method_val.string.bytes(), args_buf[0..ac])
-                                else if (target == .string) blk: {
-                                    var buf: [256]u8 = undefined;
-                                    const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ target.string.bytes(), method_val.string.bytes() }) catch return error.RuntimeError;
-                                    break :blk try self.callByName(full, args_buf[0..ac]);
-                                } else {
-                                    var buf2: [256]u8 = undefined;
-                                    const msg = std.fmt.bufPrint(&buf2, "Value of type {s} is not callable", .{valueTypeName(name_val)}) catch "Value is not callable";
-                                    if (try self.throwBuiltinException("TypeError", msg)) continue;
-                                    return error.RuntimeError;
-                                };
-                                self.pushCallResult(result);
-                            } else {
-                                if (try self.throwBuiltinException("TypeError", "Method name must be a string")) continue;
-                                return error.RuntimeError;
-                            }
-                        } else {
-                            if (try self.throwBuiltinException("TypeError", "Array callback must have exactly two elements")) continue;
-                            return error.RuntimeError;
-                        }
-                    } else if (name_val == .object and (std.mem.eql(u8, name_val.object.class_name, "Closure") or self.hasMethod(name_val.object.class_name, "__invoke"))) {
+                    } else {
                         retainValue(name_val);
                         defer self.releaseValue(name_val);
-                        const ac = arr.entries.items.len;
-                        const args_buf = try self.allocator.alloc(Value, ac);
-                        defer self.allocator.free(args_buf);
-                        for (0..ac) |i| args_buf[i] = arr.entries.items[i].value;
-                        const result = if (std.mem.eql(u8, name_val.object.class_name, "Closure"))
-                            (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callValueCallable(name_val.object.get("__callable"), args_buf[0..ac]) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; })
-                        else
-                            (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMethod(name_val.object, "__invoke", args_buf[0..ac]) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
+                        const args = try self.allocator.alloc(Value, arr.entries.items.len);
+                        defer self.allocator.free(args);
+                        for (arr.entries.items, args) |entry, *arg| arg.* = if (entry.ref) |ref| ref.* else entry.value;
+                        const result = (try self.invokeDynamic(name_val, args, base_frame)) orelse continue;
                         self.pushCallResult(result);
-                    } else {
-                        var buf2: [256]u8 = undefined;
-                        const msg = std.fmt.bufPrint(&buf2, "Value of type {s} is not callable", .{valueTypeName(name_val)}) catch "Value is not callable";
-                        if (try self.throwBuiltinException("TypeError", msg)) continue;
-                        return error.RuntimeError;
                     }
                 },
                 .return_ref => {
@@ -9557,7 +9428,7 @@ pub const VM = struct {
                                     continue;
                                 }
                             } else if (mc_entry.native) |native_call| {
-                                const native: Native = .{ .call = native_call, .arity = mc_entry.native_arity };
+                                const native: Native = .{ .call = native_call, .arity = mc_entry.native_arity, .callbacks = mc_entry.native_callbacks };
                                 var args_buf: [16]Value = undefined;
                                 for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
                                 self.saveFrameArgs(arg_count);
@@ -9660,7 +9531,7 @@ pub const VM = struct {
                             const mc_chunk_key2 = @intFromPtr(self.currentChunk());
                             const mc_idx2 = InlineCache.methodIndex(mc_chunk_key2, mc_ip2);
                             if (mvr.visibility == .public) {
-                                ic.method[mc_idx2] = .{ .key = mc_ip2, .chunk_key = mc_chunk_key2, .class_ptr = @intFromPtr(obj.class_name.ptr), .native = native.call, .native_arity = native.arity, .full_name = full_name };
+                                ic.method[mc_idx2] = .{ .key = mc_ip2, .chunk_key = mc_chunk_key2, .class_ptr = @intFromPtr(obj.class_name.ptr), .native = native.call, .native_arity = native.arity, .native_callbacks = native.callbacks, .full_name = full_name };
                             }
                         }
                         var args_buf: [16]Value = undefined;
@@ -15409,11 +15280,12 @@ pub const VM = struct {
         const prev_floor = self.handler_floor;
         self.handler_floor = self.handler_count;
         try self.ensureCallRoom();
-        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .call_name = self.pending_call_name };
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .call_name = self.pending_call_name, .called_class = self.pending_called_class };
         self.frames[self.frame_count].entry_sp = self.sp;
         self.consumePendingArgCount();
         self.saveFrameArgsSlice(args);
         self.pending_call_name = null;
+        self.pending_called_class = null;
         self.frame_count += 1;
         self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
@@ -16959,7 +16831,7 @@ pub const VM = struct {
         return " from global scope";
     }
 
-    fn checkVisibility(self: *VM, target_class: []const u8, vis: ClassDef.Visibility) bool {
+    pub fn checkVisibility(self: *VM, target_class: []const u8, vis: ClassDef.Visibility) bool {
         if (vis == .public) return true;
         if (vis == .private) {
             // for private, check defining class first so parent::__construct()
@@ -17248,7 +17120,7 @@ pub const VM = struct {
         return false;
     }
 
-    fn findMethodVisibility(self: *VM, class_name: []const u8, method_name: []const u8) VisResult {
+    pub fn findMethodVisibility(self: *VM, class_name: []const u8, method_name: []const u8) VisResult {
         var current: ?[]const u8 = class_name;
         while (current) |cn| {
             if (self.classes.getEntry(cn)) |entry| {
@@ -17755,7 +17627,7 @@ pub const VM = struct {
         return result;
     }
 
-    fn ensureClassHierarchyLoaded(self: *VM, class_name: []const u8) void {
+    pub fn ensureClassHierarchyLoaded(self: *VM, class_name: []const u8) void {
         var current = class_name;
         var depth: usize = 0;
         while (depth < 64) : (depth += 1) {
@@ -18556,6 +18428,7 @@ pub const VM = struct {
             try self.setPendingException("ArgumentCountError", native.arity.describe(&buf, label, input_args.len));
             return error.RuntimeError;
         }
+        if (native.callbacks != 0) if (name) |n| try self.checkCallbackArgs(n, label, native.callbacks, input_args);
         var args_buf: [256]Value = undefined;
         if (input_args.len > args_buf.len) return error.RuntimeError;
         var native_args = input_args;
@@ -19067,7 +18940,7 @@ pub const VM = struct {
     }
 
     // $this of the running frame, whether it lives in the vars map or a slot
-    fn scopeThis(self: *VM) ?*PhpObject {
+    pub fn scopeThis(self: *VM) ?*PhpObject {
         if (self.frame_count == 0) return null;
         const frame = self.currentFrame();
         if (frame.vars.get("$this")) |v| return if (v == .object) v.object else null;
@@ -20034,24 +19907,84 @@ pub const VM = struct {
         return error.RuntimeError;
     }
 
-    fn callValueCallable(self: *VM, callable: Value, args: []const Value) RuntimeError!Value {
-        if (callable == .string) return self.callByName(callable.string.bytes(), args);
-        if (callable == .object) return self.callMethod(callable.object, "__invoke", args);
-        if (callable == .array and callable.array.entries.items.len == 2) {
-            const target = callable.array.entries.items[0].value;
-            const method = callable.array.entries.items[1].value;
-            if (method != .string) return error.RuntimeError;
-            if (target == .object) return self.callMethod(target.object, method.string.bytes(), args);
-            if (target == .string) {
-                const full = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ target.string.bytes(), method.string.bytes() });
-                defer self.allocator.free(full);
-                return self.callByName(full, args);
+    // `$f(...)` for anything but a plain function name, resolved as php's
+    // dynamic call resolves it. null when an exception it raised was
+    // dispatched to a handler the caller resumes at
+    fn invokeDynamic(self: *VM, callable: Value, args: []const Value, base_frame: usize) RuntimeError!?Value {
+        const resolution = callables.resolveDynamic(self, callable) catch {
+            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) return null;
+            return error.RuntimeError;
+        };
+        switch (resolution) {
+            .failure => |failure| {
+                if (try callables.throwDynamicFailure(self, failure)) return null;
+                return error.RuntimeError;
+            },
+            .callee => |callee| {
+                const handlers_before = self.handler_count;
+                return callables.invoke(self, callee, args) catch {
+                    if (self.resumeAfterThrow(base_frame, handlers_before)) return null;
+                    return error.RuntimeError;
+                };
+            },
+        }
+    }
+
+    pub fn callValueCallable(self: *VM, callable: Value, args: []const Value) RuntimeError!Value {
+        return callables.invoke(self, try self.callbackCallee(callable), args);
+    }
+
+    // what a callback calls when an internal function runs it. its callable
+    // parameter was checked on the way in, so a method the running scope can
+    // no longer see (a private method registered as a shutdown function) is
+    // still the one it named; anything else php reports as an invalid callback
+    pub fn callbackCallee(self: *VM, callable: Value) RuntimeError!callables.Callee {
+        switch (try callables.resolveCallback(self, callable, .{ .deprecations = false })) {
+            .callee => |callee| return callee,
+            .failure => |failure| {
+                if (failure == .inaccessible) return failure.inaccessible.direct;
+                var buf: std.ArrayListUnmanaged(u8) = .empty;
+                defer buf.deinit(self.allocator);
+                try buf.appendSlice(self.allocator, "Invalid callback ");
+                try callables.writeName(callable, &buf, self.allocator);
+                try buf.appendSlice(self.allocator, ", ");
+                try callables.writeReason(failure, &buf, self.allocator);
+                try self.setPendingException("Error", buf.items);
+                return error.RuntimeError;
+            },
+        }
+    }
+
+    // a native's `callable` parameters, checked as php's argument parsing
+    // does before the function runs
+    fn checkCallbackArgs(self: *VM, name: []const u8, label: []const u8, positions: u32, args: []const Value) RuntimeError!void {
+        const signature = native_params.get(name) orelse return;
+        for (args, 0..) |arg, i| {
+            if (i >= 32 or positions & (@as(u32, 1) << @intCast(i)) == 0) continue;
+            const param = signature.params[@min(i, signature.params.len - 1)];
+            const nullable = param.type.len > 0 and param.type[0] == '?';
+            if (nullable and arg == .null) continue;
+            switch (try callables.resolveCallback(self, arg, .{})) {
+                .callee => continue,
+                .failure => |failure| {
+                    var buf: std.ArrayListUnmanaged(u8) = .empty;
+                    defer buf.deinit(self.allocator);
+                    try buf.print(self.allocator, "{s}(): Argument #{d} (${s}) must be a valid callback{s}, ", .{ label, i + 1, param.name, if (nullable) " or null" else "" });
+                    try callables.writeReason(failure, &buf, self.allocator);
+                    try self.setPendingException("TypeError", buf.items);
+                    return error.RuntimeError;
+                },
             }
         }
-        return error.RuntimeError;
     }
 
     pub fn callByName(self: *VM, raw_name: []const u8, args: []const Value) RuntimeError!Value {
+        return self.callByNameAs(raw_name, args, null);
+    }
+
+    // called_class is what static:: names in a static method the call reaches
+    // through a subclass (call_user_func(['Child', 'inheritedStatic']))
+    pub fn callByNameAs(self: *VM, raw_name: []const u8, args: []const Value, called_class: ?[]const u8) RuntimeError!Value {
         // A native callback may execute calls at the same VM frame depth.
         // Restore the enclosing call's output-argument destinations afterwards.
         const saved_sources_count = self.ic.?.active_arg_count;
@@ -20082,11 +20015,11 @@ pub const VM = struct {
             var checked_buf: [16]Value = undefined;
             const checked = try self.checkedArgs(name, func, args, &checked_buf);
             defer if (checked.ptr != &checked_buf and checked.ptr != args.ptr) self.allocator.free(checked);
-            return self.callUserFunction(name, func, checked);
+            return self.callUserFunction(name, func, checked, called_class);
         } else if (self.functionNamedIgnoringCase(name)) |registered| {
-            return self.callByName(registered, args);
+            return self.callByNameAs(registered, args, called_class);
         } else if (self.staticMethodNamed(name)) |registered| {
-            return self.callByName(registered, args);
+            return self.callByNameAs(registered, args, called_class);
         } else return error.RuntimeError;
     }
 
@@ -20117,11 +20050,11 @@ pub const VM = struct {
         return error.RuntimeError;
     }
 
-    fn callUserFunction(self: *VM, name: []const u8, func: *const ObjFunction, args: []const Value) RuntimeError!Value {
+    fn callUserFunction(self: *VM, name: []const u8, func: *const ObjFunction, args: []const Value, called_class: ?[]const u8) RuntimeError!Value {
         {
             if (self.ic) |ic| ic.pending_arg_count = @intCast(@min(args.len, 255));
             self.pending_call_name = name;
-            self.pending_called_class = self.closureScopeByName(name);
+            self.pending_called_class = called_class orelse self.closureScopeByName(name);
             const saved_pia_outer = self.pending_invoke_args;
             self.pending_invoke_args = args;
             defer self.pending_invoke_args = saved_pia_outer;
@@ -20277,10 +20210,14 @@ pub const VM = struct {
     }
 
     pub fn callByNameRef(self: *VM, raw_name: []const u8, args: []Value) RuntimeError!Value {
+        return self.callByNameRefAs(raw_name, args, null);
+    }
+
+    pub fn callByNameRefAs(self: *VM, raw_name: []const u8, args: []Value, called_class: ?[]const u8) RuntimeError!Value {
         const name = if (raw_name.len > 0 and raw_name[0] == '\\') raw_name[1..] else raw_name;
         if (self.functions.get(name)) |func| {
             if (func.ref_params.len == 0) {
-                return self.callByName(name, args);
+                return self.callByNameAs(name, args, called_class);
             }
             const bind_count = @min(args.len, func.arity);
             var new_vars = self.acquireFrameVars();
@@ -20305,7 +20242,7 @@ pub const VM = struct {
             try self.fillDefaults(&new_vars, func, bind_count);
 
             self.pending_call_name = name;
-            self.pending_called_class = self.closureScopeByName(name);
+            self.pending_called_class = called_class orelse self.closureScopeByName(name);
             const result = try self.executeFunctionWithRefs(func, new_vars, ref_slots);
 
             for (0..bind_count) |i| {
@@ -20318,7 +20255,7 @@ pub const VM = struct {
         const saved_ref_args = self.pending_ref_args;
         self.pending_ref_args = args;
         defer self.pending_ref_args = saved_ref_args;
-        return self.callByName(name, args);
+        return self.callByNameAs(name, args, called_class);
     }
 
     // fibers

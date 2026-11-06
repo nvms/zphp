@@ -41,8 +41,8 @@ pub const Signature = struct {
 
 const zphp_only = std.StaticStringMap(Signature).initComptime(.{
     .{ "Zphp\\Pool::__construct", Signature{ .params = &[_]Param{ .{ .name = "workers", .default = .null, .type = "?int" }, .{ .name = "bootstrap", .default = .null, .type = "?string" }, .{ .name = "queue", .default = .null, .type = "?int" } }, .returns = "" } },
-    .{ "Zphp\\Pool::submit", Signature{ .params = &[_]Param{ .{ .name = "callable", .type = "callable" }, .{ .name = "args", .default = .empty_array, .type = "array" } }, .returns = "Zphp\\Future" } },
-    .{ "Zphp\\Pool::trySubmit", Signature{ .params = &[_]Param{ .{ .name = "callable", .type = "callable" }, .{ .name = "args", .default = .empty_array, .type = "array" } }, .returns = "?Zphp\\Future" } },
+    .{ "Zphp\\Pool::submit", Signature{ .params = &[_]Param{ .{ .name = "callable", .type = "Closure|array|string" }, .{ .name = "args", .default = .empty_array, .type = "array" } }, .returns = "Zphp\\Future" } },
+    .{ "Zphp\\Pool::trySubmit", Signature{ .params = &[_]Param{ .{ .name = "callable", .type = "Closure|array|string" }, .{ .name = "args", .default = .empty_array, .type = "array" } }, .returns = "?Zphp\\Future" } },
     .{ "Zphp\\Pool::collect", Signature{ .params = &[_]Param{ .{ .name = "timeout", .default = .null, .type = "int|float|null" } }, .returns = "?Zphp\\Future" } },
     .{ "Zphp\\Pool::shutdown", Signature{ .params = &[_]Param{ .{ .name = "timeout", .default = .null, .type = "int|float|null" } }, .returns = "bool" } },
     .{ "Zphp\\Future::await", Signature{ .params = &[_]Param{ .{ .name = "timeout", .default = .null, .type = "int|float|null" } }, .returns = "mixed" } },

@@ -13,12 +13,14 @@ pub fn Table(comptime NativeFn: type) type {
         pub const Native = struct {
             call: NativeFn,
             arity: Arity,
+            // bit i set: parameter i is `callable` or `?callable`
+            callbacks: u32,
         };
 
         map: std.StringHashMapUnmanaged(Native) = .{},
 
         pub fn put(self: *Self, allocator: Allocator, name: []const u8, call: NativeFn) !void {
-            try self.map.put(allocator, name, .{ .call = call, .arity = Arity.of(name) });
+            try self.map.put(allocator, name, .{ .call = call, .arity = Arity.of(name), .callbacks = callbackParams(name) });
         }
 
         pub fn get(self: *const Self, name: []const u8) ?Native {
@@ -45,6 +47,17 @@ pub fn Table(comptime NativeFn: type) type {
             self.map.deinit(allocator);
         }
     };
+}
+
+// the parameters php checks as callbacks before the function runs
+pub fn callbackParams(name: []const u8) u32 {
+    const signature = native_params.get(name) orelse return 0;
+    var positions: u32 = 0;
+    for (signature.params, 0..) |param, i| {
+        if (i >= 32) break;
+        if (std.mem.eql(u8, param.type, "callable") or std.mem.eql(u8, param.type, "?callable")) positions |= @as(u32, 1) << @intCast(i);
+    }
+    return positions;
 }
 
 // how many arguments php lets a call pass; a native without a signature
