@@ -51,8 +51,8 @@ pub const entries = .{
     .{ "is_infinite", native_is_infinite },
     .{ "is_nan", native_is_nan },
     .{ "mt_rand", native_rand },
-    .{ "mt_srand", native_srand_noop },
-    .{ "srand", native_srand_noop },
+    .{ "mt_srand", native_mt_srand },
+    .{ "srand", native_mt_srand },
     .{ "mt_getrandmax", native_getrandmax },
     .{ "getrandmax", native_getrandmax },
     .{ "fpow", native_fpow },
@@ -217,11 +217,20 @@ fn native_lcg_value(_: *NativeContext, _: []const Value) RuntimeError!NativeResu
     return NativeResult.scalar(.{ .float = platform.random.float(f64) });
 }
 
-fn native_srand_noop(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const seed: u32 = if (args.len >= 1) blk: {
+// mt_srand and srand: a seed, or a random one for null, and the mode; any
+// mode but MT_RAND_PHP is MT_RAND_MT19937
+fn native_mt_srand(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const legacy = args.len >= 2 and Value.toInt(args[1]) == 1;
+    if (legacy) try ctx.vm.raiseError(@import("../runtime/vm.zig").VM.E_DEPRECATED, "The MT_RAND_PHP variant of Mt19937 is deprecated");
+    const seed: u32 = if (args.len >= 1 and args[0] != .null) blk: {
         const v = Value.toInt(args[0]);
         break :blk @as(u32, @truncate(@as(u64, @bitCast(v))));
-    } else @truncate(@as(u64, @intCast(platform.timestamp())));
+    } else blk: {
+        var entropy: [4]u8 = undefined;
+        platform.random.bytes(&entropy);
+        break :blk std.mem.readInt(u32, &entropy, .little);
+    };
+    ctx.vm.mt19937.mode = if (legacy) .php else .mt19937;
     ctx.vm.mt19937.seed(seed);
     ctx.vm.rng_seeded = true;
     return NativeResult.scalar(.null);
@@ -249,15 +258,14 @@ fn native_rand(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     if (lo > hi) {
         const fn_name: []const u8 = if (ctx.call_name) |c| c else "mt_rand";
         if (std.mem.eql(u8, fn_name, "rand")) {
-            return NativeResult.scalar(.{ .int = ctx.vm.mt19937.nextRange(hi, lo) });
+            return NativeResult.scalar(.{ .int = ctx.vm.mt19937.nextCommon(hi, lo) });
         }
         const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Argument #2 ($max) must be greater than or equal to argument #1 ($min)", .{fn_name});
         defer ctx.allocator.free(msg);
         try ctx.vm.setPendingException("ValueError", msg);
         return error.RuntimeError;
     }
-    if (lo == hi) return NativeResult.scalar(.{ .int = lo });
-    return NativeResult.scalar(.{ .int = ctx.vm.mt19937.nextRange(lo, hi) });
+    return NativeResult.scalar(.{ .int = ctx.vm.mt19937.nextCommon(lo, hi) });
 }
 
 fn native_pow(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {

@@ -1,7 +1,8 @@
 // PHP-compatible MT19937 + range-conversion. matches PHP 8.x byte-for-byte for
 // any given seed and mt_rand($min, $max) call so deterministic test fixtures
-// reproduce. PHP's RAND_RANGE_BADSCALING legacy path isn't implemented; default
-// PHP 7.1+ mode is the standard rejection-sampled mode this file implements.
+// reproduce, in both of php's modes: MT_RAND_MT19937 and the deprecated
+// MT_RAND_PHP, which reloads with php's old twist and scales mt_rand ranges
+// as RAND_RANGE_BADSCALING did
 
 const std = @import("std");
 
@@ -11,9 +12,12 @@ const MATRIX_A: u32 = 0x9908b0df;
 const UPPER_MASK: u32 = 0x80000000;
 const LOWER_MASK: u32 = 0x7fffffff;
 
+pub const Mode = enum(u8) { mt19937 = 0, php = 1 };
+
 pub const Mt19937 = struct {
     state: [N]u32 = undefined,
     index: usize = N,
+    mode: Mode = .mt19937,
 
     pub fn seed(self: *Mt19937, s: u32) void {
         self.state[0] = s;
@@ -25,18 +29,23 @@ pub const Mt19937 = struct {
         self.index = N;
     }
 
+    // twist(m, u, v): MT19937 takes the low bit of v, php's legacy twist that
+    // of u
+    fn twist(self: *const Mt19937, m: u32, u: u32, v: u32) u32 {
+        const y = (u & UPPER_MASK) | (v & LOWER_MASK);
+        const odd = if (self.mode == .php) u & 1 else v & 1;
+        return m ^ (y >> 1) ^ (if (odd != 0) MATRIX_A else @as(u32, 0));
+    }
+
     fn generateBlock(self: *Mt19937) void {
         var i: usize = 0;
         while (i < N - M) : (i += 1) {
-            const y = (self.state[i] & UPPER_MASK) | (self.state[i + 1] & LOWER_MASK);
-            self.state[i] = self.state[i + M] ^ (y >> 1) ^ (if ((y & 1) != 0) MATRIX_A else @as(u32, 0));
+            self.state[i] = self.twist(self.state[i + M], self.state[i], self.state[i + 1]);
         }
         while (i < N - 1) : (i += 1) {
-            const y = (self.state[i] & UPPER_MASK) | (self.state[i + 1] & LOWER_MASK);
-            self.state[i] = self.state[i + M - N] ^ (y >> 1) ^ (if ((y & 1) != 0) MATRIX_A else @as(u32, 0));
+            self.state[i] = self.twist(self.state[i + M - N], self.state[i], self.state[i + 1]);
         }
-        const y_last = (self.state[N - 1] & UPPER_MASK) | (self.state[0] & LOWER_MASK);
-        self.state[N - 1] = self.state[M - 1] ^ (y_last >> 1) ^ (if ((y_last & 1) != 0) MATRIX_A else @as(u32, 0));
+        self.state[N - 1] = self.twist(self.state[M - 1], self.state[N - 1], self.state[0]);
         self.index = 0;
     }
 
@@ -54,6 +63,16 @@ pub const Mt19937 = struct {
     // PHP's mt_rand returns a 31-bit value
     pub fn next31(self: *Mt19937) i64 {
         return @as(i64, self.nextU32() >> 1);
+    }
+
+    // mt_rand($min, $max) and rand($min, $max): php_mt_rand_common, which in
+    // MT_RAND_PHP mode scales a 31-bit value into the range
+    pub fn nextCommon(self: *Mt19937, min: i64, max: i64) i64 {
+        if (self.mode == .mt19937) return self.nextRange(min, max);
+        const r: f64 = @floatFromInt(self.nextU32() >> 1);
+        const width = @as(f64, @floatFromInt(max)) - @as(f64, @floatFromInt(min)) + 1.0;
+        const offset: u64 = @intFromFloat(width * (r / 2147483648.0));
+        return @bitCast(offset +% @as(u64, @bitCast(min)));
     }
 
     // PHP's range conversion for mt_rand($min, $max). uses the full 32-bit

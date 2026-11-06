@@ -9,10 +9,7 @@ set_error_handler(function ($level, $message) {
 
 utf8_encode("a");
 lcg_value();
-$h = curl_init();
-curl_close($h);
-$f = finfo_open();
-finfo_close($f);
+mt_srand(1, MT_RAND_PHP);
 $r = new ReflectionProperty('Exception', 'message');
 $r->setAccessible(true);
 $s = new SplObjectStorage;

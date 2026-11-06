@@ -123,12 +123,13 @@ fn mtConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
         @as(u32, @truncate(@as(u64, @bitCast(Value.toInt(args[0])))))
     else
         @truncate(freshU64FromCrypto());
-    // arg 1 is the MT_RAND_* mode; only MT_RAND_MT19937 (= 0) is supported
-    if (args.len >= 2 and args[1] == .int and args[1].int != 0 and args[1].int != 1) {
-        try ctx.vm.setPendingException("ValueError", "Mt19937::__construct(): Argument #2 ($mode) must be a valid mode");
+    const mode: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
+    if (mode != 0 and mode != 1) {
+        try ctx.vm.setPendingException("ValueError", "Random\\Engine\\Mt19937::__construct(): Argument #2 ($mode) must be either MT_RAND_MT19937 or MT_RAND_PHP");
         return error.RuntimeError;
     }
-    var m = Mt19937{};
+    if (mode == 1) try ctx.vm.raiseError(VM.E_DEPRECATED, "The MT_RAND_PHP variant of Mt19937 is deprecated");
+    var m = Mt19937{ .mode = if (mode == 1) .php else .mt19937 };
     m.seed(seed_int);
     try storeState(ctx, this, std.mem.asBytes(&m));
     return NativeResult.scalar(.null);
