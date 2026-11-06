@@ -263,6 +263,15 @@ pub const Compiler = struct {
     use_fn_aliases: std.StringHashMapUnmanaged([]const u8) = .{},
     use_const_aliases: std.StringHashMapUnmanaged([]const u8) = .{},
     labels: std.StringHashMapUnmanaged(usize) = .{},
+    // the token of each label's statement, telling a repeat compile of the
+    // same statement from a second definition
+    label_sites: std.StringHashMapUnmanaged(u32) = .{},
+    // the loops, switches, and finally bodies being compiled, innermost
+    // last. a goto may not jump into one it isn't in, nor out of a finally
+    jump_scopes: std.ArrayListUnmanaged(JumpScope) = .empty,
+    next_jump_scope: u32 = 0,
+    // the scopes each label was compiled in
+    label_scopes: std.StringHashMapUnmanaged([]const JumpScope) = .{},
     pending_gotos: std.ArrayListUnmanaged(PendingGoto) = .empty,
     file_path: []const u8 = "",
     file_dir: ?[]const u8 = null,
@@ -297,7 +306,43 @@ pub const Compiler = struct {
         label: []const u8,
         source_offset: usize,
         token: u32,
+        // the scopes the goto was compiled in, owned
+        scopes: []const JumpScope,
     };
+
+    pub const JumpScope = struct { id: u32, finally: bool };
+
+    pub fn pushJumpScope(self: *Compiler, finally: bool) !void {
+        try self.jump_scopes.append(self.allocator, .{ .id = self.next_jump_scope, .finally = finally });
+        self.next_jump_scope += 1;
+    }
+
+    pub fn popJumpScope(self: *Compiler) void {
+        _ = self.jump_scopes.pop();
+    }
+
+    fn jumpScopesNow(self: *Compiler) ![]const JumpScope {
+        return self.allocator.dupe(JumpScope, self.jump_scopes.items);
+    }
+
+    // zend_resolve_goto_label's checks: the label's scopes must all enclose
+    // the goto too, and a goto in a finally body stays in it
+    fn checkGoto(self: *Compiler, token: u32, from: []const JumpScope, to: []const JumpScope) error{CompileError}!void {
+        for (to) |scope| {
+            if (!hasJumpScope(from, scope.id)) {
+                if (scope.finally) return self.fail(token, "jump into a finally block is disallowed");
+                return self.fail(token, "'goto' into loop or switch statement is disallowed");
+            }
+        }
+        for (from) |scope| {
+            if (scope.finally and !hasJumpScope(to, scope.id)) return self.fail(token, "jump out of a finally block is disallowed");
+        }
+    }
+
+    fn hasJumpScope(scopes: []const JumpScope, id: u32) bool {
+        for (scopes) |scope| if (scope.id == id) return true;
+        return false;
+    }
 
     // ==================================================================
     // node dispatch
@@ -605,18 +650,40 @@ pub const Compiler = struct {
             .use_const_stmt => try compiler_stmt.compileUseConst(self, node),
             .label_stmt => {
                 const label = self.ast.tokenSlice(node.main_token);
-                if (self.labels.contains(label)) return self.failFmt(node.main_token, "Label '{s}' already defined", .{label});
-                try self.labels.put(self.allocator, label, self.chunk.offset());
+                // finally bodies compile more than once; the same label
+                // statement coming round again isn't a second definition
+                const site = try self.label_sites.getOrPut(self.allocator, label);
+                if (site.found_existing and site.value_ptr.* != node.main_token) return self.failFmt(node.main_token, "Label '{s}' already defined", .{label});
+                site.value_ptr.* = node.main_token;
+                const target = self.chunk.offset();
+                try self.labels.put(self.allocator, label, target);
+                const here = try self.jumpScopesNow();
+                const scopes = try self.label_scopes.getOrPut(self.allocator, label);
+                if (scopes.found_existing) self.allocator.free(scopes.value_ptr.*);
+                scopes.value_ptr.* = here;
+                // forward gotos land on the label as compiled now, so a goto
+                // in one copy of a finally body jumps within that copy
+                var i: usize = 0;
+                while (i < self.pending_gotos.items.len) {
+                    const pg = self.pending_gotos.items[i];
+                    if (std.mem.eql(u8, pg.label, label)) {
+                        try self.checkGoto(pg.token, pg.scopes, here);
+                        self.patchJumpTo(pg.offset, target);
+                        self.allocator.free(pg.scopes);
+                        _ = self.pending_gotos.swapRemove(i);
+                    } else i += 1;
+                }
             },
             // strict_types is read from the file's tokens; ticks and encoding have no effect
             .declare_stmt => if (node.data.rhs != 0) try self.compileNode(node.data.rhs),
             .goto_stmt => {
                 const label = self.ast.tokenSlice(node.main_token);
                 if (self.labels.get(label)) |target| {
+                    try self.checkGoto(node.main_token, self.jump_scopes.items, self.label_scopes.get(label).?);
                     try self.emitLoop(target);
                 } else {
                     const j = try self.emitJump(.jump);
-                    try self.pending_gotos.append(self.allocator, .{ .offset = j, .label = label, .source_offset = self.current_source_offset, .token = node.main_token });
+                    try self.pending_gotos.append(self.allocator, .{ .offset = j, .label = label, .source_offset = self.current_source_offset, .token = node.main_token, .scopes = try self.jumpScopesNow() });
                 }
             },
             .qualified_name => {
@@ -1343,8 +1410,14 @@ pub const Compiler = struct {
         const a = self.allocator;
         self.break_jumps.deinit(a);
         self.continue_jumps.deinit(a);
+        for (self.pending_gotos.items) |pg| a.free(pg.scopes);
         self.pending_gotos.deinit(a);
+        var ls_it = self.label_scopes.valueIterator();
+        while (ls_it.next()) |v| a.free(v.*);
+        self.label_scopes.deinit(a);
+        self.jump_scopes.deinit(a);
         self.labels.deinit(a);
+        self.label_sites.deinit(a);
         self.local_slots.deinit(a);
         self.hoisted_nodes.deinit(a);
         self.hoisted_names.deinit(a);
@@ -1414,9 +1487,13 @@ pub const Compiler = struct {
     }
 
     pub fn patchGotos(self: *Compiler) error{CompileError}!void {
-        for (self.pending_gotos.items) |pg| {
-            const target = self.labels.get(pg.label) orelse return self.failFmt(pg.token, "'goto' to undefined label '{s}'", .{pg.label});
-            self.patchJumpTo(pg.offset, target);
+        // a goto is patched when its label compiles, so one still pending
+        // names a label that never did
+        if (self.pending_gotos.items.len > 0) {
+            const pg = self.pending_gotos.items[0];
+            // a label inside a finally body is out of reach once that body is compiled
+            if (self.label_scopes.get(pg.label)) |to| try self.checkGoto(pg.token, pg.scopes, to);
+            return self.failFmt(pg.token, "'goto' to undefined label '{s}'", .{pg.label});
         }
     }
 

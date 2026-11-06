@@ -41,6 +41,7 @@ pub fn compileWhile(self: *Compiler, node: Ast.Node) Error!void {
     self.break_jumps = .empty;
     self.continue_jumps = .empty;
     self.loop_depth += 1;
+    try self.pushJumpScope(false);
 
     const loop_top = self.chunk.offset();
     self.loop_start = loop_top;
@@ -64,6 +65,7 @@ pub fn compileWhile(self: *Compiler, node: Ast.Node) Error!void {
     self.break_jumps = prev_breaks;
     self.continue_jumps = prev_continues;
     self.loop_depth -= 1;
+    self.popJumpScope();
     self.loop_start = prev_start;
 }
 
@@ -74,6 +76,7 @@ pub fn compileDoWhile(self: *Compiler, node: Ast.Node) Error!void {
     self.break_jumps = .empty;
     self.continue_jumps = .empty;
     self.loop_depth += 1;
+    try self.pushJumpScope(false);
 
     const loop_top = self.chunk.offset();
     self.loop_start = loop_top;
@@ -98,6 +101,7 @@ pub fn compileDoWhile(self: *Compiler, node: Ast.Node) Error!void {
     self.break_jumps = prev_breaks;
     self.continue_jumps = prev_continues;
     self.loop_depth -= 1;
+    self.popJumpScope();
     self.loop_start = prev_start;
 }
 
@@ -148,6 +152,7 @@ pub fn compileFor(self: *Compiler, node: Ast.Node) Error!void {
     self.continue_jumps = .empty;
     self.use_continue_jumps = (update_n != 0);
     self.loop_depth += 1;
+    try self.pushJumpScope(false);
 
     if (init_n != 0) {
         try self.compileNode(init_n);
@@ -204,6 +209,7 @@ pub fn compileFor(self: *Compiler, node: Ast.Node) Error!void {
     self.continue_jumps = prev_continues;
     self.use_continue_jumps = prev_use_cj;
     self.loop_depth -= 1;
+    self.popJumpScope();
     self.loop_start = prev_start;
 }
 
@@ -234,6 +240,7 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
         self.loop_foreach_close[self.loop_depth] = close_on_exit;
     }
     self.loop_depth += 1;
+    try self.pushJumpScope(false);
     self.foreach_depth += 1;
     // COW: a by-ref foreach writes back into the iterable each iteration; if the
     // iterable variable shares its array, separate it once up front (vivify-load
@@ -318,6 +325,7 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     self.continue_jumps = prev_continues;
     self.use_continue_jumps = prev_use_cj;
     self.loop_depth -= 1;
+    self.popJumpScope();
     if (self.loop_depth < 32) self.loop_is_foreach[self.loop_depth] = false;
     self.foreach_depth -= 1;
     self.loop_start = prev_start;
@@ -336,6 +344,7 @@ pub fn compileSwitch(self: *Compiler, node: Ast.Node) Error!void {
     self.loop_start = self.chunk.offset();
     if (self.loop_depth < 32) self.loop_is_foreach[self.loop_depth] = false;
     self.loop_depth += 1;
+    try self.pushJumpScope(false);
 
     try self.compileNode(node.data.lhs);
     const temp_name = try std.fmt.allocPrint(self.allocator, "__switch_{d}", .{self.closure_count});
@@ -408,6 +417,7 @@ pub fn compileSwitch(self: *Compiler, node: Ast.Node) Error!void {
 
     if (end_no_match) |j| self.patchJump(j);
     self.loop_depth -= 1;
+    self.popJumpScope();
     const switch_depth = self.loop_depth;
     for (self.break_jumps.items) |bj| {
         if (bj.depth > switch_depth) {
@@ -670,7 +680,7 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
     if (finally_node != 0) {
         // no catch matched: pop catch-body handler, run finally, re-throw
         try self.emitOp(.pop_handler);
-        try self.compileNode(finally_node);
+        try compileFinallyCopy(self, finally_node);
         try self.emitOp(.throw);
 
         // catch body completed normally: pop catch-body handler, jump to normal finally
@@ -681,13 +691,13 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
         // exception from catch body: patch the catch-body handler to here
         // exception is on the stack, run finally then re-throw
         self.patchJump(finally_handler_offset);
-        try self.compileNode(finally_node);
+        try compileFinallyCopy(self, finally_node);
         try self.emitOp(.throw);
 
         // normal path: try completed or catch completed without throwing
         self.patchJump(skip_catches);
         self.patchJump(skip_to_normal);
-        try self.compileNode(finally_node);
+        try compileFinallyCopy(self, finally_node);
     } else {
         // no finally: just re-throw
         try self.emitOp(.throw);
@@ -695,6 +705,25 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
         self.patchJump(skip_catches);
         for (end_jumps.items) |ej| self.patchJump(ej);
     }
+}
+
+// a finally body compiles once per way out of the try. php allows no jump
+// into or out of a finally block, so its labels belong to the copy being
+// compiled: drop them after each one, or a goto in the next copy would take
+// the previous copy's label for a backward jump
+fn compileFinallyCopy(self: *Compiler, finally_node: u32) Error!void {
+    var before: std.StringHashMapUnmanaged(void) = .{};
+    defer before.deinit(self.allocator);
+    var it = self.labels.keyIterator();
+    while (it.next()) |k| try before.put(self.allocator, k.*, {});
+    try self.pushJumpScope(true);
+    try self.compileNode(finally_node);
+    self.popJumpScope();
+    var added: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer added.deinit(self.allocator);
+    it = self.labels.keyIterator();
+    while (it.next()) |k| if (!before.contains(k.*)) try added.append(self.allocator, k.*);
+    for (added.items) |k| _ = self.labels.remove(k);
 }
 
 pub fn compileGlobal(self: *Compiler, node: Ast.Node) Error!void {

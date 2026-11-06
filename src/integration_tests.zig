@@ -2077,6 +2077,15 @@ test "goto labels are checked at compile time" {
     try expectCompileFatal("<?php function f() { a: a: }", "Label 'a' already defined");
     try expectCompileFatal("<?php function f() { goto out; }", "'goto' to undefined label 'out'");
     try expectOutput("<?php $i = 0; again: $i++; if ($i < 3) goto again; echo $i; goto done; echo 'skipped'; done: echo '!';", "3!");
+    try expectCompileFatal("<?php goto t; try { } finally { t: echo 1; }", "jump into a finally block is disallowed");
+    try expectCompileFatal("<?php try { } finally { b: echo 1; } goto b;", "jump into a finally block is disallowed");
+    try expectCompileFatal("<?php try { } finally { goto o; } o: echo 1;", "jump out of a finally block is disallowed");
+    try expectCompileFatal("<?php goto t; while (0) { t: echo 1; }", "'goto' into loop or switch statement is disallowed");
+    try expectCompileFatal("<?php for ($i = 0; $i < 3; $i++) { t: echo $i; } goto t;", "'goto' into loop or switch statement is disallowed");
+    try expectCompileFatal("<?php goto s; switch (1) { case 1: s: echo 1; }", "'goto' into loop or switch statement is disallowed");
+    try expectOutput("<?php foreach ([1, 2] as $v) { if ($v == 2) goto done; echo $v; } done: echo 'd'; switch (1) { case 1: goto x; case 2: x: echo 'x'; }", "1dx");
+    // a finally body compiles once per path out of the try; its labels aren't duplicates
+    try expectOutput("<?php function f() { try { } finally { goto t; t: echo 'f'; } } f(); goto b; try { echo 1; } catch (Exception $e) { b: echo 4; } finally { echo 5; c: echo 6; } echo 7;", "f4567");
 }
 
 test "self, parent, and static cannot be extended or implemented" {
