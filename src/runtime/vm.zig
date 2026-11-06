@@ -5061,7 +5061,10 @@ pub const VM = struct {
                     const val = self.pop();
                     const arr_val = self.pop();
                     if (arr_val == .array) {
-                        try arr_val.array.append(self.allocator, val);
+                        if (!try arr_val.array.appendNew(self.allocator, val)) {
+                            if (try self.throwNextElementOccupied()) continue;
+                            return error.RuntimeError;
+                        }
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetSet")) {
                         _ = self.callMethod(arr_val.object, "offsetSet", &.{ .null, val }) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -5093,6 +5096,10 @@ pub const VM = struct {
                         return error.RuntimeError;
                     }
                     if (key == .resource) self.warnResourceOffset(key) catch if (try self.resumeRaised()) continue;
+                    if (op == .array_push_ref and array.nextElementOccupied()) {
+                        if (try self.throwNextElementOccupied()) continue;
+                        return error.RuntimeError;
+                    }
                     const ak = if (op == .array_push_ref)
                         PhpArray.Key{ .int = if (array.has_int_keys) array.next_int_key else 0 }
                     else
@@ -5112,7 +5119,11 @@ pub const VM = struct {
                     const val = self.popTransfer();
                     const arr_val = self.peek();
                     if (arr_val == .array) {
-                        try arr_val.array.append(self.allocator, val);
+                        if (!try arr_val.array.appendNew(self.allocator, val)) {
+                            self.stackRelease(val);
+                            if (try self.throwNextElementOccupied()) continue;
+                            return error.RuntimeError;
+                        }
                         if (op == .arg_array_push) try self.recordArgArraySource(arr_val.array, arr_val.array.entries.items[arr_val.array.entries.items.len - 1].key, source);
                         self.stackRelease(val);
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetSet")) {
@@ -5310,13 +5321,13 @@ pub const VM = struct {
                     const container = self.pop();
                     switch (container) {
                         .array => |arr| {
+                            if (arr.nextElementOccupied()) {
+                                if (try self.throwNextElementOccupied()) continue;
+                                return error.RuntimeError;
+                            }
                             const new_arr = try self.allocArray();
-                            const before = arr.entries.items.len;
                             try self.arrayAppendOwned(arr, .{ .array = new_arr });
-                            if (arr.entries.items.len == before) {
-                                self.emitWarning("Cannot add element to the array as the next element is already occupied") catch if (try self.resumeRaised()) continue;
-                                self.push(.null);
-                            } else self.push(.{ .array = new_arr });
+                            self.push(.{ .array = new_arr });
                         },
                         .object => |obj| if (self.hasMethod(obj.class_name, "offsetGet")) {
                             const result = self.callMethod(obj, "offsetGet", &.{.null}) catch {
@@ -6533,6 +6544,10 @@ pub const VM = struct {
                     else
                         try self.internName(varVarName(try self.valueToString(self.pop()), &buf));
                     const arr_val = self.pop();
+                    if (arr_val == .array and arr_val.array.nextElementOccupied()) {
+                        if (try self.throwNextElementOccupied()) continue;
+                        return error.RuntimeError;
+                    }
                     self.push(try self.bindArrayElementRef(arr_val, null, var_name));
                 },
 
@@ -8094,8 +8109,15 @@ pub const VM = struct {
                         src = self.callMethod(src.object, "getIterator", &.{}) catch .null;
                     }
 
+                    // an integer-keyed element appended past maxInt is php's
+                    // "next element is already occupied" Error
+                    var occupied = false;
                     if (src == .array) {
                         for (src.array.entries.items) |entry| {
+                            if (entry.key == .int and target.array.nextElementOccupied()) {
+                                occupied = true;
+                                break;
+                            }
                             if (entry.key == .string) {
                                 try self.arraySetOwned(target.array, entry.key, if (entry.ref) |ref| ref.* else entry.value);
                             } else if (entry.ref) |ref| {
@@ -8122,8 +8144,9 @@ pub const VM = struct {
                         while (gen.state != .completed) {
                             if (gen.current_key == .string) {
                                 try self.arraySetOwned(target.array, .{ .string = gen.current_key.string }, gen.current_value);
-                            } else {
-                                try target.array.append(self.allocator, gen.current_value);
+                            } else if (!try target.array.appendNew(self.allocator, gen.current_value)) {
+                                occupied = true;
+                                break;
                             }
                             self.resumeGenerator(gen, .null) catch {
                                 if (self.dispatchPendingException(base_frame)) continue;
@@ -8141,11 +8164,16 @@ pub const VM = struct {
                             const val = self.callMethod(src.object, "current", &.{}) catch .null;
                             if (key == .string) {
                                 try self.arraySetOwned(target.array, .{ .string = key.string }, val);
-                            } else {
-                                try target.array.append(self.allocator, val);
+                            } else if (!try target.array.appendNew(self.allocator, val)) {
+                                occupied = true;
+                                break;
                             }
                             _ = self.callMethod(src.object, "next", &.{}) catch {};
                         }
+                    }
+                    if (occupied) {
+                        if (try self.throwNextElementOccupied()) continue;
+                        return error.RuntimeError;
                     }
                 },
                 .splat_call => {},
@@ -11235,7 +11263,7 @@ pub const VM = struct {
                         return error.RuntimeError;
                     };
                     self.setGeneratorCurrent(gen, .{ .int = gen.implicit_key }, val, true);
-                    gen.implicit_key += 1;
+                    gen.implicit_key +%= 1;
                     gen.ip = self.currentFrame().ip;
                     gen.vars = self.currentFrame().vars;
                     gen.ref_slots = self.currentFrame().ref_slots;
@@ -11258,7 +11286,7 @@ pub const VM = struct {
                         return error.RuntimeError;
                     };
                     self.setGeneratorCurrent(gen, key, val, true);
-                    if (key == .int and key.int >= gen.implicit_key) gen.implicit_key = key.int + 1;
+                    if (key == .int and key.int >= gen.implicit_key) gen.implicit_key = key.int +% 1;
                     gen.ip = self.currentFrame().ip;
                     gen.vars = self.currentFrame().vars;
                     gen.ref_slots = self.currentFrame().ref_slots;
@@ -12901,6 +12929,11 @@ pub const VM = struct {
         self.allocator.free(record.message);
         self.allocator.free(record.at.file);
         slot.* = null;
+    }
+
+    // what php throws when an append finds the next index taken
+    pub fn throwNextElementOccupied(self: *VM) !bool {
+        return self.throwBuiltinException("Error", "Cannot add element to the array as the next element is already occupied");
     }
 
     // php's E_ERROR from inside the engine: the script ends past any

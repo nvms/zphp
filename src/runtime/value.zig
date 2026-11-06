@@ -176,6 +176,19 @@ pub const PhpArray = struct {
         self.refcount +%= 1;
     }
 
+    // php's next index is taken: maxInt is in use, and no key comes after it
+    pub fn nextElementOccupied(self: *const PhpArray) bool {
+        return self.has_int_keys and self.next_int_key == std.math.maxInt(i64) and self.contains(.{ .int = std.math.maxInt(i64) });
+    }
+
+    // append, or false when the next index is taken, where php's
+    // zend_hash_next_index_insert fails
+    pub fn appendNew(self: *PhpArray, allocator: std.mem.Allocator, value: Value) !bool {
+        if (self.nextElementOccupied()) return false;
+        try self.append(allocator, value);
+        return true;
+    }
+
     pub fn append(self: *PhpArray, allocator: std.mem.Allocator, value: Value) !void {
         // a store choke point: the new element takes a reference (callers
         // pass raw values, never copyValue'd ones); weak containers count nothing

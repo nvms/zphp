@@ -50,6 +50,7 @@ Zend/tests/array_append_COW.phpt
 Zend/tests/array_append_by_reference.phpt
 Zend/tests/array_append_reading_error.phpt
 Zend/tests/array_hash_zero.phpt
+Zend/tests/array_merge_recursive_next_key_overflow.phpt
 Zend/tests/array_self_add_globals.phpt
 Zend/tests/array_unpack/basic.phpt
 Zend/tests/array_unpack/gh19303.phpt
@@ -79,6 +80,7 @@ Zend/tests/assign_obj_op_cache_slot.phpt
 Zend/tests/assign_obj_ref_return.phpt
 Zend/tests/assign_op_type_error.phpt
 Zend/tests/assign_property_null_object.phpt
+Zend/tests/assign_ref_error_var_handling.phpt
 Zend/tests/assign_to_obj_001.phpt
 Zend/tests/assign_to_obj_002.phpt
 Zend/tests/assign_to_var_001.phpt
@@ -267,6 +269,7 @@ Zend/tests/bug46241.phpt
 Zend/tests/bug46308.phpt
 Zend/tests/bug47109.phpt
 Zend/tests/bug47596.phpt
+Zend/tests/bug47836.phpt
 Zend/tests/bug48899.phpt
 Zend/tests/bug49269.phpt
 Zend/tests/bug50174.phpt
@@ -308,6 +311,7 @@ Zend/tests/bug67922.phpt
 Zend/tests/bug67985.phpt
 Zend/tests/bug68148.phpt
 Zend/tests/bug68163.phpt
+Zend/tests/bug69017.phpt
 Zend/tests/bug69201.phpt
 Zend/tests/bug69221_2.phpt
 Zend/tests/bug69376.phpt
@@ -580,6 +584,16 @@ Zend/tests/ctor_promotion/ctor_promotion_defaults.phpt
 Zend/tests/ctor_promotion/ctor_promotion_final.phpt
 Zend/tests/ctor_promotion/ctor_promotion_untyped_default.phpt
 Zend/tests/debug_info/bug69537.phpt
+Zend/tests/debug_info/debug_info-error-0.0.phpt
+Zend/tests/debug_info/debug_info-error-0.phpt
+Zend/tests/debug_info/debug_info-error-1.0.phpt
+Zend/tests/debug_info/debug_info-error-1.phpt
+Zend/tests/debug_info/debug_info-error-empty_str.phpt
+Zend/tests/debug_info/debug_info-error-false.phpt
+Zend/tests/debug_info/debug_info-error-object.phpt
+Zend/tests/debug_info/debug_info-error-resource.phpt
+Zend/tests/debug_info/debug_info-error-str.phpt
+Zend/tests/debug_info/debug_info-error-true.phpt
 Zend/tests/debug_info/recursive_debug_info.phpt
 Zend/tests/declare/bug43027.phpt
 Zend/tests/declare/gh18033_2.phpt
@@ -3757,12 +3771,14 @@ ext/standard/tests/array/array_diff_variation7.phpt
 ext/standard/tests/array/array_diff_variation8.phpt
 ext/standard/tests/array/array_fill.phpt
 ext/standard/tests/array/array_fill_basic.phpt
+ext/standard/tests/array/array_fill_error.phpt
 ext/standard/tests/array/array_fill_keys.phpt
 ext/standard/tests/array/array_fill_keys_variation2.phpt
 ext/standard/tests/array/array_fill_keys_variation3.phpt
 ext/standard/tests/array/array_fill_keys_variation4.phpt
 ext/standard/tests/array/array_fill_variation4.phpt
 ext/standard/tests/array/array_fill_variation5.phpt
+ext/standard/tests/array/array_fill_variation6.phpt
 ext/standard/tests/array/array_filter.phpt
 ext/standard/tests/array/array_filter_object.phpt
 ext/standard/tests/array/array_filter_variation10.phpt
@@ -3839,7 +3855,15 @@ ext/standard/tests/array/array_map_variation8.phpt
 ext/standard/tests/array/array_merge.phpt
 ext/standard/tests/array/array_merge_basic.phpt
 ext/standard/tests/array/array_merge_recursive_basic1.phpt
+ext/standard/tests/array/array_merge_recursive_basic2.phpt
+ext/standard/tests/array/array_merge_recursive_variation1.phpt
 ext/standard/tests/array/array_merge_recursive_variation10.phpt
+ext/standard/tests/array/array_merge_recursive_variation2.phpt
+ext/standard/tests/array/array_merge_recursive_variation3.phpt
+ext/standard/tests/array/array_merge_recursive_variation4.phpt
+ext/standard/tests/array/array_merge_recursive_variation5.phpt
+ext/standard/tests/array/array_merge_recursive_variation6.phpt
+ext/standard/tests/array/array_merge_recursive_variation9.phpt
 ext/standard/tests/array/array_merge_replace_recursive_refs.phpt
 ext/standard/tests/array/array_merge_variation10.phpt
 ext/standard/tests/array/array_merge_variation3.phpt
@@ -3861,6 +3885,7 @@ ext/standard/tests/array/array_product_variation6.phpt
 ext/standard/tests/array/array_push.phpt
 ext/standard/tests/array/array_push_basic.phpt
 ext/standard/tests/array/array_push_empty.phpt
+ext/standard/tests/array/array_push_error2.phpt
 ext/standard/tests/array/array_push_variation2.phpt
 ext/standard/tests/array/array_push_variation3.phpt
 ext/standard/tests/array/array_push_variation5.phpt
@@ -4007,6 +4032,7 @@ ext/standard/tests/array/bug48224.phpt
 ext/standard/tests/array/bug48854.phpt
 ext/standard/tests/array/bug51552.phpt
 ext/standard/tests/array/bug52534.phpt
+ext/standard/tests/array/bug61058.phpt
 ext/standard/tests/array/bug65251.phpt
 ext/standard/tests/array/bug67693.phpt
 ext/standard/tests/array/bug69166.phpt
@@ -4061,6 +4087,7 @@ ext/standard/tests/array/extract_variation9.phpt
 ext/standard/tests/array/gh14140.phpt
 ext/standard/tests/array/gh14775.phpt
 ext/standard/tests/array/gh15982.phpt
+ext/standard/tests/array/gh16053.phpt
 ext/standard/tests/array/gh16649/array_splice_normal_destructor.phpt
 ext/standard/tests/array/gh16957.phpt
 ext/standard/tests/array/gh17447.phpt

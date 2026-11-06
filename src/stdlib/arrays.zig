@@ -100,9 +100,16 @@ fn array_push(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     if (args.len == 0 or args[0] != .array) return NativeResult.scalar(.{ .int = 0 });
     const arr = args[0].array;
     if (args.len >= 2) {
-        for (args[1..]) |val| try arr.append(ctx.allocator, val);
+        for (args[1..]) |val| {
+            if (!try arr.appendNew(ctx.allocator, val)) return nextElementOccupied(ctx);
+        }
     }
     return NativeResult.scalar(.{ .int = arr.length() });
+}
+
+fn nextElementOccupied(ctx: *NativeContext) RuntimeError!NativeResult {
+    try ctx.vm.setPendingException("Error", "Cannot add element to the array as the next element is already occupied");
+    return error.RuntimeError;
 }
 
 fn array_pop(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -1143,8 +1150,18 @@ fn rowGet(row: Value, key: Value) Value {
 fn array_fill(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 3) return NativeResult.scalar(.null);
     const start_idx = Value.toInt(args[0]);
-    const count: usize = @intCast(@max(0, Value.toInt(args[1])));
+    const num = Value.toInt(args[1]);
     const val = args[2];
+    if (num < 0) {
+        try ctx.vm.setPendingException("ValueError", "array_fill(): Argument #2 ($count) must be greater than or equal to 0");
+        return error.RuntimeError;
+    }
+    if (num > std.math.maxInt(i32)) {
+        try ctx.vm.setPendingException("ValueError", "array_fill(): Argument #2 ($count) is too large");
+        return error.RuntimeError;
+    }
+    if (num > 0 and start_idx > std.math.maxInt(i64) - num + 1) return nextElementOccupied(ctx);
+    const count: usize = @intCast(num);
 
     var result = try ctx.createArray();
     try result.entries.ensureTotalCapacity(ctx.allocator, count);
@@ -1152,8 +1169,7 @@ fn array_fill(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
         VM.retainValue(val);
         result.entries.appendAssumeCapacity(.{ .key = .{ .int = start_idx + @as(i64, @intCast(i)) }, .value = val });
     }
-    result.next_int_key = start_idx + @as(i64, @intCast(count));
-    result.has_int_keys = count > 0;
+    if (count > 0) result.noteIntKey(start_idx + @as(i64, @intCast(count - 1)));
     return NativeResult.borrowed(.{ .array = result });
 }
 
@@ -1969,62 +1985,56 @@ fn array_walk_recursive(ctx: *NativeContext, args: []const Value) RuntimeError!N
     return NativeResult.scalar(.{ .bool = true });
 }
 
-fn deepMerge(ctx: *NativeContext, a: *PhpArray, b: *PhpArray) RuntimeError!*PhpArray {
-    const result = try ctx.createArray();
-    for (a.entries.items) |entry| {
-        try ctx.vm.arraySetOwned(result, entry.key, entry.value);
-    }
-    for (b.entries.items) |entry| {
+// php_array_merge_recursive: integer keys are appended; a string key already
+// in dest turns that entry into an array (a scalar becomes its only element,
+// null an array holding null) and src's value is merged into it, an array
+// recursively and anything else appended
+fn mergeRecursiveInto(ctx: *NativeContext, dest: *PhpArray, src: *PhpArray) RuntimeError!void {
+    for (src.entries.items) |entry| {
+        const value = if (entry.ref) |ref| ref.* else entry.value;
         switch (entry.key) {
-            .int => try result.append(ctx.allocator, entry.value),
+            .int => if (!try dest.appendNew(ctx.allocator, value)) {
+                _ = try nextElementOccupied(ctx);
+            },
             .string => {
-                const existing = result.get(entry.key);
-                if (existing == .array and entry.value == .array) {
-                    const merged = try deepMerge(ctx, existing.array, entry.value.array);
-                    try ctx.vm.arraySetOwned(result, entry.key, .{ .array = merged });
-                } else if (existing != .null) {
-                    // both are scalars - wrap into array
-                    if (entry.value == .array) {
-                        // existing is scalar, incoming is array
-                        var merged = try ctx.createArray();
-                        try merged.append(ctx.allocator, existing);
-                        for (entry.value.array.entries.items) |sub| {
-                            try merged.append(ctx.allocator, sub.value);
-                        }
-                        try ctx.vm.arraySetOwned(result, entry.key, .{ .array = merged });
-                    } else if (existing == .array) {
-                        // existing is array, incoming is scalar
-                        var merged = try ctx.createArray();
-                        for (existing.array.entries.items) |sub| {
-                            try merged.append(ctx.allocator, sub.value);
-                        }
-                        try merged.append(ctx.allocator, entry.value);
-                        try ctx.vm.arraySetOwned(result, entry.key, .{ .array = merged });
-                    } else {
-                        // both scalars - combine into array
-                        var merged = try ctx.createArray();
-                        try merged.append(ctx.allocator, existing);
-                        try merged.append(ctx.allocator, entry.value);
-                        try ctx.vm.arraySetOwned(result, entry.key, .{ .array = merged });
-                    }
-                } else {
-                    try ctx.vm.arraySetOwned(result, entry.key, entry.value);
+                if (!dest.contains(entry.key)) {
+                    try ctx.vm.arraySetOwned(dest, entry.key, value);
+                    continue;
+                }
+                const existing = dest.get(entry.key);
+                const target = try ctx.vm.allocArray();
+                switch (existing) {
+                    .array => |arr| for (arr.entries.items) |e| try target.set(ctx.allocator, e.key, if (e.ref) |ref| ref.* else e.value),
+                    .null => try target.append(ctx.allocator, .null),
+                    else => {
+                        const converted = try ctx.vm.castToArray(existing);
+                        for (converted.array.entries.items) |e| try target.set(ctx.allocator, e.key, e.value);
+                    },
+                }
+                try ctx.vm.arraySetOwned(dest, entry.key, .{ .array = target });
+                const incoming = if (value == .object) try ctx.vm.castToArray(value) else value;
+                if (incoming == .array) {
+                    try mergeRecursiveInto(ctx, target, incoming.array);
+                } else if (!try target.appendNew(ctx.allocator, incoming)) {
+                    _ = try nextElementOccupied(ctx);
                 }
             },
         }
     }
-    return result;
 }
 
 fn array_merge_recursive(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     // PHP allows array_merge_recursive() with no arguments, returning []
     if (args.len == 0) return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-    if (args[0] != .array) return NativeResult.scalar(.null);
-    var result = args[0].array;
-    for (args[1..]) |arg| {
-        if (arg != .array) continue;
-        result = try deepMerge(ctx, result, arg.array);
+    for (args, 1..) |arg, position| {
+        if (arg == .array) continue;
+        const msg = try std.fmt.allocPrint(ctx.allocator, "array_merge_recursive(): Argument #{d} must be of type array, {s} given", .{ position, phpTypeName(arg) });
+        defer ctx.allocator.free(msg);
+        try ctx.vm.setPendingException("TypeError", msg);
+        return error.RuntimeError;
     }
+    const result = try ctx.createArray();
+    for (args) |arg| try mergeRecursiveInto(ctx, result, arg.array);
     return NativeResult.borrowed(.{ .array = result });
 }
 
