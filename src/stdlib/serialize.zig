@@ -930,9 +930,9 @@ pub fn serializeSplArray(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Nati
     var refs: SerCtx = .{};
     defer refs.deinit(ctx.allocator);
     try buf.appendSlice(ctx.allocator, "x:");
-    try serializeValue(ctx, &buf, &refs, obj.get("__flags"));
-    const flags = obj.get("__flags").toInt();
-    if ((flags & 16777216) == 0) {
+    const flags = @import("spl.zig").serializedFlags(obj);
+    try serializeValue(ctx, &buf, &refs, .{ .int = flags });
+    if ((flags & @import("spl.zig").IS_SELF) == 0) {
         try serializeValue(ctx, &buf, &refs, obj.get("__data"));
         try buf.appendSlice(ctx.allocator, ";");
     }
@@ -995,13 +995,28 @@ fn parseSplArray(ctx: *NativeContext, obj: *PhpObject, refs: *UnserCtx, s: []con
     const flags = try unserializeValue(ctx, refs, s, pos.*);
     pos.* = flags.pos;
     if (flags.value != .int) return error.RuntimeError;
-    var storage: Value = .{ .object = obj };
-    if ((flags.value.int & 16777216) == 0) {
+    const spl = @import("spl.zig");
+    // the storage takes effect before the members are read; an object php
+    // refuses as storage throws once the members are loaded
+    var refused = false;
+    if ((flags.value.int & spl.IS_SELF) != 0) {
+        try spl.splSetSelf(ctx, obj, flags.value.int);
+    } else {
         if (pos.* >= s.len or (s[pos.*] != 'a' and s[pos.*] != 'O' and s[pos.*] != 'C' and s[pos.*] != 'r')) return error.RuntimeError;
         const parsed = try unserializeValue(ctx, refs, s, pos.*);
         pos.* = parsed.pos;
-        storage = parsed.value;
+        const storage = parsed.value;
         if (storage != .array and storage != .object) return error.RuntimeError;
+        if (storage == .array) {
+            try obj.set(ctx.allocator, "__data", storage);
+            try obj.set(ctx.allocator, "__flags", .{ .int = flags.value.int & spl.FLAGS_MASK });
+            try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+        } else {
+            spl.splSetStorage(ctx, obj, storage, flags.value.int | spl.otherFlags(ctx.vm, storage), "unserialize") catch |err| {
+                if (err != error.RuntimeError or ctx.vm.pending_exception == null) return err;
+                refused = true;
+            };
+        }
         if (pos.* >= s.len or s[pos.*] != ';') return error.RuntimeError;
         pos.* += 1;
     }
@@ -1010,24 +1025,27 @@ fn parseSplArray(ctx: *NativeContext, obj: *PhpObject, refs: *UnserCtx, s: []con
     const members = try unserializeValue(ctx, refs, s, pos.*);
     pos.* = members.pos;
     if (members.value != .array) return error.RuntimeError;
-    try obj.set(ctx.allocator, "__flags", flags.value);
-    try obj.set(ctx.allocator, "__data", storage);
-    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
-    for (members.value.array.entries.items) |entry| {
-        if (entry.key == .string) {
-            const name = stripVisibilityPrefix(entry.key.string.bytes());
-            if (!splInternal(name)) try obj.set(ctx.allocator, name, entry.value);
+    if (refused) {
+        const pending = ctx.vm.takePending();
+        defer if (pending) |p| ctx.vm.stackRelease(p);
+        try spl.loadProperties(ctx, obj, members.value.array);
+        if (pending) |p| {
+            ctx.vm.pending_exception = p;
+            @import("../runtime/vm.zig").VM.retainValue(p);
         }
+        return error.RuntimeError;
     }
+    try spl.loadProperties(ctx, obj, members.value.array);
     // Trailing bytes are intentionally ignored, as in PHP 8.5.
 }
 
 pub fn splArrayState(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeResult {
     const state = try ctx.createArray();
-    try state.append(ctx.allocator, obj.get("__flags"));
+    const flags = @import("spl.zig").serializedFlags(obj);
+    try state.append(ctx.allocator, .{ .int = flags });
     const data = obj.get("__data");
     // __serialize exposes a value snapshot, not the mutable internal table.
-    try state.append(ctx.allocator, if (data == .array) .{ .array = try splStorageSnapshot(ctx, data.array) } else data);
+    try state.append(ctx.allocator, if (flags & @import("spl.zig").IS_SELF != 0) .null else if (data == .array) .{ .array = try splStorageSnapshot(ctx, data.array) } else data);
     try state.append(ctx.allocator, .{ .array = try splMembers(ctx, obj) });
     try state.append(ctx.allocator, obj.get("__iter_class"));
     return NativeResult.borrowed(.{ .array = state });
@@ -1043,25 +1061,33 @@ pub fn restoreSplArrayState(ctx: *NativeContext, obj: *PhpObject, state: Value) 
         try ctx.vm.setPendingException("UnexpectedValueException", "Incomplete or ill-typed serialization data");
         return error.RuntimeError;
     }
-    if (storage != .array and storage != .object) {
-        try ctx.vm.setPendingException("InvalidArgumentException", "Passed variable is not an array or object");
-        return error.RuntimeError;
-    }
-    if (iterator == .string and !ctx.vm.isInstanceOf(iterator.string.bytes(), "Iterator")) {
-        const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot deserialize ArrayObject with iterator class '{s}'; this class does not implement the Iterator interface", .{iterator.string.bytes()});
-        defer ctx.allocator.free(msg);
-        try ctx.vm.setPendingException("UnexpectedValueException", msg);
-        return error.RuntimeError;
-    }
-    try obj.set(ctx.allocator, "__flags", flags);
-    try obj.set(ctx.allocator, "__data", storage);
-    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
-    try obj.set(ctx.allocator, "__iter_class", iterator);
-    for (members.array.entries.items) |entry| {
-        if (entry.key == .string) {
-            const name = stripVisibilityPrefix(entry.key.string.bytes());
-            if (!splInternal(name)) try obj.set(ctx.allocator, name, entry.value);
+    const spl = @import("spl.zig");
+    if (flags.int & spl.IS_SELF != 0) {
+        try spl.splSetSelf(ctx, obj, flags.int);
+    } else {
+        if (storage != .array and storage != .object) {
+            try ctx.vm.setPendingException("InvalidArgumentException", "Passed variable is not an array or object");
+            return error.RuntimeError;
         }
+        try spl.splSetStorage(ctx, obj, storage, flags.int | spl.otherFlags(ctx.vm, storage), "__unserialize");
+    }
+    try spl.loadProperties(ctx, obj, members.array);
+    if (iterator == .string) {
+        const name = iterator.string.bytes();
+        if (!ctx.vm.classes.contains(name) and !ctx.vm.interfaces.contains(name)) try ctx.vm.tryAutoload(name);
+        if (!ctx.vm.classes.contains(name) and !ctx.vm.interfaces.contains(name)) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot deserialize ArrayObject with iterator class '{s}'; no such class exists", .{iterator.string.bytes()});
+            defer ctx.allocator.free(msg);
+            try ctx.vm.setPendingException("UnexpectedValueException", msg);
+            return error.RuntimeError;
+        }
+        if (!ctx.vm.isInstanceOf(iterator.string.bytes(), "Iterator")) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot deserialize ArrayObject with iterator class '{s}'; this class does not implement the Iterator interface", .{iterator.string.bytes()});
+            defer ctx.allocator.free(msg);
+            try ctx.vm.setPendingException("UnexpectedValueException", msg);
+            return error.RuntimeError;
+        }
+        try obj.set(ctx.allocator, "__iter_class", iterator);
     }
     return NativeResult.scalar(.null);
 }

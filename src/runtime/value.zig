@@ -1081,6 +1081,13 @@ pub const PhpObject = struct {
         gop.value_ptr.* = value;
     }
 
+    // a property stored under exactly this name, never in a declared slot
+    // (php's property table written directly)
+    pub fn setDynamic(self: *PhpObject, allocator: std.mem.Allocator, name: []const u8, value: Value) !void {
+        retainStored(value);
+        try self.putProperty(allocator, name, value);
+    }
+
     // the removed property's value, handed to the caller to release
     pub fn removeProperty(self: *PhpObject, allocator: std.mem.Allocator, name: []const u8) ?Value {
         const removed = self.properties.fetchOrderedRemove(name) orelse return null;

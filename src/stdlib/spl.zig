@@ -162,7 +162,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "SplStack::toArray", stackToArray);
 
     // ArrayObject
-    var ao_def = ClassDef{ .name = "ArrayObject", .native_properties = arrayStorageProperties };
+    var ao_def = ClassDef{ .name = "ArrayObject", .native_properties = arrayStorageProperties, .native_clone = splArrayClone };
     // matches PHP's interface order on ArrayObject so getInterfaceNames() lists
     // them the way callers expect
     try ao_def.interfaces.append(a, "IteratorAggregate");
@@ -231,7 +231,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ArrayObject::__unset", aoMagicUnset);
 
     // ArrayIterator
-    var ai_def = ClassDef{ .name = "ArrayIterator", .native_properties = arrayStorageProperties };
+    var ai_def = ClassDef{ .name = "ArrayIterator", .native_properties = arrayStorageProperties, .native_clone = splArrayClone };
     try ai_def.interfaces.append(a, "Serializable");
     try ai_def.interfaces.append(a, "Iterator");
     try ai_def.interfaces.append(a, "Countable");
@@ -258,6 +258,10 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try ai_def.methods.put(a, "natsort", .{ .name = "natsort", .arity = 0 });
     try ai_def.methods.put(a, "natcasesort", .{ .name = "natcasesort", .arity = 0 });
     try ai_def.methods.put(a, "seek", .{ .name = "seek", .arity = 1 });
+    try ai_def.methods.put(a, "__get", .{ .name = "__get", .arity = 1 });
+    try ai_def.methods.put(a, "__set", .{ .name = "__set", .arity = 2 });
+    try ai_def.methods.put(a, "__isset", .{ .name = "__isset", .arity = 1 });
+    try ai_def.methods.put(a, "__unset", .{ .name = "__unset", .arity = 1 });
     try ai_def.methods.put(a, "__serialize", .{ .name = "__serialize", .arity = 0 });
     try ai_def.methods.put(a, "__unserialize", .{ .name = "__unserialize", .arity = 1 });
     try ai_def.methods.put(a, "serialize", .{ .name = "serialize", .arity = 0 });
@@ -274,15 +278,15 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ArrayIterator::key", aiKey);
     try vm.native_fns.put(a, "ArrayIterator::next", aiNext);
     try vm.native_fns.put(a, "ArrayIterator::valid", aiValid);
-    try vm.native_fns.put(a, "ArrayIterator::count", aiCount);
-    try vm.native_fns.put(a, "ArrayIterator::offsetGet", aiOffsetGet);
-    try vm.native_fns.put(a, "ArrayIterator::offsetSet", aiOffsetSet);
-    try vm.native_fns.put(a, "ArrayIterator::offsetExists", aiOffsetExists);
-    try vm.native_fns.put(a, "ArrayIterator::offsetUnset", aiOffsetUnset);
-    try vm.native_fns.put(a, "ArrayIterator::getArrayCopy", aiGetArrayCopy);
-    try vm.native_fns.put(a, "ArrayIterator::append", aiAppend);
-    try vm.native_fns.put(a, "ArrayIterator::getFlags", aiGetFlags);
-    try vm.native_fns.put(a, "ArrayIterator::setFlags", aiSetFlags);
+    try vm.native_fns.put(a, "ArrayIterator::count", aoCount);
+    try vm.native_fns.put(a, "ArrayIterator::offsetGet", aoOffsetGet);
+    try vm.native_fns.put(a, "ArrayIterator::offsetSet", aoOffsetSet);
+    try vm.native_fns.put(a, "ArrayIterator::offsetExists", aoOffsetExists);
+    try vm.native_fns.put(a, "ArrayIterator::offsetUnset", aoOffsetUnset);
+    try vm.native_fns.put(a, "ArrayIterator::getArrayCopy", aoGetArrayCopy);
+    try vm.native_fns.put(a, "ArrayIterator::append", aoAppend);
+    try vm.native_fns.put(a, "ArrayIterator::getFlags", aoGetFlags);
+    try vm.native_fns.put(a, "ArrayIterator::setFlags", aoSetFlags);
     try vm.native_fns.put(a, "ArrayIterator::ksort", aoKsort);
     try vm.native_fns.put(a, "ArrayIterator::asort", aoAsort);
     try vm.native_fns.put(a, "ArrayIterator::uksort", aoUksort);
@@ -290,6 +294,10 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ArrayIterator::natsort", aoNatsort);
     try vm.native_fns.put(a, "ArrayIterator::natcasesort", aoNatcasesort);
     try vm.native_fns.put(a, "ArrayIterator::seek", aiSeek);
+    try vm.native_fns.put(a, "ArrayIterator::__get", aoMagicGet);
+    try vm.native_fns.put(a, "ArrayIterator::__set", aoMagicSet);
+    try vm.native_fns.put(a, "ArrayIterator::__isset", aoMagicIsset);
+    try vm.native_fns.put(a, "ArrayIterator::__unset", aoMagicUnset);
 
     // WeakMap (simplified - uses spl_object_id as key, no weak reference semantics)
     var wm_def = ClassDef{ .name = "WeakMap" };
@@ -696,21 +704,21 @@ fn weakMapGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Native
 // STD_PROP_LIST asks for the object's own properties
 fn arrayStorageProperties(ctx: *NativeContext, obj: *PhpObject, purpose: object_properties.Purpose) RuntimeError!?*PhpArray {
     const storage = obj.get("__data");
+    const is_self = storage == .object and storage.object == obj;
     switch (purpose) {
         .debug => {
             const table = try object_properties.ownTable(ctx.vm, obj);
+            if (is_self) return table;
             const base = if (ctx.vm.isInstanceOf(obj.class_name, "ArrayIterator")) "ArrayIterator" else "ArrayObject";
             const shown: Value = if (storage == .array or storage == .object) storage else .{ .array = try ctx.vm.allocArray() };
             try object_properties.setMangled(ctx.vm, table, "storage", .private, base, shown);
             return table;
         },
         .array_cast, .var_export, .json => {
-            const flags = obj.get("__flags");
-            if (flags == .int and flags.int & 1 != 0) return null;
-            return switch (storage) {
-                .array => |arr| arr,
-                .object => |backing| try object_properties.ownTable(ctx.vm, backing),
-                else => try ctx.vm.allocArray(),
+            if (splFlags(obj) & STD_PROP_LIST != 0) return null;
+            return switch (try splStorage(ctx, obj)) {
+                .array => |s| s.arr,
+                .object => |o| try tableArray(ctx, o),
             };
         },
         .serialize => return null,
@@ -966,12 +974,13 @@ fn invalidHeapData(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeResu
 }
 
 // object_properties_load: serialized properties back onto the object, a
-// new dynamic one deprecated as any other
-fn loadProperties(ctx: *NativeContext, obj: *PhpObject, members: *PhpArray) RuntimeError!void {
+// new dynamic one deprecated as any other; zphp's own state is not among them
+pub fn loadProperties(ctx: *NativeContext, obj: *PhpObject, members: *PhpArray) RuntimeError!void {
     for (members.entries.items) |entry| {
-        if (entry.key != .string) continue;
-        const key = entry.key.string.bytes();
+        var buf: [24]u8 = undefined;
+        const key = tableKey(entry.key, &buf);
         const name = if (key.len > 0 and key[0] == 0) if (std.mem.indexOfScalarPos(u8, key, 1, 0)) |end| key[end + 1 ..] else key else key;
+        if (object_properties.isInternalState(ctx.vm, obj, name)) continue;
         if (!obj.properties.contains(name) and !ctx.vm.classDeclaresProperty(obj.class_name, name) and ctx.vm.dynamicPropertyRule(obj) == .deprecated) {
             const msg = try std.fmt.allocPrint(ctx.allocator, "Creation of dynamic property {s}::${s} is deprecated", .{ obj.class_name, name });
             defer ctx.allocator.free(msg);
@@ -1156,7 +1165,336 @@ fn stackToArray(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
     return NativeResult.borrowed(.{ .array = copy });
 }
 
-// --- ArrayObject ---
+// --- ArrayObject and ArrayIterator ---
+//
+// php's spl_array. the storage (`__data`) is an array; another ArrayObject or
+// ArrayIterator, whose storage is used (php's USE_OTHER); the object itself
+// (IS_SELF); or any other object, whose property table is then read and
+// written directly, past visibility, types, readonly and hooks
+
+const STD_PROP_LIST = 1;
+const ARRAY_AS_PROPS = 2;
+// the flags a clone or an iterator takes from its source
+const CLONE_MASK = 0x0100FFFF;
+// the flags a script sees; IS_SELF only appears in serialized data
+pub const FLAGS_MASK = 0xFFFF;
+pub const IS_SELF = 0x01000000;
+
+const SplStorage = union(enum) {
+    array: struct { holder: *PhpObject, arr: *PhpArray },
+    object: *PhpObject,
+};
+
+fn isSplArray(vm: *VM, obj: *PhpObject) bool {
+    return vm.isInstanceOf(obj.class_name, "ArrayObject") or vm.isInstanceOf(obj.class_name, "ArrayIterator");
+}
+
+// spl_array_get_hash_table
+fn splStorage(ctx: *NativeContext, obj: *PhpObject) RuntimeError!SplStorage {
+    var holder = obj;
+    var depth: usize = 0;
+    while (true) : (depth += 1) {
+        switch (holder.get("__data")) {
+            .array => |arr| return .{ .array = .{ .holder = holder, .arr = arr } },
+            .object => |other| {
+                if (other == holder) return .{ .object = holder };
+                if (depth < 64 and isSplArray(ctx.vm, other)) {
+                    holder = other;
+                    continue;
+                }
+                try ctx.vm.triggerLazyInit(other);
+                return .{ .object = other.storage() };
+            },
+            else => return .{ .array = .{ .holder = holder, .arr = try ensureData(ctx, holder) } },
+        }
+    }
+}
+
+// the storage array separated from the copies sharing it, for a write
+fn writableArray(ctx: *NativeContext, holder: *PhpObject, arr: *PhpArray) RuntimeError!*PhpArray {
+    const sep = try ctx.vm.cowSeparate(arr);
+    if (sep != arr) {
+        try holder.set(ctx.allocator, "__data", .{ .array = sep });
+        sep.refcount -= 1;
+    }
+    return sep;
+}
+
+fn splFlags(obj: *PhpObject) i64 {
+    const flags = obj.get("__flags");
+    return if (flags == .int) flags.int else 0;
+}
+
+// an entry of an object's property table in php's order: declared properties
+// first, where one that is unset or typed and never initialized is a hole
+// that keeps its place, then dynamic ones in insertion order
+const TableProp = struct {
+    name: []const u8,
+    value: Value,
+    slot: bool,
+    visibility: ClassDef.Visibility,
+    declaring: []const u8,
+    hole: bool,
+
+    // the key php's table holds it under, compared without building it
+    fn hasKey(self: TableProp, key: []const u8) bool {
+        if (!self.slot or self.visibility == .public) return std.mem.eql(u8, key, self.name);
+        const class: []const u8 = if (self.visibility == .protected) "*" else self.declaring;
+        return key.len == class.len + self.name.len + 2 and key[0] == 0 and
+            std.mem.eql(u8, key[1 .. 1 + class.len], class) and key[1 + class.len] == 0 and
+            std.mem.endsWith(u8, key, self.name);
+    }
+
+    // iteration and count pass over private and protected entries
+    fn mangled(self: TableProp) bool {
+        return if (self.slot) self.visibility != .public else self.name.len > 0 and self.name[0] == 0;
+    }
+};
+
+fn tableSize(o: *PhpObject) usize {
+    return (if (o.slots) |s| s.len else 0) + o.properties.count();
+}
+
+fn tableAt(vm: *VM, o: *PhpObject, pos: usize) ?TableProp {
+    const slot_count = if (o.slots) |s| s.len else 0;
+    if (pos < slot_count) {
+        const layout = o.slot_layout.?;
+        const name = layout.names[pos];
+        if (object_properties.isInternalState(vm, o, name)) return null;
+        const declared = vm.propertyDeclaration(layout.declaring_classes[pos], name);
+        const value = o.slots.?[pos];
+        const uninitialized = value == .null and declared.type_str.len > 0 and vm.typedPropForbidsNull(declared.type_str);
+        return .{ .name = name, .value = value, .slot = true, .visibility = declared.visibility, .declaring = declared.defining_class, .hole = uninitialized or o.isUnset(name) };
+    }
+    const index = pos - slot_count;
+    if (index >= o.properties.count()) return null;
+    const name = o.properties.keys()[index];
+    if (object_properties.isInternalState(vm, o, name)) return null;
+    // an entry beside a non-private slot of the name is not a property of its own
+    if (o.slot_layout) |layout| for (layout.names, 0..) |slot_name, i| {
+        if (!layout.is_private[i] and std.mem.eql(u8, slot_name, name)) return null;
+    };
+    return .{ .name = name, .value = o.properties.values()[index], .slot = false, .visibility = .public, .declaring = "", .hole = false };
+}
+
+fn tableFind(vm: *VM, o: *PhpObject, key: []const u8, holes: bool) ?TableProp {
+    for (0..tableSize(o)) |pos| {
+        const prop = tableAt(vm, o, pos) orelse continue;
+        if (prop.hole and !holes) continue;
+        if (prop.hasKey(key)) return prop;
+    }
+    return null;
+}
+
+fn tableWrite(ctx: *NativeContext, o: *PhpObject, key: []const u8, value: Value) RuntimeError!void {
+    if (tableFind(ctx.vm, o, key, true)) |prop| if (prop.slot) {
+        return o.setForScope(ctx.allocator, prop.name, value, prop.declaring);
+    };
+    try o.setDynamic(ctx.allocator, key, value);
+}
+
+fn tableUnset(ctx: *NativeContext, o: *PhpObject, key: []const u8) RuntimeError!void {
+    const prop = tableFind(ctx.vm, o, key, false) orelse return;
+    if (prop.slot) {
+        try o.setForScope(ctx.allocator, prop.name, .null, prop.declaring);
+        try o.markUnset(ctx.allocator, prop.name);
+    } else if (o.removeProperty(ctx.allocator, prop.name)) |old| ctx.vm.releaseValue(old);
+}
+
+// the table as an array, under php's keys for private and protected entries
+fn tableArray(ctx: *NativeContext, o: *PhpObject) RuntimeError!*PhpArray {
+    const arr = try ctx.vm.allocArray();
+    for (0..tableSize(o)) |pos| {
+        const prop = tableAt(ctx.vm, o, pos) orelse continue;
+        if (prop.hole) continue;
+        if (prop.slot) {
+            try object_properties.setMangled(ctx.vm, arr, prop.name, prop.visibility, prop.declaring, prop.value);
+        } else try arr.setCopiedKey(ctx.allocator, prop.name, prop.value);
+    }
+    return arr;
+}
+
+// an offset as php's property table spells it: integers in decimal
+fn tableKey(key: PhpArray.Key, buf: *[24]u8) []const u8 {
+    return switch (key) {
+        .string => |s| s.bytes(),
+        .int => |i| std.fmt.bufPrint(buf, "{d}", .{i}) catch unreachable,
+    };
+}
+
+fn splRead(ctx: *NativeContext, obj: *PhpObject, offset: Value) RuntimeError!NativeResult {
+    const key = offset.toArrayKey();
+    switch (try splStorage(ctx, obj)) {
+        .array => |s| if (s.arr.getPtr(key)) |entry| return NativeResult.share(if (entry.ref) |ref| ref.* else entry.value),
+        .object => |o| {
+            var buf: [24]u8 = undefined;
+            const name = tableKey(key, &buf);
+            if (tableFind(ctx.vm, o, name, false)) |prop| return NativeResult.share(prop.value);
+            try ctx.vm.emitUndefinedKeyWarning(.{ .string = Value.String.borrowed(name) });
+            return NativeResult.scalar(.null);
+        },
+    }
+    try ctx.vm.emitUndefinedKeyWarning(key);
+    return NativeResult.scalar(.null);
+}
+
+fn splWrite(ctx: *NativeContext, obj: *PhpObject, offset: Value, value: Value) RuntimeError!void {
+    switch (try splStorage(ctx, obj)) {
+        .array => |s| {
+            const arr = try writableArray(ctx, s.holder, s.arr);
+            if (offset == .null) return arr.append(ctx.allocator, value);
+            detachSplReference(ctx, arr, offset.toArrayKey());
+            try arr.set(ctx.allocator, offset.toArrayKey(), value);
+        },
+        .object => |o| {
+            var buf: [24]u8 = undefined;
+            if (offset == .null) return tableWrite(ctx, o, tableKey(.{ .int = nextTableIndex(ctx.vm, o) }, &buf), value);
+            try tableWrite(ctx, o, tableKey(offset.toArrayKey(), &buf), value);
+        },
+    }
+}
+
+// php appends to a property table under the next integer its hash hands
+// out, which only appends advance (an offset written as a number is stored
+// as a string); the smallest unused integer name follows that for every
+// table not appended to past a removal
+fn nextTableIndex(vm: *VM, o: *PhpObject) i64 {
+    var next: i64 = 0;
+    var buf: [24]u8 = undefined;
+    while (tableFind(vm, o, tableKey(.{ .int = next }, &buf), true) != null) next += 1;
+    return next;
+}
+
+fn splUnset(ctx: *NativeContext, obj: *PhpObject, offset: Value) RuntimeError!void {
+    const key = offset.toArrayKey();
+    switch (try splStorage(ctx, obj)) {
+        .array => |s| ctx.vm.arrayRemoveOwned(try writableArray(ctx, s.holder, s.arr), key),
+        .object => |o| {
+            var buf: [24]u8 = undefined;
+            try tableUnset(ctx, o, tableKey(key, &buf));
+        },
+    }
+}
+
+// offsetExists reports a null element; isset and empty() look at its value
+const ExistsCheck = enum { exists, isset, empty };
+
+fn splHas(ctx: *NativeContext, obj: *PhpObject, offset: Value, check: ExistsCheck) RuntimeError!bool {
+    const key = offset.toArrayKey();
+    const value: Value = switch (try splStorage(ctx, obj)) {
+        .array => |s| if (s.arr.getPtr(key)) |entry| (if (entry.ref) |ref| ref.* else entry.value) else return false,
+        .object => |o| blk: {
+            var buf: [24]u8 = undefined;
+            const prop = tableFind(ctx.vm, o, tableKey(key, &buf), false) orelse return false;
+            break :blk prop.value;
+        },
+    };
+    return switch (check) {
+        .exists => true,
+        .isset => value != .null,
+        .empty => !value.isTruthy(),
+    };
+}
+
+// isset($o[$k]) on an ArrayObject or ArrayIterator, which looks at the value
+pub fn arrayStorageIsset(ctx: *NativeContext, obj: *PhpObject, offset: Value) RuntimeError!bool {
+    return splHas(ctx, obj, offset, .isset);
+}
+
+fn splCount(ctx: *NativeContext, obj: *PhpObject) RuntimeError!i64 {
+    switch (try splStorage(ctx, obj)) {
+        .array => |s| return s.arr.length(),
+        .object => |o| {
+            var count: i64 = 0;
+            for (0..tableSize(o)) |pos| {
+                const prop = tableAt(ctx.vm, o, pos) orelse continue;
+                if (prop.hole or (prop.slot and prop.mangled())) continue;
+                count += 1;
+            }
+            return count;
+        },
+    }
+}
+
+// a copy of the storage as an array
+fn splTableCopy(ctx: *NativeContext, obj: *PhpObject) RuntimeError!*PhpArray {
+    return switch (try splStorage(ctx, obj)) {
+        .array => |s| try ctx.vm.cloneArray(s.arr),
+        .object => |o| try tableArray(ctx, o),
+    };
+}
+
+// zpp's "A": an array or an object, reported as an array
+fn requireStorageArg(ctx: *NativeContext, obj: *PhpObject, func: []const u8, arg: Value) RuntimeError!void {
+    if (arg == .array or arg == .object) return;
+    const class = if (ctx.vm.isInstanceOf(obj.class_name, "ArrayIterator")) "ArrayIterator" else "ArrayObject";
+    const msg = try std.fmt.allocPrint(ctx.allocator, "{s}::{s}(): Argument #1 ($array) must be of type array, {s} given", .{ class, func, phpTypeName(arg) });
+    defer ctx.allocator.free(msg);
+    try ctx.vm.setPendingException("TypeError", msg);
+    return error.RuntimeError;
+}
+
+// the flags another ArrayObject or ArrayIterator hands on when it becomes
+// the storage
+pub fn otherFlags(vm: *VM, storage: Value) i64 {
+    if (storage == .object and isSplArray(vm, storage.object)) return splFlags(storage.object);
+    return 0;
+}
+
+// spl_array_set_array: a new storage for the constructor, exchangeArray and
+// __unserialize (`func`), with the flags the object ends with
+pub fn splSetStorage(ctx: *NativeContext, obj: *PhpObject, storage: Value, flags: i64, func: []const u8) RuntimeError!void {
+    if (storage == .object) {
+        const kind = if (ctx.vm.isInstanceOf(obj.class_name, "ArrayIterator")) "ArrayIterator" else "ArrayObject";
+        const msg = try std.fmt.allocPrint(ctx.allocator, "{s}::{s}(): Using an object as a backing array for {s} is deprecated, as it allows violating class constraints and invariants", .{ kind, func, kind });
+        defer ctx.allocator.free(msg);
+        try ctx.vm.raiseError(VM.E_DEPRECATED, msg);
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+        const other = storage.object;
+        if (!isSplArray(ctx.vm, other)) {
+            if (try overloadedObject(ctx, other)) {
+                const msg2 = try std.fmt.allocPrint(ctx.allocator, "Overloaded object of type {s} is not compatible with {s}", .{ other.class_name, obj.class_name });
+                defer ctx.allocator.free(msg2);
+                try ctx.vm.setPendingException("InvalidArgumentException", msg2);
+                return error.RuntimeError;
+            }
+            if (if (ctx.vm.classes.get(other.class_name)) |def| def.is_enum else false) {
+                const msg2 = try std.fmt.allocPrint(ctx.allocator, "Enums are not compatible with {s}", .{obj.class_name});
+                defer ctx.allocator.free(msg2);
+                try ctx.vm.setPendingException("InvalidArgumentException", msg2);
+                return error.RuntimeError;
+            }
+        }
+    }
+    try obj.set(ctx.allocator, "__data", storage);
+    try obj.set(ctx.allocator, "__flags", .{ .int = flags & FLAGS_MASK });
+    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+}
+
+// the object as its own storage (IS_SELF), from serialized data
+pub fn splSetSelf(ctx: *NativeContext, obj: *PhpObject, flags: i64) RuntimeError!void {
+    try obj.set(ctx.allocator, "__data", .{ .object = obj });
+    try obj.set(ctx.allocator, "__flags", .{ .int = flags & FLAGS_MASK });
+    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+}
+
+// the flags serialize writes: IS_SELF when the object is its own storage
+pub fn serializedFlags(obj: *PhpObject) i64 {
+    const data = obj.get("__data");
+    return splFlags(obj) | (if (data == .object and data.object == obj) @as(i64, IS_SELF) else 0);
+}
+
+// php's objects whose properties come from a handler rather than a table:
+// a built-in class that builds its own table for a purpose past the debug view
+fn overloadedObject(ctx: *NativeContext, obj: *PhpObject) RuntimeError!bool {
+    var name: ?[]const u8 = obj.class_name;
+    while (name) |n| {
+        const def = ctx.vm.classes.get(n) orelse return false;
+        if (def.native_properties) |hook| return try hook(ctx, obj, .array_cast) != null;
+        name = def.parent;
+    }
+    return false;
+}
 
 fn aoSerializeState(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
@@ -1188,246 +1526,221 @@ fn aoUnserialize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     return @import("serialize.zig").unserializeSplArray(ctx, obj, args[0].string.bytes());
 }
 
-// php 8.5 deprecates an object as the storage of an ArrayObject or
-// ArrayIterator, whichever the receiver is
-fn deprecateObjectBacking(ctx: *NativeContext, obj: *PhpObject, comptime func: []const u8) !void {
-    const kind = if (ctx.vm.isInstanceOf(obj.class_name, "ArrayIterator")) "ArrayIterator" else "ArrayObject";
-    const msg = try std.fmt.allocPrint(ctx.allocator, func ++ "(): Using an object as a backing array for {s} is deprecated, as it allows violating class constraints and invariants", .{kind});
-    defer ctx.allocator.free(msg);
-    try ctx.vm.raiseError(VM.E_DEPRECATED, msg);
-}
-
 fn aoConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len >= 1 and (args[0] == .array or args[0] == .object)) {
-        if (args[0] == .object) try deprecateObjectBacking(ctx, obj, "ArrayObject::__construct");
-        try obj.set(ctx.allocator, "__data", args[0]);
+    if (args.len >= 3 and args[2] == .string) try obj.set(ctx.allocator, "__iter_class", args[2]);
+    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
+    if (args.len >= 1) {
+        try requireStorageArg(ctx, obj, "__construct", args[0]);
+        try splSetStorage(ctx, obj, args[0], if (args.len == 1) otherFlags(ctx.vm, args[0]) else flags, "__construct");
     } else {
         _ = try ensureData(ctx, obj);
-    }
-    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
-    try obj.set(ctx.allocator, "__flags", .{ .int = flags });
-    if (args.len >= 3 and args[2] == .string) {
-        try obj.set(ctx.allocator, "__iter_class", args[2]);
+        try obj.set(ctx.allocator, "__flags", .{ .int = flags });
+        try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
     }
     return NativeResult.scalar(.null);
+}
+
+fn aiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
+    if (args.len >= 1) {
+        try requireStorageArg(ctx, obj, "__construct", args[0]);
+        try splSetStorage(ctx, obj, args[0], if (args.len == 1) otherFlags(ctx.vm, args[0]) else flags, "__construct");
+    } else {
+        _ = try ensureData(ctx, obj);
+        try obj.set(ctx.allocator, "__flags", .{ .int = flags });
+        try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    }
+    return NativeResult.scalar(.null);
+}
+
+// ARRAY_AS_PROPS sends a missing property to the storage; without it the
+// property is an ordinary one
+fn arrayAsProps(obj: *PhpObject) bool {
+    return splFlags(obj) & ARRAY_AS_PROPS != 0;
 }
 
 fn aoMagicGet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len == 0) return NativeResult.scalar(.null);
-    const flags = obj.get("__flags");
-    const has_props = flags == .int and (flags.int & 2) != 0; // ArrayObject::ARRAY_AS_PROPS
-    if (!has_props) return NativeResult.scalar(.null);
-    const arr = getData(obj) orelse return NativeResult.scalar(.null);
-    return NativeResult.share(arr.get(args[0].toArrayKey()));
+    if (arrayAsProps(obj)) return splRead(ctx, obj, args[0]);
+    const msg = try std.fmt.allocPrint(ctx.allocator, "Undefined property: {s}::${s}", .{ obj.class_name, args[0].string.bytes() });
+    defer ctx.allocator.free(msg);
+    try ctx.vm.emitWarning(msg);
+    return NativeResult.scalar(.null);
 }
 
 fn aoMagicSet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len < 2) return NativeResult.scalar(.null);
-    const flags = obj.get("__flags");
-    const has_props = flags == .int and (flags.int & 2) != 0;
-    if (!has_props) {
-        const name = args[0].string.bytes();
-        // an ordinary property write, so creating one is deprecated as anywhere
-        if (!obj.properties.contains(name) and !ctx.vm.classDeclaresProperty(obj.class_name, name) and ctx.vm.dynamicPropertyRule(obj) == .deprecated) {
-            const msg = try std.fmt.allocPrint(ctx.allocator, "Creation of dynamic property {s}::${s} is deprecated", .{ obj.class_name, name });
-            defer ctx.allocator.free(msg);
-            try ctx.vm.raiseError(VM.E_DEPRECATED, msg);
-        }
-        try obj.set(ctx.allocator, name, args[1]);
+    if (arrayAsProps(obj)) {
+        try splWrite(ctx, obj, args[0], args[1]);
         return NativeResult.scalar(.null);
     }
-    const arr = try ensureData(ctx, obj);
-    try arr.set(ctx.allocator, args[0].toArrayKey(), args[1]);
+    const name = args[0].string.bytes();
+    // an ordinary property write, so creating one is deprecated as anywhere
+    if (!obj.properties.contains(name) and !ctx.vm.classDeclaresProperty(obj.class_name, name) and ctx.vm.dynamicPropertyRule(obj) == .deprecated) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Creation of dynamic property {s}::${s} is deprecated", .{ obj.class_name, name });
+        defer ctx.allocator.free(msg);
+        try ctx.vm.raiseError(VM.E_DEPRECATED, msg);
+    }
+    try obj.set(ctx.allocator, name, args[1]);
     return NativeResult.scalar(.null);
 }
 
 fn aoMagicIsset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
-    const flags = obj.get("__flags");
-    const has_props = flags == .int and (flags.int & 2) != 0;
-    if (!has_props) return NativeResult.scalar(.{ .bool = false });
-    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
-    const v = arr.get(args[0].toArrayKey());
-    return NativeResult.scalar(.{ .bool = v != .null });
+    if (args.len == 0 or !arrayAsProps(obj)) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = try splHas(ctx, obj, args[0], .isset) });
 }
 
 fn aoMagicUnset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len == 0) return NativeResult.scalar(.null);
-    const flags = obj.get("__flags");
-    const has_props = flags == .int and (flags.int & 2) != 0;
-    if (!has_props) return NativeResult.scalar(.null);
-    const arr = getData(obj) orelse return NativeResult.scalar(.null);
-    const key = args[0].toArrayKey();
-    ctx.vm.arrayRemoveOwned(arr, key);
+    if (args.len == 0 or !arrayAsProps(obj)) return NativeResult.scalar(.null);
+    try splUnset(ctx, obj, args[0]);
     return NativeResult.scalar(.null);
 }
 
 fn aoOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len > 0 and obj.get("__data") == .object and args[0] == .string)
-        return NativeResult.share(obj.get("__data").object.get(args[0].string.bytes()));
-    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     if (args.len == 0) return NativeResult.scalar(.null);
-    return NativeResult.share(arr.get(args[0].toArrayKey()));
+    return splRead(ctx, obj, args[0]);
 }
 
 fn aoOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const arr = try ensureData(ctx, obj);
     if (args.len < 2) return NativeResult.scalar(.null);
-    if (args[0] == .null) {
-        try arr.append(ctx.allocator, args[1]);
-    } else {
-        detachSplReference(ctx, arr, args[0].toArrayKey());
-        try arr.set(ctx.allocator, args[0].toArrayKey(), args[1]);
-    }
+    try splWrite(ctx, obj, args[0], args[1]);
     return NativeResult.scalar(.null);
 }
 
 fn aoOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
     if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
-    const key = args[0].toArrayKey();
-    for (arr.entries.items) |entry| {
-        if (entry.key.eql(key)) return NativeResult.scalar(.{ .bool = true });
-    }
-    return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = try splHas(ctx, obj, args[0], .exists) });
 }
 
 fn aoOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     if (args.len == 0) return NativeResult.scalar(.null);
-    const key = args[0].toArrayKey();
-    ctx.vm.arrayRemoveOwned(arr, key);
+    try splUnset(ctx, obj, args[0]);
     return NativeResult.scalar(.null);
 }
 
 fn aoCount(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
-    const arr = getData(obj) orelse return NativeResult.scalar(.{ .int = 0 });
-    return NativeResult.scalar(.{ .int = arr.length() });
+    return NativeResult.scalar(.{ .int = try splCount(ctx, obj) });
 }
 
 fn aoAppend(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const arr = try ensureData(ctx, obj);
-    if (args.len >= 1) try arr.append(ctx.allocator, args[0]);
+    if (args.len == 0) return NativeResult.scalar(.null);
+    if (try splStorage(ctx, obj) == .object) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot append properties to objects, use {s}::offsetSet() instead", .{obj.class_name});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.setPendingException("Error", msg);
+        return error.RuntimeError;
+    }
+    try splWrite(ctx, obj, .null, args[0]);
     return NativeResult.scalar(.null);
 }
 
 fn aoGetArrayCopy(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (obj.get("__data") == .object) {
-        const storage = obj.get("__data").object;
-        const copy = try ctx.createArray();
-        if (storage.slot_layout) |layout| {
-            if (storage.slots) |slots| {
-                for (layout.names, 0..) |name, i| try copy.set(ctx.allocator, .{ .string = Value.String.borrowed(name) }, slots[i]);
+    return NativeResult.borrowed(.{ .array = try splTableCopy(ctx, obj) });
+}
+
+const SplSort = union(enum) {
+    values: i64,
+    keys: i64,
+    user_values: Value,
+    user_keys: Value,
+    natural: bool,
+};
+
+fn splSort(ctx: *NativeContext, how: SplSort) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    switch (try splStorage(ctx, obj)) {
+        .array => |s| try sortEntries(ctx, try writableArray(ctx, s.holder, s.arr), how),
+        .object => |o| {
+            // zphp keeps declared properties in declaration order, so only a
+            // table of dynamic properties can take the sorted order
+            const table = try tableArray(ctx, o);
+            defer ctx.vm.releaseValue(.{ .array = table });
+            table.refcount += 1;
+            try sortEntries(ctx, table, how);
+            for (0..tableSize(o)) |pos| {
+                const prop = tableAt(ctx.vm, o, pos) orelse continue;
+                if (prop.slot and !prop.hole) return NativeResult.scalar(.{ .bool = true });
             }
-        }
-        var it = storage.properties.iterator();
-        while (it.next()) |entry| try copy.setCopiedKey(ctx.allocator, entry.key_ptr.*, entry.value_ptr.*);
-        return NativeResult.borrowed(.{ .array = copy });
+            const SortByTable = struct {
+                keys: []const []const u8,
+                table: *PhpArray,
+                fn rank(self: @This(), index: usize) usize {
+                    var buf: [24]u8 = undefined;
+                    for (self.table.entries.items, 0..) |entry, i| {
+                        if (std.mem.eql(u8, tableKey(entry.key, &buf), self.keys[index])) return i;
+                    }
+                    return std.math.maxInt(usize);
+                }
+                pub fn lessThan(self: @This(), a: usize, b: usize) bool {
+                    return self.rank(a) < self.rank(b);
+                }
+            };
+            o.properties.sort(SortByTable{ .keys = o.properties.keys(), .table = table });
+        },
     }
-    const arr = getData(obj) orelse {
-        const empty = try ctx.createArray();
-        return NativeResult.borrowed(.{ .array = empty });
-    };
-    // independent deep snapshot: ArrayObject mutates its internal array in place,
-    // and under COW a shallow copy would share nested arrays with it (a later
-    // $ao[k][..]=v would leak into this copy). a deep clone isolates the snapshot,
-    // matching PHP's copy-on-write independence
-    return NativeResult.borrowed(.{ .array = try ctx.vm.cloneArray(arr) });
+    return NativeResult.scalar(.{ .bool = true });
+}
+
+fn sortEntries(ctx: *NativeContext, arr: *PhpArray, how: SplSort) RuntimeError!void {
+    switch (how) {
+        .values => |flags| arrays_mod.sortWithFlags(arr, flags, false),
+        .keys => |flags| arrays_mod.sortKeysWithFlags(arr, flags, false),
+        .user_values => |callback| try arrays_mod.mergeSort(PhpArray.Entry, arr.entries.items, ctx, callback, .value),
+        .user_keys => |callback| try arrays_mod.mergeSort(PhpArray.Entry, arr.entries.items, ctx, callback, .key),
+        // SORT_NATURAL, with SORT_FLAG_CASE
+        .natural => |fold_case| arrays_mod.sortWithFlags(arr, if (fold_case) 6 | 8 else 6, false),
+    }
+    arr.rebuildStringIndexAssumeCapacity();
 }
 
 fn aoKsort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
-    const flags: i64 = if (args.len >= 1) Value.toInt(args[0]) else 0;
-    arrays_mod.sortKeysWithFlags(arr, flags, false);
-    arr.rebuildStringIndexAssumeCapacity();
-    return NativeResult.scalar(.{ .bool = true });
-}
-
-fn aoKrsort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
-    const flags: i64 = if (args.len >= 1) Value.toInt(args[0]) else 0;
-    arrays_mod.sortKeysWithFlags(arr, flags, true);
-    arr.rebuildStringIndexAssumeCapacity();
-    return NativeResult.scalar(.{ .bool = true });
+    return splSort(ctx, .{ .keys = if (args.len >= 1) Value.toInt(args[0]) else 0 });
 }
 
 fn aoAsort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
-    const flags: i64 = if (args.len >= 1) Value.toInt(args[0]) else 0;
-    arrays_mod.sortWithFlags(arr, flags, false);
-    arr.rebuildStringIndexAssumeCapacity();
-    return NativeResult.scalar(.{ .bool = true });
-}
-
-fn aoArsort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
-    const flags: i64 = if (args.len >= 1) Value.toInt(args[0]) else 0;
-    arrays_mod.sortWithFlags(arr, flags, true);
-    arr.rebuildStringIndexAssumeCapacity();
-    return NativeResult.scalar(.{ .bool = true });
+    return splSort(ctx, .{ .values = if (args.len >= 1) Value.toInt(args[0]) else 0 });
 }
 
 fn aoUasort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
     if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
-    try arrays_mod.mergeSort(PhpArray.Entry, arr.entries.items, ctx, args[0], .value);
-    arr.rebuildStringIndexAssumeCapacity();
-    return NativeResult.scalar(.{ .bool = true });
+    return splSort(ctx, .{ .user_values = args[0] });
 }
 
 fn aoUksort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
     if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
-    try arrays_mod.mergeSort(PhpArray.Entry, arr.entries.items, ctx, args[0], .key);
-    arr.rebuildStringIndexAssumeCapacity();
-    return NativeResult.scalar(.{ .bool = true });
+    return splSort(ctx, .{ .user_keys = args[0] });
 }
 
 fn aoNatsort(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
-    arrays_mod.sortWithFlags(arr, 6, false); // SORT_NATURAL
-    arr.rebuildStringIndexAssumeCapacity();
-    return NativeResult.scalar(.{ .bool = true });
+    return splSort(ctx, .{ .natural = false });
 }
 
 fn aoNatcasesort(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
-    arrays_mod.sortWithFlags(arr, 6 | 8, false); // SORT_NATURAL | SORT_FLAG_CASE
-    arr.rebuildStringIndexAssumeCapacity();
-    return NativeResult.scalar(.{ .bool = true });
+    return splSort(ctx, .{ .natural = true });
 }
 
 fn aoExchangeArray(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    if (args.len < 1 or (args[0] != .array and args[0] != .object)) return NativeResult.scalar(.{ .bool = false });
-    if (args[0] == .object) try deprecateObjectBacking(ctx, obj, "ArrayObject::exchangeArray");
-    const old = getData(obj);
-    const old_copy = try ctx.createArray();
-    if (old) |o| {
-        for (o.entries.items) |e| try old_copy.set(ctx.allocator, e.key, e.value);
-    }
-    try obj.set(ctx.allocator, "__data", args[0]);
-    return NativeResult.borrowed(.{ .array = old_copy });
+    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
+    try requireStorageArg(ctx, obj, "exchangeArray", args[0]);
+    const old = try splTableCopy(ctx, obj);
+    errdefer ctx.vm.releaseValue(.{ .array = old });
+    // the new storage's flags join the ones the object has
+    try splSetStorage(ctx, obj, args[0], splFlags(obj) | otherFlags(ctx.vm, args[0]), "exchangeArray");
+    return NativeResult.borrowed(.{ .array = old });
 }
 
 fn aoSetIteratorClass(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -1438,15 +1751,15 @@ fn aoSetIteratorClass(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     return NativeResult.scalar(.null);
 }
 
+// the iterator works on this object's storage, with its own position
 fn aoGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const arr = getData(obj) orelse return NativeResult.scalar(.null);
     const ic = obj.get("__iter_class");
     const cls_name = if (ic == .string and ic.string.bytes().len > 0) ic.string.bytes() else "ArrayIterator";
     const it = try ctx.createObject(cls_name);
-    try it.set(ctx.allocator, "__data", .{ .array = arr });
+    try it.set(ctx.allocator, "__data", .{ .object = obj });
     try it.set(ctx.allocator, "__cursor", .{ .int = 0 });
-    try it.set(ctx.allocator, "__flags", .{ .int = 0 });
+    try it.set(ctx.allocator, "__flags", .{ .int = splFlags(obj) & CLONE_MASK });
     return NativeResult.borrowed(.{ .object = it });
 }
 
@@ -1459,28 +1772,58 @@ fn aoGetIteratorClass(ctx: *NativeContext, _: []const Value) RuntimeError!Native
 
 fn aoSetFlags(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len >= 1) try obj.set(ctx.allocator, "__flags", .{ .int = Value.toInt(args[0]) });
+    if (args.len >= 1) try obj.set(ctx.allocator, "__flags", .{ .int = Value.toInt(args[0]) & FLAGS_MASK });
     return NativeResult.scalar(.null);
 }
 
 fn aoGetFlags(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
-    return NativeResult.scalar(.{ .int = Value.toInt(obj.get("__flags")) });
+    return NativeResult.scalar(.{ .int = splFlags(obj) });
+}
+
+// a clone of an ArrayObject owns a copy of the storage; a clone of an
+// ArrayIterator works on the original's storage
+fn splArrayClone(vm: *VM, src: *PhpObject, copy: *PhpObject) bool {
+    var ctx = vm.makeContext(null);
+    const data = src.get("__data");
+    if (data == .object and data.object == src) {
+        copy.set(vm.allocator, "__data", .{ .object = copy }) catch return false;
+    } else if (vm.isInstanceOf(src.class_name, "ArrayIterator")) {
+        copy.set(vm.allocator, "__data", .{ .object = src }) catch return false;
+    } else {
+        const table = splTableCopy(&ctx, src) catch return false;
+        copy.set(vm.allocator, "__data", .{ .array = table }) catch return false;
+    }
+    return true;
 }
 
 // --- ArrayIterator ---
 
-fn aiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len >= 1 and (args[0] == .array or args[0] == .object)) {
-        if (args[0] == .object) try deprecateObjectBacking(ctx, obj, "ArrayIterator::__construct");
-        try obj.set(ctx.allocator, "__data", args[0]);
-    } else {
-        _ = try ensureData(ctx, obj);
+// a position iteration visits, at or after `from`: an array's next entry, or
+// the next public, initialized entry of a property table
+fn iterPosition(ctx: *NativeContext, obj: *PhpObject, from: usize) RuntimeError!?usize {
+    switch (try splStorage(ctx, obj)) {
+        .array => |s| return if (from < s.arr.entries.items.len) from else null,
+        .object => |o| {
+            var pos = from;
+            while (pos < tableSize(o)) : (pos += 1) {
+                const prop = tableAt(ctx.vm, o, pos) orelse continue;
+                if (!prop.hole and !prop.mangled()) return pos;
+            }
+            return null;
+        },
     }
-    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
-    try obj.set(ctx.allocator, "__flags", .{ .int = if (args.len >= 2) args[1].toInt() else 0 });
-    return NativeResult.scalar(.null);
+}
+
+fn storageEnd(storage: SplStorage) usize {
+    return switch (storage) {
+        .array => |s| s.arr.entries.items.len,
+        .object => |o| tableSize(o),
+    };
+}
+
+fn cursorOf(obj: *PhpObject) usize {
+    return @intCast(@max(Value.toInt(obj.get("__cursor")), 0));
 }
 
 fn aiRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -1489,139 +1832,71 @@ fn aiRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     return NativeResult.scalar(.null);
 }
 
+// the element at an ArrayIterator's position, or null past the end
+pub fn iteratorCurrent(ctx: *NativeContext, obj: *PhpObject) RuntimeError!?Value {
+    const pos = try iterPosition(ctx, obj, cursorOf(obj)) orelse return null;
+    return switch (try splStorage(ctx, obj)) {
+        .array => |s| blk: {
+            const entry = s.arr.entries.items[pos];
+            break :blk if (entry.ref) |ref| ref.* else entry.value;
+        },
+        .object => |o| tableAt(ctx.vm, o, pos).?.value,
+    };
+}
+
+pub fn iteratorFlags(obj: *PhpObject) i64 {
+    return splFlags(obj);
+}
+
 fn aiCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
-    const cursor: usize = @intCast(@max(Value.toInt(obj.get("__cursor")), 0));
-    if (cursor >= arr.entries.items.len) return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.share(arr.entries.items[cursor].value);
+    return NativeResult.share(try iteratorCurrent(ctx, obj) orelse .null);
 }
 
 fn aiKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const arr = getData(obj) orelse return NativeResult.scalar(.null);
-    const cursor: usize = @intCast(@max(Value.toInt(obj.get("__cursor")), 0));
-    if (cursor >= arr.entries.items.len) return NativeResult.scalar(.null);
-    const key = arr.entries.items[cursor].key;
-    return switch (key) {
-        .int => |i| NativeResult.scalar(.{ .int = i }),
-        .string => |value| NativeResult.shareString(value),
+    const pos = try iterPosition(ctx, obj, cursorOf(obj)) orelse return NativeResult.scalar(.null);
+    return switch (try splStorage(ctx, obj)) {
+        .array => |s| switch (s.arr.entries.items[pos].key) {
+            .int => |i| NativeResult.scalar(.{ .int = i }),
+            .string => |value| NativeResult.shareString(value),
+        },
+        .object => |o| NativeResult.takeString(try Value.String.create(ctx.allocator, tableAt(ctx.vm, o, pos).?.name)),
     };
 }
 
 fn aiNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const cursor = Value.toInt(obj.get("__cursor"));
-    try obj.set(ctx.allocator, "__cursor", .{ .int = cursor + 1 });
+    const pos = try iterPosition(ctx, obj, cursorOf(obj)) orelse return NativeResult.scalar(.null);
+    try obj.set(ctx.allocator, "__cursor", .{ .int = @intCast(pos + 1) });
     return NativeResult.scalar(.null);
 }
 
 fn aiValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
-    const cursor = Value.toInt(obj.get("__cursor"));
-    return NativeResult.scalar(.{ .bool = cursor >= 0 and cursor < arr.length() });
+    return NativeResult.scalar(.{ .bool = try iterPosition(ctx, obj, cursorOf(obj)) != null });
 }
 
 fn aiSeek(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const arr = getData(obj) orelse return NativeResult.scalar(.null);
-    const pos = if (args.len >= 1) Value.toInt(args[0]) else 0;
-    if (pos < 0 or pos >= arr.length()) {
-        try ctx.vm.setPendingException("OutOfBoundsException", "Seek position is out of range");
-        return error.RuntimeError;
-    }
-    try obj.set(ctx.allocator, "__cursor", .{ .int = pos });
-    return NativeResult.scalar(.null);
-}
-
-fn aiCount(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
-    const arr = getData(obj) orelse return NativeResult.scalar(.{ .int = 0 });
-    return NativeResult.scalar(.{ .int = arr.length() });
-}
-
-fn aiOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len > 0 and obj.get("__data") == .object and args[0] == .string)
-        return NativeResult.share(obj.get("__data").object.get(args[0].string.bytes()));
-    const arr = getData(obj) orelse return NativeResult.scalar(.null);
-    if (args.len == 0) return NativeResult.scalar(.null);
-    return NativeResult.share(arr.get(args[0].toArrayKey()));
-}
-
-fn aiOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const arr = try ensureData(ctx, obj);
-    if (args.len < 2) return NativeResult.scalar(.null);
-    if (args[0] == .null) {
-        try arr.append(ctx.allocator, args[1]);
-    } else {
-        detachSplReference(ctx, arr, args[0].toArrayKey());
-        try arr.set(ctx.allocator, args[0].toArrayKey(), args[1]);
-    }
-    return NativeResult.scalar(.null);
-}
-
-fn aiOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
-    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
-    const key = args[0].toArrayKey();
-    for (arr.entries.items) |entry| {
-        if (entry.key.eql(key)) return NativeResult.scalar(.{ .bool = true });
-    }
-    return NativeResult.scalar(.{ .bool = false });
-}
-
-fn aiOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const arr = getData(obj) orelse return NativeResult.scalar(.null);
-    if (args.len == 0) return NativeResult.scalar(.null);
-    const key = args[0].toArrayKey();
-    ctx.vm.arrayRemoveOwned(arr, key);
-    return NativeResult.scalar(.null);
-}
-
-fn aiGetArrayCopy(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (obj.get("__data") == .object) {
-        const storage = obj.get("__data").object;
-        const copy = try ctx.createArray();
-        if (storage.slot_layout) |layout| {
-            if (storage.slots) |slots| {
-                for (layout.names, 0..) |name, i| try copy.set(ctx.allocator, .{ .string = Value.String.borrowed(name) }, slots[i]);
-            }
+    const target = if (args.len >= 1) Value.toInt(args[0]) else 0;
+    if (target >= 0) {
+        var pos = try iterPosition(ctx, obj, 0);
+        var steps = target;
+        while (steps > 0) : (steps -= 1) {
+            const at = pos orelse break;
+            pos = try iterPosition(ctx, obj, at + 1);
         }
-        var it = storage.properties.iterator();
-        while (it.next()) |entry| try copy.setCopiedKey(ctx.allocator, entry.key_ptr.*, entry.value_ptr.*);
-        return NativeResult.borrowed(.{ .array = copy });
+        if (pos) |at| {
+            try obj.set(ctx.allocator, "__cursor", .{ .int = @intCast(at) });
+            return NativeResult.scalar(.null);
+        }
     }
-    const arr = getData(obj) orelse {
-        const empty = try ctx.createArray();
-        return NativeResult.borrowed(.{ .array = empty });
-    };
-    // independent deep snapshot (see aoGetArrayCopy) - avoids nested-array COW
-    // sharing with the iterator's mutable internal array
-    return NativeResult.borrowed(.{ .array = try ctx.vm.cloneArray(arr) });
-}
-
-fn aiAppend(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const arr = try ensureData(ctx, obj);
-    if (args.len >= 1) try arr.append(ctx.allocator, args[0]);
-    return NativeResult.scalar(.null);
-}
-
-fn aiGetFlags(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
-    return NativeResult.scalar(.{ .int = Value.toInt(obj.get("__flags")) });
-}
-
-fn aiSetFlags(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len >= 1) try obj.set(ctx.allocator, "__flags", .{ .int = Value.toInt(args[0]) });
-    return NativeResult.scalar(.null);
+    if (target >= 0) try obj.set(ctx.allocator, "__cursor", .{ .int = @intCast(storageEnd(try splStorage(ctx, obj))) });
+    const msg = try std.fmt.allocPrint(ctx.allocator, "Seek position {d} is out of range", .{target});
+    defer ctx.allocator.free(msg);
+    try ctx.vm.setPendingException("OutOfBoundsException", msg);
+    return error.RuntimeError;
 }
 
 // --- WeakMap ---
@@ -1860,7 +2135,7 @@ fn pqIsEmpty(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
 
 fn pqSetExtractFlags(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len >= 1) try obj.set(ctx.allocator, "__flags", .{ .int = Value.toInt(args[0]) });
+    if (args.len >= 1) try obj.set(ctx.allocator, "__flags", .{ .int = Value.toInt(args[0]) & FLAGS_MASK });
     return NativeResult.scalar(.null);
 }
 

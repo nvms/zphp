@@ -318,8 +318,9 @@ pub const ClassDef = struct {
     // an internal class php refuses to clone though it holds no native handle
     uncloneable: bool = false,
     native_cleanup: ?*const fn (*PhpObject) bool = null,
-    // copies the native handle for `clone`; a class with a handle and no
-    // hook is uncloneable, like php's handle classes
+    // completes `clone` after the properties are copied: a native handle, or
+    // state a built-in class keeps in its properties. a class with a handle
+    // and no hook is uncloneable, like php's handle classes
     native_clone: ?*const fn (*VM, *PhpObject, *PhpObject) bool = null,
     // arithmetic and comparison on instances of a native class (BcMath\Number).
     // null result means the operand pair is not supported and the ordinary
@@ -7357,15 +7358,14 @@ pub const VM = struct {
                         return error.RuntimeError;
                     }
                     if (arr_val == .object and (std.mem.eql(u8, arr_val.object.class_name, "ArrayObject") or std.mem.eql(u8, arr_val.object.class_name, "ArrayIterator"))) {
-                        // SPL ArrayObject/ArrayIterator: isset() is null-aware (PHP's spl_array_has_dimension semantics)
-                        const data = arr_val.object.get("__data");
-                        if (data == .array) {
-                            if (key == .resource) self.warnResourceOffset(key) catch if (try self.resumeRaised()) continue;
-                            const v = data.array.get(Value.toArrayKey(key));
-                            self.push(.{ .bool = v != .null });
-                        } else {
-                            self.push(.{ .bool = false });
-                        }
+                        // spl_array_has_dimension: isset() looks at the value
+                        if (key == .resource) self.warnResourceOffset(key) catch if (try self.resumeRaised()) continue;
+                        var ctx = self.makeContext(null);
+                        const set = @import("../stdlib/spl.zig").arrayStorageIsset(&ctx, arr_val.object, key) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        self.push(.{ .bool = set });
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetExists")) {
                         const result = self.callMethod(arr_val.object, "offsetExists", &.{key}) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -7404,7 +7404,7 @@ pub const VM = struct {
                             return error.RuntimeError;
                         };
                         src = src.storage();
-                        const native_clone = if (src.native.kind == .none) null else self.nativeCloneHook(src.class_name);
+                        const native_clone = self.nativeCloneHook(src.class_name);
                         const uncloneable = if (self.classes.getPtr(src.class_name)) |cls| cls.uncloneable else false;
                         if ((src.native.kind != .none and native_clone == null) or uncloneable) {
                             if (try self.throwUncloneable(src.class_name)) continue;
@@ -12311,7 +12311,7 @@ pub const VM = struct {
         return self.emitWarning("A non-numeric value encountered");
     }
 
-    fn emitUndefinedKeyWarning(self: *VM, key: PhpArray.Key) RuntimeError!void {
+    pub fn emitUndefinedKeyWarning(self: *VM, key: PhpArray.Key) RuntimeError!void {
         const msg = switch (key) {
             .int => |n| try std.fmt.allocPrint(self.allocator, "Undefined array key {d}", .{n}),
             .string => |s| try std.fmt.allocPrint(self.allocator, "Undefined array key \"{s}\"", .{s.bytes()}),
@@ -18559,7 +18559,7 @@ pub const VM = struct {
     // was > 1). sole owners pass through untouched - the common case, ~free.
     // this is what makes copyValue/transferArg able to share arrays instead of
     // deep-cloning: the clone is deferred to the first in-place write
-    fn cowSeparate(self: *VM, arr: *PhpArray) RuntimeError!*PhpArray {
+    pub fn cowSeparate(self: *VM, arr: *PhpArray) RuntimeError!*PhpArray {
         // $GLOBALS is a live view of the global symbol table - it is a durable
         // VM root (extra retain) AND held by frame.vars['$GLOBALS'], so its
         // refcount is always >1. it must NEVER be separated: a write to
