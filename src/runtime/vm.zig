@@ -8805,8 +8805,12 @@ pub const VM = struct {
                         // passing a variable by reference defines it, as null,
                         // whether or not the callee writes it
                         const frame = self.currentFrame();
-                        if (!isSuperglobal(name) and self.frameVariable(frame, name) == null)
-                            try self.setVariableByName(frame, try self.internName(name), .null);
+                        if (!isSuperglobal(name) and self.frameVariable(frame, name) == null) {
+                            if (self.frameSlot(frame, name)) |slot|
+                                try self.assignLocal(frame, slot, .null)
+                            else
+                                try self.setVariableByName(frame, try self.internName(name), .null);
+                        }
                         self.setArgSource(self.sp - 1, .{ .simple = name });
                     }
                 },
@@ -13031,7 +13035,7 @@ pub const VM = struct {
                         self.setCell(cell, val);
                         try self.propagateCellWrite(cell, val);
                     }
-                    if (try frame.vars.fetchPut(self.allocator, name, val)) |old| {
+                    if (try self.fetchPutFrameVar(&frame.vars, name, val)) |old| {
                         self.releaseValue(old.value);
                     } else self.releaseValue(frame.locals[slot]);
                     frame.locals[slot] = val;
@@ -13049,7 +13053,7 @@ pub const VM = struct {
             self.setCell(cell, val);
             try self.propagateCellWrite(cell, val);
         }
-        const old = try frame.vars.fetchPut(self.allocator, name, val);
+        const old = try self.fetchPutFrameVar(&frame.vars, name, val);
         if (old) |kv| self.releaseValue(kv.value);
         try self.syncIncludeVar(frame, name, val);
     }
@@ -14786,6 +14790,14 @@ pub const VM = struct {
         return cell.*;
     }
 
+    fn frameSlot(self: *VM, frame: *const CallFrame, name: []const u8) ?u16 {
+        const slot_names = if (frame.slot_names.len > 0) frame.slot_names else if (frame.func) |f| f.slot_names else self.global_slot_names;
+        for (slot_names, 0..) |sn, si| {
+            if (std.mem.eql(u8, sn, name)) return if (si < frame.locals.len) @intCast(si) else null;
+        }
+        return null;
+    }
+
     pub fn frameVariable(self: *VM, frame: *CallFrame, name: []const u8) ?Value {
         if (frame.ref_slots.get(name)) |cell| return cell.*;
         const slot_names = if (frame.slot_names.len > 0) frame.slot_names else if (frame.func) |f| f.slot_names else self.global_slot_names;
@@ -15485,6 +15497,15 @@ pub const VM = struct {
             if (self.vars_pool.pop()) |pooled| vars.* = pooled;
         }
         try vars.put(self.allocator, name, val);
+    }
+
+    // put that hands back the entry it replaced, taking a pooled map as
+    // putFrameVar does
+    fn fetchPutFrameVar(self: *VM, vars: *std.StringHashMapUnmanaged(Value), name: []const u8, val: Value) !?std.StringHashMapUnmanaged(Value).KV {
+        if (vars.capacity() == 0) {
+            if (self.vars_pool.pop()) |pooled| vars.* = pooled;
+        }
+        return vars.fetchPut(self.allocator, name, val);
     }
 
     pub fn releaseFrameVars(self: *VM, hm: *std.StringHashMapUnmanaged(Value)) void {
