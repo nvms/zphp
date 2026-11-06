@@ -1295,6 +1295,10 @@ pub const Value = union(enum) {
     // PhpObject so natives keep their state in its property bag, but scripts
     // never see it as an object; its id is the resource id
     resource: *PhpObject,
+    // a local variable that was never assigned (or was unset): php's IS_UNDEF.
+    // it lives only in a frame's local slots; every read turns it into null,
+    // with "Undefined variable" where php warns, so it never reaches a value
+    undef,
 
     // sentinel for "default = []" in function params - fillDefaults creates a fresh empty array
     var empty_array_sentinel: PhpArray = .{};
@@ -1317,7 +1321,7 @@ pub const Value = union(enum) {
     // php's value-name messages do
     pub fn valueName(self: Value) []const u8 {
         return switch (self) {
-            .null => "null",
+            .null, .undef => "null",
             .bool => |b| if (b) "true" else "false",
             .int => "int",
             .float => "float",
@@ -1332,7 +1336,7 @@ pub const Value = union(enum) {
 
     pub fn isTruthy(self: Value) bool {
         return switch (self) {
-            .null => false,
+            .null, .undef => false,
             .bool => |b| b,
             .int => |i| i != 0,
             .float => |f| f != 0.0,
@@ -1554,7 +1558,7 @@ pub const Value = union(enum) {
     pub fn identical(a: Value, b: Value) bool {
         if (@intFromEnum(a) != @intFromEnum(b)) return false;
         return switch (a) {
-            .null => true,
+            .null, .undef => true,
             .bool => |ab| ab == b.bool,
             .int => |ai| ai == b.int,
             .float => |af| af == b.float,
@@ -1730,7 +1734,7 @@ pub const Value = union(enum) {
 
     pub fn toInt(v: Value) i64 {
         return switch (v) {
-            .null => 0,
+            .null, .undef => 0,
             .bool => |b| if (b) @as(i64, 1) else 0,
             .int => |i| i,
             .float => |f| dvalToLval(f),
@@ -1744,7 +1748,7 @@ pub const Value = union(enum) {
 
     pub fn toFloat(v: Value) f64 {
         return switch (v) {
-            .null => 0.0,
+            .null, .undef => 0.0,
             .bool => |b| if (b) 1.0 else 0.0,
             .int => |i| @floatFromInt(i),
             .float => |f| f,
@@ -1850,7 +1854,7 @@ pub const Value = union(enum) {
             .string => |s| .{ .string = s },
             .bool => |b| .{ .int = if (b) 1 else 0 },
             .float => |f| .{ .int = dvalToLval(f) },
-            .null => .{ .string = Value.String.borrowed("") },
+            .null, .undef => .{ .string = Value.String.borrowed("") },
             .resource => |r| .{ .int = r.id },
             .array, .object, .generator, .fiber => .{ .int = 0 },
         };
@@ -1858,7 +1862,7 @@ pub const Value = union(enum) {
 
     pub fn format(self: Value, buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator) !void {
         switch (self) {
-            .null => {},
+            .null, .undef => {},
             .bool => |b| if (b) try buf.appendSlice(allocator, "1"),
             .int => |i| {
                 var tmp: [32]u8 = undefined;

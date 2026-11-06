@@ -39,7 +39,7 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
     const a = ctx.allocator;
     const indent = depth * 2;
     switch (val) {
-        .null => {
+        .null, .undef => {
             try appendIndent(out, a, indent);
             try out.appendSlice(a, "NULL\n");
         },
@@ -223,7 +223,7 @@ fn printRValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Valu
 
 fn printRValueImpl(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Value, depth: usize, vm: ?*@import("../runtime/vm.zig").VM) !void {
     switch (val) {
-        .null => {},
+        .null, .undef => {},
         .bool => |b| if (b) try out.appendSlice(a, "1"),
         .int => |i| {
             var tmp: [32]u8 = undefined;
@@ -391,7 +391,7 @@ fn varExportString(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), s: []
 
 fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Value, depth: usize, ctx: *NativeContext) !void {
     switch (val) {
-        .null => try out.appendSlice(a, "NULL"),
+        .null, .undef => try out.appendSlice(a, "NULL"),
         .bool => |b| try out.appendSlice(a, if (b) "true" else "false"),
         .int => |i| {
             if (i == std.math.minInt(i64)) {

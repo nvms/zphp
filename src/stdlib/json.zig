@@ -97,7 +97,7 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
     const unescape_slashes = (flags & JSON_UNESCAPED_SLASHES) != 0;
     const unescape_unicode = (flags & JSON_UNESCAPED_UNICODE) != 0;
     switch (val) {
-        .null => try buf.appendSlice(a, "null"),
+        .null, .undef => try buf.appendSlice(a, "null"),
         .bool => |b| try buf.appendSlice(a, if (b) "true" else "false"),
         .int => |i| {
             var tmp: [32]u8 = undefined;

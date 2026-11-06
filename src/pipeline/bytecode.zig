@@ -375,6 +375,10 @@ pub const OpCode = enum(u8) {
     // u16 name, u16 text: marks a global constant #[\Deprecated]; text is what
     // follows "is deprecated" in the warning its reads raise
     deprecate_const,
+    // u16 slot / u16 name: get_local and get_var for isset, ?? and empty(),
+    // reading a variable that holds nothing as null without a warning
+    get_local_quiet,
+    get_var_quiet,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -383,6 +387,7 @@ pub const OpCode = enum(u8) {
             .reference_source,
             .constant,
             .get_var,
+            .get_var_quiet,
             .set_var,
             .jump,
             .jump_back,
@@ -394,6 +399,7 @@ pub const OpCode = enum(u8) {
             .get_prop_coalesce,
             .set_prop,
             .get_local,
+            .get_local_quiet,
             .set_local,
             .set_local_transfer,
             .get_global,
@@ -477,7 +483,9 @@ pub const OpCode = enum(u8) {
             .op_false,
             .dup,
             .get_var,
+            .get_var_quiet,
             .get_local,
+            .get_local_quiet,
             .get_global,
             .get_static,
             .get_static_prop,

@@ -235,6 +235,9 @@ pub const Compiler = struct {
     // `$x?->y()->z()` chain short-circuit ALL of `z()` (and further links)
     // when $x is null, matching PHP's nullsafe semantics
     nullsafe_chain_jumps: ?*std.ArrayListUnmanaged(usize) = null,
+    // set while compiling the variable of an isset, ??, or empty(): its read
+    // doesn't warn when the variable holds nothing
+    quiet_reads: bool = false,
     loop_depth: u32 = 0,
     foreach_depth: u32 = 0,
     loop_is_foreach: [32]bool = @as([32]bool, @splat(false)),
@@ -1538,31 +1541,33 @@ pub const Compiler = struct {
     }
 
     pub fn emitGetVar(self: *Compiler, name: []const u8) Error!void {
+        const get_local: OpCode = if (self.quiet_reads) .get_local_quiet else .get_local;
+        const get_var: OpCode = if (self.quiet_reads and name.len > 0 and name[0] == '$') .get_var_quiet else .get_var;
         if (isSuperglobal(name)) {
-            try self.emitOp(.get_var);
+            try self.emitOp(get_var);
             try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(name) }));
             return;
         }
         if (self.local_slots.get(name)) |slot| {
-            try self.emitOp(.get_local);
+            try self.emitOp(get_local);
             try self.emitU16(slot);
             return;
         }
         if (self.arrowCaptureSlot(name)) |slot| {
-            try self.emitOp(.get_local);
+            try self.emitOp(get_local);
             try self.emitU16(slot);
             return;
         }
         if (!self.inFunctionScope() and name.len > 0 and name[0] == '$') {
             const slot = self.getOrCreateSlot(name);
-            try self.emitOp(.get_local);
+            try self.emitOp(get_local);
             try self.emitU16(slot);
             return;
         }
         // non-$ name: may be a namespaced constant aliased by `use const`
         const resolved = if (name.len == 0 or name[0] != '$') (self.use_const_aliases.get(name) orelse name) else name;
         const idx = try self.addConstant(.{ .string = Value.String.borrowed(resolved) });
-        try self.emitOp(.get_var);
+        try self.emitOp(get_var);
         try self.emitU16(idx);
     }
 

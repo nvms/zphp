@@ -56,6 +56,12 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         return;
                     }
                     const slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    // a variable that holds nothing warns in runLoop
+                    if (locals[slot] == .undef) {
+                        frame.ip = ip - 1;
+                        self.sp = sp;
+                        return;
+                    }
                     ip += 2;
                     // an object pushed onto the operand stack takes a reference
                     // (Stage 1); arrays are not stack-owned (refcounting Stage 2)
@@ -915,7 +921,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     }
                     sp -= 1;
                     const ci_locals = ic.locals_buf[ci_lbase .. ci_lbase + ci_lc];
-                    @memset(ci_locals, .null);
+                    @memset(ci_locals, .undef);
                     ic.locals_sp = ci_lbase + ci_lc;
                     const ci_bind = @min(ci_acn, ci_func.arity);
                     for (0..ci_bind) |i| ci_locals[i] = stack[sp - ci_acn + i];
@@ -1093,7 +1099,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                                     return;
                                 }
                                 const mc_locals = ic.locals_buf[mc_lbase .. mc_lbase + mc_lc];
-                                @memset(mc_locals, .null);
+                                @memset(mc_locals, .undef);
                                 ic.locals_sp = mc_lbase + mc_lc;
                                 // a static method reached through an instance has no $this slot
                                 const mc_first: usize = if (mc_func.is_static) 0 else 1;
@@ -1194,7 +1200,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     }
 
                     const new_locals = ic.locals_buf[lbase .. lbase + lc];
-                    @memset(new_locals, .null);
+                    @memset(new_locals, .undef);
                     ic.locals_sp = lbase + lc;
 
                     const bind_count = @min(ac, func.arity);

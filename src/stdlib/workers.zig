@@ -777,7 +777,7 @@ const TransferCheck = struct {
 
     fn check(self: *TransferCheck, v: Value) RuntimeError!void {
         switch (v) {
-            .null, .bool, .int, .float => {},
+            .null, .undef, .bool, .int, .float => {},
             .string => |s| if (std.mem.startsWith(u8, s.bytes(), "__closure")) return self.refuse("a Closure"),
             .array => |arr| {
                 if (!try self.firstVisit(arr)) return;

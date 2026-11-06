@@ -1525,37 +1525,24 @@ fn array_rand(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
 fn native_compact(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
     const frame = ctx.vm.currentFrame();
-    const slot_names = if (frame.func) |func| func.slot_names else ctx.vm.global_slot_names;
-    for (args) |arg| try compactValue(ctx, arg, arr, frame, slot_names);
+    for (args) |arg| try compactValue(ctx, arg, arr, frame);
     return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn compactValue(ctx: *NativeContext, arg: Value, arr: *PhpArray, frame: anytype, slot_names: []const []const u8) RuntimeError!void {
+fn compactValue(ctx: *NativeContext, arg: Value, arr: *PhpArray, frame: anytype) RuntimeError!void {
     if (arg == .string) {
         const name = arg.string.bytes();
         const var_name = try std.fmt.allocPrint(ctx.allocator, "${s}", .{name});
         defer ctx.allocator.free(var_name);
-        var in_slot = false;
-        for (slot_names, 0..) |sn, i| {
-            if (std.mem.eql(u8, sn, var_name)) {
-                in_slot = true;
-                if (i < frame.locals.len) {
-                    try ctx.vm.arraySetOwned(arr, .{ .string = arg.string }, frame.locals[i]);
-                }
-                break;
-            }
-        }
-        if (!in_slot) {
-            if (frame.vars.get(var_name)) |val| {
-                try ctx.vm.arraySetOwned(arr, .{ .string = arg.string }, val);
-            } else {
-                const w = try std.fmt.allocPrint(ctx.allocator, "compact(): Undefined variable ${s}", .{name});
-                defer ctx.allocator.free(w);
-                try ctx.vm.emitWarning(w);
-            }
+        if (ctx.vm.frameVariable(frame, var_name)) |val| {
+            try ctx.vm.arraySetOwned(arr, .{ .string = arg.string }, val);
+        } else {
+            const w = try std.fmt.allocPrint(ctx.allocator, "compact(): Undefined variable ${s}", .{name});
+            defer ctx.allocator.free(w);
+            try ctx.vm.emitWarning(w);
         }
     } else if (arg == .array) {
-        for (arg.array.entries.items) |entry| try compactValue(ctx, entry.value, arr, frame, slot_names);
+        for (arg.array.entries.items) |entry| try compactValue(ctx, entry.value, arr, frame);
     }
 }
 
@@ -1573,12 +1560,11 @@ fn native_extract(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         fn f(fr: anytype, names: []const []const u8, name: []const u8) bool {
             for (names, 0..) |sn, i| {
                 if (std.mem.eql(u8, sn, name)) {
-                    if (i < fr.locals.len and fr.locals[i] != .null) return true;
+                    if (i < fr.locals.len and fr.locals[i] != .undef) return true;
                     break;
                 }
             }
-            if (fr.vars.get(name)) |v| if (v != .null) return true;
-            return false;
+            return fr.vars.contains(name);
         }
     }.f;
 

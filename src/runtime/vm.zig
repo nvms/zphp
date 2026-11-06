@@ -3272,7 +3272,7 @@ pub const VM = struct {
         var locals: []Value = &.{};
         if (result.local_count > 0) {
             locals = try self.allocator.alloc(Value, result.local_count);
-            @memset(locals, .null);
+            @memset(locals, .undef);
             for (result.slot_names, 0..) |sn, i| {
                 if (sn.len > 0) {
                     if (vars.get(sn)) |val| locals[i] = val;
@@ -3627,7 +3627,7 @@ pub const VM = struct {
         var eval_locals: []Value = &.{};
         if (heap_result.local_count > 0) {
             eval_locals = try self.allocator.alloc(Value, heap_result.local_count);
-            @memset(eval_locals, .null);
+            @memset(eval_locals, .undef);
         }
         var inherited_vars: @TypeOf(self.frames[0].vars) = .{};
         var inherited_refs: @TypeOf(self.frames[0].ref_slots) = .{};
@@ -3661,8 +3661,9 @@ pub const VM = struct {
                 try self.bindRefSlot(&inherited_refs, entry.key_ptr.*, entry.value_ptr.*);
             }
         }
+        // a caller variable that holds nothing isn't passed on: it isn't defined
         for (caller_slot_names, 0..) |name, caller_slot| {
-            if (name.len == 0 or caller_slot >= caller.locals.len) continue;
+            if (name.len == 0 or caller_slot >= caller.locals.len or caller.locals[caller_slot] == .undef) continue;
             try inherited_vars.put(self.allocator, name, caller.locals[caller_slot]);
         }
         const saved_slot_names = self.global_slot_names;
@@ -3841,7 +3842,7 @@ pub const VM = struct {
                     self.stack[self.sp - 2] = tmp;
                 },
 
-                .get_var => {
+                .get_var, .get_var_quiet => {
                     const idx = self.readU16();
                     const name = self.currentChunk().constants.items[idx].string.bytes();
                     if (isSuperglobal(name)) {
@@ -3897,6 +3898,7 @@ pub const VM = struct {
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
                     } else {
+                        if (op == .get_var) self.undefinedVariableRead(name) catch if (try self.resumeRaised()) continue;
                         self.push(.null);
                     }
                 },
@@ -6798,7 +6800,7 @@ pub const VM = struct {
                         if (sn.len == name.len and std.mem.eql(u8, sn, name)) {
                             if (si < uframe.locals.len) {
                                 if (!u_had_vars) self.releaseValue(uframe.locals[si]);
-                                uframe.locals[si] = .null;
+                                uframe.locals[si] = .undef;
                             }
                             break;
                         }
@@ -7140,7 +7142,7 @@ pub const VM = struct {
                     try self.setVariableByName(frame, name, result);
                     self.push(result);
                 },
-                .get_local => {
+                .get_local, .get_local_quiet => {
                     const slot = self.readU16();
                     const frame = self.currentFrame();
                     if (frame.func) |func| {
@@ -7158,11 +7160,11 @@ pub const VM = struct {
                                 }
                             }
                         }
-                        if (slot < frame.locals.len) {
-                            self.push(frame.locals[slot]);
-                        } else {
+                        const value = if (slot < frame.locals.len) frame.locals[slot] else Value.undef;
+                        if (value == .undef) {
+                            if (op == .get_local) self.undefinedVariableRead(if (slot < func.slot_names.len) func.slot_names[slot] else "") catch if (try self.resumeRaised()) continue;
                             self.push(.null);
-                        }
+                        } else self.push(value);
                     } else {
                         // top-frame: check $GLOBALS by slot name
                         if (slot < self.global_slot_names.len and std.mem.eql(u8, self.global_slot_names[slot], "$GLOBALS")) {
@@ -7171,7 +7173,11 @@ pub const VM = struct {
                                 continue;
                             }
                         }
-                        self.push(self.getLocalGlobal(slot, frame));
+                        const value = self.getLocalGlobal(slot, frame);
+                        if (value == .undef) {
+                            if (op == .get_local) self.undefinedVariableRead(if (slot < self.global_slot_names.len) self.global_slot_names[slot] else "") catch if (try self.resumeRaised()) continue;
+                            self.push(.null);
+                        } else self.push(value);
                     }
                 },
                 .set_local_transfer => {
@@ -7261,8 +7267,8 @@ pub const VM = struct {
                     const slot_b = self.readU16();
                     const offset = self.readU16();
                     const frame_lj = self.currentFrame();
-                    const a = self.fusedRead(frame_lj, slot_a);
-                    const b = self.fusedRead(frame_lj, slot_b);
+                    const a = try self.fusedRead(frame_lj, slot_a);
+                    const b = try self.fusedRead(frame_lj, slot_b);
                     const is_less = if (a == .int and b == .int) a.int < b.int else if (a == .float and b == .float) a.float < b.float else Value.lessThan(a, b);
                     if (!is_less) frame_lj.ip += offset;
                 },
@@ -7590,6 +7596,11 @@ pub const VM = struct {
                         v
                     else
                         .null;
+                    // capturing a variable that holds nothing warns, as a read
+                    // does; $this is bound implicitly and never does
+                    if (val == .null and !std.mem.eql(u8, var_name, "$this") and self.currentFrame().ref_slots.get(var_name) == null and self.localHoldsNothing(var_name)) {
+                        self.undefinedVariableRead(var_name) catch if (try self.resumeRaised()) continue;
+                    }
                     const cap_pos: u32 = @intCast(self.captures.items.len);
                     // a by-value capture holds a reference (Stage 1): the
                     // closure outlives the scope that created it, so the
@@ -7737,7 +7748,7 @@ pub const VM = struct {
                                 for (gf.slot_names, 0..) |sn, i| {
                                     if (std.mem.eql(u8, sn, name) and i < gf.locals.len) {
                                         const v = gf.locals[i];
-                                        if (v != .null) break :blk v;
+                                        if (v != .null and v != .undef) break :blk v;
                                     }
                                 }
                                 if (gf.vars.get(name)) |v| {
@@ -7841,7 +7852,7 @@ pub const VM = struct {
                                 var req_locals: []Value = &.{};
                                 if (r.local_count > 0) {
                                     req_locals = try self.allocator.alloc(Value, r.local_count);
-                                    @memset(req_locals, .null);
+                                    @memset(req_locals, .undef);
                                 }
                                 var inherited_vars: @TypeOf(self.frames[0].vars) = .{};
                                 var inherited_refs: @TypeOf(self.frames[0].ref_slots) = .{};
@@ -7879,7 +7890,7 @@ pub const VM = struct {
                                     }
                                 }
                                 for (caller_sn, 0..) |name, ci| {
-                                    if (name.len == 0 or ci >= caller.locals.len or inherited_vars.contains(name)) continue;
+                                    if (name.len == 0 or ci >= caller.locals.len or inherited_vars.contains(name) or caller.locals[ci] == .undef) continue;
                                     try inherited_vars.put(self.allocator, name, caller.locals[ci]);
                                 }
                                 const saved_slot_names = self.global_slot_names;
@@ -8533,12 +8544,12 @@ pub const VM = struct {
                                 const ctor_lbase = ctor_ic.locals_sp;
                                 const ctor_locals = if (ctor_lbase + ctor_lc <= ctor_ic.locals_cap) blk: {
                                     const s = ctor_ic.locals_buf[ctor_lbase .. ctor_lbase + ctor_lc];
-                                    @memset(s, .null);
+                                    @memset(s, .undef);
                                     ctor_ic.locals_sp = ctor_lbase + ctor_lc;
                                     break :blk s;
                                 } else blk: {
                                     const s = try self.allocator.alloc(Value, ctor_lc);
-                                    @memset(s, .null);
+                                    @memset(s, .undef);
                                     break :blk s;
                                 };
                                 ctor_locals[0] = .{ .object = obj };
@@ -12903,10 +12914,43 @@ pub const VM = struct {
         self.releaseValue(old);
     }
 
+    // a read of a variable that holds nothing: php warns "Undefined variable",
+    // except for $this outside an object (an Error) and an argument the callee
+    // takes by reference, which creates the variable
+    fn undefinedVariableRead(self: *VM, name: []const u8) RuntimeError!void {
+        // the compiler's own locals start out empty by design
+        for ([_][]const u8{ "$__closure_context", "$__closure_scope", "$__closure_defclass", "$__ret_ref" }) |internal| {
+            if (std.mem.eql(u8, name, internal)) return;
+        }
+        if (std.mem.eql(u8, name, "$this")) {
+            try self.setPendingException("Error", "Using $this when not in object context");
+            return error.RuntimeError;
+        }
+        if (self.nextArgIsByRef()) return;
+        const msg = try std.fmt.allocPrint(self.allocator, "Undefined variable {s}", .{name});
+        defer self.allocator.free(msg);
+        try self.emitWarning(msg);
+    }
+
+    // the read is the argument an arg_variable right after it passes by
+    // reference
+    fn nextArgIsByRef(self: *VM) bool {
+        const frame = self.currentFrame();
+        const code = frame.chunk.code.items;
+        if (frame.ip >= code.len or code[frame.ip] != @intFromEnum(OpCode.arg_variable)) return false;
+        const field = frame.ip + 3;
+        if (field + 2 >= code.len) return false;
+        const delta = (@as(u16, code[field]) << 8) | code[field + 1];
+        // the value isn't on the stack yet
+        return self.argNeedsCapture(frame.chunk, field, delta, code[field + 2], 0);
+    }
+
+    // a local's value for a write that builds on it ($x[] = 1): one that holds
+    // nothing is null, without a warning
     fn loadLocalSlot(self: *VM, frame: *CallFrame, slot: u16, ref_cell: ?*Value) Value {
         if (ref_cell) |cell| return cell.*;
-        if (frame.func == null) return self.getLocalGlobal(slot, frame);
-        return if (slot < frame.locals.len) frame.locals[slot] else .null;
+        const value = if (frame.func == null) self.getLocalGlobal(slot, frame) else if (slot < frame.locals.len) frame.locals[slot] else Value.undef;
+        return if (value == .undef) .null else value;
     }
 
     fn getLocalGlobal(self: *VM, slot: u16, frame: *CallFrame) Value {
@@ -12919,15 +12963,16 @@ pub const VM = struct {
         }
         if (slot < frame.locals.len) {
             const val = frame.locals[slot];
-            if (val != .null) return val;
+            if (val != .null and val != .undef) return val;
             if (slot < self.global_slot_names.len and self.global_slot_names[slot].len > 0) {
                 if (frame.vars.get(self.global_slot_names[slot])) |v| {
                     frame.locals[slot] = v;
                     return v;
                 }
             }
+            return val;
         }
-        return .null;
+        return .undef;
     }
 
     // store a value back into a local slot (function or global frame),
@@ -13050,7 +13095,7 @@ pub const VM = struct {
     // only holder, otherwise builds a new one; either way the result is
     // assigned the way set_local assigns and left on the stack
     fn concatAssignLocal(self: *VM, frame: *CallFrame, slot: u16, append_val: Value) RuntimeError!void {
-        const current = self.fusedRead(frame, slot);
+        const current = try self.fusedRead(frame, slot);
         var suffix_buf: [128]u8 = undefined;
         var suffix_allocator: std.heap.BufferFirstAllocator = .init(&suffix_buf, self.allocator);
         const temporary_allocator = suffix_allocator.allocator();
@@ -13100,20 +13145,27 @@ pub const VM = struct {
     }
 
     // a local as get_local reads it
-    fn fusedRead(self: *VM, frame: *CallFrame, slot: u16) Value {
-        if (frame.func) |func| {
-            if (slot < func.slot_names.len and func.slot_names[slot].len > 0) {
-                if (frame.ref_slots.get(func.slot_names[slot])) |cell| return cell.*;
+    // a local's value for an operation that reads it ($x++, $x .= y, $a < $b):
+    // one that holds nothing warns and reads as null
+    fn fusedRead(self: *VM, frame: *CallFrame, slot: u16) RuntimeError!Value {
+        const value = blk: {
+            if (frame.func) |func| {
+                if (slot < func.slot_names.len and func.slot_names[slot].len > 0) {
+                    if (frame.ref_slots.get(func.slot_names[slot])) |cell| return cell.*;
+                }
+                break :blk if (slot < frame.locals.len) frame.locals[slot] else Value.undef;
             }
-            return if (slot < frame.locals.len) frame.locals[slot] else .null;
-        }
-        return self.getLocalGlobal(slot, frame);
+            break :blk self.getLocalGlobal(slot, frame);
+        };
+        if (value != .undef) return value;
+        try self.undefinedVariableRead(self.slotName(frame, slot));
+        return .null;
     }
 
     // `$x++;` / `$x--;` as the unfused get_local, inc_value, set_local, pop
     // true when a thrown TypeError was caught
     fn fusedStep(self: *VM, frame: *CallFrame, slot: u16, up: bool) RuntimeError!bool {
-        const v = self.fusedRead(frame, slot);
+        const v = try self.fusedRead(frame, slot);
         VM.stackRetain(v);
         const stepped = self.stepValue(v, up) catch |err| {
             self.stackRelease(v);
@@ -13166,8 +13218,9 @@ pub const VM = struct {
     // `$dst op= $src;` as the unfused loads, arithmetic, set_local and pop.
     // true when an exception was dispatched
     fn fusedArith(self: *VM, frame: *CallFrame, f: FusedArith) RuntimeError!bool {
-        const a = self.fusedRead(frame, f.dst);
-        const b = self.fusedRead(frame, f.src);
+        // php reads the right operand before the variable it assigns to
+        const b = try self.fusedRead(frame, f.src);
+        const a = try self.fusedRead(frame, f.dst);
         if (f.op == .add and a == .array and b == .array) {
             self.push(.{ .array = try self.arrayUnion(a.array, b.array) });
         } else {
@@ -13300,7 +13353,8 @@ pub const VM = struct {
         self.global_vars_dirty = false;
         const frame = &self.frames[0];
         for (self.top_slot_names, 0..) |name, i| {
-            if (name.len > 0 and i < frame.locals.len) {
+            // a variable that holds nothing has no entry: it isn't defined
+            if (name.len > 0 and i < frame.locals.len and frame.locals[i] != .undef) {
                 try self.putFrameVar(&frame.vars, name, frame.locals[i]);
             }
         }
@@ -14702,15 +14756,20 @@ pub const VM = struct {
     }
 
     // a variable of the frame below the current one: what a native sees as
-    // its caller's scope. reference cells win, then the slot, then the map
+    // its caller's scope
     pub fn callerVar(self: *VM, name: []const u8) ?Value {
         if (self.frame_count < 2) return null;
-        const frame = &self.frames[self.frame_count - 2];
+        return self.frameVariable(&self.frames[self.frame_count - 2], name);
+    }
+
+    // a frame's variable by name, null when it holds nothing: reference cells
+    // win, then the slot, then the map
+    pub fn frameVariable(self: *VM, frame: *CallFrame, name: []const u8) ?Value {
         if (frame.ref_slots.get(name)) |cell| return cell.*;
         const slot_names = if (frame.slot_names.len > 0) frame.slot_names else if (frame.func) |f| f.slot_names else self.global_slot_names;
         for (slot_names, 0..) |sn, si| {
             if (!std.mem.eql(u8, sn, name)) continue;
-            if (si < frame.locals.len and frame.locals[si] != .null) return frame.locals[si];
+            if (si < frame.locals.len and frame.locals[si] != .undef) return frame.locals[si];
             break;
         }
         return frame.vars.get(name);
@@ -14996,17 +15055,31 @@ pub const VM = struct {
         return instance;
     }
 
+    // a function frame's local by name; one that holds nothing reads as null
     fn getLocalByName(self: *VM, name: []const u8) Value {
         const frame = self.currentFrame();
         if (frame.func) |func| {
             for (func.slot_names, 0..) |sn, si| {
                 if (std.mem.eql(u8, sn, name)) {
-                    if (si < frame.locals.len) return frame.locals[si];
+                    if (si < frame.locals.len and frame.locals[si] != .undef) return frame.locals[si];
                     break;
                 }
             }
         }
         return .null;
+    }
+
+    // the running frame has no value under the name: a slot that holds
+    // nothing, or no slot and no variable at all
+    fn localHoldsNothing(self: *VM, name: []const u8) bool {
+        const frame = self.currentFrame();
+        if (frame.vars.contains(name)) return false;
+        const names = if (frame.func) |func| func.slot_names else self.global_slot_names;
+        for (names, 0..) |sn, si| {
+            if (!std.mem.eql(u8, sn, name)) continue;
+            return si >= frame.locals.len or frame.locals[si] == .undef;
+        }
+        return true;
     }
 
     fn saveFrameLocalsToGenerator(self: *VM, gen: *Generator) void {
@@ -15098,12 +15171,12 @@ pub const VM = struct {
 
         const locals = if (base + lc <= ic.locals_cap) blk: {
             const s = ic.locals_buf[base .. base + lc];
-            @memset(s, .null);
+            @memset(s, .undef);
             ic.locals_sp = base + lc;
             break :blk s;
         } else blk: {
             const s = try self.allocator.alloc(Value, lc);
-            @memset(s, .null);
+            @memset(s, .undef);
             break :blk s;
         };
 
@@ -15147,12 +15220,12 @@ pub const VM = struct {
         const lbase = ic.locals_sp;
         const locals = if (lbase + lc <= ic.locals_cap) blk: {
             const s = ic.locals_buf[lbase .. lbase + lc];
-            @memset(s, .null);
+            @memset(s, .undef);
             ic.locals_sp = lbase + lc;
             break :blk s;
         } else blk: {
             const s = try self.allocator.alloc(Value, lc);
-            @memset(s, .null);
+            @memset(s, .undef);
             break :blk s;
         };
         // a static method reached through an instance has no $this slot
@@ -15182,12 +15255,12 @@ pub const VM = struct {
 
         const locals = if (base + lc <= ic.locals_cap) blk: {
             const s = ic.locals_buf[base .. base + lc];
-            @memset(s, .null);
+            @memset(s, .undef);
             ic.locals_sp = base + lc;
             break :blk s;
         } else blk: {
             const s = try self.allocator.alloc(Value, lc);
-            @memset(s, .null);
+            @memset(s, .undef);
             break :blk s;
         };
 
@@ -15246,12 +15319,12 @@ pub const VM = struct {
 
         const locals = if (lbase + lc <= ic.locals_cap) blk: {
             const s = ic.locals_buf[lbase .. lbase + lc];
-            @memset(s, .null);
+            @memset(s, .undef);
             ic.locals_sp = lbase + lc;
             break :blk s;
         } else blk: {
             const s = try self.allocator.alloc(Value, lc);
-            @memset(s, .null);
+            @memset(s, .undef);
             break :blk s;
         };
 
@@ -15433,7 +15506,7 @@ pub const VM = struct {
         } else {
             locals = try self.allocator.alloc(Value, lc);
         }
-        @memset(locals, .null);
+        @memset(locals, .undef);
         for (func.slot_names, 0..) |name, i| {
             if (name.len > 0) {
                 if (vars.get(name)) |val| {
@@ -15710,6 +15783,10 @@ pub const VM = struct {
         var found_slot = false;
         for (sn, 0..) |s, si| {
             if (std.mem.eql(u8, s, var_name) and si < frame.locals.len) {
+                // a reference to a variable that holds nothing creates it as null
+                if (frame.locals[si] == .undef) {
+                    frame.locals[si] = frame.vars.get(var_name) orelse .null;
+                }
                 seed = frame.locals[si];
                 found_slot = true;
                 break;
@@ -20147,12 +20224,12 @@ pub const VM = struct {
 
         const locals = if (lbase + lc <= ic.locals_cap) blk: {
             const s = ic.locals_buf[lbase .. lbase + lc];
-            @memset(s, .null);
+            @memset(s, .undef);
             ic.locals_sp = lbase + lc;
             break :blk s;
         } else blk: {
             const s = try self.allocator.alloc(Value, lc);
-            @memset(s, .null);
+            @memset(s, .undef);
             break :blk s;
         };
 
@@ -20723,6 +20800,9 @@ pub const VM = struct {
     }
 
     inline fn push(self: *VM, value: Value) void {
+        // a variable that holds nothing is read as null; the marker itself
+        // never becomes a value
+        if (@import("builtin").mode == .debug) std.debug.assert(value != .undef);
         if (value == .string) {
             if (value.string.owner) |owner| self.removePendingStringRelease(owner);
         }

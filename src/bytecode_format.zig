@@ -18,7 +18,7 @@ const MAGIC = "ZPHPC\x00";
 // v18 adds defer_prop_defaults; v19 gives interface, trait and enum
 // declarations their start line, end line and doc comment. v20 gives class
 // constants their own opcodes.
-pub const FORMAT_VERSION: u16 = 25;
+pub const FORMAT_VERSION: u16 = 26;
 
 // tag bytes for serialized values
 const TAG_NULL: u8 = 0;
@@ -291,7 +291,7 @@ fn serializeFunction(buf: *std.ArrayListUnmanaged(u8), allocator: Allocator, str
 
 fn serializeValue(buf: *std.ArrayListUnmanaged(u8), allocator: Allocator, strtab: *StringTable, val: Value) !void {
     switch (val) {
-        .null => try buf.append(allocator, TAG_NULL),
+        .null, .undef => try buf.append(allocator, TAG_NULL),
         .bool => |b| try buf.append(allocator, if (b) TAG_BOOL_TRUE else TAG_BOOL_FALSE),
         .int => |i| {
             try buf.append(allocator, TAG_INT);

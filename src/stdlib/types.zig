@@ -375,7 +375,7 @@ fn strval(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
 fn gettype(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.literal("NULL");
     return switch (args[0]) {
-        .null => NativeResult.literal("NULL"),
+        .null, .undef => NativeResult.literal("NULL"),
         .bool => NativeResult.literal("boolean"),
         .int => NativeResult.literal("integer"),
         .float => NativeResult.literal("double"),
@@ -389,7 +389,7 @@ fn gettype(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
 fn get_debug_type(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.literal("null");
     return switch (args[0]) {
-        .null => NativeResult.literal("null"),
+        .null, .undef => NativeResult.literal("null"),
         .bool => NativeResult.literal("bool"),
         .int => NativeResult.literal("int"),
         .float => NativeResult.literal("float"),
@@ -2084,7 +2084,7 @@ fn native_match_unhandled_msg(ctx: *NativeContext, args: []const Value) RuntimeE
         .int => |i| try buf.print(ctx.allocator, "{d}", .{i}),
         .float => try v.format(&buf, ctx.allocator),
         .bool => |b| try buf.appendSlice(ctx.allocator, if (b) "true" else "false"),
-        .null => try buf.appendSlice(ctx.allocator, "null"),
+        .null, .undef => try buf.appendSlice(ctx.allocator, "null"),
         .string => |s| {
             // closures stored as Value.string with a __closure_ prefix are objects
             if (std.mem.startsWith(u8, s.bytes(), "__closure_")) {

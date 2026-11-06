@@ -913,7 +913,7 @@ fn native_get_defined_vars(ctx: *NativeContext, _: []const Value) RuntimeError!N
     for (slot_names, 0..) |sn, i| {
         if (sn.len == 0) continue;
         if (i >= frame.locals.len) break;
-        if (frame.locals[i] == .null) continue;
+        if (frame.locals[i] == .undef) continue;
         const name = if (sn.len > 0 and sn[0] == '$') sn[1..] else sn;
         if (name.len == 0) continue;
         if (std.mem.eql(u8, name, "this")) continue;

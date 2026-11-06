@@ -296,7 +296,11 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
 
     if (op_tag == .question_question_equal) {
         {
+            // the read is the left side of ??: no warning when it holds nothing
+            const saved = self.quiet_reads;
+            self.quiet_reads = true;
             try self.compileGetVar(target);
+            self.quiet_reads = saved;
             const skip_jump = try self.emitJump(.jump_if_not_null);
             try self.emitOp(.pop);
             try self.compileNode(node.data.rhs);
@@ -686,15 +690,18 @@ pub fn compilePostfixOp(self: *Compiler, node: Ast.Node) Error!void {
     }
     if (try emitPlaceOperands(self, node.data.lhs)) |place| return compilePlaceIncDec(self, place, op_tag, true);
 
+    // the variable is read once: the read is the expression's value and the
+    // stepped copy goes back into the variable
     try self.compileNode(node.data.lhs);
-    try self.compileNode(node.data.lhs);
-    try self.emitOp(if (op_tag == .plus_plus) .inc_value else .dec_value);
-
-    if (target.tag == .variable) {
-        const name = self.ast.tokenSlice(target.main_token);
-        try self.emitSetVar(name);
-        try self.emitOp(.pop);
+    if (target.tag != .variable) {
+        try self.compileNode(node.data.lhs);
+        try self.emitOp(if (op_tag == .plus_plus) .inc_value else .dec_value);
+        return;
     }
+    try self.emitOp(.dup);
+    try self.emitOp(if (op_tag == .plus_plus) .inc_value else .dec_value);
+    try self.emitSetVar(self.ast.tokenSlice(target.main_token));
+    try self.emitOp(.pop);
 }
 
 pub fn compileLogicalAnd(self: *Compiler, node: Ast.Node) Error!void {
@@ -751,6 +758,12 @@ fn compileCoalesceFetch(self: *Compiler, node_idx: u32) Error!void {
             try self.emitU16(name_idx);
         }
         return;
+    }
+    if (n.tag == .variable) {
+        const saved = self.quiet_reads;
+        self.quiet_reads = true;
+        defer self.quiet_reads = saved;
+        return self.compileNode(node_idx);
     }
     if (n.tag == .nullsafe_property_access) return compileNullsafePropertyFetch(self, n, true);
     if (n.tag == .static_prop_access) return compileStaticPropRead(self, n, true);
@@ -923,7 +936,7 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
             // an array element or static-name property read uses isset-
             // semantics here: an undefined key or an uninitialized typed
             // property must not warn/throw, just count as empty
-            if (arg.tag == .array_access or arg.tag == .static_prop_access or (arg.tag == .property_access and !self.isDynamicProp(arg))) {
+            if (arg.tag == .variable or arg.tag == .array_access or arg.tag == .static_prop_access or (arg.tag == .property_access and !self.isDynamicProp(arg))) {
                 try compileCoalesceFetch(self, args[0]);
                 try self.emitOp(.cast_bool);
                 try self.emitOp(.not);
