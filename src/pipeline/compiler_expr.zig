@@ -759,6 +759,10 @@ fn compileCoalesceFetch(self: *Compiler, node_idx: u32) Error!void {
         }
         return;
     }
+    if (n.tag == .variable_variable) {
+        try self.compileNode(n.data.lhs);
+        return self.emitOp(.get_var_var_quiet);
+    }
     if (n.tag == .variable) {
         const saved = self.quiet_reads;
         self.quiet_reads = true;
@@ -1296,6 +1300,9 @@ pub fn compileVivifyChain(self: *Compiler, node_idx: u32) Error!void {
         try self.emitOp(.ensure_array_static_prop);
         try self.emitU16(class_idx);
         try self.emitU16(prop_idx);
+    } else if (node.tag == .variable_variable) {
+        try self.compileNode(node.data.lhs);
+        try self.emitOp(.ensure_array_var_var);
     } else {
         try self.compileNode(node_idx);
     }

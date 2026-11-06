@@ -379,6 +379,10 @@ pub const OpCode = enum(u8) {
     // reading a variable that holds nothing as null without a warning
     get_local_quiet,
     get_var_quiet,
+    // get_var_var for isset and ??
+    get_var_var_quiet,
+    // pop a variable name: ensure_array_var for ${...}[k] = v
+    ensure_array_var_var,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {

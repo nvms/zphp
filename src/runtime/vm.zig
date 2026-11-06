@@ -3866,7 +3866,9 @@ pub const VM = struct {
                     }
                     if (self.currentFrame().ref_slots.get(name)) |cell| {
                         self.push(cell.*);
-                    } else if (self.currentFrame().vars.get(name)) |val| {
+                    } else if (self.frameVariable(self.currentFrame(), name)) |val| {
+                        // a read compiled before the variable's first write still
+                        // reads the slot that write fills
                         self.push(val);
                     } else if (self.php_constants.get(name)) |val| {
                         self.warnDeprecatedConstant(name) catch if (try self.resumeRaised()) continue;
@@ -3933,7 +3935,7 @@ pub const VM = struct {
                     }
                 },
 
-                .get_var_var => {
+                .get_var_var, .get_var_var_quiet => {
                     const name_val = self.pop();
                     const raw_name = if (name_val == .string) name_val.string.bytes() else "";
                     if (raw_name.len == 0) {
@@ -3945,34 +3947,45 @@ pub const VM = struct {
                             self.push(if (self.globals_cells.get(dollar_name)) |cell| cell.* else .null);
                             continue;
                         }
-                        if (self.currentFrame().ref_slots.get(dollar_name)) |cell| {
-                            self.push(cell.*);
+                        if (self.frameVariable(self.currentFrame(), dollar_name)) |val| {
+                            self.push(val);
+                        } else if (isSuperglobal(dollar_name) and self.frameInGlobalScope(self.currentFrame())) {
+                            self.push(if (self.globals_cells.get(dollar_name)) |cell| cell.* else .null);
                         } else {
-                            // check locals first (via slot_names) since vars can have stale entries
-                            const sn = if (self.currentFrame().func) |func| func.slot_names else self.global_slot_names;
-                            var found = false;
-                            for (sn, 0..) |s, si| {
-                                if (std.mem.eql(u8, s, dollar_name)) {
-                                    if (si < self.currentFrame().locals.len) {
-                                        self.push(self.currentFrame().locals[si]);
-                                    } else {
-                                        self.push(.null);
-                                    }
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if (!found) {
-                                if (self.currentFrame().vars.get(dollar_name)) |val| {
-                                    self.push(val);
-                                } else if (isSuperglobal(dollar_name) and self.frameInGlobalScope(self.currentFrame())) {
-                                    self.push(if (self.globals_cells.get(dollar_name)) |cell| cell.* else .null);
-                                } else {
-                                    self.push(.null);
-                                }
-                            }
+                            if (op == .get_var_var) self.undefinedVariableRead(dollar_name) catch if (try self.resumeRaised()) continue;
+                            self.push(.null);
                         }
                     }
+                },
+                .ensure_array_var_var => {
+                    // the variable a ${...}[k] write lands in: made an array when
+                    // it holds nothing, separated from co-holders, written back
+                    const name_val = self.pop();
+                    var buf: [256]u8 = undefined;
+                    const dollar_name = varVarName(if (name_val == .string) name_val.string.bytes() else "", &buf);
+                    const frame = self.currentFrame();
+                    const cur = self.frameVariable(frame, dollar_name) orelse .null;
+                    if (cur == .int or cur == .float or (cur == .bool and cur.bool)) {
+                        if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
+                        return error.RuntimeError;
+                    }
+                    if (cur == .array) {
+                        const sep = if (frame.ref_slots.get(dollar_name)) |cell|
+                            (try self.separateReferencedArray(frame, dollar_name, cell, cur.array)) orelse cur.array
+                        else
+                            try self.cowSeparate(cur.array);
+                        if (sep != cur.array) try self.setVariableByName(frame, try self.internName(dollar_name), .{ .array = sep });
+                        self.push(.{ .array = sep });
+                        continue;
+                    }
+                    if (cur != .null and !(cur == .bool and !cur.bool)) {
+                        self.push(cur);
+                        continue;
+                    }
+                    const arr: Value = .{ .array = try self.allocArray() };
+                    retainValue(arr);
+                    try self.setVariableByName(frame, try self.internName(dollar_name), arr);
+                    self.push(arr);
                 },
                 .set_var_var => {
                     const name_val = self.pop();
