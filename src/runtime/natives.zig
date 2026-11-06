@@ -15,12 +15,14 @@ pub fn Table(comptime NativeFn: type) type {
             arity: Arity,
             // bit i set: parameter i is `callable` or `?callable`
             callbacks: u32,
+            // #[\NoDiscard]'s reason, for a native php marks with it
+            no_discard: ?[]const u8,
         };
 
         map: std.StringHashMapUnmanaged(Native) = .{},
 
         pub fn put(self: *Self, allocator: Allocator, name: []const u8, call: NativeFn) !void {
-            try self.map.put(allocator, name, .{ .call = call, .arity = Arity.of(name), .callbacks = callbackParams(name) });
+            try self.map.put(allocator, name, .{ .call = call, .arity = Arity.of(name), .callbacks = callbackParams(name), .no_discard = no_discard.get(name) });
         }
 
         pub fn get(self: *const Self, name: []const u8) ?Native {
@@ -48,6 +50,19 @@ pub fn Table(comptime NativeFn: type) type {
         }
     };
 }
+
+// the natives php 8.5 marks #[\NoDiscard], with the reason it gives
+const no_discard = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "DateTimeImmutable::modify", "as DateTimeImmutable::modify() does not modify the object itself" },
+    .{ "DateTimeImmutable::add", "as DateTimeImmutable::add() does not modify the object itself" },
+    .{ "DateTimeImmutable::sub", "as DateTimeImmutable::sub() does not modify the object itself" },
+    .{ "DateTimeImmutable::setTimezone", "as DateTimeImmutable::setTimezone() does not modify the object itself" },
+    .{ "DateTimeImmutable::setTime", "as DateTimeImmutable::setTime() does not modify the object itself" },
+    .{ "DateTimeImmutable::setDate", "as DateTimeImmutable::setDate() does not modify the object itself" },
+    .{ "DateTimeImmutable::setISODate", "as DateTimeImmutable::setISODate() does not modify the object itself" },
+    .{ "DateTimeImmutable::setTimestamp", "as DateTimeImmutable::setTimestamp() does not modify the object itself" },
+    .{ "DateTimeImmutable::setMicrosecond", "as DateTimeImmutable::setMicrosecond() does not modify the object itself" },
+});
 
 // the parameters php checks as callbacks before the function runs
 pub fn callbackParams(name: []const u8) u32 {

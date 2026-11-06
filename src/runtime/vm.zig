@@ -1526,9 +1526,7 @@ pub const VM = struct {
             chunk_key: usize = 0,
             class_ptr: usize = 0,
             func: ?*const ObjFunction = null,
-            native: ?NativeFn = null,
-            native_arity: @import("natives.zig").Arity = .{},
-            native_callbacks: u32 = 0,
+            native: ?Native = null,
             full_name: []const u8 = "",
         };
 
@@ -9422,8 +9420,7 @@ pub const VM = struct {
                                     try self.enterMethodLocalsOnly(func, obj, arg_count);
                                     continue;
                                 }
-                            } else if (mc_entry.native) |native_call| {
-                                const native: Native = .{ .call = native_call, .arity = mc_entry.native_arity, .callbacks = mc_entry.native_callbacks };
+                            } else if (mc_entry.native) |native| {
                                 var args_buf: [16]Value = undefined;
                                 for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
                                 self.saveFrameArgs(arg_count);
@@ -9526,7 +9523,7 @@ pub const VM = struct {
                             const mc_chunk_key2 = @intFromPtr(self.currentChunk());
                             const mc_idx2 = InlineCache.methodIndex(mc_chunk_key2, mc_ip2);
                             if (mvr.visibility == .public) {
-                                ic.method[mc_idx2] = .{ .key = mc_ip2, .chunk_key = mc_chunk_key2, .class_ptr = @intFromPtr(obj.class_name.ptr), .native = native.call, .native_arity = native.arity, .native_callbacks = native.callbacks, .full_name = full_name };
+                                ic.method[mc_idx2] = .{ .key = mc_ip2, .chunk_key = mc_chunk_key2, .class_ptr = @intFromPtr(obj.class_name.ptr), .native = native, .full_name = full_name };
                             }
                         }
                         var args_buf: [16]Value = undefined;
@@ -18394,6 +18391,7 @@ pub const VM = struct {
             record = .{ .label = label, .args = input_args, .depth = self.frame_count, .instance = call.instance, .outer = outer };
             self.native_call = &record;
         }
+        if (native.no_discard) |reason| try self.warnDiscardedNative(label, reason, outer, call.instance);
         if (!admitted) {
             var buf: [256]u8 = undefined;
             try self.setPendingException("ArgumentCountError", native.arity.describe(&buf, label, input_args.len));
@@ -19926,6 +19924,24 @@ pub const VM = struct {
                 return error.RuntimeError;
             },
         }
+    }
+
+    // #[\NoDiscard] on a native: php warns at the call when the statement
+    // throws the result away, before the function runs. a native that calls
+    // it back (array_map) uses the result; a method native runs on a frame of
+    // its own above the caller
+    fn warnDiscardedNative(self: *VM, name: []const u8, reason: []const u8, outer: ?*const NativeCall, method: bool) RuntimeError!void {
+        if (self.frame_count == 0) return;
+        const own_frames: usize = @intFromBool(method);
+        if (outer) |o| if (o.depth + own_frames == self.frame_count) return;
+        const frame = self.currentFrame();
+        const code = frame.chunk.code.items;
+        if (frame.ip >= code.len or code[frame.ip] != @intFromEnum(OpCode.pop_boundary)) return;
+        const kind: []const u8 = if (std.mem.indexOf(u8, name, "::") != null) "method" else "function";
+        const msg = try std.fmt.allocPrint(self.allocator, "The return value of {s} {s}() should either be used or intentionally ignored by casting it as (void), {s}", .{ kind, name, reason });
+        defer self.allocator.free(msg);
+        const line: i64 = if (self.sourceLocation(frame.chunk, if (frame.ip > 0) frame.ip - 1 else 0)) |loc| @intCast(loc.line) else 0;
+        try self.raiseErrorAt(E_WARNING, msg, .{ .file = self.frameFile(self.frame_count - 1), .line = line });
     }
 
     // a native's `callable` parameters, checked as php's argument parsing
