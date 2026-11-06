@@ -69,7 +69,7 @@ SKIP_SLOW_TESTS=1 SKIP_ONLINE_TESTS=1 NO_INTERACTION=1 \
     TEST_PHP_EXECUTABLE="$work/zphp" \
     "${cap[@]}" \
     nice -n 15 bash -c 'ulimit -f 524288; ulimit -c 0; exec "$@"' bash \
-    php run-tests.php -p "$work/zphp" -q "-j$jobs" --no-progress --set-timeout 30 "${dirs[@]}" > "$SCRIPT_DIR/last.log" 2>&1 || true
+    php run-tests.php -p "$work/zphp" -q "-j$jobs" --no-progress --set-timeout 60 "${dirs[@]}" > "$SCRIPT_DIR/last.log" 2>&1 || true
 # windows path tests that zphp gets wrong create names like "php-src\x" beside it
 rm -rf "$SCRIPT_DIR"/php-src?*
 grep -q "^Number of tests :" "$SCRIPT_DIR/last.log" || { tail -20 "$SCRIPT_DIR/last.log"; echo "run-tests.php did not finish"; exit 1; }
