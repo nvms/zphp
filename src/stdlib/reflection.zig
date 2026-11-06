@@ -735,7 +735,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     var closure_def = ClassDef{ .name = "Closure", .is_final = true };
     try closure_def.methods.put(a, "bind", .{ .name = "bind", .arity = 2, .is_static = true });
     try closure_def.methods.put(a, "fromCallable", .{ .name = "fromCallable", .arity = 1, .is_static = true });
+    try closure_def.methods.put(a, "getCurrent", .{ .name = "getCurrent", .arity = 0, .is_static = true });
     try vm.classes.put(a, "Closure", closure_def);
+    try vm.native_fns.put(a, "Closure::getCurrent", closureGetCurrent);
 
     try vm.native_fns.put(a, "Closure::bind", closureBind);
     try vm.native_fns.put(a, "Closure::fromCallable", closureFromCallable);
@@ -3522,6 +3524,25 @@ fn wrapCallableClosure(ctx: *NativeContext, callable: Value) RuntimeError!Native
     const obj = try ctx.createObject("Closure");
     try obj.set(ctx.allocator, "__callable", callable);
     return NativeResult.borrowed(.{ .object = obj });
+}
+
+// the closure the calling frame runs, as the same instance it was called
+// through; a function reached through a callable isn't one
+fn closureGetCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const vm = ctx.vm;
+    // the calling frame, under any frame a native static call put on top
+    var caller = vm.frame_count;
+    while (caller > 1 and vm.frames[caller - 1].func == null) caller -= 1;
+    const name = if (caller > 0) vm.frames[caller - 1].call_name else null;
+    if (name == null or !std.mem.startsWith(u8, name.?, "__closure_")) {
+        try vm.setPendingException("Error", "Current function is not a closure");
+        return error.RuntimeError;
+    }
+    if (vm.capture_index.getPtr(name.?)) |range| if (range.owner) |owner| {
+        owner.refcount += 1;
+        return NativeResult.takeString(.{ .ptr = owner.bytes.ptr, .len = owner.bytes.len, .owner = owner });
+    };
+    return NativeResult.copyString(ctx.allocator, name.?);
 }
 
 fn closureFromCallable(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
