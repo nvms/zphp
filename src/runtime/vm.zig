@@ -12903,6 +12903,14 @@ pub const VM = struct {
         slot.* = null;
     }
 
+    // php's E_ERROR from inside the engine: the script ends past any
+    // try/catch, reported as "Fatal error: <message>"
+    pub fn raiseFatal(self: *VM, message: []const u8) RuntimeError {
+        try self.setPendingException("Error", message);
+        self.uncatchable_fatal = true;
+        return error.RuntimeError;
+    }
+
     // a compile-time fatal ends the script where php reports it: in the file
     // being compiled, past any try/catch
     pub fn raiseCompileFatal(self: *VM, message: []const u8, at: SourcePosition) RuntimeError {

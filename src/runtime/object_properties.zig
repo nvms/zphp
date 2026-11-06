@@ -107,7 +107,8 @@ pub fn table(vm: *VM, obj: *PhpObject, purpose: Purpose) RuntimeError!?*PhpArray
     if (purpose == .debug and vm.hasMethod(obj.class_name, "__debugInfo")) {
         const result = try vm.callMethod(obj, "__debugInfo", &.{});
         if (result == .array) return result.array;
-        return null;
+        if (result == .null) return try vm.allocArray();
+        return vm.raiseFatal("__debuginfo() must return an array");
     }
     var name: ?[]const u8 = obj.class_name;
     while (name) |n| {
