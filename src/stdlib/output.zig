@@ -35,20 +35,28 @@ fn var_dump(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
 }
 
 fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
+    return varDumpMarked(ctx, val, depth, "");
+}
+
+// marker is "&" for a value a reference still shares with another holder
+fn varDumpMarked(ctx: *NativeContext, val: Value, depth: usize, marker: []const u8) RuntimeError!void {
     const out = &ctx.vm.output;
     const a = ctx.allocator;
     const indent = depth * 2;
     switch (val) {
         .null, .undef => {
             try appendIndent(out, a, indent);
+            try out.appendSlice(a, marker);
             try out.appendSlice(a, "NULL\n");
         },
         .bool => |b| {
             try appendIndent(out, a, indent);
+            try out.appendSlice(a, marker);
             try out.appendSlice(a, if (b) "bool(true)\n" else "bool(false)\n");
         },
         .int => |i| {
             try appendIndent(out, a, indent);
+            try out.appendSlice(a, marker);
             try out.appendSlice(a, "int(");
             var tmp: [32]u8 = undefined;
             const s = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch return;
@@ -57,6 +65,7 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
         },
         .float => |f| {
             try appendIndent(out, a, indent);
+            try out.appendSlice(a, marker);
             try out.appendSlice(a, "float(");
             var tmp: [64]u8 = undefined;
             const s = formatFloat(&tmp, f);
@@ -65,6 +74,7 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
         },
         .string => |s| {
             try appendIndent(out, a, indent);
+            try out.appendSlice(a, marker);
             try out.appendSlice(a, "string(");
             var tmp: [32]u8 = undefined;
             const len_s = std.fmt.bufPrint(&tmp, "{d}", .{s.bytes().len}) catch return;
@@ -84,6 +94,7 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
             defer _ = visited_ptrs.pop();
 
             try appendIndent(out, a, indent);
+            try out.appendSlice(a, marker);
             try out.appendSlice(a, "array(");
             var tmp: [32]u8 = undefined;
             const len_s = std.fmt.bufPrint(&tmp, "{d}", .{arr.entries.items.len}) catch return;
@@ -104,7 +115,8 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
                         try out.appendSlice(a, "\"]=>\n");
                     },
                 }
-                try varDumpValue(ctx, entry.value, depth + 1);
+                const shared = if (entry.ref) |cell| value_mod.cellOf(cell).binders > 1 else false;
+                try varDumpMarked(ctx, entry.value, depth + 1, if (shared) "&" else "");
             }
             try appendIndent(out, a, indent);
             try out.appendSlice(a, "}\n");
@@ -125,6 +137,7 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
                     const name_v = obj.get("name");
                     if (name_v == .string) {
                         try appendIndent(out, a, indent);
+                        try out.appendSlice(a, marker);
                         try out.appendSlice(a, "enum(");
                         try out.appendSlice(a, obj.class_name);
                         try out.appendSlice(a, "::");
@@ -139,6 +152,7 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
             defer listing.deinit(a);
 
             try appendIndent(out, a, indent);
+            try out.appendSlice(a, marker);
             try out.appendSlice(a, "object(");
             try out.appendSlice(a, obj.class_name);
             // PHP's '#N' for var_dump is the refcount-reused object id; the
@@ -161,7 +175,11 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
                     try out.print(a, "uninitialized({s})\n", .{type_str});
                     continue;
                 }
-                try varDumpValue(ctx, prop.value, depth + 1);
+                const shared = switch (prop.key) {
+                    .name => |name| propertyReferenced(ctx, obj, name),
+                    .int => false,
+                };
+                try varDumpMarked(ctx, prop.value, depth + 1, if (shared) "&" else "");
             }
 
             try appendIndent(out, a, indent);
@@ -169,6 +187,7 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
         },
         .generator => |g| {
             try appendIndent(out, a, indent);
+            try out.appendSlice(a, marker);
             try out.appendSlice(a, "object(Generator)#1 (1) {\n");
             try appendIndent(out, a, indent + 2);
             try out.appendSlice(a, "[\"function\"]=>\n");
@@ -186,15 +205,25 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
         },
         .fiber => {
             try appendIndent(out, a, indent);
+            try out.appendSlice(a, marker);
             try out.appendSlice(a, "object(Fiber)#1 (0) {\n");
             try appendIndent(out, a, indent);
             try out.appendSlice(a, "}\n");
         },
         .resource => |r| {
             try appendIndent(out, a, indent);
+            try out.appendSlice(a, marker);
             try out.print(a, "resource({d}) of type ({s})\n", .{ r.id, value_mod.resourceTypeName(r) });
         },
     }
+}
+
+// a property a reference still shares with another holder
+fn propertyReferenced(ctx: *NativeContext, obj: *value_mod.PhpObject, name: []const u8) bool {
+    const index = ctx.vm.ref_index orelse return false;
+    const cells = index.prop_rev.get(.{ .object = obj, .class_name = "", .prop_name = name }) orelse return false;
+    for (cells.items) |cell| if (value_mod.cellOf(cell).binders > 1) return true;
+    return false;
 }
 
 fn print_r(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
