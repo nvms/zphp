@@ -118,7 +118,7 @@ fn varDumpMarked(ctx: *NativeContext, val: Value, depth: usize, marker: []const 
                         try out.appendSlice(a, "\"]=>\n");
                     },
                 }
-                const shared = if (entry.ref) |cell| value_mod.cellOf(cell).binders > 1 else false;
+                const shared = if (entry.ref) |cell| referenceShared(ctx, cell) else false;
                 try varDumpMarked(ctx, entry.value, depth + 1, if (shared) "&" else "");
             }
             try appendIndent(out, a, indent);
@@ -225,8 +225,17 @@ fn varDumpMarked(ctx: *NativeContext, val: Value, depth: usize, marker: []const 
 fn propertyReferenced(ctx: *NativeContext, obj: *value_mod.PhpObject, name: []const u8) bool {
     const index = ctx.vm.ref_index orelse return false;
     const cells = index.prop_rev.get(.{ .object = obj, .class_name = "", .prop_name = name }) orelse return false;
-    for (cells.items) |cell| if (value_mod.cellOf(cell).binders > 1) return true;
+    for (cells.items) |cell| if (referenceShared(ctx, cell)) return true;
     return false;
+}
+
+// a reference with a holder besides the one asking. the last reference a
+// function returned stays held until the next one replaces it, which php
+// would already have freed
+fn referenceShared(ctx: *NativeContext, cell: *Value) bool {
+    var holders = value_mod.cellOf(cell).binders;
+    if (ctx.vm.last_return_ref == cell) holders -= 1;
+    return holders > 1;
 }
 
 fn print_r(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

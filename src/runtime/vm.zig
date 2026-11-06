@@ -647,9 +647,6 @@ pub const VM = struct {
     array_ref_bindings: std.ArrayListUnmanaged(ArrayRefBinding) = .empty,
     persistent_ref_owner: RefIndex.OwnerId = 0,
     last_return_ref_owner: RefIndex.OwnerId = 0,
-    // set while a handler calls __get or a get hook to bind what it returns
-    // by reference
-    binding_return_ref: bool = false,
     // pointer to the $GLOBALS PhpArray for the current run, used so writes
     // to $GLOBALS[key] = val also propagate to the top frame's variable
     // table (matching PHP's superglobal semantics)
@@ -1141,14 +1138,6 @@ pub const VM = struct {
         entry.ref = cell;
         if (cell) |c| self.bindCell(c);
         if (old) |c| self.unbindCell(c);
-    }
-
-    fn dropReturnRef(self: *VM) void {
-        if (self.last_return_ref_owner != 0) {
-            if (self.ref_index) |ri| ri.releaseOwner(self.allocator, self.last_return_ref_owner);
-            self.last_return_ref_owner = 0;
-        }
-        self.setReturnRef(null);
     }
 
     fn setReturnRef(self: *VM, cell: ?*Value) void {
@@ -4888,15 +4877,7 @@ pub const VM = struct {
                     self.pushTransfer(rr_result);
                     if (rr_ret_pin) |p| self.objRelease(p);
                     if (rr_ret_arr_pin) |a| arrayUnpin(a);
-                    // a reference the caller doesn't bind ends with the call,
-                    // as php frees it, so it stops counting as a holder
-                    if (self.frame_count <= base_frame) {
-                        if (!self.binding_return_ref) self.dropReturnRef();
-                        return;
-                    }
-                    const caller = self.currentFrame();
-                    if (caller.ip >= caller.chunk.code.items.len or caller.chunk.code.items[caller.ip] != @intFromEnum(OpCode.bind_ref_from_return))
-                        self.dropReturnRef();
+                    if (self.frame_count <= base_frame) return;
                 },
                 .return_val => {
                     var result = self.popTransfer();
@@ -6577,8 +6558,6 @@ pub const VM = struct {
                             obj_ptr.refcount +%= 1;
                             defer self.releaseValue(.{ .object = obj_ptr });
                             self.setReturnRef(null);
-                            self.binding_return_ref = true;
-                            defer self.binding_return_ref = false;
                             if (ref_hook) {
                                 _ = self.callPropHook(obj_ptr, prop_name, .get, .null) catch {
                                     if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -6665,8 +6644,6 @@ pub const VM = struct {
                             obj_ptr.refcount +%= 1;
                             defer self.releaseValue(.{ .object = obj_ptr });
                             self.setReturnRef(null);
-                            self.binding_return_ref = true;
-                            defer self.binding_return_ref = false;
                             if (ref_hook) {
                                 _ = self.callPropHook(obj_ptr, prop_owned, .get, .null) catch {
                                     if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -17901,11 +17878,6 @@ pub const VM = struct {
         if (!self.hasPropHook(obj.class_name, prop_name, if (kind == .get) .get else .set)) return null;
         const hook_name = try self.propHookName(prop_name, if (kind == .get) .get else .set);
         const obj_id = @intFromPtr(obj);
-        // the reference a get hook returns is taken by its caller
-        // (takeHookReturnCell), so it outlives the call
-        const was_binding = self.binding_return_ref;
-        if (kind == .get) self.binding_return_ref = true;
-        defer self.binding_return_ref = was_binding;
         try self.prop_hook_guard.append(self.allocator, .{ .obj_ptr = obj_id, .prop_name = prop_name });
         defer {
             var i: usize = self.prop_hook_guard.items.len;
