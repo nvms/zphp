@@ -2587,9 +2587,9 @@ fn matchEntity(s: []const u8) ?EntityMatch {
 
 fn native_hex2bin(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
-    const s = if (args[0] == .string) args[0].string.bytes() else return NativeResult.scalar(Value{ .bool = false });
+    const s = try coerceToString(ctx, args[0]);
     if (s.len % 2 != 0) {
-        try ctx.vm.emitWarning("hex2bin(): Input string must be hexadecimal string");
+        try ctx.vm.emitWarning("hex2bin(): Hexadecimal input string must have an even length");
         return NativeResult.scalar(.{ .bool = false });
     }
     const out_len = s.len / 2;
@@ -2619,7 +2619,7 @@ fn hexVal(c: u8) ?u8 {
 
 fn native_bin2hex(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.literal("");
-    const s = if (args[0] == .string) args[0].string.bytes() else return NativeResult.literal("");
+    const s = try coerceToString(ctx, args[0]);
     const hex_chars = "0123456789abcdef";
     const buf = try ctx.allocator.alloc(u8, s.len * 2);
     for (s, 0..) |c, j| {
