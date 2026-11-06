@@ -257,11 +257,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DateInterval::__set_state", intervalSetState);
     try vm.native_fns.put(a, "DateInterval::__wakeup", intervalWakeup);
     try di_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
-    try di_def.methods.put(a, "invert", .{ .name = "invert", .arity = 1 });
     try vm.classes.put(a, "DateInterval", di_def);
 
     try vm.native_fns.put(a, "DateInterval::__construct", diConstruct);
-    try vm.native_fns.put(a, "DateInterval::invert", diInvert);
     try vm.native_fns.put(a, "DateInterval::createFromDateString", diCreateFromDateString);
     try vm.native_fns.put(a, "DateInterval::format", diFormat);
 
@@ -3571,15 +3569,6 @@ fn diFormat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     }
 
     return NativeResult.takeString(try Value.String.adopt(ctx.allocator, try buf.toOwnedSlice()));
-}
-
-fn diInvert(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len > 0) {
-        const invert = if (args[0] == .bool) (if (args[0].bool) @as(i64, 1) else @as(i64, 0)) else if (args[0] == .int) (if (args[0].int != 0) @as(i64, 1) else @as(i64, 0)) else @as(i64, 0);
-        try obj.set(ctx.allocator, "invert", .{ .int = invert });
-    }
-    return NativeResult.borrowed(.{ .object = obj });
 }
 
 // ---- the date string parser (date_parse.zig) wired to zphp's zones ----
