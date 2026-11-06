@@ -8884,7 +8884,7 @@ pub const VM = struct {
                                     }
                                 }
                                 const msg = try std.fmt.allocPrint(self.allocator, "Cannot access {s} property {s}::${s}", .{
-                                    @tagName(vr.visibility), vr.defining_class, prop_name,
+                                    @tagName(vr.visibility), obj.class_name, prop_name,
                                 });
                                 defer self.allocator.free(msg);
                                 if (try self.throwBuiltinException("Error", msg)) continue;
@@ -16966,7 +16966,7 @@ pub const VM = struct {
                 return .magic;
             }
             const msg = try std.fmt.allocPrint(self.allocator, "Cannot access {s} property {s}::${s}", .{
-                @tagName(vr.visibility), vr.defining_class, prop_name,
+                @tagName(vr.visibility), obj.class_name, prop_name,
             });
             defer self.allocator.free(msg);
             if (try self.throwBuiltinException("Error", msg)) return .dispatched;
@@ -17021,7 +17021,7 @@ pub const VM = struct {
             else
                 try std.fmt.allocPrint(self.allocator, "Cannot {s} {s}(set){s} property {s}::${s} from global scope", .{ verb, @tagName(vr.set_visibility), ro, vr.defining_class, name });
         } else if (action == .indirect and !self.checkVisibility(vr.defining_class, vr.visibility)) {
-            msg = try std.fmt.allocPrint(self.allocator, "Cannot access {s} property {s}::${s}", .{ @tagName(vr.visibility), vr.defining_class, name });
+            msg = try std.fmt.allocPrint(self.allocator, "Cannot access {s} property {s}::${s}", .{ @tagName(vr.visibility), obj.class_name, name });
         } else if (action == .indirect and vr.is_readonly) {
             msg = try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{ vr.defining_class, name });
         }

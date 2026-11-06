@@ -6,9 +6,22 @@ const vm_mod = @import("../runtime/vm.zig");
 const VM = vm_mod.VM;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
+const PhpArray = @import("../runtime/value.zig").PhpArray;
 
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
+
+// Exception's and Error's properties as php declares them
+fn appendThrowableProperties(a: Allocator, def: *ClassDef, trace_default: *PhpArray) !void {
+    const empty: Value = .{ .string = Value.String.borrowed("") };
+    try def.properties.append(a, .{ .name = "message", .default = empty, .has_default = true, .visibility = .protected });
+    try def.properties.append(a, .{ .name = "string", .default = empty, .has_default = true, .type_str = "string", .visibility = .private });
+    try def.properties.append(a, .{ .name = "code", .default = .{ .int = 0 }, .has_default = true, .visibility = .protected });
+    try def.properties.append(a, .{ .name = "file", .default = empty, .has_default = true, .type_str = "string", .visibility = .protected });
+    try def.properties.append(a, .{ .name = "line", .default = .{ .int = 0 }, .has_default = true, .type_str = "int", .visibility = .protected });
+    try def.properties.append(a, .{ .name = "trace", .default = .{ .array = trace_default }, .has_default = true, .type_str = "array", .visibility = .private });
+    try def.properties.append(a, .{ .name = "previous", .default = .null, .has_default = true, .type_str = "?Throwable", .visibility = .private });
+}
 
 pub fn register(vm: *VM, a: Allocator) !void {
     var throwable = vm_mod.InterfaceDef{ .name = "Throwable", .parent = "Stringable" };
@@ -23,12 +36,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     const trace_default = try vm.allocArray();
 
     var exc_def = ClassDef{ .name = "Exception" };
-    try exc_def.properties.append(a, .{ .name = "message", .default = .{ .string = Value.String.borrowed("") } });
-    try exc_def.properties.append(a, .{ .name = "code", .default = .{ .int = 0 } });
-    try exc_def.properties.append(a, .{ .name = "previous", .default = .null });
-    try exc_def.properties.append(a, .{ .name = "file", .default = .{ .string = Value.String.borrowed("") } });
-    try exc_def.properties.append(a, .{ .name = "line", .default = .{ .int = 0 } });
-    try exc_def.properties.append(a, .{ .name = "trace", .has_default = true, .type_str = "array", .visibility = .private, .default = .{ .array = trace_default } });
+    try appendThrowableProperties(a, &exc_def, trace_default);
     exc_def.slot_layout = try vm.buildSlotLayout(&exc_def);
     try exc_def.interfaces.append(a, "Throwable");
     try exc_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 3 });
@@ -54,12 +62,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "Exception::__toString", exceptionToString);
 
     var err_def = ClassDef{ .name = "Error" };
-    try err_def.properties.append(a, .{ .name = "message", .default = .{ .string = Value.String.borrowed("") } });
-    try err_def.properties.append(a, .{ .name = "code", .default = .{ .int = 0 } });
-    try err_def.properties.append(a, .{ .name = "previous", .default = .null });
-    try err_def.properties.append(a, .{ .name = "file", .default = .{ .string = Value.String.borrowed("") } });
-    try err_def.properties.append(a, .{ .name = "line", .default = .{ .int = 0 } });
-    try err_def.properties.append(a, .{ .name = "trace", .has_default = true, .type_str = "array", .visibility = .private, .default = .{ .array = trace_default } });
+    try appendThrowableProperties(a, &err_def, trace_default);
     err_def.slot_layout = try vm.buildSlotLayout(&err_def);
     try err_def.interfaces.append(a, "Throwable");
     try err_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 3 });
@@ -129,13 +132,20 @@ pub fn register(vm: *VM, a: Allocator) !void {
     inline for (subclasses) |entry| {
         var def = ClassDef{ .name = entry[0] };
         def.parent = entry[1];
+        // the subclasses that redeclare a property, as php's do
+        if (comptime std.mem.eql(u8, entry[0], "DOMException")) {
+            try def.properties.append(a, .{ .name = "code", .default = .{ .int = 0 }, .has_default = true });
+        } else if (comptime std.mem.eql(u8, entry[0], "PDOException")) {
+            try def.properties.append(a, .{ .name = "code", .default = .{ .int = 0 }, .has_default = true, .visibility = .protected });
+            try def.properties.append(a, .{ .name = "errorInfo", .default = .null, .has_default = true, .type_str = "?array" });
+        }
         try vm.classes.put(a, entry[0], def);
     }
 
     // ErrorException: extends Exception, adds $severity + getSeverity()
     var ee_def = ClassDef{ .name = "ErrorException" };
     ee_def.parent = "Exception";
-    try ee_def.properties.append(a, .{ .name = "severity", .default = .{ .int = 0 } });
+    try ee_def.properties.append(a, .{ .name = "severity", .default = .{ .int = 1 }, .has_default = true, .type_str = "int", .visibility = .protected });
     try ee_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
     try ee_def.methods.put(a, "getSeverity", .{ .name = "getSeverity", .arity = 0 });
     try vm.classes.put(a, "ErrorException", ee_def);

@@ -745,6 +745,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "mysqli_driver::__set", driverSet);
     try vm.classes.put(a, "mysqli_warning", ClassDef{ .name = "mysqli_warning" });
     var exception = ClassDef{ .name = "mysqli_sql_exception", .parent = "RuntimeException" };
+    try exception.properties.append(a, .{ .name = "sqlstate", .default = .{ .string = Value.String.borrowed("00000") }, .has_default = true, .type_str = "string", .visibility = .protected });
     try exception.methods.put(a, "getSqlState", .{ .name = "getSqlState", .arity = 0 });
     try vm.classes.put(a, "mysqli_sql_exception", exception);
     try vm.native_fns.put(a, "mysqli_sql_exception::getSqlState", exceptionSqlState);
