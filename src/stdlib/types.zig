@@ -1,5 +1,6 @@
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
+const object_properties = @import("../runtime/object_properties.zig");
 const paths = @import("../paths.zig");
 const php_version = @import("../php_version.zig");
 const bundle = @import("../bundle.zig");
@@ -1040,7 +1041,7 @@ fn native_get_object_vars(ctx: *NativeContext, args: []const Value) RuntimeError
     if (obj.slot_layout) |layout| {
         if (obj.slots) |slots| {
             for (layout.names, 0..) |name, i| {
-                if (name.len > 1 and name[0] == '_' and name[1] == '_') continue;
+                if (object_properties.isInternalState(ctx.vm, obj, name)) continue;
                 const vis = propVisibilityWithParents(ctx.vm, obj.class_name, name);
                 // private: caller must be the declaring class
                 if (vis == .private) {
@@ -1055,7 +1056,7 @@ fn native_get_object_vars(ctx: *NativeContext, args: []const Value) RuntimeError
     var iter = obj.properties.iterator();
     while (iter.next()) |entry| {
         const name = entry.key_ptr.*;
-        if (name.len > 1 and name[0] == '_' and name[1] == '_') continue;
+        if (object_properties.isInternalState(ctx.vm, obj, name)) continue;
         const vis = propVisibilityWithParents(ctx.vm, obj.class_name, name);
         if (vis == .private) {
             const decl = propDeclaringClass(ctx.vm, obj.class_name, name);

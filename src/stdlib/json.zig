@@ -7,6 +7,7 @@ const NativeResult = vm_mod.NativeResult;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 const PhpObject = @import("../runtime/value.zig").PhpObject;
+const object_properties = @import("../runtime/object_properties.zig");
 const JSON_HEX_TAG: i64 = 1;
 const JSON_HEX_AMP: i64 = 2;
 const JSON_HEX_APOS: i64 = 4;
@@ -370,43 +371,24 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                 }
             }
 
-            // collect public property names in stable order
-            const PropEntry = struct { name: []const u8, value: Value };
-            var props: [128]PropEntry = undefined;
-            var prop_count: usize = 0;
-
-            // slots first (declared properties in class order)
-            if (obj.slot_layout) |layout| {
-                for (layout.names, 0..) |name, i| {
-                    const is_public = if (vm) |v| blk: {
-                        const vr = v.findPropertyVisibility(obj.class_name, name);
-                        break :blk vr.visibility == .public;
-                    } else true;
-                    if (is_public and obj.slots != null and i < obj.slots.?.len) {
-                        props[prop_count] = .{ .name = name, .value = obj.slots.?[i] };
-                        prop_count += 1;
-                    }
+            // the public properties, or the table the object's class builds
+            // for json (ArrayObject's storage); a json encoder without a vm
+            // sees only dynamic properties
+            const PropEntry = struct { key: object_properties.Key, value: Value };
+            var props: std.ArrayListUnmanaged(PropEntry) = .empty;
+            defer props.deinit(a);
+            if (vm) |v| {
+                var listing = try object_properties.list(v, obj, .json, a);
+                defer listing.deinit(a);
+                for (listing.items.items) |prop| {
+                    if (prop.visibility != .public) continue;
+                    try props.append(a, .{ .key = prop.key, .value = prop.value });
                 }
+            } else {
+                var it = obj.properties.iterator();
+                while (it.next()) |entry| try props.append(a, .{ .key = .{ .name = entry.key_ptr.* }, .value = entry.value_ptr.* });
             }
-
-            // dynamic properties (always public)
-            var dyn_iter = obj.properties.iterator();
-            while (dyn_iter.next()) |entry| {
-                // skip if already in slots
-                var in_slots = false;
-                if (obj.slot_layout) |layout| {
-                    for (layout.names) |sn| {
-                        if (std.mem.eql(u8, sn, entry.key_ptr.*)) {
-                            in_slots = true;
-                            break;
-                        }
-                    }
-                }
-                if (!in_slots and prop_count < props.len) {
-                    props[prop_count] = .{ .name = entry.key_ptr.*, .value = entry.value_ptr.* };
-                    prop_count += 1;
-                }
-            }
+            const prop_count = props.items.len;
 
             if (prop_count == 0) {
                 try buf.appendSlice(a, "{}");
@@ -414,13 +396,16 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
             }
 
             try buf.append(a, '{');
-            for (props[0..prop_count], 0..) |prop, idx| {
+            for (props.items, 0..) |prop, idx| {
                 if (idx > 0) try buf.append(a, ',');
                 if (pretty) {
                     try buf.append(a, '\n');
                     try appendIndent(buf, a, depth + 1);
                 }
-                try encodeValue(buf, a, .{ .string = Value.String.borrowed(prop.name) }, depth, max_depth, flags, vm, visited);
+                switch (prop.key) {
+                    .name => |name| try encodeValue(buf, a, .{ .string = Value.String.borrowed(name) }, depth, max_depth, flags, vm, visited),
+                    .int => |i| try buf.print(a, "\"{d}\"", .{i}),
+                }
                 try buf.append(a, ':');
                 if (pretty) try buf.append(a, ' ');
                 try encodeValue(buf, a, prop.value, depth + 1, max_depth, flags, vm, visited);

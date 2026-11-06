@@ -3,6 +3,7 @@ const Value = @import("../runtime/value.zig").Value;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
 const NativeHandle = @import("../runtime/value.zig").NativeHandle;
 const vm_mod = @import("../runtime/vm.zig");
+const object_properties = @import("../runtime/object_properties.zig");
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const VM = vm_mod.VM;
 const NativeContext = vm_mod.NativeContext;
@@ -519,7 +520,7 @@ fn cloneGmp(_: *VM, src: *PhpObject, copy: *PhpObject) bool {
 }
 
 pub fn register(vm: *VM, a: Allocator) !void {
-    var def = ClassDef{ .name = "GMP", .native_cleanup = cleanupGmp, .native_clone = cloneGmp, .native_debug_info = gmpDebugInfo, .native_binop = gmpBinop, .native_cast = gmpCast };
+    var def = ClassDef{ .name = "GMP", .native_cleanup = cleanupGmp, .native_clone = cloneGmp, .native_properties = gmpProperties, .native_binop = gmpBinop, .native_cast = gmpCast };
     // GMP is mostly a value-holding class; user-facing methods are
     // PHP's procedural ones. providing __toString lets `(string)$gmp` work
     try def.methods.put(a, "__toString", .{ .name = "__toString", .arity = 0 });
@@ -698,10 +699,10 @@ fn gmpBinop(ctx: *NativeContext, op: vm_mod.NativeBinop, a: Value, b: Value) Run
 }
 
 // php lists a GMP's own properties and then its value in decimal as num
-fn gmpDebugInfo(ctx: *NativeContext, obj: *PhpObject) RuntimeError!*@import("../runtime/value.zig").PhpArray {
-    const arr = try ctx.createArray();
-    var it = obj.properties.iterator();
-    while (it.next()) |e| try arr.setCopiedKey(ctx.allocator, e.key_ptr.*, e.value_ptr.*);
+// var_dump and print_r show the number as "num"
+fn gmpProperties(ctx: *NativeContext, obj: *PhpObject, purpose: object_properties.Purpose) RuntimeError!?*@import("../runtime/value.zig").PhpArray {
+    if (purpose != .debug) return null;
+    const arr = try object_properties.ownTable(ctx.vm, obj);
     const cstr = if (getMpz(obj)) |p| zphp_mpz_get_str(10, p) else null;
     const num = try Value.String.create(ctx.allocator, if (cstr) |c| c[0..cstrLen(c)] else "0");
     if (cstr) |c| zphp_gmp_free(c);

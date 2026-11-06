@@ -1,0 +1,174 @@
+// the properties an object shows, per purpose, as php's get_properties_for
+// gives them. a built-in class may build its own table for a purpose
+// (ArrayObject's debug view has its storage, DateTime shows date, timezone_type
+// and timezone everywhere); every other object shows its declared and dynamic
+// properties. built-in classes keep their own state in properties named "__x",
+// which no listing ever shows
+
+const std = @import("std");
+const vm_mod = @import("vm.zig");
+const VM = vm_mod.VM;
+const ClassDef = vm_mod.ClassDef;
+const RuntimeError = vm_mod.RuntimeError;
+const value_mod = @import("value.zig");
+const Value = value_mod.Value;
+const PhpArray = value_mod.PhpArray;
+const PhpObject = value_mod.PhpObject;
+
+// php's ZEND_PROP_PURPOSE_*
+pub const Purpose = enum {
+    // var_dump, print_r, debug_zval_dump
+    debug,
+    // (array)
+    array_cast,
+    serialize,
+    var_export,
+    json,
+};
+
+pub const Key = union(enum) {
+    int: i64,
+    name: []const u8,
+};
+
+pub const Property = struct {
+    key: Key,
+    value: Value,
+    visibility: ClassDef.Visibility = .public,
+    // the class a private property belongs to
+    declaring: []const u8 = "",
+    // the name is class metadata, which outlives the object
+    declared: bool = false,
+};
+
+pub const Listing = struct {
+    items: std.ArrayListUnmanaged(Property) = .empty,
+
+    pub fn deinit(self: *Listing, allocator: std.mem.Allocator) void {
+        self.items.deinit(allocator);
+    }
+};
+
+// a built-in class's own table for a purpose, or null for its plain
+// properties. keys of private and protected entries are mangled as (array)
+// mangles them: "\0Class\0name", "\0*\0name"
+pub const Hook = *const fn (*vm_mod.NativeContext, *PhpObject, Purpose) RuntimeError!?*PhpArray;
+
+pub fn list(vm: *VM, obj: *PhpObject, purpose: Purpose, allocator: std.mem.Allocator) RuntimeError!Listing {
+    var listing: Listing = .{};
+    errdefer listing.deinit(allocator);
+    if (try table(vm, obj, purpose)) |arr| {
+        for (arr.entries.items) |entry| {
+            const value = if (entry.ref) |ref| ref.* else entry.value;
+            try listing.items.append(allocator, switch (entry.key) {
+                .int => |i| .{ .key = .{ .int = i }, .value = value },
+                .string => |s| unmangle(s.bytes(), value),
+            });
+        }
+        return listing;
+    }
+    try appendOwn(vm, obj, purpose, &listing, allocator);
+    return listing;
+}
+
+// what replaces the object's own properties for a purpose: __debugInfo for
+// the debug view, else the table its class builds
+pub fn table(vm: *VM, obj: *PhpObject, purpose: Purpose) RuntimeError!?*PhpArray {
+    if (purpose == .debug and vm.hasMethod(obj.class_name, "__debugInfo")) {
+        const result = try vm.callMethod(obj, "__debugInfo", &.{});
+        if (result == .array) return result.array;
+        return null;
+    }
+    var name: ?[]const u8 = obj.class_name;
+    while (name) |n| {
+        const def = vm.classes.get(n) orelse return null;
+        if (def.native_properties) |hook| {
+            var ctx = vm.makeContext(null);
+            return hook(&ctx, obj, purpose);
+        }
+        name = def.parent;
+    }
+    return null;
+}
+
+// the object's declared properties in declaration order, then its dynamic
+// ones, leaving out unset properties and built-in state. only the debug view
+// lists a typed property that was never initialized
+pub fn appendOwn(vm: *VM, obj: *PhpObject, purpose: Purpose, listing: *Listing, allocator: std.mem.Allocator) RuntimeError!void {
+    if (obj.slot_layout) |layout| if (obj.slots) |slots| {
+        for (layout.names, 0..) |name, i| {
+            if (i >= slots.len) break;
+            if (obj.isLazySlot(name, layout.declaring_classes[i])) continue;
+            if (obj.isUnset(name) or isInternalState(vm, obj, name)) continue;
+            const declared = vm.findPropertyVisibility(obj.class_name, name);
+            if (purpose != .debug and slots[i] == .null and declared.type_str.len > 0 and vm.typedPropForbidsNull(declared.type_str)) continue;
+            try listing.items.append(allocator, .{ .key = .{ .name = name }, .value = slots[i], .visibility = declared.visibility, .declaring = declared.defining_class, .declared = true });
+        }
+    };
+    var it = obj.properties.iterator();
+    while (it.next()) |entry| {
+        const name = entry.key_ptr.*;
+        if (obj.slot_layout) |layout| if (inSlots(layout, name)) continue;
+        if (isInternalState(vm, obj, name)) continue;
+        const declared = vm.findPropertyVisibility(obj.class_name, name);
+        try listing.items.append(allocator, .{ .key = .{ .name = name }, .value = entry.value_ptr.*, .visibility = declared.visibility, .declaring = declared.defining_class });
+    }
+}
+
+// the object's own properties as an array with (array)'s mangled keys, for a
+// class hook to extend
+pub fn ownTable(vm: *VM, obj: *PhpObject) RuntimeError!*PhpArray {
+    const arr = try vm.allocArray();
+    var listing: Listing = .{};
+    defer listing.deinit(vm.allocator);
+    try appendOwn(vm, obj, .debug, &listing, vm.allocator);
+    for (listing.items.items) |p| try setMangled(vm, arr, p.key.name, p.visibility, p.declaring, p.value);
+    return arr;
+}
+
+// a property in a hook's table under its mangled name
+pub fn setMangled(vm: *VM, arr: *PhpArray, name: []const u8, visibility: ClassDef.Visibility, declaring: []const u8, value: Value) RuntimeError!void {
+    const key = switch (visibility) {
+        .public => try vm.allocator.dupe(u8, name),
+        .protected => try std.fmt.allocPrint(vm.allocator, "\x00*\x00{s}", .{name}),
+        .private => try std.fmt.allocPrint(vm.allocator, "\x00{s}\x00{s}", .{ declaring, name }),
+    };
+    defer vm.allocator.free(key);
+    try arr.setCopiedKey(vm.allocator, key, value);
+}
+
+fn unmangle(key: []const u8, value: Value) Property {
+    if (key.len > 0 and key[0] == 0) {
+        if (std.mem.indexOfScalarPos(u8, key, 1, 0)) |end| {
+            const class = key[1..end];
+            const name = key[end + 1 ..];
+            if (std.mem.eql(u8, class, "*")) return .{ .key = .{ .name = name }, .value = value, .visibility = .protected };
+            return .{ .key = .{ .name = name }, .value = value, .visibility = .private, .declaring = class };
+        }
+    }
+    return .{ .key = .{ .name = key }, .value = value };
+}
+
+fn inSlots(layout: *const PhpObject.SlotLayout, name: []const u8) bool {
+    for (layout.names) |slot_name| if (std.mem.eql(u8, slot_name, name)) return true;
+    return false;
+}
+
+// a property zphp keeps a built-in class's state in: named "__x", on an
+// object of a built-in class, and declared by no user class
+pub fn isInternalState(vm: *VM, obj: *const PhpObject, name: []const u8) bool {
+    if (name.len < 2 or name[0] != '_' or name[1] != '_') return false;
+    var built_in = false;
+    var current: ?[]const u8 = obj.class_name;
+    while (current) |cn| {
+        const def = vm.classes.get(cn) orelse break;
+        if (def.is_internal) {
+            built_in = true;
+        } else {
+            for (def.properties.items) |prop| if (std.mem.eql(u8, prop.name, name)) return false;
+        }
+        current = def.parent;
+    }
+    // stdClass and the incomplete class hold only what the script put there
+    return built_in and !std.mem.eql(u8, obj.class_name, "stdClass") and !std.mem.eql(u8, obj.class_name, "__PHP_Incomplete_Class");
+}

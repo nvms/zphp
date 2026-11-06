@@ -4,6 +4,7 @@ const Value = @import("../runtime/value.zig").Value;
 const value_mod = @import("../runtime/value.zig");
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const ClassDef = @import("../runtime/vm.zig").ClassDef;
+const object_properties = @import("../runtime/object_properties.zig");
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 // Per-call visited-pointer stack used to detect recursion during dump operations.
@@ -134,8 +135,8 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
                 }
             }
 
-            // honor __debugInfo if defined
-            const debug_arr = try ctx.vm.debugInfo(obj);
+            var listing = try object_properties.list(ctx.vm, obj, .debug, a);
+            defer listing.deinit(a);
 
             try appendIndent(out, a, indent);
             try out.appendSlice(a, "object(");
@@ -146,78 +147,14 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
             // refcount dropped before the next allocation. zphp's arena keeps
             // objects alive so monotonic obj.id would diverge. emit #1 here
             // and let spl_object_id surface the underlying unique counter
-            try out.appendSlice(a, ")#1 (");
-            var tmp: [32]u8 = undefined;
-            var prop_count: usize = 0;
-            if (debug_arr) |da| {
-                prop_count = da.entries.items.len;
-            } else {
-                if (obj.slot_layout) |layout| prop_count += layout.names.len;
-                prop_count += obj.properties.count();
-                if (obj.slot_layout) |layout| {
-                    var dyn_iter = obj.properties.iterator();
-                    while (dyn_iter.next()) |entry| {
-                        for (layout.names) |sn| {
-                            if (std.mem.eql(u8, sn, entry.key_ptr.*)) {
-                                prop_count -= 1;
-                                break;
-                            }
-                        }
-                    }
+            try out.print(a, ")#1 ({d}) {{\n", .{listing.items.items.len});
+            for (listing.items.items) |prop| {
+                try appendIndent(out, a, indent + 2);
+                switch (prop.key) {
+                    .int => |ki| try out.print(a, "[{d}]=>\n", .{ki}),
+                    .name => |name| try emitDumpKey(out, a, name, prop.declaring, prop.visibility),
                 }
-            }
-            const len_s = std.fmt.bufPrint(&tmp, "{d}", .{prop_count}) catch return;
-            try out.appendSlice(a, len_s);
-            try out.appendSlice(a, ") {\n");
-
-            if (debug_arr) |da| {
-                for (da.entries.items) |entry| {
-                    try appendIndent(out, a, indent + 2);
-                    switch (entry.key) {
-                        .int => |ki| {
-                            try out.appendSlice(a, "[");
-                            const ks = std.fmt.bufPrint(&tmp, "{d}", .{ki}) catch return;
-                            try out.appendSlice(a, ks);
-                            try out.appendSlice(a, "]=>\n");
-                        },
-                        .string => |ks| {
-                            try out.appendSlice(a, "[\"");
-                            try out.appendSlice(a, ks.bytes());
-                            try out.appendSlice(a, "\"]=>\n");
-                        },
-                    }
-                    try varDumpValue(ctx, entry.value, depth + 1);
-                }
-            } else {
-                if (obj.slot_layout) |layout| {
-                    if (obj.slots) |slots| {
-                        for (layout.names, 0..) |name, i| {
-                            if (i >= slots.len) break;
-                            try appendIndent(out, a, indent + 2);
-                            const vi = propVisibilityVm(ctx.vm, obj.class_name, name);
-                            try emitDumpKey(out, a, name, vi.declaring, vi.vis);
-                            try varDumpValue(ctx, slots[i], depth + 1);
-                        }
-                    }
-                }
-                var dyn_iter = obj.properties.iterator();
-                while (dyn_iter.next()) |entry| {
-                    var in_slots = false;
-                    if (obj.slot_layout) |layout| {
-                        for (layout.names) |sn| {
-                            if (std.mem.eql(u8, sn, entry.key_ptr.*)) {
-                                in_slots = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (!in_slots) {
-                        try appendIndent(out, a, indent + 2);
-                        const vi = propVisibilityVm(ctx.vm, obj.class_name, entry.key_ptr.*);
-                        try emitDumpKey(out, a, entry.key_ptr.*, vi.declaring, vi.vis);
-                        try varDumpValue(ctx, entry.value_ptr.*, depth + 1);
-                    }
-                }
+                try varDumpValue(ctx, prop.value, depth + 1);
             }
 
             try appendIndent(out, a, indent);
@@ -351,88 +288,25 @@ fn printRValueImpl(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: 
             try appendIndent(out, a, depth * 4);
             try out.appendSlice(a, "(\n");
 
-            // honor __debugInfo if defined - it replaces the property listing
             if (vm) |v| {
-                if (v.debugInfo(obj) catch null) |listing| {
-                    for (listing.entries.items) |entry| {
-                        try appendIndent(out, a, (depth + 1) * 4);
-                        try out.appendSlice(a, "[");
-                        switch (entry.key) {
-                            .string => |s| try out.appendSlice(a, s.bytes()),
-                            .int => |i| {
-                                var tmp: [32]u8 = undefined;
-                                const ki = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch return;
-                                try out.appendSlice(a, ki);
-                            },
-                        }
-                        try out.appendSlice(a, "] => ");
-                        const nested = entry.value == .array or entry.value == .object;
-                        try printRValueImpl(a, out, entry.value, depth + if (nested) @as(usize, 2) else 1, vm);
-                        try out.appendSlice(a, "\n");
-                    }
-                    try appendIndent(out, a, depth * 4);
-                    try out.appendSlice(a, ")\n");
-                    return;
-                }
-            }
-
-            if (obj.slot_layout) |layout| {
-                if (obj.slots) |slots| {
-                    for (layout.names, 0..) |name, i| {
-                        if (i < slots.len) {
-                            try appendIndent(out, a, (depth + 1) * 4);
-                            try out.appendSlice(a, "[");
-                            try out.appendSlice(a, name);
-                            if (vm) |v| {
-                                var current: ?[]const u8 = obj.class_name;
-                                while (current) |cn| {
-                                    const cls = v.classes.get(cn) orelse break;
-                                    var found = false;
-                                    for (cls.properties.items) |pdef| {
-                                        if (std.mem.eql(u8, pdef.name, name)) {
-                                            switch (pdef.visibility) {
-                                                .public => {},
-                                                .protected => try out.appendSlice(a, ":protected"),
-                                                .private => {
-                                                    try out.append(a, ':');
-                                                    try out.appendSlice(a, cn);
-                                                    try out.appendSlice(a, ":private");
-                                                },
-                                            }
-                                            found = true;
-                                            break;
-                                        }
-                                    }
-                                    if (found) break;
-                                    current = cls.parent;
-                                }
-                            }
-                            try out.appendSlice(a, "] => ");
-                            const nested = slots[i] == .array or slots[i] == .object;
-                            try printRValueImpl(a, out, slots[i], depth + if (nested) @as(usize, 2) else 1, vm);
-                            try out.appendSlice(a, "\n");
-                        }
-                    }
-                }
-            }
-            var dyn_iter = obj.properties.iterator();
-            while (dyn_iter.next()) |entry| {
-                var in_slots = false;
-                if (obj.slot_layout) |layout| {
-                    for (layout.names) |sn| {
-                        if (std.mem.eql(u8, sn, entry.key_ptr.*)) {
-                            in_slots = true;
-                            break;
-                        }
-                    }
-                }
-                if (!in_slots) {
+                var listing = try object_properties.list(v, obj, .debug, a);
+                defer listing.deinit(a);
+                for (listing.items.items) |prop| {
                     try appendIndent(out, a, (depth + 1) * 4);
-                    try out.appendSlice(a, "[");
-                    try out.appendSlice(a, entry.key_ptr.*);
+                    switch (prop.key) {
+                        .int => |ki| try out.print(a, "[{d}", .{ki}),
+                        .name => |name| {
+                            try out.print(a, "[{s}", .{name});
+                            switch (prop.visibility) {
+                                .public => {},
+                                .protected => try out.appendSlice(a, ":protected"),
+                                .private => try out.print(a, ":{s}:private", .{prop.declaring}),
+                            }
+                        },
+                    }
                     try out.appendSlice(a, "] => ");
-                    const nested = entry.value_ptr.* == .array or entry.value_ptr.* == .object;
-                    try printRValueImpl(a, out, entry.value_ptr.*, depth + if (nested) @as(usize, 2) else 1, vm);
+                    const nested = prop.value == .array or prop.value == .object;
+                    try printRValueImpl(a, out, prop.value, depth + if (nested) @as(usize, 2) else 1, vm);
                     try out.appendSlice(a, "\n");
                 }
             }
@@ -610,55 +484,26 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
                 try out.appendSlice(a, "::__set_state(array(\n");
             }
             const item_indent = (depth + 1) * 2 + 1;
-            if (obj.slot_layout) |layout| {
-                if (obj.slots) |slots| {
-                    for (layout.names, 0..) |name, i| {
-                        if (i < slots.len) {
-                            for (0..item_indent) |_| try out.append(a, ' ');
-                            try varExportString(a, out, name);
-                            try out.appendSlice(a, " => ");
-                            const sr = switch (slots[i]) {
-                                .array => |aa| visitedContains(@intFromPtr(aa)),
-                                .object => |oo| visitedContains(@intFromPtr(oo)),
-                                else => false,
-                            };
-                            if ((slots[i] == .array or slots[i] == .object) and !sr) {
-                                try out.append(a, '\n');
-                                for (0..(depth + 1) * 2) |_| try out.append(a, ' ');
-                            }
-                            try varExportValue(a, out, slots[i], depth + 1, ctx);
-                            try out.appendSlice(a, ",\n");
-                        }
-                    }
+            var listing = try object_properties.list(ctx.vm, obj, .var_export, a);
+            defer listing.deinit(a);
+            for (listing.items.items) |prop| {
+                for (0..item_indent) |_| try out.append(a, ' ');
+                switch (prop.key) {
+                    .int => |ki| try out.print(a, "{d}", .{ki}),
+                    .name => |name| try varExportString(a, out, name),
                 }
-            }
-            var dyn_iter = obj.properties.iterator();
-            while (dyn_iter.next()) |entry| {
-                var in_slots = false;
-                if (obj.slot_layout) |layout| {
-                    for (layout.names) |sn| {
-                        if (std.mem.eql(u8, sn, entry.key_ptr.*)) {
-                            in_slots = true;
-                            break;
-                        }
-                    }
+                try out.appendSlice(a, " => ");
+                const seen = switch (prop.value) {
+                    .array => |aa| visitedContains(@intFromPtr(aa)),
+                    .object => |oo| visitedContains(@intFromPtr(oo)),
+                    else => false,
+                };
+                if ((prop.value == .array or prop.value == .object) and !seen) {
+                    try out.append(a, '\n');
+                    for (0..(depth + 1) * 2) |_| try out.append(a, ' ');
                 }
-                if (!in_slots) {
-                    for (0..item_indent) |_| try out.append(a, ' ');
-                    try varExportString(a, out, entry.key_ptr.*);
-                    try out.appendSlice(a, " => ");
-                    const er = switch (entry.value_ptr.*) {
-                        .array => |aa| visitedContains(@intFromPtr(aa)),
-                        .object => |oo| visitedContains(@intFromPtr(oo)),
-                        else => false,
-                    };
-                    if ((entry.value_ptr.* == .array or entry.value_ptr.* == .object) and !er) {
-                        try out.append(a, '\n');
-                        for (0..(depth + 1) * 2) |_| try out.append(a, ' ');
-                    }
-                    try varExportValue(a, out, entry.value_ptr.*, depth + 1, ctx);
-                    try out.appendSlice(a, ",\n");
-                }
+                try varExportValue(a, out, prop.value, depth + 1, ctx);
+                try out.appendSlice(a, ",\n");
             }
             for (0..depth * 2) |_| try out.append(a, ' ');
             if (is_std) {
@@ -674,19 +519,6 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
 
 fn appendIndent(out: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, n: usize) !void {
     for (0..n) |_| try out.append(a, ' ');
-}
-
-fn propVisibilityVm(vm: *@import("../runtime/vm.zig").VM, class_name: []const u8, name: []const u8) struct { vis: ClassDef.Visibility, declaring: []const u8 } {
-    var current: ?[]const u8 = class_name;
-    while (current) |cn| {
-        if (vm.classes.get(cn)) |cls| {
-            for (cls.properties.items) |pdef| {
-                if (std.mem.eql(u8, pdef.name, name)) return .{ .vis = pdef.visibility, .declaring = cn };
-            }
-            current = cls.parent;
-        } else break;
-    }
-    return .{ .vis = .public, .declaring = class_name };
 }
 
 fn emitDumpKey(out: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, name: []const u8, class_name: []const u8, vis: ClassDef.Visibility) !void {

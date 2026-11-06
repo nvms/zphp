@@ -30,6 +30,7 @@ const parser_mod = @import("../pipeline/parser.zig");
 const compiler_mod = @import("../pipeline/compiler.zig");
 const enums = @import("../stdlib/enums.zig");
 const callables = @import("callables.zig");
+const object_properties = @import("object_properties.zig");
 
 const Allocator = std.mem.Allocator;
 pub const RuntimeError = error{ RuntimeError, OutOfMemory };
@@ -324,9 +325,10 @@ pub const ClassDef = struct {
     // null result means the operand pair is not supported and the ordinary
     // TypeError path runs
     native_binop: ?*const fn (*NativeContext, NativeBinop, Value, Value) RuntimeError!?Value = null,
-    // what var_dump and print_r list for an instance, the way php's internal
-    // classes report state that lives outside their properties (GMP's num)
-    native_debug_info: ?*const fn (*NativeContext, *PhpObject) RuntimeError!*PhpArray = null,
+    // the table an instance shows for an output purpose in place of its
+    // properties (object_properties.zig), the way php's internal classes
+    // build one
+    native_properties: ?object_properties.Hook = null,
     // (int), (float), (bool), and the numeric conversion array_sum uses, for a
     // class whose value lives in its native handle (GMP)
     native_cast: ?*const fn (*PhpObject, @import("value.zig").NumericCast) ?Value = null,
@@ -6188,30 +6190,17 @@ pub const VM = struct {
                                     return vm.isInstanceOf(sc, declaring) or vm.isInstanceOf(declaring, sc);
                                 }
                             }.check;
-                            if (obj.slots) |slots| {
-                                if (obj.slot_layout) |layout| {
-                                    for (layout.names, 0..) |name, i| {
-                                        if (i < slots.len) {
-                                            const vr = self.findPropertyVisibility(obj.class_name, name);
-                                            if (includeProp(self, scope_class, vr.visibility, vr.defining_class)) {
-                                                // PHP's foreach($obj) omits uninitialized typed
-                                                // properties (a .null slot whose type forbids null
-                                                // was never written) and explicitly-unset ones -
-                                                // accessing them would otherwise throw "before
-                                                // initialization" (e.g. Symfony VarDumper Stub)
-                                                if (slots[i] == .null and vr.type_str.len > 0 and self.typedPropForbidsNull(vr.type_str)) continue;
-                                                if (obj.isUnset(name)) continue;
-                                                try arr.set(self.allocator, .{ .string = Value.String.borrowed(name) }, slots[i]);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            var it = obj.properties.iterator();
-                            while (it.next()) |entry| {
-                                const vr = self.findPropertyVisibility(obj.class_name, entry.key_ptr.*);
-                                if (includeProp(self, scope_class, vr.visibility, vr.defining_class)) {
-                                    try arr.setCopiedKey(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
+                            // the object's own properties: never uninitialized typed
+                            // ones (reading them would throw), nor unset ones
+                            var listing: object_properties.Listing = .{};
+                            defer listing.deinit(self.allocator);
+                            try object_properties.appendOwn(self, obj, .array_cast, &listing, self.allocator);
+                            for (listing.items.items) |prop| {
+                                if (!includeProp(self, scope_class, prop.visibility, prop.declaring)) continue;
+                                if (prop.declared) {
+                                    try arr.set(self.allocator, .{ .string = Value.String.borrowed(prop.key.name) }, prop.value);
+                                } else {
+                                    try arr.setCopiedKey(self.allocator, prop.key.name, prop.value);
                                 }
                             }
                             // the snapshot takes the object's stack slot; the object's
@@ -12497,25 +12486,6 @@ pub const VM = struct {
         return null;
     }
 
-    // the listing var_dump and print_r show in place of an object's
-    // properties: its __debugInfo, or its native class's debug info
-    pub fn debugInfo(self: *VM, obj: *PhpObject) RuntimeError!?*PhpArray {
-        if (self.hasMethod(obj.class_name, "__debugInfo")) {
-            const result = try self.callMethod(obj, "__debugInfo", &.{});
-            return if (result == .array) result.array else null;
-        }
-        var name: ?[]const u8 = obj.class_name;
-        while (name) |n| {
-            const def = self.classes.get(n) orelse return null;
-            if (def.native_debug_info) |hook| {
-                var ctx = self.makeContext(null);
-                return try hook(&ctx, obj);
-            }
-            name = def.parent;
-        }
-        return null;
-    }
-
     pub fn throwUncloneable(self: *VM, class_name: []const u8) !bool {
         const msg = try std.fmt.allocPrint(self.allocator, "Trying to clone an uncloneable object of class {s}", .{class_name});
         defer self.allocator.free(msg);
@@ -14643,40 +14613,30 @@ pub const VM = struct {
     }
 
     fn copyPropertiesToArray(self: *VM, obj: *PhpObject, arr: *PhpArray) !void {
-        if (obj.slots) |slots| {
-            if (obj.slot_layout) |layout| {
-                for (layout.names, 0..) |name, i| {
-                    if (i >= slots.len) continue;
-                    if (obj.isLazySlot(name, layout.declaring_classes[i])) continue;
-                    const vr = self.findPropertyVisibility(obj.class_name, name);
-                    // PHP omits uninitialized typed properties and
-                    // explicitly-unset properties from (array) casts
-                    if (slots[i] == .null and vr.type_str.len > 0 and self.typedPropForbidsNull(vr.type_str)) continue;
-                    if (obj.isUnset(name)) continue;
-                    try self.setPropertyKey(arr, .{ .name = name, .declared = true }, vr, slots[i]);
-                }
-            }
+        if (try object_properties.table(self, obj, .array_cast)) |built| {
+            for (built.entries.items) |entry| try arr.set(self.allocator, entry.key, if (entry.ref) |ref| ref.* else entry.value);
+            return;
         }
-        var it = obj.properties.iterator();
-        while (it.next()) |entry| {
-            const vr = self.findPropertyVisibility(obj.class_name, entry.key_ptr.*);
-            try self.setPropertyKey(arr, .{ .name = entry.key_ptr.* }, vr, entry.value_ptr.*);
-        }
+        var listing: object_properties.Listing = .{};
+        defer listing.deinit(self.allocator);
+        try object_properties.appendOwn(self, obj, .array_cast, &listing, self.allocator);
+        for (listing.items.items) |prop| try self.setPropertyKey(arr, prop);
     }
 
     // php's (array) key for a property: the bare name when public, else the
     // name mangled with its visibility. a declared name is class metadata and
     // its mangled form is interned; an object's own names are copied
-    fn setPropertyKey(self: *VM, arr: *PhpArray, prop: struct { name: []const u8, declared: bool = false }, vr: anytype, value: Value) !void {
-        if (vr.visibility == .public) {
-            if (prop.declared) return arr.set(self.allocator, .{ .string = Value.String.borrowed(prop.name) }, value);
-            return arr.setCopiedKey(self.allocator, prop.name, value);
+    fn setPropertyKey(self: *VM, arr: *PhpArray, prop: object_properties.Property) !void {
+        const name = prop.key.name;
+        if (prop.visibility == .public) {
+            if (prop.declared) return arr.set(self.allocator, .{ .string = Value.String.borrowed(name) }, prop.value);
+            return arr.setCopiedKey(self.allocator, name, prop.value);
         }
         var mangled: std.ArrayListUnmanaged(u8) = .empty;
         defer mangled.deinit(self.allocator);
-        if (vr.visibility == .protected) try mangled.print(self.allocator, "\x00*\x00{s}", .{prop.name}) else try mangled.print(self.allocator, "\x00{s}\x00{s}", .{ vr.defining_class, prop.name });
-        if (prop.declared) return arr.set(self.allocator, .{ .string = Value.String.borrowed(try self.internName(mangled.items)) }, value);
-        try arr.setCopiedKey(self.allocator, mangled.items, value);
+        if (prop.visibility == .protected) try mangled.print(self.allocator, "\x00*\x00{s}", .{name}) else try mangled.print(self.allocator, "\x00{s}\x00{s}", .{ prop.declaring, name });
+        if (prop.declared) return arr.set(self.allocator, .{ .string = Value.String.borrowed(try self.internName(mangled.items)) }, prop.value);
+        try arr.setCopiedKey(self.allocator, mangled.items, prop.value);
     }
 
     // a directive's runtime value; the previous runtime value is freed

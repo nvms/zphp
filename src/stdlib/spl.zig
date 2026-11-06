@@ -1,4 +1,5 @@
 const std = @import("std");
+const object_properties = @import("../runtime/object_properties.zig");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
@@ -161,7 +162,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "SplStack::toArray", stackToArray);
 
     // ArrayObject
-    var ao_def = ClassDef{ .name = "ArrayObject" };
+    var ao_def = ClassDef{ .name = "ArrayObject", .native_properties = arrayStorageProperties };
     // matches PHP's interface order on ArrayObject so getInterfaceNames() lists
     // them the way callers expect
     try ao_def.interfaces.append(a, "IteratorAggregate");
@@ -230,7 +231,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ArrayObject::__unset", aoMagicUnset);
 
     // ArrayIterator
-    var ai_def = ClassDef{ .name = "ArrayIterator" };
+    var ai_def = ClassDef{ .name = "ArrayIterator", .native_properties = arrayStorageProperties };
     try ai_def.interfaces.append(a, "Serializable");
     try ai_def.interfaces.append(a, "Iterator");
     try ai_def.interfaces.append(a, "Countable");
@@ -310,7 +311,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "WeakMap::count", wmCount);
 
     // SplPriorityQueue
-    var pq_def = ClassDef{ .name = "SplPriorityQueue" };
+    var pq_def = ClassDef{ .name = "SplPriorityQueue", .native_properties = priorityQueueProperties };
     try pq_def.interfaces.append(a, "Countable");
     try pq_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
     try pq_def.methods.put(a, "insert", .{ .name = "insert", .arity = 2 });
@@ -364,7 +365,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
         .{ "SplMaxHeap", @as(?[]const u8, "SplHeap"), @as(?vm_mod.NativeFn, maxHeapCompare) },
     };
     inline for (heap_classes) |hc| {
-        var def = ClassDef{ .name = hc[0], .parent = hc[1] };
+        var def = ClassDef{ .name = hc[0], .parent = hc[1], .native_properties = heapProperties };
         try def.interfaces.append(a, "Iterator");
         try def.interfaces.append(a, "Countable");
         inline for (heap_methods) |m| {
@@ -379,7 +380,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     }
 
     // SplFixedArray
-    var fa_def = ClassDef{ .name = "SplFixedArray" };
+    var fa_def = ClassDef{ .name = "SplFixedArray", .native_properties = fixedArrayProperties };
     try fa_def.interfaces.append(a, "Traversable");
     try fa_def.interfaces.append(a, "Countable");
     try fa_def.interfaces.append(a, "ArrayAccess");
@@ -447,7 +448,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "SplQueue::valid", sqValid);
 
     // SplDoublyLinkedList
-    var dll_def = ClassDef{ .name = "SplDoublyLinkedList" };
+    var dll_def = ClassDef{ .name = "SplDoublyLinkedList", .native_properties = listProperties };
     try dll_def.interfaces.append(a, "Iterator");
     try dll_def.interfaces.append(a, "Countable");
     try dll_def.interfaces.append(a, "ArrayAccess");
@@ -505,7 +506,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "SplDoublyLinkedList::toArray", dllToArray);
 
     // SplObjectStorage
-    var sos_def = ClassDef{ .name = "SplObjectStorage" };
+    var sos_def = ClassDef{ .name = "SplObjectStorage", .native_properties = objectStorageProperties };
     try sos_def.interfaces.append(a, "Countable");
     try sos_def.interfaces.append(a, "Iterator");
     try sos_def.interfaces.append(a, "Traversable");
@@ -667,6 +668,108 @@ fn weakMapGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Native
     if (data_v == .array) try iter.set(ctx.allocator, "__info", data_v);
     try iter.set(ctx.allocator, "__cursor", .{ .int = 0 });
     return NativeResult.borrowed(.{ .object = iter });
+}
+
+// ArrayObject and ArrayIterator (spl_array_get_properties_for and
+// get_debug_info): the debug view adds the storage as a private property;
+// (array), var_export and json_encode show the storage itself unless
+// STD_PROP_LIST asks for the object's own properties
+fn arrayStorageProperties(ctx: *NativeContext, obj: *PhpObject, purpose: object_properties.Purpose) RuntimeError!?*PhpArray {
+    const storage = obj.get("__data");
+    switch (purpose) {
+        .debug => {
+            const table = try object_properties.ownTable(ctx.vm, obj);
+            const base = if (ctx.vm.isInstanceOf(obj.class_name, "ArrayIterator")) "ArrayIterator" else "ArrayObject";
+            const shown: Value = if (storage == .array or storage == .object) storage else .{ .array = try ctx.vm.allocArray() };
+            try object_properties.setMangled(ctx.vm, table, "storage", .private, base, shown);
+            return table;
+        },
+        .array_cast, .var_export, .json => {
+            const flags = obj.get("__flags");
+            if (flags == .int and flags.int & 1 != 0) return null;
+            return switch (storage) {
+                .array => |arr| arr,
+                .object => |backing| try object_properties.ownTable(ctx.vm, backing),
+                else => try ctx.vm.allocArray(),
+            };
+        },
+        .serialize => return null,
+    }
+}
+
+// the debug view of SplDoublyLinkedList, SplQueue and SplStack: the
+// iteration flags and the list
+fn listProperties(ctx: *NativeContext, obj: *PhpObject, purpose: object_properties.Purpose) RuntimeError!?*PhpArray {
+    if (purpose != .debug) return null;
+    const table = try object_properties.ownTable(ctx.vm, obj);
+    const mode = obj.get("__it_mode");
+    try object_properties.setMangled(ctx.vm, table, "flags", .private, "SplDoublyLinkedList", if (mode == .int) mode else .{ .int = 0 });
+    try object_properties.setMangled(ctx.vm, table, "dllist", .private, "SplDoublyLinkedList", try dataOrEmpty(ctx, obj));
+    return table;
+}
+
+// the debug view of a heap: its flags, whether it is corrupted, and the heap
+// array in heap order
+fn heapProperties(ctx: *NativeContext, obj: *PhpObject, purpose: object_properties.Purpose) RuntimeError!?*PhpArray {
+    if (purpose != .debug) return null;
+    const table = try object_properties.ownTable(ctx.vm, obj);
+    try object_properties.setMangled(ctx.vm, table, "flags", .private, "SplHeap", .{ .int = 0 });
+    try object_properties.setMangled(ctx.vm, table, "isCorrupted", .private, "SplHeap", .{ .bool = obj.get("__corrupted") == .bool and obj.get("__corrupted").bool });
+    try object_properties.setMangled(ctx.vm, table, "heap", .private, "SplHeap", try dataOrEmpty(ctx, obj));
+    return table;
+}
+
+// a priority queue's debug view shows each element as data and priority
+fn priorityQueueProperties(ctx: *NativeContext, obj: *PhpObject, purpose: object_properties.Purpose) RuntimeError!?*PhpArray {
+    if (purpose != .debug) return null;
+    const table = try object_properties.ownTable(ctx.vm, obj);
+    const flags = obj.get("__flags");
+    try object_properties.setMangled(ctx.vm, table, "flags", .private, "SplPriorityQueue", if (flags == .int) flags else .{ .int = EXTR_DATA });
+    try object_properties.setMangled(ctx.vm, table, "isCorrupted", .private, "SplPriorityQueue", .{ .bool = obj.get("__corrupted") == .bool and obj.get("__corrupted").bool });
+    const heap = try ctx.vm.allocArray();
+    if (getData(obj)) |arr| for (arr.entries.items) |entry| {
+        if (entry.value != .array) continue;
+        const pair = try ctx.vm.allocArray();
+        try pair.set(ctx.allocator, .{ .string = Value.String.borrowed("data") }, entry.value.array.get(.{ .int = 0 }));
+        try pair.set(ctx.allocator, .{ .string = Value.String.borrowed("priority") }, entry.value.array.get(.{ .int = 1 }));
+        try heap.append(ctx.allocator, .{ .array = pair });
+    };
+    try object_properties.setMangled(ctx.vm, table, "heap", .private, "SplPriorityQueue", .{ .array = heap });
+    return table;
+}
+
+// SplFixedArray lists its elements, then its own properties, for every
+// purpose (json_encode goes through jsonSerialize)
+fn fixedArrayProperties(ctx: *NativeContext, obj: *PhpObject, purpose: object_properties.Purpose) RuntimeError!?*PhpArray {
+    if (purpose == .serialize) return null;
+    const table = try ctx.vm.allocArray();
+    if (getData(obj)) |arr| for (arr.entries.items) |entry| try table.append(ctx.allocator, entry.value);
+    const own = try object_properties.ownTable(ctx.vm, obj);
+    for (own.entries.items) |entry| try table.set(ctx.allocator, entry.key, entry.value);
+    return table;
+}
+
+// the debug view of SplObjectStorage: each object with its data
+fn objectStorageProperties(ctx: *NativeContext, obj: *PhpObject, purpose: object_properties.Purpose) RuntimeError!?*PhpArray {
+    if (purpose != .debug) return null;
+    const table = try object_properties.ownTable(ctx.vm, obj);
+    const storage = try ctx.vm.allocArray();
+    if (sosGetObjs(obj)) |objs| {
+        const info = sosGetInfo(obj);
+        for (objs.entries.items) |entry| {
+            const pair = try ctx.vm.allocArray();
+            try pair.set(ctx.allocator, .{ .string = Value.String.borrowed("obj") }, entry.value);
+            try pair.set(ctx.allocator, .{ .string = Value.String.borrowed("inf") }, if (info) |i| i.get(entry.key) else .null);
+            try storage.append(ctx.allocator, .{ .array = pair });
+        }
+    }
+    try object_properties.setMangled(ctx.vm, table, "storage", .private, "SplObjectStorage", .{ .array = storage });
+    return table;
+}
+
+fn dataOrEmpty(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
+    if (getData(obj)) |arr| return .{ .array = arr };
+    return .{ .array = try ctx.vm.allocArray() };
 }
 
 fn getThis(ctx: *NativeContext) ?*PhpObject {
