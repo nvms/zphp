@@ -184,6 +184,7 @@ Zend/tests/bug26077.phpt
 Zend/tests/bug26802.phpt
 Zend/tests/bug27304.phpt
 Zend/tests/bug27669.phpt
+Zend/tests/bug27798.phpt
 Zend/tests/bug28072.phpt
 Zend/tests/bug28442.phpt
 Zend/tests/bug29104.phpt
@@ -396,6 +397,7 @@ Zend/tests/clone/bug69996.phpt
 Zend/tests/clone/clone_001.phpt
 Zend/tests/clone/clone_002.phpt
 Zend/tests/clone/clone_with_001.phpt
+Zend/tests/clone/clone_with_002.phpt
 Zend/tests/clone/clone_with_003.phpt
 Zend/tests/clone/clone_with_006.phpt
 Zend/tests/clone/clone_with_007.phpt
@@ -965,6 +967,7 @@ Zend/tests/get_required_files.phpt
 Zend/tests/get_resource_id.phpt
 Zend/tests/gh10486.phpt
 Zend/tests/gh10486_2.phpt
+Zend/tests/gh10570.phpt
 Zend/tests/gh11016.phpt
 Zend/tests/gh11189.phpt
 Zend/tests/gh11189_1.phpt
@@ -1124,6 +1127,8 @@ Zend/tests/inheritance/abstract_inheritance_001.phpt
 Zend/tests/inheritance/abstract_inheritance_002.phpt
 Zend/tests/inheritance/argument_restriction_004.phpt
 Zend/tests/inheritance/bug22725.phpt
+Zend/tests/inheritance/bug29674.phpt
+Zend/tests/inheritance/bug29689.phpt
 Zend/tests/inheritance/bug30451.phpt
 Zend/tests/inheritance/bug33277.phpt
 Zend/tests/inheritance/bug37212.phpt
@@ -1214,8 +1219,10 @@ Zend/tests/lazy_objects/gh17941.phpt
 Zend/tests/lazy_objects/gh17998.phpt
 Zend/tests/lazy_objects/gh18038-002.phpt
 Zend/tests/lazy_objects/gh20504-001.phpt
+Zend/tests/lazy_objects/gh20504-002.phpt
 Zend/tests/lazy_objects/gh20657-001.phpt
 Zend/tests/lazy_objects/gh20657-002.phpt
+Zend/tests/lazy_objects/gh20854.phpt
 Zend/tests/lazy_objects/gh21478-set.phpt
 Zend/tests/lazy_objects/init_exception_leaves_object_lazy.phpt
 Zend/tests/lazy_objects/init_exception_reverts_initializer_changes_overridden_prop.phpt
@@ -1327,6 +1334,7 @@ Zend/tests/magic_methods/bug38146.phpt
 Zend/tests/magic_methods/bug38234.phpt
 Zend/tests/magic_methods/bug38624.phpt
 Zend/tests/magic_methods/bug43450.phpt
+Zend/tests/magic_methods/bug44899.phpt
 Zend/tests/magic_methods/bug44899_2.phpt
 Zend/tests/magic_methods/bug46409.phpt
 Zend/tests/magic_methods/bug47353.phpt
@@ -1505,6 +1513,7 @@ Zend/tests/nullable_types/int.phpt
 Zend/tests/nullable_types/invariant_param_and_return_succeeds.phpt
 Zend/tests/nullable_types/string.phpt
 Zend/tests/nullsafe_operator/002.phpt
+Zend/tests/nullsafe_operator/003.phpt
 Zend/tests/nullsafe_operator/006.phpt
 Zend/tests/nullsafe_operator/007.phpt
 Zend/tests/nullsafe_operator/011.phpt
@@ -1512,6 +1521,7 @@ Zend/tests/nullsafe_operator/012.phpt
 Zend/tests/nullsafe_operator/014.phpt
 Zend/tests/nullsafe_operator/028.phpt
 Zend/tests/nullsafe_operator/030.phpt
+Zend/tests/nullsafe_operator/031.phpt
 Zend/tests/nullsafe_operator/032.phpt
 Zend/tests/nullsafe_operator/034.phpt
 Zend/tests/nullsafe_operator/035.phpt
@@ -1603,6 +1613,7 @@ Zend/tests/oss_fuzz_410939023.phpt
 Zend/tests/oss_fuzz_447521098.phpt
 Zend/tests/oss_fuzz_60441.phpt
 Zend/tests/oss_fuzz_60741.phpt
+Zend/tests/oss_fuzz_61712.phpt
 Zend/tests/oss_fuzz_64209.phpt
 Zend/tests/parameter_default_values/bug68446.phpt
 Zend/tests/php_tag_only.phpt
@@ -1633,6 +1644,7 @@ Zend/tests/prop_const_expr/lhs_class_not_found.phpt
 Zend/tests/prop_const_expr/lhs_class_not_found_nullsafe.phpt
 Zend/tests/prop_const_expr/property_initializer.phpt
 Zend/tests/prop_const_expr/rhs_object.phpt
+Zend/tests/prop_const_expr/rhs_prop_not_found.phpt
 Zend/tests/prop_const_expr/static_initalizer.phpt
 Zend/tests/prop_const_expr/static_property_initializer.phpt
 Zend/tests/property_exists.phpt
@@ -1707,6 +1719,7 @@ Zend/tests/readonly_classes/readonly_class_inheritance_success.phpt
 Zend/tests/readonly_classes/readonly_class_property1.phpt
 Zend/tests/readonly_classes/readonly_class_property2.phpt
 Zend/tests/readonly_props/initialization_scope.phpt
+Zend/tests/readonly_props/magic_get_set.phpt
 Zend/tests/readonly_props/override_with_attributes.phpt
 Zend/tests/readonly_props/promotion.phpt
 Zend/tests/readonly_props/public_set_non_readonly.phpt
@@ -1830,6 +1843,8 @@ Zend/tests/traits/bug55424.phpt
 Zend/tests/traits/bug55524.phpt
 Zend/tests/traits/bug55825.phpt
 Zend/tests/traits/bug60217a.phpt
+Zend/tests/traits/bug60536_001.phpt
+Zend/tests/traits/bug60536_003.phpt
 Zend/tests/traits/bug60536_004.phpt
 Zend/tests/traits/bug60536_005.phpt
 Zend/tests/traits/bug61998.phpt
@@ -2100,6 +2115,7 @@ Zend/tests/type_declarations/typed_properties_094.phpt
 Zend/tests/type_declarations/typed_properties_098.phpt
 Zend/tests/type_declarations/typed_properties_099.phpt
 Zend/tests/type_declarations/typed_properties_100.phpt
+Zend/tests/type_declarations/typed_properties_103.phpt
 Zend/tests/type_declarations/typed_properties_104.phpt
 Zend/tests/type_declarations/typed_properties_110.phpt
 Zend/tests/type_declarations/typed_properties_111.phpt
@@ -2177,6 +2193,7 @@ Zend/tests/weakrefs/gh10043-010.phpt
 Zend/tests/weakrefs/gh10043-011.phpt
 Zend/tests/weakrefs/weakmap_nested.phpt
 Zend/tests/weakrefs/weakrefs_002.phpt
+Zend/tests/weakrefs/weakrefs_003.phpt
 Zend/tests/write_property_ref_overwrite_return.phpt
 Zend/tests/xor_001.phpt
 Zend/tests/xor_003.phpt
@@ -2489,9 +2506,11 @@ ext/date/tests/bug74524.phpt
 ext/date/tests/bug74639.phpt
 ext/date/tests/bug74652.phpt
 ext/date/tests/bug74671.phpt
+ext/date/tests/bug74852.phpt
 ext/date/tests/bug75035.phpt
 ext/date/tests/bug75167.phpt
 ext/date/tests/bug75222.phpt
+ext/date/tests/bug75232.phpt
 ext/date/tests/bug75577.phpt
 ext/date/tests/bug75857.phpt
 ext/date/tests/bug76032.phpt
@@ -3850,6 +3869,8 @@ ext/standard/tests/class_object/get_declared_interfaces_basic_001.phpt
 ext/standard/tests/class_object/get_declared_interfaces_variation1.phpt
 ext/standard/tests/class_object/get_declared_traits_basic_001.phpt
 ext/standard/tests/class_object/get_declared_traits_variation1.phpt
+ext/standard/tests/class_object/get_object_vars_basic_001.phpt
+ext/standard/tests/class_object/get_object_vars_basic_002.phpt
 ext/standard/tests/class_object/get_object_vars_variation_001.phpt
 ext/standard/tests/class_object/get_parent_class_variation_001.phpt
 ext/standard/tests/class_object/interface_exists_variation3.phpt
@@ -4990,6 +5011,7 @@ tests/classes/bug27504.phpt
 tests/classes/class_abstract.phpt
 tests/classes/class_stdclass.phpt
 tests/classes/clone_003.phpt
+tests/classes/constants_basic_002.phpt
 tests/classes/constants_basic_003.phpt
 tests/classes/constants_basic_004.phpt
 tests/classes/constants_comments_001.phpt
@@ -5013,6 +5035,7 @@ tests/classes/incdec_property_002.phpt
 tests/classes/incdec_property_003.phpt
 tests/classes/incdec_property_004.phpt
 tests/classes/inheritance.phpt
+tests/classes/inheritance_006.phpt
 tests/classes/inheritance_008.phpt
 tests/classes/inheritance_009.phpt
 tests/classes/interface_constant_inheritance_001.phpt
@@ -5032,6 +5055,7 @@ tests/classes/method_call_variation_001.phpt
 tests/classes/object_reference_001.phpt
 tests/classes/private_006.phpt
 tests/classes/private_007.phpt
+tests/classes/private_members.phpt
 tests/classes/property_override_privateStatic_private.phpt
 tests/classes/property_override_privateStatic_privateStatic.phpt
 tests/classes/property_override_privateStatic_protected.phpt
@@ -5186,6 +5210,7 @@ tests/lang/foreachLoop.012.phpt
 tests/lang/foreachLoop.014.phpt
 tests/lang/foreachLoop.017.phpt
 tests/lang/foreachLoopObjects.001.phpt
+tests/lang/foreachLoopObjects.004.phpt
 tests/lang/foreachLoopObjects.006.phpt
 tests/lang/foreach_with_object_001.phpt
 tests/lang/foreach_with_references_001.phpt
