@@ -3970,11 +3970,13 @@ pub const VM = struct {
                         return error.RuntimeError;
                     }
                     if (cur == .array) {
-                        const sep = if (frame.ref_slots.get(dollar_name)) |cell|
-                            (try self.separateReferencedArray(frame, dollar_name, cell, cur.array)) orelse cur.array
+                        // a reference's separation rebinds every alias itself
+                        const cell = frame.ref_slots.get(dollar_name);
+                        const sep = if (cell) |c|
+                            (try self.separateReferencedArray(frame, dollar_name, c, cur.array)) orelse cur.array
                         else
                             try self.cowSeparate(cur.array);
-                        if (sep != cur.array) try self.setVariableByName(frame, try self.internName(dollar_name), .{ .array = sep });
+                        if (sep != cur.array and cell == null) try self.setVariableByName(frame, try self.internName(dollar_name), .{ .array = sep });
                         self.push(.{ .array = sep });
                         continue;
                     }
@@ -6391,48 +6393,31 @@ pub const VM = struct {
                     }
                 },
 
-                .array_bind_ref => {
+                .array_bind_ref, .array_bind_ref_var_var => {
                     // `$arr[$key] = &$var`: make $var a reference (get/create its
                     // cell) and point the array element at the SAME cell, so the
                     // element and the variable name one shared storage
-                    const var_idx = self.readU16();
-                    const var_name = self.currentChunk().constants.items[var_idx].string.bytes();
+                    var buf: [256]u8 = undefined;
+                    const var_name = if (op == .array_bind_ref)
+                        self.currentChunk().constants.items[self.readU16()].string.bytes()
+                    else
+                        try self.internName(varVarName(try self.valueToString(self.pop()), &buf));
                     const key_val = self.pop();
                     const arr_val = self.pop();
-                    const frame = self.currentFrame();
-                    const cell = try self.getOrCreateVarCell(frame, var_name);
                     if (key_val == .resource) self.warnResourceOffset(key_val) catch if (try self.resumeRaised()) continue;
-                    if (arr_val == .array) {
-                        const arr_ptr = arr_val.array;
-                        const key = PhpArray.normalizeKey(Value.toArrayKey(key_val));
-                        // The element becomes a mirror of the cell.
-                        try self.arraySetOwned(arr_ptr, key, cell.*);
-                        if (arr_ptr.getPtr(key)) |ep| self.setEntryRef(ep, cell);
-                        try self.array_ref_bindings.append(self.allocator, .{ .cell = cell, .array = arr_ptr, .key = key });
-                        try self.regRefArray(try self.persistentRefOwner(), cell, arr_ptr, key);
-                        self.array_ref_active = true;
-                    }
-                    self.push(cell.*);
+                    const key = PhpArray.normalizeKey(Value.toArrayKey(key_val));
+                    self.push(try self.bindArrayElementRef(arr_val, key, var_name));
                 },
 
-                .array_push_bind_ref => {
+                .array_push_bind_ref, .array_push_bind_ref_var_var => {
                     // `$arr[] = &$var`: append a new element sharing $var's storage
-                    const var_idx = self.readU16();
-                    const var_name = self.currentChunk().constants.items[var_idx].string.bytes();
+                    var buf: [256]u8 = undefined;
+                    const var_name = if (op == .array_push_bind_ref)
+                        self.currentChunk().constants.items[self.readU16()].string.bytes()
+                    else
+                        try self.internName(varVarName(try self.valueToString(self.pop()), &buf));
                     const arr_val = self.pop();
-                    const frame = self.currentFrame();
-                    const cell = try self.getOrCreateVarCell(frame, var_name);
-                    if (arr_val == .array) {
-                        const arr_ptr = arr_val.array;
-                        const k = if (arr_ptr.has_int_keys) arr_ptr.next_int_key else 0;
-                        try arr_ptr.append(self.allocator, cell.*);
-                        const key: PhpArray.Key = .{ .int = k };
-                        if (arr_ptr.getPtr(key)) |ep| self.setEntryRef(ep, cell);
-                        try self.array_ref_bindings.append(self.allocator, .{ .cell = cell, .array = arr_ptr, .key = key });
-                        try self.regRefArray(try self.persistentRefOwner(), cell, arr_ptr, key);
-                        self.array_ref_active = true;
-                    }
-                    self.push(cell.*);
+                    self.push(try self.bindArrayElementRef(arr_val, null, var_name));
                 },
 
                 .break_var_ref => {
@@ -8815,8 +8800,15 @@ pub const VM = struct {
                     const field = self.currentFrame().ip;
                     const delta = self.readU16();
                     const pos = self.readByte();
-                    if (self.argNeedsCapture(self.currentChunk(), field, delta, pos, 1))
-                        self.setArgSource(self.sp - 1, .{ .simple = self.currentChunk().constants.items[name_idx].string.bytes() });
+                    if (self.argNeedsCapture(self.currentChunk(), field, delta, pos, 1)) {
+                        const name = self.currentChunk().constants.items[name_idx].string.bytes();
+                        // passing a variable by reference defines it, as null,
+                        // whether or not the callee writes it
+                        const frame = self.currentFrame();
+                        if (!isSuperglobal(name) and self.frameVariable(frame, name) == null)
+                            try self.setVariableByName(frame, try self.internName(name), .null);
+                        self.setArgSource(self.sp - 1, .{ .simple = name });
+                    }
                 },
                 .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim => {
                     const field = self.currentFrame().ip;
@@ -14777,6 +14769,23 @@ pub const VM = struct {
 
     // a frame's variable by name, null when it holds nothing: reference cells
     // win, then the slot, then the map
+    // the element at key (appended when null) becomes a reference to the
+    // variable, which turns into a reference first if it isn't one
+    fn bindArrayElementRef(self: *VM, arr_val: Value, key_opt: ?PhpArray.Key, var_name: []const u8) RuntimeError!Value {
+        const cell = try self.getOrCreateVarCell(self.currentFrame(), var_name);
+        if (arr_val == .array) {
+            const arr_ptr = arr_val.array;
+            const key: PhpArray.Key = if (key_opt) |k| k else .{ .int = if (arr_ptr.has_int_keys) arr_ptr.next_int_key else 0 };
+            // the element becomes a mirror of the cell
+            if (key_opt != null) try self.arraySetOwned(arr_ptr, key, cell.*) else try arr_ptr.append(self.allocator, cell.*);
+            if (arr_ptr.getPtr(key)) |ep| self.setEntryRef(ep, cell);
+            try self.array_ref_bindings.append(self.allocator, .{ .cell = cell, .array = arr_ptr, .key = key });
+            try self.regRefArray(try self.persistentRefOwner(), cell, arr_ptr, key);
+            self.array_ref_active = true;
+        }
+        return cell.*;
+    }
+
     pub fn frameVariable(self: *VM, frame: *CallFrame, name: []const u8) ?Value {
         if (frame.ref_slots.get(name)) |cell| return cell.*;
         const slot_names = if (frame.slot_names.len > 0) frame.slot_names else if (frame.func) |f| f.slot_names else self.global_slot_names;

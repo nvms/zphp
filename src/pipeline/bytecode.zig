@@ -383,6 +383,10 @@ pub const OpCode = enum(u8) {
     get_var_var_quiet,
     // pop a variable name: ensure_array_var for ${...}[k] = v
     ensure_array_var_var,
+    // array_bind_ref and array_push_bind_ref with the source variable's name
+    // popped last: $arr[k] = &${...}, $arr[] = &${...}
+    array_bind_ref_var_var,
+    array_push_bind_ref_var_var,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {

@@ -53,6 +53,12 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                 try self.emitU16(vidx);
                 return;
             }
+            if (ref_inner.tag == .variable_variable) {
+                try compileVivifyChain(self, target.data.lhs);
+                try self.compileNode(ref_inner.data.lhs);
+                try self.emitOp(.array_push_bind_ref_var_var);
+                return;
+            }
         }
         try compileVivifyChain(self, target.data.lhs);
         try self.compileNode(node.data.rhs);
@@ -102,6 +108,13 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                     try self.compileNode(target.data.rhs);
                     try self.emitOp(.array_bind_ref);
                     try self.emitU16(vidx);
+                    return;
+                }
+                if (ref_inner.tag == .variable_variable) {
+                    try compileVivifyChain(self, target.data.lhs);
+                    try self.compileNode(target.data.rhs);
+                    try self.compileNode(ref_inner.data.lhs);
+                    try self.emitOp(.array_bind_ref_var_var);
                     return;
                 }
             }
@@ -940,7 +953,7 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
             // an array element or static-name property read uses isset-
             // semantics here: an undefined key or an uninitialized typed
             // property must not warn/throw, just count as empty
-            if (arg.tag == .variable or arg.tag == .array_access or arg.tag == .static_prop_access or (arg.tag == .property_access and !self.isDynamicProp(arg))) {
+            if (arg.tag == .variable or arg.tag == .array_access or arg.tag == .static_prop_access or arg.tag == .nullsafe_property_access or (arg.tag == .property_access and !self.isDynamicProp(arg))) {
                 try compileCoalesceFetch(self, args[0]);
                 try self.emitOp(.cast_bool);
                 try self.emitOp(.not);
@@ -1208,8 +1221,12 @@ fn compileSettype(self: *Compiler, args: []const u32) Error!void {
     }
     const var_name = self.ast.tokenSlice(target.main_token);
 
-    // settype returns the converted value, we store it back and push true
+    // settype returns the converted value, we store it back and push true.
+    // the variable is passed by reference, so reading it doesn't warn
+    const saved = self.quiet_reads;
+    self.quiet_reads = true;
     try self.emitGetVar(var_name);
+    self.quiet_reads = saved;
     try self.compileNode(args[1]);
     const fn_idx = try self.addConstant(.{ .string = Value.String.borrowed("settype") });
     try self.emitOp(.call);

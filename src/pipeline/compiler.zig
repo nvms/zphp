@@ -1600,8 +1600,11 @@ pub const Compiler = struct {
     // returns true if it handled the return (caller does not need to emit
     // return_val), false to fall back to the regular value-return path
     pub fn tryCompileRefReturn(self: *Compiler, expr_idx: u32) Error!bool {
+        // php's tree has no node for parentheses: `return ($a);` returns $a
+        var target = expr_idx;
+        while (self.ast.nodes[target].tag == .grouped_expr) target = self.ast.nodes[target].data.lhs;
         const name = try self.addConstant(.{ .string = Value.String.borrowed("$__ret_ref") });
-        if (!try compiler_expr.compileReferenceBinding(self, expr_idx, name)) return false;
+        if (!try compiler_expr.compileReferenceBinding(self, target, name)) return false;
         try self.emitOp(.return_ref);
         try self.emitU16(name);
         return true;
