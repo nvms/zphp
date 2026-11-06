@@ -1952,7 +1952,8 @@ pub const VM = struct {
         try c.put(a, "PHP_VERSION_ID", .{ .int = php_version.id });
         try c.put(a, "PHP_EXTRA_VERSION", .{ .string = Value.String.borrowed("") });
         try c.put(a, "PHP_BUILD_DATE", .{ .string = Value.String.borrowed(php_version.build_date) });
-        try c.put(a, "PHP_DEBUG", .{ .bool = false });
+        // true in a debug build, as in php's own
+        try c.put(a, "PHP_DEBUG", .{ .bool = @import("builtin").mode == .debug });
         try c.put(a, "PHP_ZTS", .{ .bool = false });
         try c.put(a, "PHP_MAXPATHLEN", .{ .int = 1024 });
         try c.put(a, "ICONV_VERSION", .{ .string = Value.String.borrowed("1.11") });

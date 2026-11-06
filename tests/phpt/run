@@ -7,9 +7,6 @@
 #   tests/phpt/run Zend/tests ...   just these directories
 #   tests/phpt/run --update         also rewrite `passing` from this run
 #   JOBS=n, MEMORY_MAX=size         parallel tests (4) and the memory cap (4G)
-#
-# run it against a release build (`make release`): a debug build reports
-# leaks on stderr, which fails tests that otherwise pass
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ZPHP="$(realpath "${ZPHP:-$SCRIPT_DIR/../../zig-out/bin/zphp}")"
@@ -17,6 +14,7 @@ SRC="$SCRIPT_DIR/php-src"
 [ -f "$ZPHP" ] || { echo "zphp not found at $ZPHP"; exit 1; }
 [ -f "$SRC/run-tests.php" ] || { echo "run tests/phpt/setup first"; exit 1; }
 command -v php >/dev/null || { echo "php not found in PATH"; exit 1; }
+[ -z "$("$ZPHP" -r 'echo PHP_DEBUG;')" ] || { echo "$ZPHP is a debug build, which reports leaks on stderr; build with make release"; exit 1; }
 
 update=0
 dirs=()
