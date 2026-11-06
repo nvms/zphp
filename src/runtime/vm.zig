@@ -18394,7 +18394,6 @@ pub const VM = struct {
             try self.setPendingException("ArgumentCountError", native.arity.describe(&buf, label, input_args.len));
             return error.RuntimeError;
         }
-        if (native.callbacks != 0) if (name) |n| try self.checkCallbackArgs(n, label, native.callbacks, input_args);
         var args_buf: [256]Value = undefined;
         if (input_args.len > args_buf.len) return error.RuntimeError;
         var native_args = input_args;
@@ -18434,6 +18433,9 @@ pub const VM = struct {
                 if (a.array.refcount == 0) self.queueArrayRelease(a.array);
             };
         }
+        // the callable parameters are checked once the arguments are pinned:
+        // resolving one may autoload, which runs php
+        if (native.callbacks != 0) if (name) |n| try self.checkCallbackArgs(n, label, native.callbacks, native_args);
         const result = try native.call(ctx, native_args);
         return result.value;
     }
