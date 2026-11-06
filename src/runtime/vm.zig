@@ -5105,18 +5105,10 @@ pub const VM = struct {
                         self.push(.null);
                     } else if (arr_val == .string) {
                         const string = arr_val.string;
-                        const s = string.bytes();
-                        const idx = Value.toInt(key);
-                        const resolved: ?usize = if (idx >= 0)
-                            if (@as(usize, @intCast(idx)) < s.len) @as(usize, @intCast(idx)) else null
-                        else if (@as(usize, @intCast(-idx)) <= s.len)
-                            s.len - @as(usize, @intCast(-idx))
-                        else
-                            null;
-                        if (resolved) |ri| {
-                            self.pushTransfer(.{ .string = string.retainedSlice(ri, ri + 1) });
-                        } else {
-                            self.push(.{ .string = Value.String.borrowed("") });
+                        switch (try self.stringOffset(string.len, key, .read)) {
+                            .at => |ri| self.pushTransfer(.{ .string = string.retainedSlice(ri, ri + 1) }),
+                            .none => self.push(.{ .string = Value.String.borrowed("") }),
+                            .resumed => continue,
                         }
                     } else if (arr_val == .object) {
                         const msg = try std.fmt.allocPrint(self.allocator, "Cannot use object of type {s} as array", .{arr_val.object.class_name});
@@ -5191,18 +5183,10 @@ pub const VM = struct {
                         self.push(.null);
                     } else if (arr_val == .string) {
                         const string = arr_val.string;
-                        const s = string.bytes();
-                        const idx = Value.toInt(key);
-                        const resolved: ?usize = if (idx >= 0)
-                            if (@as(usize, @intCast(idx)) < s.len) @as(usize, @intCast(idx)) else null
-                        else if (@as(usize, @intCast(-idx)) <= s.len)
-                            s.len - @as(usize, @intCast(-idx))
-                        else
-                            null;
-                        if (resolved) |ri| {
-                            self.pushTransfer(.{ .string = string.retainedSlice(ri, ri + 1) });
-                        } else {
-                            self.push(.null);
+                        switch (try self.stringOffset(string.len, key, .coalesce)) {
+                            .at => |ri| self.pushTransfer(.{ .string = string.retainedSlice(ri, ri + 1) }),
+                            .none => self.push(.null),
+                            .resumed => continue,
                         }
                     } else {
                         self.push(.null);
@@ -7392,13 +7376,11 @@ pub const VM = struct {
                         const v = arr_val.array.get(Value.toArrayKey(key));
                         self.push(.{ .bool = v != .null });
                     } else if (arr_val == .string) {
-                        const s = arr_val.string;
-                        const idx = Value.toInt(key);
-                        const valid = if (idx >= 0)
-                            @as(usize, @intCast(idx)) < s.len
-                        else
-                            @as(usize, @intCast(-idx)) <= s.len;
-                        self.push(.{ .bool = valid });
+                        switch (try self.stringOffset(arr_val.string.len, key, .isset)) {
+                            .at => self.push(.{ .bool = true }),
+                            .none => self.push(.{ .bool = false }),
+                            .resumed => continue,
+                        }
                     } else {
                         self.push(.{ .bool = false });
                     }
@@ -11942,6 +11924,83 @@ pub const VM = struct {
         const msg = std.fmt.allocPrint(self.allocator, "Cannot use {s} as array", .{type_name}) catch return error.OutOfMemory;
         defer self.allocator.free(msg);
         try self.emitWarning(msg);
+    }
+
+    pub const StringOffsetMode = enum { read, coalesce, isset };
+    pub const StringOffset = union(enum) { at: usize, none, resumed };
+
+    // the byte a string offset names, as zend_fetch_dimension_str and
+    // zend_isset_dim_slow resolve it: an integer-numeric string names its
+    // number (one with trailing data warns "Illegal string offset"), other
+    // scalars are cast (a read warns), anything else is a TypeError except
+    // under isset. a read past the end warns "Uninitialized string offset"
+    fn stringOffset(self: *VM, len: usize, key: Value, mode: StringOffsetMode) RuntimeError!StringOffset {
+        const index: i64 = switch (key) {
+            .int => |i| i,
+            .string => |str| blk: {
+                const parsed = offsetStringKey(str.bytes());
+                switch (parsed.kind) {
+                    .integer => break :blk parsed.value,
+                    .trailing => {
+                        if (mode == .isset) return .none;
+                        const msg = try std.fmt.allocPrint(self.allocator, "Illegal string offset \"{s}\"", .{str.bytes()});
+                        defer self.allocator.free(msg);
+                        self.emitWarning(msg) catch return if (try self.resumeRaised()) .resumed else error.RuntimeError;
+                        break :blk parsed.value;
+                    },
+                    .other => {
+                        if (mode != .read) return .none;
+                        if (try self.throwBuiltinException("TypeError", "Cannot access offset of type string on string")) return .resumed;
+                        return error.RuntimeError;
+                    },
+                }
+            },
+            .null, .undef, .bool, .float => blk: {
+                if (mode == .read) self.emitWarning("String offset cast occurred") catch return if (try self.resumeRaised()) .resumed else error.RuntimeError;
+                break :blk Value.toInt(key);
+            },
+            else => {
+                if (mode == .isset) return .none;
+                const msg = try std.fmt.allocPrint(self.allocator, "Cannot access offset of type {s} on string", .{if (key == .object) key.object.class_name else key.valueName()});
+                defer self.allocator.free(msg);
+                if (try self.throwBuiltinException("TypeError", msg)) return .resumed;
+                return error.RuntimeError;
+            },
+        };
+        const in_range = if (index >= 0) index < len else index != std.math.minInt(i64) and @as(usize, @intCast(-index)) <= len;
+        if (in_range) return .{ .at = if (index >= 0) @intCast(index) else len - @as(usize, @intCast(-index)) };
+        if (mode == .read) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Uninitialized string offset {d}", .{index});
+            defer self.allocator.free(msg);
+            self.emitWarning(msg) catch return if (try self.resumeRaised()) .resumed else error.RuntimeError;
+        }
+        return .none;
+    }
+
+    const OffsetStringKey = struct { kind: enum { integer, trailing, other }, value: i64 = 0 };
+
+    // php's is_numeric_string as a string offset reads it: whitespace around
+    // an integer is allowed, a float or an overflow is not an integer, and
+    // an integer followed by anything else is one with trailing data
+    fn offsetStringKey(s: []const u8) OffsetStringKey {
+        const space = " \t\n\r\x0b\x0c";
+        var i: usize = 0;
+        while (i < s.len and std.mem.indexOfScalar(u8, space, s[i]) != null) i += 1;
+        const start = i;
+        if (i < s.len and (s[i] == '-' or s[i] == '+')) i += 1;
+        const digits_start = i;
+        while (i < s.len and std.ascii.isDigit(s[i])) i += 1;
+        if (i == digits_start) return .{ .kind = .other };
+        const value = std.fmt.parseInt(i64, s[start..i], 10) catch return .{ .kind = .other };
+        if (i < s.len and s[i] == '.') return .{ .kind = .other };
+        if (i < s.len and (s[i] == 'e' or s[i] == 'E')) {
+            var j = i + 1;
+            if (j < s.len and (s[j] == '-' or s[j] == '+')) j += 1;
+            if (j < s.len and std.ascii.isDigit(s[j])) return .{ .kind = .other };
+        }
+        var end = i;
+        while (end < s.len and std.mem.indexOfScalar(u8, space, s[end]) != null) end += 1;
+        return .{ .kind = if (end == s.len) .integer else .trailing, .value = value };
     }
 
     // reading an element of something that holds no elements
