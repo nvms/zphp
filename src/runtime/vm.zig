@@ -9917,7 +9917,16 @@ pub const VM = struct {
                         return error.RuntimeError;
                     }
                     const mcs_ac_u8: u8 = @intCast(@min(ac, 255));
-                    const full_name = try self.resolveMethod(obj.class_name, method_name);
+                    const full_name = self.resolveMethod(obj.class_name, method_name) catch {
+                        if (self.hasMethod(obj.class_name, "__call")) {
+                            var args_arr = try self.allocArray();
+                            for (0..ac) |ai| try args_arr.append(self.allocator, self.stack[self.sp - ac + ai]);
+                            self.dropN(ac);
+                            self.dropN(1);
+                            const result = self.callMethod(obj, "__call", &.{ .{ .string = Value.String.borrowed(method_name) }, .{ .array = args_arr } }) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
                             self.push(result);
                             continue;
                         }
