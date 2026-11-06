@@ -641,17 +641,18 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
-                .array_get => {
+                .array_get, .array_get_list => {
                     // missing keys (a warning), non-scalar keys (a TypeError),
                     // $GLOBALS (global cells) and anything but arrays and
-                    // in-range string offsets take runLoop's path
+                    // in-range string offsets take runLoop's path, as does a
+                    // destructured string, which php doesn't index
                     const ag_key = stack[sp - 1];
                     const ag_arr = stack[sp - 2];
                     const ag_elem: ?Value = switch (ag_arr) {
                         .array => |arr| if (ag_key == .resource or ag_key == .array or ag_key == .object or arr == self.globals_array)
                             null
                         else if (arr.getPtr(Value.toArrayKey(ag_key))) |entry| entry.value else null,
-                        .string => |str| if (ag_key == .int and ag_key.int >= 0 and @as(usize, @intCast(ag_key.int)) < str.len) blk: {
+                        .string => |str| if (code[ip - 1] == @intFromEnum(OpCode.array_get) and ag_key == .int and ag_key.int >= 0 and @as(usize, @intCast(ag_key.int)) < str.len) blk: {
                             const at: usize = @intCast(ag_key.int);
                             break :blk .{ .string = str.retainedSlice(at, at + 1) };
                         } else null,

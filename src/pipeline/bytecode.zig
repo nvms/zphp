@@ -387,6 +387,9 @@ pub const OpCode = enum(u8) {
     // popped last: $arr[k] = &${...}, $arr[] = &${...}
     array_bind_ref_var_var,
     array_push_bind_ref_var_var,
+    // array_get for a destructuring slot: null reads as null quietly, other
+    // scalars (strings too) warn "Cannot use T as array" and read null
+    array_get_list,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {

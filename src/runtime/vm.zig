@@ -5043,7 +5043,7 @@ pub const VM = struct {
                         };
                     }
                 },
-                .array_get => {
+                .array_get, .array_get_list => {
                     const capturing = self.arg_capture_pending;
                     self.arg_capture_pending = false;
                     const key = self.pop();
@@ -5094,6 +5094,9 @@ pub const VM = struct {
                             return error.RuntimeError;
                         };
                         self.pushCallResult(result);
+                    } else if (op == .array_get_list and arr_val != .object) {
+                        if (arr_val != .null) self.warnListFromScalar(arr_val) catch if (try self.resumeRaised()) continue;
+                        self.push(.null);
                     } else if (arr_val == .string) {
                         const string = arr_val.string;
                         const s = string.bytes();
@@ -5109,7 +5112,15 @@ pub const VM = struct {
                         } else {
                             self.push(.{ .string = Value.String.borrowed("") });
                         }
+                    } else if (arr_val == .object) {
+                        const msg = try std.fmt.allocPrint(self.allocator, "Cannot use object of type {s} as array", .{arr_val.object.class_name});
+                        defer self.allocator.free(msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
                     } else {
+                        // a by-reference argument fetches for writing, which
+                        // makes the container an array instead
+                        if (!capturing) self.warnScalarOffsetRead(arr_val) catch if (try self.resumeRaised()) continue;
                         self.push(.null);
                     }
                 },
@@ -5169,6 +5180,9 @@ pub const VM = struct {
                             // object's array alone
                             self.pushCallResult(.{ .array = try self.shallowCloneCow(result.array) });
                         } else self.pushCallResult(result);
+                    } else if (op == .array_get_list and arr_val != .object) {
+                        if (arr_val != .null) self.warnListFromScalar(arr_val) catch if (try self.resumeRaised()) continue;
+                        self.push(.null);
                     } else if (arr_val == .string) {
                         const string = arr_val.string;
                         const s = string.bytes();
@@ -11867,6 +11881,36 @@ pub const VM = struct {
     }
 
     // php keys an array by a resource's id, with a warning
+    // destructuring something that isn't an array
+    fn warnListFromScalar(self: *VM, container: Value) RuntimeError!void {
+        const type_name: []const u8 = switch (container) {
+            .bool => "bool",
+            .int => "int",
+            .float => "float",
+            .string => "string",
+            .resource => "resource",
+            else => return,
+        };
+        const msg = std.fmt.allocPrint(self.allocator, "Cannot use {s} as array", .{type_name}) catch return error.OutOfMemory;
+        defer self.allocator.free(msg);
+        try self.emitWarning(msg);
+    }
+
+    // reading an element of something that holds no elements
+    fn warnScalarOffsetRead(self: *VM, container: Value) RuntimeError!void {
+        const type_name: []const u8 = switch (container) {
+            .null, .undef => "null",
+            .bool => |b| if (b) "true" else "false",
+            .int => "int",
+            .float => "float",
+            .resource => "resource",
+            else => return,
+        };
+        const msg = std.fmt.allocPrint(self.allocator, "Trying to access array offset on {s}", .{type_name}) catch return error.OutOfMemory;
+        defer self.allocator.free(msg);
+        try self.emitWarning(msg);
+    }
+
     pub fn warnResourceOffset(self: *VM, key: Value) RuntimeError!void {
         const msg = std.fmt.allocPrint(self.allocator, "Resource ID#{d} used as offset, casting to integer ({d})", .{ key.resource.id, key.resource.id }) catch return error.OutOfMemory;
         defer self.allocator.free(msg);

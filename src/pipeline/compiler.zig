@@ -882,7 +882,7 @@ pub const Compiler = struct {
                     }
                     try self.emitOp(.dup);
                     try self.compileNode(slot_node.data.rhs);
-                    try self.emitOp(.array_get);
+                    try self.emitOp(.array_get_list);
                     try self.compileStoreTop(slot_node.data.lhs);
                     continue;
                 }
@@ -894,7 +894,7 @@ pub const Compiler = struct {
                 const key_idx = try self.addConstant(.{ .int = @intCast(i) });
                 try self.emitOp(.constant);
                 try self.emitU16(key_idx);
-                try self.emitOp(.array_get);
+                try self.emitOp(.array_get_list);
                 try self.compileStoreTop(slot);
             }
         } else if (target.tag == .array_literal) {
@@ -920,7 +920,7 @@ pub const Compiler = struct {
                     try self.emitOp(.constant);
                     try self.emitU16(key_idx);
                 }
-                try self.emitOp(.array_get);
+                try self.emitOp(.array_get_list);
                 try self.compileStoreTop(elem.data.lhs);
             }
         }
