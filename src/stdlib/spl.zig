@@ -867,9 +867,19 @@ fn aoUnserialize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     return @import("serialize.zig").unserializeSplArray(ctx, obj, args[0].string.bytes());
 }
 
+// php 8.5 deprecates an object as the storage of an ArrayObject or
+// ArrayIterator, whichever the receiver is
+fn deprecateObjectBacking(ctx: *NativeContext, obj: *PhpObject, comptime func: []const u8) !void {
+    const kind = if (ctx.vm.isInstanceOf(obj.class_name, "ArrayIterator")) "ArrayIterator" else "ArrayObject";
+    const msg = try std.fmt.allocPrint(ctx.allocator, func ++ "(): Using an object as a backing array for {s} is deprecated, as it allows violating class constraints and invariants", .{kind});
+    defer ctx.allocator.free(msg);
+    try ctx.vm.raiseError(VM.E_DEPRECATED, msg);
+}
+
 fn aoConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len >= 1 and (args[0] == .array or args[0] == .object)) {
+        if (args[0] == .object) try deprecateObjectBacking(ctx, obj, "ArrayObject::__construct");
         try obj.set(ctx.allocator, "__data", args[0]);
     } else {
         _ = try ensureData(ctx, obj);
@@ -1088,13 +1098,14 @@ fn aoNatcasesort(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
 
 fn aoExchangeArray(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    if (args.len < 1 or args[0] != .array) return NativeResult.scalar(.{ .bool = false });
+    if (args.len < 1 or (args[0] != .array and args[0] != .object)) return NativeResult.scalar(.{ .bool = false });
+    if (args[0] == .object) try deprecateObjectBacking(ctx, obj, "ArrayObject::exchangeArray");
     const old = getData(obj);
     const old_copy = try ctx.createArray();
     if (old) |o| {
         for (o.entries.items) |e| try old_copy.set(ctx.allocator, e.key, e.value);
     }
-    try obj.set(ctx.allocator, "__data", .{ .array = args[0].array });
+    try obj.set(ctx.allocator, "__data", args[0]);
     return NativeResult.borrowed(.{ .array = old_copy });
 }
 
@@ -1141,6 +1152,7 @@ fn aoGetFlags(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
 fn aiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len >= 1 and (args[0] == .array or args[0] == .object)) {
+        if (args[0] == .object) try deprecateObjectBacking(ctx, obj, "ArrayIterator::__construct");
         try obj.set(ctx.allocator, "__data", args[0]);
     } else {
         _ = try ensureData(ctx, obj);
