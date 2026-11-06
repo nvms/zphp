@@ -1086,7 +1086,7 @@ fn buildPropertyObjStatic(
         .{ .bool = prop.has_set_visibility },
     );
 
-    try obj.set(ctx.allocator, "_is_readonly", .{ .bool = prop.is_readonly });
+    try obj.set(ctx.allocator, "_is_readonly", .{ .bool = prop.is_readonly and !prop.readonly_undeclared });
     try obj.set(ctx.allocator, "_is_final", .{ .bool = prop.is_final });
     try obj.set(ctx.allocator, "_is_static", .{ .bool = is_static });
 
@@ -3741,7 +3741,7 @@ fn rpConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
         try this.set(
             ctx.allocator,
             "_is_readonly",
-            .{ .bool = result.prop.is_readonly },
+            .{ .bool = result.prop.is_readonly and !result.prop.readonly_undeclared },
         );
 
         try this.set(

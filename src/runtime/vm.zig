@@ -389,6 +389,9 @@ pub const ClassDef = struct {
         set_visibility: Visibility = .public,
         has_set_visibility: bool = false,
         is_readonly: bool = false,
+        // enforced as readonly but declared plainly, so reflection doesn't
+        // report it (DatePeriod's properties)
+        readonly_undeclared: bool = false,
         is_final: bool = false,
         is_promoted: bool = false,
         is_virtual: bool = false,
@@ -2375,8 +2378,10 @@ pub const VM = struct {
         try c.put(a, "OPENSSL_NO_PADDING", .{ .int = 3 });
         try c.put(a, "DATE_ATOM", .{ .string = Value.String.borrowed("Y-m-d\\TH:i:sP") });
         try c.put(a, "DATE_ISO8601", .{ .string = Value.String.borrowed("Y-m-d\\TH:i:sO") });
+        try c.put(a, "DATE_ISO8601_EXPANDED", .{ .string = Value.String.borrowed("X-m-d\\TH:i:sP") });
         try c.put(a, "DATE_RFC2822", .{ .string = Value.String.borrowed("D, d M Y H:i:s O") });
         try c.put(a, "DATE_RFC3339", .{ .string = Value.String.borrowed("Y-m-d\\TH:i:sP") });
+        try c.put(a, "DATE_RFC3339_EXTENDED", .{ .string = Value.String.borrowed("Y-m-d\\TH:i:s.vP") });
         try c.put(a, "DATE_W3C", .{ .string = Value.String.borrowed("Y-m-d\\TH:i:sP") });
         try c.put(a, "DATE_COOKIE", .{ .string = Value.String.borrowed("l, d-M-Y H:i:s T") });
         try c.put(a, "DATE_RFC822", .{ .string = Value.String.borrowed("D, d M y H:i:s O") });

@@ -722,7 +722,7 @@ fn dfFormat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
         .float => |fl| fl * 1000.0,
         .object => |o| blk: {
             // DateTime, DateTimeImmutable: pull the unix timestamp
-            const ts_v = o.get("timestamp");
+            const ts_v = o.get("__timestamp");
             if (ts_v == .int) break :blk @as(f64, @floatFromInt(ts_v.int)) * 1000.0;
             if (ts_v == .float) break :blk ts_v.float * 1000.0;
             return NativeResult.scalar(.{ .bool = false });
