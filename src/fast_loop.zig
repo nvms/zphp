@@ -871,7 +871,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     };
                     // a frame that would outgrow the committed depth regions
                     // goes through runLoop, which grows them
-                    if (!ci_func.locals_only or !self.hasCallRoomAt(sp, 1)) {
+                    // too few arguments is runLoop's to report
+                    if (!ci_func.locals_only or !self.hasCallRoomAt(sp, 1) or ci_ac < ci_func.required_params) {
                         frame.ip = ip - 2;
                         self.sp = sp;
                         return;
@@ -1163,8 +1164,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         return;
                     };
 
-                    // a declared function is never a closure instance, so it has no captures
-                    if (!func.locals_only or !self.hasCallRoomAt(sp, 1)) {
+                    // a declared function is never a closure instance, so it has no captures.
+                    // too few arguments is runLoop's to report
+                    if (!func.locals_only or !self.hasCallRoomAt(sp, 1) or arg_count < func.required_params) {
                         frame.ip = ip - 4;
                         self.sp = sp;
                         return;

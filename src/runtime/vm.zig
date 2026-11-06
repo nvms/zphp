@@ -198,6 +198,13 @@ pub const NativeContext = struct {
     }
 
     pub fn invokeCallable(self: *NativeContext, callable: Value, args: []const Value) RuntimeError!Value {
+        const outer = self.vm.native_caller;
+        self.vm.native_caller = .{ .name = self.call_name, .frames = self.vm.frame_count };
+        defer self.vm.native_caller = outer;
+        return self.invokeCallableAsCaller(callable, args);
+    }
+
+    fn invokeCallableAsCaller(self: *NativeContext, callable: Value, args: []const Value) RuntimeError!Value {
         if (callable == .string) return self.vm.callByName(callable.string.bytes(), args);
         if (callable == .object) {
             if (std.mem.eql(u8, callable.object.class_name, "Closure")) {
@@ -232,6 +239,13 @@ pub const NativeContext = struct {
     }
 
     pub fn invokeCallableRef(self: *NativeContext, callable: Value, args: []Value) RuntimeError!Value {
+        const outer = self.vm.native_caller;
+        self.vm.native_caller = .{ .name = self.call_name, .frames = self.vm.frame_count };
+        defer self.vm.native_caller = outer;
+        return self.invokeCallableRefAsCaller(callable, args);
+    }
+
+    fn invokeCallableRefAsCaller(self: *NativeContext, callable: Value, args: []Value) RuntimeError!Value {
         if (callable == .string) return self.vm.callByNameRef(callable.string.bytes(), args);
         if (callable == .object) {
             if (std.mem.eql(u8, callable.object.class_name, "Closure")) {
@@ -737,6 +751,9 @@ pub const VM = struct {
     // pointer to the same value. lets writes propagate live to recursive calls
     globals_cells: std.StringHashMapUnmanaged(*Value) = .{},
     pending_call_name: ?[]const u8 = null,
+    // the native whose callback is being called (array_map, usort, ...) and
+    // the frame depth it called from; a deeper frame means php code calls
+    native_caller: struct { name: ?[]const u8 = null, frames: usize = 0 } = .{},
     // late-static-binding class for the next executeFunction frame. set by
     // callMethod (the native-side method dispatch used by reflection
     // newInstance, __toString, etc.) so static::class inside the called method
@@ -19831,7 +19848,7 @@ pub const VM = struct {
             }
             return self.borrowCallResult(result);
         } else if (self.functions.get(full_name)) |func| {
-            if (args.len < func.required_params) return error.RuntimeError;
+            if (args.len < func.required_params) return self.raiseTooFewArgs(full_name, args.len, func);
             var checked_buf: [16]Value = undefined;
             const checked = try self.checkedArgs(full_name, func, args, &checked_buf);
             defer if (checked.ptr != &checked_buf and checked.ptr != args.ptr) self.allocator.free(checked);
@@ -19950,6 +19967,25 @@ pub const VM = struct {
         return std.fmt.allocPrint(self.allocator, "Too few arguments to function {s}(), {d} passed in {s} on line {d} and {s} {d} expected", .{ name, ac, caller_file, caller_line, modifier, func.required_params });
     }
 
+    // too few arguments for a call made from native code (call_user_func and
+    // the like): the ArgumentCountError goes pending for the caller's handlers
+    fn raiseTooFewArgs(self: *VM, name: []const u8, ac: usize, func: *const ObjFunction) RuntimeError {
+        const display = try self.callableDisplayName(name, func);
+        // php names the calling file and line only for a call from php code;
+        // call_user_func compiles to one, a callback from array_map doesn't
+        const caller = self.native_caller;
+        const from_native = caller.name != null and caller.frames == self.frame_count;
+        const from_php = !from_native or
+            std.mem.eql(u8, caller.name.?, "call_user_func") or std.mem.eql(u8, caller.name.?, "call_user_func_array");
+        const msg = if (from_php) try self.formatTooFewArgs(display, ac, func) else blk: {
+            const modifier: []const u8 = if (func.required_params == func.arity) "exactly" else "at least";
+            break :blk try std.fmt.allocPrint(self.allocator, "Too few arguments to function {s}(), {d} passed and {s} {d} expected", .{ display, ac, modifier, func.required_params });
+        };
+        defer self.allocator.free(msg);
+        try self.setPendingException("ArgumentCountError", msg);
+        return error.RuntimeError;
+    }
+
     fn callValueCallable(self: *VM, callable: Value, args: []const Value) RuntimeError!Value {
         if (callable == .string) return self.callByName(callable.string.bytes(), args);
         if (callable == .object) return self.callMethod(callable.object, "__invoke", args);
@@ -19994,7 +20030,7 @@ pub const VM = struct {
             const result = try self.invokeNative(native, &ctx, .{ .args = args, .name = name });
             return self.borrowCallResult(result);
         } else if (self.functions.get(name)) |func| {
-            if (args.len < func.required_params) return error.RuntimeError;
+            if (args.len < func.required_params) return self.raiseTooFewArgs(name, args.len, func);
             var checked_buf: [16]Value = undefined;
             const checked = try self.checkedArgs(name, func, args, &checked_buf);
             defer if (checked.ptr != &checked_buf and checked.ptr != args.ptr) self.allocator.free(checked);
