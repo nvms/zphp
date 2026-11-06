@@ -15391,6 +15391,10 @@ pub const VM = struct {
         try self.ensureCallRoom();
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.closureScopeByName(name) orelse self.callerCalledClass(), .call_name = name };
         self.frames[self.frame_count].entry_sp = self.sp;
+        // the frame names its closure itself; one left pending would be taken
+        // by the next frame executeFunction builds
+        self.pending_call_name = null;
+        self.pending_called_class = null;
         self.setFrameArgCount(arg_count);
         self.frame_count += 1;
         self.retainFrameObjects(self.frame_count - 1);
@@ -19857,10 +19861,14 @@ pub const VM = struct {
         if (func.has_param_types) {
             if (try self.checkParamTypes(name, arg_count)) return;
         }
-        self.pending_call_name = name;
         if (func.locals_only) {
-            if (self.captures.items.len == 0 or !self.hasCaptures(name))
+            // callLocalsOnly takes the frame's call name from here; no other
+            // path consumes it, and a stale one would be released by the next
+            // frame executeFunction builds
+            if (self.captures.items.len == 0 or !self.hasCaptures(name)) {
+                self.pending_call_name = name;
                 return self.callLocalsOnly(func, arg_count);
+            }
             if (std.mem.startsWith(u8, name, "__closure_"))
                 return self.callClosureLocalsOnly(func, name, arg_count);
         }
@@ -20512,6 +20520,10 @@ pub const VM = struct {
         try self.ensureCallRoom();
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.closureScopeByName(name) orelse self.callerCalledClass(), .call_name = name };
         self.frames[self.frame_count].entry_sp = self.sp;
+        // the frame names its closure itself; one left pending would be taken
+        // by the next frame executeFunction builds
+        self.pending_call_name = null;
+        self.pending_called_class = null;
         self.consumePendingArgCount();
         self.saveFrameArgsSlice(args);
         self.frame_count += 1;
