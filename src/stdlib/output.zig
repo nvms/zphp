@@ -158,15 +158,9 @@ fn varDumpMarked(ctx: *NativeContext, val: Value, depth: usize, marker: []const 
             try out.appendSlice(a, marker);
             try out.appendSlice(a, "object(");
             try out.appendSlice(a, obj.class_name);
-            // PHP's '#N' for var_dump is the refcount-reused object id; the
-            // dominant real-world pattern (allocate -> dump -> allocate ->
-            // dump) yields '#1' for every dump because the previous object's
-            // refcount dropped before the next allocation. zphp's arena keeps
-            // objects alive so monotonic obj.id would diverge. emit #1 here
-            // and let spl_object_id surface the underlying unique counter
             var initialized: usize = 0;
             for (listing.items.items) |prop| initialized += @intFromBool(prop.uninitialized == null);
-            try out.print(a, ")#1 ({d}) {{\n", .{initialized});
+            try out.print(a, ")#{d} ({d}) {{\n", .{ obj.id, initialized });
             for (listing.items.items) |prop| {
                 try appendIndent(out, a, indent + 2);
                 switch (prop.key) {
@@ -191,7 +185,7 @@ fn varDumpMarked(ctx: *NativeContext, val: Value, depth: usize, marker: []const 
         .generator => |g| {
             try appendIndent(out, a, indent);
             try out.appendSlice(a, marker);
-            try out.appendSlice(a, "object(Generator)#1 (1) {\n");
+            try out.print(a, "object(Generator)#{d} (1) {{\n", .{g.handle});
             try appendIndent(out, a, indent + 2);
             try out.appendSlice(a, "[\"function\"]=>\n");
             try appendIndent(out, a, indent + 2);
@@ -206,10 +200,10 @@ fn varDumpMarked(ctx: *NativeContext, val: Value, depth: usize, marker: []const 
             try appendIndent(out, a, indent);
             try out.appendSlice(a, "}\n");
         },
-        .fiber => {
+        .fiber => |f| {
             try appendIndent(out, a, indent);
             try out.appendSlice(a, marker);
-            try out.appendSlice(a, "object(Fiber)#1 (0) {\n");
+            try out.print(a, "object(Fiber)#{d} (0) {{\n", .{f.handle});
             try appendIndent(out, a, indent);
             try out.appendSlice(a, "}\n");
         },

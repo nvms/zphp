@@ -753,6 +753,10 @@ pub const Generator = struct {
     // unreachable; the VM runs closeGenerator + releases gen.vars at that
     // point. starts at 0; new_gen op + push retain to 1
     refcount: u32 = 0,
+    // the Generator object's handle
+    handle: u32 = 0,
+    // the closure instance the generator came from, kept alive with it
+    closure: ?*PhpString.Owner = null,
     state: State = .created,
     func: *const ObjFunction,
     ip: usize = 0,
@@ -806,6 +810,8 @@ pub const Fiber = struct {
     // unreachable; the VM runs cleanupFiberFrames + drops saved state at
     // that point. starts at 0; new_fiber + push retain to 1
     refcount: u32 = 0,
+    // the Fiber object's handle
+    handle: u32 = 0,
     state: State = .created,
     callable: Value = .null,
 
@@ -956,7 +962,9 @@ pub const PhpObject = struct {
     magic_get_active: std.StringHashMapUnmanaged(void) = .{},
     lazy: ?*LazyState = null,
 
+    // the object's handle, or a resource's number
     id: u32 = 0,
+    resource: bool = false,
     // object refcounting (Stage 1). counts live references to this object,
     // including operand-stack slots. born at 0: the `new` opcode pushes the
     // result and `push` retains it to 1. every push retains, every pop/drop

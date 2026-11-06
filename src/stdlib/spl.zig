@@ -666,8 +666,7 @@ fn wmiValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
 
 fn weakRefCreate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .object) return NativeResult.scalar(.null);
-    const ref = try ctx.vm.allocObjectShell();
-    ref.* = .{ .class_name = "WeakReference" };
+    const ref = try ctx.vm.allocObject(.{ .class_name = "WeakReference" });
     try ref.set(ctx.vm.allocator, "__target", args[0]);
     return NativeResult.borrowed(.{ .object = ref });
 }
@@ -690,8 +689,7 @@ fn weakMapGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Native
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const keys_v = obj.get("__keys");
     const data_v = obj.get("__data");
-    const iter = try ctx.vm.allocObjectShell();
-    iter.* = .{ .class_name = "WeakMapIterator" };
+    const iter = try ctx.vm.allocObject(.{ .class_name = "WeakMapIterator" });
     if (keys_v == .array) try iter.set(ctx.allocator, "__objs", keys_v);
     if (data_v == .array) try iter.set(ctx.allocator, "__info", data_v);
     try iter.set(ctx.allocator, "__cursor", .{ .int = 0 });

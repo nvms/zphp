@@ -16,7 +16,7 @@ pub fn enumCases(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
     var arr = try ctx.createArray();
     for (def.case_order.items) |name| {
         if (def.constants.get(name)) |val| {
-            try arr.append(ctx.allocator, val);
+            try arr.append(ctx.allocator, ctx.vm.enumCase(val));
         }
     }
     return NativeResult.borrowed(.{ .array = arr });
@@ -109,7 +109,7 @@ pub fn enumFrom(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     while (iter.next()) |entry| {
         if (entry.value_ptr.* == .object) {
             const case_val = entry.value_ptr.*.object.get("value");
-            if (Value.identical(case_val, lookup)) return NativeResult.borrowed(entry.value_ptr.*);
+            if (Value.identical(case_val, lookup)) return NativeResult.borrowed(ctx.vm.enumCase(entry.value_ptr.*));
         }
     }
     const arg_str = try argDisplayString(ctx, lookup);
@@ -129,7 +129,7 @@ pub fn enumTryFrom(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     while (iter.next()) |entry| {
         if (entry.value_ptr.* == .object) {
             const case_val = entry.value_ptr.*.object.get("value");
-            if (Value.identical(case_val, lookup)) return NativeResult.borrowed(entry.value_ptr.*);
+            if (Value.identical(case_val, lookup)) return NativeResult.borrowed(ctx.vm.enumCase(entry.value_ptr.*));
         }
     }
     return NativeResult.scalar(.null);

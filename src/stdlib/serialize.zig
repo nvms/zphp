@@ -728,7 +728,7 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
             const cls_name = payload[0..sep];
             const case_name = payload[sep + 1 ..];
             const def = ctx.vm.classes.get(cls_name) orelse return error.RuntimeError;
-            const v = def.constants.get(case_name) orelse return error.RuntimeError;
+            const v = ctx.vm.enumCase(def.constants.get(case_name) orelse return error.RuntimeError);
             if (v == .string) v.string.retain();
             try uctx.slots.append(ctx.allocator, v);
             var p = colon1 + 2 + name_len + 1;

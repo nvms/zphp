@@ -947,8 +947,7 @@ fn rdiValid(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
 fn wrapAsIterator(ctx: *NativeContext, v: Value) !Value {
     if (v == .object) return v;
     if (v == .generator) {
-        const wrapper = try ctx.vm.allocObjectShell();
-        wrapper.* = .{ .class_name = "GeneratorWrapper" };
+        const wrapper = try ctx.vm.allocObject(.{ .class_name = "GeneratorWrapper" });
         try wrapper.set(ctx.allocator, "__gen", v);
         return .{ .object = wrapper };
     }
@@ -2070,8 +2069,7 @@ fn rfiGetChildren(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
     if (inner_v != .object) return NativeResult.scalar(.null);
     const child_inner = try ctx.vm.callMethod(inner_v.object, "getChildren", &.{});
     if (child_inner != .object) return NativeResult.scalar(.null);
-    const new_obj = try ctx.vm.allocObjectShell();
-    new_obj.* = .{ .class_name = obj.class_name };
+    const new_obj = try ctx.vm.allocObject(.{ .class_name = obj.class_name });
     ctx.vm.initObjectProperties(new_obj, obj.class_name) catch {};
     try new_obj.set(ctx.allocator, "__fi_inner", child_inner);
     return NativeResult.borrowed(.{ .object = new_obj });
@@ -2083,8 +2081,7 @@ fn rcbfGetChildren(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
     if (inner_v != .object) return NativeResult.scalar(.null);
     const child_inner = try ctx.vm.callMethod(inner_v.object, "getChildren", &.{});
     if (child_inner != .object) return NativeResult.scalar(.null);
-    const new_obj = try ctx.vm.allocObjectShell();
-    new_obj.* = .{ .class_name = obj.class_name };
+    const new_obj = try ctx.vm.allocObject(.{ .class_name = obj.class_name });
     ctx.vm.initObjectProperties(new_obj, obj.class_name) catch {};
     try new_obj.set(ctx.allocator, "__fi_inner", child_inner);
     try new_obj.set(ctx.allocator, "__cb_fn", obj.get("__cb_fn"));
@@ -2097,8 +2094,7 @@ fn rrxGetChildren(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
     if (inner_v != .object) return NativeResult.scalar(.null);
     const child_inner = try ctx.vm.callMethod(inner_v.object, "getChildren", &.{});
     if (child_inner != .object) return NativeResult.scalar(.null);
-    const new_obj = try ctx.vm.allocObjectShell();
-    new_obj.* = .{ .class_name = obj.class_name };
+    const new_obj = try ctx.vm.allocObject(.{ .class_name = obj.class_name });
     ctx.vm.initObjectProperties(new_obj, obj.class_name) catch {};
     try new_obj.set(ctx.allocator, "__fi_inner", child_inner);
     try new_obj.set(ctx.allocator, "__rx_regex", obj.get("__rx_regex"));

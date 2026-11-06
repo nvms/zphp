@@ -393,6 +393,15 @@ pub const OpCode = enum(u8) {
     // u16 delta, u8 pos: an argument written $a[]. passed by reference it
     // appends a null element and passes that; by value it is an Error
     arg_append,
+    // the end of a statement that consumed its value (echo): temporaries it
+    // dropped are freed here, as php frees them when the op finishes
+    statement_end,
+    // `new` takes its object's handle before the arguments run, as php's
+    // ZEND_NEW does: new_reserve pushes a placeholder holding the handle,
+    // new_obj gives it to the object, new_end drops the placeholder from
+    // under the result
+    new_reserve,
+    new_end,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {

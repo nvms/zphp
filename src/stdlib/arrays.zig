@@ -979,11 +979,9 @@ fn array_combine(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     const keys_arr = args[0].array;
     const vals_arr = args[1].array;
     if (keys_arr.entries.items.len != vals_arr.entries.items.len) {
-        const obj = try ctx.allocator.create(@import("../runtime/value.zig").PhpObject);
-        obj.* = .{ .class_name = "ValueError" };
+        const obj = try ctx.vm.allocObject(.{ .class_name = "ValueError" });
         try obj.set(ctx.allocator, "message", .{ .string = Value.String.borrowed("array_combine(): Argument #1 ($keys) and argument #2 ($values) must have the same number of elements") });
         try obj.set(ctx.allocator, "code", .{ .int = 0 });
-        try ctx.vm.objects.append(ctx.allocator, obj);
         ctx.vm.raise(.{ .object = obj });
         return error.RuntimeError;
     }

@@ -35,8 +35,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     var hook_type = ClassDef{ .name = "PropertyHookType", .is_enum = true, .is_final = true };
     for ([_][]const u8{ "Get", "Set" }) |name| {
         const obj = try a.create(PhpObject);
-        vm.next_object_id += 1;
-        obj.* = .{ .class_name = "PropertyHookType", .id = vm.next_object_id };
+        obj.* = .{ .class_name = "PropertyHookType" };
         try vm.objects.append(a, obj);
         try obj.set(a, "name", .{ .string = Value.String.borrowed(name) });
         VM.objRetain(obj);
@@ -1287,9 +1286,7 @@ fn rcNewInstance(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
             return error.RuntimeError;
         }
     }
-    const obj = try ctx.vm.allocObjectShell();
-    ctx.vm.next_object_id += 1;
-    obj.* = .{ .class_name = try ctx.vm.stableClassName(class_name), .id = ctx.vm.next_object_id };
+    const obj = try ctx.vm.allocObject(.{ .class_name = try ctx.vm.stableClassName(class_name) });
     // full slot layout + per-instance default copies (walks the parent chain,
     // deep-clones array defaults) - the raw cls.properties loop skipped both,
     // so inherited typed props read as uninitialized
@@ -1319,9 +1316,7 @@ fn rcNewInstanceArgs(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
     defer ctx.freeArgs(ctor_args, &ctor_buf);
     const count = ctor_args.len;
 
-    const obj = try ctx.vm.allocObjectShell();
-    ctx.vm.next_object_id += 1;
-    obj.* = .{ .class_name = try ctx.vm.stableClassName(class_name), .id = ctx.vm.next_object_id };
+    const obj = try ctx.vm.allocObject(.{ .class_name = try ctx.vm.stableClassName(class_name) });
 
     try ctx.vm.initObjectProperties(obj, class_name);
 
@@ -1833,18 +1828,15 @@ fn rcNewLazyGhost(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
     if (args.len < 1) return NativeResult.scalar(.null);
-    const obj = try ctx.vm.allocObjectShell();
     // the lazy object owns its initializer until it runs or is cleared
     VM.retainValue(args[0]);
-    obj.* = .{ .class_name = try ctx.vm.stableClassName(class_name) };
+    const obj = try ctx.vm.allocObject(.{ .class_name = try ctx.vm.stableClassName(class_name) });
     try ctx.vm.initObjectProperties(obj, class_name);
     const state = try ctx.allocator.create(PhpObject.LazyState);
     const count = if (obj.slots) |slots| slots.len else 0;
     state.* = .{ .initializer = args[0], .pending = try ctx.allocator.alloc(bool, count), .skip_serialize = args.len > 1 and args[1] == .int and (args[1].int & 8) != 0 };
     @memset(state.pending, true);
     obj.lazy = state;
-    ctx.vm.next_object_id += 1;
-    obj.id = ctx.vm.next_object_id;
     if (count == 0) {
         ctx.vm.releaseValue(state.initializer);
         state.initializer = .null;
@@ -1881,9 +1873,7 @@ fn rcNewInstanceWithoutConstructor(ctx: *NativeContext, _: []const Value) Runtim
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
 
-    const obj = try ctx.vm.allocObjectShell();
-    ctx.vm.next_object_id += 1;
-    obj.* = .{ .class_name = try ctx.vm.stableClassName(class_name), .id = ctx.vm.next_object_id };
+    const obj = try ctx.vm.allocObject(.{ .class_name = try ctx.vm.stableClassName(class_name) });
 
     // mirror the `new` path: install slot layout + per-instance default copies
     // (initObjectProperties deep-clones array/object defaults via copyDefault, so
@@ -1979,7 +1969,7 @@ fn appendInterfaceConstants(ctx: *NativeContext, name: []const u8, out: *std.Arr
 }
 
 fn appendConstant(ctx: *NativeContext, cls: ClassDef, declaring: []const u8, cname: []const u8, is_own: bool, out: *std.ArrayListUnmanaged(VisibleConstant)) RuntimeError!void {
-    const value = cls.constants.get(cname) orelse return;
+    const value = ctx.vm.enumCase(cls.constants.get(cname) orelse return);
     if (!is_own and (cls.const_visibility.get(cname) orelse .public) == .private) return;
     for (out.items) |seen| if (std.mem.eql(u8, seen.name, cname)) return;
     try out.append(ctx.allocator, .{ .declaring = declaring, .name = cname, .value = value });
@@ -2018,7 +2008,7 @@ fn rcGetReflectionConstant(ctx: *NativeContext, args: []const Value) RuntimeErro
         const cls = ctx.vm.classes.get(name) orelse break;
         if (cls.constants.contains(target)) {
             if (cls.constants.get(target)) |val| {
-                return NativeResult.borrowed(try buildReflectionClassConstant(ctx, name, target, val));
+                return NativeResult.borrowed(try buildReflectionClassConstant(ctx, name, target, ctx.vm.enumCase(val)));
             }
         }
         current = cls.parent;
@@ -2051,7 +2041,7 @@ fn rcGetConstant(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     while (current) |name| {
         const cls = ctx.vm.classes.get(name) orelse break;
         if (cls.constants.contains(target)) {
-            if (cls.constants.get(target)) |val| return NativeResult.share(val);
+            if (cls.constants.get(target)) |val| return NativeResult.share(ctx.vm.enumCase(val));
         }
         current = cls.parent;
     }
@@ -2121,7 +2111,7 @@ fn rccGetValue(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult 
     var current: ?[]const u8 = class_name;
     while (current) |name| {
         const cls = ctx.vm.classes.get(name) orelse break;
-        if (cls.constants.get(const_name)) |val| return NativeResult.share(val);
+        if (cls.constants.get(const_name)) |val| return NativeResult.share(ctx.vm.enumCase(val));
         current = cls.parent;
     }
     return NativeResult.scalar(.null);
@@ -4729,7 +4719,7 @@ fn reucGetValue(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
     const class_name = if (this.get("class") == .string) this.get("class").string.bytes() else return NativeResult.scalar(.null);
     const case_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
     const cls = ctx.vm.classes.get(class_name) orelse return NativeResult.scalar(.null);
-    return NativeResult.share(cls.constants.get(case_name) orelse .null);
+    return NativeResult.share(ctx.vm.enumCase(cls.constants.get(case_name) orelse .null));
 }
 
 fn rebcGetBackingValue(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {

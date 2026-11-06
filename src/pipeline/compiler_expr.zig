@@ -1842,6 +1842,7 @@ pub fn compileNewExpr(self: *Compiler, node: Ast.Node) Error!void {
     } else self.resolveClassName(raw_name);
     const args = self.ast.extraSlice(node.data.lhs);
     const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(class_name) });
+    try self.emitOp(.new_reserve);
     if (hasSplatOrNamed(self.ast, args)) {
         var guards = try emitSpreadArgs(self, args);
         try emitCallOp(self, &guards, .new_obj, .{ .a = name_idx, .argc = 0xFF });
@@ -1849,6 +1850,7 @@ pub fn compileNewExpr(self: *Compiler, node: Ast.Node) Error!void {
         var guards = try compileArgs(self, args);
         try emitCallOp(self, &guards, .new_obj, .{ .a = name_idx, .argc = @intCast(args.len) });
     }
+    try self.emitOp(.new_end);
 }
 
 pub fn compileNewExprDynamic(self: *Compiler, node: Ast.Node) Error!void {

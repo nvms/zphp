@@ -791,12 +791,13 @@ fn parseObject(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max
         return .{ .array = arr };
     }
 
-    const obj = try ctx.vm.allocObjectShell();
-    obj.* = .{ .class_name = "stdClass" };
-    errdefer ctx.vm.discardOrphan(.{ .object = obj });
+    // php's parser makes the object once its first member's value is
+    // parsed, so objects nested there are numbered before it
+    var made: ?*PhpObject = null;
+    errdefer if (made) |obj| ctx.vm.discardOrphan(.{ .object = obj });
     if (pos.* < s.len and s[pos.*] == '}') {
         pos.* += 1;
-        return .{ .object = obj };
+        return .{ .object = try ctx.vm.allocObject(.{ .class_name = "stdClass" }) };
     }
     while (pos.* < s.len) {
         skipWhitespace(s, pos);
@@ -815,6 +816,10 @@ fn parseObject(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max
         pos.* += 1;
         const val = try parseValue(ctx, s, pos, assoc, max_depth, cur_depth + 1, flags);
         defer if (val == .string) val.string.release();
+        const obj = made orelse blk: {
+            made = try ctx.vm.allocObject(.{ .class_name = "stdClass" });
+            break :blk made.?;
+        };
         try obj.set(ctx.allocator, key_str, val);
         skipWhitespace(s, pos);
         if (pos.* < s.len and s[pos.*] == ',') {
@@ -827,7 +832,7 @@ fn parseObject(ctx: *NativeContext, s: []const u8, pos: *usize, assoc: bool, max
         return error.RuntimeError;
     }
     pos.* += 1;
-    return .{ .object = obj };
+    return .{ .object = made orelse try ctx.vm.allocObject(.{ .class_name = "stdClass" }) };
 }
 
 fn skipWhitespace(s: []const u8, pos: *usize) void {

@@ -1265,20 +1265,22 @@ fn native_is_subclass_of(ctx: *NativeContext, args: []const Value) RuntimeError!
 fn native_spl_object_id(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(Value{ .int = 0 });
     if (args[0] == .object) {
-        if (args[0].object.id == 0) {
-            ctx.vm.next_object_id += 1;
-            args[0].object.id = ctx.vm.next_object_id;
-        }
+        if (args[0].object.id == 0) args[0].object.id = try ctx.vm.allocHandle();
         return NativeResult.scalar(.{ .int = @intCast(args[0].object.id) });
     }
-    if (args[0] == .generator) return NativeResult.scalar(.{ .int = @intCast(@intFromPtr(args[0].generator)) });
-    if (args[0] == .fiber) return NativeResult.scalar(.{ .int = @intCast(@intFromPtr(args[0].fiber)) });
-    // closures stored as unique name strings - mirror spl_object_hash by
-    // using the string's pointer as the id
-    if (args[0] == .string and std.mem.startsWith(u8, args[0].string.bytes(), "__closure_")) {
-        return NativeResult.scalar(.{ .int = @intCast(@intFromPtr(args[0].string.bytes().ptr)) });
-    }
+    if (args[0] == .generator) return NativeResult.scalar(.{ .int = args[0].generator.handle });
+    if (args[0] == .fiber) return NativeResult.scalar(.{ .int = args[0].fiber.handle });
+    if (closureHandle(ctx, args[0])) |handle| return NativeResult.scalar(.{ .int = @intCast(handle) });
     return throwObjectArg(ctx, "spl_object_id", args[0]);
+}
+
+// a closure held as its instance name: the handle of the Closure object it
+// stands for. a closure with no instance range of its own (a plain function
+// name) takes its address, which no handle collides with in practice
+fn closureHandle(ctx: *NativeContext, v: Value) ?u64 {
+    if (v != .string or !std.mem.startsWith(u8, v.string.bytes(), "__closure_")) return null;
+    if (ctx.vm.closureHandle(v.string.bytes())) |handle| return handle;
+    return @intCast(@intFromPtr(v.string.bytes().ptr));
 }
 
 fn throwObjectArg(ctx: *NativeContext, comptime func: []const u8, v: Value) RuntimeError {
@@ -3255,24 +3257,12 @@ fn native_spl_object_hash(ctx: *NativeContext, args: []const Value) RuntimeError
     var id: u64 = 0;
     switch (args[0]) {
         .object => |o| {
-            if (o.id == 0) {
-                ctx.vm.next_object_id += 1;
-                o.id = ctx.vm.next_object_id;
-            }
+            if (o.id == 0) o.id = try ctx.vm.allocHandle();
             id = o.id;
         },
-        .generator => |g| id = @intCast(@intFromPtr(g)),
-        .fiber => |f| id = @intCast(@intFromPtr(f)),
-        // closures are represented as unique name strings ("__closure_N_M"
-        // or "__closure_bound_N"). use the string's pointer as the id so
-        // every distinct closure instance gets a distinct hash
-        .string => |s| {
-            if (std.mem.startsWith(u8, s.bytes(), "__closure_")) {
-                id = @intCast(@intFromPtr(s.bytes().ptr));
-            } else {
-                return throwObjectArg(ctx, "spl_object_hash", args[0]);
-            }
-        },
+        .generator => |g| id = g.handle,
+        .fiber => |f| id = f.handle,
+        .string => id = closureHandle(ctx, args[0]) orelse return throwObjectArg(ctx, "spl_object_hash", args[0]),
         else => return throwObjectArg(ctx, "spl_object_hash", args[0]),
     }
     // PHP format: 16 hex chars of id, then 16 zeros

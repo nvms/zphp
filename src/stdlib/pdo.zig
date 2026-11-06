@@ -1678,8 +1678,7 @@ fn getDefaultFetchMode(obj: *PhpObject) i64 {
 // helpers
 
 fn fetchRowAsObject(ctx: *NativeContext, stmt: *sqlite.Stmt) !Value {
-    const obj = try ctx.vm.allocObjectShell();
-    obj.* = .{ .class_name = "stdClass" };
+    const obj = try ctx.vm.allocObject(.{ .class_name = "stdClass" });
     const col_count = sqlite.sqlite3_column_count(stmt);
     var i: c_int = 0;
     while (i < col_count) : (i += 1) {
@@ -1694,8 +1693,7 @@ fn fetchRowAsObject(ctx: *NativeContext, stmt: *sqlite.Stmt) !Value {
 }
 
 fn fetchRowAsClass(ctx: *NativeContext, stmt: *sqlite.Stmt, class_name: []const u8) !Value {
-    const obj = try ctx.vm.allocObjectShell();
-    obj.* = .{ .class_name = try ctx.vm.stableClassName(class_name) };
+    const obj = try ctx.vm.allocObject(.{ .class_name = try ctx.vm.stableClassName(class_name) });
     if (ctx.vm.classes.contains(class_name)) try ctx.vm.initObjectProperties(obj, class_name);
     const col_count = sqlite.sqlite3_column_count(stmt);
     var i: c_int = 0;

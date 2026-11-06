@@ -3937,8 +3937,7 @@ fn native_linkinfo(_: *NativeContext, args: []const Value) RuntimeError!NativeRe
 }
 
 fn native_finfo_open(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = try ctx.vm.allocObjectShell();
-    obj.* = .{ .class_name = "finfo" };
+    const obj = try ctx.vm.allocObject(.{ .class_name = "finfo" });
     return NativeResult.borrowed(.{ .object = obj });
 }
 

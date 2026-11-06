@@ -2262,6 +2262,8 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
 
     // now instantiate with constructor args
     const ctor_args_slice = self.ast.extra_data[ctor_args_start .. ctor_args_start + ctor_arg_count];
+    try self.emitOp(.new_reserve);
+    defer self.emitOp(.new_end) catch {};
     if (@import("compiler_expr.zig").hasSplatOrNamed(self.ast, ctor_args_slice)) {
         var guards = try @import("compiler_expr.zig").emitSpreadArgs(self, ctor_args_slice);
         try @import("compiler_expr.zig").emitSpreadCallOp(self, &guards, .new_obj, name_idx, 0xFF);

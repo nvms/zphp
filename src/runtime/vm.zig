@@ -284,6 +284,8 @@ pub const CaptureRange = struct {
     has_statics: bool = false,
     // RefIndex owner of this instance's by-ref capture bindings
     ref_owner: RefIndex.OwnerId = 0,
+    // the Closure object's handle
+    handle: u32 = 0,
 };
 
 pub const AttributeDef = struct {
@@ -575,6 +577,12 @@ pub const VM = struct {
     free_objects: std.ArrayListUnmanaged(*PhpObject) = .empty,
     released_objects: std.ArrayListUnmanaged(*PhpObject) = .empty,
     next_object_id: u32 = 0,
+    // handles of destroyed objects, the most recently freed last: php's
+    // object store hands that one out first
+    free_handles: std.ArrayListUnmanaged(u32) = .empty,
+    // while a release drain destroys a value: what that destruction drops
+    release_log: ?*std.ArrayListUnmanaged(ReleasedItem) = null,
+    release_depth: u32 = 0,
     // the innermost running native call; a user call made at its depth comes
     // from the native itself
     native_call: ?*const NativeCall = null,
@@ -1617,6 +1625,7 @@ pub const VM = struct {
             break :blk created;
         };
         gen.* = initial;
+        gen.handle = try self.allocHandle();
         return gen;
     }
 
@@ -1633,7 +1642,7 @@ pub const VM = struct {
     // others it creates alongside it (a process after its pipes)
     pub fn allocResource(self: *VM, class_name: []const u8) RuntimeError!*PhpObject {
         const obj = try self.allocObjectShell();
-        obj.* = .{ .class_name = class_name };
+        obj.* = .{ .class_name = class_name, .resource = true };
         return obj;
     }
 
@@ -1660,10 +1669,13 @@ pub const VM = struct {
     }
 
     fn allocUserObject(self: *VM, class_name: []const u8) RuntimeError!*PhpObject {
-        const obj = try self.allocObjectShell();
-        self.next_object_id += 1;
+        return self.allocUserObjectHandle(class_name, 0);
+    }
+
+    // handle 0 takes the next free one
+    fn allocUserObjectHandle(self: *VM, class_name: []const u8, handle: u32) RuntimeError!*PhpObject {
         const stable_class_name = try self.stableClassName(class_name);
-        obj.* = .{ .class_name = stable_class_name, .id = self.next_object_id };
+        const obj = try self.allocObject(.{ .class_name = stable_class_name, .id = handle });
         if (self.debug_trace_class) |trace_class| if (std.mem.eql(u8, trace_class, class_name)) {
             @import("value.zig").hooks().trace_obj = obj;
             @import("value.zig").hooks().trace_rc_verbose = true;
@@ -1678,7 +1690,28 @@ pub const VM = struct {
         return self.internName(class_name);
     }
 
-    pub fn allocObjectShell(self: *VM) RuntimeError!*PhpObject {
+    // a new object with the next free handle, the number var_dump shows and
+    // spl_object_id returns
+    pub fn allocObject(self: *VM, fields: PhpObject) RuntimeError!*PhpObject {
+        const obj = try self.allocObjectShell();
+        obj.* = fields;
+        if (obj.id == 0) obj.id = try self.allocHandle();
+        return obj;
+    }
+
+    pub fn allocHandle(self: *VM) RuntimeError!u32 {
+        if (self.free_handles.pop()) |handle| return handle;
+        self.next_object_id += 1;
+        return self.next_object_id;
+    }
+
+    fn freeHandle(self: *VM, obj: *PhpObject) void {
+        if (obj.resource or obj.id == 0) return;
+        self.free_handles.append(self.allocator, obj.id) catch {};
+        obj.id = 0;
+    }
+
+    fn allocObjectShell(self: *VM) RuntimeError!*PhpObject {
         if (self.free_objects.pop()) |obj| return obj;
         const created = try self.allocator.create(PhpObject);
         errdefer self.allocator.destroy(created);
@@ -1855,8 +1888,7 @@ pub const VM = struct {
         };
         for (rm_cases) |name| {
             const case_obj = try allocator.create(PhpObject);
-            vm.next_object_id += 1;
-            case_obj.* = .{ .class_name = "RoundingMode", .id = vm.next_object_id };
+            case_obj.* = .{ .class_name = "RoundingMode" };
             try vm.objects.append(allocator, case_obj);
             try case_obj.set(allocator, "name", .{ .string = Value.String.borrowed(name) });
             objRetain(case_obj);
@@ -2650,6 +2682,7 @@ pub const VM = struct {
             self.releaseGeneratorVars(g);
             self.releaseValue(g.return_value);
             g.return_value = .null;
+            self.releaseGeneratorClosure(g);
         };
         for (self.fibers.items) |f| if (!f.pooled) {
             self.cleanupFiberFrames(f);
@@ -2927,6 +2960,7 @@ pub const VM = struct {
         self.free_generators.deinit(self.allocator);
         self.free_fibers.deinit(self.allocator);
         self.free_objects.deinit(self.allocator);
+        self.free_handles.deinit(self.allocator);
         self.released_objects.deinit(self.allocator);
         self.pending_destruct.deinit(self.allocator);
         self.pending_array_release.deinit(self.allocator);
@@ -3076,6 +3110,7 @@ pub const VM = struct {
         self.released_arrays.clearRetainingCapacity();
         self.free_objects.clearRetainingCapacity();
         self.released_objects.clearRetainingCapacity();
+        self.free_handles.clearRetainingCapacity();
         self.free_generators.clearRetainingCapacity();
         if (self.serve_mode and self.builtins_recorded) {
             self.strings.shrinkRetainingCapacity(self.builtin_str_hw);
@@ -3299,6 +3334,7 @@ pub const VM = struct {
         // matching PHP. internal stdlib-init objects keep the ids they already
         // got (some of those are case singletons we hold references to)
         self.next_object_id = 0;
+        self.free_handles.clearRetainingCapacity();
         // at script end run every still-live object's __destruct (PHP's
         // shutdown guarantee), then drain - on success or error
         defer self.runShutdownDestructors();
@@ -3361,16 +3397,21 @@ pub const VM = struct {
     // not re-enter; drain afterwards so cascades fire
     // pooled object structs are reused out of creation order, so order the
     // final sweep by object id (creation order) rather than list position
+    // php's zend_call_destructors: global variables holding the only
+    // reference to an object are destroyed, last declared first, until a
+    // pass destroys none; then every object left gets its destructor in
+    // handle order
     pub fn runShutdownDestructors(self: *VM) void {
+        self.destroyGlobalsAtShutdown();
         var live: std.ArrayListUnmanaged(*PhpObject) = .empty;
         defer live.deinit(self.allocator);
         for (self.objects.items) |obj| {
-            if (obj.destructed or obj.pooled) continue;
+            if (obj.destructed or obj.pooled or obj.resource) continue;
             live.append(self.allocator, obj) catch return;
         }
         std.mem.sort(*PhpObject, live.items, {}, struct {
             fn lessThan(_: void, a: *PhpObject, b: *PhpObject) bool {
-                return a.id > b.id;
+                return a.id < b.id;
             }
         }.lessThan);
         for (live.items) |obj| {
@@ -3384,6 +3425,64 @@ pub const VM = struct {
             }
         }
         self.drainPendingDestruct();
+    }
+
+    fn destroyGlobalsAtShutdown(self: *VM) void {
+        if (self.frame_count == 0) return;
+        const frame = &self.frames[0];
+        const names = self.global_slot_names;
+        while (true) {
+            var destroyed = false;
+            // variables made at run time come after the compiled ones in
+            // php's table; $GLOBALS keeps their order
+            if (self.globals_array) |ga| {
+                var gi = ga.entries.items.len;
+                while (gi > 0) {
+                    gi -= 1;
+                    if (gi >= ga.entries.items.len) continue;
+                    const entry = ga.entries.items[gi];
+                    if (entry.key != .string) continue;
+                    var buf: [256]u8 = undefined;
+                    const key = entry.key.string.bytes();
+                    if (key.len + 1 > buf.len) continue;
+                    buf[0] = '$';
+                    @memcpy(buf[1 .. key.len + 1], key);
+                    const name = buf[0 .. key.len + 1];
+                    var compiled = false;
+                    for (names) |n| if (std.mem.eql(u8, n, name)) {
+                        compiled = true;
+                        break;
+                    };
+                    if (compiled or frame.ref_slots.contains(name)) continue;
+                    const value = frame.vars.get(name) orelse continue;
+                    if (value != .object or value.object.refcount != 1 or value.object.destructed) continue;
+                    const removed = frame.vars.fetchRemove(name).?;
+                    ga.remove(.{ .string = Value.String.borrowed(key) });
+                    self.releaseValue(removed.value);
+                    self.drainPendingDestruct();
+                    destroyed = true;
+                }
+            }
+            var si = @min(names.len, frame.locals.len);
+            while (si > 0) {
+                si -= 1;
+                const name = names[si];
+                if (name.len == 0 or frame.ref_slots.contains(name)) continue;
+                const value = if (frame.vars.get(name)) |v| v else frame.locals[si];
+                if (value != .object or value.object.refcount != 1 or value.object.destructed) continue;
+                if (frame.vars.fetchRemove(name)) |removed| {
+                    self.releaseValue(removed.value);
+                } else self.releaseValue(frame.locals[si]);
+                frame.locals[si] = .undef;
+                if (name.len > 1 and name[0] == '$') {
+                    if (self.globals_array) |ga| ga.remove(.{ .string = Value.String.borrowed(name[1..]) });
+                    if (self.globals_cells.get(name)) |cell| self.setCell(cell, .null);
+                }
+                self.drainPendingDestruct();
+                destroyed = true;
+            }
+            if (!destroyed) break;
+        }
     }
 
     // tracked allocPrint into self.error_msg. the underlying string is
@@ -4939,6 +5038,19 @@ pub const VM = struct {
                     if (self.ob_stack.items.len == 0) self.headers_sent = true;
                 },
                 .halt => return,
+                .statement_end => if (self.hasPendingReleases()) self.drainPendingDestruct(),
+                .new_reserve => {
+                    const placeholder = try self.allocObject(.{ .class_name = new_reservation });
+                    self.push(.{ .object = placeholder });
+                },
+                .new_end => {
+                    const result = self.stack[self.sp - 1];
+                    const placeholder = self.stack[self.sp - 2];
+                    self.stack[self.sp - 2] = result;
+                    self.stack[self.sp - 1] = .null;
+                    self.sp -= 1;
+                    self.stackRelease(placeholder);
+                },
 
                 .array_new => {
                     const arr = try self.allocArray();
@@ -6143,13 +6255,13 @@ pub const VM = struct {
                             if (try self.throwBuiltinException("Exception", "Cannot traverse an already closed generator")) continue;
                             return error.RuntimeError;
                         }
+                        try self.pushIteratorMarker();
                         if (iterable.generator.state == .created) {
                             self.resumeGenerator(iterable.generator, .null) catch {
                                 if (self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
                         }
-                        self.push(.{ .int = -1 }); // sentinel: -1 means generator iteration
                     } else if (iterable == .object) {
                         // IteratorAggregate: replace iterable with getIterator() result.
                         // PHP allows getIterator to return another IteratorAggregate;
@@ -6177,17 +6289,17 @@ pub const VM = struct {
                         if (unwrap_failed) return error.RuntimeError;
                         // getIterator may have returned a generator; iterate it directly
                         if (iterable == .generator) {
+                            try self.pushIteratorMarker();
                             self.resumeGenerator(iterable.generator, .null) catch {
                                 if (self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
-                            self.push(.{ .int = -1 });
                             continue;
                         }
                         // Iterator protocol
                         if (iterable == .object and self.hasMethod(iterable.object.class_name, "rewind")) {
+                            try self.pushIteratorMarker();
                             _ = self.callMethod(iterable.object, "rewind", &.{}) catch {};
-                            self.push(.{ .int = -2 }); // sentinel: -2 means Iterator
                         } else if (iterable == .array) {
                             self.push(.{ .int = 0 });
                         } else if (iterable == .object) {
@@ -6256,7 +6368,7 @@ pub const VM = struct {
                             self.push(gen.current_key);
                             self.push(gen.current_value);
                         }
-                    } else if (Value.toInt(idx_val) == -2 and iterable == .object) {
+                    } else if (idx_val == .object and iterable == .object) {
                         // Iterator protocol
                         const valid = self.callMethod(iterable.object, "valid", &.{}) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -6305,7 +6417,7 @@ pub const VM = struct {
                             self.stackRelease(self.stack[self.sp - 2]);
                             self.stack[self.sp - 2] = .null;
                         }
-                    } else if (Value.toInt(self.stack[self.sp - 1]) == -2 and iterable == .object) {
+                    } else if (self.stack[self.sp - 1] == .object and iterable == .object) {
                         _ = self.callMethod(iterable.object, "next", &.{}) catch {};
                     } else {
                         const idx = self.pop();
@@ -6315,8 +6427,7 @@ pub const VM = struct {
                 // the end of a foreach is a statement boundary: the iterable
                 // it drops is released here, as php frees it at FE_FREE
                 .iter_end => {
-                    _ = self.pop();
-                    _ = self.pop();
+                    self.endForeach();
                     if (self.hasPendingReleases()) self.drainPendingDestruct();
                 },
                 .iter_end_close => {
@@ -6324,8 +6435,7 @@ pub const VM = struct {
                     if (iterable == .generator and iterable.generator.state == .suspended) {
                         try self.closeGenerator(iterable.generator, base_frame);
                     }
-                    _ = self.pop();
-                    _ = self.pop();
+                    self.endForeach();
                     if (self.hasPendingReleases()) self.drainPendingDestruct();
                 },
 
@@ -7410,9 +7520,7 @@ pub const VM = struct {
                             if (try self.throwUncloneable(src.class_name)) continue;
                             return error.RuntimeError;
                         }
-                        const copy = try self.allocObjectShell();
-                        self.next_object_id += 1;
-                        copy.* = .{ .class_name = src.class_name, .id = self.next_object_id };
+                        const copy = try self.allocObject(.{ .class_name = src.class_name });
                         if (src.slots) |src_slots| {
                             const new_slots = try self.allocator.alloc(Value, src_slots.len);
                             for (src_slots, 0..) |sv, i| {
@@ -7450,9 +7558,7 @@ pub const VM = struct {
                             };
                         }
                         if (val.object.backingValue() != .null) {
-                            const proxy = try self.allocObjectShell();
-                            self.next_object_id += 1;
-                            proxy.* = .{ .class_name = val.object.class_name, .id = self.next_object_id, .slot_layout = val.object.slot_layout };
+                            const proxy = try self.allocObject(.{ .class_name = val.object.class_name, .slot_layout = val.object.slot_layout });
                             const state = try self.allocator.create(PhpObject.LazyState);
                             state.* = .{ .initializer = .null, .proxy = true, .pending = try self.allocator.alloc(bool, 0), .backing = copy };
                             proxy.lazy = state;
@@ -7574,9 +7680,7 @@ pub const VM = struct {
 
                 .callable_closure => {
                     const callable = self.pop();
-                    const obj = try self.allocObjectShell();
-                    self.next_object_id += 1;
-                    obj.* = .{ .class_name = "Closure", .id = self.next_object_id };
+                    const obj = try self.allocObject(.{ .class_name = "Closure" });
                     try obj.set(self.allocator, "__callable", callable);
                     self.push(.{ .object = obj });
                 },
@@ -8411,6 +8515,7 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
                         const callable = self.stack[self.sp - ac];
+                        const reserved = self.takeReservedHandle(ac);
                         self.dropN(ac);
                         const fiber = if (!self.serve_mode) self.free_fibers.pop() orelse blk: {
                             const created = try self.allocator.create(Fiber);
@@ -8423,7 +8528,7 @@ pub const VM = struct {
                         };
                         // the fiber owns its callable until it is released
                         retainValue(callable);
-                        fiber.* = .{ .callable = callable };
+                        fiber.* = .{ .callable = callable, .handle = if (reserved != 0) reserved else try self.allocHandle() };
                         self.push(.{ .fiber = fiber });
                         continue;
                     }
@@ -8459,7 +8564,7 @@ pub const VM = struct {
                         }
                     }
 
-                    const obj = try self.allocUserObject(class_name);
+                    const obj = try self.allocUserObjectHandle(class_name, self.takeReservedHandle(arg_count));
 
                     // set property defaults from class and parent chain
                     self.initObjectProperties(obj, class_name) catch {
@@ -9196,6 +9301,10 @@ pub const VM = struct {
 
                     if (obj_val == .generator) {
                         const gen = obj_val.generator;
+                        // the generator and its arguments stay counted while
+                        // the method runs the generator's code
+                        const held = self.holdCallOperands(ac + 1);
+                        defer self.releaseHeld(held);
                         self.dropN(ac);
                         self.dropN(1); // pop generator
                         if (std.mem.eql(u8, method_name, "current")) {
@@ -9303,6 +9412,8 @@ pub const VM = struct {
                         // save args before popping
                         var args_buf: [16]Value = undefined;
                         for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
+                        const held = self.holdCallOperands(ac + 1);
+                        defer self.releaseHeld(held);
                         self.dropN(ac);
                         self.dropN(1);
 
@@ -11486,6 +11597,15 @@ pub const VM = struct {
         return null;
     }
 
+    // an enum case as the script reaches it: php creates a case object on
+    // first access, so that is when it takes a handle
+    pub fn enumCase(self: *VM, value: Value) Value {
+        if (value == .object and value.object.id == 0 and !value.object.resource) {
+            value.object.id = self.allocHandle() catch 0;
+        }
+        return value;
+    }
+
     // a class constant or enum case, inherited through parents and
     // interfaces, autoloading ancestors on the way like getStaticProp
     pub fn getClassConstant(self: *VM, class_name: []const u8, const_name: []const u8) ?Value {
@@ -11505,7 +11625,7 @@ pub const VM = struct {
         var parent: ?[]const u8 = null;
         {
             const cls = self.classes.getPtr(cn) orelse return null;
-            if (cls.constants.get(const_name)) |val| return .{ .found = val, .parent = null };
+            if (cls.constants.get(const_name)) |val| return .{ .found = self.enumCase(val), .parent = null };
             n = @min(cls.interfaces.items.len, ifaces.len);
             @memcpy(ifaces[0..n], cls.interfaces.items[0..n]);
             parent = cls.parent;
@@ -12044,9 +12164,7 @@ pub const VM = struct {
     // different exception raised by finally still propagates to the caller
     pub fn closeGenerator(self: *VM, gen: *Generator, base_frame: usize) RuntimeError!void {
         if (gen.state != .suspended) return;
-        const obj = try self.allocObjectShell();
-        self.next_object_id += 1;
-        obj.* = .{ .class_name = "Exception", .id = self.next_object_id };
+        const obj = try self.allocObject(.{ .class_name = "Exception" });
         try obj.set(self.allocator, "message", .{ .string = Value.String.borrowed("Generator closed") });
         try obj.set(self.allocator, "code", .{ .int = 0 });
         const marker_ptr = @intFromPtr(obj);
@@ -14327,9 +14445,9 @@ pub const VM = struct {
 
         var vj: usize = 0;
         for (0..case_count) |ci| {
+            // the case takes its handle on first access (enumCase)
             const case_obj = try self.allocObjectShell();
-            self.next_object_id += 1;
-            case_obj.* = .{ .class_name = enum_name, .id = self.next_object_id };
+            case_obj.* = .{ .class_name = enum_name };
             try case_obj.set(self.allocator, "name", .{ .string = Value.String.borrowed(case_names[ci]) });
             if (case_has_value[ci] == 1) {
                 try case_obj.set(self.allocator, "value", case_values[vj]);
@@ -14790,6 +14908,7 @@ pub const VM = struct {
             .len = 0,
             .has_refs = false,
             .owner = owner,
+            .handle = try self.allocHandle(),
         });
         return .{ .string = .{ .ptr = name.ptr, .len = name.len, .owner = owner } };
     }
@@ -14962,6 +15081,68 @@ pub const VM = struct {
         return frame.vars.get(name);
     }
 
+    // foreach over a Traversable runs through an iterator php keeps as an
+    // object of its own, taking a handle for the loop; it sits in the loop's
+    // position slot, so the handle goes back when the slot is released
+    fn pushIteratorMarker(self: *VM) RuntimeError!void {
+        const marker = try self.allocObject(.{ .class_name = "InternalIterator" });
+        self.push(.{ .object = marker });
+    }
+
+    const new_reservation = "\x00new";
+
+    // the handle new_reserve set aside, from the placeholder `depth` slots
+    // under the top; the placeholder gives it up, so releasing it frees nothing
+    fn takeReservedHandle(self: *VM, depth: usize) u32 {
+        if (self.sp < depth + 1) return 0;
+        const slot = self.stack[self.sp - depth - 1];
+        if (slot != .object or slot.object.class_name.ptr != new_reservation.ptr) return 0;
+        const handle = slot.object.id;
+        slot.object.id = 0;
+        return handle;
+    }
+
+    fn releaseGeneratorClosure(self: *VM, gen: *Generator) void {
+        const owner = gen.closure orelse return;
+        gen.closure = null;
+        owner.refcount -= 1;
+        if (owner.refcount == 0) self.queueStringRelease(owner);
+    }
+
+    const HeldOperands = struct { values: [17]Value = undefined, len: usize = 0 };
+
+    // the top `count` operands, counted until releaseHeld: a call that pops
+    // its receiver and arguments before running php code keeps them alive
+    fn holdCallOperands(self: *VM, count: usize) HeldOperands {
+        var held: HeldOperands = .{};
+        held.len = @min(count, held.values.len);
+        for (0..held.len) |i| {
+            held.values[i] = self.stack[self.sp - held.len + i];
+            retainValue(held.values[i]);
+        }
+        return held;
+    }
+
+    fn releaseHeld(self: *VM, held: HeldOperands) void {
+        for (held.values[0..held.len]) |value| self.releaseValue(value);
+    }
+
+    // php's FE_FREE drops the iterated value, then the iterator
+    fn endForeach(self: *VM) void {
+        const position = self.stack[self.sp - 1];
+        self.stack[self.sp - 1] = .null;
+        _ = self.pop();
+        _ = self.pop();
+        if (position == .object and self.hasPendingReleases()) self.drainPendingDestruct();
+        self.stackRelease(position);
+    }
+
+    // the handle of a closure instance, the number its Closure object has in php
+    pub fn closureHandle(self: *VM, name: []const u8) ?u32 {
+        const range = self.capture_index.get(name) orelse return null;
+        return if (range.handle != 0) range.handle else null;
+    }
+
     pub fn retainClosureByName(self: *VM, name: []const u8) void {
         const range = self.capture_index.getPtr(name) orelse return;
         if (range.owner) |owner| owner.refcount += 1;
@@ -14993,6 +15174,7 @@ pub const VM = struct {
         const name: []const u8 = owner.bytes;
         if (self.capture_index.fetchRemove(name)) |removed| {
             const range = removed.value;
+            if (range.handle != 0) self.free_handles.append(self.allocator, range.handle) catch {};
             for (0..range.len) |i| {
                 const capture = &self.captures.items[range.start + i];
                 self.releaseValue(capture.value);
@@ -18761,6 +18943,10 @@ pub const VM = struct {
     // QUEUE them (releaseValue queues at 0) and free live data (Stage 2)
     fn invokeNative(self: *VM, native: Native, ctx: *NativeContext, call: NativeInvocation) RuntimeError!Value {
         const input_args = call.args;
+        // the arguments live until the call returns, as on php's call stack,
+        // even when the native runs php code that frees what it can
+        for (input_args) |arg| retainValue(arg);
+        defer for (input_args) |arg| self.releaseValue(arg);
         const name = call.name;
         // the call is on the native stack while it runs, so a trace made
         // inside it shows it and user code it calls back is called by an
@@ -19066,10 +19252,8 @@ pub const VM = struct {
             self.error_msg = msg;
             return error.RuntimeError;
         }
-        const obj = try self.allocObjectShell();
-        self.next_object_id += 1;
         const stable_class_name = try self.stableClassName(class_name);
-        obj.* = .{ .class_name = stable_class_name, .id = self.next_object_id };
+        const obj = try self.allocObject(.{ .class_name = stable_class_name });
         try self.initObjectProperties(obj, class_name);
 
         var resolved_args: [16]Value = undefined;
@@ -19931,6 +20115,11 @@ pub const VM = struct {
             if (self.ref_index) |ri| ri.releaseOwner(self.allocator, callee_owner);
             const gen = try self.allocGenerator(.{ .func = func, .vars = new_vars, .ref_slots = callee_refs });
             retainVarsObjects(&gen.vars);
+            // a closure's generator keeps the closure alive, as php's does
+            if (self.capture_index.get(name)) |range| if (range.owner) |owner| {
+                owner.refcount += 1;
+                gen.closure = owner;
+            };
             self.push(.{ .generator = gen });
         } else {
             if (!self.hasCallRoom(1) and !(try self.growCallRoom(1))) {
@@ -21042,10 +21231,13 @@ pub const VM = struct {
         self.push(op(a, b));
     }
 
+    // an internal call's result; php frees the call's arguments and the
+    // object it was called on as it returns, so what they held goes now
     fn pushNativeResult(self: *VM, value: Value) void {
         if (value == .string and value.string.owner != null and value.string.owner.?.refcount > 0) {
             self.pushTransfer(value);
         } else self.push(value);
+        if (self.hasPendingReleases()) self.drainPendingDestruct();
     }
 
     // call results borrow storage until the next release drain. Other holders
@@ -21167,12 +21359,119 @@ pub const VM = struct {
         }
         if (obj.destructed) return;
         self.pending_destruct.append(self.allocator, obj) catch {};
+        if (self.release_log) |log| log.append(self.allocator, .{ .object = obj }) catch {};
     }
 
     // run __destruct for every queued object still at refcount 0. called at
     // statement boundaries and at run end. reentrancy-guarded: a destructor
     // runs a nested runLoop whose own drains are absorbed into this outer
     // pass, which keeps consuming as destructors queue further objects
+    // php frees what a dying object or array held before the next queued
+    // value, depth first: an object's destructor, then everything its
+    // properties held, then its handle. what a destruction drops is logged
+    // and destroyed right away; past this depth it waits in the queues
+    const max_release_depth = 2000;
+
+    pub const ReleasedItem = union(enum) { object: *PhpObject, array: *PhpArray };
+
+    fn destroyDropped(self: *VM, items: []const ReleasedItem, deferred_stack_arrays: *std.ArrayListUnmanaged(*PhpArray)) void {
+        self.release_depth += 1;
+        defer self.release_depth -= 1;
+        for (items) |item| switch (item) {
+            .object => |obj| self.destroyReleasedObject(obj, deferred_stack_arrays),
+            .array => |arr| self.destroyReleasedArray(arr, deferred_stack_arrays),
+        };
+    }
+
+    fn destroyReleasedObject(self: *VM, obj: *PhpObject, deferred_stack_arrays: *std.ArrayListUnmanaged(*PhpArray)) void {
+        if (obj.refcount != 0 or obj.destructed) return;
+        // the in-flight exception is a VM-level root: while it
+        // propagates it lives in self.pending_exception, not on the
+        // stack or in a var, so refcounting cannot see it - never
+        // destruct it here
+        if (self.pendingExceptionIs(obj)) return;
+        // a `global $x` cell (globals_cells) is a VM-level root the
+        // refcount cannot see - the cell holds its value via a raw
+        // cell.* write with no retain. an object reachable from a
+        // global is alive for the whole request; never destruct it
+        if (self.valueInGlobalsCell(.{ .object = obj })) return;
+        if (self.debug_gc_verify) self.gcVerifyDestructing(obj);
+        obj.destructed = true;
+        var dropped: std.ArrayListUnmanaged(ReleasedItem) = .empty;
+        defer dropped.deinit(self.allocator);
+        const outer_log = self.release_log;
+        if (self.release_depth < max_release_depth) self.release_log = &dropped;
+        defer self.release_log = outer_log;
+        if (obj.ownsDestructor() and self.hasMethod(obj.class_name, "__destruct")) {
+            _ = self.callMethod(obj, "__destruct", &.{}) catch {
+                // a throwing destructor must not corrupt the drop site
+                // it was called from - swallow (revisit for fidelity)
+                self.discardPending();
+            };
+            // a destructor that stored $this resurrected the object:
+            // it stays alive with its properties and is never pooled
+            if (obj.refcount != 0) return;
+        }
+        // PHP's WeakMap drops entries whose key object is unreachable.
+        // walk registered WeakMaps and remove entries keyed by this
+        // now-destructed object so iteration / count / offsetGet see
+        // the entry as gone (Stage 2)
+        self.weakmapsOnObjectDestruct(obj);
+        // collapse the object tree: release the objects this object's
+        // property slots held. runs after __destruct (PHP tears
+        // properties down after)
+        const reusable = self.releaseNativeState(obj);
+        self.releaseObjectProperties(obj);
+        self.release_log = outer_log;
+        self.destroyDropped(dropped.items, deferred_stack_arrays);
+        // closures it held go before it
+        self.drainPendingStringReleases();
+        self.freeHandle(obj);
+        if (!self.serve_mode and !self.debug_no_pool and reusable) {
+            self.released_objects.append(self.allocator, obj) catch {};
+        }
+    }
+
+    fn destroyReleasedArray(self: *VM, arr: *PhpArray, deferred_stack_arrays: *std.ArrayListUnmanaged(*PhpArray)) void {
+        if (arr.refcount != 0 or arr.elements_released) return;
+        // a global `global $x` cell is a root the refcount cannot
+        // see (raw cell.* write, no retain) - never free an array
+        // reachable from one
+        if (self.valueInGlobalsCell(.{ .array = arr })) return;
+        // Operand-stack array slots are non-counted roots. A returned
+        // array can reach refcount zero while it waits for later call
+        // arguments to be evaluated, so keep its elements alive until
+        // the slot is consumed or a durable holder retains it.
+        var stack_root = false;
+        for (self.stack[0..self.sp]) |value| {
+            if (value == .array and value.array == arr) {
+                stack_root = true;
+                break;
+            }
+        }
+        if (stack_root) {
+            self.stat_deferred_stack += 1;
+            deferred_stack_arrays.append(self.allocator, arr) catch {};
+            return;
+        }
+        if (self.debug_gc_verify and self.arrayHasLiveContainerOwner(arr)) {
+            self.stat_deferred_container += 1;
+            self.gcReportContainerOwner(arr);
+            @panic("array reached zero with a live container owner");
+        }
+        // mark before walking so a cyclic array (a self-reference
+        // reachable through unserialize R:N) is not re-queued
+        arr.elements_released = true;
+        var dropped: std.ArrayListUnmanaged(ReleasedItem) = .empty;
+        defer dropped.deinit(self.allocator);
+        const outer_log = self.release_log;
+        if (self.release_depth < max_release_depth) self.release_log = &dropped;
+        self.releaseArrayElements(arr);
+        self.release_log = outer_log;
+        self.destroyDropped(dropped.items, deferred_stack_arrays);
+        if (!self.serve_mode) self.released_arrays.append(self.allocator, arr) catch {};
+    }
+
     pub fn drainPendingDestruct(self: *VM) void {
         if (@import("value.zig").hooks().trace_obj) |obj| self.gcCheckTraced(obj);
         if (self.draining_destructors or self.heap_teardown) return;
@@ -21237,78 +21536,13 @@ pub const VM = struct {
             while (self.destruct_cursor < self.pending_destruct.items.len) {
                 const obj = self.pending_destruct.items[self.destruct_cursor];
                 self.destruct_cursor += 1;
-                if (obj.refcount != 0 or obj.destructed) continue;
-                // the in-flight exception is a VM-level root: while it
-                // propagates it lives in self.pending_exception, not on the
-                // stack or in a var, so refcounting cannot see it - never
-                // destruct it here
-                if (self.pendingExceptionIs(obj)) continue;
-                // a `global $x` cell (globals_cells) is a VM-level root the
-                // refcount cannot see - the cell holds its value via a raw
-                // cell.* write with no retain. an object reachable from a
-                // global is alive for the whole request; never destruct it
-                if (self.valueInGlobalsCell(.{ .object = obj })) continue;
-                if (self.debug_gc_verify) self.gcVerifyDestructing(obj);
-                obj.destructed = true;
-                if (obj.ownsDestructor() and self.hasMethod(obj.class_name, "__destruct")) {
-                    _ = self.callMethod(obj, "__destruct", &.{}) catch {
-                        // a throwing destructor must not corrupt the drop site
-                        // it was called from - swallow (revisit for fidelity)
-                        self.discardPending();
-                    };
-                    // a destructor that stored $this resurrected the object:
-                    // it stays alive with its properties and is never pooled
-                    if (obj.refcount != 0) continue;
-                }
-                // PHP's WeakMap drops entries whose key object is unreachable.
-                // walk registered WeakMaps and remove entries keyed by this
-                // now-destructed object so iteration / count / offsetGet see
-                // the entry as gone (Stage 2)
-                self.weakmapsOnObjectDestruct(obj);
-                // collapse the object tree: release the objects this object's
-                // property slots held. runs after __destruct (PHP tears
-                // properties down after)
-                const reusable = self.releaseNativeState(obj);
-                self.releaseObjectProperties(obj);
-                if (!self.serve_mode and !self.debug_no_pool and reusable) {
-                    self.released_objects.append(self.allocator, obj) catch {};
-                }
+                self.destroyReleasedObject(obj, &deferred_stack_arrays);
             }
             while (self.array_release_cursor < self.pending_array_release.items.len) {
                 const arr = self.pending_array_release.items[self.array_release_cursor];
                 self.array_release_cursor += 1;
                 arr.release_queued = false;
-                if (arr.refcount != 0 or arr.elements_released) continue;
-                // a global `global $x` cell is a root the refcount cannot
-                // see (raw cell.* write, no retain) - never free an array
-                // reachable from one
-                if (self.valueInGlobalsCell(.{ .array = arr })) continue;
-                // Operand-stack array slots are non-counted roots. A returned
-                // array can reach refcount zero while it waits for later call
-                // arguments to be evaluated, so keep its elements alive until
-                // the slot is consumed or a durable holder retains it.
-                var stack_root = false;
-                for (self.stack[0..self.sp]) |value| {
-                    if (value == .array and value.array == arr) {
-                        stack_root = true;
-                        break;
-                    }
-                }
-                if (stack_root) {
-                    self.stat_deferred_stack += 1;
-                    deferred_stack_arrays.append(self.allocator, arr) catch {};
-                    continue;
-                }
-                if (self.debug_gc_verify and self.arrayHasLiveContainerOwner(arr)) {
-                    self.stat_deferred_container += 1;
-                    self.gcReportContainerOwner(arr);
-                    @panic("array reached zero with a live container owner");
-                }
-                // mark before walking so a cyclic array (a self-reference
-                // reachable through unserialize R:N) is not re-queued
-                arr.elements_released = true;
-                self.releaseArrayElements(arr);
-                if (!self.serve_mode) self.released_arrays.append(self.allocator, arr) catch {};
+                self.destroyReleasedArray(arr, &deferred_stack_arrays);
             }
             while (self.gen_release_cursor < self.pending_gen_release.items.len) {
                 const gen = self.pending_gen_release.items[self.gen_release_cursor];
@@ -21321,6 +21555,12 @@ pub const VM = struct {
                 self.releaseGeneratorVars(gen);
                 self.releaseValue(gen.return_value);
                 gen.return_value = .null;
+                self.releaseGeneratorClosure(gen);
+                self.drainPendingStringReleases();
+                if (gen.handle != 0) {
+                    self.free_handles.append(self.allocator, gen.handle) catch {};
+                    gen.handle = 0;
+                }
                 if (!self.serve_mode) {
                     gen.deinit(self.allocator);
                     gen.pooled = true;
@@ -21336,6 +21576,10 @@ pub const VM = struct {
                 self.releaseValue(fiber.callable);
                 self.releaseValue(fiber.suspend_value);
                 self.releaseValue(fiber.return_value);
+                if (fiber.handle != 0) {
+                    self.free_handles.append(self.allocator, fiber.handle) catch {};
+                    fiber.handle = 0;
+                }
                 fiber.deinit(self.allocator);
                 if (!self.serve_mode) {
                     fiber.pooled = true;
@@ -22206,7 +22450,9 @@ pub const VM = struct {
         arr.release_queued = true;
         self.pending_array_release.append(self.allocator, arr) catch {
             arr.release_queued = false;
+            return;
         };
+        if (self.release_log) |log| log.append(self.allocator, .{ .array = arr }) catch {};
     }
 
     // zend_exception_set_previous: hang `add` off the end of the exception's

@@ -432,9 +432,7 @@ fn dpGetRecurrences(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRe
 
 fn dpGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const iter = try ctx.vm.allocator.create(PhpObject);
-    iter.* = .{ .class_name = "DatePeriodIterator" };
-    try ctx.vm.objects.append(ctx.vm.allocator, iter);
+    const iter = try ctx.vm.allocObject(.{ .class_name = "DatePeriodIterator" });
     try iter.set(ctx.allocator, "__period", .{ .object = obj });
     try iter.set(ctx.allocator, "__index", .{ .int = 0 });
     return NativeResult.borrowed(.{ .object = iter });

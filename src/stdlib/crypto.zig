@@ -726,8 +726,7 @@ fn native_hash_init(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const algo = HashAlgo.fromString(args[0].string.bytes()) orelse return NativeResult.scalar(.{ .bool = false });
     _ = algo;
-    const obj = try ctx.vm.allocObjectShell();
-    obj.* = .{ .class_name = "HashContext" };
+    const obj = try ctx.vm.allocObject(.{ .class_name = "HashContext" });
     try obj.set(ctx.allocator, "algo", args[0]);
     // store accumulated bytes in a string buffer that grows
     try obj.set(ctx.allocator, "buffer", .{ .string = Value.String.borrowed("") });
@@ -782,8 +781,7 @@ fn native_hash_final(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
 fn native_hash_copy(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
     const orig = args[0].object;
-    const obj = try ctx.vm.allocObjectShell();
-    obj.* = .{ .class_name = "HashContext" };
+    const obj = try ctx.vm.allocObject(.{ .class_name = "HashContext" });
     try obj.set(ctx.allocator, "algo", orig.get("algo"));
     try obj.set(ctx.allocator, "buffer", orig.get("buffer"));
     try obj.set(ctx.allocator, "key", orig.get("key"));

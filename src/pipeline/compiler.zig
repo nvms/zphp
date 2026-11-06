@@ -408,6 +408,7 @@ pub const Compiler = struct {
                 for (self.ast.extraSlice(node.data.lhs)) |expr| {
                     try self.compileNode(expr);
                     try self.emitOp(.echo);
+                    try self.emitOp(.statement_end);
                 }
             },
             .return_stmt => {
