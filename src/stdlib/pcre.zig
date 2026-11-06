@@ -1713,38 +1713,31 @@ fn mb_split(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return NativeResult.scalar(.null);
     defer pcre2.pcre2_match_data_free_8(match_data);
 
+    // php_mbregex's loop: a match that ends past the search position closes
+    // a piece; an empty one only moves the search on
     var result = try ctx.createArray();
-    var offset: usize = 0;
-    var splits: i64 = 1;
+    var chunk: usize = 0;
+    var pos: usize = 0;
+    var pieces: i64 = 1;
     const utf = UtfCheck.init(code, subject, args[1]);
 
-    while (offset <= subject.len) {
-        if (limit > 0 and splits >= limit) break;
-
-        const rc = exec(ctx, code, subject, offset, utf.options(offset), match_data);
+    while (pos < subject.len) {
+        if (limit > 0 and pieces >= limit) break;
+        const rc = exec(ctx, code, subject, pos, utf.options(pos), match_data);
         if (rc < 0) break;
-
         const ovector = pcre2.pcre2_get_ovector_pointer_8(match_data);
         const match_start = ovector[0];
         const match_end = ovector[1];
-
-        try result.appendCopiedString(ctx.allocator, subject[offset..match_start]);
-        splits += 1;
-
-        if (match_end == offset) {
-            const step = utf.step(offset);
-            if (offset < subject.len) {
-                try result.appendCopiedString(ctx.allocator, subject[offset..@min(offset + step, subject.len)]);
-            }
-            offset += step;
+        if (match_end > pos) {
+            try result.appendCopiedString(ctx.allocator, subject[chunk..@max(chunk, match_start)]);
+            pieces += 1;
+            chunk = match_end;
+            pos = match_end;
         } else {
-            offset = match_end;
+            pos += utf.step(pos);
         }
     }
-
-    if (offset <= subject.len) {
-        try result.appendCopiedString(ctx.allocator, subject[offset..]);
-    }
+    try result.appendCopiedString(ctx.allocator, subject[chunk..]);
 
     return NativeResult.borrowed(.{ .array = result });
 }
