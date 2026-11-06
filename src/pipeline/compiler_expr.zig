@@ -925,6 +925,36 @@ fn compileArgLvalue(self: *Compiler, arg_idx: u32, guard: ArgGuard) Error!void {
     }
 }
 
+// whether php already knows, while compiling a call, that the callee takes
+// the argument at pos by value: an internal function, or one declared at the
+// top of this file before the call. an unqualified name inside a namespace
+// is resolved only when the call runs
+fn argKnownByValue(self: *Compiler, raw_name: []const u8, pos: usize, call_token: u32) bool {
+    const qualified = raw_name.len > 0 and raw_name[0] == '\\';
+    const name = if (qualified) raw_name[1..] else raw_name;
+    if (std.mem.indexOfScalar(u8, name, '\\') != null) return false;
+    if (!qualified and self.namespace.len > 0) return false;
+    for (self.ast.extraSlice(self.ast.nodes[0].data.lhs)) |stmt| {
+        const decl = self.ast.nodes[stmt];
+        if (decl.tag != .function_decl or decl.main_token > call_token) continue;
+        if (!std.ascii.eqlIgnoreCase(self.ast.tokenSlice(decl.main_token), name)) continue;
+        const params = self.ast.extraSlice(decl.data.lhs);
+        if (pos < params.len) return self.ast.nodes[params[pos]].data.rhs & 2 == 0;
+        if (params.len == 0) return true;
+        const last = self.ast.nodes[params[params.len - 1]].data.rhs;
+        return last & 1 == 0 or last & 2 == 0;
+    }
+    var lower_buf: [128]u8 = undefined;
+    if (name.len > lower_buf.len) return false;
+    const sig = native_signatures.map.get(std.ascii.lowerString(&lower_buf, name)) orelse return false;
+    if (pos < sig.params.len) return !sig.params[pos].by_ref;
+    if (sig.params.len == 0) return true;
+    const last = sig.params[sig.params.len - 1];
+    return !last.variadic or !last.by_ref;
+}
+
+const native_signatures = @import("../stdlib/native_params_generated.zig");
+
 fn compileArgs(self: *Compiler, args: []const u32) Error!ArgGuards {
     var guards: ArgGuards = .empty;
     errdefer guards.deinit(self.allocator);
@@ -1056,6 +1086,11 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
         const call_offset = self.current_source_offset;
         const raw_name = self.ast.tokenSlice(callee.main_token);
         const name = self.resolveFunctionName(raw_name);
+        for (args, 0..) |arg, i| {
+            const arg_node = self.ast.nodes[arg];
+            if (arg_node.tag == .array_push_target and argKnownByValue(self, raw_name, i, callee.main_token))
+                return self.fail(arg_node.main_token, "Cannot use [] for reading");
+        }
         var guards = try compileArgs(self, args);
         self.current_source_offset = call_offset;
         const idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });
