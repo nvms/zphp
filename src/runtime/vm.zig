@@ -14116,6 +14116,18 @@ pub const VM = struct {
             if (try self.throwBuiltinException("Error", msg)) return;
             return error.RuntimeError;
         }
+
+        // zend_implement_serializable: every class that implements Serializable,
+        // itself or through a parent, unless explicitly abstract or serializing
+        // with __serialize and __unserialize
+        if (!def.is_abstract and !std.mem.startsWith(u8, class_name, "class@anonymous") and
+            self.isInstanceOf(class_name, "Serializable") and
+            (!self.hasMethod(class_name, "__serialize") or !self.hasMethod(class_name, "__unserialize")))
+        {
+            const msg = try std.fmt.allocPrint(self.allocator, "{s} implements the Serializable interface, which is deprecated. Implement __serialize() and __unserialize() instead (or in addition, if support for old PHP versions is necessary)", .{class_name});
+            defer self.allocator.free(msg);
+            try self.raiseErrorAt(E_DEPRECATED, msg, .{ .file = def.file_path, .line = def.start_line });
+        }
     }
 
     fn methodExistsInAncestors(self: *VM, class_name: []const u8, method_name: []const u8, def: *const ClassDef) bool {
