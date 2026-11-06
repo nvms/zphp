@@ -359,8 +359,12 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                         try buf.appendSlice(a, "{}");
                         return;
                     };
-                    try encodeValue(buf, a, result, depth, max_depth, flags, vm, visited);
-                    return;
+                    // an object that serializes to itself is encoded by its
+                    // properties
+                    if (!(result == .object and result.object.storage() == obj)) {
+                        try encodeValue(buf, a, result, depth, max_depth, flags, vm, visited);
+                        return;
+                    }
                 }
                 if (std.mem.eql(u8, obj.class_name, "SplFixedArray")) {
                     const data = obj.get("__data");
