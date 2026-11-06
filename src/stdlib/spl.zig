@@ -1396,6 +1396,19 @@ fn splHas(ctx: *NativeContext, obj: *PhpObject, offset: Value, check: ExistsChec
     };
 }
 
+// $o[$k] fetched for a nested write, quiet about a missing key
+pub fn arrayStorageFetch(ctx: *NativeContext, obj: *PhpObject, offset: Value) RuntimeError!Value {
+    const key = offset.toArrayKey();
+    switch (try splStorage(ctx, obj)) {
+        .array => |s| if (s.arr.getPtr(key)) |entry| return if (entry.ref) |ref| ref.* else entry.value,
+        .object => |o| {
+            var buf: [24]u8 = undefined;
+            if (tableFind(ctx.vm, o, tableKey(key, &buf), false)) |prop| return prop.value;
+        },
+    }
+    return .null;
+}
+
 // isset($o[$k]) on an ArrayObject or ArrayIterator, which looks at the value
 pub fn arrayStorageIsset(ctx: *NativeContext, obj: *PhpObject, offset: Value) RuntimeError!bool {
     return splHas(ctx, obj, offset, .isset);

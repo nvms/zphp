@@ -5281,7 +5281,7 @@ pub const VM = struct {
                             self.push(new_val);
                         }
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetGet")) {
-                        const result = self.callMethod(arr_val.object, "offsetGet", &.{key}) catch {
+                        const result = self.offsetGetForWrite(arr_val.object, key) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
@@ -5460,7 +5460,7 @@ pub const VM = struct {
                         // inner element via offsetGet so the write is on the
                         // underlying stored value (or routed back through
                         // offsetSet for scalar inners)
-                        existing = self.callMethod(base.object, "offsetGet", &.{outer_key}) catch {
+                        existing = self.offsetGetForWrite(base.object, outer_key) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
@@ -18055,6 +18055,18 @@ pub const VM = struct {
 
     // functions and classes are only ever added within a request, so a count
     // change is exactly when a cached resolution may have gone stale
+    // the element a nested write goes into: offsetGet, or for ArrayObject and
+    // ArrayIterator's own offsetGet php's write fetch, which doesn't warn
+    // about a missing key
+    fn offsetGetForWrite(self: *VM, obj: *PhpObject, key: Value) RuntimeError!Value {
+        const method = try self.resolveMethod(obj.class_name, "offsetGet");
+        if (std.mem.eql(u8, method, "ArrayObject::offsetGet") or std.mem.eql(u8, method, "ArrayIterator::offsetGet")) {
+            var ctx = self.makeContext(null);
+            return @import("../stdlib/spl.zig").arrayStorageFetch(&ctx, obj, key);
+        }
+        return self.callMethod(obj, "offsetGet", &.{key});
+    }
+
     pub fn resolveMethod(self: *VM, class_name: []const u8, method_name: []const u8) RuntimeError![]const u8 {
         const ic = self.ic.?;
         const key: MethodKey = .{ .class = class_name, .method = method_name };
