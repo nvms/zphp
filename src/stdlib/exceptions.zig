@@ -288,44 +288,8 @@ fn exceptionGetTraceAsString(ctx: *NativeContext, _: []const Value) RuntimeError
 }
 
 fn traceString(ctx: *NativeContext, throwable: *PhpObject) RuntimeError![]u8 {
-    const t = throwable.getForScope("trace", ctx.vm.exceptionTraceScope(throwable));
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(ctx.allocator);
-    if (t == .array) {
-        for (t.array.entries.items, 0..) |entry, i| {
-            if (entry.value != .array) continue;
-            const e = entry.value.array;
-            const fn_v = e.get(.{ .string = Value.String.borrowed("function") });
-            const line_v = e.get(.{ .string = Value.String.borrowed("line") });
-            const file_v = e.get(.{ .string = Value.String.borrowed("file") });
-            const class_v = e.get(.{ .string = Value.String.borrowed("class") });
-            const type_v = e.get(.{ .string = Value.String.borrowed("type") });
-            const fn_s = if (fn_v == .string) fn_v.string.bytes() else "?";
-            const class_s = if (class_v == .string) class_v.string.bytes() else "";
-            const type_s = if (type_v == .string) type_v.string.bytes() else "";
-            const file_s = if (file_v == .string) file_v.string.bytes() else "";
-            const line_n: i64 = if (line_v == .int) line_v.int else 0;
-            // a frame with no file/line was called from an internal function
-            // (a native dispatched the user callback) - PHP renders these as
-            // `[internal function]` instead of the synthesized `(0)` location
-            if (file_s.len == 0 and line_n == 0) {
-                try buf.print(ctx.allocator, "#{d} [internal function]: {s}{s}{s}(", .{ i, class_s, type_s, fn_s });
-            } else {
-                try buf.print(ctx.allocator, "#{d} {s}({d}): {s}{s}{s}(", .{ i, file_s, line_n, class_s, type_s, fn_s });
-            }
-            const args_v = e.get(.{ .string = Value.String.borrowed("args") });
-            if (args_v == .array) {
-                for (args_v.array.entries.items, 0..) |arg_entry, ai| {
-                    if (ai > 0) try buf.appendSlice(ctx.allocator, ", ");
-                    @import("../error_format.zig").writeTraceArg(&buf, ctx.allocator, arg_entry.value);
-                }
-            }
-            try buf.appendSlice(ctx.allocator, ")\n");
-        }
-        const n = t.array.entries.items.len;
-        try buf.print(ctx.allocator, "#{d} {{main}}", .{n});
-    } else {
-        try buf.appendSlice(ctx.allocator, "#0 {main}");
-    }
+    @import("../error_format.zig").writeTrace(&buf, ctx.allocator, throwable.getForScope("trace", ctx.vm.exceptionTraceScope(throwable)));
     return buf.toOwnedSlice(ctx.allocator);
 }

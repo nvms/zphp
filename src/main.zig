@@ -232,26 +232,36 @@ fn compileFrom(allocator: std.mem.Allocator, source: []const u8, origin: compile
     defer ast.deinit();
 
     if (ast.errors.len > 0) {
-        const msg = error_format.formatParseErrors(allocator, &ast, path);
-        if (msg.len > 0) {
-            try writeStderr(msg);
-        } else {
-            try writeStderr("parse error\n");
-        }
-        std.process.exit(1);
+        const found = try error_format.syntaxError(allocator, &ast);
+        exitOnCompileFailure(allocator, "ParseError", found.message, .{ .file = path, .line = found.line });
     }
 
     var diag: ?compiler.Diagnostic = null;
     var diagnosed = origin;
     diagnosed.diagnostic = &diag;
-    return compiler.compileWithOrigin(&ast, allocator, diagnosed) catch {
-        if (diag) |d| {
-            try writeStderr(error_format.formatCompileError(allocator, &ast, path, d));
-            std.process.exit(255);
-        }
-        try writeStderr("compile error\n");
-        std.process.exit(1);
+    return compiler.compileWithOrigin(&ast, allocator, diagnosed) catch |err| {
+        const d = diag orelse return err;
+        exitOnCompileFailure(allocator, "CompileError", d.message(), .{ .file = path, .line = error_format.compileErrorLine(&ast, d) });
     };
+}
+
+// the script never starts: php reports its syntax error or compile-time fatal
+// as an uncaught ParseError or CompileError, through the same log and display
+// copies as any other, and exits with 255
+fn exitOnCompileFailure(allocator: std.mem.Allocator, class_name: []const u8, message: []const u8, at: VM.SourcePosition) noreturn {
+    const vm = VM.initOnHeap(allocator) catch std.process.exit(255);
+    report: {
+        vm.setPendingException(class_name, message) catch break :report;
+        const exc = vm.pending_exception orelse break :report;
+        if (exc == .object) {
+            exc.object.setCopiedString(vm.allocator, "file", at.file) catch break :report;
+            exc.object.set(vm.allocator, "line", .{ .int = at.line }) catch break :report;
+        }
+        vm.uncatchable_fatal = true;
+        reportRuntimeError(allocator, vm) catch {};
+    }
+    vm.flushOutputToStdout();
+    std.process.exit(255);
 }
 
 fn readSource(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
@@ -466,9 +476,9 @@ fn loadFile(path: []const u8, allocator: std.mem.Allocator, vm: *@import("runtim
     };
 
     if (ast.errors.len > 0) {
-        if (error_format.parseErrorSummary(allocator, &ast)) |summary| {
-            vm.recordIncludeParseError(summary, abs_path, error_format.parseErrorLine(&ast));
-            allocator.free(summary);
+        if (error_format.syntaxError(allocator, &ast)) |found| {
+            vm.recordIncludeParseError(found.message, abs_path, found.line);
+            allocator.free(found.message);
         } else |_| {}
         ast.deinit();
         allocator.free(source);
@@ -702,14 +712,15 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
 // zphp's own fatals print their diagnostic to stderr
 // the display copy joins the script's buffered output so it lands in order
 fn reportRuntimeError(allocator: std.mem.Allocator, vm: *VM) !void {
-    if ((vm.error_reporting_level & 1) == 0) return;
+    if ((vm.error_reporting_level & uncaughtSeverity(vm)) == 0) return;
     if (vm.pending_exception == null) {
         const msg = error_format.formatRuntimeError(allocator, vm);
         vm.flushOutputToStdout();
         try writeStderr(if (msg.len > 0) msg else vm.error_msg orelse "runtime error\n");
         return;
     }
-    const description = exceptions.uncaughtDescription(vm, allocator);
+    // a syntax error or compile-time fatal is reported by its message alone
+    const description = if (uncaughtSeverity(vm) == 1) exceptions.uncaughtDescription(vm, allocator) else null;
     defer if (description) |text| allocator.free(text);
     if (vm.logErrorsEnabled()) {
         vm.flushOutputToStdout();
@@ -726,6 +737,16 @@ fn reportRuntimeError(allocator: std.mem.Allocator, vm: *VM) !void {
             try writeStderr(error_format.formatUncaught(allocator, vm, .display, description));
         },
     }
+}
+
+// the error level php reports the pending throwable at: E_PARSE for a syntax
+// error, E_COMPILE_ERROR for a compile-time fatal, E_ERROR for the rest
+fn uncaughtSeverity(vm: *const VM) i64 {
+    const exc = vm.pending_exception orelse return 1;
+    if (exc != .object) return 1;
+    if (std.mem.eql(u8, exc.object.class_name, "ParseError")) return 4;
+    if (std.mem.eql(u8, exc.object.class_name, "CompileError")) return 64;
+    return 1;
 }
 
 fn buildFile(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -862,6 +883,7 @@ test {
     _ = @import("pipeline/lexer.zig");
     _ = @import("pipeline/ast.zig");
     _ = @import("pipeline/parser.zig");
+    _ = @import("pipeline/php_syntax.zig");
     _ = @import("pipeline/bytecode.zig");
     _ = @import("pipeline/compiler.zig");
     _ = @import("runtime/value.zig");

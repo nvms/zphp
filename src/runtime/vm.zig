@@ -3590,12 +3590,12 @@ pub const VM = struct {
         var ast = parser_mod.parse(self.allocator, source) catch return error.OutOfMemory;
         defer ast.deinit();
         if (ast.errors.len == 0) return;
-        const summary = @import("../error_format.zig").parseErrorSummary(self.allocator, &ast) catch null;
-        defer if (summary) |s| self.allocator.free(s);
-        try self.setPendingException("ParseError", summary orelse "syntax error");
+        const found = try @import("../error_format.zig").syntaxError(self.allocator, &ast);
+        defer self.allocator.free(found.message);
+        try self.setPendingException("ParseError", found.message);
         if (self.pending_exception) |exc| if (exc == .object) {
             try exc.object.set(self.allocator, "file", .{ .string = Value.String.borrowed("") });
-            try exc.object.set(self.allocator, "line", .{ .int = @import("../error_format.zig").parseErrorLine(&ast) });
+            try exc.object.set(self.allocator, "line", .{ .int = found.line });
         };
         return error.RuntimeError;
     }
@@ -3609,12 +3609,16 @@ pub const VM = struct {
             return error.OutOfMemory;
         };
         if (ast.errors.len > 0) {
-            const summary = @import("../error_format.zig").parseErrorSummary(self.allocator, &ast) catch null;
-            const error_line = @import("../error_format.zig").parseErrorLine(&ast);
+            const found = @import("../error_format.zig").syntaxError(self.allocator, &ast) catch |err| {
+                ast.deinit();
+                self.allocator.free(wrapped);
+                return err;
+            };
+            const error_line = found.line;
             ast.deinit();
             self.allocator.free(wrapped);
-            defer if (summary) |s| self.allocator.free(s);
-            try self.setPendingException("ParseError", summary orelse "syntax error");
+            defer self.allocator.free(found.message);
+            try self.setPendingException("ParseError", found.message);
             // php places the error in the evaluated code: "<file>(<line>) : eval()'d code"
             if (self.pending_exception) |exc| if (exc == .object) {
                 const caller = self.currentSourcePosition();
@@ -11911,7 +11915,7 @@ pub const VM = struct {
 
     // Native throwable access must use the root declaring class, never a
     // subclass's unrelated same-name property.
-    pub fn exceptionTraceScope(self: *VM, obj: *const PhpObject) []const u8 {
+    pub fn exceptionTraceScope(self: *const VM, obj: *const PhpObject) []const u8 {
         var name = obj.class_name;
         while (true) {
             if (std.mem.eql(u8, name, "Error")) return "Error";

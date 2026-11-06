@@ -33,9 +33,7 @@ with tempfile.TemporaryDirectory(dir=os.environ.get('PICO_SCRATCHPAD')) as tmp:
         for command in ([os.environ.get('PHP_BIN', 'php')], [str(ROOT / 'zig-out/bin/zphp'), 'run']):
             result = subprocess.run(command + [str(path)], capture_output=True, text=True, timeout=15)
             output = result.stdout + result.stderr
-            # Parser diagnostics currently use exit 1, rather than PHP's fatal 255.
-            expected = (1, 255) if message is None and len(command) > 1 else (255,)
-            assert result.returncode in expected, (i, command, result.returncode, output)
+            assert result.returncode == 255, (i, command, result.returncode, output)
             if message:
                 assert message in output, (i, command, output)
     path = ROOT / 'tests/asymmetric_declaration_metadata.php'

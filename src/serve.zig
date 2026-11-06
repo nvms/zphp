@@ -554,6 +554,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
         };
 
         if (ast.errors.len > 0) {
+            try writeStderr(try error_format.compileFailureLog(allocator, &ast, null, abs_path));
             ast.deinit();
             allocator.free(source);
             if (config.watch) {
@@ -561,15 +562,12 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
                 platform.sleep(1_000_000_000);
                 continue;
             }
-            try writeStderr("parse error in ");
-            try writeStderr(config.file);
-            try writeStderr("\n");
-            std.process.exit(1);
+            std.process.exit(255);
         }
 
         var diag: ?compiler.Diagnostic = null;
         var result = compiler.compileWithOrigin(&ast, allocator, .{ .file_path = abs_path, .diagnostic = &diag }) catch {
-            if (diag) |d| try writeStderr(error_format.formatCompileError(allocator, &ast, abs_path, d));
+            try writeStderr(try error_format.compileFailureLog(allocator, &ast, diag, abs_path));
             ast.deinit();
             allocator.free(source);
             if (config.watch) {
@@ -577,8 +575,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
                 platform.sleep(1_000_000_000);
                 continue;
             }
-            try writeStderr("compile error\n");
-            std.process.exit(1);
+            std.process.exit(255);
         };
 
         const ws_enabled = blk: {

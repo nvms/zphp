@@ -2167,6 +2167,6 @@ test "a parse error past the last token is reported at end of input" {
     for (ast.errors) |err| try std.testing.expect(err.token < ast.tokens.len);
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const text = @import("error_format.zig").formatParseErrors(arena.allocator(), &ast, "box.php");
-    try std.testing.expect(std.mem.indexOf(u8, text, "Parse error") != null);
+    const text = try @import("error_format.zig").compileFailureLog(arena.allocator(), &ast, null, "box.php");
+    try std.testing.expect(std.mem.startsWith(u8, text, "PHP Parse error:  syntax error"));
 }

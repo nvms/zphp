@@ -1,9 +1,8 @@
 const std = @import("std");
 const Chunk = @import("pipeline/bytecode.zig").Chunk;
-const SourceLocation = @import("pipeline/bytecode.zig").SourceLocation;
 const Ast = @import("pipeline/ast.zig").Ast;
-const Token = @import("pipeline/token.zig").Token;
 const Value = @import("runtime/value.zig").Value;
+const php_syntax = @import("pipeline/php_syntax.zig");
 const VM = @import("runtime/vm.zig").VM;
 const Diagnostic = @import("pipeline/compiler.zig").Diagnostic;
 
@@ -17,180 +16,46 @@ fn writeFmt(buf: *Writer, alloc: std.mem.Allocator, comptime fmt: []const u8, ar
     buf.print(alloc, fmt, args) catch {};
 }
 
-fn writeSourceSnippet(buf: *Writer, alloc: std.mem.Allocator, source: []const u8, loc: SourceLocation, highlight_len: u32) void {
-    // bytecode mode has empty source and loc.column == 0. nothing to render,
-    // and `loc.column - 1` would overflow a u32 below
-    if (source.len == 0 or loc.column == 0) return;
-
-    const gutter_width = digitCount(loc.line + 1);
-
-    if (loc.line > 1) {
-        if (findLineByNumber(source, loc.line - 1)) |prev| {
-            writeGutterLine(buf, alloc, gutter_width, loc.line - 1, prev);
-        }
-    }
-
-    const current_line_text = source[loc.line_start..loc.line_end];
-    writeGutterLine(buf, alloc, gutter_width, loc.line, current_line_text);
-
-    writeGutterBlank(buf, alloc, gutter_width);
-    for (0..loc.column - 1) |i| {
-        const ch = if (loc.line_start + i < source.len and source[loc.line_start + i] == '\t') @as(u8, '\t') else @as(u8, ' ');
-        buf.append(alloc, ch) catch {};
-    }
-    const caret_len = @max(1, highlight_len);
-    for (0..caret_len) |_| buf.append(alloc, '^') catch {};
-    write(buf, alloc, "\n");
-
-    if (loc.line_end < source.len) {
-        if (findLineByNumber(source, loc.line + 1)) |next| {
-            writeGutterLine(buf, alloc, gutter_width, loc.line + 1, next);
-        }
-    }
-}
-
-fn writeGutterLine(buf: *Writer, alloc: std.mem.Allocator, gutter_width: u32, line_num: u32, text: []const u8) void {
-    // strip trailing \r so CRLF source files don't emit a literal CR that the
-    // terminal interprets as a carriage return, overwriting the gutter
-    var trimmed = text;
-    if (trimmed.len > 0 and trimmed[trimmed.len - 1] == '\r') {
-        trimmed = trimmed[0 .. trimmed.len - 1];
-    }
-    writeFmt(buf, alloc, " {d: >[1]} | ", .{ line_num, gutter_width });
-    write(buf, alloc, trimmed);
-    write(buf, alloc, "\n");
-}
-
-fn writeGutterBlank(buf: *Writer, alloc: std.mem.Allocator, gutter_width: u32) void {
-    for (0..gutter_width + 2) |_| buf.append(alloc, ' ') catch {};
-    write(buf, alloc, "| ");
-}
-
-fn findLineByNumber(source: []const u8, target_line: u32) ?[]const u8 {
-    var line: u32 = 1;
-    var start: usize = 0;
-    for (source, 0..) |c, i| {
-        if (c == '\n') {
-            if (line == target_line) return source[start..i];
-            line += 1;
-            start = i + 1;
-        }
-    }
-    if (line == target_line and start <= source.len) return source[start..];
-    return null;
-}
-
-fn digitCount(n: u32) u32 {
-    if (n == 0) return 1;
-    var v = n;
-    var count: u32 = 0;
-    while (v > 0) : (v /= 10) count += 1;
-    return count;
-}
-
 fn displayPath(file_path: []const u8) []const u8 {
     if (file_path.len == 0) return "<input>";
     return file_path;
 }
 
-pub fn formatParseErrors(alloc: std.mem.Allocator, ast: *const Ast, file_path: []const u8) []const u8 {
-    var buf: Writer = .empty;
-    const path = displayPath(file_path);
+pub const SyntaxError = php_syntax.SyntaxError;
 
-    for (ast.errors) |err| {
-        const tok = ast.tokens[err.token];
-        var loc = Chunk.locationFromOffset(ast.source, tok.start);
-        const token_len: u32 = tok.end - tok.start;
-        loc.line += err.line_delta;
-
-        const message = heredocMessage(alloc, err) orelse errorTagMessage(err.tag);
-        writeFmt(&buf, alloc, "\nParse error: {s} in {s} on line {d}\n\n", .{ message, path, loc.line });
-        if (err.line_delta == 0) writeSourceSnippet(&buf, alloc, ast.source, loc, token_len);
-    }
-
-    return buf.items;
-}
-
-// the first syntax error in php's wording: syntax error, unexpected token
-// "}", expecting ";". the caller owns the returned bytes
-pub fn parseErrorSummary(alloc: std.mem.Allocator, ast: *const Ast) ![]u8 {
-    if (ast.errors.len == 0) return alloc.dupe(u8, "syntax error");
-    const err = ast.errors[0];
+// the source's first syntax error as php reports it. php's scanner words the
+// heredoc and cast errors itself; the rest come from php's grammar, and an
+// error only zphp's parser sees is named at the token where it stopped. the
+// caller owns the message
+pub fn syntaxError(alloc: std.mem.Allocator, ast: *const Ast) !SyntaxError {
+    const err = if (ast.errors.len > 0) ast.errors[0] else return .{ .message = try alloc.dupe(u8, "syntax error"), .line = 0 };
+    const tok = ast.tokens[err.token];
+    const line = Chunk.locationFromOffset(ast.source, tok.start).line + err.line_delta;
     switch (err.tag) {
-        .heredoc_mixed_indentation => return alloc.dupe(u8, "Invalid indentation - tabs and spaces cannot be mixed"),
-        .heredoc_body_indentation => return std.fmt.allocPrint(alloc, "Invalid body indentation level (expecting an indentation level of at least {d})", .{err.detail}),
+        .heredoc_mixed_indentation => return .{ .message = try alloc.dupe(u8, "Invalid indentation - tabs and spaces cannot be mixed"), .line = line },
+        .heredoc_body_indentation => return .{ .message = try std.fmt.allocPrint(alloc, "Invalid body indentation level (expecting an indentation level of at least {d})", .{err.detail}), .line = line },
+        .real_cast_removed => return .{ .message = try alloc.dupe(u8, "The (real) cast has been removed, use (float) instead"), .line = line },
         else => {},
     }
-    const tok = ast.tokens[err.token];
-    const lexeme = ast.source[tok.start..tok.end];
-    const expecting: ?[]const u8 = switch (err.tag) {
-        .expected_expression => "expression",
-        .expected_semicolon => "\";\"",
-        .expected_r_paren => "\")\"",
-        .expected_r_brace => "\"}\"",
-        .expected_r_bracket => "\"]\"",
-        .expected_identifier => "identifier",
-        .expected_variable => "variable",
-        .expected_colon => "\":\"",
-        .unexpected_token => null,
-        .real_cast_removed => return alloc.dupe(u8, "The (real) cast has been removed, use (float) instead"),
-        .void_cast_misplaced => return alloc.dupe(u8, "syntax error, unexpected token \"(void)\""),
-        .heredoc_mixed_indentation, .heredoc_body_indentation => unreachable,
-    };
-    if (lexeme.len == 0) {
-        if (expecting) |e| return std.fmt.allocPrint(alloc, "syntax error, unexpected end of file, expecting {s}", .{e});
-        return alloc.dupe(u8, "syntax error, unexpected end of file");
-    }
-    if (expecting) |e| return std.fmt.allocPrint(alloc, "syntax error, unexpected token \"{s}\", expecting {s}", .{ lexeme, e });
-    return std.fmt.allocPrint(alloc, "syntax error, unexpected token \"{s}\"", .{lexeme});
+    if (try php_syntax.diagnose(alloc, ast.source)) |found| return found;
+    return .{ .message = try php_syntax.unexpectedAt(alloc, ast.source, tok.start), .line = line };
 }
 
-// a compile-time fatal in the script being run, reported like a parse error
-pub fn formatCompileError(alloc: std.mem.Allocator, ast: *const Ast, file_path: []const u8, diag: Diagnostic) []const u8 {
-    var buf: Writer = .empty;
-    const tok = ast.tokens[diag.token];
-    const loc = Chunk.locationFromOffset(ast.source, tok.start);
-    writeFmt(&buf, alloc, "\nFatal error: {s} in {s} on line {d}\n\n", .{ diag.message(), displayPath(file_path), loc.line });
-    writeSourceSnippet(&buf, alloc, ast.source, loc, tok.end - tok.start);
-    return buf.items;
+// the error-log line php writes for a file that fails to parse or compile:
+// its syntax error when the ast has one, else the compile diagnostic. the
+// caller owns the result
+pub fn compileFailureLog(alloc: std.mem.Allocator, ast: *const Ast, diag: ?Diagnostic, path: []const u8) ![]u8 {
+    if (ast.errors.len > 0) {
+        const found = try syntaxError(alloc, ast);
+        defer alloc.free(found.message);
+        return std.fmt.allocPrint(alloc, "PHP Parse error:  {s} in {s} on line {d}\n", .{ found.message, displayPath(path), found.line });
+    }
+    const d = diag orelse return alloc.dupe(u8, "PHP Fatal error:  compile error\n");
+    return std.fmt.allocPrint(alloc, "PHP Fatal error:  {s} in {s} on line {d}\n", .{ d.message(), displayPath(path), compileErrorLine(ast, d) });
 }
 
 pub fn compileErrorLine(ast: *const Ast, diag: Diagnostic) i64 {
     return @intCast(Chunk.locationFromOffset(ast.source, ast.tokens[diag.token].start).line);
-}
-
-pub fn parseErrorLine(ast: *const Ast) i64 {
-    if (ast.errors.len == 0) return 0;
-    const err = ast.errors[0];
-    return @intCast(Chunk.locationFromOffset(ast.source, ast.tokens[err.token].start).line + err.line_delta);
-}
-
-// a heredoc's indentation errors, worded as php words them; null for
-// every other error
-fn heredocMessage(alloc: std.mem.Allocator, err: Ast.Error) ?[]const u8 {
-    return switch (err.tag) {
-        .heredoc_mixed_indentation => "Invalid indentation - tabs and spaces cannot be mixed",
-        .heredoc_body_indentation => std.fmt.allocPrint(alloc, "Invalid body indentation level (expecting an indentation level of at least {d})", .{err.detail}) catch null,
-        else => null,
-    };
-}
-
-fn errorTagMessage(tag: Ast.Error.Tag) []const u8 {
-    return switch (tag) {
-        .expected_expression => "expected expression",
-        .expected_semicolon => "expected ';'",
-        .expected_r_paren => "expected ')'",
-        .expected_r_brace => "expected '}'",
-        .expected_r_bracket => "expected ']'",
-        .expected_identifier => "expected identifier",
-        .expected_variable => "expected variable",
-        .expected_colon => "expected ':'",
-        .unexpected_token => "unexpected token",
-        .real_cast_removed => "The (real) cast has been removed, use (float) instead",
-        .void_cast_misplaced => "syntax error, unexpected token \"(void)\"",
-        .heredoc_mixed_indentation => "Invalid indentation - tabs and spaces cannot be mixed",
-        .heredoc_body_indentation => "Invalid body indentation level",
-    };
 }
 
 pub fn formatRuntimeError(alloc: std.mem.Allocator, vm: *const VM) []const u8 {
@@ -274,15 +139,22 @@ fn formatUncaughtException(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM
     const lead: []const u8 = if (copy == .log) "PHP " else "";
     const gap: []const u8 = if (copy == .log) ":  " else ": ";
 
-    // an uncaught ParseError prints the way php reports a syntax error: at
-    // the exception's own file and line, with no stack trace
+    // an uncaught ParseError or CompileError prints the way php reports a
+    // syntax error or compile-time fatal: at the exception's own file and line
     if (exc == .object and (std.mem.eql(u8, class_name, "ParseError") or std.mem.eql(u8, class_name, "CompileError"))) {
         const file_v = exc.object.get("file");
         const line_v = exc.object.get("line");
         const where = displayPath(if (file_v == .string) file_v.string.bytes() else path_raw);
         const line: i64 = if (line_v == .int) line_v.int else 0;
-        const label: []const u8 = if (std.mem.eql(u8, class_name, "ParseError")) "Parse error" else "Fatal error";
+        const parse = std.mem.eql(u8, class_name, "ParseError");
+        const label: []const u8 = if (parse) "Parse error" else "Fatal error";
         writeFmt(buf, alloc, "{s}{s}{s}{s} in {s} on line {d}\n", .{ lead, label, gap, message, where, line });
+        // php 8.5 follows a compile-time fatal with the stack it was raised on
+        if (!parse) {
+            write(buf, alloc, "Stack trace:\n");
+            writeTrace(buf, alloc, exc.object.getForScope("trace", vm.exceptionTraceScope(exc.object)));
+            write(buf, alloc, "\n");
+        }
         return;
     }
 
@@ -334,25 +206,18 @@ fn appendLocationContext(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM) 
     }
     const frame = &vm.frames[vm.frame_count - 1];
     const ip = if (frame.ip > 0) frame.ip - 1 else 0;
-    const source = vm.chunkSource(frame.chunk);
     const path = displayPath(framePath(frame, vm));
-
     if (vm.sourceLocation(frame.chunk, ip)) |loc| {
-        writeFmt(buf, alloc, " in {s} on line {d}\n\n", .{ path, loc.line });
-        const token_len: u32 = estimateTokenLength(source, loc);
-        writeSourceSnippet(buf, alloc, source, loc, token_len);
-        if (vm.frame_count > 1) {
-            write(buf, alloc, "\nStack trace:\n");
-            writeStackTrace(buf, alloc, vm);
-        }
+        writeFmt(buf, alloc, " in {s} on line {d}\n", .{ path, loc.line });
     } else {
         writeFmt(buf, alloc, " in {s}\n", .{path});
     }
+    write(buf, alloc, "Stack trace:\n");
+    writeStackTrace(buf, alloc, vm);
 }
 
 fn writeStackTrace(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM) void {
     if (vm.frame_count == 0) return;
-
 
     var depth: u32 = 0;
 
@@ -465,26 +330,43 @@ pub fn writeTraceArg(buf: *Writer, alloc: std.mem.Allocator, v: Value) void {
     }
 }
 
-fn estimateTokenLength(source: []const u8, loc: SourceLocation) u32 {
-    // bytecode mode has empty source and column == 0, which would underflow below
-    if (source.len == 0 or loc.column == 0) return 1;
-    const start = loc.line_start + loc.column - 1;
-    if (start >= source.len) return 1;
-
-    const c = source[start];
-    if (c == '$' or isIdentStart(c)) {
-        var end = start + 1;
-        while (end < source.len and isIdentChar(source[end])) end += 1;
-        return @intCast(end - start);
+// a throwable's trace array as getTraceAsString() prints it, ending with the
+// {main} line and no newline
+pub fn writeTrace(buf: *Writer, alloc: std.mem.Allocator, trace: Value) void {
+    if (trace != .array) {
+        write(buf, alloc, "#0 {main}");
+        return;
     }
-    if (c == '"' or c == '\'') return 1;
-    return 1;
+    for (trace.array.entries.items, 0..) |entry, i| {
+        if (entry.value != .array) continue;
+        const e = entry.value.array;
+        const fn_s = stringField(e, "function") orelse "?";
+        const class_s = stringField(e, "class") orelse "";
+        const type_s = stringField(e, "type") orelse "";
+        const file_s = stringField(e, "file") orelse "";
+        const line_v = e.get(.{ .string = Value.String.borrowed("line") });
+        const line_n: i64 = if (line_v == .int) line_v.int else 0;
+        // a frame with no file/line was called from an internal function
+        // (a native dispatched the user callback) - PHP renders these as
+        // `[internal function]` instead of the synthesized `(0)` location
+        if (file_s.len == 0 and line_n == 0) {
+            writeFmt(buf, alloc, "#{d} [internal function]: {s}{s}{s}(", .{ i, class_s, type_s, fn_s });
+        } else {
+            writeFmt(buf, alloc, "#{d} {s}({d}): {s}{s}{s}(", .{ i, file_s, line_n, class_s, type_s, fn_s });
+        }
+        const args_v = e.get(.{ .string = Value.String.borrowed("args") });
+        if (args_v == .array) {
+            for (args_v.array.entries.items, 0..) |arg_entry, ai| {
+                if (ai > 0) write(buf, alloc, ", ");
+                writeTraceArg(buf, alloc, arg_entry.value);
+            }
+        }
+        write(buf, alloc, ")\n");
+    }
+    writeFmt(buf, alloc, "#{d} {{main}}", .{trace.array.entries.items.len});
 }
 
-fn isIdentStart(c: u8) bool {
-    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_';
-}
-
-fn isIdentChar(c: u8) bool {
-    return isIdentStart(c) or (c >= '0' and c <= '9');
+fn stringField(arr: anytype, key: []const u8) ?[]const u8 {
+    const v = arr.get(.{ .string = Value.String.borrowed(key) });
+    return if (v == .string) v.string.bytes() else null;
 }
