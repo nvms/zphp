@@ -1097,6 +1097,7 @@ fn stackUnshift(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     const arr = try ensureData(ctx, obj);
     if (args.len == 0) return NativeResult.scalar(.null);
     try arr.entries.insert(ctx.allocator, 0, .{ .key = .{ .int = 0 }, .value = args[0] });
+    arr.noteIntKey(0);
     VM.retainValue(args[0]);
     return NativeResult.scalar(.null);
 }
@@ -2085,6 +2086,7 @@ fn pqInsert(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
 
     const new_idx = arr.entries.items.len;
     try arr.entries.append(ctx.allocator, .{ .key = .{ .int = @intCast(new_idx) }, .value = .{ .array = pair } });
+    arr.noteIntKey(@intCast(new_idx));
     try pqSiftUp(ctx, obj, arr, new_idx);
     return NativeResult.scalar(.null);
 }
@@ -2738,6 +2740,7 @@ fn dllUnshift(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
         entry.key = .{ .int = @intCast(i) };
     }
     arr.next_int_key = @intCast(arr.entries.items.len);
+    arr.has_int_keys = true;
     return NativeResult.scalar(.null);
 }
 
@@ -2986,6 +2989,7 @@ fn dllAdd(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const uidx: usize = @intCast(idx);
     if (uidx > arr.entries.items.len) return NativeResult.scalar(.null);
     try arr.entries.insert(ctx.allocator, uidx, .{ .key = .{ .int = idx }, .value = args[1] });
+    arr.noteIntKey(idx);
     VM.retainValue(args[1]);
     return NativeResult.scalar(.null);
 }

@@ -111,12 +111,9 @@ fn array_pop(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
     if (arr.entries.items.len == 0) return NativeResult.scalar(.null);
     const entry = arr.entries.pop() orelse return NativeResult.scalar(.null);
     if (entry.key == .string) _ = arr.string_index.remove(entry.key.string.bytes());
-    // PHP: array_pop recomputes next int key from the remaining entries
-    var max_int: i64 = -1;
-    for (arr.entries.items) |e| {
-        if (e.key == .int and e.key.int > max_int) max_int = e.key.int;
-    }
-    arr.next_int_key = max_int + 1;
+    // php hands the popped integer key out again only when it was the last
+    // one given
+    if (entry.key == .int and entry.key.int == arr.next_int_key - 1) arr.next_int_key -= 1;
     // native strings transfer ownership; other heap results remain borrowed.
     if (entry.key == .string) entry.key.string.release();
     if (entry.value != .string) ctx.vm.releaseValue(entry.value);
@@ -141,6 +138,7 @@ fn array_shift(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
             .string => {},
         }
     }
+    arr.next_int_key = next_int;
     arr.rebuildStringIndexAssumeCapacity();
 
     return if (first.value == .string and first.value.string.owner != null) NativeResult.takeString(first.value.string) else NativeResult.share(first.value);
@@ -1460,6 +1458,7 @@ fn array_unshift(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         }
     }
     arr.next_int_key = next_int;
+    arr.has_int_keys = next_int > 0;
     arr.rebuildStringIndexAssumeCapacity();
     return NativeResult.scalar(.{ .int = arr.length() });
 }

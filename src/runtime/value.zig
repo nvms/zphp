@@ -213,6 +213,20 @@ pub const PhpArray = struct {
         try self.set(allocator, .{ .string = owned }, value);
     }
 
+    // every int key is below next_int_key (which stops at maxInt, so a key
+    // of maxInt may sit at it), and has_int_keys is false only when there
+    // are none: an int key past them is absent without a scan. code that
+    // adds entries directly records their int keys here
+    pub fn noteIntKey(self: *PhpArray, key: i64) void {
+        const next = if (key == std.math.maxInt(i64)) key else key + 1;
+        self.next_int_key = if (self.has_int_keys) @max(self.next_int_key, next) else next;
+        self.has_int_keys = true;
+    }
+
+    fn mayHoldInt(self: *const PhpArray, key: i64) bool {
+        return self.has_int_keys and (key < self.next_int_key or self.next_int_key == std.math.maxInt(i64));
+    }
+
     pub fn set(self: *PhpArray, allocator: std.mem.Allocator, raw_key: Key, value: Value) !void {
         // a store choke point: the element takes a new reference to the
         // value (callers pass raw values, never copyValue'd ones) and the
@@ -246,7 +260,7 @@ pub const PhpArray = struct {
                 if (!self.weak) releaseReplaced(old);
                 return;
             }
-        } else {
+        } else if (self.mayHoldInt(key.int)) {
             for (self.entries.items) |*entry| {
                 if (entry.key.eql(key)) {
                     if (!self.weak) retainStored(value);
@@ -288,6 +302,7 @@ pub const PhpArray = struct {
                 }
             }
         }
+        if (!self.mayHoldInt(key.int)) return false;
         for (self.entries.items) |e| if (e.key.eql(key)) return true;
         return false;
     }
@@ -310,6 +325,7 @@ pub const PhpArray = struct {
             }
             return .null;
         }
+        if (!self.mayHoldInt(key.int)) return .null;
         for (self.entries.items) |entry| {
             if (entry.key.eql(key)) return entry.value;
         }
@@ -334,6 +350,7 @@ pub const PhpArray = struct {
             if (self.string_index.get(key.string.bytes())) |idx| return &self.entries.items[idx];
             return null;
         }
+        if (!self.mayHoldInt(key.int)) return null;
         for (self.entries.items) |*entry| {
             if (entry.key.eql(key)) return entry;
         }

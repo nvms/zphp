@@ -18487,8 +18487,9 @@ pub const VM = struct {
                 retainValue(entry.value);
                 if (entry.key == .string) entry.key.string.retain();
                 try result.entries.append(self.allocator, entry);
-                if (entry.key == .string) {
-                    result.string_index.put(self.allocator, entry.key.string.bytes(), result.entries.items.len - 1) catch return error.RuntimeError;
+                switch (entry.key) {
+                    .string => |str| result.string_index.put(self.allocator, str.bytes(), result.entries.items.len - 1) catch return error.RuntimeError,
+                    .int => |i| result.noteIntKey(i),
                 }
             }
         }
