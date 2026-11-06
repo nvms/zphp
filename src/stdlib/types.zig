@@ -1009,10 +1009,10 @@ fn native_call_user_func_array(ctx: *NativeContext, args: []const Value) Runtime
     if (args.len < 2) return NativeResult.scalar(.null);
     if (args[1] != .array) return NativeResult.share(try ctx.invokeCallable(args[0], &.{}));
     const arr = args[1].array;
-    var call_args: [16]Value = undefined;
-    const count_val: usize = @min(16, arr.entries.items.len);
-    for (0..count_val) |i| call_args[i] = arr.entries.items[i].value;
-    return NativeResult.share(try ctx.invokeCallable(args[0], call_args[0..count_val]));
+    var buf: [16]Value = undefined;
+    const call_args = try ctx.argsFromArray(arr, &buf);
+    defer ctx.freeArgs(call_args, &buf);
+    return NativeResult.share(try ctx.invokeCallable(args[0], call_args));
 }
 
 fn native_function_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

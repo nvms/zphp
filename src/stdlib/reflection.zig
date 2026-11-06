@@ -1312,11 +1312,10 @@ fn rcNewInstanceArgs(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
 
     const arr = if (args.len >= 1 and args[0] == .array) args[0].array else return NativeResult.scalar(.null);
 
-    var ctor_args: [16]Value = undefined;
-    const count = @min(arr.entries.items.len, 16);
-    for (0..count) |i| {
-        ctor_args[i] = arr.entries.items[i].value;
-    }
+    var ctor_buf: [16]Value = undefined;
+    const ctor_args = try ctx.argsFromArray(arr, &ctor_buf);
+    defer ctx.freeArgs(ctor_args, &ctor_buf);
+    const count = ctor_args.len;
 
     const obj = try ctx.vm.allocObjectShell();
     ctx.vm.next_object_id += 1;
@@ -3005,10 +3004,10 @@ fn rfInvokeArgs(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     const fn_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
     if (args.len < 1 or args[0] != .array) return NativeResult.scalar(.null);
     const arr = args[0].array;
-    var call_args: [16]Value = undefined;
-    const count = @min(arr.entries.items.len, 16);
-    for (0..count) |i| call_args[i] = arr.entries.items[i].value;
-    return NativeResult.share(try ctx.vm.callByName(fn_name, call_args[0..count]));
+    var buf: [16]Value = undefined;
+    const call_args = try ctx.argsFromArray(arr, &buf);
+    defer ctx.freeArgs(call_args, &buf);
+    return NativeResult.share(try ctx.vm.callByName(fn_name, call_args));
 }
 
 fn rfGetName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -4212,13 +4211,10 @@ fn rmInvokeArgs(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     if (args.len < 1) return NativeResult.scalar(.null);
     const target = args[0];
 
-    var call_args: [16]Value = undefined;
-    var count: usize = 0;
-    if (args.len >= 2 and args[1] == .array) {
-        const arg_arr = args[1].array;
-        count = @min(arg_arr.entries.items.len, 16);
-        for (0..count) |i| call_args[i] = arg_arr.entries.items[i].value;
-    }
+    var arg_buf: [16]Value = undefined;
+    const call_args: []Value = if (args.len >= 2 and args[1] == .array) try ctx.argsFromArray(args[1].array, &arg_buf) else arg_buf[0..0];
+    defer ctx.freeArgs(call_args, &arg_buf);
+    const count = call_args.len;
 
     if (target == .object) {
         return NativeResult.share(ctx.callMethod(target.object, method_name, call_args[0..count]) catch .null);
@@ -4558,16 +4554,16 @@ fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
                 }
                 _ = try ctx.callMethod(obj, "__construct", resolved[0..placed.count]);
             } else {
-                var call_args: [16]Value = undefined;
-                const count = @min(arr.entries.items.len, 16);
-                for (0..count) |i| call_args[i] = arr.entries.items[i].value;
-                _ = try ctx.callMethod(obj, "__construct", call_args[0..count]);
+                var arg_buf: [16]Value = undefined;
+                const call_args = try ctx.argsFromArray(arr, &arg_buf);
+                defer ctx.freeArgs(call_args, &arg_buf);
+                _ = try ctx.callMethod(obj, "__construct", call_args);
             }
         } else {
-            var call_args: [16]Value = undefined;
-            const count = @min(arr.entries.items.len, 16);
-            for (0..count) |i| call_args[i] = arr.entries.items[i].value;
-            if (count > 0) _ = try ctx.callMethod(obj, "__construct", call_args[0..count]);
+            var arg_buf: [16]Value = undefined;
+            const call_args = try ctx.argsFromArray(arr, &arg_buf);
+            defer ctx.freeArgs(call_args, &arg_buf);
+            if (call_args.len > 0) _ = try ctx.callMethod(obj, "__construct", call_args);
         }
     }
     return NativeResult.borrowed(.{ .object = obj });

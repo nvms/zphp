@@ -197,6 +197,19 @@ pub const NativeContext = struct {
         }
     }
 
+    // an array's values as call arguments: in buf when they fit, else in an
+    // allocation freeArgs releases
+    pub fn argsFromArray(self: *NativeContext, arr: *const PhpArray, buf: []Value) ![]Value {
+        const n = arr.entries.items.len;
+        const out = if (n <= buf.len) buf[0..n] else try self.allocator.alloc(Value, n);
+        for (arr.entries.items, 0..) |e, i| out[i] = e.value;
+        return out;
+    }
+
+    pub fn freeArgs(self: *NativeContext, args: []Value, buf: []Value) void {
+        if (args.len > buf.len) self.allocator.free(args);
+    }
+
     pub fn invokeCallable(self: *NativeContext, callable: Value, args: []const Value) RuntimeError!Value {
         const outer = self.vm.native_caller;
         self.vm.native_caller = .{ .name = self.call_name, .frames = self.vm.frame_count };
@@ -9905,6 +9918,15 @@ pub const VM = struct {
                     }
                     const mcs_ac_u8: u8 = @intCast(@min(ac, 255));
                     const full_name = try self.resolveMethod(obj.class_name, method_name);
+                            self.push(result);
+                            continue;
+                        }
+                        self.dropN(ac + 1);
+                        const msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name });
+                        defer self.allocator.free(msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    };
                     if (self.native_fns.get(full_name)) |native| {
                         var args_buf: [16]Value = undefined;
                         for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
