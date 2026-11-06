@@ -1038,65 +1038,21 @@ fn native_get_object_vars(ctx: *NativeContext, args: []const Value) RuntimeError
     const caller_class: ?[]const u8 = ctx.vm.currentDefiningClass();
     const can_see_protected = caller_class != null and isInClassHierarchy(ctx.vm, caller_class.?, obj.class_name);
 
-    if (obj.slot_layout) |layout| {
-        if (obj.slots) |slots| {
-            for (layout.names, 0..) |name, i| {
-                if (object_properties.isInternalState(ctx.vm, obj, name)) continue;
-                const vis = propVisibilityWithParents(ctx.vm, obj.class_name, name);
-                // private: caller must be the declaring class
-                if (vis == .private) {
-                    const decl = propDeclaringClass(ctx.vm, obj.class_name, name);
-                    if (caller_class == null or decl == null or !std.mem.eql(u8, caller_class.?, decl.?)) continue;
-                }
-                if (vis == .protected and !can_see_protected) continue;
-                try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(name) }, slots[i]);
-            }
+    // the object's own properties, as php's get_properties gives them: never
+    // unset or uninitialized ones
+    var listing: object_properties.Listing = .{};
+    defer listing.deinit(ctx.allocator);
+    try object_properties.appendOwn(ctx.vm, obj, .array_cast, &listing, ctx.allocator);
+    for (listing.items.items) |prop| {
+        if (prop.visibility == .private and (caller_class == null or !std.mem.eql(u8, caller_class.?, prop.declaring))) continue;
+        if (prop.visibility == .protected and !can_see_protected) continue;
+        if (prop.declared) {
+            try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(prop.key.name) }, prop.value);
+        } else {
+            try arr.setCopiedKey(ctx.allocator, prop.key.name, prop.value);
         }
-    }
-    var iter = obj.properties.iterator();
-    while (iter.next()) |entry| {
-        const name = entry.key_ptr.*;
-        if (object_properties.isInternalState(ctx.vm, obj, name)) continue;
-        const vis = propVisibilityWithParents(ctx.vm, obj.class_name, name);
-        if (vis == .private) {
-            const decl = propDeclaringClass(ctx.vm, obj.class_name, name);
-            if (caller_class == null or decl == null or !std.mem.eql(u8, caller_class.?, decl.?)) continue;
-        }
-        if (vis == .protected and !can_see_protected) continue;
-        try arr.setCopiedKey(ctx.allocator, name, entry.value_ptr.*);
     }
     return NativeResult.borrowed(.{ .array = arr });
-}
-
-fn propVisibility(class_def: ?@import("../runtime/vm.zig").ClassDef, name: []const u8) @import("../runtime/vm.zig").ClassDef.Visibility {
-    const cls = class_def orelse return .public;
-    for (cls.properties.items) |pdef| {
-        if (std.mem.eql(u8, pdef.name, name)) return pdef.visibility;
-    }
-    return .public;
-}
-
-fn propVisibilityWithParents(vm: *@import("../runtime/vm.zig").VM, class_name: []const u8, name: []const u8) @import("../runtime/vm.zig").ClassDef.Visibility {
-    var current_name = class_name;
-    while (true) {
-        const cls = vm.classes.get(current_name) orelse return .public;
-        for (cls.properties.items) |pdef| {
-            if (std.mem.eql(u8, pdef.name, name)) return pdef.visibility;
-        }
-        const parent = cls.parent orelse return .public;
-        current_name = parent;
-    }
-}
-
-fn propDeclaringClass(vm: *@import("../runtime/vm.zig").VM, class_name: []const u8, name: []const u8) ?[]const u8 {
-    var current_name = class_name;
-    while (true) {
-        const cls = vm.classes.get(current_name) orelse return null;
-        for (cls.properties.items) |pdef| {
-            if (std.mem.eql(u8, pdef.name, name)) return current_name;
-        }
-        current_name = cls.parent orelse return null;
-    }
 }
 
 fn isInClassHierarchy(vm: *@import("../runtime/vm.zig").VM, candidate: []const u8, target: []const u8) bool {

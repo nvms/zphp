@@ -39,6 +39,9 @@ pub const Property = struct {
     declaring: []const u8 = "",
     // the name is class metadata, which outlives the object
     declared: bool = false,
+    // the declared type of a typed property never initialized, which only
+    // the debug view lists
+    uninitialized: ?[]const u8 = null,
 };
 
 pub const Listing = struct {
@@ -93,7 +96,8 @@ pub fn table(vm: *VM, obj: *PhpObject, purpose: Purpose) RuntimeError!?*PhpArray
 
 // the object's declared properties in declaration order, then its dynamic
 // ones, leaving out unset properties and built-in state. only the debug view
-// lists a typed property that was never initialized
+// lists a typed property that was never initialized (one whose type forbids
+// null; a nullable one reads as null, roadmap item 6)
 pub fn appendOwn(vm: *VM, obj: *PhpObject, purpose: Purpose, listing: *Listing, allocator: std.mem.Allocator) RuntimeError!void {
     if (obj.slot_layout) |layout| if (obj.slots) |slots| {
         for (layout.names, 0..) |name, i| {
@@ -101,8 +105,9 @@ pub fn appendOwn(vm: *VM, obj: *PhpObject, purpose: Purpose, listing: *Listing, 
             if (obj.isLazySlot(name, layout.declaring_classes[i])) continue;
             if (obj.isUnset(name) or isInternalState(vm, obj, name)) continue;
             const declared = vm.findPropertyVisibility(obj.class_name, name);
-            if (purpose != .debug and slots[i] == .null and declared.type_str.len > 0 and vm.typedPropForbidsNull(declared.type_str)) continue;
-            try listing.items.append(allocator, .{ .key = .{ .name = name }, .value = slots[i], .visibility = declared.visibility, .declaring = declared.defining_class, .declared = true });
+            const uninitialized = slots[i] == .null and declared.type_str.len > 0 and vm.typedPropForbidsNull(declared.type_str);
+            if (uninitialized and purpose != .debug) continue;
+            try listing.items.append(allocator, .{ .key = .{ .name = name }, .value = slots[i], .visibility = declared.visibility, .declaring = declared.defining_class, .declared = true, .uninitialized = if (uninitialized) declared.type_str else null });
         }
     };
     var it = obj.properties.iterator();

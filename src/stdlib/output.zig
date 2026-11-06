@@ -147,12 +147,19 @@ fn varDumpValue(ctx: *NativeContext, val: Value, depth: usize) !void {
             // refcount dropped before the next allocation. zphp's arena keeps
             // objects alive so monotonic obj.id would diverge. emit #1 here
             // and let spl_object_id surface the underlying unique counter
-            try out.print(a, ")#1 ({d}) {{\n", .{listing.items.items.len});
+            var initialized: usize = 0;
+            for (listing.items.items) |prop| initialized += @intFromBool(prop.uninitialized == null);
+            try out.print(a, ")#1 ({d}) {{\n", .{initialized});
             for (listing.items.items) |prop| {
                 try appendIndent(out, a, indent + 2);
                 switch (prop.key) {
                     .int => |ki| try out.print(a, "[{d}]=>\n", .{ki}),
                     .name => |name| try emitDumpKey(out, a, name, prop.declaring, prop.visibility),
+                }
+                if (prop.uninitialized) |type_str| {
+                    try appendIndent(out, a, indent + 2);
+                    try out.print(a, "uninitialized({s})\n", .{type_str});
+                    continue;
                 }
                 try varDumpValue(ctx, prop.value, depth + 1);
             }
@@ -292,6 +299,7 @@ fn printRValueImpl(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: 
                 var listing = try object_properties.list(v, obj, .debug, a);
                 defer listing.deinit(a);
                 for (listing.items.items) |prop| {
+                    if (prop.uninitialized != null) continue;
                     try appendIndent(out, a, (depth + 1) * 4);
                     switch (prop.key) {
                         .int => |ki| try out.print(a, "[{d}", .{ki}),
