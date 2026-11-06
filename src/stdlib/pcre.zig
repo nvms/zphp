@@ -47,7 +47,12 @@ threadlocal var match_context_limits: [2]u32 = .{ 0, 0 };
 
 fn matchContext(ctx: *NativeContext) ?*anyopaque {
     const limits = [2]u32{ iniLimit(ctx, "pcre.backtrack_limit", 1000000), iniLimit(ctx, "pcre.recursion_limit", 100000) };
-    if (match_context == null) match_context = pcre2.pcre2_match_context_create_8(null);
+    if (match_context == null) {
+        match_context = pcre2.pcre2_match_context_create_8(null);
+        // php's PCRE_JIT_STACK_MIN_SIZE and PCRE_JIT_STACK_MAX_SIZE
+        if (match_context) |mc| if (pcre2.pcre2_jit_stack_create_8(32 * 1024, 192 * 1024, null)) |stack|
+            pcre2.pcre2_jit_stack_assign_8(mc, null, stack);
+    }
     const mc = match_context orelse return null;
     if (!std.mem.eql(u32, &limits, &match_context_limits)) {
         _ = pcre2.pcre2_set_match_limit_8(mc, limits[0]);
@@ -64,7 +69,9 @@ fn iniLimit(ctx: *NativeContext, name: []const u8, default: u32) u32 {
 }
 
 fn exec(ctx: *NativeContext, code: *pcre2.Code, subject: []const u8, offset: usize, options: u32, match_data: *pcre2.MatchData) c_int {
-    return pcre2.pcre2_match_8(code, subject.ptr, subject.len, offset, options, match_data, matchContext(ctx));
+    // an empty slice's pointer can be anything, and jit code reads through it
+    const bytes: [*]const u8 = if (subject.len == 0) "" else subject.ptr;
+    return pcre2.pcre2_match_8(code, bytes, subject.len, offset, options, match_data, matchContext(ctx));
 }
 
 // a match that failed for a reason other than finding nothing, recorded for
@@ -104,6 +111,7 @@ const pcre2 = struct {
     const DOTALL: u32 = 0x00000020;
     const EXTENDED: u32 = 0x00000080;
     const UTF: u32 = 0x00080000;
+    const JIT_COMPLETE: u32 = 0x00000001;
     const NO_UTF_CHECK: u32 = 0x40000000;
     const INFO_ALLOPTIONS: u32 = 0;
     const UCP: u32 = 0x00020000;
@@ -155,6 +163,9 @@ const pcre2 = struct {
     extern "c" fn pcre2_match_data_free_8(match_data: ?*MatchData) callconv(.c) void;
 
     extern "c" fn pcre2_match_context_create_8(gcontext: ?*anyopaque) callconv(.c) ?*anyopaque;
+    extern "c" fn pcre2_jit_compile_8(code: *Code, options: u32) callconv(.c) c_int;
+    extern "c" fn pcre2_jit_stack_create_8(startsize: usize, maxsize: usize, gcontext: ?*anyopaque) callconv(.c) ?*anyopaque;
+    extern "c" fn pcre2_jit_stack_assign_8(mcontext: *anyopaque, callback: ?*anyopaque, data: ?*anyopaque) callconv(.c) void;
     extern "c" fn pcre2_set_match_limit_8(mcontext: *anyopaque, value: u32) callconv(.c) c_int;
     extern "c" fn pcre2_set_depth_limit_8(mcontext: *anyopaque, value: u32) callconv(.c) c_int;
 
@@ -340,7 +351,47 @@ fn normalizeOpenBoundQuantifier(pattern: []const u8) ?[]u8 {
     return null;
 }
 
-fn compilePattern(pattern: []const u8, flags: u32) ?*pcre2.Code {
+// compiled patterns are kept per thread, as php keeps its pcre cache, up to
+// php's PCRE_CACHE_SIZE entries. past that a pattern is compiled for its call
+// and freed after it: a cached code is never freed while a call (or a
+// callback it runs) could be using it
+const cache_size = 4096;
+threadlocal var pattern_cache: std.StringHashMapUnmanaged(*pcre2.Code) = .empty;
+
+const Compiled = struct {
+    code: *pcre2.Code,
+    owned: bool,
+
+    fn release(self: Compiled) void {
+        if (self.owned) pcre2.pcre2_code_free_8(self.code);
+    }
+};
+
+fn compilePattern(ctx: *NativeContext, pattern: []const u8, flags: u32) ?Compiled {
+    var key_buf: [256]u8 = undefined;
+    const key_len = pattern.len + 4;
+    const key: ?[]u8 = if (key_len <= key_buf.len) key_buf[0..key_len] else null;
+    if (key) |k| {
+        std.mem.writeInt(u32, k[0..4], flags, .little);
+        @memcpy(k[4..], pattern);
+        if (pattern_cache.get(k)) |code| return .{ .code = code, .owned = false };
+    }
+    const code = compileUncached(pattern, flags) orelse return null;
+    // as php does with pcre.jit on; a pattern the jit can't take still
+    // matches through the interpreter
+    if (iniLimit(ctx, "pcre.jit", 1) != 0) _ = pcre2.pcre2_jit_compile_8(code, pcre2.JIT_COMPLETE);
+    if (key) |k| if (pattern_cache.count() < cache_size) {
+        const kept = std.heap.c_allocator.dupe(u8, k) catch return .{ .code = code, .owned = true };
+        pattern_cache.put(std.heap.c_allocator, kept, code) catch {
+            std.heap.c_allocator.free(kept);
+            return .{ .code = code, .owned = true };
+        };
+        return .{ .code = code, .owned = false };
+    };
+    return .{ .code = code, .owned = true };
+}
+
+fn compileUncached(pattern: []const u8, flags: u32) ?*pcre2.Code {
     var err_code: c_int = 0;
     var err_offset: usize = 0;
     if (normalizeOpenBoundQuantifier(pattern)) |buf| {
@@ -424,12 +475,13 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     };
     const subject = subj_str;
 
-    const code = compilePattern(info.pattern, info.flags) orelse {
+    const compiled = compilePattern(ctx, info.pattern, info.flags) orelse {
         setPregError(1);
         try emitCompileWarning(ctx, "preg_match", info.pattern, info.flags);
         return NativeResult.scalar(.{ .bool = false });
     };
-    defer pcre2.pcre2_code_free_8(code);
+    defer compiled.release();
+    const code = compiled.code;
 
     const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return NativeResult.scalar(.{ .bool = false });
     defer pcre2.pcre2_match_data_free_8(match_data);
@@ -443,18 +495,13 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     if (rc < 0) {
         // no match: $matches must still be set to an empty array so callers
         // can safely iterate without an isset() guard
-        if (args.len >= 3) {
-            const matches_arr = if (args[2] == .array) args[2].array else try ctx.createArray();
-            clearMatches(ctx, matches_arr);
-            if (args[2] != .array) {
-                ctx.setCallerVar(2, args.len, .{ .array = matches_arr });
-            }
-        }
+        if (args.len >= 3) ctx.setCallerVar(2, args.len, .{ .array = try ctx.createArray() });
         return NativeResult.scalar(if (execFailed(rc)) .{ .bool = false } else .{ .int = 0 });
     }
 
     if (args.len >= 3) {
-        const matches_arr = if (args[2] == .array) args[2].array else try ctx.createArray();
+        // the output variable gets a new array; the one it held may be shared
+        const matches_arr = try ctx.createArray();
         const ovector = pcre2.pcre2_get_ovector_pointer_8(match_data);
         const matched_count: usize = @intCast(rc);
 
@@ -464,8 +511,6 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
         var total_groups: u32 = 0;
         _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_CAPTURECOUNT, @ptrCast(&total_groups));
         const count: usize = if (unmatched_as_null) @as(usize, total_groups) + 1 else matched_count;
-
-        clearMatches(ctx, matches_arr);
 
         for (0..count) |i| {
             const start = ovector[i * 2];
@@ -483,9 +528,7 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
         }
         try addNamedGroupsInterleaved(ctx, matches_arr, code, ovector, subject, count, offset_capture, unmatched_as_null);
         try setMark(ctx, matches_arr, .{ .string = Value.String.borrowed("MARK") }, match_data);
-        if (args[2] != .array) {
-            ctx.setCallerVar(2, args.len, .{ .array = matches_arr });
-        }
+        ctx.setCallerVar(2, args.len, .{ .array = matches_arr });
     }
 
     return NativeResult.scalar(.{ .int = 1 });
@@ -629,12 +672,13 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     const offset_capture = (flags & 256) != 0; // PREG_OFFSET_CAPTURE
     const unmatched_as_null = (flags & 512) != 0; // PREG_UNMATCHED_AS_NULL
 
-    const code = compilePattern(info.pattern, info.flags) orelse {
+    const compiled = compilePattern(ctx, info.pattern, info.flags) orelse {
         setPregError(1);
         try emitCompileWarning(ctx, "preg_match_all", info.pattern, info.flags);
         return NativeResult.scalar(.{ .bool = false });
     };
-    defer pcre2.pcre2_code_free_8(code);
+    defer compiled.release();
+    const code = compiled.code;
 
     const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return NativeResult.scalar(.{ .int = 0 });
     defer pcre2.pcre2_match_data_free_8(match_data);
@@ -643,8 +687,7 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_CAPTURECOUNT, @ptrCast(&capture_count));
     const group_count: usize = capture_count + 1;
 
-    const out = if (args.len >= 3 and args[2] == .array) args[2].array else try ctx.createArray();
-    clearMatches(ctx, out);
+    const out = try ctx.createArray();
 
     var group_arrays: ?std.ArrayListUnmanaged(*PhpArray) = null;
     if (!set_order) {
@@ -788,9 +831,7 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         if (marks) |m| try out.set(ctx.allocator, .{ .string = Value.String.borrowed("MARK") }, .{ .array = m });
     }
 
-    if (args.len >= 3 and args[2] != .array) {
-        ctx.setCallerVar(2, args.len, .{ .array = out });
-    }
+    if (args.len >= 3) ctx.setCallerVar(2, args.len, .{ .array = out });
 
     return NativeResult.scalar(if (failed) .{ .bool = false } else .{ .int = total_matches });
 }
@@ -863,16 +904,6 @@ fn addNamedGroupsToMatch(ctx: *NativeContext, arr: *PhpArray, code: *pcre2.Code,
         try insertNamedMatch(ctx, arr, insert_pos, named_entry);
     }
     arr.rebuildStringIndexAssumeCapacity();
-}
-
-fn clearMatches(ctx: *NativeContext, arr: *PhpArray) void {
-    while (arr.entries.items.len > 0) {
-        ctx.vm.arrayRemoveOwned(arr, arr.entries.items[arr.entries.items.len - 1].key);
-    }
-    arr.string_index.clearRetainingCapacity();
-    arr.next_int_key = 0;
-    arr.has_int_keys = false;
-    arr.cursor = 0;
 }
 
 fn insertNamedMatch(ctx: *NativeContext, arr: *PhpArray, position: usize, entry: PhpArray.Entry) !void {
@@ -1018,12 +1049,13 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         return NativeResult.takeString(try Value.String.create(ctx.allocator, subject));
     }
 
-    const code = compilePattern(info.pattern, info.flags) orelse {
+    const compiled = compilePattern(ctx, info.pattern, info.flags) orelse {
         setPregError(1);
         try emitCompileWarning(ctx, "preg_replace", info.pattern, info.flags);
         return NativeResult.scalar(.null);
     };
-    defer pcre2.pcre2_code_free_8(code);
+    defer compiled.release();
+    const code = compiled.code;
 
     const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
     defer pcre2.pcre2_match_data_free_8(match_data);
@@ -1040,7 +1072,7 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     var out_len: usize = 0;
     var rc = pcre2.pcre2_substitute_8(
         code,
-        subject.ptr,
+        if (subject.len == 0) "" else subject.ptr,
         subject.len,
         0,
         sub_opts,
@@ -1065,7 +1097,7 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     const buf = try ctx.allocator.alloc(u8, out_len);
     rc = pcre2.pcre2_substitute_8(
         code,
-        subject.ptr,
+        if (subject.len == 0) "" else subject.ptr,
         subject.len,
         0,
         sub_opts,
@@ -1108,8 +1140,9 @@ fn pregReplaceArrayPattern(ctx: *NativeContext, args: []const Value) RuntimeErro
         if (current.value == .string) {
             const before = current.value.string.bytes();
             if (parsePattern(pe.value.string.bytes())) |info| {
-                if (compilePattern(info.pattern, info.flags)) |code| {
-                    defer pcre2.pcre2_code_free_8(code);
+                if (compilePattern(ctx, info.pattern, info.flags)) |compiled| {
+                    defer compiled.release();
+                    const code = compiled.code;
                     if (pcre2.pcre2_match_data_create_from_pattern_8(code, null)) |md| {
                         defer pcre2.pcre2_match_data_free_8(md);
                         var off: usize = 0;
@@ -1263,8 +1296,9 @@ fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!
     const callback = args[1];
     const subject = args[2].string.bytes();
 
-    const code = compilePattern(info.pattern, info.flags) orelse return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
-    defer pcre2.pcre2_code_free_8(code);
+    const compiled = compilePattern(ctx, info.pattern, info.flags) orelse return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
+    defer compiled.release();
+    const code = compiled.code;
 
     const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
     defer pcre2.pcre2_match_data_free_8(match_data);
@@ -1391,8 +1425,9 @@ fn preg_replace_callback_array(ctx: *NativeContext, args: []const Value) Runtime
         if (current.value == .string) {
             const subject = current.value.string.bytes();
             if (parsePattern(entry.key.string.bytes())) |info| {
-                if (compilePattern(info.pattern, info.flags)) |code| {
-                    defer pcre2.pcre2_code_free_8(code);
+                if (compilePattern(ctx, info.pattern, info.flags)) |compiled| {
+                    defer compiled.release();
+                    const code = compiled.code;
                     if (pcre2.pcre2_match_data_create_from_pattern_8(code, null)) |md| {
                         defer pcre2.pcre2_match_data_free_8(md);
                         var off: usize = 0;
@@ -1453,8 +1488,9 @@ fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     const no_empty = (flags & 1) != 0;
     const offset_capture = (flags & 4) != 0;
 
-    const code = compilePattern(info.pattern, info.flags) orelse return NativeResult.scalar(.null);
-    defer pcre2.pcre2_code_free_8(code);
+    const compiled = compilePattern(ctx, info.pattern, info.flags) orelse return NativeResult.scalar(.null);
+    defer compiled.release();
+    const code = compiled.code;
 
     const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return NativeResult.scalar(.null);
     defer pcre2.pcre2_match_data_free_8(match_data);
@@ -1604,8 +1640,9 @@ fn preg_grep(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
     const input = args[1].array;
     const invert = args.len >= 3 and Value.toInt(args[2]) == 1;
 
-    const code = compilePattern(info.pattern, info.flags) orelse return NativeResult.scalar(.null);
-    defer pcre2.pcre2_code_free_8(code);
+    const compiled = compilePattern(ctx, info.pattern, info.flags) orelse return NativeResult.scalar(.null);
+    defer compiled.release();
+    const code = compiled.code;
 
     const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return NativeResult.scalar(.null);
     defer pcre2.pcre2_match_data_free_8(match_data);
@@ -1654,8 +1691,9 @@ fn mb_split(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     const subject = args[1].string.bytes();
     const limit: i64 = if (args.len >= 3 and args[2] != .null) Value.toInt(args[2]) else -1;
 
-    const code = compilePattern(pattern, pcre2.UTF) orelse return NativeResult.scalar(.null);
-    defer pcre2.pcre2_code_free_8(code);
+    const compiled = compilePattern(ctx, pattern, pcre2.UTF) orelse return NativeResult.scalar(.null);
+    defer compiled.release();
+    const code = compiled.code;
 
     const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return NativeResult.scalar(.null);
     defer pcre2.pcre2_match_data_free_8(match_data);
@@ -1700,8 +1738,9 @@ fn mb_ereg_match(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     const pattern = args[0].string.bytes();
     const subject = args[1].string.bytes();
 
-    const code = compilePattern(pattern, pcre2.UTF | pcre2.ANCHORED) orelse return NativeResult.scalar(.{ .bool = false });
-    defer pcre2.pcre2_code_free_8(code);
+    const compiled = compilePattern(ctx, pattern, pcre2.UTF | pcre2.ANCHORED) orelse return NativeResult.scalar(.{ .bool = false });
+    defer compiled.release();
+    const code = compiled.code;
 
     const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return NativeResult.scalar(.{ .bool = false });
     defer pcre2.pcre2_match_data_free_8(match_data);

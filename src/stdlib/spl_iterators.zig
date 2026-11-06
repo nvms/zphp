@@ -1675,10 +1675,10 @@ fn rxAccept(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const flags = objGetInt(obj, "__rx_flags");
     const invert = (flags & 2) != 0;
 
-    const matches_arr = try ctx.createArray();
-    const result = try ctx.vm.callByName("preg_match", &.{ .{ .string = Value.String.borrowed(regex) }, .{ .string = subject }, .{ .array = matches_arr } });
+    var call_args = [_]Value{ .{ .string = Value.String.borrowed(regex) }, .{ .string = subject }, .null };
+    const result = try ctx.vm.callByNameRef("preg_match", &call_args);
     const matched = result == .int and result.int == 1;
-    try obj.set(ctx.allocator, "__rx_match", .{ .array = matches_arr });
+    try obj.set(ctx.allocator, "__rx_match", if (call_args[2] == .array) call_args[2] else .{ .array = try ctx.createArray() });
     return NativeResult.scalar(.{ .bool = if (invert) !matched else matched });
 }
 
@@ -1702,9 +1702,9 @@ fn rxCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
         if (mode == 3) {
             return NativeResult.share(try ctx.vm.callByName("preg_split", &.{ .{ .string = Value.String.borrowed(regex) }, .{ .string = subject } }));
         } else {
-            const out_arr = try ctx.createArray();
-            _ = try ctx.vm.callByName("preg_match_all", &.{ .{ .string = Value.String.borrowed(regex) }, .{ .string = subject }, .{ .array = out_arr } });
-            return NativeResult.borrowed(.{ .array = out_arr });
+            var call_args = [_]Value{ .{ .string = Value.String.borrowed(regex) }, .{ .string = subject }, .null };
+            _ = try ctx.vm.callByNameRef("preg_match_all", &call_args);
+            return NativeResult.borrowed(if (call_args[2] == .array) call_args[2] else .{ .array = try ctx.createArray() });
         }
     }
     return NativeResult.share(try ctx.vm.callMethod(inner_v.object, "current", &.{}));
