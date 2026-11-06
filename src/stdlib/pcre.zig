@@ -8,6 +8,80 @@ const RuntimeError = error{ RuntimeError, OutOfMemory };
 // coerce to string with __toString support. preg functions previously
 // bailed on Stringable objects (passing a Symfony Path-like wrapper or a
 // custom regex builder to preg_match returned false silently)
+// pcre checks a utf subject from the start offset to the end on every match,
+// so matching a long subject at many offsets costs quadratic time. as php
+// does, a subject known to be valid utf-8 skips the check: it is validated
+// once, and a string that owns its bytes remembers the result
+const UtfCheck = struct {
+    valid: bool,
+    subject: []const u8,
+
+    fn init(code: *pcre2.Code, subject: []const u8, holder: ?Value) UtfCheck {
+        var all: u32 = 0;
+        _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_ALLOPTIONS, @ptrCast(&all));
+        if (all & pcre2.UTF == 0) return .{ .valid = false, .subject = subject };
+        const owner: ?*Value.String.Owner = if (holder) |h| switch (h) {
+            .string => |str| if (str.owner) |o| (if (!o.closure and str.ptr == o.bytes.ptr and str.len == o.bytes.len) o else null) else null,
+            else => null,
+        } else null;
+        if (owner) |o| if (o.utf8_valid) return .{ .valid = true, .subject = subject };
+        const valid = std.unicode.utf8ValidateSlice(subject);
+        if (valid) if (owner) |o| {
+            o.utf8_valid = true;
+        };
+        return .{ .valid = valid, .subject = subject };
+    }
+
+    // the check may be skipped only from the start of a code point
+    fn options(self: UtfCheck, offset: usize) u32 {
+        if (!self.valid) return 0;
+        if (offset < self.subject.len and self.subject[offset] & 0xc0 == 0x80) return 0;
+        return pcre2.NO_UTF_CHECK;
+    }
+};
+
+// the match context carrying pcre.backtrack_limit and pcre.recursion_limit,
+// one per thread, updated when the settings change
+threadlocal var match_context: ?*anyopaque = null;
+threadlocal var match_context_limits: [2]u32 = .{ 0, 0 };
+
+fn matchContext(ctx: *NativeContext) ?*anyopaque {
+    const limits = [2]u32{ iniLimit(ctx, "pcre.backtrack_limit", 1000000), iniLimit(ctx, "pcre.recursion_limit", 100000) };
+    if (match_context == null) match_context = pcre2.pcre2_match_context_create_8(null);
+    const mc = match_context orelse return null;
+    if (!std.mem.eql(u32, &limits, &match_context_limits)) {
+        _ = pcre2.pcre2_set_match_limit_8(mc, limits[0]);
+        _ = pcre2.pcre2_set_depth_limit_8(mc, limits[1]);
+        match_context_limits = limits;
+    }
+    return mc;
+}
+
+fn iniLimit(ctx: *NativeContext, name: []const u8, default: u32) u32 {
+    const text = ctx.vm.ini_settings.get(name) orelse return default;
+    const value = std.fmt.parseInt(i64, std.mem.trim(u8, text, " "), 10) catch return default;
+    return std.math.cast(u32, @max(value, 0)) orelse std.math.maxInt(u32);
+}
+
+fn exec(ctx: *NativeContext, code: *pcre2.Code, subject: []const u8, offset: usize, options: u32, match_data: *pcre2.MatchData) c_int {
+    return pcre2.pcre2_match_8(code, subject.ptr, subject.len, offset, options, match_data, matchContext(ctx));
+}
+
+// a match that failed for a reason other than finding nothing, recorded for
+// preg_last_error as php_pcre's pcre_handle_exec_error records it
+fn execFailed(rc: c_int) bool {
+    if (rc >= 0 or rc == pcre2.ERROR_NOMATCH) return false;
+    setPregError(switch (rc) {
+        pcre2.ERROR_MATCHLIMIT => 2,
+        pcre2.ERROR_DEPTHLIMIT => 3,
+        pcre2.ERROR_UTF8_ERR21...pcre2.ERROR_UTF8_ERR1 => 4,
+        pcre2.ERROR_BADUTFOFFSET => 5,
+        pcre2.ERROR_JIT_STACKLIMIT => 6,
+        else => 1,
+    });
+    return true;
+}
+
 fn coerceStrArg(ctx: *NativeContext, v: Value) ?[]const u8 {
     return switch (v) {
         .string => |s| s.bytes(),
@@ -30,6 +104,8 @@ const pcre2 = struct {
     const DOTALL: u32 = 0x00000020;
     const EXTENDED: u32 = 0x00000080;
     const UTF: u32 = 0x00080000;
+    const NO_UTF_CHECK: u32 = 0x40000000;
+    const INFO_ALLOPTIONS: u32 = 0;
     const UCP: u32 = 0x00020000;
     const ANCHORED: u32 = 0x80000000;
     const UNGREEDY: u32 = 0x00040000;
@@ -45,6 +121,13 @@ const pcre2 = struct {
     const INFO_NAMEENTRYSIZE: u32 = 18;
     const INFO_NAMETABLE: u32 = 19;
     const ERROR_NOMEMORY: c_int = -48;
+    const ERROR_NOMATCH: c_int = -1;
+    const ERROR_UTF8_ERR1: c_int = -3;
+    const ERROR_UTF8_ERR21: c_int = -23;
+    const ERROR_BADUTFOFFSET: c_int = -36;
+    const ERROR_JIT_STACKLIMIT: c_int = -46;
+    const ERROR_MATCHLIMIT: c_int = -47;
+    const ERROR_DEPTHLIMIT: c_int = -53;
     const UNSET: usize = std.math.maxInt(usize);
 
     extern "c" fn pcre2_compile_8(
@@ -70,6 +153,10 @@ const pcre2 = struct {
     ) callconv(.c) ?*MatchData;
 
     extern "c" fn pcre2_match_data_free_8(match_data: ?*MatchData) callconv(.c) void;
+
+    extern "c" fn pcre2_match_context_create_8(gcontext: ?*anyopaque) callconv(.c) ?*anyopaque;
+    extern "c" fn pcre2_set_match_limit_8(mcontext: *anyopaque, value: u32) callconv(.c) c_int;
+    extern "c" fn pcre2_set_depth_limit_8(mcontext: *anyopaque, value: u32) callconv(.c) c_int;
 
     extern "c" fn pcre2_match_8(
         code: *const Code,
@@ -351,7 +438,8 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     const offset_capture = (flags & 256) != 0;
     const unmatched_as_null = (flags & 512) != 0;
     const offset: usize = if (args.len >= 5 and args[4] == .int and args[4].int >= 0) @intCast(args[4].int) else 0;
-    const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, offset, 0, match_data, null);
+    const utf = UtfCheck.init(code, subject, args[1]);
+    const rc = exec(ctx, code, subject, offset, utf.options(offset), match_data);
     if (rc < 0) {
         // no match: $matches must still be set to an empty array so callers
         // can safely iterate without an isset() guard
@@ -362,7 +450,7 @@ fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
                 ctx.setCallerVar(2, args.len, .{ .array = matches_arr });
             }
         }
-        return NativeResult.scalar(.{ .int = 0 });
+        return NativeResult.scalar(if (execFailed(rc)) .{ .bool = false } else .{ .int = 0 });
     }
 
     if (args.len >= 3) {
@@ -571,10 +659,15 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     var total_matches: i64 = 0;
     var offset: usize = 0;
     var marks: ?*PhpArray = null;
+    const utf = UtfCheck.init(code, subject, args[1]);
 
+    var failed = false;
     while (offset <= subject.len) {
-        const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, offset, 0, match_data, null);
-        if (rc < 0) break;
+        const rc = exec(ctx, code, subject, offset, utf.options(offset), match_data);
+        if (rc < 0) {
+            failed = execFailed(rc);
+            break;
+        }
 
         const ovector = pcre2.pcre2_get_ovector_pointer_8(match_data);
         const count: usize = @intCast(rc);
@@ -699,7 +792,7 @@ fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         ctx.setCallerVar(2, args.len, .{ .array = out });
     }
 
-    return NativeResult.scalar(.{ .int = total_matches });
+    return NativeResult.scalar(if (failed) .{ .bool = false } else .{ .int = total_matches });
 }
 
 fn matchGroupValue(ctx: *NativeContext, subject: []const u8, ovector: [*]usize, count: usize, i: usize, offset_capture: bool) RuntimeError!Value {
@@ -842,6 +935,7 @@ fn translateReplacement(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
 }
 
 fn preg_filter(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    setPregError(0);
     if (args.len < 3) return NativeResult.scalar(.null);
     if (args[2] == .array) {
         const subj_arr = args[2].array;
@@ -882,6 +976,7 @@ fn replaceWithCoercedSubject(ctx: *NativeContext, args: []const Value, comptime 
 
 fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 3) return NativeResult.scalar(.null);
+    setPregError(0);
     if (try replaceWithCoercedSubject(ctx, args, 2, preg_replace)) |coerced| return coerced;
     // subject can be an array - apply replacements element-wise and return array
     if (args[2] == .array) {
@@ -899,6 +994,8 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
             }
             const replaced = (try preg_replace(ctx, sub_args[0..n])).value;
             defer if (replaced == .string) replaced.string.release();
+            // a subject the match failed on is left out
+            if (replaced == .null) continue;
             try result_arr.set(ctx.allocator, se.key, replaced);
         }
         return NativeResult.borrowed(.{ .array = result_arr });
@@ -938,7 +1035,7 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     const xrep = try translateReplacement(ctx.allocator, replacement);
     defer ctx.allocator.free(xrep);
 
-    const sub_opts: u32 = pcre2.SUBSTITUTE_OVERFLOW_LENGTH | pcre2.SUBSTITUTE_GLOBAL;
+    const sub_opts: u32 = pcre2.SUBSTITUTE_OVERFLOW_LENGTH | pcre2.SUBSTITUTE_GLOBAL | UtfCheck.init(code, subject, args[2]).options(0);
 
     var out_len: usize = 0;
     var rc = pcre2.pcre2_substitute_8(
@@ -948,7 +1045,7 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         0,
         sub_opts,
         match_data,
-        null,
+        matchContext(ctx),
         xrep.ptr,
         xrep.len,
         null,
@@ -961,6 +1058,7 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     }
     if (rc != pcre2.ERROR_NOMEMORY) {
         ctx.setCallerVar(4, args.len, .{ .int = 0 });
+        if (execFailed(rc)) return NativeResult.scalar(.null);
         return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
     }
 
@@ -972,7 +1070,7 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         0,
         sub_opts,
         match_data,
-        null,
+        matchContext(ctx),
         xrep.ptr,
         xrep.len,
         buf.ptr,
@@ -982,6 +1080,7 @@ fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     if (rc < 0) {
         ctx.allocator.free(buf);
         ctx.setCallerVar(4, args.len, .{ .int = 0 });
+        if (execFailed(rc)) return NativeResult.scalar(.null);
         return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
     }
 
@@ -1015,9 +1114,10 @@ fn pregReplaceArrayPattern(ctx: *NativeContext, args: []const Value) RuntimeErro
                         defer pcre2.pcre2_match_data_free_8(md);
                         var off: usize = 0;
                         var matched: i64 = 0;
+                        const utf = UtfCheck.init(code, before, current.value);
                         while (off <= before.len) {
                             if (limit_per >= 0 and matched >= limit_per) break;
-                            const rc = pcre2.pcre2_match_8(code, before.ptr, before.len, off, 0, md, null);
+                            const rc = exec(ctx, code, before, off, utf.options(off), md);
                             if (rc < 0) break;
                             const ov = pcre2.pcre2_get_ovector_pointer_8(md);
                             const me = ov[1];
@@ -1055,10 +1155,14 @@ fn pregReplaceLimited(ctx: *NativeContext, code: *pcre2.Code, match_data: *pcre2
     defer parts.deinit(ctx.allocator);
     var offset: usize = 0;
     var count: usize = 0;
+    const utf = UtfCheck.init(code, subject, null);
 
     while (offset <= subject.len and count < limit) {
-        const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, offset, 0, match_data, null);
-        if (rc < 0) break;
+        const rc = exec(ctx, code, subject, offset, utf.options(offset), match_data);
+        if (rc < 0) {
+            if (execFailed(rc)) return NativeResult.scalar(.null);
+            break;
+        }
 
         const ovector = pcre2.pcre2_get_ovector_pointer_8(match_data);
         const ms = ovector[0];
@@ -1121,6 +1225,7 @@ fn pregReplaceLimited(ctx: *NativeContext, code: *pcre2.Code, match_data: *pcre2
 }
 
 fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    setPregError(0);
     if (args.len < 3) return NativeResult.scalar(.null);
     if (try replaceWithCoercedSubject(ctx, args, 2, preg_replace_callback)) |coerced| return coerced;
     if (args[2] == .array) {
@@ -1181,11 +1286,15 @@ fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!
     var offset: usize = 0;
     var replace_count: i64 = 0;
     const limit: i64 = if (args.len >= 4) Value.toInt(args[3]) else -1;
+    const utf = UtfCheck.init(code, subject, args[2]);
 
     while (offset <= subject.len) {
         if (limit >= 0 and replace_count >= limit) break;
-        const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, offset, 0, match_data, null);
-        if (rc < 0) break;
+        const rc = exec(ctx, code, subject, offset, utf.options(offset), match_data);
+        if (rc < 0) {
+            if (execFailed(rc)) return NativeResult.scalar(.null);
+            break;
+        }
 
         const ovector = pcre2.pcre2_get_ovector_pointer_8(match_data);
         const match_start = ovector[0];
@@ -1253,6 +1362,7 @@ fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!
 }
 
 fn preg_replace_callback_array(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    setPregError(0);
     if (args.len < 2 or args[0] != .array) return if (args.len >= 2) NativeResult.share(args[1]) else NativeResult.scalar(.null);
     if (try replaceWithCoercedSubject(ctx, args, 1, preg_replace_callback_array)) |coerced| return coerced;
     const map = args[0].array;
@@ -1287,9 +1397,10 @@ fn preg_replace_callback_array(ctx: *NativeContext, args: []const Value) Runtime
                         defer pcre2.pcre2_match_data_free_8(md);
                         var off: usize = 0;
                         var matched: i64 = 0;
+                        const utf = UtfCheck.init(code, subject, current.value);
                         while (off <= subject.len) {
                             if (limit >= 0 and matched >= limit) break;
-                            const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, off, 0, md, null);
+                            const rc = exec(ctx, code, subject, off, utf.options(off), md);
                             if (rc < 0) break;
                             const ov = pcre2.pcre2_get_ovector_pointer_8(md);
                             const me = ov[1];
@@ -1329,6 +1440,7 @@ fn utf8SeqLen(lead: u8) usize {
 }
 
 fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    setPregError(0);
     if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     const info = parsePattern(args[0].string.bytes()) orelse {
         setPregError(1);
@@ -1357,12 +1469,16 @@ fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     var search: usize = 0;
     var splits: i64 = 1;
     const is_utf = (info.flags & pcre2.UTF) != 0;
+    const utf = UtfCheck.init(code, subject, args[1]);
 
     while (search <= subject.len) {
         if (limit > 0 and splits >= limit) break;
 
-        const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, search, 0, match_data, null);
-        if (rc < 0) break;
+        const rc = exec(ctx, code, subject, search, utf.options(search), match_data);
+        if (rc < 0) {
+            if (execFailed(rc)) return NativeResult.scalar(.{ .bool = false });
+            break;
+        }
 
         const ovector = pcre2.pcre2_get_ovector_pointer_8(match_data);
         const match_start = ovector[0];
@@ -1479,6 +1595,7 @@ fn preg_quote(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
 }
 
 fn preg_grep(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    setPregError(0);
     if (args.len < 2 or args[0] != .string or args[1] != .array) return NativeResult.scalar(.{ .bool = false });
     const info = parsePattern(args[0].string.bytes()) orelse {
         setPregError(1);
@@ -1496,7 +1613,8 @@ fn preg_grep(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
     var result = try ctx.createArray();
     for (input.entries.items) |entry| {
         const str = if (entry.value == .string) entry.value.string.bytes() else continue;
-        const rc = pcre2.pcre2_match_8(code, str.ptr, str.len, 0, 0, match_data, null);
+        const rc = exec(ctx, code, str, 0, UtfCheck.init(code, str, entry.value).options(0), match_data);
+        if (execFailed(rc)) break;
         const matched = rc >= 0;
         if (matched != invert) {
             try result.set(ctx.allocator, entry.key, entry.value);
@@ -1545,11 +1663,12 @@ fn mb_split(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     var result = try ctx.createArray();
     var offset: usize = 0;
     var splits: i64 = 1;
+    const utf = UtfCheck.init(code, subject, args[1]);
 
     while (offset <= subject.len) {
         if (limit > 0 and splits >= limit) break;
 
-        const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, offset, 0, match_data, null);
+        const rc = exec(ctx, code, subject, offset, utf.options(offset), match_data);
         if (rc < 0) break;
 
         const ovector = pcre2.pcre2_get_ovector_pointer_8(match_data);
@@ -1576,7 +1695,7 @@ fn mb_split(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     return NativeResult.borrowed(.{ .array = result });
 }
 
-fn mb_ereg_match(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+fn mb_ereg_match(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     const pattern = args[0].string.bytes();
     const subject = args[1].string.bytes();
@@ -1587,6 +1706,6 @@ fn mb_ereg_match(_: *NativeContext, args: []const Value) RuntimeError!NativeResu
     const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return NativeResult.scalar(.{ .bool = false });
     defer pcre2.pcre2_match_data_free_8(match_data);
 
-    const rc = pcre2.pcre2_match_8(code, subject.ptr, subject.len, 0, 0, match_data, null);
+    const rc = exec(ctx, code, subject, 0, UtfCheck.init(code, subject, args[1]).options(0), match_data);
     return NativeResult.scalar(.{ .bool = rc >= 0 });
 }

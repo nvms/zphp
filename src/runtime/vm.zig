@@ -7126,6 +7126,7 @@ pub const VM = struct {
                                     owner.bytes = try owner.allocator.realloc(owner.bytes, capacity);
                                 }
                                 @memcpy(owner.bytes[current.string.len..length], suffix.items);
+                                owner.utf8_valid = false;
                                 const result: Value = .{ .string = .{ .ptr = owner.bytes.ptr, .len = length, .owner = owner } };
                                 VM.retainValue(result);
                                 try self.setVariableByName(frame, name, result);
@@ -13274,6 +13275,7 @@ pub const VM = struct {
                         owner.bytes = try owner.allocator.realloc(owner.bytes, capacity);
                     }
                     @memcpy(owner.bytes[current.string.len..length], suffix.items);
+                    owner.utf8_valid = false;
                     self.push(.{ .string = .{ .ptr = owner.bytes.ptr, .len = length, .owner = owner } });
                     return self.assignLocal(frame, slot, self.peek());
                 }

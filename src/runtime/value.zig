@@ -1194,6 +1194,9 @@ pub const PhpString = struct {
         // arena and the VM releases the instance's captures when the last
         // reference drops, so the owner struct is the closure's identity
         closure: bool = false,
+        // bytes[0..len] were found to be valid utf-8 when len == bytes.len;
+        // an in-place append clears it
+        utf8_valid: bool = false,
     };
 
     pub fn borrowed(value: []const u8) PhpString {

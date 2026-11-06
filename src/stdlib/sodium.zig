@@ -182,6 +182,7 @@ fn native_increment(_: *NativeContext, args: []const Value) RuntimeError!NativeR
     const s = args[0].string.bytes();
     const mut: [*]u8 = @ptrCast(@constCast(s.ptr));
     c.sodium_increment(mut, s.len);
+    if (args[0].string.owner) |o| o.utf8_valid = false;
     return NativeResult.scalar(.null);
 }
 
@@ -192,6 +193,7 @@ fn native_add(_: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     const b = args[1].string.bytes();
     if (a.len != b.len) return NativeResult.scalar(.null);
     c.sodium_add(@ptrCast(@constCast(a.ptr)), b.ptr, a.len);
+    if (args[0].string.owner) |o| o.utf8_valid = false;
     return NativeResult.scalar(.null);
 }
 

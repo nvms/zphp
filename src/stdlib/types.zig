@@ -1530,6 +1530,9 @@ fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "date.default_latitude")) return "31.7667";
     if (std.mem.eql(u8, name, "date.default_longitude")) return "35.2333";
     if (std.mem.eql(u8, name, "precision")) return "14";
+    if (std.mem.eql(u8, name, "pcre.backtrack_limit")) return "1000000";
+    if (std.mem.eql(u8, name, "pcre.recursion_limit")) return "100000";
+    if (std.mem.eql(u8, name, "pcre.jit")) return "1";
     if (std.mem.eql(u8, name, "serialize_precision")) return "-1";
     if (std.mem.eql(u8, name, "open_basedir")) return "";
     if (std.mem.eql(u8, name, "include_path")) return includes.default_include_path;
