@@ -195,6 +195,10 @@ pub const Ast = struct {
     pub const Error = struct {
         token: u32,
         tag: Tag,
+        // the indentation level a heredoc body line fell short of
+        detail: u32 = 0,
+        // lines past the token's first where the error is (heredoc bodies)
+        line_delta: u32 = 0,
 
         pub const Tag = enum {
             expected_expression,
@@ -208,6 +212,8 @@ pub const Ast = struct {
             unexpected_token,
             real_cast_removed,
             void_cast_misplaced,
+            heredoc_mixed_indentation,
+            heredoc_body_indentation,
         };
     };
 };

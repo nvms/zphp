@@ -99,11 +99,13 @@ pub fn formatParseErrors(alloc: std.mem.Allocator, ast: *const Ast, file_path: [
 
     for (ast.errors) |err| {
         const tok = ast.tokens[err.token];
-        const loc = Chunk.locationFromOffset(ast.source, tok.start);
+        var loc = Chunk.locationFromOffset(ast.source, tok.start);
         const token_len: u32 = tok.end - tok.start;
+        loc.line += err.line_delta;
 
-        writeFmt(&buf, alloc, "\nParse error: {s} in {s} on line {d}\n\n", .{ errorTagMessage(err.tag), path, loc.line });
-        writeSourceSnippet(&buf, alloc, ast.source, loc, token_len);
+        const message = heredocMessage(alloc, err) orelse errorTagMessage(err.tag);
+        writeFmt(&buf, alloc, "\nParse error: {s} in {s} on line {d}\n\n", .{ message, path, loc.line });
+        if (err.line_delta == 0) writeSourceSnippet(&buf, alloc, ast.source, loc, token_len);
     }
 
     return buf.items;
@@ -114,6 +116,11 @@ pub fn formatParseErrors(alloc: std.mem.Allocator, ast: *const Ast, file_path: [
 pub fn parseErrorSummary(alloc: std.mem.Allocator, ast: *const Ast) ![]u8 {
     if (ast.errors.len == 0) return alloc.dupe(u8, "syntax error");
     const err = ast.errors[0];
+    switch (err.tag) {
+        .heredoc_mixed_indentation => return alloc.dupe(u8, "Invalid indentation - tabs and spaces cannot be mixed"),
+        .heredoc_body_indentation => return std.fmt.allocPrint(alloc, "Invalid body indentation level (expecting an indentation level of at least {d})", .{err.detail}),
+        else => {},
+    }
     const tok = ast.tokens[err.token];
     const lexeme = ast.source[tok.start..tok.end];
     const expecting: ?[]const u8 = switch (err.tag) {
@@ -128,6 +135,7 @@ pub fn parseErrorSummary(alloc: std.mem.Allocator, ast: *const Ast) ![]u8 {
         .unexpected_token => null,
         .real_cast_removed => return alloc.dupe(u8, "The (real) cast has been removed, use (float) instead"),
         .void_cast_misplaced => return alloc.dupe(u8, "syntax error, unexpected token \"(void)\""),
+        .heredoc_mixed_indentation, .heredoc_body_indentation => unreachable,
     };
     if (lexeme.len == 0) {
         if (expecting) |e| return std.fmt.allocPrint(alloc, "syntax error, unexpected end of file, expecting {s}", .{e});
@@ -153,7 +161,18 @@ pub fn compileErrorLine(ast: *const Ast, diag: Diagnostic) i64 {
 
 pub fn parseErrorLine(ast: *const Ast) i64 {
     if (ast.errors.len == 0) return 0;
-    return @intCast(Chunk.locationFromOffset(ast.source, ast.tokens[ast.errors[0].token].start).line);
+    const err = ast.errors[0];
+    return @intCast(Chunk.locationFromOffset(ast.source, ast.tokens[err.token].start).line + err.line_delta);
+}
+
+// a heredoc's indentation errors, worded as php words them; null for
+// every other error
+fn heredocMessage(alloc: std.mem.Allocator, err: Ast.Error) ?[]const u8 {
+    return switch (err.tag) {
+        .heredoc_mixed_indentation => "Invalid indentation - tabs and spaces cannot be mixed",
+        .heredoc_body_indentation => std.fmt.allocPrint(alloc, "Invalid body indentation level (expecting an indentation level of at least {d})", .{err.detail}) catch null,
+        else => null,
+    };
 }
 
 fn errorTagMessage(tag: Ast.Error.Tag) []const u8 {
@@ -169,6 +188,8 @@ fn errorTagMessage(tag: Ast.Error.Tag) []const u8 {
         .unexpected_token => "unexpected token",
         .real_cast_removed => "The (real) cast has been removed, use (float) instead",
         .void_cast_misplaced => "syntax error, unexpected token \"(void)\"",
+        .heredoc_mixed_indentation => "Invalid indentation - tabs and spaces cannot be mixed",
+        .heredoc_body_indentation => "Invalid body indentation level",
     };
 }
 

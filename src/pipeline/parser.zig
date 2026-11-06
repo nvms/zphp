@@ -2809,7 +2809,11 @@ const Parser = struct {
         return switch (self.peek()) {
             .integer => self.addLiteral(.integer_literal),
             .float => self.addLiteral(.float_literal),
-            .string, .heredoc, .nowdoc => self.addLiteral(.string_literal),
+            .string => self.addLiteral(.string_literal),
+            .heredoc, .nowdoc => blk: {
+                try self.checkHeredocIndentation(self.pos);
+                break :blk self.addLiteral(.string_literal);
+            },
             .kw_true => self.addLiteral(.true_literal),
             .kw_false => self.addLiteral(.false_literal),
             .kw_null => self.addLiteral(.null_literal),
@@ -3499,6 +3503,45 @@ const Parser = struct {
         // advance() can step past the eof token; an error there is at eof
         const last: u32 = @intCast(self.tokens.len - 1);
         try self.errors.append(self.allocator, .{ .token = @min(token, last), .tag = tag });
+    }
+
+    // strip_multiline_string_indentation's checks: the closing marker's
+    // indentation is all spaces or all tabs, and every body line starts with
+    // at least that much of the same whitespace (a shorter line that is only
+    // whitespace is fine)
+    fn checkHeredocIndentation(self: *Parser, token: u32) Error!void {
+        const tok = self.tokens[token];
+        const lexeme = self.source[tok.start..tok.end];
+        const first_nl = std.mem.indexOfScalar(u8, lexeme, '\n') orelse return;
+        const body_start = first_nl + 1;
+        var end = lexeme.len;
+        while (end > body_start and (lexeme[end - 1] == '\n' or lexeme[end - 1] == '\r' or lexeme[end - 1] == ';')) end -= 1;
+        while (end > body_start and (std.ascii.isAlphanumeric(lexeme[end - 1]) or lexeme[end - 1] == '_' or lexeme[end - 1] >= 0x80)) end -= 1;
+        var closing_line_start = end;
+        while (closing_line_start > body_start and lexeme[closing_line_start - 1] != '\n') closing_line_start -= 1;
+        const indent = lexeme[closing_line_start..end];
+        if (indent.len == 0) return;
+        const has_space = std.mem.indexOfScalar(u8, indent, ' ') != null;
+        const has_tab = std.mem.indexOfScalar(u8, indent, '\t') != null;
+        // php reports a mixed closing marker on the line after the opener
+        if (has_space and has_tab) return self.addHeredocError(token, .heredoc_mixed_indentation, 0, 1);
+        const using_spaces = has_space;
+        if (closing_line_start <= body_start) return;
+        const body = lexeme[body_start .. closing_line_start - 1];
+        var lines = std.mem.splitScalar(u8, body, '\n');
+        var delta: u32 = 1;
+        while (lines.next()) |line| : (delta += 1) {
+            for (0..indent.len) |k| {
+                if (k == line.len or line[k] == '\r') break;
+                const c = line[k];
+                if (c != ' ' and c != '\t') return self.addHeredocError(token, .heredoc_body_indentation, @intCast(indent.len), delta);
+                if ((c == ' ') != using_spaces) return self.addHeredocError(token, .heredoc_mixed_indentation, 0, delta);
+            }
+        }
+    }
+
+    fn addHeredocError(self: *Parser, token: u32, tag: Ast.Error.Tag, detail: u32, line_delta: u32) Error!void {
+        try self.errors.append(self.allocator, .{ .token = token, .tag = tag, .detail = detail, .line_delta = line_delta });
     }
 
     fn synchronize(self: *Parser) void {
