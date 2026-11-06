@@ -2,6 +2,7 @@ const std = @import("std");
 const sync = @import("../sync.zig");
 const sys = @import("../sys.zig");
 const native_params = @import("../stdlib/native_params.zig");
+const deprecations = @import("../stdlib/deprecations_generated.zig");
 const platform = @import("../platform.zig");
 const php_version = @import("../php_version.zig");
 const class_names = @import("class_names.zig");
@@ -8202,7 +8203,7 @@ pub const VM = struct {
                     }
 
                     const const_count = self.readByte();
-                    var def = ClassDef{ .name = iface_name, .file_path = iface_site.file, .start_line = iface_site.start_line, .end_line = iface_site.end_line, .doc_comment = iface_site.doc_comment };
+                    var def = ClassDef{ .name = iface_name, .is_internal = false, .file_path = iface_site.file, .start_line = iface_site.start_line, .end_line = iface_site.end_line, .doc_comment = iface_site.doc_comment };
                     if (const_count > 0) {
                         var ci: usize = const_count;
                         while (ci > 0) : (ci -= 1) {
@@ -8257,6 +8258,16 @@ pub const VM = struct {
                         }
                         const attrs = try self.readAttributeDefs();
                         if (attrs.len > 0) try def.property_attributes.put(self.allocator, prop_name, attrs);
+                    }
+                    const iface_const_attr_count = self.readByte();
+                    for (0..iface_const_attr_count) |_| {
+                        const ca_name = self.currentChunk().constants.items[self.readU16()].string.bytes();
+                        const ca_attrs = try self.readAttributeDefs();
+                        try def.constant_attributes.put(self.allocator, ca_name, ca_attrs);
+                        if (try self.deprecationOf(ca_attrs)) |suffix| {
+                            try def.deprecated_constants.put(self.allocator, ca_name, suffix);
+                            self.has_deprecated_constants = true;
+                        }
                     }
                     // Interfaces inherit contracts from every parent, including
                     // diamonds. Keep local declarations authoritative.
@@ -8429,7 +8440,7 @@ pub const VM = struct {
                     }
 
                     if (trait_attrs.len > 0 or trait_method_attr_count > 0 or trait_prop_attr_count > 0) {
-                        var tdef = ClassDef{ .name = trait_name };
+                        var tdef = ClassDef{ .name = trait_name, .is_internal = false };
                         for (trait_attrs) |a| try tdef.attributes.append(self.allocator, a);
                         if (trait_attrs.len > 0) self.allocator.free(trait_attrs);
                         for (0..trait_method_attr_count) |tmi| {
@@ -12566,6 +12577,11 @@ pub const VM = struct {
 
     // warns, as php does on each read, when the global constant is #[\Deprecated]
     pub fn warnDeprecatedConstant(self: *VM, name: []const u8) RuntimeError!void {
+        if (deprecations.constants.get(name)) |suffix| {
+            const msg = try std.fmt.allocPrint(self.allocator, "Constant {s} is deprecated{s}", .{ name, suffix });
+            defer self.allocator.free(msg);
+            return self.raiseError(E_DEPRECATED, msg);
+        }
         if (!self.has_deprecated_constants) return;
         const suffix = self.deprecated_globals.get(name) orelse return;
         const msg = try std.fmt.allocPrint(self.allocator, "Constant {s} is deprecated{s}", .{ name, suffix });
@@ -12575,26 +12591,50 @@ pub const VM = struct {
 
     // warns, as php does on each read, when class_name::const_name is a
     // #[\Deprecated] constant or enum case. returns whether it is one
+    // warns, as php does on each read, when class_name::const_name is a
+    // #[\Deprecated] constant or enum case, naming the class or interface that
+    // declares it. returns whether it is one
     pub fn warnDeprecatedClassConstant(self: *VM, class_name: []const u8, const_name: []const u8) RuntimeError!bool {
-        if (!self.has_deprecated_constants) return false;
+        const found = self.constantDeprecation(class_name, const_name, 0) orelse return false;
+        const kind: []const u8 = if (found.is_case) "Enum case" else "Constant";
+        const msg = try std.fmt.allocPrint(self.allocator, "{s} {s}::{s} is deprecated{s}", .{ kind, found.owner, const_name, found.suffix });
+        defer self.allocator.free(msg);
+        try self.raiseError(if (found.internal) E_DEPRECATED else E_USER_DEPRECATED, msg);
+        return true;
+    }
+
+    const ConstantDeprecation = struct { owner: []const u8, suffix: []const u8, internal: bool, is_case: bool };
+
+    // the class, parent or interface whose declaration of the constant is
+    // deprecated: php's for an internal one, the attribute's for a user one
+    fn constantDeprecation(self: *VM, class_name: []const u8, const_name: []const u8, depth: u8) ?ConstantDeprecation {
+        if (depth > 32) return null;
         var current: ?[]const u8 = class_name;
         while (current) |name| {
-            const entry = self.classes.getEntry(name) orelse return false;
+            const entry = self.classes.getEntry(name) orelse return null;
             const cls = entry.value_ptr;
-            if (cls.constants.contains(const_name)) {
-                const suffix = cls.deprecated_constants.get(const_name) orelse return false;
-                var is_case = false;
-                if (cls.is_enum) for (cls.case_order.items) |case_name| {
-                    if (std.mem.eql(u8, case_name, const_name)) is_case = true;
-                };
-                const msg = try std.fmt.allocPrint(self.allocator, "{s} {s}::{s} is deprecated{s}", .{ if (is_case) "Enum case" else "Constant", entry.key_ptr.*, const_name, suffix });
-                defer self.allocator.free(msg);
-                try self.raiseError(E_USER_DEPRECATED, msg);
-                return true;
+            if (!cls.constants.contains(const_name)) {
+                // inherited from an interface or parent the lookup reached
+            } else if (cls.is_internal) {
+                var buf: [256]u8 = undefined;
+                if (std.fmt.bufPrint(&buf, "{s}::{s}", .{ entry.key_ptr.*, const_name })) |key| {
+                    if (deprecations.class_constants.get(key)) |suffix| return .{ .owner = entry.key_ptr.*, .suffix = suffix, .internal = true, .is_case = false };
+                } else |_| {}
+            } else if (self.has_deprecated_constants) {
+                if (cls.deprecated_constants.get(const_name)) |suffix| {
+                    var is_case = false;
+                    if (cls.is_enum) for (cls.case_order.items) |case_name| {
+                        if (std.mem.eql(u8, case_name, const_name)) is_case = true;
+                    };
+                    return .{ .owner = entry.key_ptr.*, .suffix = suffix, .internal = false, .is_case = is_case };
+                }
+            }
+            for (cls.interfaces.items) |iface| {
+                if (self.constantDeprecation(iface, const_name, depth + 1)) |found| return found;
             }
             current = cls.parent;
         }
-        return false;
+        return null;
     }
 
     pub fn raiseError(self: *VM, level: i64, msg: []const u8) RuntimeError!void {
@@ -14417,7 +14457,7 @@ pub const VM = struct {
         const backed_type_byte = self.readByte();
         const case_count = self.readByte();
 
-        var def = ClassDef{ .name = enum_name, .is_enum = true, .file_path = site.file, .start_line = site.start_line, .end_line = site.end_line, .doc_comment = site.doc_comment };
+        var def = ClassDef{ .name = enum_name, .is_enum = true, .is_internal = false, .file_path = site.file, .start_line = site.start_line, .end_line = site.end_line, .doc_comment = site.doc_comment };
         def.backed_type = @enumFromInt(backed_type_byte);
 
         const case_names = try self.allocator.alloc([]const u8, case_count);
@@ -18962,6 +19002,7 @@ pub const VM = struct {
             record = .{ .label = label, .args = input_args, .depth = self.frame_count, .instance = call.instance, .outer = outer };
             self.native_call = &record;
         }
+        if (native.deprecated) |suffix| try self.warnDeprecatedNative(name orelse label, suffix);
         if (native.no_discard) |reason| try self.warnDiscardedNative(label, reason, outer, call.instance);
         if (!admitted) {
             var buf: [256]u8 = undefined;
@@ -20508,6 +20549,15 @@ pub const VM = struct {
     // throws the result away, before the function runs. a native that calls
     // it back (array_map) uses the result; a method native runs on a frame of
     // its own above the caller
+    // zend_deprecated_function for an internal function or method
+    fn warnDeprecatedNative(self: *VM, name: []const u8, suffix: []const u8) RuntimeError!void {
+        const kind: []const u8 = if (std.mem.indexOf(u8, name, "::") != null) "Method" else "Function";
+        const msg = try std.fmt.allocPrint(self.allocator, "{s} {s}() is deprecated{s}", .{ kind, name, suffix });
+        defer self.allocator.free(msg);
+        try self.raiseError(E_DEPRECATED, msg);
+        if (self.pending_exception != null) return error.RuntimeError;
+    }
+
     fn warnDiscardedNative(self: *VM, name: []const u8, reason: []const u8, outer: ?*const NativeCall, method: bool) RuntimeError!void {
         if (self.frame_count == 0) return;
         const own_frames: usize = @intFromBool(method);

@@ -2399,6 +2399,22 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
         freeAttrSlice(self.allocator, attrs);
     }
 
+    // constant attributes
+    var consts_with_attrs = std.ArrayListUnmanaged(MemberAttr).empty;
+    defer consts_with_attrs.deinit(self.allocator);
+    for (members) |m| {
+        const member = self.ast.nodes[m];
+        if (member.tag != .const_decl) continue;
+        const cattrs = extractAttributes(self, member.main_token);
+        if (cattrs.len > 0) try consts_with_attrs.append(self.allocator, .{ .name = self.ast.tokenSlice(member.main_token), .attrs = cattrs });
+    }
+    try self.emitByte(@intCast(consts_with_attrs.items.len));
+    for (consts_with_attrs.items) |ca| {
+        try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(ca.name) }));
+        try emitAttributeData(self, ca.attrs);
+    }
+    for (consts_with_attrs.items) |ca| freeAttrSlice(self.allocator, ca.attrs);
+
     // set interface constants after interface_decl so self:: references resolve
     for (members) |m| {
         const member = self.ast.nodes[m];

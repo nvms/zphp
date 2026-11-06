@@ -1,4 +1,5 @@
 const std = @import("std");
+const deprecations = @import("deprecations_generated.zig");
 const Value = @import("../runtime/value.zig").Value;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
 const php_version = @import("../php_version.zig");
@@ -135,7 +136,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionConstant::getValue", rconstGetValue);
     try vm.native_fns.put(a, "ReflectionConstant::getShortName", rconstGetShortName);
     try vm.native_fns.put(a, "ReflectionConstant::getNamespaceName", rconstGetNamespaceName);
-    try vm.native_fns.put(a, "ReflectionConstant::isDeprecated", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionConstant::isDeprecated", rconstIsDeprecated);
     try vm.native_fns.put(a, "ReflectionConstant::getAttributes", reflectionEmptyArray);
     try vm.native_fns.put(a, "ReflectionConstant::getFileName", reflectionFalse);
     try vm.native_fns.put(a, "ReflectionConstant::__toString", rconstToString);
@@ -4892,6 +4893,7 @@ fn deprecatedConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Na
 fn rfIsDeprecated(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const func_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    if (ctx.vm.native_fns.get(func_name)) |native| return NativeResult.scalar(.{ .bool = native.deprecated != null });
     const attrs = ctx.vm.function_attributes.get(ctx.vm.getOrigClosureName(func_name)) orelse return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = hasDeprecatedAttribute(attrs) });
 }
@@ -4901,6 +4903,11 @@ fn rmIsDeprecated(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
     const method_name = methodLookupName(this) orelse return NativeResult.scalar(.{ .bool = false });
     const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.scalar(.{ .bool = false });
     const cls = ctx.vm.classes.get(declaring) orelse return NativeResult.scalar(.{ .bool = false });
+    if (cls.is_internal) {
+        var buf: [256]u8 = undefined;
+        const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.scalar(.{ .bool = deprecations.functions.has(key) });
+    }
     const attrs = cls.method_attributes.get(method_name) orelse return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = hasDeprecatedAttribute(attrs) });
 }
@@ -4910,8 +4917,20 @@ fn rccIsDeprecated(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
     const class_name = if (this.get("class") == .string) this.get("class").string.bytes() else return NativeResult.scalar(.{ .bool = false });
     const const_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
     const cls = ctx.vm.classes.get(class_name) orelse return NativeResult.scalar(.{ .bool = false });
+    if (cls.is_internal) {
+        var buf: [256]u8 = undefined;
+        const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ class_name, const_name }) catch return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.scalar(.{ .bool = deprecations.class_constants.has(key) });
+    }
     const attrs = cls.constant_attributes.get(const_name) orelse return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = hasDeprecatedAttribute(attrs) });
+}
+
+fn rconstIsDeprecated(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    if (deprecations.constants.has(name)) return NativeResult.scalar(.{ .bool = true });
+    return NativeResult.scalar(.{ .bool = ctx.vm.deprecated_globals.contains(name) });
 }
 
 fn rconstConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

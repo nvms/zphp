@@ -52,6 +52,10 @@ ext: build ## Run extension API tests (builds tests/extensions/demo.c with zig c
 php-metadata: build ## Regenerate native parameter lists and serialization rules from php's reflection (run with the targeted php on PATH after adding natives or classes)
 	python3 scripts/gen-php-metadata
 
+.PHONY: php-deprecations
+php-deprecations: ## Regenerate the internal functions, methods and constants php marks #[\Deprecated], from the php release's stubs (run when src/php_version.zig moves)
+	python3 scripts/gen-php-deprecations
+
 .PHONY: php-grammar
 php-grammar: ## Regenerate php's parser tables, used to word syntax errors as php does (run when src/php_version.zig moves)
 	python3 scripts/gen-php-grammar

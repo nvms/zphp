@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+# Regenerates src/stdlib/deprecations_generated.zig: every internal function,
+# method, constant and class constant php marks #[\Deprecated], with the text
+# php appends to "... is deprecated" (" since 8.2, use x() instead").
+#
+# the marks come from the *.stub.php files in the php release tarball for the
+# version in src/php_version.zig. the stubs declare every extension, so this
+# does not depend on which extensions the local php loads. regenerate whenever
+# that version moves:
+#
+#   make php-deprecations
+#
+# pass a tarball or an unpacked source tree to skip the download:
+#
+#   scripts/gen-php-deprecations ~/Downloads/php-8.5.12.tar.xz
+
+import os, re, sys, tarfile, tempfile, urllib.request
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUT = os.path.join(REPO, "src", "stdlib", "deprecations_generated.zig")
+
+
+def target_version():
+    text = open(os.path.join(REPO, "src", "php_version.zig")).read()
+    parts = [re.search(r"pub const %s = (\d+);" % name, text).group(1) for name in ("major", "minor", "release")]
+    return ".".join(parts)
+
+
+def stubs(version, given):
+    if given and os.path.isdir(given):
+        for root, _, files in os.walk(given):
+            for name in sorted(files):
+                if name.endswith(".stub.php"):
+                    path = os.path.join(root, name)
+                    yield os.path.relpath(path, given), open(path).read()
+        return
+    path = given
+    if not path:
+        path = os.path.join(tempfile.gettempdir(), "php-%s.tar.xz" % version)
+        if not os.path.exists(path):
+            url = "https://www.php.net/distributions/php-%s.tar.xz" % version
+            print("downloading " + url, file=sys.stderr)
+            urllib.request.urlretrieve(url, path)
+    with tarfile.open(path) as tar:
+        for member in sorted(tar.getmembers(), key=lambda m: m.name):
+            if not member.name.endswith(".stub.php"):
+                continue
+            # php's own test extension is not part of a php build
+            if "/ext/zend_test/" in member.name or "/tests/" in member.name:
+                continue
+            yield member.name, tar.extractfile(member).read().decode()
+
+
+def php_string(literal):
+    quote, body = literal[0], literal[1:-1]
+    if quote == "'":
+        return re.sub(r"\\([\\'])", r"\1", body)
+    return re.sub(r"\\(.)", lambda m: {"n": "\n", "t": "\t"}.get(m.group(1), m.group(1)), body)
+
+
+STRING = r"""('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")"""
+
+
+def suffix(args):
+    since = re.search(r"since:\s*" + STRING, args)
+    message = re.search(r"message:\s*" + STRING, args)
+    text = ""
+    if since:
+        text += " since " + php_string(since.group(1))
+    if message:
+        text += ", " + php_string(message.group(1))
+    return text
+
+
+def strip_comments(source):
+    source = re.sub(r"/\*.*?\*/", lambda m: "\n" * m.group(0).count("\n"), source, flags=re.S)
+    return re.sub(r"(?m)//.*$", "", source)
+
+
+def scan(source, found):
+    namespace = ""
+    scope = None
+    scope_depth = 0
+    depth = 0
+    pending = None
+    for line in strip_comments(source).split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("#if") or stripped.startswith("#endif") or stripped.startswith("#else") or stripped.startswith("#elif"):
+            continue
+        m = re.match(r"namespace\b\s*([\w\\]*)\s*[;{]", stripped)
+        if m:
+            namespace = m.group(1)
+        m = re.search(r"#\[\\Deprecated(?:\((.*)\))?\]", stripped)
+        if m:
+            pending = suffix(m.group(1) or "")
+        m = re.match(r"(?:(?:abstract|final|readonly)\s+)*(class|interface|trait|enum)\s+(\w+)", stripped)
+        if m and scope is None:
+            scope = (namespace + "\\" if namespace else "") + m.group(2)
+            scope_depth = depth
+        m = re.search(r"\bfunction\s+(\w+)\s*\(", stripped)
+        if m and pending is not None:
+            name = m.group(1)
+            if scope:
+                found["functions"][scope + "::" + name] = pending
+            else:
+                found["functions"][(namespace + "\\" if namespace else "") + name] = pending
+            pending = None
+        m = re.match(r"(?:(?:public|protected|private|final)\s+)*const\s+(?:\w+\s+)?(\w+)\s*=", stripped)
+        if m and pending is not None:
+            name = m.group(1)
+            if scope:
+                found["class_constants"][scope + "::" + name] = pending
+            else:
+                found["constants"][(namespace + "\\" if namespace else "") + name] = pending
+            pending = None
+        m = re.match(r"case\s+(\w+)", stripped)
+        if m and pending is not None and scope:
+            found["class_constants"][scope + "::" + m.group(1)] = pending
+            pending = None
+        depth += line.count("{") - line.count("}")
+        if scope is not None and depth <= scope_depth and "}" in line:
+            scope = None
+
+
+def zig_string(s):
+    out = []
+    for b in s.encode():
+        c = chr(b)
+        if c in '"\\':
+            out.append("\\" + c)
+        elif 32 <= b < 127:
+            out.append(c)
+        else:
+            out.append("\\x%02x" % b)
+    return '"' + "".join(out) + '"'
+
+
+def main():
+    version = target_version()
+    found = {"functions": {}, "constants": {}, "class_constants": {}}
+    for _, source in stubs(version, sys.argv[1] if len(sys.argv) > 1 else None):
+        scan(source, found)
+    lines = [
+        "// generated by scripts/gen-php-deprecations from the php %s stubs; do not edit" % version,
+        "const std = @import(\"std\");",
+        "",
+    ]
+    docs = {
+        "functions": "// functions and methods (\"Class::method\"), with what follows \"is deprecated\"",
+        "constants": "// global constants",
+        "class_constants": "// class constants and enum cases (\"Class::NAME\")",
+    }
+    for kind in ("functions", "constants", "class_constants"):
+        lines.append(docs[kind])
+        lines.append("pub const %s = std.StaticStringMap([]const u8).initComptime(.{" % kind)
+        for name in sorted(found[kind]):
+            lines.append("    .{ %s, %s }," % (zig_string(name), zig_string(found[kind][name])))
+        lines.append("});")
+        lines.append("")
+    with open(OUT, "w") as f:
+        f.write("\n".join(lines).rstrip() + "\n")
+    print("%d functions and methods, %d constants, %d class constants" % tuple(len(found[k]) for k in ("functions", "constants", "class_constants")))
+
+
+if __name__ == "__main__":
+    main()
