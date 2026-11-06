@@ -108,10 +108,19 @@ pub const EnvSnapshot = struct {
         const env_map = platform.getEnvMap(a) catch return .{ .env_arr = arr, .allocator = a };
         defer @constCast(&env_map).deinit();
         var iter = env_map.iterator();
+        // a variable that can't be copied in full is left out, its copied
+        // half freed
         while (iter.next()) |entry| {
             const key = a.dupe(u8, entry.key_ptr.*) catch continue;
-            const val = a.dupe(u8, entry.value_ptr.*) catch continue;
-            arr.set(a, .{ .string = Value.String.borrowed(key) }, .{ .string = Value.String.borrowed(val) }) catch continue;
+            const val = a.dupe(u8, entry.value_ptr.*) catch {
+                a.free(key);
+                continue;
+            };
+            arr.set(a, .{ .string = Value.String.borrowed(key) }, .{ .string = Value.String.borrowed(val) }) catch {
+                a.free(key);
+                a.free(val);
+                continue;
+            };
         }
         return .{ .env_arr = arr, .allocator = a };
     }
