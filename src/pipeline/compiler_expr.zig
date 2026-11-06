@@ -909,6 +909,10 @@ fn compileArgLvalue(self: *Compiler, arg_idx: u32, guard: ArgGuard) Error!void {
             try emitArgGuard(self, guard, .arg_guard_dim);
             try self.emitOp(.array_get);
         },
+        .array_push_target => {
+            try compileArgLvalue(self, arg.data.lhs, guard);
+            try emitArgGuard(self, guard, .arg_append);
+        },
         .variable => {
             try self.compileNode(arg_idx);
             try self.emitOp(.arg_variable);

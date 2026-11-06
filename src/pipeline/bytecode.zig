@@ -390,11 +390,14 @@ pub const OpCode = enum(u8) {
     // array_get for a destructuring slot: null reads as null quietly, other
     // scalars (strings too) warn "Cannot use T as array" and read null
     array_get_list,
+    // u16 delta, u8 pos: an argument written $a[]. passed by reference it
+    // appends a null element and passes that; by value it is an Error
+    arg_append,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
             .arg_variable => 6,
-            .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim => 4,
+            .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim, .arg_append => 4,
             .reference_source,
             .constant,
             .get_var,

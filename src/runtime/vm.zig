@@ -5049,9 +5049,15 @@ pub const VM = struct {
                     const key = self.pop();
                     var base_source = if (capturing) self.retainArgSource(self.ic.?.arg_stack[self.sp - 1]) else RefSource.none;
                     defer self.releaseArgSource(&base_source);
-                    const arr_val = self.pop();
+                    var arr_val = self.pop();
                     const arg_sp = self.sp;
                     if (capturing) {
+                        // a by-reference argument fetches for writing: a
+                        // container that holds nothing becomes an array
+                        if ((arr_val == .null or arr_val == .undef or (arr_val == .bool and !arr_val.bool)) and base_source != .none)
+                            arr_val = try self.vivifyArgContainer(base_source)
+                        else if (arr_val == .array)
+                            arr_val = .{ .array = try self.separateArgContainer(base_source, arr_val.array) };
                         retainValue(arr_val);
                         retainValue(key);
                     }
@@ -5084,7 +5090,7 @@ pub const VM = struct {
                         }
                         if (key == .resource) self.warnResourceOffset(key) catch if (try self.resumeRaised()) continue;
                         const ak = Value.toArrayKey(key);
-                        if (!arr_val.array.contains(ak)) {
+                        if (!capturing and !arr_val.array.contains(ak)) {
                             self.emitUndefinedKeyWarning(ak) catch if (try self.resumeRaised()) continue;
                         }
                         self.push(arr_val.array.get(ak));
@@ -8828,6 +8834,37 @@ pub const VM = struct {
                         self.setArgSource(self.sp - 1, .{ .simple = name });
                     }
                 },
+                .arg_append => {
+                    const field = self.currentFrame().ip;
+                    const delta = self.readU16();
+                    const pos = self.readByte();
+                    if (!self.argNeedsCapture(self.currentChunk(), field, delta, pos, 1)) {
+                        if (try self.throwBuiltinException("Error", "Cannot use [] for reading")) continue;
+                        return error.RuntimeError;
+                    }
+                    var base_source = self.retainArgSource(self.ic.?.arg_stack[self.sp - 1]);
+                    defer self.releaseArgSource(&base_source);
+                    var container = self.pop();
+                    if (container == .null or container == .undef or (container == .bool and !container.bool)) {
+                        container = try self.vivifyArgContainer(base_source);
+                    } else if (container == .array) {
+                        container = .{ .array = try self.separateArgContainer(base_source, container.array) };
+                    } else {
+                        const msg = switch (container) {
+                            .string => try self.allocator.dupe(u8, "[] operator not supported for strings"),
+                            .object => |o| try std.fmt.allocPrint(self.allocator, "Cannot use object of type {s} as array", .{o.class_name}),
+                            else => try self.allocator.dupe(u8, "Cannot use a scalar value as an array"),
+                        };
+                        defer self.allocator.free(msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    }
+                    const arr = container.array;
+                    const key: Value = .{ .int = if (arr.has_int_keys) arr.next_int_key else 0 };
+                    const arg_sp = self.sp;
+                    self.push(.null);
+                    try self.captureDimensionCell(arg_sp, arr, key, base_source);
+                },
                 .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim => {
                     const field = self.currentFrame().ip;
                     const delta = self.readU16();
@@ -8969,11 +9006,19 @@ pub const VM = struct {
                                 if (try self.throwBuiltinException("Error", msg)) continue;
                                 return error.RuntimeError;
                             }
-                            const msg = try std.fmt.allocPrint(self.allocator, "Undefined property: {s}::${s}", .{ obj.class_name, prop_name });
-                            defer self.allocator.free(msg);
-                            self.emitWarning(msg) catch if (try self.resumeRaised()) continue;
+                            // a by-reference argument creates the property
+                            if (!capturing) {
+                                const msg = try std.fmt.allocPrint(self.allocator, "Undefined property: {s}::${s}", .{ obj.class_name, prop_name });
+                                defer self.allocator.free(msg);
+                                self.emitWarning(msg) catch if (try self.resumeRaised()) continue;
+                            }
                             self.push(.null);
                         }
+                    } else if (capturing) {
+                        const msg = try std.fmt.allocPrint(self.allocator, "Attempt to modify property \"{s}\" on {s}", .{ prop_name, obj_val.valueName() });
+                        defer self.allocator.free(msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
                     } else {
                         self.push(.null);
                     }
@@ -16359,6 +16404,54 @@ pub const VM = struct {
     }
 
     // Provenance is an owning transport, independent of the evaluated value.
+    // the array a by-reference argument's container becomes when it holds
+    // nothing, stored where the container came from
+    fn vivifyArgContainer(self: *VM, base: RefSource) RuntimeError!Value {
+        const fresh: Value = .{ .array = try self.allocArray() };
+        switch (base) {
+            .simple => |name| {
+                if (isSuperglobal(name)) {
+                    const cell = try self.superglobalCell(name);
+                    self.setCell(cell, fresh);
+                    try self.propagateCellWrite(cell, fresh);
+                } else {
+                    retainValue(fresh);
+                    try self.setVariableByName(self.currentFrame(), try self.internName(name), fresh);
+                }
+            },
+            .cell => |c| {
+                self.setCell(c.value, fresh);
+                try self.propagateCellWrite(c.value, fresh);
+            },
+            .none => {},
+        }
+        return fresh;
+    }
+
+    // the array a by-reference argument writes into, separated from the
+    // copies that share it and stored back where it came from
+    fn separateArgContainer(self: *VM, base: RefSource, arr: *PhpArray) RuntimeError!*PhpArray {
+        switch (base) {
+            .simple => |name| {
+                const frame = self.currentFrame();
+                if (isSuperglobal(name)) return arr;
+                if (frame.ref_slots.get(name)) |cell| return (try self.separateReferencedArray(frame, name, cell, arr)) orelse arr;
+                const sep = try self.cowSeparate(arr);
+                if (sep != arr) try self.setVariableByName(frame, try self.internName(name), .{ .array = sep });
+                return sep;
+            },
+            .cell => |c| {
+                if (arr.refcount - arr.byref_pins <= self.referenceAliasCount(c.value)) return arr;
+                const clone = try self.shallowCloneCow(arr);
+                const value: Value = .{ .array = clone };
+                self.setCell(c.value, value);
+                try self.propagateCellWrite(c.value, value);
+                return clone;
+            },
+            .none => return arr,
+        }
+    }
+
     fn captureDimensionCell(self: *VM, slot: usize, array: *PhpArray, key: Value, base: RefSource) RuntimeError!void {
         const ak = Value.toArrayKey(key);
         if (!array.contains(ak)) try self.arraySetOwned(array, ak, .null);
