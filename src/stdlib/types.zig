@@ -1577,6 +1577,7 @@ fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "open_basedir")) return "";
     if (std.mem.eql(u8, name, "include_path")) return includes.default_include_path;
     if (std.mem.eql(u8, name, "log_errors")) return "1";
+    if (std.mem.eql(u8, name, "fatal_error_backtraces")) return "1";
     if (std.mem.eql(u8, name, "error_log")) return "";
     if (std.mem.eql(u8, name, "html_errors")) return "0";
     if (std.mem.eql(u8, name, "max_execution_time")) return "0";

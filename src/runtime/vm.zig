@@ -4419,9 +4419,10 @@ pub const VM = struct {
                 },
                 .jump_back => {
                     const offset = self.readU16();
+                    // a timeout is reported at the jump, the loop's own line
+                    try self.pollExecutionDeadline();
                     self.currentFrame().ip -= offset;
                     self.collectCyclesIfNeeded();
-                    try self.pollExecutionDeadline();
                     if (self.currentFrame().locals.len > 0) {
                         try self.fastLoop();
                         if (self.frame_count <= base_frame) return;
@@ -12417,6 +12418,11 @@ pub const VM = struct {
 
     pub fn logErrorsEnabled(self: *const VM) bool {
         return self.iniFlagOn("log_errors", "1");
+    }
+
+    // php 8.5 follows a fatal error with the stack it happened on
+    pub fn fatalErrorBacktraces(self: *const VM) bool {
+        return self.iniFlagOn("fatal_error_backtraces", "1");
     }
 
     // php's error log: the error_log file when one is set, each line stamped

@@ -395,11 +395,14 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .jump_back => {
                     const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     ip += 2;
+                    // a timeout is reported at the jump, the loop's own line;
+                    // fastLoop owns its ip, so flush it for the exception
+                    if (self.deadlineReached()) {
+                        self.frames[self.frame_count - 1].ip = ip;
+                        try status(ic.slow.expire_execution(self));
+                    }
                     ip -= offset;
-                    // fastLoop owns its own ip; flush it before the deadline check
-                    // so a timeout-thrown exception sees a coherent frame state
                     self.frames[self.frame_count - 1].ip = ip;
-                    if (self.deadlineReached()) try status(ic.slow.expire_execution(self));
                     const _next = code[ip];
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));

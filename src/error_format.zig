@@ -2,6 +2,7 @@ const std = @import("std");
 const Chunk = @import("pipeline/bytecode.zig").Chunk;
 const Ast = @import("pipeline/ast.zig").Ast;
 const Value = @import("runtime/value.zig").Value;
+const PhpObject = @import("runtime/value.zig").PhpObject;
 const php_syntax = @import("pipeline/php_syntax.zig");
 const VM = @import("runtime/vm.zig").VM;
 const Diagnostic = @import("pipeline/compiler.zig").Diagnostic;
@@ -72,8 +73,10 @@ pub fn formatRuntimeError(alloc: std.mem.Allocator, vm: *const VM) []const u8 {
         } else {
             writeFmt(&buf, alloc, "PHP Fatal error:  {s}", .{msg});
             appendPhpLocationLine(&buf, alloc, vm);
-            write(&buf, alloc, "Stack trace:\n");
-            writeStackTrace(&buf, alloc, vm);
+            if (vm.fatalErrorBacktraces()) {
+                write(&buf, alloc, "Stack trace:\n");
+                writeStackTrace(&buf, alloc, vm);
+            }
         }
     } else {
         write(&buf, alloc, "Fatal error: unknown runtime error");
@@ -149,12 +152,7 @@ fn formatUncaughtException(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM
         const parse = std.mem.eql(u8, class_name, "ParseError");
         const label: []const u8 = if (parse) "Parse error" else "Fatal error";
         writeFmt(buf, alloc, "{s}{s}{s}{s} in {s} on line {d}\n", .{ lead, label, gap, message, where, line });
-        // php 8.5 follows a compile-time fatal with the stack it was raised on
-        if (!parse) {
-            write(buf, alloc, "Stack trace:\n");
-            writeTrace(buf, alloc, exc.object.getForScope("trace", vm.exceptionTraceScope(exc.object)));
-            write(buf, alloc, "\n");
-        }
+        if (!parse) writeFatalTrace(buf, alloc, vm, exc.object);
         return;
     }
 
@@ -162,11 +160,16 @@ fn formatUncaughtException(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM
     // bare fatals without the "Uncaught Class:" prefix or stack trace - this
     // matches how PHP prints `Maximum execution time of N seconds exceeded`
     if (vm.uncatchable_fatal) {
-        if (vm.sourceLocation(frame.chunk, ip)) |loc| {
+        const file_v = if (exc == .object) exc.object.get("file") else Value.null;
+        const line_v = if (exc == .object) exc.object.get("line") else Value.null;
+        if (file_v == .string and file_v.string.bytes().len > 0 and line_v == .int) {
+            writeFmt(buf, alloc, "{s}Fatal error{s}{s} in {s} on line {d}\n", .{ lead, gap, message, file_v.string.bytes(), line_v.int });
+        } else if (vm.sourceLocation(frame.chunk, ip)) |loc| {
             writeFmt(buf, alloc, "{s}Fatal error{s}{s} in {s} on line {d}\n", .{ lead, gap, message, path, loc.line });
         } else {
             writeFmt(buf, alloc, "{s}Fatal error{s}{s} in {s}\n", .{ lead, gap, message, path });
         }
+        if (exc == .object) writeFatalTrace(buf, alloc, vm, exc.object);
         return;
     }
 
@@ -199,6 +202,15 @@ fn formatUncaughtException(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM
     }
 }
 
+// php 8.5's "Stack trace:" after a fatal error, from the stack the error
+// recorded, unless fatal_error_backtraces is off
+fn writeFatalTrace(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM, err: *const PhpObject) void {
+    if (!vm.fatalErrorBacktraces()) return;
+    write(buf, alloc, "Stack trace:\n");
+    writeTrace(buf, alloc, err.getForScope("trace", vm.exceptionTraceScope(err)));
+    write(buf, alloc, "\n");
+}
+
 fn appendLocationContext(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM) void {
     if (vm.frame_count == 0) {
         write(buf, alloc, "\n");
@@ -212,6 +224,7 @@ fn appendLocationContext(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM) 
     } else {
         writeFmt(buf, alloc, " in {s}\n", .{path});
     }
+    if (!vm.fatalErrorBacktraces()) return;
     write(buf, alloc, "Stack trace:\n");
     writeStackTrace(buf, alloc, vm);
 }
