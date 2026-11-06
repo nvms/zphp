@@ -104,7 +104,7 @@ pub fn appendOwn(vm: *VM, obj: *PhpObject, purpose: Purpose, listing: *Listing, 
             if (i >= slots.len) break;
             if (obj.isLazySlot(name, layout.declaring_classes[i])) continue;
             if (obj.isUnset(name) or isInternalState(vm, obj, name)) continue;
-            const declared = vm.findPropertyVisibility(obj.class_name, name);
+            const declared = vm.propertyDeclaration(layout.declaring_classes[i], name);
             const uninitialized = slots[i] == .null and declared.type_str.len > 0 and vm.typedPropForbidsNull(declared.type_str);
             if (uninitialized and purpose != .debug) continue;
             try listing.items.append(allocator, .{ .key = .{ .name = name }, .value = slots[i], .visibility = declared.visibility, .declaring = declared.defining_class, .declared = true, .uninitialized = if (uninitialized) declared.type_str else null });
@@ -113,9 +113,15 @@ pub fn appendOwn(vm: *VM, obj: *PhpObject, purpose: Purpose, listing: *Listing, 
     var it = obj.properties.iterator();
     while (it.next()) |entry| {
         const name = entry.key_ptr.*;
-        if (obj.slot_layout) |layout| if (inSlots(layout, name)) continue;
         if (isInternalState(vm, obj, name)) continue;
-        const declared = vm.findPropertyVisibility(obj.class_name, name);
+        // beside a slot of the same name (an ancestor's private) the entry is
+        // a dynamic property of its own
+        if (obj.slot_layout) |layout| if (inSlots(layout, name)) {
+            if (!shadowsPrivate(layout, name)) continue;
+            try listing.items.append(allocator, .{ .key = .{ .name = name }, .value = entry.value_ptr.*, .declaring = obj.class_name });
+            continue;
+        };
+        const declared = vm.propertyDeclaration(obj.class_name, name);
         try listing.items.append(allocator, .{ .key = .{ .name = name }, .value = entry.value_ptr.*, .visibility = declared.visibility, .declaring = declared.defining_class });
     }
 }
@@ -152,6 +158,15 @@ fn unmangle(key: []const u8, value: Value) Property {
         }
     }
     return .{ .key = .{ .name = key }, .value = value };
+}
+
+// every slot of the name is some class's private, so a property stored by
+// name beside them is a separate one
+fn shadowsPrivate(layout: *const PhpObject.SlotLayout, name: []const u8) bool {
+    for (layout.names, 0..) |slot_name, i| {
+        if (std.mem.eql(u8, slot_name, name) and !layout.is_private[i]) return false;
+    }
+    return true;
 }
 
 fn inSlots(layout: *const PhpObject.SlotLayout, name: []const u8) bool {
