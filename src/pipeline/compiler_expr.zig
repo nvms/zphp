@@ -752,6 +752,7 @@ fn compileCoalesceFetch(self: *Compiler, node_idx: u32) Error!void {
         }
         return;
     }
+    if (n.tag == .nullsafe_property_access) return compileNullsafePropertyFetch(self, n, true);
     if (n.tag == .static_prop_access) return compileStaticPropRead(self, n, true);
     try self.compileNode(node_idx);
 }
@@ -1481,6 +1482,11 @@ pub fn compileMethodCall(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 pub fn compileNullsafePropertyAccess(self: *Compiler, node: Ast.Node) Error!void {
+    return compileNullsafePropertyFetch(self, node, false);
+}
+
+// quiet under `??`: the property reads as isset would, without a warning
+fn compileNullsafePropertyFetch(self: *Compiler, node: Ast.Node, quiet: bool) Error!void {
     // create or reuse the chain jump-list. when an outer chain link is
     // collecting, append our short-circuit jump there; otherwise patch locally
     var local_jumps: std.ArrayListUnmanaged(usize) = .empty;
@@ -1492,12 +1498,12 @@ pub fn compileNullsafePropertyAccess(self: *Compiler, node: Ast.Node) Error!void
         local_jumps.deinit(self.allocator);
     };
 
-    try self.compileNode(node.data.lhs);
+    if (quiet) try compileCoalesceFetch(self, node.data.lhs) else try self.compileNode(node.data.lhs);
     const skip_jump = try self.emitJump(.jump_if_not_null);
     const end_jump = try self.emitJump(.jump);
     self.patchJump(skip_jump);
     const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(self.propName(node)) });
-    try self.emitOp(.get_prop);
+    try self.emitOp(if (quiet) .get_prop_coalesce else .get_prop);
     try self.emitU16(name_idx);
     try self.nullsafe_chain_jumps.?.append(self.allocator, end_jump);
 }

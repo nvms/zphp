@@ -6575,6 +6575,11 @@ pub const VM = struct {
                                 continue;
                             }
                         }
+                        // a reference to a property that doesn't exist creates it
+                        if (!has_prop) {
+                            if (!self.classDeclaresProperty(obj_ptr.class_name, prop_name) and try self.checkDynamicProperty(obj_ptr, prop_name)) continue;
+                            try obj_ptr.set(self.allocator, prop_name, .null);
+                        }
                         const cell = blk: {
                             if (self.ref_index) |ri| {
                                 if (ri.prop_rev.get(.{ .object = obj_ptr, .class_name = "", .prop_name = prop_name })) |cells| {
@@ -8922,6 +8927,9 @@ pub const VM = struct {
                                 if (try self.throwBuiltinException("Error", msg)) continue;
                                 return error.RuntimeError;
                             }
+                            const msg = try std.fmt.allocPrint(self.allocator, "Undefined property: {s}::${s}", .{ obj.class_name, prop_name });
+                            defer self.allocator.free(msg);
+                            self.emitWarning(msg) catch if (try self.resumeRaised()) continue;
                             self.push(.null);
                         }
                     } else {
