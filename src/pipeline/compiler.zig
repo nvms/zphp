@@ -388,7 +388,13 @@ pub const Compiler = struct {
         defer self.hoistable = was_hoistable;
         switch (node.tag) {
             .expression_stmt => {
-                if (self.tryCompileLocalAssignSuper(node.data.lhs)) |emitted| {
+                // a bare variable statement reads nothing in php, so it never
+                // warns, except $this, which php fetches
+                var expr = self.ast.nodes[node.data.lhs];
+                while (expr.tag == .grouped_expr) expr = self.ast.nodes[expr.data.lhs];
+                if (expr.tag == .variable and !std.mem.eql(u8, self.ast.tokenSlice(expr.main_token), "$this")) {
+                    // nothing to emit
+                } else if (self.tryCompileLocalAssignSuper(node.data.lhs)) |emitted| {
                     if (!emitted) {
                         try self.compileNode(node.data.lhs);
                         try self.emitOp(.pop_boundary);
