@@ -222,6 +222,7 @@ Zend/tests/bug34062.phpt
 Zend/tests/bug34064.phpt
 Zend/tests/bug34137.phpt
 Zend/tests/bug34260.phpt
+Zend/tests/bug34617.phpt
 Zend/tests/bug34678.phpt
 Zend/tests/bug35017.phpt
 Zend/tests/bug35163_2.phpt
@@ -617,6 +618,7 @@ Zend/tests/dynamic_call/dynamic_call_freeing.phpt
 Zend/tests/dynamic_call/dynamic_call_non_static.phpt
 Zend/tests/dynamic_call/dynamic_fully_qualified_call.phpt
 Zend/tests/dynamic_call/dynamic_method_calls.phpt
+Zend/tests/e_strict-deprecated.phpt
 Zend/tests/empty_with_expr.phpt
 Zend/tests/entry_block_with_predecessors.phpt
 Zend/tests/enum/__call.phpt
@@ -2370,11 +2372,13 @@ ext/date/tests/DatePeriod_serialize-003.phpt
 ext/date/tests/DatePeriod_set_state.phpt
 ext/date/tests/DatePeriod_set_state_exception.phpt
 ext/date/tests/DatePeriod_wrong_recurrence_on_constructor.phpt
+ext/date/tests/DateTimeImmutable_constants.phpt
 ext/date/tests/DateTimeImmutable_createFromInterface-001.phpt
 ext/date/tests/DateTimeImmutable_inherited_serialization.phpt
 ext/date/tests/DateTimeImmutable_modify_invalid_format.phpt
 ext/date/tests/DateTimeImmutable_serialization.phpt
 ext/date/tests/DateTimeImmutable_set_state.phpt
+ext/date/tests/DateTimeInterface_constants.phpt
 ext/date/tests/DateTimeInterval_inherited_serialization.phpt
 ext/date/tests/DateTimePeriod_inherited_serialization.phpt
 ext/date/tests/DateTimeZone_clone_basic1.phpt
@@ -2407,6 +2411,7 @@ ext/date/tests/DateTime_clone_basic1.phpt
 ext/date/tests/DateTime_clone_basic2.phpt
 ext/date/tests/DateTime_clone_basic3.phpt
 ext/date/tests/DateTime_clone_basic4.phpt
+ext/date/tests/DateTime_constants.phpt
 ext/date/tests/DateTime_construct-dst-overlap.phpt
 ext/date/tests/DateTime_construct_basic1.phpt
 ext/date/tests/DateTime_construct_error.phpt
@@ -2438,6 +2443,7 @@ ext/date/tests/DateTime_extends_basic2.phpt
 ext/date/tests/DateTime_extends_basic3.phpt
 ext/date/tests/DateTime_fix_createFromFormat.phpt
 ext/date/tests/DateTime_format_basic1.phpt
+ext/date/tests/DateTime_format_basic2.phpt
 ext/date/tests/DateTime_getOffset_basic1.phpt
 ext/date/tests/DateTime_getTimeZone_basic1.phpt
 ext/date/tests/DateTime_inherited_serialization.phpt
@@ -2616,6 +2622,7 @@ ext/date/tests/bug64653.phpt
 ext/date/tests/bug64887.phpt
 ext/date/tests/bug64992.phpt
 ext/date/tests/bug65003.phpt
+ext/date/tests/bug65371.phpt
 ext/date/tests/bug65502.phpt
 ext/date/tests/bug66019.phpt
 ext/date/tests/bug66545.phpt
@@ -2707,6 +2714,7 @@ ext/date/tests/date-time-modify-times.phpt
 ext/date/tests/date.phpt
 ext/date/tests/date_add_basic.phpt
 ext/date/tests/date_basic1.phpt
+ext/date/tests/date_constants.phpt
 ext/date/tests/date_create-1.phpt
 ext/date/tests/date_create-2.phpt
 ext/date/tests/date_create-relative.phpt
@@ -2792,6 +2800,13 @@ ext/date/tests/gmdate_variation9.phpt
 ext/date/tests/gmmktime_basic.phpt
 ext/date/tests/gmmktime_variation7.phpt
 ext/date/tests/gmmktime_variation8.phpt
+ext/date/tests/gmstrftime_basic.phpt
+ext/date/tests/gmstrftime_variation11.phpt
+ext/date/tests/gmstrftime_variation12.phpt
+ext/date/tests/gmstrftime_variation19.phpt
+ext/date/tests/gmstrftime_variation20.phpt
+ext/date/tests/gmstrftime_variation4.phpt
+ext/date/tests/gmstrftime_variation5.phpt
 ext/date/tests/idate_basic.phpt
 ext/date/tests/idate_variation4.phpt
 ext/date/tests/idate_variation5.phpt
@@ -2816,6 +2831,13 @@ ext/date/tests/rfc-datetime_and_daylight_saving_time-type3-bs.phpt
 ext/date/tests/rfc-datetime_and_daylight_saving_time-type3-fa.phpt
 ext/date/tests/rfc-datetime_and_daylight_saving_time-type3-fd.phpt
 ext/date/tests/rfc-datetime_and_daylight_saving_time-type3-fs.phpt
+ext/date/tests/strftime_basic.phpt
+ext/date/tests/strftime_variation11.phpt
+ext/date/tests/strftime_variation12.phpt
+ext/date/tests/strftime_variation19.phpt
+ext/date/tests/strftime_variation20.phpt
+ext/date/tests/strftime_variation4.phpt
+ext/date/tests/strftime_variation5.phpt
 ext/date/tests/strtotime-mysql-64bit.phpt
 ext/date/tests/strtotime-relative.phpt
 ext/date/tests/strtotime.phpt
@@ -3064,6 +3086,7 @@ ext/reflection/tests/ReflectionClass_modifiers_001.phpt
 ext/reflection/tests/ReflectionConstant_double_construct.phpt
 ext/reflection/tests/ReflectionConstant_getAttributes_empty.phpt
 ext/reflection/tests/ReflectionConstant_inexistent.phpt
+ext/reflection/tests/ReflectionConstant_isDeprecated_userland.phpt
 ext/reflection/tests/ReflectionConstant_null_byte_value.phpt
 ext/reflection/tests/ReflectionEnumUnitCase_getDocComment.phpt
 ext/reflection/tests/ReflectionEnumUnitCase_getValue.phpt
@@ -3091,6 +3114,7 @@ ext/reflection/tests/ReflectionMethod_006.phpt
 ext/reflection/tests/ReflectionMethod_basic3.phpt
 ext/reflection/tests/ReflectionMethod_constructor_basic.phpt
 ext/reflection/tests/ReflectionMethod_isDeprecated_interface.phpt
+ext/reflection/tests/ReflectionMethod_setAccessible.phpt
 ext/reflection/tests/ReflectionNamedType.phpt
 ext/reflection/tests/ReflectionObject_FileInfo_basic.phpt
 ext/reflection/tests/ReflectionObject_getConstants_basic.phpt
@@ -4150,6 +4174,7 @@ ext/standard/tests/array/unexpected_array_mod_bug.phpt
 ext/standard/tests/array/var_export.phpt
 ext/standard/tests/array/var_export2.phpt
 ext/standard/tests/array/var_export3.phpt
+ext/standard/tests/assert/assert_closures_multiple.phpt
 ext/standard/tests/assert/assert_custom_exception.phpt
 ext/standard/tests/bug49244.phpt
 ext/standard/tests/bug64370_var2.phpt
@@ -4917,6 +4942,7 @@ ext/standard/tests/strings/bug40637.phpt
 ext/standard/tests/strings/bug40704.phpt
 ext/standard/tests/strings/bug40915.phpt
 ext/standard/tests/strings/bug43927.phpt
+ext/standard/tests/strings/bug43957.phpt
 ext/standard/tests/strings/bug44242.phpt
 ext/standard/tests/strings/bug45166.phpt
 ext/standard/tests/strings/bug45485.phpt
@@ -5215,6 +5241,7 @@ ext/standard/tests/strings/trim_basic.phpt
 ext/standard/tests/strings/ucwords_variation3.phpt
 ext/standard/tests/strings/ucwords_variation5.phpt
 ext/standard/tests/strings/unpack_bug68225.phpt
+ext/standard/tests/strings/utf8.phpt
 ext/standard/tests/strings/vfprintf_basic.phpt
 ext/standard/tests/strings/vfprintf_basic1.phpt
 ext/standard/tests/strings/vfprintf_basic2.phpt
