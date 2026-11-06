@@ -57,9 +57,36 @@ pub const Listing = struct {
 // mangles them: "\0Class\0name", "\0*\0name"
 pub const Hook = *const fn (*vm_mod.NativeContext, *PhpObject, Purpose) RuntimeError!?*PhpArray;
 
+// php's lazy objects: a ghost until its initializer runs, a proxy for good
+pub const Laziness = enum { none, ghost, proxy };
+
+pub fn laziness(obj: *const PhpObject) Laziness {
+    const state = obj.lazy orelse return .none;
+    if (state.proxy) return if (state.initializer != .null or state.backing != null) .proxy else .none;
+    return if (state.initializer != .null) .ghost else .none;
+}
+
+// what var_dump and debug_zval_dump write before "object("
+pub fn lazyPrefix(obj: *const PhpObject) []const u8 {
+    return switch (laziness(obj)) {
+        .none => "",
+        .ghost => "lazy ghost ",
+        .proxy => "lazy proxy ",
+    };
+}
+
 pub fn list(vm: *VM, obj: *PhpObject, purpose: Purpose, allocator: std.mem.Allocator) RuntimeError!Listing {
     var listing: Listing = .{};
     errdefer listing.deinit(allocator);
+    // an initialized proxy shows its instance in the debug view and stands
+    // for it everywhere else
+    if (obj.lazy) |state| if (state.proxy) if (state.backing) |instance| {
+        if (purpose == .debug) {
+            try listing.items.append(allocator, .{ .key = .{ .name = "instance" }, .value = .{ .object = instance } });
+            return listing;
+        }
+        return list(vm, instance, purpose, allocator);
+    };
     if (try table(vm, obj, purpose)) |arr| {
         for (arr.entries.items) |entry| {
             const value = if (entry.ref) |ref| ref.* else entry.value;
@@ -102,7 +129,15 @@ pub fn appendOwn(vm: *VM, obj: *PhpObject, purpose: Purpose, listing: *Listing, 
     if (obj.slot_layout) |layout| if (obj.slots) |slots| {
         for (layout.names, 0..) |name, i| {
             if (i >= slots.len) break;
-            if (obj.isLazySlot(name, layout.declaring_classes[i])) continue;
+            // a lazy object's property not yet initialized: the debug view
+            // lists a typed one as uninitialized, as php does
+            if (obj.isLazySlot(name, layout.declaring_classes[i])) {
+                if (purpose != .debug or isInternalState(vm, obj, name)) continue;
+                const declared = vm.propertyDeclaration(layout.declaring_classes[i], name);
+                if (declared.type_str.len == 0) continue;
+                try listing.items.append(allocator, .{ .key = .{ .name = name }, .value = .null, .visibility = declared.visibility, .declaring = declared.defining_class, .declared = true, .uninitialized = declared.type_str });
+                continue;
+            }
             if (obj.isUnset(name) or isInternalState(vm, obj, name)) continue;
             const declared = vm.propertyDeclaration(layout.declaring_classes[i], name);
             const uninitialized = slots[i] == .null and declared.type_str.len > 0 and vm.typedPropForbidsNull(declared.type_str);

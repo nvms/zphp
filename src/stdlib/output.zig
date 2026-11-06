@@ -156,6 +156,7 @@ fn varDumpMarked(ctx: *NativeContext, val: Value, depth: usize, marker: []const 
 
             try appendIndent(out, a, indent);
             try out.appendSlice(a, marker);
+            try out.appendSlice(a, object_properties.lazyPrefix(obj));
             try out.appendSlice(a, "object(");
             try out.appendSlice(a, obj.class_name);
             var initialized: usize = 0;

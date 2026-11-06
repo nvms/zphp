@@ -1018,7 +1018,9 @@ pub const PhpObject = struct {
     pub fn isLazySlot(self: *const PhpObject, name: []const u8, scope: ?[]const u8) bool {
         const state = self.lazy orelse return false;
         if (state.running or state.initializer == .null) return false;
-        const index = self.getSlotIndexForScope(name, scope) orelse return state.proxy;
+        // php initializes on any access to a property the object doesn't
+        // declare: it needs the real property table for it
+        const index = self.getSlotIndexForScope(name, scope) orelse return true;
         return state.pending[index];
     }
     pub const SlotLayout = struct {
