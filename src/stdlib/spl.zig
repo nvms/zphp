@@ -328,9 +328,13 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try pq_def.constants.put(a, "EXTR_DATA", .{ .int = EXTR_DATA });
     try pq_def.constants.put(a, "EXTR_PRIORITY", .{ .int = EXTR_PRIORITY });
     try pq_def.constants.put(a, "EXTR_BOTH", .{ .int = EXTR_BOTH });
+    try pq_def.methods.put(a, "__serialize", .{ .name = "__serialize", .arity = 0 });
+    try pq_def.methods.put(a, "__unserialize", .{ .name = "__unserialize", .arity = 1 });
     try vm.classes.put(a, "SplPriorityQueue", pq_def);
 
     try vm.native_fns.put(a, "SplPriorityQueue::__construct", pqConstruct);
+    try vm.native_fns.put(a, "SplPriorityQueue::__serialize", heapSerialize);
+    try vm.native_fns.put(a, "SplPriorityQueue::__unserialize", heapUnserialize);
     try vm.native_fns.put(a, "SplPriorityQueue::insert", pqInsert);
     try vm.native_fns.put(a, "SplPriorityQueue::extract", pqExtract);
     try vm.native_fns.put(a, "SplPriorityQueue::top", pqTop);
@@ -376,6 +380,10 @@ pub fn register(vm: *VM, a: Allocator) !void {
             try def.methods.put(a, "compare", .{ .name = "compare", .arity = 2, .visibility = .protected });
             try vm.native_fns.put(a, hc[0] ++ "::compare", compare);
         }
+        try def.methods.put(a, "__serialize", .{ .name = "__serialize", .arity = 0 });
+        try def.methods.put(a, "__unserialize", .{ .name = "__unserialize", .arity = 1 });
+        try vm.native_fns.put(a, hc[0] ++ "::__serialize", heapSerialize);
+        try vm.native_fns.put(a, hc[0] ++ "::__unserialize", heapUnserialize);
         try vm.classes.put(a, hc[0], def);
     }
 
@@ -399,9 +407,13 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try fa_def.methods.put(a, "next", .{ .name = "next", .arity = 0 });
     try fa_def.methods.put(a, "rewind", .{ .name = "rewind", .arity = 0 });
     try fa_def.methods.put(a, "valid", .{ .name = "valid", .arity = 0 });
+    try fa_def.methods.put(a, "__serialize", .{ .name = "__serialize", .arity = 0 });
+    try fa_def.methods.put(a, "__unserialize", .{ .name = "__unserialize", .arity = 1 });
     try vm.classes.put(a, "SplFixedArray", fa_def);
 
     try vm.native_fns.put(a, "SplFixedArray::__construct", faConstruct);
+    try vm.native_fns.put(a, "SplFixedArray::__serialize", fixedArraySerialize);
+    try vm.native_fns.put(a, "SplFixedArray::__unserialize", fixedArrayUnserialize);
     try vm.native_fns.put(a, "SplFixedArray::getSize", faGetSize);
     try vm.native_fns.put(a, "SplFixedArray::setSize", faSetSize);
     try vm.native_fns.put(a, "SplFixedArray::count", faCount);
@@ -479,9 +491,13 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dll_def.constants.put(a, "IT_MODE_FIFO", .{ .int = DLL_IT_MODE_FIFO });
     try dll_def.constants.put(a, "IT_MODE_DELETE", .{ .int = DLL_IT_MODE_DELETE });
     try dll_def.constants.put(a, "IT_MODE_KEEP", .{ .int = DLL_IT_MODE_KEEP });
+    try dll_def.methods.put(a, "__serialize", .{ .name = "__serialize", .arity = 0 });
+    try dll_def.methods.put(a, "__unserialize", .{ .name = "__unserialize", .arity = 1 });
     try vm.classes.put(a, "SplDoublyLinkedList", dll_def);
 
     try vm.native_fns.put(a, "SplDoublyLinkedList::__construct", dllConstruct);
+    try vm.native_fns.put(a, "SplDoublyLinkedList::__serialize", listSerialize);
+    try vm.native_fns.put(a, "SplDoublyLinkedList::__unserialize", listUnserialize);
     try vm.native_fns.put(a, "SplDoublyLinkedList::push", dllPush);
     try vm.native_fns.put(a, "SplDoublyLinkedList::pop", dllPop);
     try vm.native_fns.put(a, "SplDoublyLinkedList::unshift", dllUnshift);
@@ -531,9 +547,13 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try sos_def.methods.put(a, "offsetSet", .{ .name = "offsetSet", .arity = 2 });
     try sos_def.methods.put(a, "offsetExists", .{ .name = "offsetExists", .arity = 1 });
     try sos_def.methods.put(a, "offsetUnset", .{ .name = "offsetUnset", .arity = 1 });
+    try sos_def.methods.put(a, "__serialize", .{ .name = "__serialize", .arity = 0 });
+    try sos_def.methods.put(a, "__unserialize", .{ .name = "__unserialize", .arity = 1 });
     try vm.classes.put(a, "SplObjectStorage", sos_def);
 
     try vm.native_fns.put(a, "SplObjectStorage::__construct", sosConstruct);
+    try vm.native_fns.put(a, "SplObjectStorage::__serialize", objectStorageSerialize);
+    try vm.native_fns.put(a, "SplObjectStorage::__unserialize", objectStorageUnserialize);
     try vm.native_fns.put(a, "SplObjectStorage::attach", sosAttach);
     try vm.native_fns.put(a, "SplObjectStorage::detach", sosDetach);
     try vm.native_fns.put(a, "SplObjectStorage::contains", sosContains);
@@ -770,6 +790,204 @@ fn objectStorageProperties(ctx: *NativeContext, obj: *PhpObject, purpose: object
 fn dataOrEmpty(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Value {
     if (getData(obj)) |arr| return .{ .array = arr };
     return .{ .array = try ctx.vm.allocArray() };
+}
+
+// php's serialized forms of the SPL containers, each with the object's own
+// properties alongside its contents
+
+// SplDoublyLinkedList, SplQueue, SplStack: [flags, elements, properties]
+fn listSerialize(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const out = try ctx.createArray();
+    const mode = obj.get("__it_mode");
+    try out.append(ctx.allocator, if (mode == .int) mode else .{ .int = 0 });
+    const elements = try ctx.vm.allocArray();
+    if (getData(obj)) |arr| for (arr.entries.items) |entry| try elements.append(ctx.allocator, entry.value);
+    try out.append(ctx.allocator, .{ .array = elements });
+    try out.append(ctx.allocator, .{ .array = try object_properties.ownTable(ctx.vm, obj) });
+    return NativeResult.borrowed(.{ .array = out });
+}
+
+fn listUnserialize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const data = if (args.len > 0 and args[0] == .array) args[0].array else return illTyped(ctx);
+    const flags = data.get(.{ .int = 0 });
+    const elements = data.get(.{ .int = 1 });
+    const members = data.get(.{ .int = 2 });
+    if (flags != .int or elements != .array or members != .array) return illTyped(ctx);
+    try obj.set(ctx.allocator, "__it_mode", flags);
+    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    const arr = try ctx.vm.allocArray();
+    for (elements.array.entries.items) |entry| try arr.append(ctx.allocator, entry.value);
+    try obj.set(ctx.allocator, "__data", .{ .array = arr });
+    try loadProperties(ctx, obj, members.array);
+    return NativeResult.scalar(.null);
+}
+
+// SplObjectStorage: [obj, inf, obj, inf, ..., properties]
+fn objectStorageSerialize(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const out = try ctx.createArray();
+    const flat = try ctx.vm.allocArray();
+    if (sosGetObjs(obj)) |objs| {
+        const info = sosGetInfo(obj);
+        for (objs.entries.items) |entry| {
+            try flat.append(ctx.allocator, entry.value);
+            try flat.append(ctx.allocator, if (info) |i| i.get(entry.key) else .null);
+        }
+    }
+    try out.append(ctx.allocator, .{ .array = flat });
+    try out.append(ctx.allocator, .{ .array = try object_properties.ownTable(ctx.vm, obj) });
+    return NativeResult.borrowed(.{ .array = out });
+}
+
+fn objectStorageUnserialize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const data = if (args.len > 0 and args[0] == .array) args[0].array else return illTyped(ctx);
+    const flat = data.get(.{ .int = 0 });
+    const members = data.get(.{ .int = 1 });
+    if (flat != .array or members != .array) return illTyped(ctx);
+    if (flat.array.entries.items.len % 2 != 0) return unexpected(ctx, "Odd number of elements");
+    _ = try sosConstruct(ctx, &.{});
+    const objs = sosGetObjs(obj).?;
+    const info = sosGetInfo(obj).?;
+    var i: usize = 0;
+    while (i < flat.array.entries.items.len) : (i += 2) {
+        const target = flat.array.entries.items[i].value;
+        if (target != .object) return unexpected(ctx, "Non-object key");
+        const key = try sosHashKey(ctx, obj, target.object);
+        defer if (key == .string) key.string.release();
+        try ctx.vm.arraySetOwned(objs, key, target);
+        try ctx.vm.arraySetOwned(info, key, flat.array.entries.items[i + 1].value);
+    }
+    try loadProperties(ctx, obj, members.array);
+    return NativeResult.scalar(.null);
+}
+
+// SplFixedArray: its elements, then its own properties by name
+fn fixedArraySerialize(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const out = try ctx.createArray();
+    if (getData(obj)) |arr| for (arr.entries.items) |entry| try out.append(ctx.allocator, entry.value);
+    const own = try object_properties.ownTable(ctx.vm, obj);
+    for (own.entries.items) |entry| try out.set(ctx.allocator, entry.key, entry.value);
+    return NativeResult.borrowed(.{ .array = out });
+}
+
+fn fixedArrayUnserialize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const data = if (args.len > 0 and args[0] == .array) args[0].array else return NativeResult.scalar(.null);
+    const arr = try ctx.vm.allocArray();
+    for (data.entries.items) |entry| {
+        if (entry.key == .string) {
+            try obj.set(ctx.allocator, entry.key.string.bytes(), entry.value);
+        } else {
+            try arr.append(ctx.allocator, entry.value);
+        }
+    }
+    try obj.set(ctx.allocator, "__data", .{ .array = arr });
+    try obj.set(ctx.allocator, "__size", .{ .int = @intCast(arr.entries.items.len) });
+    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    return NativeResult.scalar(.null);
+}
+
+// the heaps: [properties, [flags, heap_elements]], the elements in heap
+// order; a priority queue's as data and priority
+fn heapSerialize(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const pqueue = ctx.vm.isInstanceOf(obj.class_name, "SplPriorityQueue");
+    const out = try ctx.createArray();
+    try out.append(ctx.allocator, .{ .array = try object_properties.ownTable(ctx.vm, obj) });
+    const state = try ctx.vm.allocArray();
+    const flags = obj.get("__flags");
+    try state.set(ctx.allocator, .{ .string = Value.String.borrowed("flags") }, if (pqueue) (if (flags == .int) flags else Value{ .int = EXTR_DATA }) else .{ .int = 0 });
+    const elements = try ctx.vm.allocArray();
+    if (getData(obj)) |arr| for (arr.entries.items) |entry| {
+        if (pqueue and entry.value == .array) {
+            const pair = try ctx.vm.allocArray();
+            try pair.set(ctx.allocator, .{ .string = Value.String.borrowed("data") }, entry.value.array.get(.{ .int = 0 }));
+            try pair.set(ctx.allocator, .{ .string = Value.String.borrowed("priority") }, entry.value.array.get(.{ .int = 1 }));
+            try elements.append(ctx.allocator, .{ .array = pair });
+        } else try elements.append(ctx.allocator, entry.value);
+    };
+    try state.set(ctx.allocator, .{ .string = Value.String.borrowed("heap_elements") }, .{ .array = elements });
+    try out.append(ctx.allocator, .{ .array = state });
+    return NativeResult.borrowed(.{ .array = out });
+}
+
+// the elements go back in through insert, so the heap is rebuilt by its
+// own comparison
+fn heapUnserialize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const pqueue = ctx.vm.isInstanceOf(obj.class_name, "SplPriorityQueue");
+    const data = if (args.len > 0 and args[0] == .array) args[0].array else return invalidHeapData(ctx, obj);
+    if (data.entries.items.len != 2) return invalidHeapData(ctx, obj);
+    const members = data.get(.{ .int = 0 });
+    if (members != .array) return invalidHeapData(ctx, obj);
+    loadProperties(ctx, obj, members.array) catch return invalidHeapData(ctx, obj);
+    const state = data.get(.{ .int = 1 });
+    if (state != .array) return invalidHeapData(ctx, obj);
+    const flags = state.array.get(.{ .string = Value.String.borrowed("flags") });
+    if (flags != .int) return invalidHeapData(ctx, obj);
+    if (pqueue) {
+        if (flags.int & 3 == 0) return invalidHeapData(ctx, obj);
+        try obj.set(ctx.allocator, "__flags", .{ .int = flags.int & 3 });
+    } else if (flags.int != 0) return invalidHeapData(ctx, obj);
+    const elements = state.array.get(.{ .string = Value.String.borrowed("heap_elements") });
+    if (elements != .array) return invalidHeapData(ctx, obj);
+    _ = try ensureData(ctx, obj);
+    try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+    for (elements.array.entries.items) |entry| {
+        if (pqueue) {
+            if (entry.value != .array or entry.value.array.entries.items.len != 2) return invalidHeapData(ctx, obj);
+            const data_key: PhpArray.Key = .{ .string = Value.String.borrowed("data") };
+            const priority_key: PhpArray.Key = .{ .string = Value.String.borrowed("priority") };
+            if (!entry.value.array.contains(data_key) or !entry.value.array.contains(priority_key)) return invalidHeapData(ctx, obj);
+            _ = pqInsert(ctx, &.{ entry.value.array.get(data_key), entry.value.array.get(priority_key) }) catch return invalidHeapData(ctx, obj);
+        } else {
+            _ = heapInsert(ctx, &.{entry.value}) catch return invalidHeapData(ctx, obj);
+        }
+    }
+    return NativeResult.scalar(.null);
+}
+
+fn invalidHeapData(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeResult {
+    const msg = try std.fmt.allocPrint(ctx.allocator, "Invalid serialization data for {s} object", .{obj.class_name});
+    defer ctx.allocator.free(msg);
+    // an exception the restore threw becomes the previous of this one, as
+    // throwing over a pending exception does in php
+    const cause = ctx.vm.takePending();
+    defer if (cause) |c| ctx.vm.stackRelease(c);
+    try ctx.vm.setPendingException("Exception", msg);
+    if (cause) |c| if (c == .object) if (ctx.vm.pending_exception) |exc| if (exc == .object) {
+        _ = try ctx.vm.chainPrevious(exc.object, c.object);
+    };
+    return error.RuntimeError;
+}
+
+// object_properties_load: serialized properties back onto the object, a
+// new dynamic one deprecated as any other
+fn loadProperties(ctx: *NativeContext, obj: *PhpObject, members: *PhpArray) RuntimeError!void {
+    for (members.entries.items) |entry| {
+        if (entry.key != .string) continue;
+        const key = entry.key.string.bytes();
+        const name = if (key.len > 0 and key[0] == 0) if (std.mem.indexOfScalarPos(u8, key, 1, 0)) |end| key[end + 1 ..] else key else key;
+        if (!obj.properties.contains(name) and !ctx.vm.classDeclaresProperty(obj.class_name, name) and ctx.vm.dynamicPropertyRule(obj) == .deprecated) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Creation of dynamic property {s}::${s} is deprecated", .{ obj.class_name, name });
+            defer ctx.allocator.free(msg);
+            try ctx.vm.raiseError(VM.E_DEPRECATED, msg);
+        }
+        try obj.set(ctx.allocator, name, entry.value);
+    }
+}
+
+fn illTyped(ctx: *NativeContext) RuntimeError!NativeResult {
+    return unexpected(ctx, "Incomplete or ill-typed serialization data");
+}
+
+fn unexpected(ctx: *NativeContext, msg: []const u8) RuntimeError!NativeResult {
+    try ctx.vm.setPendingException("UnexpectedValueException", msg);
+    return error.RuntimeError;
 }
 
 fn getThis(ctx: *NativeContext) ?*PhpObject {

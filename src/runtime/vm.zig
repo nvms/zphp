@@ -21800,7 +21800,7 @@ pub const VM = struct {
     // zend_exception_set_previous: hang `add` off the end of the exception's
     // previous chain, unless it already leads back into that chain, which
     // would make the chain a loop
-    fn chainPrevious(self: *VM, exception: *PhpObject, add: *PhpObject) !bool {
+    pub fn chainPrevious(self: *VM, exception: *PhpObject, add: *PhpObject) !bool {
         if (exception == add) return false;
         var ex = exception;
         while (true) {

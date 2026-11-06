@@ -1,5 +1,6 @@
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
+const object_properties = @import("../runtime/object_properties.zig");
 const types = @import("types.zig");
 const value_mod = @import("../runtime/value.zig");
 const serialization_generated = @import("serialization_generated.zig");
@@ -508,19 +509,10 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
             try buf.appendSlice(a, ":\"");
             try buf.appendSlice(a, obj.class_name);
             try buf.appendSlice(a, "\":");
-            var total_count: u32 = 0;
-            if (sleep_props) |sp| {
-                total_count = @intCast(sp.entries.items.len);
-            } else {
-                var slot_count: u32 = 0;
-                if (obj.slot_layout) |layout| for (layout.names, 0..) |name, i| {
-                    if (obj.isLazySlot(name, layout.declaring_classes[i]) or obj.isUnset(name)) continue;
-                    const vr = ctx.vm.findPropertyVisibility(layout.declaring_classes[i], name);
-                    if (obj.slots.?[i] == .null and ctx.vm.typedPropForbidsNull(vr.type_str)) continue;
-                    slot_count += 1;
-                };
-                total_count = slot_count + @as(u32, @intCast(obj.properties.count()));
-            }
+            var listing: object_properties.Listing = .{};
+            defer listing.deinit(a);
+            if (sleep_props == null) listing = try object_properties.list(ctx.vm, obj, .serialize, a);
+            const total_count: usize = if (sleep_props) |sp| sp.entries.items.len else listing.items.items.len;
             const cl = std.fmt.bufPrint(&tmp, "{d}", .{total_count}) catch return;
             try buf.appendSlice(a, cl);
             try buf.appendSlice(a, ":{");
@@ -538,26 +530,12 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
                 try buf.append(a, '}');
                 return;
             }
-            if (obj.slot_layout) |layout| {
-                if (obj.slots) |slots| {
-                    for (layout.names, 0..) |name, i| {
-                        if (obj.isLazySlot(name, layout.declaring_classes[i]) or obj.isUnset(name)) continue;
-                        const vr = ctx.vm.findPropertyVisibility(layout.declaring_classes[i], name);
-                        if (slots[i] == .null and ctx.vm.typedPropForbidsNull(vr.type_str)) continue;
-                        const vis: ClassDef.Visibility = if (class_def) |c| findPropertyVisibility(c, name) else .public;
-                        try emitObjectPropertyKey(buf, a, obj.class_name, name, vis);
-                        try serializeValue(ctx, buf, sctx, slots[i]);
-                    }
+            for (listing.items.items) |prop| {
+                switch (prop.key) {
+                    .int => |i| try buf.print(a, "i:{d};", .{i}),
+                    .name => |name| try emitObjectPropertyKey(buf, a, if (prop.declaring.len > 0) prop.declaring else obj.class_name, name, prop.visibility),
                 }
-            }
-            var iter = obj.properties.iterator();
-            while (iter.next()) |entry| {
-                const k = entry.key_ptr.*;
-                // properties in the hashmap are keyed by the bare name (visibility stored on ClassDef),
-                // so look up visibility the same way as slot properties
-                const vis: ClassDef.Visibility = if (class_def) |c| findPropertyVisibility(c, k) else .public;
-                try emitObjectPropertyKey(buf, a, obj.class_name, k, vis);
-                try serializeValue(ctx, buf, sctx, entry.value_ptr.*);
+                try serializeValue(ctx, buf, sctx, prop.value);
             }
             try buf.append(a, '}');
         },
