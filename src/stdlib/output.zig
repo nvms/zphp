@@ -24,6 +24,9 @@ pub const entries = .{
 };
 
 fn var_dump(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    // php has already freed what the last statements dropped, so a reference
+    // that lost its other holders shows unmarked
+    if (ctx.vm.hasPendingReleases()) ctx.vm.drainPendingDestruct();
     visited_ptrs.deinit(ctx.allocator);
     visited_ptrs = .empty;
     defer {

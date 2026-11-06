@@ -34,3 +34,19 @@ $rp = &$o->p;
 var_dump($o);
 unset($rp);
 var_dump($o);
+// a reference returned and not bound, and one a finished function held, end
+// with the call
+class T {
+    public $c = 0;
+    protected $p = 0;
+    function &getc() { return $this->c; }
+    public function &__get($name) { return $this->$name; }
+}
+$t = new T;
+$t->getc();
+$y = $t->getc();
+++$t->p;
+var_dump($t);
+unset($t);
+function fill(array $props) { $o = new stdClass; foreach ($props as $k => &$v) { $o->$k = &$v; } return $o; }
+var_dump(fill(['a' => 1]));
