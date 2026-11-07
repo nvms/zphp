@@ -19309,8 +19309,11 @@ pub const VM = struct {
             for (0..bind_fixed) |i| {
                 try vars.put(self.allocator, func.params[i], try self.bindFrameArg(args[i]));
             }
+            for (bind_fixed..fixed) |i| {
+                if (i < func.defaults.len) try vars.put(self.allocator, func.params[i], try self.resolveParamDefault(func, i));
+            }
             const rest = try self.allocArray();
-            for (fixed..args.len) |i| {
+            for (bind_fixed..args.len) |i| {
                 try rest.append(self.allocator, try self.bindFrameArg(args[i]));
             }
             try vars.put(self.allocator, func.params[fixed], .{ .array = rest });
@@ -20901,6 +20904,22 @@ pub const VM = struct {
     }
 
     fn callUserFunction(self: *VM, name: []const u8, func: *const ObjFunction, args: []const Value, called_class: ?[]const u8) RuntimeError!Value {
+        // a generator function called back (call_user_func, array_map)
+        // returns its generator without running the body
+        if (func.is_generator) {
+            var new_vars = self.acquireFrameVars();
+            var closure_refs: std.StringHashMapUnmanaged(*Value) = .{};
+            try self.bindClosures(&new_vars, &closure_refs, name);
+            try self.bindArgs(&new_vars, func, if (func.is_variadic) args else args[0..@min(args.len, func.arity)]);
+            const gen = try self.allocGenerator(.{ .func = func, .vars = new_vars, .ref_slots = closure_refs });
+            retainVarsObjects(&gen.vars);
+            // a closure's generator keeps the closure alive, as php's does
+            if (self.capture_index.get(name)) |range| if (range.owner) |owner| {
+                owner.refcount += 1;
+                gen.closure = owner;
+            };
+            return .{ .generator = gen };
+        }
         {
             if (self.ic) |ic| ic.pending_arg_count = @intCast(@min(args.len, unknown_arg_count - 1));
             self.pending_call_name = name;
