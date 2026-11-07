@@ -266,6 +266,12 @@ pub const Compiler = struct {
     // therefore should be closed when the loop exits. `break` uses this to
     // pick iter_end_close vs iter_end
     loop_foreach_close: [32]bool = @as([32]bool, @splat(false)),
+    // the outer loops a return has already ended while the finally copies
+    // it runs compile: a return inside one of those must not end them again
+    loops_ended: u32 = 0,
+    // return values waiting on the operand stack while those finally copies
+    // compile: a return inside one replaces them, so it discards them first
+    pending_returns: u32 = 0,
     closure_count: u32 = 0,
     // the static variables the function being compiled declares
     static_vars: std.ArrayListUnmanaged(bytecode.StaticVar) = .empty,
@@ -476,12 +482,14 @@ pub const Compiler = struct {
                     // close suspended generators in active foreach scopes; the
                     // function is returning so the iterables go out of scope
                     var fei: usize = self.loop_depth;
-                    while (fei > 0) {
+                    while (fei > self.loops_ended) {
                         fei -= 1;
                         if (fei < 32 and self.loop_is_foreach[fei]) {
                             try self.emitOp(if (self.loop_foreach_close[fei]) .iter_end_close else .iter_end);
                         }
                     }
+                    var stale = self.pending_returns;
+                    while (stale > 0) : (stale -= 1) try self.emitOp(.pop);
                     // ref-returning function: route refable return shapes
                     // (`return $arr[$k]`, `return $obj->prop`, `return $var`)
                     // through make_var_*_ref + return_ref so the caller can
@@ -497,6 +505,10 @@ pub const Compiler = struct {
                     // that a return inside the finally itself does not re-enter
                     // its own finally block (would cause infinite recursion)
                     const saved_fd = self.finally_depth;
+                    const saved_ended = self.loops_ended;
+                    self.loops_ended = self.loop_depth;
+                    const saved_pending = self.pending_returns;
+                    self.pending_returns = @intFromBool(!ref_return_emitted and node.data.lhs != 0);
                     var fd = self.finally_depth;
                     while (fd > 0) {
                         fd -= 1;
@@ -505,6 +517,8 @@ pub const Compiler = struct {
                         try self.compileNode(self.finally_nodes[fd]);
                     }
                     self.finally_depth = saved_fd;
+                    self.loops_ended = saved_ended;
+                    self.pending_returns = saved_pending;
                     if (ref_return_emitted) {
                         // tryCompileRefReturn already emitted return_ref
                     } else if (node.data.lhs != 0) {
