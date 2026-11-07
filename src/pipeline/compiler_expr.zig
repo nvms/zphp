@@ -1151,7 +1151,11 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
     }
 }
 
+// whether a call compiles to its spread form, which carries its arguments in
+// an array: unpacking, named arguments, or more arguments than a call
+// opcode's count byte holds (0xFF marks new_obj's spread form)
 pub fn hasSplatOrNamed(ast: *const Ast, args: []const u32) bool {
+    if (args.len >= 0xFF) return true;
     for (args) |arg_idx| {
         const tag = ast.nodes[arg_idx].tag;
         if (tag == .splat_expr or tag == .named_arg) return true;
@@ -1627,6 +1631,7 @@ pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
     if (class_node.tag == .variable) {
         try self.compileNode(class_lhs_idx);
         const method_idx = try self.addConstant(.{ .string = Value.String.borrowed(method_name) });
+        if (hasSplatOrNamed(self.ast, args)) return emitDynStaticSpread(self, method_idx, args);
         var guards = try compileArgs(self, args);
         try emitCallOp(self, &guards, .static_call_dynamic, .{ .a = method_idx, .argc = @intCast(args.len) });
         return;
@@ -1640,6 +1645,7 @@ pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
             try self.compileNode(class_lhs_idx);
             try self.emitOp(.get_obj_class);
             const method_idx = try self.addConstant(.{ .string = Value.String.borrowed(method_name) });
+            if (hasSplatOrNamed(self.ast, args)) return emitDynStaticSpread(self, method_idx, args);
             var guards = try compileArgs(self, args);
             try emitCallOp(self, &guards, .static_call_dynamic, .{ .a = method_idx, .argc = @intCast(args.len) });
             return;
@@ -1660,11 +1666,34 @@ pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
     }
 }
 
+// a static call on a class only known at run time, its arguments in an array:
+// the class value is on the stack, the method name a constant
+fn emitDynStaticSpread(self: *Compiler, method_idx: u16, args: []const u32) Error!void {
+    try self.emitOp(.constant);
+    try self.emitU16(method_idx);
+    var guards = try emitSpreadArgs(self, args);
+    try emitCallOp(self, &guards, .static_call_dyn_both_spread, .{});
+}
+
 pub fn compileDynamicStaticCall(self: *Compiler, node: Ast.Node) Error!void {
     const class_node = self.ast.nodes[node.data.lhs];
     const extra = self.ast.extraSlice(node.data.rhs);
     const method_expr = extra[0];
     const args = extra[1..];
+
+    if (hasSplatOrNamed(self.ast, args)) {
+        if (class_node.tag == .variable) {
+            try self.compileNode(node.data.lhs);
+        } else {
+            const class_name = try resolveNodeClassName(self, class_node);
+            try self.emitOp(.constant);
+            try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(class_name) }));
+        }
+        try self.compileNode(method_expr);
+        var guards = try emitSpreadArgs(self, args);
+        try emitCallOp(self, &guards, .static_call_dyn_both_spread, .{});
+        return;
+    }
 
     if (class_node.tag == .variable) {
         try self.compileNode(node.data.lhs);

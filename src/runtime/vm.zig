@@ -1531,8 +1531,8 @@ pub const VM = struct {
         sp_save: []usize = &.{},
         sp_save_room: Region(usize) = .{},
         // per-frame actual arg count for func_get_args
-        arg_counts: []u8 = &.{},
-        arg_counts_room: Region(u8) = .{},
+        arg_counts: []u32 = &.{},
+        arg_counts_room: Region(u32) = .{},
         // per-frame saved arg values for func_get_args (flat buffer indexed by frame)
         fga_buf: []Value = &.{},
         fga_room: Region(Value) = .{},
@@ -1540,7 +1540,7 @@ pub const VM = struct {
         fga_offsets_room: Region(u32) = .{},
         fga_sp: u32 = 0,
         // set before pushing a frame, consumed by executeFunction et al
-        pending_arg_count: u8 = 0xFF,
+        pending_arg_count: u32 = unknown_arg_count,
 
         const PropIC = struct {
             key: usize = 0,
@@ -4714,11 +4714,14 @@ pub const VM = struct {
                     }
                     if (has_named) {
                         if (self.functions.get(name)) |func| {
-                            var resolved: [256]Value = @splat(.null);
-                            var resolved_sources: [256]RefSource = undefined;
-                            @memset(resolved_sources[0..@min(resolved_sources.len, func.params.len + arr.entries.items.len)], .none);
-                            if (func.params.len > resolved.len) return error.RuntimeError;
-                            var assigned: [16]bool = @splat(false);
+                            var resolved_buf: [256]Value = undefined;
+                            var sources_buf: [256]RefSource = undefined;
+                            var assigned_buf: [256]bool = undefined;
+                            const slots = try self.argSlots(&resolved_buf, &sources_buf, &assigned_buf, func.params.len + arr.entries.items.len);
+                            defer self.freeArgSlots(slots, &resolved_buf);
+                            const resolved = slots.values;
+                            const resolved_sources = slots.sources;
+                            const assigned = slots.assigned;
                             var pos: usize = 0;
                             var ok = true;
                             // a variadic function's last param is the catch-all -
@@ -4842,27 +4845,18 @@ pub const VM = struct {
                                 return error.RuntimeError;
                             };
                         } else {
-                            for (arr.entries.items) |entry| self.pushArgEntry(arr, entry);
+                            try self.pushArgEntries(arr, arr.entries.items);
                             self.callNamedFunction(name, @intCast(arr.entries.items.len)) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
                         }
                     } else {
-                        const ref_func = self.functions.get(name);
-                        var function_needs_refs = false;
-                        if (ref_func) |func| {
-                            for (func.ref_params) |is_ref| {
-                                if (is_ref) {
-                                    function_needs_refs = true;
-                                    break;
-                                }
-                            }
-                        }
                         const native_needs_refs = self.native_fns.contains(name) and (std.mem.eql(u8, name, "preg_match") or std.mem.eql(u8, name, "preg_match_all") or std.mem.eql(u8, name, "pcntl_sigprocmask"));
-                        if (native_needs_refs or function_needs_refs) {
-                            var ref_args: [256]Value = undefined;
-                            if (arr.entries.items.len > ref_args.len) return error.RuntimeError;
+                        if (native_needs_refs) {
+                            var ref_buf: [16]Value = undefined;
+                            const ref_args = if (arr.entries.items.len <= ref_buf.len) ref_buf[0..arr.entries.items.len] else try self.allocator.alloc(Value, arr.entries.items.len);
+                            defer if (ref_args.ptr != &ref_buf) self.allocator.free(ref_args);
                             for (arr.entries.items, 0..) |entry, i| ref_args[i] = if (entry.ref) |ref| ref.* else entry.value;
                             // the popped argument array is read again after the
                             // call for the by-ref writeback; pin it across the call
@@ -4871,7 +4865,7 @@ pub const VM = struct {
                                 arrayUnpin(arr);
                                 if (arr.refcount == 0) self.queueArrayRelease(arr);
                             }
-                            const result = try self.callByNameRef(name, ref_args[0..arr.entries.items.len]);
+                            const result = try self.callByNameRef(name, ref_args);
                             for (arr.entries.items, 0..) |*entry, i| {
                                 if (entry.ref) |ref| {
                                     self.setCell(ref, ref_args[i]);
@@ -4880,7 +4874,7 @@ pub const VM = struct {
                             }
                             self.pushCallResult(result);
                         } else {
-                            for (arr.entries.items) |entry| self.pushArgEntry(arr, entry);
+                            try self.pushArgEntries(arr, arr.entries.items);
                             self.callNamedFunction(name, @intCast(arr.entries.items.len)) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
@@ -4909,20 +4903,11 @@ pub const VM = struct {
                         if (arr.refcount == 0) self.queueArrayRelease(arr);
                     }
                     if (name_val == .string and std.mem.indexOf(u8, name_val.string.bytes(), "::") == null) {
-                        const ref_func = self.functions.get(name_val.string.bytes());
-                        var function_needs_refs = false;
-                        if (ref_func) |func| {
-                            for (func.ref_params) |is_ref| {
-                                if (is_ref) {
-                                    function_needs_refs = true;
-                                    break;
-                                }
-                            }
-                        }
                         const native_needs_refs = self.native_fns.contains(name_val.string.bytes()) and (std.mem.eql(u8, name_val.string.bytes(), "preg_match") or std.mem.eql(u8, name_val.string.bytes(), "preg_match_all") or std.mem.eql(u8, name_val.string.bytes(), "pcntl_sigprocmask"));
-                        if (native_needs_refs or function_needs_refs) {
-                            var ref_args: [256]Value = undefined;
-                            if (arr.entries.items.len > ref_args.len) return error.RuntimeError;
+                        if (native_needs_refs) {
+                            var ref_buf: [16]Value = undefined;
+                            const ref_args = if (arr.entries.items.len <= ref_buf.len) ref_buf[0..arr.entries.items.len] else try self.allocator.alloc(Value, arr.entries.items.len);
+                            defer if (ref_args.ptr != &ref_buf) self.allocator.free(ref_args);
                             for (arr.entries.items, 0..) |entry, i| ref_args[i] = if (entry.ref) |ref| ref.* else entry.value;
                             // the popped argument array is read again after the
                             // call for the by-ref writeback; pin it across the call
@@ -4931,7 +4916,7 @@ pub const VM = struct {
                                 arrayUnpin(arr);
                                 if (arr.refcount == 0) self.queueArrayRelease(arr);
                             }
-                            const result = try self.callByNameRef(name_val.string.bytes(), ref_args[0..arr.entries.items.len]);
+                            const result = try self.callByNameRef(name_val.string.bytes(), ref_args);
                             for (arr.entries.items, 0..) |*entry, i| {
                                 if (entry.ref) |ref| {
                                     self.setCell(ref, ref_args[i]);
@@ -4950,10 +4935,13 @@ pub const VM = struct {
                         }
                         if (has_named_args) {
                             if (self.functions.get(name_val.string.bytes())) |func| {
-                                var resolved: [256]Value = @splat(.null);
-                                var resolved_sources: [256]RefSource = undefined;
-                                @memset(resolved_sources[0..@min(resolved_sources.len, func.params.len + arr.entries.items.len)], .none);
-                                if (func.params.len > resolved.len) return error.RuntimeError;
+                                var resolved_buf: [256]Value = undefined;
+                                var sources_buf: [256]RefSource = undefined;
+                                var assigned_buf: [256]bool = undefined;
+                                const slots = try self.argSlots(&resolved_buf, &sources_buf, &assigned_buf, func.params.len + arr.entries.items.len);
+                                defer self.freeArgSlots(slots, &resolved_buf);
+                                const resolved = slots.values;
+                                const resolved_sources = slots.sources;
                                 var pos: usize = 0;
                                 for (arr.entries.items) |entry| {
                                     if (entry.key == .string) {
@@ -4981,16 +4969,16 @@ pub const VM = struct {
                                     return error.RuntimeError;
                                 };
                             } else {
-                                for (arr.entries.items) |entry| self.pushArgEntry(arr, entry);
-                                const ac2: u8 = @intCast(arr.entries.items.len);
+                                try self.pushArgEntries(arr, arr.entries.items);
+                                const ac2: u32 = @intCast(arr.entries.items.len);
                                 self.callNamedFunction(name_val.string.bytes(), ac2) catch {
                                     if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                     return error.RuntimeError;
                                 };
                             }
                         } else {
-                            for (arr.entries.items) |entry| self.pushArgEntry(arr, entry);
-                            const ac: u8 = @intCast(arr.entries.items.len);
+                            try self.pushArgEntries(arr, arr.entries.items);
+                            const ac: u32 = @intCast(arr.entries.items.len);
                             self.callNamedFunction(name_val.string.bytes(), ac) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
@@ -8552,7 +8540,7 @@ pub const VM = struct {
                     const cf_scope = try self.enterCallFamily(op);
                     defer self.leaveCallFamily(cf_scope);
                     const name_idx = self.readU16();
-                    var arg_count = self.readByte();
+                    var arg_count: u32 = self.readByte();
                     // 0xFF signals spread args: top of stack is an array to unpack
                     if (arg_count == 0xFF) {
                         const arr_val = self.pop();
@@ -8589,7 +8577,7 @@ pub const VM = struct {
                                     .thrown => continue,
                                 }
                             } else {
-                                for (entries) |entry| self.pushArgEntry(arr_val.array, entry);
+                                try self.pushArgEntries(arr_val.array, entries);
                                 arg_count = @intCast(entries.len);
                             }
                         } else {
@@ -8691,7 +8679,8 @@ pub const VM = struct {
                         }
                         if (self.native_fns.get(cn)) |native| {
                             var args_buf: [16]Value = undefined;
-                            for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
+                            const args_buf_s = try self.copyStackArgs(&args_buf, self.stack[self.sp - ac ..][0..ac]);
+                            defer self.freeStackArgs(args_buf_s, &args_buf);
                             self.dropN(ac);
 
                             var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
@@ -8706,7 +8695,7 @@ pub const VM = struct {
                             const saved_fc = self.frame_count;
                             var ctx = self.makeContext(null);
                             const pre_handlers = self.handler_count;
-                            const ctor_result = self.invokeNative(native, &ctx, .{ .args = args_buf[0..ac], .name = cn, .instance = true }) catch {
+                            const ctor_result = self.invokeNative(native, &ctx, .{ .args = args_buf_s, .name = cn, .instance = true }) catch {
                                 // clean up temp frame if throwBuiltinException didn't already unwind past it
                                 if (self.frame_count >= saved_fc) {
                                     self.frame_count -= 1;
@@ -8858,7 +8847,7 @@ pub const VM = struct {
                 .new_obj_dynamic => {
                     const cf_scope = try self.enterCallFamily(op);
                     defer self.leaveCallFamily(cf_scope);
-                    var arg_count = self.readByte();
+                    var arg_count: u32 = self.readByte();
                     // 0xFF signals spread args: top of stack is an array to unpack
                     if (arg_count == 0xFF) {
                         const arr_val = self.pop();
@@ -8920,7 +8909,8 @@ pub const VM = struct {
                         }
                         if (self.native_fns.get(cn)) |native| {
                             var args_buf: [16]Value = undefined;
-                            for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
+                            const args_buf_s = try self.copyStackArgs(&args_buf, self.stack[self.sp - ac ..][0..ac]);
+                            defer self.freeStackArgs(args_buf_s, &args_buf);
                             self.dropN(ac + 1);
                             var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                             try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
@@ -8932,7 +8922,7 @@ pub const VM = struct {
                             if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                             var ctx = self.makeContext(null);
                             const pre_handlers = self.handler_count;
-                            const ctor_result = self.invokeNative(native, &ctx, .{ .args = args_buf[0..ac], .name = cn, .instance = true }) catch {
+                            const ctor_result = self.invokeNative(native, &ctx, .{ .args = args_buf_s, .name = cn, .instance = true }) catch {
                                 // a handler that took the exception already unwound the temp frame
                                 if (self.handler_count >= pre_handlers) {
                                     self.frame_count -= 1;
@@ -9509,7 +9499,8 @@ pub const VM = struct {
                         // args are at stack[sp-ac..sp], fiber at stack[sp-ac-1]
                         // save args before popping
                         var args_buf: [16]Value = undefined;
-                        for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
+                        const args_buf_s = try self.copyStackArgs(&args_buf, self.stack[self.sp - ac ..][0..ac]);
+                        defer self.freeStackArgs(args_buf_s, &args_buf);
                         const held = self.holdCallOperands(ac + 1);
                         defer self.releaseHeld(held);
                         self.dropN(ac);
@@ -9533,7 +9524,7 @@ pub const VM = struct {
                                 };
                             } else {
                                 var ctx = self.makeContext(null);
-                                _ = try ctx.invokeCallable(fiber.callable, args_buf[0..ac]);
+                                _ = try ctx.invokeCallable(fiber.callable, args_buf_s);
                                 fiber.state = .terminated;
                                 self.push(.null);
                                 continue;
@@ -9558,7 +9549,7 @@ pub const VM = struct {
 
                             try self.restoreFiberState(fiber, fb, sb);
 
-                            const resume_val = if (ac > 0) args_buf[0] else Value{ .null = {} };
+                            const resume_val = if (ac > 0) args_buf_s[0] else Value{ .null = {} };
                             self.push(resume_val);
 
                             const result = self.executeFiber(fiber, fb, sb, hb) catch {
@@ -9587,7 +9578,7 @@ pub const VM = struct {
                                 if (try self.throwBuiltinException("FiberError", "Cannot resume a fiber that is not suspended")) continue;
                                 return error.RuntimeError;
                             }
-                            const exc_val = if (ac > 0) args_buf[0] else Value.null;
+                            const exc_val = if (ac > 0) args_buf_s[0] else Value.null;
                             if (exc_val != .object) {
                                 if (try self.throwBuiltinException("TypeError", "Fiber::throw() expects an object")) continue;
                                 return error.RuntimeError;
@@ -9635,9 +9626,10 @@ pub const VM = struct {
                         // existing $this/scope binding
                         if (std.mem.eql(u8, method_name, "__invoke")) {
                             var call_args: [16]Value = undefined;
-                            for (0..ac) |i| call_args[i] = self.stack[self.sp - ac + i];
+                            const call_args_s = try self.copyStackArgs(&call_args, self.stack[self.sp - ac ..][0..ac]);
+                            defer self.freeStackArgs(call_args_s, &call_args);
                             self.dropN(ac + 1);
-                            const result = try self.callByName(closure_name, call_args[0..ac]);
+                            const result = try self.callByName(closure_name, call_args_s);
                             self.push(result);
                             continue;
                         }
@@ -9664,14 +9656,15 @@ pub const VM = struct {
                             const call_scope: ClosureScope = if (new_this == .object) .{ .set = new_this.object.class_name } else .preserve;
                             var call_args: [16]Value = undefined;
                             const extra = if (ac > 1) ac - 1 else 0;
-                            for (0..extra) |i| call_args[i] = self.stack[self.sp - ac + 1 + i];
+                            const call_args_s = try self.copyStackArgs(&call_args, self.stack[self.sp - ac + 1 ..][0..extra]);
+                            defer self.freeStackArgs(call_args_s, &call_args);
                             self.dropN(ac + 1);
                             const bound = try self.cloneClosureWithThis(closure_name, new_this, call_scope);
                             // the temporary bound instance lives for this call
                             // only; the callee frame retains it while it runs
                             defer self.releaseValue(bound);
                             if (bound == .string) {
-                                const result = try self.callByName(bound.string.bytes(), call_args[0..extra]);
+                                const result = try self.callByName(bound.string.bytes(), call_args_s);
                                 self.push(result);
                             } else {
                                 self.push(.null);
@@ -9712,7 +9705,8 @@ pub const VM = struct {
                                 }
                             } else if (mc_entry.native) |native| {
                                 var args_buf: [16]Value = undefined;
-                                for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
+                                const args_buf_s = try self.copyStackArgs(&args_buf, self.stack[self.sp - ac ..][0..ac]);
+                                defer self.freeStackArgs(args_buf_s, &args_buf);
                                 self.saveFrameArgs(arg_count);
                                 self.dropN(ac + 1);
                                 var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
@@ -9733,7 +9727,7 @@ pub const VM = struct {
                                 // case and treat as a benign control-flow
                                 // signal so the catch handler runs instead
                                 // of surfacing as 'internal RuntimeError'
-                                const result = self.invokeNative(native, &ctx, .{ .args = args_buf[0..ac], .label = mc_entry.full_name, .instance = true }) catch |native_err| {
+                                const result = self.invokeNative(native, &ctx, .{ .args = args_buf_s, .label = mc_entry.full_name, .instance = true }) catch |native_err| {
                                     if (self.frame_count < saved_fc) continue;
                                     // pop the temp $this frame so it doesn't
                                     // leak into the stack trace as a bogus
@@ -9817,7 +9811,8 @@ pub const VM = struct {
                             }
                         }
                         var args_buf: [16]Value = undefined;
-                        for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
+                        const args_buf_s = try self.copyStackArgs(&args_buf, self.stack[self.sp - ac ..][0..ac]);
+                        defer self.freeStackArgs(args_buf_s, &args_buf);
                         self.saveFrameArgs(arg_count);
                         self.dropN(ac);
                         self.dropN(1);
@@ -9836,7 +9831,7 @@ pub const VM = struct {
 
                         var ctx = self.makeContext(full_name);
                         const pre_handlers = self.handler_count;
-                        const result = self.invokeNative(native, &ctx, .{ .args = args_buf[0..ac], .name = full_name, .instance = true }) catch {
+                        const result = self.invokeNative(native, &ctx, .{ .args = args_buf_s, .name = full_name, .instance = true }) catch {
                             if (self.frame_count >= saved_fc) {
                                 self.frame_count -= 1;
                                 self.deinitFrameSlot(self.frame_count);
@@ -9988,43 +9983,47 @@ pub const VM = struct {
                         }
                     }
 
-                    var resolved_buf: [256]Value = @splat(.null);
+                    var resolved_buf: [256]Value = undefined;
                     var resolved_sources: [256]RefSource = undefined;
                     var ac = arr.entries.items.len;
 
                     if (has_named) {
-                        @memset(resolved_sources[0..], .none);
                         const obj_peek = self.stack[self.sp - 1];
                         if (obj_peek == .object) {
                             const full = self.resolveMethod(obj_peek.object.class_name, method_name) catch null;
                             if (full) |fn_name| {
                                 if (self.functions.get(fn_name)) |func| {
+                                    var assigned_buf: [256]bool = undefined;
+                                    const slots = try self.argSlots(&resolved_buf, &resolved_sources, &assigned_buf, func.params.len + arr.entries.items.len);
+                                    defer self.freeArgSlots(slots, &resolved_buf);
+                                    const resolved = slots.values;
+                                    const sources = slots.sources;
                                     var pos: usize = 0;
                                     for (arr.entries.items) |entry| {
                                         if (entry.key == .string) {
                                             for (func.params, 0..) |p, pi| {
                                                 if (std.mem.eql(u8, p[1..], entry.key.string.bytes()) or std.mem.eql(u8, p, entry.key.string.bytes())) {
-                                                    resolved_buf[pi] = entry.value;
-                                                    resolved_sources[pi] = self.argArraySource(arr, entry.key);
+                                                    resolved[pi] = entry.value;
+                                                    sources[pi] = self.argArraySource(arr, entry.key);
                                                     if (pi >= pos) pos = pi + 1;
                                                     break;
                                                 }
                                             }
                                         } else {
-                                            resolved_buf[pos] = entry.value;
-                                            resolved_sources[pos] = self.argArraySource(arr, entry.key);
+                                            resolved[pos] = entry.value;
+                                            sources[pos] = self.argArraySource(arr, entry.key);
                                             pos += 1;
                                         }
                                     }
                                     ac = @max(pos, func.required_params);
                                     for (0..ac) |i| {
-                                        if (resolved_buf[i] == .null and i < func.defaults.len) {
-                                            resolved_buf[i] = try self.resolveParamDefault(func, i);
+                                        if (resolved[i] == .null and i < func.defaults.len) {
+                                            resolved[i] = try self.resolveParamDefault(func, i);
                                         }
                                     }
                                     for (0..ac) |i| {
-                                        self.push(resolved_buf[i]);
-                                        self.setArgSource(self.sp - 1, resolved_sources[i]);
+                                        self.push(resolved[i]);
+                                        self.setArgSource(self.sp - 1, sources[i]);
                                     }
                                 } else if (native_params.get(fn_name)) |signature| {
                                     const params = signature.params;
@@ -10040,16 +10039,16 @@ pub const VM = struct {
                                         self.setArgSource(self.sp - 1, resolved_sources[i]);
                                     }
                                 } else {
-                                    for (arr.entries.items) |entry| self.pushArgEntry(arr, entry);
+                                    try self.pushArgEntries(arr, arr.entries.items);
                                 }
                             } else {
-                                for (arr.entries.items) |entry| self.pushArgEntry(arr, entry);
+                                try self.pushArgEntries(arr, arr.entries.items);
                             }
                         } else {
-                            for (arr.entries.items) |entry| self.pushArgEntry(arr, entry);
+                            try self.pushArgEntries(arr, arr.entries.items);
                         }
                     } else {
-                        for (arr.entries.items) |entry| self.pushArgEntry(arr, entry);
+                        try self.pushArgEntries(arr, arr.entries.items);
                     }
                     const obj_val = self.stack[self.sp - ac - 1];
                     if (obj_val != .object) {
@@ -10068,7 +10067,7 @@ pub const VM = struct {
                         self.error_msg = msg;
                         return error.RuntimeError;
                     }
-                    const mcs_ac_u8: u8 = @intCast(@min(ac, 255));
+                    const mcs_ac: u32 = @intCast(ac);
                     const full_name = self.resolveMethod(obj.class_name, method_name) catch {
                         if (self.hasMethod(obj.class_name, "__call")) {
                             var args_arr = try self.allocArray();
@@ -10090,15 +10089,16 @@ pub const VM = struct {
                     };
                     if (self.native_fns.get(full_name)) |native| {
                         var args_buf: [16]Value = undefined;
-                        for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
-                        self.saveFrameArgs(mcs_ac_u8);
+                        const args_buf_s = try self.copyStackArgs(&args_buf, self.stack[self.sp - ac ..][0..ac]);
+                        defer self.freeStackArgs(args_buf_s, &args_buf);
+                        self.saveFrameArgs(mcs_ac);
                         self.dropN(ac);
                         self.dropN(1);
                         var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                         try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                         try self.ensureCallRoom();
                         self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
-                        self.setFrameArgCount(mcs_ac_u8);
+                        self.setFrameArgCount(mcs_ac);
                         self.frames[self.frame_count].entry_sp = self.sp;
                         self.frame_count += 1;
                         self.retainFrameObjects(self.frame_count - 1);
@@ -10106,7 +10106,7 @@ pub const VM = struct {
                         const saved_fc = self.frame_count;
                         var ctx = self.makeContext(full_name);
                         const pre_handlers = self.handler_count;
-                        const result = self.invokeNative(native, &ctx, .{ .args = args_buf[0..ac], .name = full_name, .instance = true }) catch {
+                        const result = self.invokeNative(native, &ctx, .{ .args = args_buf_s, .name = full_name, .instance = true }) catch {
                             if (self.frame_count >= saved_fc) {
                                 self.frame_count -= 1;
                                 self.deinitFrameSlot(self.frame_count);
@@ -10132,7 +10132,7 @@ pub const VM = struct {
                         } else continue;
                     } else if (self.functions.get(full_name)) |func| {
                         if (func.has_param_types) {
-                            if (try self.checkParamTypes(full_name, @intCast(@min(ac, 255)))) continue;
+                            if (try self.checkParamTypes(full_name, @intCast(ac))) continue;
                         }
                         var new_vars = self.acquireFrameVars();
                         try new_vars.put(self.allocator, "$this", .{ .object = obj });
@@ -10166,12 +10166,12 @@ pub const VM = struct {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
-                        self.saveFrameArgs(mcs_ac_u8);
+                        self.saveFrameArgs(mcs_ac);
                         self.dropN(ac);
                         self.dropN(1);
                         try self.ensureCallRoom();
                         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = method_refs, .ref_owner = method_owner };
-                        self.setFrameArgCount(mcs_ac_u8);
+                        self.setFrameArgCount(mcs_ac);
                         self.frames[self.frame_count].entry_sp = self.sp;
                         self.frame_count += 1;
                         self.retainFrameObjects(self.frame_count - 1);
@@ -10241,7 +10241,8 @@ pub const VM = struct {
                     };
                     if (self.native_fns.get(full_name)) |native| {
                         var args_buf: [16]Value = undefined;
-                        for (0..ac) |ai| args_buf[ai] = self.stack[self.sp - ac + ai];
+                        const args_buf_s = try self.copyStackArgs(&args_buf, self.stack[self.sp - ac ..][0..ac]);
+                        defer self.freeStackArgs(args_buf_s, &args_buf);
                         self.saveFrameArgs(arg_count);
                         self.dropN(ac);
                         self.dropN(1);
@@ -10257,7 +10258,7 @@ pub const VM = struct {
                         const saved_fc = self.frame_count;
                         var ctx = self.makeContext(full_name);
                         const pre_handlers = self.handler_count;
-                        const result = self.invokeNative(native, &ctx, .{ .args = args_buf[0..ac], .name = full_name, .instance = true }) catch {
+                        const result = self.invokeNative(native, &ctx, .{ .args = args_buf_s, .name = full_name, .instance = true }) catch {
                             if (self.frame_count >= saved_fc) {
                                 self.frame_count -= 1;
                                 self.deinitFrameSlot(self.frame_count);
@@ -10371,7 +10372,7 @@ pub const VM = struct {
                     const ac = arr.entries.items.len;
                     // push object and args back in method_call layout
                     self.push(obj_val);
-                    for (arr.entries.items) |entry| self.pushArgEntry(arr, entry);
+                    try self.pushArgEntries(arr, arr.entries.items);
                     const full_name = self.resolveMethod(obj.class_name, method_name) catch {
                         if (self.hasMethod(obj.class_name, "__call")) {
                             const obj_id = @intFromPtr(obj);
@@ -10409,18 +10410,19 @@ pub const VM = struct {
                         self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
                         return error.RuntimeError;
                     };
-                    const mcds_ac_u8: u8 = @intCast(@min(ac, 255));
+                    const mcds_ac: u32 = @intCast(ac);
                     if (self.native_fns.get(full_name)) |native| {
                         var args_buf: [16]Value = undefined;
-                        for (0..ac) |ai| args_buf[ai] = self.stack[self.sp - ac + ai];
-                        self.saveFrameArgs(mcds_ac_u8);
+                        const args_buf_s = try self.copyStackArgs(&args_buf, self.stack[self.sp - ac ..][0..ac]);
+                        defer self.freeStackArgs(args_buf_s, &args_buf);
+                        self.saveFrameArgs(mcds_ac);
                         self.dropN(ac);
                         self.dropN(1);
                         var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                         try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                         try self.ensureCallRoom();
                         self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
-                        self.setFrameArgCount(mcds_ac_u8);
+                        self.setFrameArgCount(mcds_ac);
                         self.frames[self.frame_count].entry_sp = self.sp;
                         self.frame_count += 1;
                         self.retainFrameObjects(self.frame_count - 1);
@@ -10428,7 +10430,7 @@ pub const VM = struct {
                         const saved_fc = self.frame_count;
                         var ctx = self.makeContext(full_name);
                         const pre_handlers = self.handler_count;
-                        const result = self.invokeNative(native, &ctx, .{ .args = args_buf[0..ac], .name = full_name, .instance = true }) catch {
+                        const result = self.invokeNative(native, &ctx, .{ .args = args_buf_s, .name = full_name, .instance = true }) catch {
                             if (self.frame_count >= saved_fc) {
                                 self.frame_count -= 1;
                                 self.deinitFrameSlot(self.frame_count);
@@ -10454,7 +10456,7 @@ pub const VM = struct {
                         } else continue;
                     } else if (self.functions.get(full_name)) |func| {
                         if (func.has_param_types) {
-                            if (try self.checkParamTypes(full_name, @intCast(@min(ac, 255)))) continue;
+                            if (try self.checkParamTypes(full_name, @intCast(ac))) continue;
                         }
                         var new_vars = self.acquireFrameVars();
                         try new_vars.put(self.allocator, "$this", .{ .object = obj });
@@ -10490,12 +10492,12 @@ pub const VM = struct {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
-                        self.saveFrameArgs(mcds_ac_u8);
+                        self.saveFrameArgs(mcds_ac);
                         self.dropN(ac);
                         self.dropN(1);
                         try self.ensureCallRoom();
                         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = method_refs, .ref_owner = method_owner };
-                        self.setFrameArgCount(mcds_ac_u8);
+                        self.setFrameArgCount(mcds_ac);
                         self.frames[self.frame_count].entry_sp = self.sp;
                         self.frame_count += 1;
                         self.retainFrameObjects(self.frame_count - 1);
@@ -10516,7 +10518,7 @@ pub const VM = struct {
                     const class_idx = self.readU16();
                     const method_idx = self.readU16();
                     const arg_count = self.readByte();
-                    var class_name = self.currentChunk().constants.items[class_idx].string.bytes();
+                    const class_name = self.currentChunk().constants.items[class_idx].string.bytes();
                     const method_name = self.currentChunk().constants.items[method_idx].string.bytes();
 
                     if (std.mem.eql(u8, class_name, "Fiber") and std.mem.eql(u8, method_name, "suspend")) {
@@ -10555,194 +10557,11 @@ pub const VM = struct {
                         continue;
                     }
 
-                    var lsb_class: ?[]const u8 = null;
-                    if (std.mem.eql(u8, class_name, "static")) {
-                        class_name = self.resolveStaticClassName(class_name);
-                    } else if (std.mem.eql(u8, class_name, "parent") or std.mem.eql(u8, class_name, "self")) {
-                        if (std.mem.eql(u8, class_name, "parent")) {
-                            const dc = self.parentResolvingClass();
-                            if (dc) |defining| {
-                                if (self.classes.get(defining)) |cls| {
-                                    if (cls.parent) |p| class_name = p;
-                                }
-                                lsb_class = self.currentFrame().called_class orelse defining;
-                            }
-                        } else {
-                            // self:: resolves to the defining class for method lookup,
-                            // but propagates called_class for LSB (new static() etc)
-                            lsb_class = self.currentFrame().called_class;
-                            if (self.currentDefiningClass()) |dc| class_name = dc;
-                        }
-                    } else if (self.currentFrame().called_class) |cc| {
-                        // compiler resolved self:: to a concrete class at compile time;
-                        // propagate called_class if the target is an ancestor of it
-                        if (self.isAncestor(class_name, cc)) lsb_class = cc;
-                    }
-
-                    const effective_called = lsb_class orelse class_name;
-
-                    // a site's resolution is fixed per target class; static
-                    // targets never forward $this, so a hit enters directly
+                    const target = self.dynamicStaticTarget(class_name);
                     const sc_ic_key = self.currentFrame().ip - 6;
                     const sc_chunk_key = @intFromPtr(self.currentChunk());
-                    const sc_ic = if (self.ic) |ic| &ic.method[InlineCache.methodIndex(sc_chunk_key, sc_ic_key)] else null;
-                    if (sc_ic) |entry| {
-                        if (entry.key == sc_ic_key and entry.chunk_key == sc_chunk_key and entry.class_ptr == @intFromPtr(class_name.ptr)) {
-                            if (entry.func) |func| {
-                                if (!self.dbg_profile_enabled) {
-                                    try self.callStaticUserFunction(func, entry.full_name, arg_count, effective_called);
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-
-                    const full_name = self.resolveMethod(class_name, method_name) catch {
-                        if (self.hasMethod(class_name, "__callStatic")) {
-                            const ac: usize = arg_count;
-                            var args_arr = try self.allocArray();
-                            for (0..ac) |i| try args_arr.append(self.allocator, self.stack[self.sp - ac + i]);
-                            self.dropN(ac);
-                            const cs_name = try self.resolveMethod(class_name, "__callStatic");
-                            self.push(.{ .string = Value.String.borrowed(method_name) });
-                            self.push(.{ .array = args_arr });
-                            try self.callStaticFunction(cs_name, 2, effective_called);
-                            continue;
-                        }
-                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch return error.OutOfMemory;
-                        defer self.allocator.free(msg);
-                        if (try self.throwBuiltinException("Error", msg)) continue;
-                        self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
-                        return error.RuntimeError;
-                    };
-
-                    // PHP forwards $this into a Class::method() call only when
-                    // the target is a non-static method (a scoped instance
-                    // call). a static target gets no $this - forwarding the
-                    // caller's $this corrupts late-static-binding inside it
-                    const this_val = self.currentFrame().vars.get("$this") orelse blk: {
-                        const f = self.currentFrame();
-                        if (f.func) |fn_info| {
-                            if (fn_info.locals_only) {
-                                for (fn_info.slot_names, 0..) |sn, si| {
-                                    if (std.mem.eql(u8, sn, "$this") and si < f.locals.len and f.locals[si] == .object) {
-                                        break :blk f.locals[si];
-                                    }
-                                }
-                            }
-                        }
-                        break :blk null;
-                    };
-                    const sc_target = self.functions.get(full_name);
-                    const sc_target_is_static = if (sc_target) |scf| scf.is_static else false;
-                    if (sc_ic) |entry| {
-                        if (sc_target) |func| {
-                            if (func.is_static) entry.* = .{ .key = sc_ic_key, .chunk_key = sc_chunk_key, .class_ptr = @intFromPtr(class_name.ptr), .func = func, .full_name = full_name };
-                        }
-                    }
-                    if (this_val) |tv| {
-                        if (tv == .object and !sc_target_is_static) {
-                            if (self.functions.get(full_name)) |func| {
-                                if (func.is_generator) {
-                                    try self.callStaticFunction(full_name, arg_count, effective_called);
-                                } else {
-                                    const ac: usize = arg_count;
-                                    var new_vars = self.acquireFrameVars();
-                                    try new_vars.put(self.allocator, "$this", tv);
-                                    if (func.is_variadic) {
-                                        const fixed: usize = func.arity - 1;
-                                        for (0..@min(ac, fixed)) |i| {
-                                            const is_ref = i < func.ref_params.len and func.ref_params[i];
-                                            const sv = self.stack[self.sp - ac + i];
-                                            try new_vars.put(self.allocator, func.params[i], if (is_ref) sv else try self.bindFrameArg(sv));
-                                        }
-                                        const rest_arr = try self.allocArray();
-                                        if (ac > fixed) {
-                                            for (fixed..ac) |i| {
-                                                try rest_arr.append(self.allocator, try self.bindFrameArg(self.stack[self.sp - ac + i]));
-                                            }
-                                        }
-                                        try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
-                                    } else {
-                                        for (0..@min(ac, func.arity)) |i| {
-                                            const is_ref = i < func.ref_params.len and func.ref_params[i];
-                                            const sv = self.stack[self.sp - ac + i];
-                                            try new_vars.put(self.allocator, func.params[i], if (is_ref) sv else try self.bindFrameArg(sv));
-                                        }
-                                    }
-                                    if (!self.hasCallRoom(1) and !(try self.growCallRoom(1))) {
-                                        self.dropN(ac);
-                                        new_vars.deinit(self.allocator);
-                                        const msg = std.fmt.allocPrint(self.allocator, "Fatal error: maximum call stack depth exceeded in {s}::{s}()", .{ class_name, method_name }) catch return error.OutOfMemory;
-                                        defer self.allocator.free(msg);
-                                        if (try self.throwBuiltinException("Error", msg)) continue;
-                                        self.setErrorMsg("{s}", .{msg});
-                                        return error.RuntimeError;
-                                    }
-                                    self.saveFrameArgs(arg_count);
-                                    self.dropN(ac);
-                                    try self.fillDefaults(&new_vars, func, ac);
-                                    try self.ensureCallRoom();
-                                    self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = effective_called };
-                                    self.setFrameArgCount(arg_count);
-                                    self.frames[self.frame_count].entry_sp = self.sp;
-                                    self.frame_count += 1;
-                                    self.retainFrameObjects(self.frame_count - 1);
-                                    if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
-                                }
-                            } else if (self.native_fns.get(full_name)) |native| {
-                                const ac: usize = arg_count;
-                                var args_buf: [16]Value = undefined;
-                                for (0..ac) |i| args_buf[i] = self.stack[self.sp - ac + i];
-                                self.saveFrameArgs(arg_count);
-                                self.dropN(ac);
-                                var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
-                                try tmp_vars.put(self.allocator, "$this", tv);
-                                try self.ensureCallRoom();
-                                self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .called_class = effective_called };
-                                self.setFrameArgCount(arg_count);
-                                const sc_saved_fc = self.frame_count;
-                                self.frames[self.frame_count].entry_sp = self.sp;
-                                self.frame_count += 1;
-                                self.retainFrameObjects(self.frame_count - 1);
-                                if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
-                                var ctx = self.makeContext(full_name);
-                                const pre_handlers = self.handler_count;
-                                const result = self.invokeNative(native, &ctx, .{ .args = args_buf[0..ac], .name = full_name, .instance = true }) catch {
-                                    if (self.frame_count > sc_saved_fc) {
-                                        self.frame_count -= 1;
-                                        self.deinitFrameSlot(self.frame_count);
-                                    }
-                                    if (self.pending_exception) |exc| {
-                                        self.pending_exception = null;
-                                        if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
-                                            const handler = self.exception_handlers[self.handler_count - 1];
-                                            self.enterHandler(handler, exc, .owned);
-                                            continue;
-                                        }
-                                        self.pending_exception = exc;
-                                    } else if (self.handler_count < pre_handlers) {
-                                        // the native threw and a handler already took the exception
-                                        continue;
-                                    }
-                                    return error.RuntimeError;
-                                };
-                                self.frame_count -= 1;
-                                self.deinitFrameSlot(self.frame_count);
-                                self.pushNativeResult(result);
-                            } else {
-                                const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch return error.OutOfMemory;
-                                defer self.allocator.free(msg);
-                                if (try self.throwBuiltinException("Error", msg)) continue;
-                                self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
-                                return error.RuntimeError;
-                            }
-                        } else {
-                            try self.callStaticFunction(full_name, arg_count, effective_called);
-                        }
-                    } else {
-                        try self.callStaticFunction(full_name, arg_count, effective_called);
-                    }
+                    const sc_ic: ?StaticCallSite = if (self.ic) |ic| .{ .entry = &ic.method[InlineCache.methodIndex(sc_chunk_key, sc_ic_key)], .key = sc_ic_key, .chunk_key = sc_chunk_key } else null;
+                    try self.callStaticMethod(target.class_name, method_name, arg_count, target.called_class, sc_ic);
                 },
 
                 .static_call_spread => {
@@ -10750,7 +10569,7 @@ pub const VM = struct {
                     defer self.leaveCallFamily(cf_scope);
                     const class_idx = self.readU16();
                     const method_idx = self.readU16();
-                    var class_name = self.currentChunk().constants.items[class_idx].string.bytes();
+                    const class_const = self.currentChunk().constants.items[class_idx].string.bytes();
                     const method_name = self.currentChunk().constants.items[method_idx].string.bytes();
                     const args_val = self.pop();
                     if (args_val != .array) {
@@ -10766,49 +10585,15 @@ pub const VM = struct {
                         arrayUnpin(arr);
                         if (arr.refcount == 0) self.queueArrayRelease(arr);
                     }
-                    const ac = arr.entries.items.len;
-
-                    const this_val = self.currentFrame().vars.get("$this") orelse blk: {
-                        const f = self.currentFrame();
-                        if (f.func) |fn_info| {
-                            if (fn_info.locals_only) {
-                                for (fn_info.slot_names, 0..) |sn, si| {
-                                    if (std.mem.eql(u8, sn, "$this") and si < f.locals.len and f.locals[si] == .object) {
-                                        break :blk f.locals[si];
-                                    }
-                                }
-                            }
-                        }
-                        break :blk null;
-                    };
-                    var lsb_class: ?[]const u8 = null;
-                    if (std.mem.eql(u8, class_name, "parent") or std.mem.eql(u8, class_name, "self")) {
-                        if (std.mem.eql(u8, class_name, "parent")) {
-                            const dc = self.parentResolvingClass();
-                            if (dc) |defining| {
-                                if (self.classes.get(defining)) |cls| {
-                                    if (cls.parent) |p| class_name = p;
-                                }
-                                lsb_class = self.currentFrame().called_class orelse defining;
-                            }
-                        } else {
-                            // self:: resolves to defining class for method lookup,
-                            // but propagates called_class for LSB
-                            lsb_class = self.currentFrame().called_class;
-                            if (self.currentDefiningClass()) |dc| class_name = dc;
-                        }
-                    } else if (self.currentFrame().called_class) |cc| {
-                        if (self.isAncestor(class_name, cc)) lsb_class = cc;
-                    }
-
-                    const effective_called = lsb_class orelse class_name;
+                    const target = self.dynamicStaticTarget(class_const);
+                    const class_name = target.class_name;
 
                     const full_name = self.resolveMethod(class_name, method_name) catch {
                         if (self.hasMethod(class_name, "__callStatic")) {
                             const cs_name = try self.resolveMethod(class_name, "__callStatic");
                             self.push(.{ .string = Value.String.borrowed(method_name) });
                             self.push(.{ .array = arr });
-                            try self.callStaticFunction(cs_name, 2, effective_called);
+                            try self.callStaticFunction(cs_name, 2, target.called_class);
                             continue;
                         }
                         const msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name });
@@ -10824,13 +10609,16 @@ pub const VM = struct {
                             break;
                         }
                     }
-                    var resolved_ac = ac;
+                    var resolved_ac = arr.entries.items.len;
                     if (has_named_sc) {
                         if (self.functions.get(full_name)) |func2| {
-                            var resolved: [256]Value = @splat(.null);
-                            var resolved_sources: [256]RefSource = undefined;
-                            @memset(resolved_sources[0..@min(resolved_sources.len, func2.params.len + arr.entries.items.len)], .none);
-                            if (func2.params.len > resolved.len) return error.RuntimeError;
+                            var resolved_buf: [256]Value = undefined;
+                            var sources_buf: [256]RefSource = undefined;
+                            var assigned_buf: [256]bool = undefined;
+                            const slots = try self.argSlots(&resolved_buf, &sources_buf, &assigned_buf, func2.params.len + arr.entries.items.len);
+                            defer self.freeArgSlots(slots, &resolved_buf);
+                            const resolved = slots.values;
+                            const resolved_sources = slots.sources;
                             var pos: usize = 0;
                             for (arr.entries.items) |entry| {
                                 if (entry.key == .string) {
@@ -10869,65 +10657,13 @@ pub const VM = struct {
                                 self.setArgSource(self.sp - 1, resolved_sources[i]);
                             }
                         } else {
-                            for (arr.entries.items) |entry| self.pushArgEntry(arr, entry);
+                            try self.pushArgEntries(arr, arr.entries.items);
                         }
                     } else {
-                        for (arr.entries.items) |entry| self.pushArgEntry(arr, entry);
+                        try self.pushArgEntries(arr, arr.entries.items);
                     }
 
-                    if (this_val) |tv| {
-                        if (tv == .object) {
-                            if (self.functions.get(full_name)) |func| {
-                                if (func.is_generator) {
-                                    try self.callStaticFunction(full_name, @intCast(resolved_ac), effective_called);
-                                } else {
-                                    var new_vars = self.acquireFrameVars();
-                                    try new_vars.put(self.allocator, "$this", tv);
-                                    if (func.is_variadic) {
-                                        const fixed: usize = func.arity - 1;
-                                        for (0..@min(resolved_ac, fixed)) |i| {
-                                            try new_vars.put(self.allocator, func.params[i], try self.bindFrameArg(self.stack[self.sp - resolved_ac + i]));
-                                        }
-                                        const rest_arr = try self.allocArray();
-                                        for (fixed..resolved_ac) |i| try rest_arr.append(self.allocator, self.stack[self.sp - resolved_ac + i]);
-                                        try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
-                                    } else {
-                                        for (0..@min(resolved_ac, func.arity)) |i| {
-                                            try new_vars.put(self.allocator, func.params[i], try self.bindFrameArg(self.stack[self.sp - resolved_ac + i]));
-                                        }
-                                        for (resolved_ac..func.arity) |i| {
-                                            if (i < func.defaults.len) try new_vars.put(self.allocator, func.params[i], try self.resolveParamDefault(func, i));
-                                        }
-                                    }
-                                    const scs_ac: u8 = @intCast(@min(resolved_ac, 255));
-                                    self.saveFrameArgs(scs_ac);
-                                    self.dropN(resolved_ac);
-                                    try self.ensureCallRoom();
-                                    self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = effective_called };
-                                    self.setFrameArgCount(scs_ac);
-                                    self.frames[self.frame_count].entry_sp = self.sp;
-                                    self.frame_count += 1;
-                                    self.retainFrameObjects(self.frame_count - 1);
-                                    if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
-                                }
-                            } else {
-                                const msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name });
-                                defer self.allocator.free(msg);
-                                if (try self.throwBuiltinException("Error", msg)) continue;
-                                return error.RuntimeError;
-                            }
-                        } else {
-                            self.callNamedFunction(full_name, @intCast(resolved_ac)) catch {
-                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
-                                return error.RuntimeError;
-                            };
-                        }
-                    } else {
-                        self.callNamedFunction(full_name, @intCast(resolved_ac)) catch {
-                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
-                            return error.RuntimeError;
-                        };
-                    }
+                    try self.callStaticMethod(class_name, method_name, @intCast(resolved_ac), target.called_class, null);
                 },
 
                 .static_call_dynamic => {
@@ -11055,32 +10791,13 @@ pub const VM = struct {
                         self.setErrorMsg("Fatal error: dynamic method name must be a string", .{});
                         return error.RuntimeError;
                     };
-                    var class_name = if (class_val == .string) class_val.string.bytes() else if (class_val == .object) class_val.object.class_name else {
+                    const raw_class = if (class_val == .string) class_val.string.bytes() else if (class_val == .object) class_val.object.class_name else {
                         self.setErrorMsg("Fatal error: dynamic class name must be a string", .{});
                         return error.RuntimeError;
                     };
-                    var lsb_class: ?[]const u8 = null;
-                    if (std.mem.eql(u8, class_name, "static")) {
-                        class_name = self.resolveStaticClassName(class_name);
-                    } else if (std.mem.eql(u8, class_name, "parent") or std.mem.eql(u8, class_name, "self")) {
-                        if (std.mem.eql(u8, class_name, "parent")) {
-                            const dc = self.parentResolvingClass();
-                            if (dc) |defining| {
-                                if (self.classes.get(defining)) |cls| {
-                                    if (cls.parent) |p| class_name = p;
-                                }
-                                lsb_class = self.currentFrame().called_class orelse defining;
-                            }
-                        } else {
-                            // self:: resolves to defining class for method lookup,
-                            // but propagates called_class for LSB
-                            lsb_class = self.currentFrame().called_class;
-                            if (self.currentDefiningClass()) |dc| class_name = dc;
-                        }
-                    } else if (self.currentFrame().called_class) |cc| {
-                        if (self.isAncestor(class_name, cc)) lsb_class = cc;
-                    }
-                    const effective_called = lsb_class orelse class_name;
+                    const target = self.dynamicStaticTarget(raw_class);
+                    const class_name = target.class_name;
+                    const effective_called = target.called_class;
                     if (!self.classes.contains(class_name)) {
                         try self.tryAutoload(class_name);
                     }
@@ -11126,11 +10843,12 @@ pub const VM = struct {
                         self.error_msg = "Fatal error: dynamic method name must be a string";
                         return error.RuntimeError;
                     };
-                    var class_name = if (class_val == .string) class_val.string.bytes() else if (class_val == .object) class_val.object.class_name else {
+                    const raw_class = if (class_val == .string) class_val.string.bytes() else if (class_val == .object) class_val.object.class_name else {
                         self.error_msg = "Fatal error: dynamic class name must be a string";
                         return error.RuntimeError;
                     };
-                    class_name = self.resolveStaticClassName(class_name);
+                    const target = self.dynamicStaticTarget(raw_class);
+                    const class_name = target.class_name;
                     if (!self.classes.contains(class_name)) try self.tryAutoload(class_name);
                     const arr = args_val.array;
                     // the popped argument array is a temporary; autoloading or
@@ -11146,7 +10864,7 @@ pub const VM = struct {
                             const cs_name = try self.resolveMethod(class_name, "__callStatic");
                             self.push(.{ .string = Value.String.borrowed(method_name) });
                             self.push(args_val);
-                            try self.callStaticFunction(cs_name, 2, class_name);
+                            try self.callStaticFunction(cs_name, 2, target.called_class);
                             continue;
                         }
                         const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch return error.OutOfMemory;
@@ -11155,9 +10873,9 @@ pub const VM = struct {
                         self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
                         return error.RuntimeError;
                     };
-                    for (arr.entries.items) |entry| self.pushArgEntry(arr, entry);
-                    const ac: u8 = @intCast(arr.entries.items.len);
-                    try self.callStaticFunction(full_name, ac, class_name);
+                    try self.pushArgEntries(arr, arr.entries.items);
+                    const ac: u32 = @intCast(arr.entries.items.len);
+                    try self.callStaticFunction(full_name, ac, target.called_class);
                 },
 
                 .get_static_prop, .get_static_prop_quiet => {
@@ -11595,6 +11313,206 @@ pub const VM = struct {
         return if (relative) self.resolveStaticClassName(name) else name;
     }
 
+    // a static call site and its inline cache entry
+    const StaticCallSite = struct { entry: *InlineCache.MethodIC, key: usize, chunk_key: usize };
+
+    // Class::method() with its arguments on the stack and the class resolved
+    // (dynamicStaticTarget). a site's resolution is fixed per target class;
+    // static targets never forward $this, so a cache hit enters directly
+    fn callStaticMethod(self: *VM, class_name: []const u8, method_name: []const u8, arg_count: u32, effective_called: []const u8, site: ?StaticCallSite) RuntimeError!void {
+        if (site) |st| {
+            const entry = st.entry;
+            if (entry.key == st.key and entry.chunk_key == st.chunk_key and entry.class_ptr == @intFromPtr(class_name.ptr)) {
+                if (entry.func) |func| {
+                    if (!self.dbg_profile_enabled) {
+                        try self.callStaticUserFunction(func, entry.full_name, arg_count, effective_called);
+                        return;
+                    }
+                }
+            }
+        }
+
+        const full_name = self.resolveMethod(class_name, method_name) catch {
+            if (self.hasMethod(class_name, "__callStatic")) {
+                const ac: usize = arg_count;
+                var args_arr = try self.allocArray();
+                for (0..ac) |i| try args_arr.append(self.allocator, self.stack[self.sp - ac + i]);
+                self.dropN(ac);
+                const cs_name = try self.resolveMethod(class_name, "__callStatic");
+                self.push(.{ .string = Value.String.borrowed(method_name) });
+                self.push(.{ .array = args_arr });
+                try self.callStaticFunction(cs_name, 2, effective_called);
+                return;
+            }
+            const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch return error.OutOfMemory;
+            defer self.allocator.free(msg);
+            if (try self.throwBuiltinException("Error", msg)) return;
+            self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
+            return error.RuntimeError;
+        };
+
+        // PHP forwards $this into a Class::method() call only when
+        // the target is a non-static method (a scoped instance
+        // call). a static target gets no $this - forwarding the
+        // caller's $this corrupts late-static-binding inside it
+        const this_val = self.currentFrame().vars.get("$this") orelse blk: {
+            const f = self.currentFrame();
+            if (f.func) |fn_info| {
+                if (fn_info.locals_only) {
+                    for (fn_info.slot_names, 0..) |sn, si| {
+                        if (std.mem.eql(u8, sn, "$this") and si < f.locals.len and f.locals[si] == .object) {
+                            break :blk f.locals[si];
+                        }
+                    }
+                }
+            }
+            break :blk null;
+        };
+        const sc_target = self.functions.get(full_name);
+        const sc_target_is_static = if (sc_target) |scf| scf.is_static else false;
+        if (site) |st| {
+            if (sc_target) |func| {
+                if (func.is_static) st.entry.* = .{ .key = st.key, .chunk_key = st.chunk_key, .class_ptr = @intFromPtr(class_name.ptr), .func = func, .full_name = full_name };
+            }
+        }
+        if (this_val) |tv| {
+            if (tv == .object and !sc_target_is_static) {
+                if (self.functions.get(full_name)) |func| {
+                    if (func.is_generator) {
+                        try self.callStaticFunction(full_name, arg_count, effective_called);
+                    } else {
+                        const ac: usize = arg_count;
+                        var new_vars = self.acquireFrameVars();
+                        try new_vars.put(self.allocator, "$this", tv);
+                        if (func.is_variadic) {
+                            const fixed: usize = func.arity - 1;
+                            for (0..@min(ac, fixed)) |i| {
+                                const is_ref = i < func.ref_params.len and func.ref_params[i];
+                                const sv = self.stack[self.sp - ac + i];
+                                try new_vars.put(self.allocator, func.params[i], if (is_ref) sv else try self.bindFrameArg(sv));
+                            }
+                            const rest_arr = try self.allocArray();
+                            if (ac > fixed) {
+                                for (fixed..ac) |i| {
+                                    try rest_arr.append(self.allocator, try self.bindFrameArg(self.stack[self.sp - ac + i]));
+                                }
+                            }
+                            try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
+                        } else {
+                            for (0..@min(ac, func.arity)) |i| {
+                                const is_ref = i < func.ref_params.len and func.ref_params[i];
+                                const sv = self.stack[self.sp - ac + i];
+                                try new_vars.put(self.allocator, func.params[i], if (is_ref) sv else try self.bindFrameArg(sv));
+                            }
+                        }
+                        if (!self.hasCallRoom(1) and !(try self.growCallRoom(1))) {
+                            self.dropN(ac);
+                            new_vars.deinit(self.allocator);
+                            const msg = std.fmt.allocPrint(self.allocator, "Fatal error: maximum call stack depth exceeded in {s}::{s}()", .{ class_name, method_name }) catch return error.OutOfMemory;
+                            defer self.allocator.free(msg);
+                            if (try self.throwBuiltinException("Error", msg)) return;
+                            self.setErrorMsg("{s}", .{msg});
+                            return error.RuntimeError;
+                        }
+                        self.saveFrameArgs(arg_count);
+                        self.dropN(ac);
+                        try self.fillDefaults(&new_vars, func, ac);
+                        try self.ensureCallRoom();
+                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = effective_called };
+                        self.setFrameArgCount(arg_count);
+                        self.frames[self.frame_count].entry_sp = self.sp;
+                        self.frame_count += 1;
+                        self.retainFrameObjects(self.frame_count - 1);
+                        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
+                    }
+                } else if (self.native_fns.get(full_name)) |native| {
+                    const ac: usize = arg_count;
+                    var args_buf: [16]Value = undefined;
+                    const args_buf_s = try self.copyStackArgs(&args_buf, self.stack[self.sp - ac ..][0..ac]);
+                    defer self.freeStackArgs(args_buf_s, &args_buf);
+                    self.saveFrameArgs(arg_count);
+                    self.dropN(ac);
+                    var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
+                    try tmp_vars.put(self.allocator, "$this", tv);
+                    try self.ensureCallRoom();
+                    self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .called_class = effective_called };
+                    self.setFrameArgCount(arg_count);
+                    const sc_saved_fc = self.frame_count;
+                    self.frames[self.frame_count].entry_sp = self.sp;
+                    self.frame_count += 1;
+                    self.retainFrameObjects(self.frame_count - 1);
+                    if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
+                    var ctx = self.makeContext(full_name);
+                    const pre_handlers = self.handler_count;
+                    const result = self.invokeNative(native, &ctx, .{ .args = args_buf_s, .name = full_name, .instance = true }) catch {
+                        if (self.frame_count > sc_saved_fc) {
+                            self.frame_count -= 1;
+                            self.deinitFrameSlot(self.frame_count);
+                        }
+                        if (self.pending_exception) |exc| {
+                            self.pending_exception = null;
+                            if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
+                                const handler = self.exception_handlers[self.handler_count - 1];
+                                self.enterHandler(handler, exc, .owned);
+                                return;
+                            }
+                            self.pending_exception = exc;
+                        } else if (self.handler_count < pre_handlers) {
+                            // the native threw and a handler already took the exception
+                            return;
+                        }
+                        return error.RuntimeError;
+                    };
+                    self.frame_count -= 1;
+                    self.deinitFrameSlot(self.frame_count);
+                    self.pushNativeResult(result);
+                } else {
+                    const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch return error.OutOfMemory;
+                    defer self.allocator.free(msg);
+                    if (try self.throwBuiltinException("Error", msg)) return;
+                    self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
+                    return error.RuntimeError;
+                }
+            } else {
+                try self.callStaticFunction(full_name, arg_count, effective_called);
+            }
+        } else {
+            try self.callStaticFunction(full_name, arg_count, effective_called);
+        }
+    }
+
+    // the class a `$class::method()` call looks the method up in, and the
+    // class static:: names inside it: self and parent keep the caller's late
+    // static binding, as does a call to an ancestor of it
+    fn dynamicStaticTarget(self: *VM, raw_class: []const u8) struct { class_name: []const u8, called_class: []const u8 } {
+        var class_name = raw_class;
+        var lsb_class: ?[]const u8 = null;
+        if (std.mem.eql(u8, class_name, "static")) {
+            class_name = self.resolveStaticClassName(class_name);
+        } else if (std.mem.eql(u8, class_name, "parent") or std.mem.eql(u8, class_name, "self")) {
+            if (std.mem.eql(u8, class_name, "parent")) {
+                const dc = self.parentResolvingClass();
+                if (dc) |defining| {
+                    if (self.classes.get(defining)) |cls| {
+                        if (cls.parent) |p| class_name = p;
+                    }
+                    lsb_class = self.currentFrame().called_class orelse defining;
+                }
+            } else {
+                // self:: resolves to defining class for method lookup,
+                // but propagates called_class for LSB
+                lsb_class = self.currentFrame().called_class;
+                if (self.currentDefiningClass()) |dc| class_name = dc;
+            }
+        } else {
+            if (class_name.len > 0 and class_name[0] == '\\') class_name = class_name[1..];
+            if (self.currentFrame().called_class) |cc| {
+                if (self.isAncestor(class_name, cc)) lsb_class = cc;
+            }
+        }
+        return .{ .class_name = class_name, .called_class = lsb_class orelse class_name };
+    }
+
     fn resolveStaticClassName(self: *VM, name: []const u8) []const u8 {
         if (name.len > 0 and name[0] == '$') {
             const local_val = self.getLocalByName(name);
@@ -11955,7 +11873,7 @@ pub const VM = struct {
     fn appendPassedArgs(self: *VM, args: *PhpArray, frame_idx: usize, f: *const ObjFunction) !void {
         const frame = &self.frames[frame_idx];
         const declared = if (f.is_variadic) f.params.len - 1 else f.params.len;
-        const passed: ?usize = if (self.ic) |ic| (if (ic.arg_counts[frame_idx] == 0xFF) null else ic.arg_counts[frame_idx]) else null;
+        const passed: ?usize = if (self.ic) |ic| (if (ic.arg_counts[frame_idx] == unknown_arg_count) null else ic.arg_counts[frame_idx]) else null;
         for (f.params[0..@min(passed orelse declared, declared)]) |pname| try args.append(self.allocator, frameParamValue(frame, f, pname));
         if (f.is_variadic) {
             const rest = frameParamValue(frame, f, f.params[declared]);
@@ -12335,19 +12253,22 @@ pub const VM = struct {
             if (entry.key == .string) break true;
         } else false;
         if (!has_named) {
-            for (entries) |entry| self.pushArgEntry(arr, entry);
+            try self.pushArgEntries(arr, entries);
             return .{ .count = entries.len };
         }
         if (!self.classes.contains(class_name)) try self.tryAutoload(class_name);
         const ctn = (self.resolveMethod(class_name, "__construct") catch null) orelse {
-            for (entries) |entry| self.pushArgEntry(arr, entry);
+            try self.pushArgEntries(arr, entries);
             return .{ .count = entries.len };
         };
         if (self.functions.get(ctn)) |func| {
-            var resolved: [256]Value = @splat(.null);
-            var resolved_sources: [256]RefSource = undefined;
-            @memset(resolved_sources[0..@min(resolved_sources.len, func.params.len + entries.len)], .none);
-            if (func.params.len > resolved.len) return error.RuntimeError;
+            var resolved_buf: [256]Value = undefined;
+            var sources_buf: [256]RefSource = undefined;
+            var assigned_buf: [256]bool = undefined;
+            const slots = try self.argSlots(&resolved_buf, &sources_buf, &assigned_buf, func.params.len + entries.len);
+            defer self.freeArgSlots(slots, &resolved_buf);
+            const resolved = slots.values;
+            const resolved_sources = slots.sources;
             var pos: usize = 0;
             for (entries) |entry| {
                 if (entry.key == .string) {
@@ -12399,7 +12320,7 @@ pub const VM = struct {
             }
             return .{ .count = placed.count };
         }
-        for (entries) |entry| self.pushArgEntry(arr, entry);
+        try self.pushArgEntries(arr, entries);
         return .{ .count = entries.len };
     }
 
@@ -15790,7 +15711,7 @@ pub const VM = struct {
         }
     }
 
-    fn callClosureLocalsOnly(self: *VM, func: *const ObjFunction, name: []const u8, arg_count: u8) RuntimeError!void {
+    fn callClosureLocalsOnly(self: *VM, func: *const ObjFunction, name: []const u8, arg_count: u32) RuntimeError!void {
         const ac: usize = arg_count;
         const lc: usize = func.local_count;
 
@@ -15879,7 +15800,7 @@ pub const VM = struct {
 
     // a locals-only method: $this in slot 0, the arguments after it, run in
     // the fast loop. the object and arguments are on the stack under the call
-    fn enterMethodLocalsOnly(self: *VM, func: *const ObjFunction, obj: *PhpObject, arg_count: u8) RuntimeError!void {
+    fn enterMethodLocalsOnly(self: *VM, func: *const ObjFunction, obj: *PhpObject, arg_count: u32) RuntimeError!void {
         const ac: usize = arg_count;
         const lc: usize = func.local_count;
         const ic = self.ic.?;
@@ -15913,7 +15834,7 @@ pub const VM = struct {
         try self.fastLoop();
     }
 
-    fn callLocalsOnly(self: *VM, func: *const ObjFunction, arg_count: u8) RuntimeError!void {
+    fn callLocalsOnly(self: *VM, func: *const ObjFunction, arg_count: u32) RuntimeError!void {
         const ac: usize = arg_count;
         const lc: usize = func.local_count;
         const ic = self.ic.?;
@@ -17276,9 +17197,35 @@ pub const VM = struct {
         return .none;
     }
 
+    // a call's arguments copied off the operand stack before they are
+    // dropped: into buf, or the heap when the call passes more
+    fn copyStackArgs(self: *VM, buf: []Value, values: []const Value) RuntimeError![]Value {
+        const out = if (values.len <= buf.len) buf[0..values.len] else try self.allocator.alloc(Value, values.len);
+        @memcpy(out, values);
+        return out;
+    }
+
+    fn freeStackArgs(self: *VM, args: []Value, buf: []Value) void {
+        if (args.ptr != buf.ptr) self.allocator.free(args);
+    }
+
     fn pushArgEntry(self: *VM, arr: *PhpArray, entry: PhpArray.Entry) void {
-        self.push(entry.value);
-        self.setArgSource(self.sp - 1, self.argArraySource(arr, entry.key));
+        self.push(if (entry.ref) |ref| ref.* else entry.value);
+        var source = self.argArraySource(arr, entry.key);
+        // a reference element of an unpacked array binds a by-reference
+        // parameter to what it references
+        if (source == .none) if (entry.ref) |ref| {
+            source = .{ .cell = .{ .value = ref } };
+        };
+        self.setArgSource(self.sp - 1, source);
+    }
+
+    // an unpacked argument list can hold more values than a frame's headroom
+    fn pushArgEntries(self: *VM, arr: *PhpArray, entries: []const PhpArray.Entry) RuntimeError!void {
+        try self.ensureStackSlots(entries.len);
+        // and func_get_args keeps them (saveFrameArgs does not grow its room)
+        _ = self.fgaRoomFor(entries.len);
+        for (entries) |entry| self.pushArgEntry(arr, entry);
     }
 
     // Binding runs below call setup, not in the dispatch loop. Queue an
@@ -19196,7 +19143,7 @@ pub const VM = struct {
         if (frame.vars.count() == 0) return;
         const count = if (self.ic) |ic| blk: {
             const raw = ic.arg_counts[frame_idx];
-            break :blk if (raw == 0xFF) func.arity else @min(@as(usize, raw), func.arity);
+            break :blk if (raw == unknown_arg_count) func.arity else @min(@as(usize, raw), func.arity);
         } else func.arity;
         for (func.params[0..@min(count, func.params.len)], 0..) |param, i| {
             const val = frame.vars.get(param) orelse continue;
@@ -19266,8 +19213,9 @@ pub const VM = struct {
             try self.setPendingException("ArgumentCountError", native.arity.describe(&buf, label, input_args.len));
             return error.RuntimeError;
         }
-        var args_buf: [256]Value = undefined;
-        if (input_args.len > args_buf.len) return error.RuntimeError;
+        var args_buf: [16]Value = undefined;
+        var separated_args: ?[]Value = null;
+        defer if (separated_args) |copy| self.freeStackArgs(copy, &args_buf);
         var native_args = input_args;
         // only a call whose arguments recorded provenance can bind an output
         // position; by-value sites skip the name lookup entirely
@@ -19282,9 +19230,10 @@ pub const VM = struct {
             }
             if (sources.len > 0 and sources[0] != .none and input_args[0] == .array and input_args[0].array.refcount > 1 and byref_args.arg0IsByRef(n)) {
                 const separated: Value = .{ .array = try self.shallowCloneCow(input_args[0].array) };
-                @memcpy(args_buf[0..input_args.len], input_args);
-                args_buf[0] = separated;
-                native_args = args_buf[0..input_args.len];
+                const copy = try self.copyStackArgs(&args_buf, input_args);
+                copy[0] = separated;
+                separated_args = copy;
+                native_args = copy;
                 ctx.setCallerVar(0, native_args.len, separated);
             }
         };
@@ -19902,7 +19851,7 @@ pub const VM = struct {
         return std.mem.eql(u8, type_str, tag) or std.mem.eql(u8, type_str, "mixed");
     }
 
-    pub noinline fn checkParamTypes(self: *VM, name: []const u8, arg_count: u8) RuntimeError!bool {
+    pub noinline fn checkParamTypes(self: *VM, name: []const u8, arg_count: u32) RuntimeError!bool {
         if (g_type_info.count() == 0) return false;
         const ac: usize = arg_count;
         // runs before the callee frame is pushed, so the caller is the top frame
@@ -20244,7 +20193,7 @@ pub const VM = struct {
             std.mem.eql(u8, name, "sizeof");
     }
 
-    fn callStaticFunction(self: *VM, name: []const u8, arg_count: u8, class_name: []const u8) RuntimeError!void {
+    fn callStaticFunction(self: *VM, name: []const u8, arg_count: u32, class_name: []const u8) RuntimeError!void {
         const fc_before = self.frame_count;
         const prev_cc = self.currentFrame().called_class;
         // set called_class on current frame so both native fns and localsOnly
@@ -20259,7 +20208,7 @@ pub const VM = struct {
             self.frames[fc_before].called_class = class_name;
     }
 
-    fn callStaticUserFunction(self: *VM, func: *const ObjFunction, name: []const u8, arg_count: u8, class_name: []const u8) RuntimeError!void {
+    fn callStaticUserFunction(self: *VM, func: *const ObjFunction, name: []const u8, arg_count: u32, class_name: []const u8) RuntimeError!void {
         const fc_before = self.frame_count;
         const prev_cc = self.currentFrame().called_class;
         self.currentFrame().called_class = class_name;
@@ -20272,14 +20221,14 @@ pub const VM = struct {
             self.frames[fc_before].called_class = class_name;
     }
 
-    fn callNamedFunction(self: *VM, raw_name: []const u8, arg_count: u8) RuntimeError!void {
+    fn callNamedFunction(self: *VM, raw_name: []const u8, arg_count: u32) RuntimeError!void {
         return self.callNamedFunctionV(raw_name, arg_count, null);
     }
 
     // named_extras: PHP 8.1 lets named arguments that match no declared
     // parameter fall into a variadic param keyed by their name. when set, its
     // entries are merged into the variadic rest array
-    fn callNamedFunctionV(self: *VM, raw_name: []const u8, arg_count: u8, named_extras: ?*PhpArray) RuntimeError!void {
+    fn callNamedFunctionV(self: *VM, raw_name: []const u8, arg_count: u32, named_extras: ?*PhpArray) RuntimeError!void {
         self.captureArgSources(arg_count);
         // PHP normalizes leading-backslash on function callable strings
         const name = if (raw_name.len > 0 and raw_name[0] == '\\') raw_name[1..] else raw_name;
@@ -20294,11 +20243,12 @@ pub const VM = struct {
         if (self.native_fns.get(name)) |native| {
             var args: [64]Value = undefined;
             const ac: usize = arg_count;
-            for (0..ac) |i| args[i] = self.stack[self.sp - ac + i];
+            const args_s = try self.copyStackArgs(&args, self.stack[self.sp - ac ..][0..ac]);
+            defer self.freeStackArgs(args_s, &args);
             self.dropN(ac);
             const pre_handler_count = self.handler_count;
             var ctx = self.makeContext(name);
-            const result = self.invokeNative(native, &ctx, .{ .args = args[0..ac], .name = name }) catch {
+            const result = self.invokeNative(native, &ctx, .{ .args = args_s, .name = name }) catch {
                 if (self.pending_exception) |exc| {
                     self.pending_exception = null;
                     if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
@@ -20329,7 +20279,7 @@ pub const VM = struct {
     }
 
     // the body of a call to a user function already resolved by name
-    fn enterUserFunction(self: *VM, func: *const ObjFunction, name: []const u8, arg_count: u8, named_extras: ?*PhpArray) RuntimeError!void {
+    fn enterUserFunction(self: *VM, func: *const ObjFunction, name: []const u8, arg_count: u32, named_extras: ?*PhpArray) RuntimeError!void {
         const ac: usize = arg_count;
         if (ac < func.required_params) {
             const msg = try self.formatTooFewArgs(name, ac, func);
@@ -20476,6 +20426,35 @@ pub const VM = struct {
     // natives declare no parameter list; native_params supplies it, so a named
     // argument lands in its position and a skipped optional parameter gets
     // its default, with php's errors for everything else
+    // scratch room for placing a call's named and positional arguments in
+    // parameter order: the buffers, or the heap for a call passing more
+    const ArgSlots = struct { values: []Value, sources: []RefSource, assigned: []bool };
+
+    fn argSlots(self: *VM, values_buf: *[256]Value, sources_buf: *[256]RefSource, assigned_buf: *[256]bool, count: usize) RuntimeError!ArgSlots {
+        const slots: ArgSlots = if (count <= values_buf.len) .{
+            .values = values_buf[0..count],
+            .sources = sources_buf[0..count],
+            .assigned = assigned_buf[0..count],
+        } else blk: {
+            const values = try self.allocator.alloc(Value, count);
+            errdefer self.allocator.free(values);
+            const sources = try self.allocator.alloc(RefSource, count);
+            errdefer self.allocator.free(sources);
+            break :blk .{ .values = values, .sources = sources, .assigned = try self.allocator.alloc(bool, count) };
+        };
+        @memset(slots.values, .null);
+        @memset(slots.sources, .none);
+        @memset(slots.assigned, false);
+        return slots;
+    }
+
+    fn freeArgSlots(self: *VM, slots: ArgSlots, values_buf: *[256]Value) void {
+        if (slots.values.ptr == values_buf) return;
+        self.allocator.free(slots.values);
+        self.allocator.free(slots.sources);
+        self.allocator.free(slots.assigned);
+    }
+
     pub fn placeNativeNamedArgs(self: *VM, arr: *PhpArray, params: []const native_params.Param, resolved: *[256]Value, sources: *[256]RefSource) RuntimeError!NativeNamedArgs {
         @memset(resolved, .null);
         @memset(sources, .none);
@@ -20923,7 +20902,7 @@ pub const VM = struct {
 
     fn callUserFunction(self: *VM, name: []const u8, func: *const ObjFunction, args: []const Value, called_class: ?[]const u8) RuntimeError!Value {
         {
-            if (self.ic) |ic| ic.pending_arg_count = @intCast(@min(args.len, 255));
+            if (self.ic) |ic| ic.pending_arg_count = @intCast(@min(args.len, unknown_arg_count - 1));
             self.pending_call_name = name;
             self.pending_called_class = called_class orelse self.closureScopeByName(name);
             const saved_pia_outer = self.pending_invoke_args;
@@ -21096,7 +21075,9 @@ pub const VM = struct {
             if (func.ref_params.len == 0) {
                 return self.callByNameAs(name, args, called_class);
             }
-            const bind_count = @min(args.len, func.arity);
+            // a variadic parameter collects what the fixed ones leave
+            const fixed: usize = if (func.is_variadic) func.arity - 1 else func.arity;
+            const bind_count = @min(args.len, fixed);
             var new_vars = self.acquireFrameVars();
             var ref_slots: std.StringHashMapUnmanaged(*Value) = .{};
             try self.bindClosures(&new_vars, &ref_slots, name);
@@ -21116,7 +21097,16 @@ pub const VM = struct {
                     cells[i] = cell;
                 }
             }
-            try self.fillDefaults(&new_vars, func, bind_count);
+            if (func.is_variadic) {
+                for (bind_count..fixed) |i| {
+                    if (i < func.defaults.len) try new_vars.put(self.allocator, func.params[i], try self.resolveParamDefault(func, i));
+                }
+                const rest_arr = try self.allocArray();
+                for (args[bind_count..]) |arg| try rest_arr.append(self.allocator, try self.bindFrameArg(arg));
+                try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
+            } else {
+                try self.fillDefaults(&new_vars, func, bind_count);
+            }
 
             self.pending_call_name = name;
             self.pending_called_class = called_class orelse self.closureScopeByName(name);
@@ -21304,21 +21294,24 @@ pub const VM = struct {
         return &self.frames[self.frame_count - 1];
     }
 
-    fn setFrameArgCount(self: *VM, ac: u8) void {
+    // an arg_counts entry for a frame whose argument count isn't known
+    pub const unknown_arg_count: u32 = std.math.maxInt(u32);
+
+    fn setFrameArgCount(self: *VM, ac: u32) void {
         if (self.ic) |ic| ic.arg_counts[self.frame_count] = ac;
     }
 
     fn consumePendingArgCount(self: *VM) void {
         if (self.ic) |ic| {
             ic.arg_counts[self.frame_count] = ic.pending_arg_count;
-            ic.pending_arg_count = 0xFF;
+            ic.pending_arg_count = unknown_arg_count;
         }
     }
 
-    pub fn getFrameArgCount(self: *VM) ?u8 {
+    pub fn getFrameArgCount(self: *VM) ?u32 {
         const ic = self.ic orelse return null;
         const ac = ic.arg_counts[self.frame_count - 1];
-        if (ac == 0xFF) return null;
+        if (ac == unknown_arg_count) return null;
         return ac;
     }
 
@@ -21328,7 +21321,8 @@ pub const VM = struct {
     // operand slots a single frame may use; the region past what is committed
     // faults, so a frame that outgrows this stops instead of overwriting
     const stack_headroom: usize = 1 << 14;
-    // func_get_args keeps at most 255 arguments per frame
+    // func_get_args room every frame keeps; a call passing more grows it
+    // beforehand (fgaRoomFor)
     const fga_headroom: usize = 256;
     const max_handlers: usize = 1 << 20;
 
@@ -21342,7 +21336,7 @@ pub const VM = struct {
         ic.arg_stack = ic.arg_stack_room.items;
         ic.sp_save_room = Region(usize).reserve(max_frames) catch return error.OutOfMemory;
         ic.sp_save = ic.sp_save_room.items;
-        ic.arg_counts_room = Region(u8).reserve(max_frames) catch return error.OutOfMemory;
+        ic.arg_counts_room = Region(u32).reserve(max_frames) catch return error.OutOfMemory;
         ic.arg_counts = ic.arg_counts_room.items;
         ic.fga_offsets_room = Region(u32).reserve(max_frames) catch return error.OutOfMemory;
         ic.fga_offsets = ic.fga_offsets_room.items;
@@ -21413,7 +21407,7 @@ pub const VM = struct {
             self.handler_room.committed * @sizeOf(ExceptionHandler) +
             ic.arg_stack_room.committed * @sizeOf(RefSource) +
             ic.sp_save_room.committed * @sizeOf(usize) +
-            ic.arg_counts_room.committed +
+            ic.arg_counts_room.committed * @sizeOf(u32) +
             ic.fga_offsets_room.committed * @sizeOf(u32) +
             ic.fga_room.committed * @sizeOf(Value);
     }
@@ -21443,7 +21437,7 @@ pub const VM = struct {
         const fga_target = growTarget(want_fga, ic.fga_room.committed, max_stack_slots);
         const ok = (self.frame_room.ensure(frame_target) catch return error.OutOfMemory) and
             (ic.sp_save_room.ensure(frame_target) catch return error.OutOfMemory) and
-            (ic.arg_counts_room.ensureFilled(frame_target, 0xFF) catch return error.OutOfMemory) and
+            (ic.arg_counts_room.ensureFilled(frame_target, unknown_arg_count) catch return error.OutOfMemory) and
             (ic.fga_offsets_room.ensureFilled(frame_target, 0) catch return error.OutOfMemory) and
             (self.stack_room.ensure(slot_target) catch return error.OutOfMemory) and
             (ic.arg_stack_room.ensureFilled(slot_target, .none) catch return error.OutOfMemory) and
@@ -21461,7 +21455,21 @@ pub const VM = struct {
         if (self.frame_count < ic.fga_offsets_room.committed) ic.fga_offsets[self.frame_count] = fga_unsaved;
     }
 
-    pub fn saveFrameArgs(self: *VM, arg_count: u8) void {
+    // whether func_get_args can keep `count` more arguments, growing its
+    // buffer when a call passes more than the headroom
+    fn fgaRoomFor(self: *VM, count: usize) bool {
+        const ic = self.ic.?;
+        const want = @as(usize, ic.fga_sp) + count;
+        if (want <= ic.fga_room.committed) return true;
+        if (want > max_stack_slots) return false;
+        const before = self.callRegionBytes();
+        const grown = ic.fga_room.ensureFilled(growTarget(want, ic.fga_room.committed, max_stack_slots), .null) catch return false;
+        if (!grown) return false;
+        self.chargeRegionGrowth(before) catch return false;
+        return true;
+    }
+
+    pub fn saveFrameArgs(self: *VM, arg_count: u32) void {
         const ic = self.ic orelse return;
         if (self.frame_count >= ic.fga_offsets_room.committed) return;
         const ac: usize = arg_count;
@@ -21495,7 +21503,7 @@ pub const VM = struct {
             return;
         }
         const sp = ic.fga_sp;
-        if (sp + ac > ic.fga_room.committed) {
+        if (!self.fgaRoomFor(ac)) {
             ic.fga_offsets[self.frame_count] = fga_unsaved;
             return;
         }
@@ -21526,7 +21534,7 @@ pub const VM = struct {
         const ic = self.ic orelse return null;
         const fc = self.frame_count - 1;
         const ac_raw = ic.arg_counts[fc];
-        if (ac_raw == 0xFF) return null;
+        if (ac_raw == unknown_arg_count) return null;
         const ac: usize = ac_raw;
         if (fc >= ic.fga_offsets_room.committed or ic.fga_offsets[fc] == fga_unsaved) return null;
         const offset: usize = ic.fga_offsets[fc];
