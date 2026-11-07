@@ -1,4 +1,5 @@
 const std = @import("std");
+const object_properties = @import("../runtime/object_properties.zig");
 const deprecations = @import("deprecations_generated.zig");
 const Value = @import("../runtime/value.zig").Value;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
@@ -346,6 +347,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rm_def.methods.put(a, "isInternal", .{ .name = "isInternal", .arity = 0 });
     try rm_def.methods.put(a, "isUserDefined", .{ .name = "isUserDefined", .arity = 0 });
     try rm_def.methods.put(a, "isDeprecated", .{ .name = "isDeprecated", .arity = 0 });
+    try rm_def.methods.put(a, "getStaticVariables", .{ .name = "getStaticVariables", .arity = 0 });
     try rm_def.methods.put(a, "createFromMethodName", .{ .name = "createFromMethodName", .arity = 1, .is_static = true });
     try vm.classes.put(a, "ReflectionMethod", rm_def);
 
@@ -387,6 +389,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionMethod::isInternal", rmIsInternal);
     try vm.native_fns.put(a, "ReflectionMethod::isUserDefined", rmIsUserDefined);
     try vm.native_fns.put(a, "ReflectionMethod::isDeprecated", rmIsDeprecated);
+    try vm.native_fns.put(a, "ReflectionMethod::getStaticVariables", rmGetStaticVariables);
 
     var rp_def = ClassDef{ .name = "ReflectionParameter" };
     try rp_def.interfaces.append(a, "Reflector");
@@ -732,7 +735,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClassConstant::getModifiers", rccGetModifiers);
 
     // Closure class (static methods only - instance methods handled in VM dispatch)
-    var closure_def = ClassDef{ .name = "Closure", .is_final = true };
+    var closure_def = ClassDef{ .name = "Closure", .is_final = true, .native_properties = closureProperties };
     try closure_def.methods.put(a, "bind", .{ .name = "bind", .arity = 2, .is_static = true });
     try closure_def.methods.put(a, "fromCallable", .{ .name = "fromCallable", .arity = 1, .is_static = true });
     try closure_def.methods.put(a, "getCurrent", .{ .name = "getCurrent", .arity = 0, .is_static = true });
@@ -3195,6 +3198,32 @@ fn rfGetClosureUsedVariables(ctx: *NativeContext, _: []const Value) RuntimeError
             try result.set(ctx.allocator, .{ .string = Value.String.borrowed(name) }, val);
         }
     }
+    try appendStaticVariables(ctx, result, fn_name);
+    return NativeResult.borrowed(.{ .array = result });
+}
+
+// the static variables a function declares, at their current values or the
+// initial ones php shows before the declaration runs
+fn appendStaticVariables(ctx: *NativeContext, result: *PhpArray, fn_name: []const u8) RuntimeError!void {
+    const func = ctx.vm.functions.get(fn_name) orelse return;
+    for (func.static_vars) |sv| {
+        var buf: [256]u8 = undefined;
+        const storage = std.fmt.bufPrint(&buf, "{s}::{s}", .{ fn_name, sv.name }) catch continue;
+        const value = if (ctx.vm.statics_cells.get(storage)) |cell| cell.* else if (ctx.vm.statics.get(storage)) |v| v else try ctx.vm.resolveDefault(sv.initial);
+        const key = if (sv.name.len > 0 and sv.name[0] == '$') sv.name[1..] else sv.name;
+        try result.setCopiedKey(ctx.allocator, key, value);
+    }
+}
+
+fn rmGetStaticVariables(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const result = try ctx.createArray();
+    const this = getThis(ctx) orelse return NativeResult.borrowed(.{ .array = result });
+    const method_name = methodLookupName(this) orelse return NativeResult.borrowed(.{ .array = result });
+    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.borrowed(.{ .array = result });
+    var buf: [512]u8 = undefined;
+    const fn_name = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return NativeResult.borrowed(.{ .array = result });
+    const registered = ctx.vm.resolveMethod(declaring, method_name) catch null;
+    try appendStaticVariables(ctx, result, registered orelse fn_name);
     return NativeResult.borrowed(.{ .array = result });
 }
 
@@ -3509,6 +3538,121 @@ fn resolveScope(args: []const Value) VM.ClosureScope {
         return .clear;
     }
     return .preserve;
+}
+
+// zend_closure_get_debug_info: a Closure shows nothing but its debug table
+fn closureProperties(ctx: *NativeContext, obj: *PhpObject, purpose: object_properties.Purpose) RuntimeError!?*PhpArray {
+    const table = try ctx.vm.allocArray();
+    if (purpose != .debug) return table;
+    const instance = obj.get("__closure");
+    if (instance == .string) {
+        try closureInstanceTable(ctx, table, instance.string.bytes());
+    } else {
+        try callableClosureTable(ctx, table, obj.get("__callable"));
+    }
+    return table;
+}
+
+fn setNamed(ctx: *NativeContext, table: *PhpArray, key: []const u8, value: Value) RuntimeError!void {
+    try table.setCopiedKey(ctx.allocator, key, value);
+}
+
+// a closure expression's instance: where it was written, what it captured
+// and declares static, the object it is bound to, its parameters
+fn closureInstanceTable(ctx: *NativeContext, table: *PhpArray, name: []const u8) RuntimeError!void {
+    const vm = ctx.vm;
+    const func = vm.functions.get(name) orelse return;
+    try setNamed(ctx, table, "name", .{ .string = Value.String.borrowed(if (func.display_name.len > 0) func.display_name else "{closure}") });
+    try setNamed(ctx, table, "file", .{ .string = Value.String.borrowed(func.file_path) });
+    try setNamed(ctx, table, "line", .{ .int = func.start_line });
+    const statics = try vm.allocArray();
+    if (vm.capture_index.get(name)) |range| {
+        for (vm.captures.items[range.start .. range.start + range.len]) |cap| {
+            if (std.mem.eql(u8, cap.var_name, "$this") or std.mem.startsWith(u8, cap.var_name, "$__closure")) continue;
+            const key = if (cap.var_name.len > 0 and cap.var_name[0] == '$') cap.var_name[1..] else cap.var_name;
+            if (cap.ref_cell) |cell| {
+                try statics.setCopiedKey(ctx.allocator, key, cell.*);
+                if (statics.getPtr(.{ .string = Value.String.borrowed(key) })) |entry| vm.setEntryRef(entry, cell);
+            } else try statics.setCopiedKey(ctx.allocator, key, cap.value);
+        }
+    }
+    for (func.static_vars) |sv| {
+        var buf: [256]u8 = undefined;
+        const storage = std.fmt.bufPrint(&buf, "{s}::{s}", .{ name, sv.name }) catch continue;
+        const value = if (vm.statics_cells.get(storage)) |cell| cell.* else if (vm.statics.get(storage)) |v| v else try vm.resolveDefault(sv.initial);
+        const key = if (sv.name.len > 0 and sv.name[0] == '$') sv.name[1..] else sv.name;
+        try statics.setCopiedKey(ctx.allocator, key, value);
+    }
+    if (statics.entries.items.len > 0) try setNamed(ctx, table, "static", .{ .array = statics });
+    const this = vm.closureThisByName(name);
+    if (this == .object) try setNamed(ctx, table, "this", this);
+    try parameterTable(ctx, table, func.params, func.ref_params, func.required_params, func.is_variadic);
+}
+
+// a Closure made from a callable: the function it calls, and the object for
+// a method
+fn callableClosureTable(ctx: *NativeContext, table: *PhpArray, callable: Value) RuntimeError!void {
+    var function: []const u8 = "";
+    var this: Value = .null;
+    var buf: [512]u8 = undefined;
+    switch (callable) {
+        .string => |s| function = s.bytes(),
+        .array => |arr| if (arr.entries.items.len == 2) {
+            const target = arr.entries.items[0].value;
+            const method = arr.entries.items[1].value;
+            if (method != .string) return;
+            const class = switch (target) {
+                .object => |o| blk: {
+                    this = target;
+                    break :blk o.class_name;
+                },
+                .string => |cs| cs.bytes(),
+                else => return,
+            };
+            const registered = ctx.vm.resolveMethod(class, method.string.bytes()) catch null;
+            function = registered orelse (std.fmt.bufPrint(&buf, "{s}::{s}", .{ class, method.string.bytes() }) catch return);
+        },
+        else => return,
+    }
+    try table.setCopiedString(ctx.allocator, .{ .string = Value.String.borrowed("function") }, function);
+    if (this == .object) try setNamed(ctx, table, "this", this);
+    if (ctx.vm.functions.get(function)) |func| {
+        try parameterTable(ctx, table, func.params, func.ref_params, func.required_params, func.is_variadic);
+    } else if (@import("native_params.zig").get(function)) |signature| {
+        const params = try ctx.allocator.alloc([]const u8, signature.params.len);
+        defer ctx.allocator.free(params);
+        const refs = try ctx.allocator.alloc(bool, signature.params.len);
+        defer ctx.allocator.free(refs);
+        var names: std.ArrayListUnmanaged([]u8) = .empty;
+        defer {
+            for (names.items) |n| ctx.allocator.free(n);
+            names.deinit(ctx.allocator);
+        }
+        var required: u8 = 0;
+        var variadic = false;
+        for (signature.params, 0..) |param, i| {
+            const dollar = try std.fmt.allocPrint(ctx.allocator, "${s}", .{param.name});
+            try names.append(ctx.allocator, dollar);
+            params[i] = dollar;
+            refs[i] = param.by_ref;
+            if (param.default == .required and !param.variadic) required = @intCast(i + 1);
+            if (param.variadic) variadic = true;
+        }
+        try parameterTable(ctx, table, params, refs, required, variadic);
+    }
+}
+
+fn parameterTable(ctx: *NativeContext, table: *PhpArray, params: []const []const u8, ref_params: []const bool, required: u8, variadic: bool) RuntimeError!void {
+    if (params.len == 0) return;
+    const out = try ctx.vm.allocArray();
+    for (params, 0..) |param, i| {
+        var buf: [256]u8 = undefined;
+        const by_ref = i < ref_params.len and ref_params[i];
+        const key = std.fmt.bufPrint(&buf, "{s}{s}", .{ if (by_ref) "&" else "", param }) catch continue;
+        const optional = i >= required or (variadic and i == params.len - 1);
+        try out.setCopiedKey(ctx.allocator, key, .{ .string = Value.String.borrowed(if (optional) "<optional>" else "<required>") });
+    }
+    try setNamed(ctx, table, "parameter", .{ .array = out });
 }
 
 fn wrapCallableClosure(ctx: *NativeContext, callable: Value) RuntimeError!NativeResult {

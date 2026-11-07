@@ -95,6 +95,10 @@ pub fn freeFunction(allocator: Allocator, f: *ObjFunction) void {
     freeDefaults(allocator, f.defaults);
     if (f.ref_params.len > 0) allocator.free(f.ref_params);
     if (f.slot_names.len > 0) allocator.free(f.slot_names);
+    if (f.static_vars.len > 0) {
+        for (f.static_vars) |sv| freeDefaultValue(allocator, sv.initial);
+        allocator.free(f.static_vars);
+    }
 }
 
 pub fn freeDefaults(allocator: Allocator, defaults: []const Value) void {
@@ -246,6 +250,8 @@ pub const Compiler = struct {
     // pick iter_end_close vs iter_end
     loop_foreach_close: [32]bool = @as([32]bool, @splat(false)),
     closure_count: u32 = 0,
+    // the static variables the function being compiled declares
+    static_vars: std.ArrayListUnmanaged(bytecode.StaticVar) = .empty,
     // PHP hoists (early-binds) only function declarations that are direct
     // top-level statements of a file - reachable through bare blocks and
     // namespace declarations but not through if/loops/try or another function
@@ -1457,6 +1463,18 @@ pub const Compiler = struct {
         self.new_defaults = .empty;
         self.deferred_exprs = .empty;
         return out;
+    }
+
+    // a `static $x = expr;` the function declares: php lists it from the start,
+    // with expr's value when it is a constant expression
+    pub fn noteStaticVar(self: *Compiler, name: []const u8, init_node: u32) Error!void {
+        for (self.static_vars.items) |sv| if (std.mem.eql(u8, sv.name, name)) return;
+        const initial: Value = if (init_node != 0) self.evalConstExpr(init_node) else .null;
+        self.static_vars.append(self.allocator, .{ .name = name, .initial = initial }) catch return error.CompileError;
+    }
+
+    pub fn takeStaticVars(self: *Compiler) Error![]const bytecode.StaticVar {
+        return self.static_vars.toOwnedSlice(self.allocator) catch error.CompileError;
     }
 
     pub fn takeChunk(self: *Compiler) Chunk {

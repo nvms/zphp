@@ -719,6 +719,10 @@ pub fn encodeNewDefaultSentinel(allocator: std.mem.Allocator, nd: *const NewDefa
 
 pub const ReturnTypeKind = enum { none, int, float, bool, string, other };
 
+// a static variable a function declares, with the initial value php shows
+// before the declaration runs (null for one that isn't a constant expression)
+pub const StaticVar = struct { name: []const u8, initial: Value };
+
 pub const ObjFunction = struct {
     name: []const u8,
     arity: u8,
@@ -744,6 +748,7 @@ pub const ObjFunction = struct {
     chunk: Chunk = .{},
     local_count: u16 = 0,
     slot_names: []const []const u8 = &.{},
+    static_vars: []const StaticVar = &.{},
     strict_types: bool = false,
     // declared return type kind. fastLoop's return_val uses this to decide
     // whether to bail to runLoop for type-check + non-strict coercion: for a

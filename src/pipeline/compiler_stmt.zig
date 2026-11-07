@@ -740,6 +740,7 @@ pub fn compileGlobal(self: *Compiler, node: Ast.Node) Error!void {
 pub fn compileStaticVar(self: *Compiler, node: Ast.Node) Error!void {
     const var_name = self.ast.tokenSlice(node.main_token);
     const var_idx = try self.addConstant(.{ .string = Value.String.borrowed(var_name) });
+    try self.noteStaticVar(var_name, node.data.lhs);
 
     // get_static pushes the current value (or null if uninitialized)
     // VM derives the storage key from current function name + var name

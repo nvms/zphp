@@ -1143,7 +1143,7 @@ pub const VM = struct {
         self.array_ref_active = true;
     }
 
-    fn setEntryRef(self: *VM, entry: *PhpArray.Entry, cell: ?*Value) void {
+    pub fn setEntryRef(self: *VM, entry: *PhpArray.Entry, cell: ?*Value) void {
         const old = entry.ref;
         entry.ref = cell;
         if (cell) |c| self.bindCell(c);
@@ -15050,6 +15050,7 @@ pub const VM = struct {
 
     fn copyPropertiesToArray(self: *VM, obj: *PhpObject, arr: *PhpArray) !void {
         if (try object_properties.table(self, obj, .array_cast)) |built| {
+            defer object_properties.releaseBuilt(self, built);
             for (built.entries.items) |entry| try arr.set(self.allocator, entry.key, if (entry.ref) |ref| ref.* else entry.value);
             return;
         }
@@ -15257,7 +15258,12 @@ pub const VM = struct {
         const name: []const u8 = owner.bytes;
         if (self.capture_index.fetchRemove(name)) |removed| {
             const range = removed.value;
-            if (range.handle != 0) self.free_handles.append(self.allocator, range.handle) catch {};
+            // what the closure captured goes before its own handle, depth
+            // first, as php frees a closure's bound object and statics first
+            var dropped: std.ArrayListUnmanaged(ReleasedItem) = .empty;
+            defer dropped.deinit(self.allocator);
+            const outer_log = self.release_log;
+            if (self.draining_destructors and self.release_depth < max_release_depth) self.release_log = &dropped;
             for (0..range.len) |i| {
                 const capture = &self.captures.items[range.start + i];
                 self.releaseValue(capture.value);
@@ -15266,6 +15272,17 @@ pub const VM = struct {
                 capture.ref_cell = null;
                 if (old_cell) |cell| self.unbindCell(cell);
             }
+            self.release_log = outer_log;
+            if (dropped.items.len > 0) {
+                var deferred: std.ArrayListUnmanaged(*PhpArray) = .empty;
+                defer deferred.deinit(self.allocator);
+                self.destroyDropped(dropped.items, &deferred);
+                for (deferred.items) |arr| {
+                    arr.release_queued = false;
+                    self.queueArrayRelease(arr);
+                }
+            }
+            if (range.handle != 0) self.free_handles.append(self.allocator, range.handle) catch {};
             if (range.ref_owner != 0) if (self.ref_index) |ri| ri.releaseOwner(self.allocator, range.ref_owner);
             self.captures_dead += range.len;
             if (range.has_statics) self.purgeClosureStatics(name);
@@ -22537,8 +22554,23 @@ pub const VM = struct {
     // an array at refcount 0 has no durable owner. queue it once; the drain
     // re-checks stack roots and containers before freeing, so queuing a
     // transient borrow that later gets stored is harmless
+    // an array nothing holds, built for one use: what it holds goes now, as
+    // php frees a temporary the moment it is done with it
+    pub fn releaseUnheldArray(self: *VM, arr: *PhpArray) void {
+        if (arr.refcount != 0 or arr.elements_released or arr.pooled) return;
+        arr.elements_released = true;
+        self.releaseArrayElements(arr);
+        if (!self.serve_mode) self.released_arrays.append(self.allocator, arr) catch {};
+    }
+
     pub fn queueArrayRelease(self: *VM, arr: *PhpArray) void {
-        if (arr.release_queued or arr.elements_released or arr.pooled) return;
+        if (arr.elements_released or arr.pooled) return;
+        // queued once already (and rescued since): the queue has it, but a
+        // depth-first destruction still has to see it dropped now
+        if (arr.release_queued) {
+            if (self.release_log) |log| log.append(self.allocator, .{ .array = arr }) catch {};
+            return;
+        }
         if (self.debug_gc_verify) self.gcRecordZeroSite(arr);
         arr.release_queued = true;
         self.pending_array_release.append(self.allocator, arr) catch {

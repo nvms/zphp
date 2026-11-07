@@ -18,7 +18,7 @@ const MAGIC = "ZPHPC\x00";
 // v18 adds defer_prop_defaults; v19 gives interface, trait and enum
 // declarations their start line, end line and doc comment. v20 gives class
 // constants their own opcodes.
-pub const FORMAT_VERSION: u16 = 30;
+pub const FORMAT_VERSION: u16 = 31;
 
 // tag bytes for serialized values
 const TAG_NULL: u8 = 0;
@@ -67,6 +67,10 @@ pub fn serialize(allocator: Allocator, result: *const CompileResult) ![]u8 {
         _ = try strtab.intern(allocator, func.name);
         for (func.params) |p| _ = try strtab.intern(allocator, p);
         for (func.defaults) |d| try internValueStrings(allocator, &strtab, d);
+        for (func.static_vars) |sv| {
+            _ = try strtab.intern(allocator, sv.name);
+            try internValueStrings(allocator, &strtab, sv.initial);
+        }
         for (func.slot_names) |sn| _ = try strtab.intern(allocator, sn);
         if (func.file_path.len > 0) _ = try strtab.intern(allocator, func.file_path);
         if (func.doc_comment.len > 0) _ = try strtab.intern(allocator, func.doc_comment);
@@ -278,6 +282,12 @@ fn serializeFunction(buf: *std.ArrayListUnmanaged(u8), allocator: Allocator, str
     try buf.append(allocator, @intCast(func.ref_params.len));
     for (func.ref_params) |r| {
         try buf.append(allocator, if (r) @as(u8, 1) else @as(u8, 0));
+    }
+
+    try writeU16(buf, allocator, @intCast(func.static_vars.len));
+    for (func.static_vars) |sv| {
+        try writeU32(buf, allocator, try strtab.intern(allocator, sv.name));
+        try serializeValue(buf, allocator, strtab, sv.initial);
     }
 
     try writeU16(buf, allocator, func.local_count);
@@ -515,6 +525,7 @@ pub fn deserializeRelocated(allocator: Allocator, data: []const u8, relocation: 
             if (f.defaults.len > 0) allocator.free(f.defaults);
             if (f.ref_params.len > 0) allocator.free(f.ref_params);
             if (f.slot_names.len > 0) allocator.free(f.slot_names);
+            if (f.static_vars.len > 0) allocator.free(f.static_vars);
         }
         functions.deinit(allocator);
     }
@@ -651,6 +662,13 @@ fn deserializeFunction(r: *Reader, ctx: *DeserCtx) !ObjFunction {
         ref_params[i] = (try r.readByte()) != 0;
     }
 
+    const static_count = try r.readU16();
+    const static_vars = try allocator.alloc(bytecode.StaticVar, static_count);
+    for (0..static_count) |i| {
+        const sidx = try r.readU32();
+        static_vars[i] = .{ .name = strings[sidx], .initial = try deserializeValue(r, ctx) };
+    }
+
     const local_count = try r.readU16();
     const slot_name_count = try r.readU16();
     const slot_names = try allocator.alloc([]const u8, slot_name_count);
@@ -688,6 +706,7 @@ fn deserializeFunction(r: *Reader, ctx: *DeserCtx) !ObjFunction {
         .chunk = chunk,
         .local_count = local_count,
         .slot_names = slot_names,
+        .static_vars = static_vars,
     };
 }
 

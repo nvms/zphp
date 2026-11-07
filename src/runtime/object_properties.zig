@@ -42,6 +42,8 @@ pub const Property = struct {
     // the declared type of a typed property never initialized, which only
     // the debug view lists
     uninitialized: ?[]const u8 = null,
+    // a hook's table entry that is a reference another holder shares
+    shared: bool = false,
 };
 
 pub const Listing = struct {
@@ -88,17 +90,26 @@ pub fn list(vm: *VM, obj: *PhpObject, purpose: Purpose, allocator: std.mem.Alloc
         return list(vm, instance, purpose, allocator);
     };
     if (try table(vm, obj, purpose)) |arr| {
+        defer releaseBuilt(vm, arr);
         for (arr.entries.items) |entry| {
             const value = if (entry.ref) |ref| ref.* else entry.value;
-            try listing.items.append(allocator, switch (entry.key) {
+            var prop: Property = switch (entry.key) {
                 .int => |i| .{ .key = .{ .int = i }, .value = value },
                 .string => |s| unmangle(s.bytes(), value),
-            });
+            };
+            if (entry.ref) |ref| prop.shared = value_mod.cellOf(ref).binders > 1;
+            try listing.items.append(allocator, prop);
         }
         return listing;
     }
     try appendOwn(vm, obj, purpose, &listing, allocator);
     return listing;
+}
+
+// a table built for one listing holds references to what it lists; once read
+// it lets them go. a hook may instead return live storage, which others hold
+pub fn releaseBuilt(vm: *VM, arr: *PhpArray) void {
+    if (arr.refcount == 0) vm.releaseUnheldArray(arr);
 }
 
 // what replaces the object's own properties for a purpose: __debugInfo for
