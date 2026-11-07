@@ -2269,22 +2269,21 @@ fn rcIsInternal(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const name_v = this.get("name");
     if (name_v != .string) return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.scalar(.{ .bool = isInternalClassName(name_v.string.bytes()) });
+    return NativeResult.scalar(.{ .bool = isInternalClassName(ctx.vm, name_v.string.bytes()) });
 }
 
 fn rcIsUserDefined(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = true });
     const name_v = this.get("name");
     if (name_v != .string) return NativeResult.scalar(.{ .bool = true });
-    return NativeResult.scalar(.{ .bool = !isInternalClassName(name_v.string.bytes()) });
+    return NativeResult.scalar(.{ .bool = !isInternalClassName(ctx.vm, name_v.string.bytes()) });
 }
 
-// hard-coded list of built-in PHP classes zphp ships natively. used by
-// ReflectionClass::isInternal/isUserDefined. covers everything registered
-// from src/stdlib/*.zig at VM init time so a user-declared class with the
-// same name is not mistakenly flagged
-fn isInternalClassName(name: []const u8) bool {
-    return @import("builtin_classes.zig").contains(name);
+// a class, interface or trait the runtime declared rather than a script
+fn isInternalClassName(vm: *VM, name: []const u8) bool {
+    if (vm.classes.get(name)) |def| return def.is_internal;
+    if (vm.interfaces.contains(name)) return vm.builtin_interfaces.contains(vm.declaredClassName(name));
+    return false;
 }
 
 fn rcGetFileName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -2523,13 +2522,13 @@ fn rmGetEndLine(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
 fn rmIsInternal(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const dc = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.scalar(.{ .bool = isInternalClassName(dc) });
+    return NativeResult.scalar(.{ .bool = isInternalClassName(ctx.vm, dc) });
 }
 
 fn rmIsUserDefined(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = true });
     const dc = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.scalar(.{ .bool = true });
-    return NativeResult.scalar(.{ .bool = !isInternalClassName(dc) });
+    return NativeResult.scalar(.{ .bool = !isInternalClassName(ctx.vm, dc) });
 }
 
 fn reflectionEmptyString(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {

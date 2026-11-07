@@ -23,6 +23,16 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rec_iter.methods.append(a, "getChildren");
     try vm.interfaces.put(a, "RecursiveIterator", rec_iter);
 
+    var outer_iter = vm_mod.InterfaceDef{ .name = "OuterIterator" };
+    outer_iter.parent = "Iterator";
+    try outer_iter.methods.append(a, "getInnerIterator");
+    try vm.interfaces.put(a, "OuterIterator", outer_iter);
+
+    var seekable_iter = vm_mod.InterfaceDef{ .name = "SeekableIterator" };
+    seekable_iter.parent = "Iterator";
+    try seekable_iter.methods.append(a, "seek");
+    try vm.interfaces.put(a, "SeekableIterator", seekable_iter);
+
     // GeneratorWrapper: lets generators be passed where Iterator objects
     // are expected (FilterIterator, AppendIterator, etc.). Stores the
     // generator and forwards Iterator methods to it.
@@ -77,7 +87,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     // DirectoryIterator
     var di_def = ClassDef{ .name = "DirectoryIterator" };
     di_def.parent = "SplFileInfo";
-    try di_def.interfaces.append(a, "Iterator");
+    try di_def.interfaces.append(a, "SeekableIterator");
     for ([_][]const u8{
         "__construct", "rewind", "current", "key", "next", "valid", "isDot",
     }) |m| {
@@ -173,7 +183,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     // RecursiveIteratorIterator
     var rii_def = ClassDef{ .name = "RecursiveIteratorIterator" };
-    try rii_def.interfaces.append(a, "Iterator");
+    try rii_def.interfaces.append(a, "OuterIterator");
     for ([_][]const u8{
         "__construct",      "rewind",         "current", "key", "next", "valid", "getDepth",
         "getInnerIterator", "getSubIterator",
@@ -202,7 +212,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     // IteratorIterator (base wrapper - exposes Iterator interface for any inner iterator)
     var iter_def = ClassDef{ .name = "IteratorIterator" };
-    try iter_def.interfaces.append(a, "Iterator");
+    try iter_def.interfaces.append(a, "OuterIterator");
     for ([_][]const u8{ "__construct", "rewind", "valid", "current", "key", "next", "getInnerIterator" }) |m| {
         const arity: u8 = if (std.mem.eql(u8, m, "__construct")) 1 else 0;
         try iter_def.methods.put(a, m, .{ .name = m, .arity = arity });

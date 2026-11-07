@@ -116,6 +116,16 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try serializable.methods.append(a, "unserialize");
     try vm.interfaces.put(a, "Serializable", serializable);
 
+    var observer = vm_mod.InterfaceDef{ .name = "SplObserver" };
+    try observer.methods.append(a, "update");
+    try vm.interfaces.put(a, "SplObserver", observer);
+
+    var subject = vm_mod.InterfaceDef{ .name = "SplSubject" };
+    try subject.methods.append(a, "attach");
+    try subject.methods.append(a, "detach");
+    try subject.methods.append(a, "notify");
+    try vm.interfaces.put(a, "SplSubject", subject);
+
     // SplStack
     var stack_def = ClassDef{ .name = "SplStack", .parent = "SplDoublyLinkedList" };
     try stack_def.interfaces.append(a, "Countable");
@@ -233,7 +243,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     // ArrayIterator
     var ai_def = ClassDef{ .name = "ArrayIterator", .native_properties = arrayStorageProperties, .native_clone = splArrayClone };
     try ai_def.interfaces.append(a, "Serializable");
-    try ai_def.interfaces.append(a, "Iterator");
+    try ai_def.interfaces.append(a, "SeekableIterator");
     try ai_def.interfaces.append(a, "Countable");
     try ai_def.interfaces.append(a, "ArrayAccess");
     try ai_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
@@ -532,7 +542,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     // SplObjectStorage
     var sos_def = ClassDef{ .name = "SplObjectStorage", .native_properties = objectStorageProperties };
     try sos_def.interfaces.append(a, "Countable");
-    try sos_def.interfaces.append(a, "Iterator");
+    try sos_def.interfaces.append(a, "SeekableIterator");
     try sos_def.interfaces.append(a, "Traversable");
     try sos_def.interfaces.append(a, "ArrayAccess");
     try sos_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
