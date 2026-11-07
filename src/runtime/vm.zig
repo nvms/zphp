@@ -3848,6 +3848,26 @@ pub const VM = struct {
         }
     }
 
+    // a nested call that failed leaves its frames and operands to be
+    // unwound by whichever loop's handler takes the exception. a caller that
+    // carries on instead (a destructor's exception discarded, a callback's
+    // swallowed) would resume in the dead frame, so the call drops them as
+    // it fails. a suspending fiber keeps its frames to resume later, and
+    // exit() unwinds by itself
+    fn unwindFailedCall(self: *VM, base_frame: usize) void {
+        if (self.fiber_suspend_pending or self.exit_requested) return;
+        if (self.frame_count <= base_frame) return;
+        const entry_sp = self.frames[base_frame].entry_sp;
+        while (self.frame_count > base_frame) {
+            self.frame_count -= 1;
+            self.deinitFrameSlot(self.frame_count);
+        }
+        if (entry_sp < self.sp) {
+            self.discardArgTransport(entry_sp);
+            self.sp = entry_sp;
+        }
+    }
+
     fn runFailure(self: *VM, err: RuntimeError) RuntimeError {
         // exit() / die() unwinds with error.RuntimeError + exit_requested
         // set - that's an orderly script exit, not an internal error.
@@ -16012,6 +16032,7 @@ pub const VM = struct {
         self.runUntilFrame(base_frame) catch |err| {
             self.handler_count = base_handler;
             self.handler_floor = prev_floor;
+            self.unwindFailedCall(base_frame);
             return err;
         };
         self.handler_count = base_handler;
@@ -19589,6 +19610,7 @@ pub const VM = struct {
         self.runUntilFrame(base_frame) catch |err| {
             self.handler_count = base_handler;
             self.handler_floor = prev_floor;
+            self.unwindFailedCall(base_frame);
             return err;
         };
         self.handler_count = base_handler;
@@ -19615,6 +19637,7 @@ pub const VM = struct {
         self.runUntilFrame(base_frame) catch |err| {
             self.handler_count = base_handler;
             self.handler_floor = prev_floor;
+            self.unwindFailedCall(base_frame);
             return err;
         };
         self.handler_count = base_handler;
@@ -21026,13 +21049,15 @@ pub const VM = struct {
         self.fastLoop() catch |err| {
             self.handler_count = base_handler;
             self.handler_floor = prev_floor;
+            self.unwindFailedCall(base_frame);
             return err;
         };
         if (self.frame_count > base_frame) {
             self.runUntilFrame(base_frame) catch |err| {
                 self.handler_count = base_handler;
                 self.handler_floor = prev_floor;
-                    return err;
+                self.unwindFailedCall(base_frame);
+                return err;
             };
         }
         self.handler_count = base_handler;
