@@ -77,6 +77,15 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     if (target.tag == .array_access) {
+        if (op_tag == .question_question_equal and target.data.rhs != 0 and (chainHasCall(self, target.data.lhs) or chainHasCall(self, target.data.rhs))) {
+            // a call on the path runs once: its result is both read and
+            // written, as php memoizes it
+            try compileVivifyChain(self, target.data.lhs);
+            try self.compileNode(target.data.rhs);
+            try self.emitOp(.dup2);
+            try self.emitOp(.array_get_coalesce);
+            return emitCoalesceAssignTail(self, node.data.rhs, .array_set);
+        }
         if (op_tag == .question_question_equal) {
             // read with coalesce-safe fetch so undefined keys don't warn -
             // recurse on the base too, else a nested `$a[k1][k2] ??= v` warns on
@@ -196,6 +205,17 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
         }
         if (self.isDynamicProp(target)) {
             try self.compileNode(target.data.lhs);
+            if (op_tag == .question_question_equal) {
+                if (target.main_token == 0) {
+                    try self.compileNode(target.data.rhs);
+                } else {
+                    const prop_node = self.ast.nodes[target.data.rhs];
+                    try self.emitGetVar(self.ast.tokenSlice(prop_node.main_token));
+                }
+                try self.emitOp(.dup2);
+                try self.emitOp(.get_prop_coalesce_dynamic);
+                return emitCoalesceAssignTail(self, node.data.rhs, .set_prop_dynamic);
+            }
             if (op_tag != .equal) {
                 try self.emitOp(.dup);
                 if (target.main_token == 0) {
@@ -522,6 +542,39 @@ fn emitPlaceOperands(self: *Compiler, target_idx: u32) Error!?Place {
         },
         else => return null,
     }
+}
+
+// whether evaluating a write target's container runs a call, so it must be
+// evaluated only once
+fn chainHasCall(self: *Compiler, node_idx: u32) bool {
+    const node = self.ast.nodes[node_idx];
+    return switch (node.tag) {
+        .variable, .identifier => false,
+        .array_access => chainHasCall(self, node.data.lhs) or (node.data.rhs != 0 and chainHasCall(self, node.data.rhs)),
+        .property_access => chainHasCall(self, node.data.lhs) or (self.isDynamicProp(node) and node.main_token == 0 and chainHasCall(self, node.data.rhs)),
+        .variable_variable => chainHasCall(self, node.data.lhs),
+        .integer_literal, .float_literal, .string_literal => false,
+        else => true,
+    };
+}
+
+// the rest of a `??=` on two operands [a, b] with the current value above
+// them: when it is null, the right side is stored with `store` (which takes
+// [a, b, value] and leaves the value, set_prop_dynamic after a swap);
+// otherwise the current value is the result
+fn emitCoalesceAssignTail(self: *Compiler, rhs: u32, store: OpCode) Error!void {
+    const skip_jump = try self.emitJump(.jump_if_not_null);
+    try self.emitOp(.pop);
+    try self.compileNode(rhs);
+    if (store == .set_prop_dynamic) try self.emitOp(.swap);
+    try self.emitOp(store);
+    const end_jump = try self.emitJump(.jump);
+    self.patchJump(skip_jump);
+    try self.emitOp(.bury);
+    try self.emitByte(2);
+    try self.emitOp(.pop);
+    try self.emitOp(.pop);
+    self.patchJump(end_jump);
 }
 
 // [operands] -> [operands, value]
