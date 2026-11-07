@@ -764,6 +764,10 @@ pub fn compileNamespace(self: *Compiler, node: Ast.Node) Error!void {
     // reconstruct namespace name from token indices
     const parts = self.ast.extraSlice(node.data.lhs);
     self.namespace = try self.buildQualifiedString(parts);
+    // a namespace declaration starts with no imports
+    self.use_aliases.clearRetainingCapacity();
+    self.use_fn_aliases.clearRetainingCapacity();
+    self.use_const_aliases.clearRetainingCapacity();
 }
 
 pub fn compileUse(self: *Compiler, node: Ast.Node) Error!void {
