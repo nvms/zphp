@@ -8728,7 +8728,9 @@ pub const VM = struct {
                                 return error.RuntimeError;
                             };
                             if (ctor_result == .string) ctor_result.string.release();
-
+                            // a constructor that threw straight into a handler and then
+                            // returned: the handler already unwound the temp frame
+                            if (self.handler_count < pre_handlers) continue;
                             self.frame_count -= 1;
                             self.deinitFrameSlot(self.frame_count);
                         } else if (self.functions.get(cn)) |func| {
@@ -8960,6 +8962,9 @@ pub const VM = struct {
                                 return error.RuntimeError;
                             };
                             if (ctor_result == .string) ctor_result.string.release();
+                            // a constructor that threw straight into a handler and then
+                            // returned: the handler already unwound the temp frame
+                            if (self.handler_count < pre_handlers) continue;
                             self.frame_count -= 1;
                             self.deinitFrameSlot(self.frame_count);
                         } else if (self.functions.get(cn)) |func| {
