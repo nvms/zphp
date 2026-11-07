@@ -1272,6 +1272,10 @@ fn classDeclEarlyBindable(self: *Compiler, node: Ast.Node) bool {
         if (!self.hoisted_names.contains(parent_name) and
             !@import("../stdlib/builtin_classes.zig").contains(parent_name)) return false;
     }
+    // php early-binds a subclass only when its inheritance checks can run
+    // with the classes known while compiling; one whose method types name
+    // anything else is declared where it stands
+    if (parent_node != 0 and !methodTypesKnown(self, node)) return false;
     for (self.ast.extraSlice(node.data.lhs)) |m_idx| {
         const m = self.ast.nodes[m_idx];
         switch (m.tag) {
@@ -1288,6 +1292,58 @@ fn classDeclEarlyBindable(self: *Compiler, node: Ast.Node) bool {
             },
             else => {},
         }
+    }
+    return true;
+}
+
+// whether every class a method of this class names in its parameter and
+// return types is built in or already early-bound in this file
+fn methodTypesKnown(self: *Compiler, node: Ast.Node) bool {
+    const own = self.resolveClassName(self.ast.tokenSlice(node.main_token));
+    for (self.ast.extraSlice(node.data.lhs)) |m_idx| {
+        const m = self.ast.nodes[m_idx];
+        if (m.tag != .class_method and m.tag != .static_class_method and m.tag != .interface_method) continue;
+        const params = self.ast.extraSlice(m.data.lhs);
+        for (params) |p| {
+            const type_extra = self.ast.nodes[p].data.rhs >> 8;
+            if (type_extra == 0) continue;
+            if (!typeNamesKnown(self, own, self.ast.extra_data[type_extra - 1], self.ast.extra_data[type_extra])) return false;
+        }
+        const ret = m.data.lhs + 1 + @as(u32, @intCast(params.len));
+        if (!typeNamesKnown(self, own, self.ast.extra_data[ret], self.ast.extra_data[ret + 1])) return false;
+    }
+    return true;
+}
+
+fn typeNamesKnown(self: *Compiler, own: []const u8, start_tok: u32, end_tok: u32) bool {
+    var tok = start_tok;
+    while (tok < end_tok) {
+        const lexeme = self.ast.tokens[tok].lexeme(self.ast.source);
+        if (lexeme.len == 1 and std.mem.indexOfScalar(u8, "|&()?", lexeme[0]) != null) {
+            tok += 1;
+            continue;
+        }
+        const first = self.ast.tokens[tok].start;
+        while (tok < end_tok) : (tok += 1) {
+            const l = self.ast.tokens[tok].lexeme(self.ast.source);
+            if (l.len == 1 and std.mem.indexOfScalar(u8, "|&()?", l[0]) != null) break;
+        }
+        const last = self.ast.tokens[tok - 1];
+        const written = self.ast.source[first .. last.start + last.lexeme(self.ast.source).len];
+        var lower_buf: [16]u8 = undefined;
+        if (written.len <= lower_buf.len) {
+            const lower = std.ascii.lowerString(&lower_buf, written);
+            const builtin = std.StaticStringMap(void).initComptime(.{
+                .{"null"},   .{"false"},  .{"true"},  .{"bool"},     .{"int"},  .{"float"},  .{"string"}, .{"array"},
+                .{"object"}, .{"callable"}, .{"void"}, .{"never"}, .{"static"}, .{"mixed"}, .{"iterable"}, .{"self"},
+                .{"parent"},
+            });
+            if (builtin.has(lower)) continue;
+        }
+        const name = if (written[0] == '\\') written[1..] else self.resolveClassName(written);
+        if (std.ascii.eqlIgnoreCase(name, own)) continue;
+        if (self.hoisted_names.contains(name) or @import("../stdlib/builtin_classes.zig").contains(name)) continue;
+        return false;
     }
     return true;
 }

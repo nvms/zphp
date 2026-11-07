@@ -2180,7 +2180,7 @@ fn native_class_alias(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
         try ctx.vm.tryAutoload(original);
     }
     if (ctx.vm.classes.get(original)) |cls| {
-        var alias_def = ClassDef{ .name = alias, .parent = original };
+        var alias_def = ClassDef{ .name = alias, .parent = original, .alias_of = cls.alias_of orelse cls.name };
         // copy interfaces
         for (cls.interfaces.items) |iface| {
             try alias_def.interfaces.append(ctx.allocator, iface);

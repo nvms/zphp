@@ -311,6 +311,9 @@ pub const ClassDef = struct {
     interfaces: std.ArrayListUnmanaged([]const u8) = .empty,
     is_enum: bool = false,
     is_internal: bool = true,
+    // the class this one names through class_alias(), which zphp models as
+    // a subclass; php treats both names as one class
+    alias_of: ?[]const u8 = null,
     // its hidden initializer still has to install some instance defaults
     defaults_pending: bool = false,
     is_abstract: bool = false,

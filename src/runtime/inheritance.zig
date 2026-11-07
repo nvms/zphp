@@ -259,6 +259,27 @@ fn classes(p: *Pending) php_types.Classes {
     return .{ .context = p, .exists = classExists, .subtype = classSubtype, .is_final = classFinal };
 }
 
+// a type with each class alias replaced by the class it names
+fn canonicalType(p: *const Pending, arena: std.mem.Allocator, text: []const u8, scope: []const u8) !php_types.Type {
+    var t = try parseType(p, arena, text, scope);
+    const names = try arena.dupe([]const u8, t.names);
+    for (names) |*name| name.* = canonicalName(p, name.*);
+    t.names = names;
+    const groups = try arena.dupe([]const []const u8, t.intersections);
+    for (groups) |*group| {
+        const members = try arena.dupe([]const u8, group.*);
+        for (members) |*name| name.* = canonicalName(p, name.*);
+        group.* = members;
+    }
+    t.intersections = groups;
+    return t;
+}
+
+fn canonicalName(p: *const Pending, name: []const u8) []const u8 {
+    const def = p.vm.classes.getPtr(name) orelse return name;
+    return def.alias_of orelse name;
+}
+
 // zend_do_perform_implementation_check
 fn implementationCheck(p: *Pending, arena: std.mem.Allocator, fe: Method, proto: Method) !Outcome {
     if (proto.required < fe.required) return .failure;
@@ -272,9 +293,9 @@ fn implementationCheck(p: *Pending, arena: std.mem.Allocator, fe: Method, proto:
         const pp = proto_param orelse continue;
         const fp = fe_param orelse return .failure;
         // zend_do_perform_arg_type_hint_check, contravariant
-        const fe_type = try parseType(p, arena, fp.type_text, fe.class);
+        const fe_type = try canonicalType(p, arena, fp.type_text, fe.class);
         if (fe_type.isSet() and !(fe_type.mask == php_types.ANY and fe_type.names.len == 0 and fe_type.intersections.len == 0)) {
-            const proto_type = try parseType(p, arena, pp.type_text, proto.class);
+            const proto_type = try canonicalType(p, arena, pp.type_text, proto.class);
             if (!proto_type.isSet()) return .failure;
             switch (php_types.covariant(classes(p), proto.class, proto_type, fe_type)) {
                 .success => {},
@@ -289,8 +310,8 @@ fn implementationCheck(p: *Pending, arena: std.mem.Allocator, fe: Method, proto:
             if (!proto.tentative) return .failure;
             return if (status == .success) .warning else status;
         }
-        const fe_type = try parseType(p, arena, fe.return_text, fe.class);
-        const proto_type = try parseType(p, arena, proto.return_text, proto.class);
+        const fe_type = try canonicalType(p, arena, fe.return_text, fe.class);
+        const proto_type = try canonicalType(p, arena, proto.return_text, proto.class);
         switch (php_types.covariant(classes(p), fe.class, fe_type, proto_type)) {
             .success => {},
             .failure => return if (proto.tentative) .warning else .failure,
