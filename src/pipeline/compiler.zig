@@ -658,7 +658,8 @@ pub const Compiler = struct {
             .array_access => try compiler_expr.compileArrayAccess(self, node),
             // `$a[]` only means something as a write target
             .array_push_target => return self.fail(node.main_token, "Cannot use [] for reading"),
-            .list_destructure => {},
+            // list() only means something as an assignment target
+            .list_destructure => return self.fail(node.main_token, "Cannot use list() as standalone expression"),
             .ref_target => try self.compileNode(node.data.lhs),
             .named_arg => try self.compileNode(node.data.lhs),
             .property_access => try compiler_expr.compilePropertyAccess(self, node),
@@ -923,6 +924,17 @@ pub const Compiler = struct {
         for (self.ast.extraSlice(target.data.lhs)) |slot| {
             if (slot != 0) break;
         } else return self.fail(target.main_token, "Cannot use empty list");
+        // a nested list must be written the way the outer one is
+        for (self.ast.extraSlice(target.data.lhs)) |slot| {
+            if (slot == 0) continue;
+            var inner = self.ast.nodes[slot];
+            if (inner.tag == .array_element) inner = self.ast.nodes[inner.data.lhs];
+            if (inner.tag == .ref_target) inner = self.ast.nodes[inner.data.lhs];
+            const nested_list = inner.tag == .list_destructure;
+            const nested_short = inner.tag == .array_literal and self.ast.tokens[inner.main_token].tag == .l_bracket;
+            if ((target.tag == .list_destructure and nested_short) or (target.tag == .array_literal and nested_list))
+                return self.fail(inner.main_token, "Cannot mix [] and list()");
+        }
         if (target.tag == .list_destructure) {
             const slots = self.ast.extraSlice(target.data.lhs);
             for (slots, 0..) |slot, i| {

@@ -78,6 +78,10 @@ const Parser = struct {
     attr_ranges: std.ArrayListUnmanaged(AttrRange) = .empty,
     allocator: Allocator,
     found_yield: bool = false,
+    // the token where a list() may stand without an `=` after it: the start
+    // of an array element or a foreach target. anywhere else php's grammar
+    // has list() only as the left side of an assignment
+    bare_list_at: u32 = std.math.maxInt(u32),
     pending_top_stmts: std.ArrayListUnmanaged(u32) = .empty,
 
     // root
@@ -784,6 +788,7 @@ const Parser = struct {
             _ = self.advance();
             val_by_ref = 1;
         }
+        self.bare_list_at = self.pos;
         const first = try self.parseExpression();
         var value: u32 = first;
         var key: u32 = 0;
@@ -796,6 +801,7 @@ const Parser = struct {
                 _ = self.advance();
                 val_by_ref = 1;
             }
+            self.bare_list_at = self.pos;
             value = try self.parseExpression();
         }
 
@@ -2860,7 +2866,15 @@ const Parser = struct {
                 const main_tok = self.nodes.items[ident].main_token;
                 break :blk self.addNode(.{ .tag = .call, .main_token = main_tok, .data = .{ .lhs = ident, .rhs = extra } });
             },
-            .kw_list => self.parseListDestructure(),
+            .kw_list => blk: {
+                const bare_ok = self.bare_list_at == self.pos;
+                const list = try self.parseListDestructure();
+                if (!bare_ok and self.peek() != .equal) {
+                    try self.addError(expectedError(.equal));
+                    return error.ParseError;
+                }
+                break :blk list;
+            },
             .kw_match => if (self.isMatchExpr()) self.parseMatchExpr() else self.addLiteral(.identifier),
             .kw_function => self.parseClosureExpr(),
             .kw_fn => self.parseArrowFunc(false),
@@ -3096,6 +3110,7 @@ const Parser = struct {
             ref_tok = self.advance();
             is_ref = true;
         }
+        self.bare_list_at = self.pos;
         const expr0 = try self.parseExpression();
         const expr = if (is_ref)
             try self.addNode(.{ .tag = .ref_target, .main_token = ref_tok, .data = .{ .lhs = expr0 } })
@@ -3110,6 +3125,7 @@ const Parser = struct {
                 vref = self.advance();
                 v_is_ref = true;
             }
+            self.bare_list_at = self.pos;
             const value0 = try self.parseExpression();
             const value = if (v_is_ref)
                 try self.addNode(.{ .tag = .ref_target, .main_token = vref, .data = .{ .lhs = value0 } })
