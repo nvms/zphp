@@ -702,6 +702,8 @@ pub const VM = struct {
     capture_index: std.StringHashMapUnmanaged(CaptureRange) = .{},
     interned_names: std.StringHashMapUnmanaged(void) = .{},
     cycle_closures: std.AutoArrayHashMapUnmanaged(*Value.String.Owner, i64) = .{},
+    // the cycle collector's walk stack, kept for its capacity
+    cycle_work: std.ArrayListUnmanaged(CycleWork) = .empty,
     collecting_cycles: bool = false,
     closure_instance_count: u32 = 0,
     captures_dead: usize = 0,
@@ -3015,6 +3017,7 @@ pub const VM = struct {
         self.held_exceptions.deinit(self.allocator);
         self.cycle_candidates.deinit(self.allocator);
         self.cycle_array_candidates.deinit(self.allocator);
+        self.cycle_work.deinit(self.allocator);
         self.array_ref_bindings.deinit(self.allocator);
         if (self.ref_index) |ri| {
             ri.deinit(self.allocator);
@@ -22716,74 +22719,83 @@ pub const VM = struct {
     }
 
     fn cycleVisit(self: *VM, obj: *PhpObject, vo: anytype, va: anytype) void {
-        if (vo.contains(obj)) return;
-        vo.put(self.allocator, obj, {}) catch return;
-        obj.scratch_rc = @intCast(obj.refcount);
-        self.cycleVisitChild(obj.lazyInitializer(), vo, va);
-        self.cycleVisitChild(obj.backingValue(), vo, va);
-        if (obj.slots) |s| {
-            for (s) |v| self.cycleVisitChild(v, vo, va);
-        }
-        var pit = obj.properties.iterator();
-        while (pit.next()) |e| self.cycleVisitChild(e.value_ptr.*, vo, va);
+        self.cycleVisitChild(.{ .object = obj }, vo, va);
     }
 
     fn cycleVisitArr(self: *VM, arr: *PhpArray, vo: anytype, va: anytype) void {
-        if (va.contains(arr)) return;
-        va.put(self.allocator, arr, {}) catch return;
-        arr.scratch_rc = @intCast(arr.refcount);
-        if (arr.weak) return;
-        for (arr.entries.items) |e| {
-            self.cycleVisitChild(e.value, vo, va);
-            if (e.ref) |value| {
-                const cell = cellOf(value);
-                if (!cell.visited) {
-                    cell.visited = true;
-                    cell.scratch = @intCast(cell.binders);
-                    self.cycleVisitChild(cell.value, vo, va);
-                }
-            }
-        }
+        self.cycleVisitChild(.{ .array = arr }, vo, va);
     }
 
     fn closureOwnsStatic(name: []const u8, key: []const u8) bool {
         return key.len > name.len + 2 and std.mem.startsWith(u8, key, name) and key[name.len] == ':' and key[name.len + 1] == ':';
     }
 
+    const CycleWork = union(enum) { value: Value, cell: *Value };
+
+    // depth-first walk over an explicit stack: a long chain of objects (a
+    // linked list of 300k nodes) would overflow the native stack as recursion.
+    // children are pushed reversed, so nodes are reached in the order the
+    // recursive walk reached them
     fn cycleVisitChild(self: *VM, v: Value, vo: anytype, va: anytype) void {
-        switch (v) {
-            .string => |string| {
-                const owner = string.owner orelse return;
-                if (!owner.closure or self.cycle_closures.contains(owner)) return;
-                const range = self.capture_index.get(owner.bytes) orelse return;
-                self.cycle_closures.put(self.allocator, owner, @intCast(owner.refcount)) catch return;
-                for (self.captures.items[range.start..][0..range.len]) |capture| {
-                    self.cycleVisitChild(capture.value, vo, va);
-                    if (capture.ref_cell) |value| {
-                        const cell = cellOf(value);
-                        if (!cell.visited) {
-                            cell.visited = true;
-                            cell.scratch = @intCast(cell.binders);
-                            self.cycleVisitChild(cell.value, vo, va);
+        const work = &self.cycle_work;
+        const floor = work.items.len;
+        defer work.shrinkRetainingCapacity(floor);
+        work.append(self.allocator, .{ .value = v }) catch return;
+        while (work.items.len > floor) {
+            const item = work.pop().?;
+            const start = work.items.len;
+            switch (item) {
+                .cell => |value| {
+                    const cell = cellOf(value);
+                    if (cell.visited) continue;
+                    cell.visited = true;
+                    cell.scratch = @intCast(cell.binders);
+                    work.append(self.allocator, .{ .value = cell.value }) catch return;
+                },
+                .value => |val| switch (val) {
+                    .string => |string| {
+                        const owner = string.owner orelse continue;
+                        if (!owner.closure or self.cycle_closures.contains(owner)) continue;
+                        const range = self.capture_index.get(owner.bytes) orelse continue;
+                        self.cycle_closures.put(self.allocator, owner, @intCast(owner.refcount)) catch return;
+                        for (self.captures.items[range.start..][0..range.len]) |capture| {
+                            work.append(self.allocator, .{ .value = capture.value }) catch return;
+                            if (capture.ref_cell) |cell| work.append(self.allocator, .{ .cell = cell }) catch return;
                         }
-                    }
-                }
-                if (range.has_statics) {
-                    var statics = self.statics_cells.iterator();
-                    while (statics.next()) |entry| {
-                        if (!closureOwnsStatic(owner.bytes, entry.key_ptr.*)) continue;
-                        const cell = cellOf(entry.value_ptr.*);
-                        if (!cell.visited) {
-                            cell.visited = true;
-                            cell.scratch = @intCast(cell.binders);
-                            self.cycleVisitChild(cell.value, vo, va);
+                        if (range.has_statics) {
+                            var statics = self.statics_cells.iterator();
+                            while (statics.next()) |entry| {
+                                if (!closureOwnsStatic(owner.bytes, entry.key_ptr.*)) continue;
+                                work.append(self.allocator, .{ .cell = entry.value_ptr.* }) catch return;
+                            }
                         }
-                    }
-                }
-            },
-            .object => |o| self.cycleVisit(o, vo, va),
-            .array => |a| self.cycleVisitArr(a, vo, va),
-            else => {},
+                    },
+                    .object => |obj| {
+                        if (vo.contains(obj)) continue;
+                        vo.put(self.allocator, obj, {}) catch return;
+                        obj.scratch_rc = @intCast(obj.refcount);
+                        work.append(self.allocator, .{ .value = obj.lazyInitializer() }) catch return;
+                        work.append(self.allocator, .{ .value = obj.backingValue() }) catch return;
+                        if (obj.slots) |slots| for (slots) |slot| {
+                            work.append(self.allocator, .{ .value = slot }) catch return;
+                        };
+                        var pit = obj.properties.iterator();
+                        while (pit.next()) |e| work.append(self.allocator, .{ .value = e.value_ptr.* }) catch return;
+                    },
+                    .array => |arr| {
+                        if (va.contains(arr)) continue;
+                        va.put(self.allocator, arr, {}) catch return;
+                        arr.scratch_rc = @intCast(arr.refcount);
+                        if (arr.weak) continue;
+                        for (arr.entries.items) |e| {
+                            work.append(self.allocator, .{ .value = e.value }) catch return;
+                            if (e.ref) |cell| work.append(self.allocator, .{ .cell = cell }) catch return;
+                        }
+                    },
+                    else => {},
+                },
+            }
+            std.mem.reverse(CycleWork, work.items[start..]);
         }
     }
 
