@@ -3345,6 +3345,7 @@ pub const VM = struct {
         // at script end run every still-live object's __destruct (PHP's
         // shutdown guarantee), then drain - on success or error
         defer self.runShutdownDestructors();
+        try self.raiseCompileWarnings(result, result.file_path);
         self.run() catch |err| return self.reportMemoryExhausted(err);
     }
 
@@ -3724,6 +3725,12 @@ pub const VM = struct {
         try self.registerResultFunctions(heap_result);
         for (heap_result.type_hints.items) |th| {
             try g_type_info.put(self.allocator, th.name, .{ .param_types = th.param_types, .return_type = th.return_type });
+        }
+        if (heap_result.warnings.items.len > 0) {
+            const caller = self.currentSourcePosition();
+            const where = try std.fmt.allocPrint(self.allocator, "{s}({d}) : eval()'d code", .{ caller.file, caller.line });
+            defer self.allocator.free(where);
+            try self.raiseCompileWarnings(heap_result, where);
         }
 
         try self.ensureCallRoom();
@@ -7972,6 +7979,7 @@ pub const VM = struct {
                                 for (r.type_hints.items) |th| {
                                     try g_type_info.put(self.allocator, th.name, .{ .param_types = th.param_types, .return_type = th.return_type });
                                 }
+                                self.raiseCompileWarnings(r, r.file_path) catch if (try self.resumeRaised()) continue;
 
                                 const return_frame = self.frame_count;
                                 try self.ensureCallRoom();
@@ -12674,6 +12682,11 @@ pub const VM = struct {
 
     // raiseError at a given source position, for a diagnostic about a frame
     // other than the running one
+    // what php reported while compiling a file, raised before the file runs
+    pub fn raiseCompileWarnings(self: *VM, result: *const CompileResult, file: []const u8) RuntimeError!void {
+        for (result.warnings.items) |w| try self.raiseErrorAt(w.level, w.message, .{ .file = file, .line = w.line });
+    }
+
     pub fn raiseErrorAt(self: *VM, level: i64, msg: []const u8, at: SourcePosition) RuntimeError!void {
         if (try self.callUserErrorHandler(level, msg, at)) return;
         self.recordLastError(level, msg, at);

@@ -44,6 +44,14 @@ pub const TypeHint = struct {
     return_type: []const u8 = "",
 };
 
+// a warning or deprecation php raises while compiling; the runtime raises it
+// each time the compiled file is about to run, at the declaration's line
+pub const CompileWarning = struct {
+    level: u16,
+    message: []const u8,
+    line: u32,
+};
+
 pub const FunctionAttrEntry = struct {
     name: []const u8,
     attrs: []const vm_mod.AttributeDef,
@@ -60,6 +68,7 @@ pub const CompileResult = struct {
     function_attrs: std.ArrayListUnmanaged(FunctionAttrEntry) = .empty,
     new_defaults: std.ArrayListUnmanaged(*bytecode.NewDefault) = .empty,
     deferred_exprs: std.ArrayListUnmanaged(*bytecode.DeferredExpr) = .empty,
+    warnings: std.ArrayListUnmanaged(CompileWarning) = .empty,
     source: []const u8 = "",
     file_path: []const u8 = "",
     strict_types: bool = false,
@@ -85,6 +94,7 @@ pub const CompileResult = struct {
         // list), so only the structs themselves need freeing
         for (self.deferred_exprs.items) |de| self.allocator.destroy(de);
         self.deferred_exprs.deinit(self.allocator);
+        self.warnings.deinit(self.allocator);
         if (self.slot_names.len > 0) self.allocator.free(self.slot_names);
     }
 };
@@ -191,6 +201,13 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
     const slot_names = try c.buildSlotNames();
     const strict = detectStrictTypes(ast.source);
     for (c.functions.items) |*f| f.strict_types = strict;
+    // php compiles a file top to bottom; zphp compiles early-bound classes
+    // first, so its warnings are put back in source order
+    std.sort.insertion(CompileWarning, c.warnings.items, {}, struct {
+        fn lessThan(_: void, a: CompileWarning, b: CompileWarning) bool {
+            return a.line < b.line;
+        }
+    }.lessThan);
     var result = c.takeOutput();
     result.local_count = c.next_slot;
     result.slot_names = slot_names;
@@ -296,11 +313,14 @@ pub const Compiler = struct {
     function_attrs: std.ArrayListUnmanaged(FunctionAttrEntry) = .empty,
     new_defaults: std.ArrayListUnmanaged(*bytecode.NewDefault) = .empty,
     deferred_exprs: std.ArrayListUnmanaged(*bytecode.DeferredExpr) = .empty,
+    warnings: std.ArrayListUnmanaged(CompileWarning) = .empty,
     current_source_offset: u32 = 0,
     current_class: []const u8 = "",
     current_parent: []const u8 = "",
     current_function: []const u8 = "",
     in_trait: bool = false,
+    // set while the parameters and return type of a closure compile
+    closure_signature: bool = false,
     finally_nodes: [8]u32 = @as([8]u32, @splat(0)),
     finally_loop_depth: [8]u32 = @as([8]u32, @splat(0)),
     finally_depth: u32 = 0,
@@ -374,6 +394,21 @@ pub const Compiler = struct {
             }
         }
         return error.CompileError;
+    }
+
+    // a warning or deprecation php raises while compiling, reported at the
+    // line of `token`
+    pub fn warn(self: *Compiler, token: u32, level: u16, comptime fmt: []const u8, args: anytype) Error!void {
+        try self.warnings.ensureUnusedCapacity(self.allocator, 1);
+        try self.string_allocs.ensureUnusedCapacity(self.allocator, 1);
+        const message = try std.fmt.allocPrint(self.allocator, fmt, args);
+        self.string_allocs.appendAssumeCapacity(message);
+        var line: u32 = 1;
+        if (token < self.ast.tokens.len) {
+            const end = @min(self.ast.tokens[token].start, self.ast.source.len);
+            line += @intCast(std.mem.count(u8, self.ast.source[0..end], "\n"));
+        }
+        self.warnings.appendAssumeCapacity(.{ .level = level, .message = message, .line = line });
     }
 
     pub fn compileNode(self: *Compiler, idx: u32) Error!void {
@@ -1454,6 +1489,7 @@ pub const Compiler = struct {
             .function_attrs = self.function_attrs,
             .new_defaults = self.new_defaults,
             .deferred_exprs = self.deferred_exprs,
+            .warnings = self.warnings,
         };
         self.chunk = .{};
         self.functions = .empty;
@@ -1462,6 +1498,7 @@ pub const Compiler = struct {
         self.function_attrs = .empty;
         self.new_defaults = .empty;
         self.deferred_exprs = .empty;
+        self.warnings = .empty;
         return out;
     }
 
@@ -1498,6 +1535,7 @@ pub const Compiler = struct {
         try self.function_attrs.ensureUnusedCapacity(a, sub.function_attrs.items.len);
         try self.new_defaults.ensureUnusedCapacity(a, sub.new_defaults.items.len);
         try self.deferred_exprs.ensureUnusedCapacity(a, sub.deferred_exprs.items.len);
+        try self.warnings.ensureUnusedCapacity(a, sub.warnings.items.len);
         var out = sub.takeOutput();
         self.functions.appendSliceAssumeCapacity(out.functions.items);
         self.string_allocs.appendSliceAssumeCapacity(out.string_allocs.items);
@@ -1505,6 +1543,7 @@ pub const Compiler = struct {
         self.function_attrs.appendSliceAssumeCapacity(out.function_attrs.items);
         self.new_defaults.appendSliceAssumeCapacity(out.new_defaults.items);
         self.deferred_exprs.appendSliceAssumeCapacity(out.deferred_exprs.items);
+        self.warnings.appendSliceAssumeCapacity(out.warnings.items);
         out.chunk.deinit(a);
         out.functions.deinit(a);
         out.string_allocs.deinit(a);
@@ -1512,6 +1551,7 @@ pub const Compiler = struct {
         out.function_attrs.deinit(a);
         out.new_defaults.deinit(a);
         out.deferred_exprs.deinit(a);
+        out.warnings.deinit(a);
     }
 
     pub fn patchGotos(self: *Compiler) error{CompileError}!void {

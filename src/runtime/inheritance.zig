@@ -11,7 +11,7 @@ const ClassDef = vm_mod.ClassDef;
 const RuntimeError = vm_mod.RuntimeError;
 const Value = @import("value.zig").Value;
 const bytecode = @import("../pipeline/bytecode.zig");
-const php_types = @import("php_types.zig");
+const php_types = @import("../pipeline/php_types.zig");
 const native_params = @import("../stdlib/native_params.zig");
 const interface_signatures = @import("../stdlib/interface_signatures_generated.zig");
 

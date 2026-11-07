@@ -18,7 +18,7 @@ const MAGIC = "ZPHPC\x00";
 // v18 adds defer_prop_defaults; v19 gives interface, trait and enum
 // declarations their start line, end line and doc comment. v20 gives class
 // constants their own opcodes.
-pub const FORMAT_VERSION: u16 = 32;
+pub const FORMAT_VERSION: u16 = 33;
 
 // tag bytes for serialized values
 const TAG_NULL: u8 = 0;
@@ -83,6 +83,7 @@ pub fn serialize(allocator: Allocator, result: *const CompileResult) ![]u8 {
         _ = try strtab.intern(allocator, nd.class_name);
         for (nd.args) |a| try internValueStrings(allocator, &strtab, a);
     }
+    for (result.warnings.items) |w| _ = try strtab.intern(allocator, w.message);
     for (result.type_hints.items) |th| {
         _ = try strtab.intern(allocator, th.name);
         if (th.return_type.len > 0) _ = try strtab.intern(allocator, th.return_type);
@@ -160,6 +161,13 @@ pub fn serialize(allocator: Allocator, result: *const CompileResult) ![]u8 {
                 try writeU32(&buf, allocator, if (arg_name) |name| try strtab.intern(allocator, name) else 0xFFFFFFFF);
             }
         }
+    }
+
+    try writeU32(&buf, allocator, @intCast(result.warnings.items.len));
+    for (result.warnings.items) |w| {
+        try writeU16(&buf, allocator, w.level);
+        try writeU32(&buf, allocator, try strtab.intern(allocator, w.message));
+        try writeU32(&buf, allocator, w.line);
     }
 
     return buf.toOwnedSlice(allocator);
@@ -580,6 +588,16 @@ pub fn deserializeRelocated(allocator: Allocator, data: []const u8, relocation: 
         }
         try function_attrs.append(allocator, .{ .name = fn_name, .attrs = attrs });
     }
+
+    var warnings = std.ArrayListUnmanaged(@import("pipeline/compiler.zig").CompileWarning).empty;
+    errdefer warnings.deinit(allocator);
+    const warning_count = r.readU32() catch return error.InvalidFormat;
+    for (0..warning_count) |_| {
+        const level = r.readU16() catch return error.InvalidFormat;
+        const message = strings[try readStringIndex(&r, strings)];
+        const line = r.readU32() catch return error.InvalidFormat;
+        try warnings.append(allocator, .{ .level = level, .message = message, .line = line });
+    }
     if (r.pos != data.len) return error.InvalidFormat;
 
     allocator.free(strings);
@@ -597,6 +615,7 @@ pub fn deserializeRelocated(allocator: Allocator, data: []const u8, relocation: 
         .function_attrs = function_attrs,
         .new_defaults = new_defaults,
         .deferred_exprs = deferred_exprs,
+        .warnings = warnings,
     };
 }
 

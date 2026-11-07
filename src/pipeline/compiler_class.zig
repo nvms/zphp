@@ -1,4 +1,5 @@
 const std = @import("std");
+const php_types = @import("php_types.zig");
 const compiler = @import("compiler.zig");
 const Compiler = @import("compiler.zig").Compiler;
 const TypeHint = @import("compiler.zig").TypeHint;
@@ -527,6 +528,7 @@ fn emitAttrValue(self: *Compiler, val: Value) Error!void {
 
 fn buildTypeString(self: *Compiler, start_tok: u32, end_tok: u32) Error![]const u8 {
     if (start_tok == end_tok) return "";
+    try checkTypeDeclaration(self, start_tok, end_tok);
 
     // A type expression is structured as:
     //   ?T   |   T1|T2|T3   |   T1&T2   |   (T1&T2)|T3
@@ -587,6 +589,357 @@ fn buildTypeString(self: *Compiler, start_tok: u32, end_tok: u32) Error![]const 
     const s = try buf.toOwnedSlice(self.allocator);
     try self.string_allocs.append(self.allocator, s);
     return s;
+}
+
+// one name of a written type: a built-in type or a class
+const TypeName = struct {
+    written: []const u8,
+    // the built-in type's bits, 0 for a class
+    mask: u32 = 0,
+    iterable: bool = false,
+    // the class php compiles it to: resolved, self and parent substituted
+    // where the scope is known
+    class: []const u8 = "",
+
+    fn isClass(n: TypeName) bool {
+        return n.mask == 0 and !n.iterable;
+    }
+};
+
+// how zend_type_to_string prints one name
+fn typeNameString(self: *Compiler, n: TypeName) Error![]const u8 {
+    if (n.iterable) return "Traversable|array";
+    if (n.isClass()) return n.class;
+    const text = php_types.format(self.allocator, .{ .mask = n.mask }) catch return error.OutOfMemory;
+    try self.string_allocs.append(self.allocator, text);
+    return text;
+}
+
+fn readTypeName(self: *Compiler, tok: *u32, end_tok: u32) Error!TypeName {
+    const start = tok.*;
+    var qualified = false;
+    while (tok.* < end_tok) : (tok.* += 1) {
+        const lexeme = self.ast.tokens[tok.*].lexeme(self.ast.source);
+        if (std.mem.eql(u8, lexeme, "|") or std.mem.eql(u8, lexeme, "&") or std.mem.eql(u8, lexeme, ")") or std.mem.eql(u8, lexeme, "(")) break;
+        if (std.mem.indexOfScalar(u8, lexeme, '\\') != null) qualified = true;
+    }
+    if (tok.* == start) return self.fail(start, "syntax error, unexpected type");
+    const first = self.ast.tokens[start].start;
+    const last = self.ast.tokens[tok.* - 1];
+    const written = self.ast.source[first .. last.start + last.lexeme(self.ast.source).len];
+    var lower_buf: [16]u8 = undefined;
+    const lower = if (written.len <= lower_buf.len) std.ascii.lowerString(&lower_buf, written) else "";
+    if (!qualified and std.mem.eql(u8, lower, "static") and self.current_class.len == 0 and !self.closure_signature and !std.mem.startsWith(u8, self.current_function, "{closure:")) {
+        return self.fail(start, "Cannot use \"static\" when no class scope is active");
+    }
+    if (!qualified) {
+        if (std.mem.eql(u8, lower, "iterable")) return .{ .written = written, .iterable = true, .mask = php_types.ARRAY };
+        const builtin = std.StaticStringMap(u32).initComptime(.{
+            .{ "null", php_types.NULL },       .{ "false", php_types.FALSE }, .{ "true", php_types.TRUE },
+            .{ "bool", php_types.BOOL },       .{ "int", php_types.LONG },    .{ "float", php_types.DOUBLE },
+            .{ "string", php_types.STRING },   .{ "array", php_types.ARRAY }, .{ "object", php_types.OBJECT },
+            .{ "callable", php_types.CALLABLE }, .{ "void", php_types.VOID }, .{ "never", php_types.NEVER },
+            .{ "static", php_types.STATIC },   .{ "mixed", php_types.ANY },
+        });
+        if (builtin.get(lower)) |mask| return .{ .written = written, .mask = mask };
+    }
+    const scope_known = self.current_class.len > 0 and !self.in_trait and !std.mem.startsWith(u8, self.current_class, "class@anonymous");
+    if (!qualified and scope_known and std.mem.eql(u8, lower, "self")) return .{ .written = written, .class = self.current_class };
+    if (!qualified and scope_known and std.mem.eql(u8, lower, "parent") and self.current_parent.len > 0) return .{ .written = written, .class = self.current_parent };
+    if (!qualified and (std.mem.eql(u8, lower, "self") or std.mem.eql(u8, lower, "parent"))) return .{ .written = written, .class = written };
+    const class = if (written[0] == '\\') written[1..] else self.resolveClassName(written);
+    return .{ .written = written, .class = class };
+}
+
+// the members of an intersection, checked as php's compiler checks them
+fn readIntersection(self: *Compiler, arena: std.mem.Allocator, tok: *u32, end_tok: u32, list: *std.ArrayListUnmanaged(TypeName)) Error!void {
+    while (true) {
+        const at = tok.*;
+        const n = try readTypeName(self, tok, end_tok);
+        if (!n.isClass()) return self.failFmt(at, "Type {s} cannot be part of an intersection type", .{try typeNameString(self, n)});
+        if (std.ascii.eqlIgnoreCase(n.class, "self") or std.ascii.eqlIgnoreCase(n.class, "parent")) {
+            return self.failFmt(at, "Type {s} cannot be part of an intersection type", .{n.class});
+        }
+        for (list.items) |prev| {
+            if (std.ascii.eqlIgnoreCase(prev.class, n.class)) return self.failFmt(at, "Duplicate type {s} is redundant", .{n.class});
+        }
+        try list.append(arena, n);
+        if (tok.* < end_tok and std.mem.eql(u8, self.ast.tokens[tok.*].lexeme(self.ast.source), "&")) {
+            tok.* += 1;
+            continue;
+        }
+        return;
+    }
+}
+
+fn intersectionString(self: *Compiler, names: []const TypeName) Error![]const u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    for (names, 0..) |n, i| {
+        if (i > 0) try out.append(self.allocator, '&');
+        try out.appendSlice(self.allocator, n.class);
+    }
+    const text = try out.toOwnedSlice(self.allocator);
+    try self.string_allocs.append(self.allocator, text);
+    return text;
+}
+
+// php's zend_compile_typename checks: a declared type that repeats a type,
+// mixes types that make each other redundant, or puts a standalone type in a
+// union or intersection is a compile-time fatal error
+fn checkTypeDeclaration(self: *Compiler, start_tok: u32, end_tok: u32) Error!void {
+    var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var tok = start_tok;
+    const nullable = std.mem.eql(u8, self.ast.tokens[tok].lexeme(self.ast.source), "?");
+    if (nullable) tok += 1;
+
+    // a union: each member a name or a parenthesized intersection
+    const Member = struct { names: []const TypeName, intersection: bool };
+    var members: std.ArrayListUnmanaged(Member) = .empty;
+    var mask: u32 = 0;
+    var has_class = false;
+    var has_only_iterable_class = true;
+    var pure_intersection = false;
+    var first = true;
+    while (tok < end_tok) {
+        const at = tok;
+        const lexeme = self.ast.tokens[tok].lexeme(self.ast.source);
+        if (std.mem.eql(u8, lexeme, "(")) {
+            tok += 1;
+            var group: std.ArrayListUnmanaged(TypeName) = .empty;
+            try readIntersection(self, arena, &tok, end_tok, &group);
+            tok += 1; // )
+            has_only_iterable_class = false;
+            has_class = true;
+            for (members.items) |prev| {
+                if (prev.intersection) {
+                    try checkIntersectionsRedundant(self, at, group.items, prev.names);
+                } else if (prev.names[0].isClass()) {
+                    try checkIntersectionRedundantBySingle(self, at, group.items, prev.names[0]);
+                }
+            }
+            try members.append(arena, .{ .names = group.items, .intersection = true });
+        } else {
+            const n = try readTypeName(self, &tok, end_tok);
+            if (first and tok < end_tok and std.mem.eql(u8, self.ast.tokens[tok].lexeme(self.ast.source), "&")) {
+                // a type that is one intersection
+                tok += 1;
+                var group: std.ArrayListUnmanaged(TypeName) = .empty;
+                var single_tok = at;
+                try readIntersection(self, arena, &single_tok, end_tok, &group);
+                tok = single_tok;
+                pure_intersection = true;
+                try members.append(arena, .{ .names = group.items, .intersection = true });
+                has_class = true;
+                break;
+            }
+            if (n.mask == php_types.ANY and (tok < end_tok or !first)) return self.fail(at, "Type mixed can only be used as a standalone type");
+            const bits = if (n.iterable) php_types.ARRAY else n.mask;
+            if (mask & bits != 0) {
+                const overlap = php_types.format(self.allocator, .{ .mask = mask & bits }) catch return error.OutOfMemory;
+                defer self.allocator.free(overlap);
+                return self.failFmt(at, "Duplicate type {s} is redundant", .{overlap});
+            }
+            if ((mask & php_types.TRUE != 0 and bits == php_types.FALSE) or (mask & php_types.FALSE != 0 and bits == php_types.TRUE)) {
+                return self.fail(at, "Type contains both true and false, bool must be used instead");
+            }
+            mask |= bits;
+            const class_name: ?[]const u8 = if (n.iterable) "Traversable" else if (n.isClass()) n.class else null;
+            if (class_name) |cn| {
+                if (!n.iterable) has_only_iterable_class = false;
+                has_class = true;
+                for (members.items) |prev| {
+                    if (prev.intersection) {
+                        try checkIntersectionRedundantBySingle(self, at, prev.names, .{ .written = cn, .class = cn });
+                        continue;
+                    }
+                    const prev_class = if (prev.names[0].iterable) "Traversable" else prev.names[0].class;
+                    if ((prev.names[0].isClass() or prev.names[0].iterable) and std.ascii.eqlIgnoreCase(prev_class, cn)) {
+                        return self.failFmt(at, "Duplicate type {s} is redundant", .{cn});
+                    }
+                }
+                try members.append(arena, .{ .names = try arena.dupe(TypeName, &.{if (n.iterable) TypeName{ .written = n.written, .class = "Traversable", .iterable = true } else n}), .intersection = false });
+            }
+        }
+        first = false;
+        if (tok < end_tok and std.mem.eql(u8, self.ast.tokens[tok].lexeme(self.ast.source), "|")) tok += 1;
+    }
+
+    if (!pure_intersection and mask & php_types.OBJECT != 0 and ((!has_only_iterable_class and has_class) or mask & php_types.STATIC != 0)) {
+        var names: std.ArrayListUnmanaged([]const u8) = .empty;
+        for (members.items) |m| {
+            if (m.intersection) {
+                try names.append(arena, try std.fmt.allocPrint(arena, "({s})", .{try intersectionString(self, m.names)}));
+            } else {
+                try names.append(arena, m.names[0].class);
+            }
+        }
+        var text: std.ArrayListUnmanaged(u8) = .empty;
+        for (names.items, 0..) |name, i| {
+            if (i > 0) try text.append(arena, '|');
+            try text.appendSlice(arena, name);
+        }
+        const builtins = php_types.format(arena, .{ .mask = mask & ~(if (has_only_iterable_class) @as(u32, 0) else 0) }) catch return error.OutOfMemory;
+        if (builtins.len > 0) {
+            if (text.items.len > 0) try text.append(arena, '|');
+            try text.appendSlice(arena, builtins);
+        }
+        return self.failFmt(start_tok, "Type {s} contains both object and a class type, which is redundant", .{text.items});
+    }
+
+    if (mask == php_types.ANY and nullable) return self.fail(start_tok, "Type mixed cannot be marked as nullable since mixed already includes null");
+    if (mask & php_types.NULL != 0 and nullable) return self.fail(start_tok, "null cannot be marked as nullable");
+    const full = if (nullable) mask | php_types.NULL else mask;
+    if (full & php_types.VOID != 0 and (has_class or full != php_types.VOID)) return self.fail(start_tok, "Void can only be used as a standalone type");
+    if (full & php_types.NEVER != 0 and (has_class or full != php_types.NEVER)) return self.fail(start_tok, "never can only be used as a standalone type");
+}
+
+// zend_are_intersection_types_redundant
+fn checkIntersectionsRedundant(self: *Compiler, at: u32, left: []const TypeName, right: []const TypeName) Error!void {
+    const flipped = right.len < left.len;
+    const smaller = if (flipped) right else left;
+    const larger = if (flipped) left else right;
+    var shared: usize = 0;
+    for (smaller) |outer| {
+        for (larger) |inner| {
+            if (std.ascii.eqlIgnoreCase(inner.class, outer.class)) {
+                shared += 1;
+                break;
+            }
+        }
+    }
+    if (shared != smaller.len) return;
+    const smaller_text = try intersectionString(self, if (flipped) right else left);
+    const larger_text = try intersectionString(self, if (flipped) left else right);
+    if (smaller.len == larger.len) return self.failFmt(at, "Type {s} is redundant with type {s}", .{ smaller_text, larger_text });
+    return self.failFmt(at, "Type {s} is redundant as it is more restrictive than type {s}", .{ larger_text, smaller_text });
+}
+
+// zend_is_intersection_type_redundant_by_single_type
+fn checkIntersectionRedundantBySingle(self: *Compiler, at: u32, intersection: []const TypeName, single: TypeName) Error!void {
+    for (intersection) |n| {
+        if (std.ascii.eqlIgnoreCase(n.class, single.class)) {
+            return self.failFmt(at, "Type {s} is redundant as it is more restrictive than type {s}", .{ try intersectionString(self, intersection), single.class });
+        }
+    }
+}
+
+// the type of a parameter default php folds at compile time (a literal, or
+// an array or operation of literals); null for one that names a constant or
+// anything php evaluates later
+const DefaultKind = enum { null, true, false, int, float, string, array };
+
+fn foldedDefault(self: *Compiler, idx: u32) ?DefaultKind {
+    if (idx == 0 or !foldsAtCompileTime(self.ast, idx)) return null;
+    const node = self.ast.nodes[idx];
+    return switch (node.tag) {
+        .null_literal => .null,
+        .true_literal => .true,
+        .false_literal => .false,
+        .integer_literal => .int,
+        .float_literal => .float,
+        .string_literal => .string,
+        .array_literal => .array,
+        else => switch (self.evalConstExpr(idx)) {
+            .null => .null,
+            .bool => |b| if (b) .true else .false,
+            .int => .int,
+            .float => .float,
+            .string => .string,
+            else => null,
+        },
+    };
+}
+
+fn foldsAtCompileTime(ast: *const Ast, idx: u32) bool {
+    const node = ast.nodes[idx];
+    return switch (node.tag) {
+        .integer_literal, .float_literal, .string_literal, .true_literal, .false_literal, .null_literal => true,
+        .prefix_op, .grouped_expr => foldsAtCompileTime(ast, node.data.lhs),
+        .binary_op => foldsAtCompileTime(ast, node.data.lhs) and foldsAtCompileTime(ast, node.data.rhs),
+        .array_literal => {
+            for (ast.extraSlice(node.data.lhs)) |el_idx| {
+                const el = ast.nodes[el_idx];
+                if (el.tag != .array_element) return false;
+                if (!foldsAtCompileTime(ast, el.data.lhs)) return false;
+                if (el.data.rhs != 0 and !foldsAtCompileTime(ast, el.data.rhs)) return false;
+            }
+            return true;
+        },
+        else => false,
+    };
+}
+
+// php counts every parameter up to the last one without a default as
+// required: an optional parameter before a required one becomes required
+fn requiredParamCount(ast: *const Ast, param_nodes: []const u32) u8 {
+    var count: u8 = 0;
+    for (param_nodes, 0..) |p, i| {
+        const node = ast.nodes[p];
+        if (node.data.lhs == 0 and (node.data.rhs & 1) == 0) count = @intCast(i + 1);
+    }
+    return count;
+}
+
+fn paramName(self: *Compiler, p: u32) []const u8 {
+    const raw = self.ast.tokenSlice(self.ast.nodes[p].main_token);
+    return if (raw.len > 0 and raw[0] == '$') raw[1..] else raw;
+}
+
+// the checks and deprecations php's zend_compile_params makes on a
+// function's declared return and parameters
+fn checkParams(self: *Compiler, func_name: []const u8, at: u32, param_nodes: []const u32, return_type: []const u8, returns_ref: bool) Error!void {
+    const scope: ?[]const u8 = if (self.current_class.len > 0) self.current_class else null;
+    const parent: ?[]const u8 = if (self.current_parent.len > 0) self.current_parent else null;
+    if (returns_ref and return_type.len > 0) {
+        const t = php_types.parse(self.allocator, return_type, scope, parent) catch return error.OutOfMemory;
+        defer t.deinit(self.allocator);
+        if (t.mask & php_types.VOID != 0) try self.warn(at, 8192, "{s}(): Returning by reference from a void function is deprecated", .{func_name});
+    }
+    var last_required: ?usize = null;
+    for (param_nodes, 0..) |p, i| {
+        const node = self.ast.nodes[p];
+        if (node.data.lhs == 0 and (node.data.rhs & 1) == 0) last_required = i;
+    }
+    for (param_nodes, 0..) |p, i| {
+        const node = self.ast.nodes[p];
+        const promoted = ((node.data.rhs >> 2) & 3) != 0 or (node.data.rhs & 16) != 0 or ((node.data.rhs >> 5) & 3) != 0;
+        const default = foldedDefault(self, node.data.lhs);
+        const force_nullable = default == .null and !promoted;
+        var forced_nullable = false;
+        const type_extra = node.data.rhs >> 8;
+        if (type_extra != 0) {
+            const text = try buildTypeString(self, self.ast.extra_data[type_extra - 1], self.ast.extra_data[type_extra]);
+            const t = php_types.parse(self.allocator, text, scope, parent) catch return error.OutOfMemory;
+            defer t.deinit(self.allocator);
+            if (force_nullable and t.mask & php_types.NULL == 0) {
+                forced_nullable = true;
+                try self.warn(at, 8192, "{s}(): Implicitly marking parameter ${s} as nullable is deprecated, the explicit nullable type must be used instead", .{ func_name, paramName(self, p) });
+            }
+            if (t.mask & php_types.VOID != 0) return self.fail(at, "void cannot be used as a parameter type");
+            if (t.mask & php_types.NEVER != 0) return self.fail(at, "never cannot be used as a parameter type");
+            if (default) |kind_of| if (!force_nullable) {
+                const accepted: bool, const kind: []const u8 = switch (kind_of) {
+                    .null => .{ t.mask & php_types.NULL != 0, "null" },
+                    .true => .{ t.mask & php_types.TRUE != 0, "bool" },
+                    .false => .{ t.mask & php_types.FALSE != 0, "bool" },
+                    .int => .{ t.mask & (php_types.LONG | php_types.DOUBLE) != 0, "int" },
+                    .float => .{ t.mask & php_types.DOUBLE != 0, "float" },
+                    .string => .{ t.mask & php_types.STRING != 0, "string" },
+                    .array => .{ t.mask & php_types.ARRAY != 0, "array" },
+                };
+                if (!accepted) {
+                    const type_text = php_types.format(self.allocator, t) catch return error.OutOfMemory;
+                    defer self.allocator.free(type_text);
+                    return self.failFmt(at, "Cannot use {s} as default value for parameter ${s} of type {s}", .{ kind, paramName(self, p), type_text });
+                }
+            };
+        }
+        if (last_required) |required| if (i < required and node.data.lhs != 0 and !forced_nullable) {
+            try self.warn(at, 8192, "{s}(): Optional parameter ${s} declared before required parameter ${s} is implicitly treated as a required parameter", .{ func_name, paramName(self, p), paramName(self, param_nodes[required]) });
+        };
+    }
 }
 
 fn isPrimitiveType(name: []const u8) bool {
@@ -816,6 +1169,9 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     const raw_name = self.ast.tokenSlice(name_tok);
     const name = if (std.mem.startsWith(u8, raw_name, "__closure_")) raw_name else self.resolveClassName(raw_name);
     const param_nodes = self.ast.extraSlice(node.data.lhs);
+    if (!std.mem.startsWith(u8, raw_name, "__closure_")) {
+        try checkParams(self, name, name_tok, param_nodes, try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len)), (node.data.rhs & (1 << 30)) != 0);
+    }
 
     var handed_over = false;
     const param_names = try self.allocator.alloc([]const u8, param_nodes.len);
@@ -824,8 +1180,6 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     errdefer if (!handed_over) self.allocator.free(ref_flags);
     var defaults = std.ArrayListUnmanaged(Value).empty;
     defer defaults.deinit(self.allocator);
-    var required: u8 = 0;
-    var seen_default = false;
     var is_variadic = false;
 
     for (param_nodes, 0..) |p, i| {
@@ -837,14 +1191,12 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
             is_variadic = true;
             try defaults.append(self.allocator, .null);
         } else if (pnode.data.lhs != 0) {
-            seen_default = true;
             try defaults.append(self.allocator, self.evalConstExpr(pnode.data.lhs));
         } else {
-            if (!seen_default) required += 1;
             try defaults.append(self.allocator, .null);
         }
     }
-    if (!seen_default and !is_variadic) required = @intCast(param_nodes.len);
+    const required = requiredParamCount(self.ast, param_nodes);
 
     const defaults_owned = try self.allocator.alloc(Value, defaults.items.len);
     @memcpy(defaults_owned, defaults.items);
@@ -988,8 +1340,6 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     var has_any_ref = false;
     var defaults = std.ArrayListUnmanaged(Value).empty;
     defer defaults.deinit(self.allocator);
-    var required: u8 = 0;
-    var seen_default = false;
     var is_variadic = false;
 
     for (param_nodes, 0..) |p, i| {
@@ -1003,16 +1353,14 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
             is_variadic = true;
             try defaults.append(self.allocator, .null);
         } else if (pnode.data.lhs != 0) {
-            seen_default = true;
             try defaults.append(self.allocator, self.evalConstExpr(pnode.data.lhs));
         } else {
-            if (!seen_default) required += 1;
             try defaults.append(self.allocator, .null);
         }
     }
-    if (!seen_default and !is_variadic) required = @intCast(param_nodes.len);
+    const required = requiredParamCount(self.ast, param_nodes);
 
-    const defaults_owned = if (seen_default or is_variadic) blk: {
+    const defaults_owned = if (required < param_nodes.len) blk: {
         const d = try self.allocator.alloc(Value, defaults.items.len);
         @memcpy(d, defaults.items);
         break :blk d;
@@ -1030,6 +1378,11 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     const use_count: u32 = if (is_arrow) 0 else raw_use_count;
     const use_vars = self.ast.extra_data[node.data.rhs + 2 .. node.data.rhs + 2 + use_count];
     const display_name = try closureDisplayName(self, lineForToken(self, node.main_token));
+    // a closure's scope is only known once it is bound
+    const outer_closure_signature = self.closure_signature;
+    self.closure_signature = true;
+    defer self.closure_signature = outer_closure_signature;
+    try checkParams(self, display_name, node.main_token, param_nodes, try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len)), false);
 
     var sub = Compiler{
         .ast = self.ast,
@@ -2907,6 +3260,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     try self.string_allocs.append(self.allocator, full_name);
 
     const param_nodes = self.ast.extraSlice(member.data.lhs);
+    try checkParams(self, full_name, member.main_token, param_nodes, try extractReturnType(self, member.data.lhs, @intCast(param_nodes.len)), (member.data.rhs & (1 << 27)) != 0);
     var handed_over = false;
     const param_names = try self.allocator.alloc([]const u8, param_nodes.len);
     errdefer if (!handed_over) self.allocator.free(param_names);
@@ -2920,8 +3274,6 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
 
     var defaults = std.ArrayListUnmanaged(Value).empty;
     defer defaults.deinit(self.allocator);
-    var required: u8 = 0;
-    var seen_default = false;
     var is_variadic = false;
     for (param_nodes) |p| {
         const pnode = self.ast.nodes[p];
@@ -2929,14 +3281,12 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
             is_variadic = true;
             try defaults.append(self.allocator, .null);
         } else if (pnode.data.lhs != 0) {
-            seen_default = true;
             try defaults.append(self.allocator, self.evalConstExpr(pnode.data.lhs));
         } else {
-            if (!seen_default) required += 1;
             try defaults.append(self.allocator, .null);
         }
     }
-    if (!seen_default and !is_variadic) required = @intCast(param_nodes.len);
+    const required = requiredParamCount(self.ast, param_nodes);
     const defaults_owned = try self.allocator.alloc(Value, defaults.items.len);
     @memcpy(defaults_owned, defaults.items);
     errdefer if (!handed_over) compiler.freeDefaults(self.allocator, defaults_owned);
@@ -3059,6 +3409,116 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     }
 
     try self.adopt(&sub);
+    try checkMagicMethod(self, class_name, member, .{
+        .params = param_nodes,
+        .param_types = param_types,
+        .return_type = try extractReturnType(self, member.data.lhs, @intCast(param_nodes.len)),
+        .is_static = member.tag == .static_class_method,
+        .visibility = @intCast((member.data.rhs >> 30) & 0x3),
+    });
+}
+
+const MagicMethod = struct {
+    params: []const u32,
+    param_types: []const []const u8,
+    // as declared: __toString's implicit string is not part of it
+    return_type: []const u8,
+    is_static: bool,
+    visibility: u8,
+};
+
+// php's zend_check_magic_method_implementation: the arity, static-ness,
+// visibility and types php requires of each magic method, checked as the
+// method compiles. only visibility is a warning, the rest end compilation
+fn checkMagicMethod(self: *Compiler, class_name: []const u8, member: Ast.Node, m: MagicMethod) Error!void {
+    const name = self.ast.tokenSlice(member.main_token);
+    if (name.len < 2 or name[0] != '_' or name[1] != '_') return;
+    const Rule = struct {
+        args: ?u32 = null,
+        static: ?bool = false,
+        public: bool = true,
+        no_return_type: bool = false,
+        // the type php requires of each parameter and of the return, when declared
+        arg_types: []const u32 = &.{},
+        returns: u32 = 0,
+    };
+    const S = php_types.STRING;
+    const A = php_types.ARRAY;
+    const rules = std.StaticStringMap(Rule).initComptime(.{
+        .{ "__construct", Rule{ .public = false, .no_return_type = true } },
+        .{ "__destruct", Rule{ .args = 0, .public = false, .no_return_type = true } },
+        .{ "__clone", Rule{ .args = 0, .public = false, .returns = php_types.VOID } },
+        .{ "__get", Rule{ .args = 1, .arg_types = &.{S} } },
+        .{ "__set", Rule{ .args = 2, .arg_types = &.{S}, .returns = php_types.VOID } },
+        .{ "__unset", Rule{ .args = 1, .arg_types = &.{S}, .returns = php_types.VOID } },
+        .{ "__isset", Rule{ .args = 1, .arg_types = &.{S}, .returns = php_types.BOOL } },
+        .{ "__call", Rule{ .args = 2, .arg_types = &.{ S, A } } },
+        .{ "__callstatic", Rule{ .args = 2, .static = true, .arg_types = &.{ S, A } } },
+        .{ "__tostring", Rule{ .args = 0, .returns = S } },
+        .{ "__debuginfo", Rule{ .args = 0, .returns = A | php_types.NULL } },
+        .{ "__serialize", Rule{ .args = 0, .returns = A } },
+        .{ "__unserialize", Rule{ .args = 1, .arg_types = &.{A}, .returns = php_types.VOID } },
+        .{ "__set_state", Rule{ .args = 1, .static = true, .arg_types = &.{A}, .returns = php_types.OBJECT } },
+        .{ "__invoke", Rule{ .static = false } },
+        .{ "__sleep", Rule{ .args = 0, .returns = A } },
+        .{ "__wakeup", Rule{ .args = 0, .returns = php_types.VOID } },
+    });
+    var lower_buf: [16]u8 = undefined;
+    if (name.len > lower_buf.len) return;
+    const rule = rules.get(std.ascii.lowerString(&lower_buf, name)) orelse return;
+    const class = if (std.mem.startsWith(u8, class_name, "class@anonymous")) "class@anonymous" else class_name;
+    const token = member.main_token;
+
+    var arg_count: u32 = 0;
+    for (m.params) |p| {
+        if ((self.ast.nodes[p].data.rhs & 1) == 0) arg_count += 1;
+    }
+    if (rule.args) |want| {
+        if (arg_count != want) {
+            if (want == 0) return self.failFmt(token, "Method {s}::{s}() cannot take arguments", .{ class, name });
+            if (want == 1) return self.failFmt(token, "Method {s}::{s}() must take exactly 1 argument", .{ class, name });
+            return self.failFmt(token, "Method {s}::{s}() must take exactly {d} arguments", .{ class, name, want });
+        }
+        for (m.params[0..want]) |p| {
+            if ((self.ast.nodes[p].data.rhs & 2) != 0) return self.failFmt(token, "Method {s}::{s}() cannot take arguments by reference", .{ class, name });
+        }
+    }
+    if (rule.static) |must_be_static| {
+        if (must_be_static and !m.is_static) return self.failFmt(token, "Method {s}::{s}() must be static", .{ class, name });
+        if (!must_be_static and m.is_static) return self.failFmt(token, "Method {s}::{s}() cannot be static", .{ class, name });
+    }
+    if (rule.public and m.visibility != 0) {
+        try self.warn(token, 2, "The magic method {s}::{s}() must have public visibility", .{ class, name });
+    }
+    for (rule.arg_types, 0..) |want, i| {
+        if (i >= m.param_types.len or m.param_types[i].len == 0) continue;
+        const declared = php_types.parse(self.allocator, m.param_types[i], class_name, null) catch return error.OutOfMemory;
+        defer declared.deinit(self.allocator);
+        if (declared.mask & want != 0) continue;
+        const pname = self.ast.tokenSlice(self.ast.nodes[m.params[i]].main_token);
+        const required = php_types.format(self.allocator, .{ .mask = want }) catch return error.OutOfMemory;
+        defer self.allocator.free(required);
+        return self.failFmt(token, "{s}::{s}(): Parameter #{d} (${s}) must be of type {s} when declared", .{ class, name, i + 1, if (pname.len > 0 and pname[0] == '$') pname[1..] else pname, required });
+    }
+    if (rule.no_return_type and m.return_type.len > 0) {
+        return self.failFmt(token, "Method {s}::{s}() cannot declare a return type", .{ class, name });
+    }
+    if (rule.returns != 0 and m.return_type.len > 0) {
+        const declared = php_types.parse(self.allocator, m.return_type, class_name, null) catch return error.OutOfMemory;
+        defer declared.deinit(self.allocator);
+        if (declared.mask & php_types.NEVER != 0) return;
+        var complex = declared.names.len > 0 or declared.intersections.len > 0;
+        var extra = declared.mask & ~rule.returns;
+        if (extra & php_types.STATIC != 0) {
+            extra &= ~php_types.STATIC;
+            complex = true;
+        }
+        if (extra != 0 or (complex and rule.returns != php_types.OBJECT)) {
+            const required = php_types.format(self.allocator, .{ .mask = rule.returns }) catch return error.OutOfMemory;
+            defer self.allocator.free(required);
+            return self.failFmt(token, "{s}::{s}(): Return type must be {s} when declared", .{ class, name, required });
+        }
+    }
 }
 
 // compiles the non-literal instance defaults into the class's hidden
@@ -3290,6 +3750,7 @@ fn compileInterfaceMethodStub(self: *Compiler, owner_name: []const u8, member: A
     try self.string_allocs.append(self.allocator, full_name);
 
     const param_nodes = self.ast.extraSlice(member.data.lhs);
+    try checkParams(self, full_name, member.main_token, param_nodes, try extractReturnType(self, member.data.lhs, @intCast(param_nodes.len)), (member.data.rhs >> 31) & 1 != 0);
     const param_names = try self.allocator.alloc([]const u8, param_nodes.len);
     const ref_flags = try self.allocator.alloc(bool, param_nodes.len);
     for (param_nodes, 0..) |p, i| {
@@ -3300,8 +3761,6 @@ fn compileInterfaceMethodStub(self: *Compiler, owner_name: []const u8, member: A
 
     var defaults = std.ArrayListUnmanaged(Value).empty;
     defer defaults.deinit(self.allocator);
-    var required: u8 = 0;
-    var seen_default = false;
     var is_variadic = false;
     for (param_nodes) |p| {
         const pnode = self.ast.nodes[p];
@@ -3309,14 +3768,12 @@ fn compileInterfaceMethodStub(self: *Compiler, owner_name: []const u8, member: A
             is_variadic = true;
             try defaults.append(self.allocator, .null);
         } else if (pnode.data.lhs != 0) {
-            seen_default = true;
             try defaults.append(self.allocator, self.evalConstExpr(pnode.data.lhs));
         } else {
-            if (!seen_default) required += 1;
             try defaults.append(self.allocator, .null);
         }
     }
-    if (!seen_default and !is_variadic) required = @intCast(param_nodes.len);
+    const required = requiredParamCount(self.ast, param_nodes);
     const defaults_owned = try self.allocator.alloc(Value, defaults.items.len);
     @memcpy(defaults_owned, defaults.items);
 
@@ -3343,6 +3800,13 @@ fn compileInterfaceMethodStub(self: *Compiler, owner_name: []const u8, member: A
         self.functions.items[self.functions.items.len - 1].has_param_types = param_types.len > 0;
         if (return_type.len > 0) self.functions.items[self.functions.items.len - 1].return_type_kind = returnTypeKind(return_type);
     }
+    try checkMagicMethod(self, owner_name, member, .{
+        .params = param_nodes,
+        .param_types = param_types,
+        .return_type = try extractReturnType(self, member.data.lhs, @intCast(param_nodes.len)),
+        .is_static = (member.data.rhs >> 30) & 1 != 0,
+        .visibility = @intCast((member.data.rhs >> 28) & 0x3),
+    });
 }
 
 fn hasRefParams(ref_flags: []const bool) bool {
