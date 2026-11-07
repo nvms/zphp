@@ -3515,7 +3515,11 @@ pub const VM = struct {
     }
 
     pub fn registerFunction(self: *VM, func: *const ObjFunction) RuntimeError!void {
-        if (self.functions.contains(func.name)) return;
+        if (self.functions.get(func.name)) |existing| if (existing == func) return;
+        if (try self.functionRedeclarationMessage(func.name)) |msg| {
+            defer self.allocator.free(msg);
+            return self.raiseCompileFatal(msg, .{ .file = func.file_path, .line = func.start_line });
+        }
         try self.noteFunctionName(func.name);
         try self.functions.put(self.allocator, func.name, func);
         try self.indexFunctionByChunk(func.name, &func.chunk);
@@ -3542,10 +3546,6 @@ pub const VM = struct {
         const ic = self.ic.?;
         const lower = try std.ascii.allocLowerString(self.allocator, name);
         errdefer self.allocator.free(lower);
-        if (ic.fn_lower.contains(lower) or self.nativeNamed(lower) != null) {
-            self.setErrorMsg("Fatal error: Cannot redeclare function {s}()", .{name});
-            return error.RuntimeError;
-        }
         try ic.fn_lower.put(self.allocator, lower, name);
         if (std.mem.indexOfScalar(u8, name, '\\') == null) return;
         var stale: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -7698,9 +7698,9 @@ pub const VM = struct {
                     };
                     for (result.functions.items) |*func| {
                         if (func.cond_id != cond_id) continue;
-                        if (self.functions.contains(func.name) or self.native_fns.contains(func.name)) {
-                            self.setErrorMsg("Fatal error: Cannot redeclare function {s}()", .{func.name});
-                            return error.RuntimeError;
+                        if (try self.functionRedeclarationMessage(func.name)) |msg| {
+                            defer self.allocator.free(msg);
+                            return self.raiseFatal(msg);
                         }
                         try self.noteFunctionName(func.name);
                         try self.functions.put(self.allocator, func.name, func);
@@ -8222,6 +8222,7 @@ pub const VM = struct {
                 .interface_decl => {
                     const name_idx = self.readU16();
                     const iface_name = self.currentChunk().constants.items[name_idx].string.bytes();
+                    try self.refuseRedeclaration(iface_name);
                     const iface_site = self.readDeclSite();
                     const method_count = self.readU16();
 
@@ -8360,6 +8361,7 @@ pub const VM = struct {
                 .trait_decl => {
                     const name_idx = self.readU16();
                     const trait_name = self.currentChunk().constants.items[name_idx].string.bytes();
+                    try self.refuseRedeclaration(trait_name);
                     try self.traits.put(self.allocator, trait_name, {});
                     try self.ic.?.trait_sites.put(self.allocator, trait_name, self.readDeclSite());
                     const sub_count = self.readByte();
@@ -12715,6 +12717,70 @@ pub const VM = struct {
         return false;
     }
 
+    // php's do_bind_function_error for a free function name already taken:
+    // a script's function is named with where it was declared. null when
+    // the name is free
+    fn functionRedeclarationMessage(self: *VM, name: []const u8) RuntimeError!?[]u8 {
+        if (!isFreeFunctionName(name)) return null;
+        var buf: [256]u8 = undefined;
+        const lower = if (name.len <= buf.len) std.ascii.lowerString(&buf, name) else return null;
+        if (self.ic.?.fn_lower.get(lower)) |existing_name| {
+            if (self.functions.get(existing_name)) |existing| if (existing.file_path.len > 0) {
+                return try std.fmt.allocPrint(self.allocator, "Cannot redeclare function {s}() (previously declared in {s}:{d})", .{ name, existing.file_path, existing.start_line });
+            };
+            return try std.fmt.allocPrint(self.allocator, "Cannot redeclare function {s}()", .{name});
+        }
+        if (self.nativeNamed(lower) != null) return try std.fmt.allocPrint(self.allocator, "Cannot redeclare function {s}()", .{name});
+        return null;
+    }
+
+    // php's zend_class_redeclaration_error for a name already declared: the
+    // class, interface, trait or enum that has it, and where a script
+    // declared it. null when the name is free
+    pub fn redeclarationMessage(self: *VM, name: []const u8) RuntimeError!?[]u8 {
+        return self.redeclarationMessageAs(name, null);
+    }
+
+    // zend_class_redeclaration_error_ex: described as `existing`, but named
+    // `shown` (class_alias reports the alias with the aliased class's kind
+    // and declaration)
+    pub fn redeclarationMessageAs(self: *VM, existing: []const u8, shown: ?[]const u8) RuntimeError!?[]u8 {
+        const name = existing;
+        var kind: []const u8 = "class";
+        var declared: []const u8 = name;
+        var file: []const u8 = "";
+        var line: u32 = 0;
+        if (self.traits.getKey(name)) |key| {
+            kind = "trait";
+            declared = key;
+            if (self.ic.?.trait_sites.get(key)) |site| {
+                file = site.file;
+                line = site.start_line;
+            }
+        } else if (self.classes.getPtr(name)) |found| {
+            // an alias stands for the class it names
+            const def = if (found.alias_of) |target| self.classes.getPtr(target) orelse found else found;
+            declared = def.name;
+            if (self.interfaces.contains(def.name)) kind = "interface" else if (def.is_enum) kind = "enum";
+            if (!def.is_internal) {
+                file = def.file_path;
+                line = def.start_line;
+            }
+        } else if (self.interfaces.getKey(name)) |key| {
+            kind = "interface";
+            declared = key;
+        } else return null;
+        if (shown) |s| declared = s;
+        if (file.len == 0) return try std.fmt.allocPrint(self.allocator, "Cannot redeclare {s} {s}", .{ kind, declared });
+        return try std.fmt.allocPrint(self.allocator, "Cannot redeclare {s} {s} (previously declared in {s}:{d})", .{ kind, declared, file, line });
+    }
+
+    fn refuseRedeclaration(self: *VM, name: []const u8) RuntimeError!void {
+        const msg = try self.redeclarationMessage(name) orelse return;
+        defer self.allocator.free(msg);
+        return self.raiseFatal(msg);
+    }
+
     // what php reported while compiling a file, raised before the file runs
     pub fn raiseCompileWarnings(self: *VM, result: *const CompileResult) RuntimeError!void {
         for (result.warnings.items) |w| try self.raiseErrorAt(w.level, w.message, .{ .file = result.file_path, .line = w.line });
@@ -13934,6 +14000,7 @@ pub const VM = struct {
         const class_modifiers = self.readByte();
         const name_idx = self.readU16();
         const class_name = self.currentChunk().constants.items[name_idx].string.bytes();
+        if (!std.mem.startsWith(u8, class_name, "class@anonymous")) try self.refuseRedeclaration(class_name);
         // PHP reserves the type keywords as class names
         {
             const reserved = [_][]const u8{ "int", "float", "bool", "string", "true", "false", "null", "void", "iterable", "object", "mixed", "never", "self", "parent" };
@@ -14283,6 +14350,23 @@ pub const VM = struct {
             while (current_parent) |parent_class_name| {
                 const parent_cls = self.classes.get(parent_class_name) orelse break;
 
+                // a property stays static or non static, readonly or not,
+                // through inheritance (php's do_inherit_property)
+                for (parent_cls.properties.items) |parent_prop| {
+                    if (parent_prop.visibility == .private or !def.static_props.contains(parent_prop.name)) continue;
+                    const msg = try std.fmt.allocPrint(self.allocator, "Cannot redeclare non static {s}::${s} as static {s}::${s}", .{ parent_class_name, parent_prop.name, class_name, parent_prop.name });
+                    defer self.allocator.free(msg);
+                    return self.raiseFatal(msg);
+                }
+                for (parent_cls.static_props.keys()) |sname| {
+                    if ((parent_cls.static_prop_visibility.get(sname) orelse .public) == .private) continue;
+                    for (def.properties.items) |child_prop| {
+                        if (!std.mem.eql(u8, child_prop.name, sname)) continue;
+                        const msg = try std.fmt.allocPrint(self.allocator, "Cannot redeclare static {s}::${s} as non static {s}::${s}", .{ parent_class_name, sname, class_name, sname });
+                        defer self.allocator.free(msg);
+                        return self.raiseFatal(msg);
+                    }
+                }
                 for (parent_cls.properties.items) |parent_prop| {
                     for (def.properties.items) |child_prop| {
                         if (!std.mem.eql(u8, parent_prop.name, child_prop.name)) continue;
@@ -14292,6 +14376,14 @@ pub const VM = struct {
                         }
                         // Private properties are separate declarations, not overrides.
                         if (parent_prop.visibility == .private) continue;
+                        if (child_prop.is_readonly != parent_prop.is_readonly and !parent_prop.readonly_undeclared) {
+                            const msg = try std.fmt.allocPrint(self.allocator, "Cannot redeclare {s} property {s}::${s} as {s} {s}::${s}", .{
+                                if (parent_prop.is_readonly) "readonly" else "non-readonly", parent_class_name, parent_prop.name,
+                                if (child_prop.is_readonly) "readonly" else "non-readonly", class_name, parent_prop.name,
+                            });
+                            defer self.allocator.free(msg);
+                            return self.raiseFatal(msg);
+                        }
                         if (@intFromEnum(child_prop.visibility) > @intFromEnum(parent_prop.visibility)) {
                             self.setErrorMsg("Access level to {s}::${s} must be {s} (as in class {s}) or weaker", .{ class_name, child_prop.name, @tagName(parent_prop.visibility), parent_class_name });
                             return error.RuntimeError;
@@ -14554,6 +14646,7 @@ pub const VM = struct {
     fn handleEnumDecl(self: *VM) RuntimeError!void {
         const name_idx = self.readU16();
         const enum_name = self.currentChunk().constants.items[name_idx].string.bytes();
+        try self.refuseRedeclaration(enum_name);
         const site = self.readDeclSite();
         const backed_type_byte = self.readByte();
         const case_count = self.readByte();
@@ -14605,6 +14698,14 @@ pub const VM = struct {
             const mi = self.readMethodInfo();
             try def.addMethod(self.allocator, mi[1]);
         }
+        // php adds an enum's own methods as it links the enum, refusing one
+        // the enum declared itself
+        const builtins: []const []const u8 = if (def.backed_type != .none) &.{ "cases", "from", "tryfrom" } else &.{"cases"};
+        for (builtins) |builtin| if (def.methods.contains(builtin)) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Cannot redeclare {s}::{s}()", .{ enum_name, builtin });
+            defer self.allocator.free(msg);
+            return self.raiseCompileFatal(msg, .{ .file = site.file, .line = site.start_line });
+        };
 
         const iface_count = self.readByte();
         for (0..iface_count) |_| {

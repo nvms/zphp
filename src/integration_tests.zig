@@ -39,6 +39,11 @@ fn expectFatal(source: []const u8, expected: []const u8) !void {
         alloc.destroy(vm);
     }
     if (vm.interpret(&result)) |_| return error.TestExpectedError else |_| {}
+    // a fatal error php raises as one is pending as an uncatchable throwable
+    if (vm.pending_exception) |exc| if (exc == .object) {
+        const message = exc.object.get("message");
+        if (message == .string) return std.testing.expectEqualStrings(expected, message.string.bytes());
+    };
     try std.testing.expectEqualStrings(expected, vm.error_msg orelse "");
 }
 
@@ -2027,15 +2032,15 @@ test "discarded regex captures release allocations between batches" {
 // ==========================================================================
 
 test "function declared twice with different case" {
-    try expectFatal("<?php function foo() {} function FOO() {}", "Fatal error: Cannot redeclare function FOO()");
+    try expectFatal("<?php function foo() {} function FOO() {}", "Cannot redeclare function FOO()");
 }
 
 test "function declared with a native name in another case" {
-    try expectFatal("<?php function STRLEN() {}", "Fatal error: Cannot redeclare function STRLEN()");
+    try expectFatal("<?php function STRLEN() {}", "Cannot redeclare function STRLEN()");
 }
 
 test "conditional function declared with a different case" {
-    try expectFatal("<?php function foo() {} if (true) { function Foo() {} }", "Fatal error: Cannot redeclare function Foo()");
+    try expectFatal("<?php function foo() {} if (true) { function Foo() {} }", "Cannot redeclare function Foo()");
 }
 
 test "calls match function names in any case" {

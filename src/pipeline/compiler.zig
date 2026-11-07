@@ -1330,6 +1330,18 @@ pub const Compiler = struct {
     // name resolution
     // ==================================================================
 
+    // the full name of a class, function or constant being declared: the
+    // current namespace and the name, never an import
+    pub fn declaredName(self: *Compiler, name: []const u8) []const u8 {
+        if (self.namespace.len == 0) return name;
+        const qualified = std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, name }) catch return name;
+        self.string_allocs.append(self.allocator, qualified) catch {
+            self.allocator.free(qualified);
+            return name;
+        };
+        return qualified;
+    }
+
     pub fn resolveClassName(self: *Compiler, name: []const u8) []const u8 {
         if (name.len > 0 and name[0] == '\\') return name[1..];
         if (std.mem.eql(u8, name, "self")) {

@@ -1167,9 +1167,10 @@ fn returnTypeKind(t: []const u8) @import("bytecode.zig").ReturnTypeKind {
 pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     const name_tok = node.main_token;
     const raw_name = self.ast.tokenSlice(name_tok);
-    const name = if (std.mem.startsWith(u8, raw_name, "__closure_")) raw_name else self.resolveClassName(raw_name);
+    const name = if (std.mem.startsWith(u8, raw_name, "__closure_")) raw_name else self.declaredName(raw_name);
     const param_nodes = self.ast.extraSlice(node.data.lhs);
     if (!std.mem.startsWith(u8, raw_name, "__closure_")) {
+        try checkImportCollision(self, name_tok, .function, name);
         try checkParams(self, name, name_tok, param_nodes, try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len)), (node.data.rhs & (1 << 30)) != 0);
     }
 
@@ -1652,7 +1653,7 @@ fn classDeclEarlyBindable(self: *Compiler, node: Ast.Node) bool {
 // whether every class a method of this class names in its parameter and
 // return types is built in or already early-bound in this file
 fn methodTypesKnown(self: *Compiler, node: Ast.Node) bool {
-    const own = self.resolveClassName(self.ast.tokenSlice(node.main_token));
+    const own = self.declaredName(self.ast.tokenSlice(node.main_token));
     for (self.ast.extraSlice(node.data.lhs)) |m_idx| {
         const m = self.ast.nodes[m_idx];
         if (m.tag != .class_method and m.tag != .static_class_method and m.tag != .interface_method) continue;
@@ -1753,14 +1754,14 @@ pub fn hoistEarlyClasses(self: *Compiler, stmts: []const u32) Error!void {
             .block => try hoistEarlyClasses(self, self.ast.extraSlice(node.data.lhs)),
             .class_decl => if (classDeclEarlyBindable(self, node)) {
                 self.current_source_offset = self.ast.tokens[node.main_token].start;
-                const name = self.resolveClassName(self.ast.tokenSlice(node.main_token));
+                const name = self.declaredName(self.ast.tokenSlice(node.main_token));
                 try compileClassDecl(self, node);
                 try self.hoisted_nodes.put(self.allocator, idx, {});
                 try self.hoisted_names.put(self.allocator, name, {});
             },
             .interface_decl => if (interfaceDeclEarlyBindable(self, node)) {
                 self.current_source_offset = self.ast.tokens[node.main_token].start;
-                const name = self.resolveClassName(self.ast.tokenSlice(node.main_token));
+                const name = self.declaredName(self.ast.tokenSlice(node.main_token));
                 try compileInterfaceDecl(self, node);
                 try self.hoisted_nodes.put(self.allocator, idx, {});
                 try self.hoisted_names.put(self.allocator, name, {});
@@ -1770,9 +1771,59 @@ pub fn hoistEarlyClasses(self: *Compiler, stmts: []const u32) Error!void {
     }
 }
 
+// php refuses to declare a class or function under a name a `use` statement
+// already imported as something else
+fn checkImportCollision(self: *Compiler, token: u32, comptime kind: enum { class, function }, full_name: []const u8) Error!void {
+    const written = self.ast.tokenSlice(token);
+    const short = if (std.mem.lastIndexOfScalar(u8, written, '\\')) |i| written[i + 1 ..] else written;
+    var it = (if (kind == .class) self.use_aliases else self.use_fn_aliases).iterator();
+    while (it.next()) |entry| {
+        if (!std.ascii.eqlIgnoreCase(entry.key_ptr.*, short) or std.ascii.eqlIgnoreCase(entry.value_ptr.*, full_name)) continue;
+        if (kind == .class) return self.failFmt(token, "Cannot redeclare class {s} (previously declared as local import)", .{full_name});
+        return self.failFmt(token, "Cannot redeclare function {s}() (previously declared as local import)", .{full_name});
+    }
+}
+
+// php's compile-time refusal of a method or property declared twice in one
+// class
+fn checkDuplicateMembers(self: *Compiler, class_name: []const u8, members: []const u32) Error!void {
+    var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var methods: std.StringHashMapUnmanaged(void) = .{};
+    var props: std.StringHashMapUnmanaged(void) = .{};
+    const class = if (std.mem.startsWith(u8, class_name, "class@anonymous")) "class@anonymous" else class_name;
+    for (members) |m_idx| {
+        const m = self.ast.nodes[m_idx];
+        switch (m.tag) {
+            .class_method, .static_class_method, .interface_method => {
+                const name = self.ast.tokenSlice(m.main_token);
+                const gop = try methods.getOrPut(arena, try std.ascii.allocLowerString(arena, name));
+                if (gop.found_existing) return self.failFmt(m.main_token, "Cannot redeclare {s}::{s}()", .{ class, name });
+                if (!std.ascii.eqlIgnoreCase(name, "__construct")) continue;
+                for (self.ast.extraSlice(m.data.lhs)) |p| {
+                    const pn = self.ast.nodes[p];
+                    const promoted = ((pn.data.rhs >> 2) & 3) != 0 or (pn.data.rhs & 16) != 0 or ((pn.data.rhs >> 5) & 3) != 0;
+                    if (!promoted) continue;
+                    const pname = paramName(self, p);
+                    if ((try props.getOrPut(arena, pname)).found_existing) return self.failFmt(pn.main_token, "Cannot redeclare {s}::${s}", .{ class, pname });
+                }
+            },
+            .class_property, .static_class_property, .class_property_hooks => {
+                const raw = self.ast.tokenSlice(m.main_token);
+                const name = if (raw.len > 0 and raw[0] == '$') raw[1..] else raw;
+                if ((try props.getOrPut(arena, name)).found_existing) return self.failFmt(m.main_token, "Cannot redeclare {s}::${s}", .{ class, name });
+            },
+            else => {},
+        }
+    }
+}
+
 pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
-    const class_name = self.resolveClassName(self.ast.tokenSlice(node.main_token));
+    const class_name = self.declaredName(self.ast.tokenSlice(node.main_token));
     const members = self.ast.extraSlice(node.data.lhs);
+    try checkImportCollision(self, node.main_token, .class, class_name);
+    try checkDuplicateMembers(self, class_name, members);
 
     const prev_class = self.current_class;
     self.current_class = class_name;
@@ -2397,6 +2448,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
     self.closure_count += 1;
 
     const members = self.ast.extraSlice(node.data.lhs);
+    try checkDuplicateMembers(self, anon_name, members);
     const rhs_base = node.data.rhs;
 
     // decode rhs: {ctor_arg_count, ctor_args..., parent, impl_count, impls...}
@@ -2696,8 +2748,10 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
-    const iface_name = self.resolveClassName(self.ast.tokenSlice(node.main_token));
+    const iface_name = self.declaredName(self.ast.tokenSlice(node.main_token));
     const members = self.ast.extraSlice(node.data.lhs);
+    try checkImportCollision(self, node.main_token, .class, iface_name);
+    try checkDuplicateMembers(self, iface_name, members);
 
     const prev_class = self.current_class;
     self.current_class = iface_name;
@@ -2862,8 +2916,10 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
-    const trait_name = self.resolveClassName(self.ast.tokenSlice(node.main_token));
+    const trait_name = self.declaredName(self.ast.tokenSlice(node.main_token));
     const members = self.ast.extraSlice(node.data.lhs);
+    try checkImportCollision(self, node.main_token, .class, trait_name);
+    try checkDuplicateMembers(self, trait_name, members);
 
     // compile trait methods as TraitName::methodName functions
     const prev_in_trait = self.in_trait;
@@ -3058,7 +3114,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
-    const enum_name = self.resolveClassName(self.ast.tokenSlice(node.main_token));
+    const enum_name = self.declaredName(self.ast.tokenSlice(node.main_token));
     const members = self.ast.extraSlice(node.data.lhs);
 
     const rhs_base = node.data.rhs;
@@ -3074,6 +3130,8 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
             backed_type = 2;
         }
     }
+    try checkImportCollision(self, node.main_token, .class, enum_name);
+    try checkDuplicateMembers(self, enum_name, members);
 
     var method_count: u16 = 0;
     for (members) |member_idx| {

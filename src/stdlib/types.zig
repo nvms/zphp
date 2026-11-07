@@ -2173,14 +2173,21 @@ fn native_error_get_last(ctx: *NativeContext, _: []const Value) RuntimeError!Nat
 
 fn native_class_alias(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
-    const original = args[0].string.bytes();
+    const written = args[0].string.bytes();
+    const original = if (written.len > 0 and written[0] == '\\') written[1..] else written;
     const alias = args[1].string.bytes();
     const autoload = if (args.len >= 3) args[2].isTruthy() else true;
     if (autoload and !ctx.vm.classes.contains(original)) {
         try ctx.vm.tryAutoload(original);
     }
     if (ctx.vm.classes.get(original)) |cls| {
-        var alias_def = ClassDef{ .name = alias, .parent = original, .alias_of = cls.alias_of orelse cls.name };
+        const taken = ctx.vm.classes.contains(alias) or ctx.vm.interfaces.contains(alias) or ctx.vm.traits.contains(alias);
+        if (if (taken) try ctx.vm.redeclarationMessageAs(cls.alias_of orelse cls.name, alias) else null) |msg| {
+            defer ctx.allocator.free(msg);
+            try ctx.vm.emitWarning(msg);
+            return NativeResult.scalar(.{ .bool = false });
+        }
+        var alias_def = ClassDef{ .name = alias, .parent = original, .alias_of = cls.alias_of orelse cls.name, .is_internal = cls.is_internal };
         // copy interfaces
         for (cls.interfaces.items) |iface| {
             try alias_def.interfaces.append(ctx.allocator, iface);
