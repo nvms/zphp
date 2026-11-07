@@ -682,6 +682,12 @@ pub const VM = struct {
     free_cells: std.ArrayListUnmanaged(*RefCell) = .empty,
     current_fiber: ?*Fiber = null,
     fiber_suspend_pending: bool = false,
+    // destructors run from the release drain, a zig call that can't be
+    // suspended across: a Fiber::suspend in one would lose the drain and
+    // resume in the destructor's frame, so it throws instead (php can).
+    // a fiber started inside the destructor suspends within itself, so
+    // each fiber run starts unblocked
+    fiber_switch_blocked: u32 = 0,
     fiber_suspend_value: Value = .null,
     captures: std.ArrayListUnmanaged(CaptureEntry) = .empty,
     capture_index: std.StringHashMapUnmanaged(CaptureRange) = .{},
@@ -10572,6 +10578,11 @@ pub const VM = struct {
                         if (self.current_fiber == null) {
                             self.releaseValue(suspend_val);
                             if (try self.throwBuiltinException("FiberError", "Cannot call Fiber::suspend() when not in a Fiber")) continue;
+                            return error.RuntimeError;
+                        }
+                        if (self.fiber_switch_blocked > 0) {
+                            self.releaseValue(suspend_val);
+                            if (try self.throwBuiltinException("FiberError", "Cannot switch fibers in current execution state")) continue;
                             return error.RuntimeError;
                         }
 
@@ -21170,6 +21181,9 @@ pub const VM = struct {
         const prev_floor = self.handler_floor;
         self.current_fiber = fiber;
         self.handler_floor = base_handler;
+        const prev_blocked = self.fiber_switch_blocked;
+        self.fiber_switch_blocked = 0;
+        defer self.fiber_switch_blocked = prev_blocked;
 
         self.runUntilFrame(base_frame) catch |err| {
             self.current_fiber = prev_fiber;
@@ -21737,6 +21751,8 @@ pub const VM = struct {
         if (self.release_depth < max_release_depth) self.release_log = &dropped;
         defer self.release_log = outer_log;
         if (obj.ownsDestructor() and self.hasMethod(obj.class_name, "__destruct")) {
+            self.fiber_switch_blocked += 1;
+            defer self.fiber_switch_blocked -= 1;
             _ = self.callMethod(obj, "__destruct", &.{}) catch {
                 // a throwing destructor must not corrupt the drop site
                 // it was called from - swallow (revisit for fidelity)
