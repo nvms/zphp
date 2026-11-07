@@ -8952,8 +8952,17 @@ pub const VM = struct {
                             if (try self.checkParamTypes(cn, arg_count)) continue;
                             var new_vars = self.acquireFrameVars();
                             try new_vars.put(self.allocator, "$this", .{ .object = obj });
-                            for (0..@min(ac, func.arity)) |i| {
+                            // a variadic parameter collects what the fixed ones leave
+                            const fixed: usize = if (func.is_variadic) func.arity - 1 else func.arity;
+                            for (0..@min(ac, fixed)) |i| {
                                 try new_vars.put(self.allocator, func.params[i], try self.bindFrameArg(self.stack[self.sp - ac + i]));
+                            }
+                            if (func.is_variadic) {
+                                const rest_arr = try self.allocArray();
+                                if (ac > fixed) for (fixed..ac) |i| {
+                                    try rest_arr.append(self.allocator, try self.bindFrameArg(self.stack[self.sp - ac + i]));
+                                };
+                                try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
                             }
                             var ctor_refs: std.StringHashMapUnmanaged(*Value) = .{};
                             const ctor_owner = try self.argRefOwner(func);
@@ -8967,7 +8976,7 @@ pub const VM = struct {
                             };
                             self.saveFrameArgs(@intCast(ac));
                             self.dropN(ac + 1);
-                            for (@min(ac, func.arity)..func.arity) |i| {
+                            for (@min(ac, fixed)..fixed) |i| {
                                 const default = if (i < func.defaults.len) try self.resolveParamDefault(func, i) else Value.null;
                                 try new_vars.put(self.allocator, func.params[i], default);
                             }
