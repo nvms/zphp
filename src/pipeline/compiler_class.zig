@@ -793,6 +793,13 @@ fn extractReturnType(self: *Compiler, extra_base: u32, param_count: u32) Error![
     return buildTypeString(self, ret_start, ret_end);
 }
 
+// php gives __toString an implicit string return type
+fn extractMethodReturnType(self: *Compiler, member: Ast.Node, param_count: u32) Error![]const u8 {
+    const declared = try extractReturnType(self, member.data.lhs, param_count);
+    if (declared.len == 0 and std.ascii.eqlIgnoreCase(self.ast.tokenSlice(member.main_token), "__toString")) return "string";
+    return declared;
+}
+
 // classify a declared return type for fastLoop's return_val fast/slow split
 fn returnTypeKind(t: []const u8) @import("bytecode.zig").ReturnTypeKind {
     if (t.len == 0) return .none;
@@ -1585,7 +1592,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitU16(mname_idx);
             const param_nodes = self.ast.extraSlice(member.data.lhs);
             try self.emitByte(@intCast(param_nodes.len));
-            try self.emitByte(0); // not static
+            try self.emitByte(@intCast((member.data.rhs >> 30) & 1));
             const i_vis: u8 = @intCast((member.data.rhs >> 28) & 0x3);
             try self.emitByte(i_vis);
             try self.emitByte(1); // abstract
@@ -1794,7 +1801,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     defer methods_with_attrs.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
-        if (member.tag == .class_method or member.tag == .static_class_method) {
+        if (member.tag == .class_method or member.tag == .static_class_method or member.tag == .interface_method) {
             const mattrs = extractAttributes(self, member.main_token);
             if (mattrs.len > 0) {
                 try methods_with_attrs.append(self.allocator, .{
@@ -2597,7 +2604,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     defer methods_with_attrs.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
-        if (member.tag == .class_method or member.tag == .static_class_method) {
+        if (member.tag == .class_method or member.tag == .static_class_method or member.tag == .interface_method) {
             const mattrs = extractAttributes(self, member.main_token);
             if (mattrs.len > 0) {
                 try methods_with_attrs.append(self.allocator, .{
@@ -2756,7 +2763,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
     defer methods_with_attrs.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
-        if (member.tag == .class_method or member.tag == .static_class_method) {
+        if (member.tag == .class_method or member.tag == .static_class_method or member.tag == .interface_method) {
             const mattrs = extractAttributes(self, member.main_token);
             if (mattrs.len > 0) {
                 try methods_with_attrs.append(self.allocator, .{
@@ -2986,7 +2993,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     handed_over = true;
 
     const param_types = try extractParamTypes(self, param_nodes);
-    const return_type = try extractReturnType(self, member.data.lhs, @intCast(param_nodes.len));
+    const return_type = try extractMethodReturnType(self, member, @intCast(param_nodes.len));
     if (param_types.len > 0 or return_type.len > 0) {
         try self.type_hints.append(self.allocator, .{ .name = full_name, .param_types = param_types, .return_type = return_type });
     }
@@ -3262,6 +3269,8 @@ fn compileInterfaceMethodStub(self: *Compiler, owner_name: []const u8, member: A
         .arity = @intCast(param_nodes.len),
         .required_params = required,
         .is_variadic = is_variadic,
+        .is_static = (member.data.rhs >> 30) & 1 != 0,
+        .returns_ref = (member.data.rhs >> 31) & 1 != 0,
         .params = param_names[0..param_nodes.len],
         .defaults = defaults_owned,
         .ref_params = ref_flags,
@@ -3270,7 +3279,7 @@ fn compileInterfaceMethodStub(self: *Compiler, owner_name: []const u8, member: A
     });
 
     const param_types = try extractParamTypes(self, param_nodes);
-    const return_type = try extractReturnType(self, member.data.lhs, @intCast(param_nodes.len));
+    const return_type = try extractMethodReturnType(self, member, @intCast(param_nodes.len));
     if (param_types.len > 0 or return_type.len > 0) {
         try self.type_hints.append(self.allocator, .{ .name = full_name, .param_types = param_types, .return_type = return_type });
     }

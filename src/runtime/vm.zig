@@ -32,6 +32,7 @@ const compiler_mod = @import("../pipeline/compiler.zig");
 const enums = @import("../stdlib/enums.zig");
 const callables = @import("callables.zig");
 const object_properties = @import("object_properties.zig");
+const inheritance = @import("inheritance.zig");
 
 const Allocator = std.mem.Allocator;
 pub const RuntimeError = error{ RuntimeError, OutOfMemory };
@@ -13902,6 +13903,9 @@ pub const VM = struct {
         const method_count = self.readU16();
 
         var def = ClassDef{ .name = class_name, .is_internal = false };
+        // a declaration that fails before the class is registered frees it
+        var registered = false;
+        errdefer if (!registered) def.deinit(self.allocator);
         def.is_abstract = (class_modifiers & 1) != 0;
         def.is_final = (class_modifiers & 2) != 0;
         def.is_readonly = (class_modifiers & 4) != 0;
@@ -14293,6 +14297,8 @@ pub const VM = struct {
             }
         }
 
+        try inheritance.checkClass(self, class_name, &def);
+
         // unless this class is itself abstract, every abstract method inherited
         // from the parent chain (and required by any implemented interface)
         // must be implemented by a non-abstract method
@@ -14410,6 +14416,7 @@ pub const VM = struct {
         }
         if (def.has_prop_hooks) self.any_prop_hooks = true;
         try self.classes.put(self.allocator, class_name, def);
+        registered = true;
 
         // #[Override] enforcement - runs after class is registered so class
         // loading state stays consistent even if the error is caught

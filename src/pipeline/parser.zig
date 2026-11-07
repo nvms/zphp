@@ -1441,7 +1441,7 @@ const Parser = struct {
                 try members.append(self.allocator, try self.parseTraitUse());
             } else if (self.peek() == .kw_function) {
                 if (is_abstract) {
-                    try members.append(self.allocator, try self.parseInterfaceMethod());
+                    try members.append(self.allocator, try self.parseInterfaceMethod(is_static));
                 } else {
                     const method = try self.parseClassMethod();
                     if (is_static) {
@@ -1638,7 +1638,7 @@ const Parser = struct {
                 try members.append(self.allocator, try self.parseTraitUse());
             } else if (self.peek() == .kw_function) {
                 if (is_abstract) {
-                    const method = try self.parseInterfaceMethod();
+                    const method = try self.parseInterfaceMethod(is_static);
                     // encode visibility in rhs bits 28-29; abstract is implicit for interface_method tag
                     self.nodes.items[method].data.rhs = self.nodes.items[method].data.rhs | (visibility << 28);
                     try members.append(self.allocator, method);
@@ -1728,14 +1728,16 @@ const Parser = struct {
 
         while (self.peek() != .r_brace and self.peek() != .eof) {
             self.skipAttributes();
+            var is_static = false;
             while (self.peek() == .kw_public or self.peek() == .kw_protected or
                 self.peek() == .kw_private or self.peek() == .kw_static or
                 self.peek() == .kw_abstract)
             {
+                if (self.peek() == .kw_static) is_static = true;
                 _ = self.advance();
             }
             if (self.peek() == .kw_function) {
-                try methods.append(self.allocator, try self.parseInterfaceMethod());
+                try methods.append(self.allocator, try self.parseInterfaceMethod(is_static));
             } else if (self.peek() == .kw_const) {
                 try self.parseConstMembers(&methods, 0);
             } else {
@@ -1769,9 +1771,12 @@ const Parser = struct {
         return self.addNode(.{ .tag = .interface_decl, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = parent_extra } });
     }
 
-    fn parseInterfaceMethod(self: *Parser) Error!u32 {
+    // rhs bit 30: static, bit 31: returns by reference; callers put the
+    // visibility in bits 28-29
+    fn parseInterfaceMethod(self: *Parser, is_static: bool) Error!u32 {
         _ = self.advance(); // function
-        if (self.peek() == .amp) _ = self.advance();
+        const by_ref = self.peek() == .amp;
+        if (by_ref) _ = self.advance();
         const name_tok = try self.expectFunctionName();
         _ = try self.expect(.l_paren);
 
@@ -1796,7 +1801,8 @@ const Parser = struct {
 
         _ = try self.expect(.semicolon);
         const extra = try self.addExtraListWithReturnType(params.items, ret_range);
-        return self.addNode(.{ .tag = .interface_method, .main_token = name_tok, .data = .{ .lhs = extra } });
+        const flags: u32 = (if (is_static) @as(u32, 1) << 30 else 0) | (if (by_ref) @as(u32, 1) << 31 else 0);
+        return self.addNode(.{ .tag = .interface_method, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = flags } });
     }
 
     fn parseTraitDecl(self: *Parser) Error!u32 {
@@ -1884,7 +1890,7 @@ const Parser = struct {
 
             if (self.peek() == .kw_function) {
                 if (is_abstract) {
-                    const method = try self.parseInterfaceMethod();
+                    const method = try self.parseInterfaceMethod(is_static);
                     self.nodes.items[method].data.rhs |= visibility << 28;
                     try members.append(self.allocator, method);
                     continue;
