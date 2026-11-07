@@ -4648,6 +4648,17 @@ fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
     const obj = try ctx.createObject(attr_name);
     const stored_args = this.get("_arguments");
     const args_val: Value = if (stored_args == .array) .{ .array = try resolvedArguments(ctx, stored_args.array) } else stored_args;
+    // without a constructor php drops positional arguments and refuses
+    // named ones
+    if (!ctx.vm.hasMethod(attr_name, "__construct")) {
+        if (args_val == .array) for (args_val.array.entries.items) |entry| if (entry.key == .string) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Unknown named parameter ${s}", .{entry.key.string.bytes()});
+            defer ctx.allocator.free(msg);
+            try ctx.vm.setPendingException("Error", msg);
+            return error.RuntimeError;
+        };
+        return NativeResult.borrowed(.{ .object = obj });
+    }
     // always call __construct even with zero attribute args - constructors
     // commonly have all-optional params plus initialization side effects
     // (e.g. Symfony's Constraint::__construct does `unset($this->groups)`
@@ -4672,17 +4683,32 @@ fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
             if (ctx.vm.functions.get(ctor_key)) |func| {
                 var resolved: [16]Value = @splat(.null);
                 var pos: usize = 0;
+                var positional: usize = 0;
                 for (arr.entries.items) |entry| {
                     if (entry.key == .string) {
-                        for (func.params, 0..) |p, pi| {
+                        const key = entry.key.string.bytes();
+                        const found = for (func.params, 0..) |p, pi| {
                             const pn = if (p.len > 0 and p[0] == '$') p[1..] else p;
-                            if (std.mem.eql(u8, pn, entry.key.string.bytes())) {
-                                resolved[pi] = entry.value;
-                                if (pi >= pos) pos = pi + 1;
-                                break;
+                            if (std.mem.eql(u8, pn, key)) break pi;
+                        } else null;
+                        const pi = found orelse if (func.is_variadic) null else {
+                            const msg = try std.fmt.allocPrint(ctx.allocator, "Unknown named parameter ${s}", .{key});
+                            defer ctx.allocator.free(msg);
+                            try ctx.vm.setPendingException("Error", msg);
+                            return error.RuntimeError;
+                        };
+                        if (pi) |i| {
+                            if (i < positional) {
+                                const msg = try std.fmt.allocPrint(ctx.allocator, "Named parameter ${s} overwrites previous argument", .{key});
+                                defer ctx.allocator.free(msg);
+                                try ctx.vm.setPendingException("Error", msg);
+                                return error.RuntimeError;
                             }
+                            resolved[i] = entry.value;
+                            if (i >= pos) pos = i + 1;
                         }
                     } else {
+                        positional += 1;
                         resolved[pos] = entry.value;
                         pos += 1;
                     }

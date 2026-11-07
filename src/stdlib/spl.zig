@@ -2418,6 +2418,12 @@ fn faSetSize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
     const new_size: usize = @intCast(@max(Value.toInt(args[0]), 0));
     const cur_len = arr.entries.items.len;
     if (new_size > cur_len) {
+        // php allocates the whole table of 16-byte zvals at once
+        if (new_size > std.math.maxInt(usize) / 16) {
+            var buf: [128]u8 = undefined;
+            return ctx.vm.raiseFatal(std.fmt.bufPrint(&buf, "Possible integer overflow in memory allocation ({d} * 16 + 0)", .{new_size}) catch unreachable);
+        }
+        try arr.entries.ensureTotalCapacity(ctx.allocator, new_size);
         var i: usize = cur_len;
         while (i < new_size) : (i += 1) {
             try arr.append(ctx.allocator, .null);

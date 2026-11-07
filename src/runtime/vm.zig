@@ -8664,6 +8664,7 @@ pub const VM = struct {
 
                             const saved_fc = self.frame_count;
                             var ctx = self.makeContext(null);
+                            const pre_handlers = self.handler_count;
                             const ctor_result = self.invokeNative(native, &ctx, .{ .args = args_buf[0..ac], .name = cn, .instance = true }) catch {
                                 // clean up temp frame if throwBuiltinException didn't already unwind past it
                                 if (self.frame_count >= saved_fc) {
@@ -8686,7 +8687,8 @@ pub const VM = struct {
                                         continue;
                                     }
                                     self.pending_exception = exc;
-                                } else {
+                                } else if (self.handler_count < pre_handlers) {
+                                    // the native threw and a handler already took the exception
                                     continue;
                                 }
                                 return error.RuntimeError;
@@ -8894,9 +8896,13 @@ pub const VM = struct {
                             self.retainFrameObjects(self.frame_count - 1);
                             if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                             var ctx = self.makeContext(null);
+                            const pre_handlers = self.handler_count;
                             const ctor_result = self.invokeNative(native, &ctx, .{ .args = args_buf[0..ac], .name = cn, .instance = true }) catch {
-                                self.frame_count -= 1;
-                                self.deinitFrameSlot(self.frame_count);
+                                // a handler that took the exception already unwound the temp frame
+                                if (self.handler_count >= pre_handlers) {
+                                    self.frame_count -= 1;
+                                    self.deinitFrameSlot(self.frame_count);
+                                }
                                 if (self.pending_exception) |exc| {
                                     self.pending_exception = null;
                                     if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
@@ -8913,7 +8919,8 @@ pub const VM = struct {
                                         continue;
                                     }
                                     self.pending_exception = exc;
-                                } else {
+                                } else if (self.handler_count < pre_handlers) {
+                                    // the native threw and a handler already took the exception
                                     continue;
                                 }
                                 return error.RuntimeError;
@@ -9798,6 +9805,7 @@ pub const VM = struct {
                         const saved_fc = self.frame_count;
 
                         var ctx = self.makeContext(full_name);
+                        const pre_handlers = self.handler_count;
                         const result = self.invokeNative(native, &ctx, .{ .args = args_buf[0..ac], .name = full_name, .instance = true }) catch {
                             if (self.frame_count >= saved_fc) {
                                 self.frame_count -= 1;
@@ -9819,7 +9827,8 @@ pub const VM = struct {
                                     continue;
                                 }
                                 self.pending_exception = exc;
-                            } else {
+                            } else if (self.handler_count < pre_handlers) {
+                                // the native threw and a handler already took the exception
                                 continue;
                             }
                             return error.RuntimeError;
@@ -10074,6 +10083,7 @@ pub const VM = struct {
                         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                         const saved_fc = self.frame_count;
                         var ctx = self.makeContext(full_name);
+                        const pre_handlers = self.handler_count;
                         const result = self.invokeNative(native, &ctx, .{ .args = args_buf[0..ac], .name = full_name, .instance = true }) catch {
                             if (self.frame_count >= saved_fc) {
                                 self.frame_count -= 1;
@@ -10095,7 +10105,8 @@ pub const VM = struct {
                                     continue;
                                 }
                                 self.pending_exception = exc;
-                            } else {
+                            } else if (self.handler_count < pre_handlers) {
+                                // the native threw and a handler already took the exception
                                 continue;
                             }
                             return error.RuntimeError;
@@ -10231,6 +10242,7 @@ pub const VM = struct {
                         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                         const saved_fc = self.frame_count;
                         var ctx = self.makeContext(full_name);
+                        const pre_handlers = self.handler_count;
                         const result = self.invokeNative(native, &ctx, .{ .args = args_buf[0..ac], .name = full_name, .instance = true }) catch {
                             if (self.frame_count >= saved_fc) {
                                 self.frame_count -= 1;
@@ -10252,7 +10264,8 @@ pub const VM = struct {
                                     continue;
                                 }
                                 self.pending_exception = exc;
-                            } else {
+                            } else if (self.handler_count < pre_handlers) {
+                                // the native threw and a handler already took the exception
                                 continue;
                             }
                             return error.RuntimeError;
@@ -10408,6 +10421,7 @@ pub const VM = struct {
                         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                         const saved_fc = self.frame_count;
                         var ctx = self.makeContext(full_name);
+                        const pre_handlers = self.handler_count;
                         const result = self.invokeNative(native, &ctx, .{ .args = args_buf[0..ac], .name = full_name, .instance = true }) catch {
                             if (self.frame_count >= saved_fc) {
                                 self.frame_count -= 1;
@@ -10429,7 +10443,8 @@ pub const VM = struct {
                                     continue;
                                 }
                                 self.pending_exception = exc;
-                            } else {
+                            } else if (self.handler_count < pre_handlers) {
+                                // the native threw and a handler already took the exception
                                 continue;
                             }
                             return error.RuntimeError;
@@ -10689,6 +10704,7 @@ pub const VM = struct {
                                 self.retainFrameObjects(self.frame_count - 1);
                                 if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                                 var ctx = self.makeContext(full_name);
+                                const pre_handlers = self.handler_count;
                                 const result = self.invokeNative(native, &ctx, .{ .args = args_buf[0..ac], .name = full_name, .instance = true }) catch {
                                     if (self.frame_count > sc_saved_fc) {
                                         self.frame_count -= 1;
@@ -10710,7 +10726,8 @@ pub const VM = struct {
                                             continue;
                                         }
                                         self.pending_exception = exc;
-                                    } else {
+                                    } else if (self.handler_count < pre_handlers) {
+                                        // the native threw and a handler already took the exception
                                         continue;
                                     }
                                     return error.RuntimeError;
@@ -21001,7 +21018,7 @@ pub const VM = struct {
             self.runUntilFrame(base_frame) catch |err| {
                 self.handler_count = base_handler;
                 self.handler_floor = prev_floor;
-                return err;
+                    return err;
             };
         }
         self.handler_count = base_handler;
