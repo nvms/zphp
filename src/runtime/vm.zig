@@ -19735,6 +19735,8 @@ pub const VM = struct {
     // is no longer pending unless the handler threw one of its own
     pub fn dispatchUncaught(self: *VM) void {
         self.unwindToMain();
+        // a fatal error is not a throwable the handler may see
+        if (self.uncatchable_fatal) return;
         const exc = self.pending_exception orelse return;
         const handler = self.user_exception_handler orelse return;
         self.user_exception_handler = null;

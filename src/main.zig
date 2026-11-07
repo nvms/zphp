@@ -682,7 +682,7 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
         // an uncaught exception. handler runs, then we exit 0 unless it
         // threw or the script set a different exit code
         if (vm.pending_exception != null) {
-            const has_handler = vm.user_exception_handler != null;
+            const has_handler = vm.user_exception_handler != null and !vm.uncatchable_fatal;
             vm.dispatchUncaught();
             if (has_handler) {
                 // an exception the handler threw is reported before shutdown
