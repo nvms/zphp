@@ -301,7 +301,7 @@ fn dumpProfile(vm: *@import("runtime/vm.zig").VM) void {
     }
 }
 
-const compile_cache_dir = std.fmt.comptimePrint("bytecode-v{d}-{s}", .{ bytecode_format.FORMAT_VERSION, @import("build_role").compiler_hash });
+const compile_cache_dir = std.fmt.comptimePrint("bytecode-v{d}-{s}", .{ bytecode_format.FORMAT_VERSION, @import("compiler_hash").compiler_hash });
 
 fn compileCachePath(allocator: std.mem.Allocator, path: []const u8, stat: std.Io.File.Stat, closure_counter: u32) ![]u8 {
     var digest: [32]u8 = undefined;

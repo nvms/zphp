@@ -12,7 +12,6 @@ pub fn build(b: *std.Build) void {
     fast_loop_role.addOption(i64, "build_epoch", build_epoch);
     const main_role = b.addOptions();
     main_role.addOption(bool, "fast_loop_object", false);
-    main_role.addOption([]const u8, "compiler_hash", compilerHash(b));
     main_role.addOption(i64, "build_epoch", build_epoch);
 
     const exe_mod = b.createModule(.{
@@ -27,6 +26,8 @@ pub fn build(b: *std.Build) void {
     const static_extensions = staticExtensionsModule(b, extension_sources);
     exe_mod.addImport("static_extensions", static_extensions);
     exe_mod.addOptions("build_role", main_role);
+    const compiler_hash = compilerHashModule(b);
+    exe_mod.addImport("compiler_hash", compiler_hash);
     for (extension_sources) |source| {
         exe_mod.addCSourceFile(.{ .file = .{ .cwd_relative = source }, .flags = &.{ "-std=c11", "-DZPHP_STATIC_EXTENSION" } });
     }
@@ -121,6 +122,7 @@ pub fn build(b: *std.Build) void {
     });
     test_mod.addImport("static_extensions", static_extensions);
     test_mod.addOptions("build_role", main_role);
+    test_mod.addImport("compiler_hash", compiler_hash);
 
     linkLib(b, test_mod, "libpcre2-8", "pcre2-8", .static, .yes);
     linkLib(b, test_mod, "sqlite3", "sqlite3", .static, .yes);
@@ -609,8 +611,19 @@ fn buildEpoch(b: *std.Build) i64 {
     return std.fmt.parseInt(i64, std.mem.trim(u8, out, " \r\n"), 10) catch 0;
 }
 
-fn compilerHash(b: *std.Build) []const u8 {
-    var hasher = std.hash.Wyhash.init(0);
+// the hash of the compiler's sources that names the compile cache directory.
+// a run step computes it so it follows every edit: build.zig itself runs only
+// when the build configuration changes
+fn compilerHashModule(b: *std.Build) *std.Build.Module {
+    const tool = b.addExecutable(.{
+        .name = "compiler_hash",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/compiler_hash.zig"),
+            .target = b.graph.host,
+        }),
+    });
+    const run = b.addRunArtifact(tool);
+    const out = run.addOutputFileArg("compiler_hash.zig");
     const io = b.graph.io;
     var dir = b.root.root_dir.handle.openDir(io, "src/pipeline", .{ .iterate = true }) catch @panic("src/pipeline");
     defer dir.close(io);
@@ -624,12 +637,7 @@ fn compilerHash(b: *std.Build) []const u8 {
             return std.mem.lessThan(u8, x, y);
         }
     }.lessThan);
-    for (names.items) |name| {
-        const bytes = dir.readFileAlloc(io, name, b.allocator, .limited(1 << 24)) catch @panic("src/pipeline");
-        hasher.update(name);
-        hasher.update(bytes);
-    }
-    const format = b.root.root_dir.handle.readFileAlloc(io, "src/bytecode_format.zig", b.allocator, .limited(1 << 24)) catch @panic("src/bytecode_format.zig");
-    hasher.update(format);
-    return b.fmt("{x:0>16}", .{hasher.final()});
+    for (names.items) |name| run.addFileArg(b.path(b.fmt("src/pipeline/{s}", .{name})));
+    run.addFileArg(b.path("src/bytecode_format.zig"));
+    return b.createModule(.{ .root_source_file = out });
 }
