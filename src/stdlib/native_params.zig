@@ -37,6 +37,7 @@ pub const Signature = struct {
     // php 8.1+ internal methods that user subclasses may still override
     // with a different return type
     tentative_returns: []const u8 = "",
+    is_static: bool = false,
 };
 
 const zphp_only = std.StaticStringMap(Signature).initComptime(.{
