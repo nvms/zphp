@@ -484,6 +484,11 @@ const TraitStaticProp = struct { name: []const u8, value: Value, doc_comment: []
 // where a class-like was declared, for reflection
 pub const DeclSite = struct { file: []const u8 = "", start_line: u32 = 0, end_line: u32 = 0, doc_comment: []const u8 = "" };
 
+fn declaresToString(methods: []const []const u8) bool {
+    for (methods) |m| if (std.ascii.eqlIgnoreCase(m, "__toString")) return true;
+    return false;
+}
+
 pub const InterfaceDef = struct {
     name: []const u8,
     methods: std.ArrayListUnmanaged([]const u8) = .empty,
@@ -8240,6 +8245,12 @@ pub const VM = struct {
                     if (parent_count > 0) {
                         idef.parent = parent_names[0];
                     }
+                    // php makes an interface that declares __toString extend Stringable
+                    const adds_stringable = declaresToString(idef.methods.items) and !self.listedInterfacesInclude(idef.parents.items, "Stringable");
+                    if (adds_stringable) {
+                        try idef.parents.append(self.allocator, "Stringable");
+                        if (idef.parent == null) idef.parent = "Stringable";
+                    }
 
                     const const_count = self.readByte();
                     var def = ClassDef{ .name = iface_name, .is_internal = false, .file_path = iface_site.file, .start_line = iface_site.start_line, .end_line = iface_site.end_line, .doc_comment = iface_site.doc_comment };
@@ -8263,6 +8274,7 @@ pub const VM = struct {
                     for (0..parent_count) |pi| {
                         try def.interfaces.append(self.allocator, parent_names[pi]);
                     }
+                    if (adds_stringable) try def.interfaces.append(self.allocator, "Stringable");
 
                     const iface_attrs = try self.readAttributeDefs();
                     for (iface_attrs) |a| try def.attributes.append(self.allocator, a);
@@ -12682,6 +12694,30 @@ pub const VM = struct {
 
     // raiseError at a given source position, for a diagnostic about a frame
     // other than the running one
+    // whether interfaces named in a declaration are, or extend, `target`
+    fn listedInterfacesInclude(self: *VM, names: []const []const u8, target: []const u8) bool {
+        for (names) |name| {
+            if (std.ascii.eqlIgnoreCase(name, target)) return true;
+            const iface = self.interfaces.getPtr(name) orelse continue;
+            if (iface.parent) |parent| if (self.listedInterfacesInclude(&.{parent}, target)) return true;
+            if (self.listedInterfacesInclude(iface.parents.items, target)) return true;
+        }
+        return false;
+    }
+
+    // whether a class being declared implements `target` through its own
+    // interface list or its parents'
+    fn classImplements(self: *VM, def: *const ClassDef, target: []const u8) bool {
+        if (self.listedInterfacesInclude(def.interfaces.items, target)) return true;
+        var parent = def.parent;
+        while (parent) |name| {
+            const pdef = self.classes.getPtr(name) orelse return false;
+            if (self.listedInterfacesInclude(pdef.interfaces.items, target)) return true;
+            parent = pdef.parent;
+        }
+        return false;
+    }
+
     // what php reported while compiling a file, raised before the file runs
     pub fn raiseCompileWarnings(self: *VM, result: *const CompileResult, file: []const u8) RuntimeError!void {
         for (result.warnings.items) |w| try self.raiseErrorAt(w.level, w.message, .{ .file = file, .line = w.line });
@@ -14313,6 +14349,11 @@ pub const VM = struct {
             }
         }
 
+        // php adds Stringable to a class that declares __toString, itself or
+        // through a trait
+        if (def.methods.contains("__toString") and !self.classImplements(&def, "Stringable")) {
+            try def.interfaces.append(self.allocator, "Stringable");
+        }
         try inheritance.checkClass(self, class_name, &def);
 
         // unless this class is itself abstract, every abstract method inherited
