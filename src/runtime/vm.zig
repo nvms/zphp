@@ -8066,14 +8066,11 @@ pub const VM = struct {
                                         }
                                     }
 
-                                    if (is_require) {
-                                        if (self.error_msg == null and self.pending_exception == null) {
-                                            self.setErrorMsg("Fatal error: require(): Failed opening required '{s}'", .{path});
-                                        }
-                                        return error.RuntimeError;
+                                    // an error inside the file ends include as it ends require
+                                    if (is_require and self.error_msg == null and self.pending_exception == null) {
+                                        self.setErrorMsg("Fatal error: require(): Failed opening required '{s}'", .{path});
                                     }
-                                    self.push(.{ .bool = false });
-                                    continue;
+                                    return error.RuntimeError;
                                 };
                                 try self.mergeIncludeScope(return_frame, caller_idx, r.slot_names);
                                 while (self.frame_count > return_frame) {
