@@ -3350,7 +3350,7 @@ pub const VM = struct {
         // at script end run every still-live object's __destruct (PHP's
         // shutdown guarantee), then drain - on success or error
         defer self.runShutdownDestructors();
-        try self.raiseCompileWarnings(result, result.file_path);
+        try self.raiseCompileWarnings(result);
         self.run() catch |err| return self.reportMemoryExhausted(err);
     }
 
@@ -3693,7 +3693,9 @@ pub const VM = struct {
             };
             return error.RuntimeError;
         }
-        const display_path = self.allocator.dupe(u8, "eval()'d code") catch {
+        // php names evaluated code after where eval ran
+        const eval_site = self.currentSourcePosition();
+        const display_path = std.fmt.allocPrint(self.allocator, "{s}({d}) : eval()'d code", .{ eval_site.file, eval_site.line }) catch {
             ast.deinit();
             self.allocator.free(wrapped);
             return error.OutOfMemory;
@@ -3731,12 +3733,7 @@ pub const VM = struct {
         for (heap_result.type_hints.items) |th| {
             try g_type_info.put(self.allocator, th.name, .{ .param_types = th.param_types, .return_type = th.return_type });
         }
-        if (heap_result.warnings.items.len > 0) {
-            const caller = self.currentSourcePosition();
-            const where = try std.fmt.allocPrint(self.allocator, "{s}({d}) : eval()'d code", .{ caller.file, caller.line });
-            defer self.allocator.free(where);
-            try self.raiseCompileWarnings(heap_result, where);
-        }
+        try self.raiseCompileWarnings(heap_result);
 
         try self.ensureCallRoom();
         const return_frame = self.frame_count;
@@ -7984,7 +7981,7 @@ pub const VM = struct {
                                 for (r.type_hints.items) |th| {
                                     try g_type_info.put(self.allocator, th.name, .{ .param_types = th.param_types, .return_type = th.return_type });
                                 }
-                                self.raiseCompileWarnings(r, r.file_path) catch if (try self.resumeRaised()) continue;
+                                self.raiseCompileWarnings(r) catch if (try self.resumeRaised()) continue;
 
                                 const return_frame = self.frame_count;
                                 try self.ensureCallRoom();
@@ -12719,8 +12716,8 @@ pub const VM = struct {
     }
 
     // what php reported while compiling a file, raised before the file runs
-    pub fn raiseCompileWarnings(self: *VM, result: *const CompileResult, file: []const u8) RuntimeError!void {
-        for (result.warnings.items) |w| try self.raiseErrorAt(w.level, w.message, .{ .file = file, .line = w.line });
+    pub fn raiseCompileWarnings(self: *VM, result: *const CompileResult) RuntimeError!void {
+        for (result.warnings.items) |w| try self.raiseErrorAt(w.level, w.message, .{ .file = result.file_path, .line = w.line });
     }
 
     pub fn raiseErrorAt(self: *VM, level: i64, msg: []const u8, at: SourcePosition) RuntimeError!void {
@@ -19120,7 +19117,9 @@ pub const VM = struct {
         const label = call.label orelse name orelse "";
         const admitted = native.arity.admits(input_args.len);
         if (!isUserCallForwarder(name) and (!admitted or !isFrameOutNative(label))) {
-            record = .{ .label = label, .args = input_args, .depth = self.frame_count, .instance = call.instance, .outer = outer };
+            // eval is a language construct to php: its frame lists no arguments
+            const shown_args = if (std.mem.eql(u8, label, "eval")) &[_]Value{} else input_args;
+            record = .{ .label = label, .args = shown_args, .depth = self.frame_count, .instance = call.instance, .outer = outer };
             self.native_call = &record;
         }
         if (native.deprecated) |suffix| try self.warnDeprecatedNative(name orelse label, suffix);
