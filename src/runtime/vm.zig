@@ -6326,7 +6326,10 @@ pub const VM = struct {
                         // Iterator protocol
                         if (iterable == .object and self.hasMethod(iterable.object.class_name, "rewind")) {
                             try self.pushIteratorMarker();
-                            _ = self.callMethod(iterable.object, "rewind", &.{}) catch {};
+                            _ = self.callMethod(iterable.object, "rewind", &.{}) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
                         } else if (iterable == .array) {
                             self.push(.{ .int = 0 });
                         } else if (iterable == .object) {
@@ -6445,7 +6448,10 @@ pub const VM = struct {
                             self.stack[self.sp - 2] = .null;
                         }
                     } else if (self.stack[self.sp - 1] == .object and iterable == .object) {
-                        _ = self.callMethod(iterable.object, "next", &.{}) catch {};
+                        _ = self.callMethod(iterable.object, "next", &.{}) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                     } else {
                         const idx = self.pop();
                         self.push(.{ .int = Value.toInt(idx) + 1 });
@@ -8167,21 +8173,29 @@ pub const VM = struct {
                             };
                         }
                     } else if (src == .object and self.hasMethod(src.object.class_name, "current")) {
-                        if (self.hasMethod(src.object.class_name, "rewind")) {
-                            _ = self.callMethod(src.object, "rewind", &.{}) catch {};
-                        }
-                        while (true) {
-                            const valid = self.callMethod(src.object, "valid", &.{}) catch Value{ .bool = false };
-                            if (!valid.isTruthy()) break;
-                            const key = self.callMethod(src.object, "key", &.{}) catch .null;
-                            const val = self.callMethod(src.object, "current", &.{}) catch .null;
-                            if (key == .string) {
-                                try self.arraySetOwned(target.array, .{ .string = key.string }, val);
-                            } else if (!try target.array.appendNew(self.allocator, val)) {
-                                occupied = true;
-                                break;
+                        // an exception from any Iterator method ends the spread
+                        const failed = iterate: {
+                            if (self.hasMethod(src.object.class_name, "rewind")) {
+                                _ = self.callMethod(src.object, "rewind", &.{}) catch break :iterate true;
                             }
-                            _ = self.callMethod(src.object, "next", &.{}) catch {};
+                            while (true) {
+                                const valid = self.callMethod(src.object, "valid", &.{}) catch break :iterate true;
+                                if (!valid.isTruthy()) break;
+                                const key = self.callMethod(src.object, "key", &.{}) catch break :iterate true;
+                                const val = self.callMethod(src.object, "current", &.{}) catch break :iterate true;
+                                if (key == .string) {
+                                    try self.arraySetOwned(target.array, .{ .string = key.string }, val);
+                                } else if (!try target.array.appendNew(self.allocator, val)) {
+                                    occupied = true;
+                                    break;
+                                }
+                                _ = self.callMethod(src.object, "next", &.{}) catch break :iterate true;
+                            }
+                            break :iterate false;
+                        };
+                        if (failed) {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
                         }
                     }
                     if (occupied) {
