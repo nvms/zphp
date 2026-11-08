@@ -417,6 +417,10 @@ pub const OpCode = enum(u8) {
     // u16 class, u16 property, then an argument guard (u16 delta, u8 pos):
     // a static property passed where the callee takes a reference
     arg_guard_static_prop,
+    // before the read of a read-modify-write on [container, key]: a string
+    // container is php's error (u8: 0 an assignment operator, 1 an increment
+    // or decrement)
+    check_rw_container,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -499,6 +503,7 @@ pub const OpCode = enum(u8) {
             => 5,
             .make_var_static_prop_ref => 7,
             .arg_guard_static_prop => 8,
+            .check_rw_container => 2,
             .static_call => 6,
             .less_local_local_jif => 7,
             .require, .call_indirect, .call_indirect_spread, .method_call_dynamic, .static_call_dyn_both, .bury => 2,

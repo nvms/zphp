@@ -5270,6 +5270,13 @@ pub const VM = struct {
                         };
                     }
                 },
+                .check_rw_container => {
+                    const access = self.readByte();
+                    if (self.stack[self.sp - 2] == .string) {
+                        if (try self.throwBuiltinException("Error", if (access == 1) "Cannot increment/decrement string offsets" else "Cannot use assign-op operators with string offsets")) continue;
+                        return error.RuntimeError;
+                    }
+                },
                 .array_get, .array_get_list => {
                     const capturing = self.arg_capture_pending;
                     self.arg_capture_pending = false;
@@ -6319,6 +6326,10 @@ pub const VM = struct {
                 .array_elem_inc, .array_elem_dec => {
                     const aei_key = self.pop();
                     const aei_arr = self.pop();
+                    if (aei_arr == .string) {
+                        if (try self.throwBuiltinException("Error", "Cannot increment/decrement string offsets")) continue;
+                        return error.RuntimeError;
+                    }
                     if (aei_arr == .array) {
                         const ak = Value.toArrayKey(aei_key);
                         const old = aei_arr.array.get(ak);

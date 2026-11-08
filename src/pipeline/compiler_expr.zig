@@ -596,7 +596,7 @@ fn isPlaceTarget(self: *Compiler, target_idx: u32) bool {
 fn emitPlaceCombine(self: *Compiler, place: Place, op_tag: Token.Tag) Error!void {
     const k = place.operandCount();
     // -> [value, operands, current]
-    try emitPlaceRead(self, place);
+    try emitPlaceRead(self, place, .assign_op);
     // -> [current, value, operands] -> [operands, current, value]
     try self.emitOp(.bury);
     try self.emitByte(k + 1);
@@ -608,8 +608,10 @@ fn emitPlaceCombine(self: *Compiler, place: Place, op_tag: Token.Tag) Error!void
     try emitPlaceWrite(self, place, true);
 }
 
-// [operands] -> [operands, value]
-fn emitPlaceRead(self: *Compiler, place: Place) Error!void {
+const PlaceAccess = enum(u8) { assign_op = 0, inc_dec = 1 };
+
+// [operands] -> [operands, value], the read of a read-modify-write
+fn emitPlaceRead(self: *Compiler, place: Place, access: PlaceAccess) Error!void {
     switch (place.operandCount()) {
         1 => try self.emitOp(.dup),
         2 => try self.emitOp(.dup2),
@@ -617,7 +619,11 @@ fn emitPlaceRead(self: *Compiler, place: Place) Error!void {
     }
     switch (place) {
         .var_var => try self.emitOp(.get_var_var),
-        .array_elem => try self.emitOp(.array_get),
+        .array_elem => {
+            try self.emitOp(.check_rw_container);
+            try self.emitByte(@intFromEnum(access));
+            try self.emitOp(.array_get);
+        },
         .prop => |name| {
             try self.emitOp(.get_prop);
             try self.emitU16(name);
@@ -685,7 +691,7 @@ fn emitPlaceWrite(self: *Compiler, place: Place, rw: bool) Error!void {
 
 // ++/-- on a place: leaves the new value, or the old one for postfix
 fn compilePlaceIncDec(self: *Compiler, place: Place, op_tag: Token.Tag, postfix: bool) Error!void {
-    try emitPlaceRead(self, place);
+    try emitPlaceRead(self, place, .inc_dec);
     if (postfix) {
         try self.emitOp(.dup);
         try self.emitOp(.bury);
