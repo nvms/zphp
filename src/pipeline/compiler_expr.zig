@@ -216,26 +216,23 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                 try self.emitOp(.get_prop_coalesce_dynamic);
                 return emitCoalesceAssignTail(self, node.data.rhs, .set_prop_dynamic);
             }
-            if (op_tag != .equal) {
-                try self.emitOp(.dup);
-                if (target.main_token == 0) {
-                    try self.compileNode(target.data.rhs);
-                } else {
-                    const prop_node = self.ast.nodes[target.data.rhs];
-                    try self.emitGetVar(self.ast.tokenSlice(prop_node.main_token));
-                }
-                try self.emitOp(.get_prop_dynamic);
-            }
-            try self.compileNode(node.data.rhs);
-            if (op_tag != .equal) {
-                try emitCompoundOp(self, op_tag);
-            }
+            // php evaluates the name once, before the value
             if (target.main_token == 0) {
                 try self.compileNode(target.data.rhs);
             } else {
                 const prop_node = self.ast.nodes[target.data.rhs];
                 try self.emitGetVar(self.ast.tokenSlice(prop_node.main_token));
             }
+            if (op_tag != .equal) {
+                try self.emitOp(.dup2);
+                try self.emitOp(.get_prop_dynamic);
+            }
+            try self.compileNode(node.data.rhs);
+            if (op_tag != .equal) {
+                try emitCompoundOp(self, op_tag);
+            }
+            // set_prop_dynamic takes the name above the value
+            try self.emitOp(.swap);
             try self.emitOp(.set_prop_dynamic);
             return;
         }
