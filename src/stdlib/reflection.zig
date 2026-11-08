@@ -376,7 +376,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionMethod::isFinal", rmIsFinal);
     try vm.native_fns.put(a, "ReflectionMethod::isVariadic", rmIsVariadic);
     try vm.native_fns.put(a, "ReflectionMethod::isGenerator", rmIsGenerator);
-    try vm.native_fns.put(a, "ReflectionMethod::returnsReference", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionMethod::returnsReference", rmReturnsReference);
     try vm.native_fns.put(a, "ReflectionMethod::getModifiers", rmGetModifiers);
     try vm.native_fns.put(a, "ReflectionMethod::getAttributes", rmGetAttributes);
     try vm.native_fns.put(a, "ReflectionMethod::getClosure", rmGetClosure);
@@ -561,7 +561,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionFunction::isUserDefined", rfIsUserDefined);
     try vm.native_fns.put(a, "ReflectionFunction::isGenerator", rfIsGenerator);
     try vm.native_fns.put(a, "ReflectionFunction::isVariadic", rfIsVariadic);
-    try vm.native_fns.put(a, "ReflectionFunction::returnsReference", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionFunction::returnsReference", rfReturnsReference);
     try vm.native_fns.put(a, "ReflectionFunction::getClosureScopeClass", rfGetClosureScopeClass);
     try vm.native_fns.put(a, "ReflectionFunction::getClosureThis", rfGetClosureThis);
     try vm.native_fns.put(a, "ReflectionFunction::isStatic", rfIsStatic);
@@ -3174,6 +3174,14 @@ fn rfIsGenerator(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
     return NativeResult.scalar(.{ .bool = func.is_generator });
 }
 
+// internal functions don't return by reference
+fn rfReturnsReference(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const func_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    const func = ctx.vm.functions.get(func_name) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = func.returns_ref });
+}
+
 fn rfIsVariadic(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const func_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
@@ -4433,6 +4441,12 @@ fn rmIsVariadic(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
     const key = rmFullName(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const func = ctx.vm.functions.get(key) orelse return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = func.is_variadic });
+}
+
+fn rmReturnsReference(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const key = rmFullName(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const func = ctx.vm.functions.get(key) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = func.returns_ref });
 }
 
 fn rmIsGenerator(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {

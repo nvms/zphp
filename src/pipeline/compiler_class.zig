@@ -1372,7 +1372,8 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     // rhs = extra -> {body (bit 31 = generator, bit 30 = static), use_count, use_vars...}
     // use_count 0xFFFFFFFF = arrow fn (implicit capture)
     const raw_body = self.ast.extra_data[node.data.rhs];
-    const body_node = raw_body & 0x3FFFFFFF;
+    const body_node = raw_body & 0x1FFFFFFF;
+    const closure_returns_ref = (raw_body & (1 << 29)) != 0;
     const gen = (raw_body & (1 << 31)) != 0;
     const is_static_closure = (raw_body & (1 << 30)) != 0;
     const raw_use_count = self.ast.extra_data[node.data.rhs + 1];
@@ -1384,7 +1385,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     const outer_closure_signature = self.closure_signature;
     self.closure_signature = true;
     defer self.closure_signature = outer_closure_signature;
-    try checkParams(self, display_name, node.main_token, param_nodes, try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len)), false);
+    try checkParams(self, display_name, node.main_token, param_nodes, try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len)), closure_returns_ref);
 
     var sub = Compiler{
         .ast = self.ast,
@@ -1398,7 +1399,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         .break_jumps = .empty,
         .continue_jumps = .empty,
         .is_generator = gen,
-        .returns_ref = false,
+        .returns_ref = closure_returns_ref,
         .closure_count = self.closure_count,
         .cond_fn_count = self.cond_fn_count,
         .hoistable = false,
@@ -1481,7 +1482,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         .static_vars = try sub.takeStaticVars(),
         .is_arrow = is_arrow,
         .is_generator = gen,
-        .returns_ref = false,
+        .returns_ref = closure_returns_ref,
         .is_variadic = is_variadic,
         .is_static = is_static_closure,
         .locals_only = closure_lo,

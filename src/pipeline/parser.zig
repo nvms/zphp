@@ -2377,6 +2377,8 @@ const Parser = struct {
             _ = self.advance();
         }
         const fn_tok = self.advance(); // function
+        const returns_ref = self.peek() == .amp;
+        if (returns_ref) _ = self.advance();
         _ = try self.expect(.l_paren);
 
         var params = std.ArrayListUnmanaged(u32).empty;
@@ -2435,10 +2437,11 @@ const Parser = struct {
 
         const param_extra = try self.addExtraListWithReturnType(params.items, ret_range);
 
-        // rhs = extra -> {body (bit 31 = generator), use_count, use_vars...}
+        // rhs = extra -> {body (bit 31 = generator, bit 30 = static, bit 29 =
+        // returns by reference), use_count, use_vars...}
         var rhs_data = std.ArrayListUnmanaged(u32).empty;
         defer rhs_data.deinit(self.allocator);
-        try rhs_data.append(self.allocator, body | (if (is_gen) @as(u32, 1) << 31 else 0) | (if (is_static) @as(u32, 1) << 30 else 0));
+        try rhs_data.append(self.allocator, body | (if (is_gen) @as(u32, 1) << 31 else 0) | (if (is_static) @as(u32, 1) << 30 else 0) | (if (returns_ref) @as(u32, 1) << 29 else 0));
         try rhs_data.append(self.allocator, @intCast(use_vars.items.len));
         try rhs_data.appendSlice(self.allocator, use_vars.items);
         const rhs_extra = try self.addExtra(rhs_data.items);
@@ -2448,6 +2451,8 @@ const Parser = struct {
 
     fn parseArrowFunc(self: *Parser, is_static: bool) Error!u32 {
         const fn_tok = self.advance(); // fn
+        const returns_ref = self.peek() == .amp;
+        if (returns_ref) _ = self.advance();
         _ = try self.expect(.l_paren);
 
         var params = std.ArrayListUnmanaged(u32).empty;
@@ -2479,7 +2484,7 @@ const Parser = struct {
         const param_extra = try self.addExtraListWithReturnType(params.items, ret_range);
         // rhs = extra -> {body (bit 30 = static), use_count}.
         // 0xFFFFFFFF signals arrow fn (implicit capture).
-        const encoded_body = body | (if (is_static) @as(u32, 1) << 30 else 0);
+        const encoded_body = body | (if (is_static) @as(u32, 1) << 30 else 0) | (if (returns_ref) @as(u32, 1) << 29 else 0);
         const rhs_extra = try self.addExtra(&.{ encoded_body, 0xFFFFFFFF });
 
         return self.addNode(.{ .tag = .closure_expr, .main_token = fn_tok, .data = .{ .lhs = param_extra, .rhs = rhs_extra } });
