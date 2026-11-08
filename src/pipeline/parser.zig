@@ -1748,17 +1748,24 @@ const Parser = struct {
         while (self.peek() != .r_brace and self.peek() != .eof) {
             self.skipAttributes();
             var is_static = false;
+            var is_final = false;
             while (self.peek() == .kw_public or self.peek() == .kw_protected or
                 self.peek() == .kw_private or self.peek() == .kw_static or
-                self.peek() == .kw_abstract)
+                self.peek() == .kw_abstract or self.peek() == .kw_final)
             {
                 if (self.peek() == .kw_static) is_static = true;
+                if (self.peek() == .kw_final) is_final = true;
                 _ = self.advance();
             }
             if (self.peek() == .kw_function) {
+                // an interface method can't be final
+                if (is_final) {
+                    try self.addError(.unexpected_token);
+                    return error.ParseError;
+                }
                 try methods.append(self.allocator, try self.parseInterfaceMethod(is_static));
             } else if (self.peek() == .kw_const) {
-                try self.parseConstMembers(&methods, 0);
+                try self.parseConstMembers(&methods, if (is_final) @as(u32, 1) << 4 else 0);
             } else {
                 const tr = self.collectTypeHint();
                 if (self.peek() != .variable) {

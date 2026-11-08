@@ -2813,6 +2813,8 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
             const cname_idx = try self.addConstant(.{ .string = Value.String.borrowed(cname) });
             try self.emitU16(cname_idx);
             try self.emitU16(try docCommentConst(self, member.main_token));
+            try self.emitByte(@intCast(member.data.rhs & 0x13)); // bits 0-1 visibility, bit 4 final
+            try self.emitU16(try propertyTypeConst(self, member.data.rhs));
         }
     }
 

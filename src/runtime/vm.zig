@@ -8354,10 +8354,15 @@ pub const VM = struct {
                             const cname = self.currentChunk().constants.items[cname_idx].string.bytes();
                             const doc_idx = self.readU16();
                             if (doc_idx != 0xffff) try def.constant_docs.put(self.allocator, cname, self.currentChunk().constants.items[doc_idx].string.bytes());
+                            const const_flags = self.readByte();
+                            const type_idx = self.readU16();
                             const cval = self.stack[self.sp - ci];
                             // copyValue: the constant value is owned by the
                             // ClassDef and must be refcounted
+                            if (!def.constants.contains(cname)) try def.constant_order.append(self.allocator, cname);
                             try def.constants.put(self.allocator, cname, try self.copyDefault(cval));
+                            if (const_flags & 0x10 != 0) try def.const_final.put(self.allocator, cname, {});
+                            if (type_idx != 0xffff) try def.constant_types.put(self.allocator, cname, self.currentChunk().constants.items[type_idx].string.bytes());
                         }
                         self.clearArgStackFrom(self.sp - const_count);
                         self.sp -= const_count;
