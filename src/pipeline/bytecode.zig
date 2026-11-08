@@ -414,6 +414,9 @@ pub const OpCode = enum(u8) {
     leave_class_scope,
     // `global ${expr}`: pops the variable's name
     get_global_dynamic,
+    // u16 class, u16 property, then an argument guard (u16 delta, u8 pos):
+    // a static property passed where the callee takes a reference
+    arg_guard_static_prop,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -495,6 +498,7 @@ pub const OpCode = enum(u8) {
             .ensure_array_static_prop,
             => 5,
             .make_var_static_prop_ref => 7,
+            .arg_guard_static_prop => 8,
             .static_call => 6,
             .less_local_local_jif => 7,
             .require, .call_indirect, .call_indirect_spread, .method_call_dynamic, .static_call_dyn_both, .bury => 2,

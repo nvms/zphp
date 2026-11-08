@@ -997,6 +997,21 @@ fn compileArgLvalue(self: *Compiler, arg_idx: u32, guard: ArgGuard) Error!void {
             try compileArgLvalue(self, arg.data.lhs, guard);
             try emitArgGuard(self, guard, .arg_append);
         },
+        .static_prop_access => {
+            const class_node = self.ast.nodes[arg.data.lhs];
+            // Class::CONST is a static_prop_access too; a property is `$name`
+            const member = if (arg.main_token != 0) self.ast.tokenSlice(arg.main_token) else "";
+            const named = member.len > 1 and member[0] == '$' and (class_node.tag == .identifier or class_node.tag == .qualified_name);
+            try self.compileNode(arg_idx);
+            if (!named) return;
+            const prop_name = member[1..];
+            try self.emitOp(.arg_guard_static_prop);
+            try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(try resolveNodeClassName(self, class_node)) }));
+            try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(prop_name) }));
+            try guard.guards.append(self.allocator, @intCast(self.chunk.offset()));
+            try self.emitU16(0);
+            try self.emitByte(guard.pos);
+        },
         .variable => {
             try self.compileNode(arg_idx);
             try self.emitOp(.arg_variable);

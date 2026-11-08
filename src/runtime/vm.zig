@@ -6975,47 +6975,40 @@ pub const VM = struct {
                     const dst_name = self.currentChunk().constants.items[dst_idx].string.bytes();
                     const class_name = self.currentChunk().constants.items[class_idx].string.bytes();
                     const prop_name = self.currentChunk().constants.items[prop_idx].string.bytes();
-                    self.resolveStaticDefaults(class_name) catch {
-                        if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
-                        return error.RuntimeError;
-                    };
-                    _ = self.staticPropTarget(class_name, prop_name, .indirect) catch {
-                        if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
-                        return error.RuntimeError;
-                    };
                     const frame = self.currentFrame();
-                    self.unbindRefSlot(&frame.ref_slots, dst_name);
-                    const cell = blk: {
-                        if (self.ref_index) |ri| {
-                            if (ri.prop_rev.get(.{ .object = null, .class_name = class_name, .prop_name = prop_name })) |cells| {
-                                if (cells.items.len > 0) {
-                                    const existing = cells.items[0];
-                                    if (existing.* == .array and existing.array.refcount > 1) {
-                                        const separated: Value = .{ .array = try self.shallowCloneCow(existing.array) };
-                                        self.setCell(existing, separated);
-                                        try self.propagateCellWrite(existing, separated);
-                                    }
-                                    break :blk existing;
-                                }
-                            }
-                        }
-                        var value = self.getStaticProp(class_name, prop_name) orelse .null;
-                        if (value == .array and value.array.refcount > 1) {
-                            value = .{ .array = try self.shallowCloneCow(value.array) };
-                            if (self.getStaticPropPtr(class_name, prop_name)) |slot| {
-                                VM.retainValue(value);
-                                self.releaseValue(slot.*);
-                                slot.* = value;
-                            }
-                        }
-                        const fresh = try self.newRefCell();
-                        self.setCell(fresh, value);
-                        break :blk fresh;
+                    const cell = self.staticPropRefCell(class_name, prop_name) catch {
+                        if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
                     };
-
+                    self.unbindRefSlot(&frame.ref_slots, dst_name);
                     try self.bindRefSlot(&frame.ref_slots, dst_name, cell);
                     try self.regRefStatic(try self.ensureRefOwner(frame), cell, class_name, prop_name);
                     self.obj_ref_active = true;
+                },
+
+                // a static property passed to a by-reference parameter
+                .arg_guard_static_prop => {
+                    const class_idx = self.readU16();
+                    const prop_idx = self.readU16();
+                    const field = self.currentFrame().ip;
+                    const delta = self.readU16();
+                    const pos = self.readByte();
+                    if (self.argNeedsCapture(self.currentChunk(), field, delta, pos, 1)) {
+                        const class_name = self.resolveStaticClassName(self.currentChunk().constants.items[class_idx].string.bytes());
+                        const prop_name = self.currentChunk().constants.items[prop_idx].string.bytes();
+                        const cell = self.staticPropRefCell(class_name, prop_name) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        try self.regRefStatic(try self.ensureRefOwner(self.currentFrame()), cell, class_name, prop_name);
+                        self.obj_ref_active = true;
+                        // the argument is the reference's value
+                        const read = self.stack[self.sp - 1];
+                        stackRetain(cell.*);
+                        self.stack[self.sp - 1] = cell.*;
+                        self.stackRelease(read);
+                        self.setArgSource(self.sp - 1, .{ .cell = .{ .value = cell } });
+                    }
                 },
 
                 .unset_var => {
@@ -12933,6 +12926,40 @@ pub const VM = struct {
         if (self.frame_count > 1) {
             try self.bindRefSlot(&self.frames[0].ref_slots, name, cell.?);
         }
+    }
+
+    // the reference cell a static property is bound through, made on first
+    // use; raises what php raises for an indirect write the property refuses
+    fn staticPropRefCell(self: *VM, class_name: []const u8, prop_name: []const u8) RuntimeError!*Value {
+        try self.resolveStaticDefaults(class_name);
+        _ = try self.staticPropTarget(class_name, prop_name, .indirect);
+        return blk: {
+            if (self.ref_index) |ri| {
+                if (ri.prop_rev.get(.{ .object = null, .class_name = class_name, .prop_name = prop_name })) |cells| {
+                    if (cells.items.len > 0) {
+                        const existing = cells.items[0];
+                        if (existing.* == .array and existing.array.refcount > 1) {
+                            const separated: Value = .{ .array = try self.shallowCloneCow(existing.array) };
+                            self.setCell(existing, separated);
+                            try self.propagateCellWrite(existing, separated);
+                        }
+                        break :blk existing;
+                    }
+                }
+            }
+            var value = self.getStaticProp(class_name, prop_name) orelse .null;
+            if (value == .array and value.array.refcount > 1) {
+                value = .{ .array = try self.shallowCloneCow(value.array) };
+                if (self.getStaticPropPtr(class_name, prop_name)) |slot| {
+                    VM.retainValue(value);
+                    self.releaseValue(slot.*);
+                    slot.* = value;
+                }
+            }
+            const fresh = try self.newRefCell();
+            self.setCell(fresh, value);
+            break :blk fresh;
+        };
     }
 
     // what php reported while compiling a file, raised before the file runs
