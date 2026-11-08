@@ -216,6 +216,12 @@ fn native_constant(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     if (std.mem.indexOf(u8, name, "::")) |sep| {
         const class_name = name[0..sep];
         const prop_name = name[sep + 2 ..];
+        if (ctx.vm.traits.contains(class_name)) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot access trait constant {s}::{s} directly", .{ ctx.vm.declaredClassName(class_name), prop_name });
+            defer ctx.allocator.free(msg);
+            try ctx.vm.setPendingException("Error", msg);
+            return error.RuntimeError;
+        }
         const found = ctx.vm.getClassConstant(class_name, prop_name);
         if (found == null and ctx.vm.pending_exception != null) return error.RuntimeError;
         if (found) |v| {

@@ -1295,6 +1295,12 @@ fn rcIsSubclassOf(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
 fn rcNewInstance(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
+    if (ctx.vm.traits.contains(class_name)) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot instantiate trait {s}", .{class_name});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.setPendingException("Error", msg);
+        return error.RuntimeError;
+    }
     if (ctx.vm.interfaces.contains(class_name)) {
         const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot instantiate interface {s}", .{class_name});
         defer ctx.allocator.free(msg);

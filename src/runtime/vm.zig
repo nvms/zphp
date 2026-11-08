@@ -8823,6 +8823,13 @@ pub const VM = struct {
                     if (!self.classes.contains(class_name)) {
                         try self.tryAutoload(class_name);
                     }
+                    if (self.traits.contains(class_name)) {
+                        self.dropN(arg_count);
+                        const msg = try std.fmt.allocPrint(self.allocator, "Cannot instantiate trait {s}", .{self.declaredClassName(class_name)});
+                        defer self.allocator.free(msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    }
                     if (self.interfaces.contains(class_name)) {
                         const ac_drop: usize = arg_count;
                         self.dropN(ac_drop);
@@ -11880,6 +11887,20 @@ pub const VM = struct {
             defer self.allocator.free(msg);
             try self.setPendingException("Error", msg);
             if (self.dispatchPendingException(self.run_base_frame)) return true;
+            return error.RuntimeError;
+        }
+        // a trait's constants exist only in the classes using it
+        if (self.traits.contains(class_name)) {
+            const declared = self.declaredClassName(class_name);
+            const has = if (self.trait_constants.get(declared)) |consts| for (consts) |c| {
+                if (std.mem.eql(u8, c.name, const_name)) break true;
+            } else false else false;
+            const msg = if (has)
+                try std.fmt.allocPrint(self.allocator, "Cannot access trait constant {s}::{s} directly", .{ declared, const_name })
+            else
+                try std.fmt.allocPrint(self.allocator, "Undefined constant {s}::{s}", .{ if (self.inInitializer() and self.class_const_written.len > 0) self.class_const_written else declared, const_name });
+            defer self.allocator.free(msg);
+            if (try self.throwBuiltinException("Error", msg)) return true;
             return error.RuntimeError;
         }
         const found = self.getClassConstant(class_name, const_name);
@@ -15140,6 +15161,7 @@ pub const VM = struct {
 
         self.trait_constant_sources.clearRetainingCapacity();
         self.trait_method_sources.clearRetainingCapacity();
+        try self.checkTraitRules(class_name, trait_names[0..trait_count], rules);
         for (trait_names[0..trait_count]) |trait_name| try self.warnDeprecatedTraitUse(trait_name, class_name);
         for (trait_names[0..trait_count]) |trait_name| {
             try self.applyTrait(&def, class_name, trait_name, alias_rules[0..alias_count], insteadof_rules[0..insteadof_count], null);
@@ -15716,6 +15738,33 @@ pub const VM = struct {
         }
     };
 
+    // zend_traits_init_trait_structures: every trait an insteadof or as rule
+    // names is a trait the class uses
+    fn checkTraitRules(self: *VM, class_name: []const u8, used: []const []const u8, rules: TraitRules) RuntimeError!void {
+        for (rules.insteadofs) |rule| {
+            try self.checkRuleTrait(class_name, used, rule.preferred);
+            for (rule.excluded[0..rule.excluded_count]) |ex| try self.checkRuleTrait(class_name, used, ex);
+        }
+        for (rules.aliases) |rule| if (rule.trait.len > 0) try self.checkRuleTrait(class_name, used, rule.trait);
+    }
+
+    fn checkRuleTrait(self: *VM, class_name: []const u8, used: []const []const u8, name: []const u8) RuntimeError!void {
+        const bare = if (name.len > 0 and name[0] == '\\') name[1..] else name;
+        if (!self.traits.contains(bare) and !self.classes.contains(bare) and !self.interfaces.contains(bare)) {
+            self.tryAutoload(bare) catch {};
+            if (self.pending_exception != null) return error.RuntimeError;
+        }
+        if (!self.traits.contains(bare) and (self.classes.contains(bare) or self.interfaces.contains(bare))) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Class {s} is not a trait, Only traits may be used in 'as' and 'insteadof' statements", .{self.declaredClassName(bare)});
+            defer self.allocator.free(msg);
+            return self.raiseFatal(msg);
+        }
+        for (used) |u| if (std.ascii.eqlIgnoreCase(u, bare)) return;
+        const msg = try std.fmt.allocPrint(self.allocator, "Required Trait {s} wasn't added to {s}", .{ self.declaredClassName(bare), class_name });
+        defer self.allocator.free(msg);
+        return self.raiseFatal(msg);
+    }
+
     fn readTraitRules(self: *VM) !TraitRules {
         var aliases = std.ArrayListUnmanaged(AliasRule).empty;
         errdefer aliases.deinit(self.allocator);
@@ -15802,6 +15851,16 @@ pub const VM = struct {
         // autoload the trait if it hasn't been loaded yet
         if (!self.traits.contains(written_trait)) {
             try self.tryAutoload(written_trait);
+            if (self.pending_exception != null) return error.RuntimeError;
+        }
+        if (!self.traits.contains(written_trait)) {
+            const msg = if (self.classes.contains(written_trait) or self.interfaces.contains(written_trait))
+                try std.fmt.allocPrint(self.allocator, "{s} cannot use {s} - it is not a trait", .{ within orelse class_name, self.declaredClassName(written_trait) })
+            else
+                try std.fmt.allocPrint(self.allocator, "Trait \"{s}\" not found", .{written_trait});
+            defer self.allocator.free(msg);
+            try self.setPendingException("Error", msg);
+            return error.RuntimeError;
         }
         // the trait's methods, properties, and constants are keyed by the
         // spelling it was declared with

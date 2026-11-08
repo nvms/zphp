@@ -1358,7 +1358,8 @@ fn emitTraitRules(self: *Compiler, members: []const u32) Error!void {
     try self.emitByte(@intCast(rules.items.len));
     for (rules.items) |rule| {
         const method_name = self.ast.tokenSlice(rule.main_token);
-        const trait_name = if (rule.data.lhs == 0) "" else self.ast.tokenSlice(self.ast.nodes[rule.data.lhs].main_token);
+        // trait names resolve like any class name: namespace and imports
+        const trait_name = if (rule.data.lhs == 0) "" else try resolveNodeClassName(self, self.ast.nodes[rule.data.lhs]);
         try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(method_name) }));
         try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(trait_name) }));
         if (rule.tag == .trait_insteadof) {
@@ -1366,7 +1367,7 @@ fn emitTraitRules(self: *Compiler, members: []const u32) Error!void {
             const excluded = self.ast.extraSlice(rule.data.rhs);
             try self.emitByte(@intCast(excluded.len));
             for (excluded) |en| {
-                const ename = self.ast.tokenSlice(self.ast.nodes[en].main_token);
+                const ename = try resolveNodeClassName(self, self.ast.nodes[en]);
                 try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(ename) }));
             }
         } else {
@@ -2021,6 +2022,26 @@ fn interfaceDeclEarlyBindable(self: *Compiler, node: Ast.Node) bool {
 // so names resolve correctly; bare blocks are descended like PHP's binding pass.
 // hoisted_names accumulates in source order so a class extending an
 // already-hoisted class is itself recognized as bindable
+fn traitDefaultsFold(self: *Compiler, node: Ast.Node) bool {
+    for (self.ast.extraSlice(node.data.lhs)) |m| {
+        const member = self.ast.nodes[m];
+        const default: u32 = switch (member.tag) {
+            .class_property, .static_class_property, .const_decl => member.data.lhs,
+            .class_property_hooks => self.ast.extra_data[member.data.lhs],
+            else => 0,
+        };
+        if (default != 0 and !foldsAtCompileTime(self.ast, default)) return false;
+    }
+    return true;
+}
+
+fn usesTraits(self: *Compiler, node: Ast.Node) bool {
+    for (self.ast.extraSlice(node.data.lhs)) |m| {
+        if (self.ast.nodes[m].tag == .trait_use) return true;
+    }
+    return false;
+}
+
 pub fn hoistEarlyClasses(self: *Compiler, stmts: []const u32) Error!void {
     for (stmts) |idx| {
         const node = self.ast.nodes[idx];
@@ -2034,6 +2055,16 @@ pub fn hoistEarlyClasses(self: *Compiler, stmts: []const u32) Error!void {
                 self.current_source_offset = self.ast.tokens[node.main_token].start;
                 const name = self.declaredName(self.ast.tokenSlice(node.main_token));
                 try compileClassDecl(self, node);
+                try self.hoisted_nodes.put(self.allocator, idx, {});
+                try self.hoisted_names.put(self.allocator, name, {});
+            },
+            // php binds a trait that uses no other trait at compile time.
+            // zphp evaluates a trait's defaults where it is declared, so only
+            // a trait whose defaults fold moves
+            .trait_decl => if (!usesTraits(self, node) and traitDefaultsFold(self, node)) {
+                self.current_source_offset = self.ast.tokens[node.main_token].start;
+                const name = self.declaredName(self.ast.tokenSlice(node.main_token));
+                try compileTraitDecl(self, node);
                 try self.hoisted_nodes.put(self.allocator, idx, {});
                 try self.hoisted_names.put(self.allocator, name, {});
             },
