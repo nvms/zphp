@@ -723,7 +723,8 @@ pub const VM = struct {
     user_constants: std.StringHashMapUnmanaged(void) = .{},
     ini_settings: std.StringHashMapUnmanaged([]const u8) = .{},
     ini_callbacks: std.StringHashMapUnmanaged(Value) = .{},
-    shutdown_callbacks: std.ArrayListUnmanaged(Value) = .empty,
+    // register_shutdown_function's callables with the arguments they get
+    shutdown_callbacks: std.ArrayListUnmanaged(ShutdownCallback) = .empty,
     strtok_state: ?[]const u8 = null,
     strtok_pos: usize = 0,
     classes: class_names.Map(ClassDef) = .{},
@@ -2619,7 +2620,10 @@ pub const VM = struct {
             for (class.properties.items) |prop| if (debugValueHas(prop.default, owner)) std.debug.print(" prop-default({s})", .{class.name});
         }
         for (self.pending_string_release.items) |o| if (o == owner) std.debug.print(" pending-queue", .{});
-        for (self.shutdown_callbacks.items) |v| if (debugValueHas(v, owner)) std.debug.print(" shutdown-cb", .{});
+        for (self.shutdown_callbacks.items) |cb| {
+            if (debugValueHas(cb.callable, owner)) std.debug.print(" shutdown-cb", .{});
+            for (cb.args) |v| if (debugValueHas(v, owner)) std.debug.print(" shutdown-cb-arg", .{});
+        }
         if (self.user_error_handler) |h| if (debugValueHas(h, owner)) std.debug.print(" error-handler", .{});
         if (self.user_exception_handler) |h| if (debugValueHas(h, owner)) std.debug.print(" exception-handler", .{});
         var ini = self.ini_callbacks.valueIterator();
@@ -2988,6 +2992,7 @@ pub const VM = struct {
         self.deprecated_globals.deinit(self.allocator);
         self.ini_settings.deinit(self.allocator);
         self.ini_callbacks.deinit(self.allocator);
+        for (self.shutdown_callbacks.items) |cb| self.allocator.free(cb.args);
         self.shutdown_callbacks.deinit(self.allocator);
         self.error_handler_stack.deinit(self.allocator);
         self.arrays.deinit(self.allocator);
@@ -3184,6 +3189,7 @@ pub const VM = struct {
         self.weakmaps.clearRetainingCapacity();
         self.weak_references.clearRetainingCapacity();
         self.held_exceptions.clearRetainingCapacity();
+        for (self.shutdown_callbacks.items) |cb| self.allocator.free(cb.args);
         self.shutdown_callbacks.clearRetainingCapacity();
         self.cycle_candidates.clearRetainingCapacity();
         self.cycle_array_candidates.clearRetainingCapacity();
@@ -19928,7 +19934,11 @@ pub const VM = struct {
         defer self.native_call = engine.outer;
         var ctx = self.makeContext(null);
         _ = ctx.invokeCallable(handler, &.{exc}) catch {};
-        self.releaseValue(handler);
+        // the handler stays installed for later uncaught exceptions (one a
+        // shutdown function throws) unless it installed another
+        if (self.user_exception_handler == null) {
+            self.user_exception_handler = handler;
+        } else self.releaseValue(handler);
     }
 
     // an uncaught throwable ends everything but the main frame, above which
@@ -20725,22 +20735,33 @@ pub const VM = struct {
         }
     }
 
+    pub const ShutdownCallback = struct { callable: Value, args: []Value };
+
+    // php's php_call_shutdown_functions: the callbacks run in registration
+    // order, including ones registered while they run, with the arguments
+    // given at registration. one that fails (an uncaught exception, left
+    // pending for the caller to report, exit(), a fatal error) ends the
+    // shutdown stage, as php's bailout does
     pub fn runShutdownCallbacks(self: *VM) !void {
-        // PHP runs shutdown callbacks in registration order, after the script
-        // returns; errors in one don't prevent the others from firing.
         var engine = self.engineCall();
         self.native_call = &engine;
         defer self.native_call = engine.outer;
-        for (self.shutdown_callbacks.items) |cb| {
-            const result = if (cb == .string) self.callByName(cb.string.bytes(), &.{}) catch null else if (cb == .object) blk: {
-                if (self.hasMethod(cb.object.class_name, "__invoke")) {
-                    break :blk self.callMethod(cb.object, "__invoke", &.{}) catch null;
+        defer self.releaseCallbackRegistries();
+        var i: usize = 0;
+        while (i < self.shutdown_callbacks.items.len) : (i += 1) {
+            // the list can grow while the callback runs
+            const cb = self.shutdown_callbacks.items[i];
+            var ctx = self.makeContext(null);
+            _ = ctx.invokeCallable(cb.callable, cb.args) catch |err| {
+                // a user exception handler takes an uncaught exception, and
+                // the next callback runs
+                if (self.pending_exception != null and self.user_exception_handler != null and !self.uncatchable_fatal) {
+                    self.dispatchUncaught();
+                    if (self.pending_exception == null and !self.exit_requested) continue;
                 }
-                break :blk null;
-            } else null;
-            _ = result;
+                return err;
+            };
         }
-        self.releaseCallbackRegistries();
     }
 
     pub fn releaseCallbackRegistries(self: *VM) void {
@@ -20748,7 +20769,11 @@ pub const VM = struct {
             if (level.callback) |cb| self.releaseValue(cb);
             level.callback = null;
         }
-        for (self.shutdown_callbacks.items) |cb| self.releaseValue(cb);
+        for (self.shutdown_callbacks.items) |cb| {
+            self.releaseValue(cb.callable);
+            for (cb.args) |v| self.releaseValue(v);
+            self.allocator.free(cb.args);
+        }
         self.shutdown_callbacks.clearRetainingCapacity();
         for (self.autoload_callbacks.items) |cb| self.releaseValue(cb);
         self.autoload_callbacks.clearRetainingCapacity();

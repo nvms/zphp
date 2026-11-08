@@ -1655,8 +1655,12 @@ fn native_get_included_files(ctx: *NativeContext, _: []const Value) RuntimeError
 
 fn native_register_shutdown_function(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(.null);
-    try ctx.vm.shutdown_callbacks.append(ctx.allocator, args[0]);
+    const extra = try ctx.allocator.alloc(Value, args.len - 1);
+    errdefer ctx.allocator.free(extra);
+    @memcpy(extra, args[1..]);
+    try ctx.vm.shutdown_callbacks.append(ctx.allocator, .{ .callable = args[0], .args = extra });
     VM.retainValue(args[0]);
+    for (extra) |v| VM.retainValue(v);
     return NativeResult.scalar(.null);
 }
 

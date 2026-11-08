@@ -1039,7 +1039,10 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
     // (normal fall-off, exit(), or fatal). CLI mode runs them from main.zig;
     // serve mode never did, which meant WP / Laravel / Symfony shutdown hooks
     // (session save, cache flush, profiler stop, etc.) silently never fired
-    w.vm.runShutdownCallbacks() catch {};
+    // an uncaught exception from one is reported like the script's own
+    w.vm.runShutdownCallbacks() catch {
+        if (w.vm.pending_exception != null) reportUncaught(w);
+    };
 
     // persist session data if session was started
     var session_ctx = w.vm.makeContext(null);

@@ -674,9 +674,9 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
     try initArgv(vm, allocator, script_path, script_args);
     vm.interpret(result) catch {
         if (vm.exit_requested) {
-            vm.runShutdownCallbacks() catch {};
+            const shutdown_failed = try runShutdown(allocator, vm);
             if (vm.output.items.len > 0) try writeStdout(vm.output.items);
-            std.process.exit(vm.exit_code);
+            std.process.exit(if (shutdown_failed) 255 else vm.exit_code);
         }
         // dispatch to user exception handler if one is installed and we have
         // an uncaught exception. handler runs, then we exit 0 unless it
@@ -689,22 +689,37 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
                 // functions run, as php does
                 const handler_failed = vm.pending_exception != null and !vm.exit_requested;
                 if (handler_failed) try reportRuntimeError(allocator, vm);
-                vm.runShutdownCallbacks() catch {};
+                const shutdown_failed = try runShutdown(allocator, vm);
                 if (vm.output.items.len > 0) try writeStdout(vm.output.items);
                 if (platform.getenv("ZPHP_DBG_PROFILE") != null) dumpProfile(vm);
+                if (shutdown_failed) std.process.exit(255);
                 if (vm.exit_requested) std.process.exit(vm.exit_code);
                 if (handler_failed) std.process.exit(255);
                 return;
             }
         }
         try reportRuntimeError(allocator, vm);
-        vm.runShutdownCallbacks() catch {};
+        _ = try runShutdown(allocator, vm);
         if (vm.output.items.len > 0) try writeStdout(vm.output.items);
         if (platform.getenv("ZPHP_DBG_PROFILE") != null) dumpProfile(vm);
         std.process.exit(255);
     };
-    vm.runShutdownCallbacks() catch {};
+    const shutdown_failed = try runShutdown(allocator, vm);
     if (vm.output.items.len > 0) try writeStdout(vm.output.items);
+    if (shutdown_failed) std.process.exit(255);
+    if (vm.exit_requested) std.process.exit(vm.exit_code);
+}
+
+// the shutdown functions. one that fails ends them as php's fatal error does:
+// reported like the script's own, and the exit status is 255. exit() in one
+// is no failure. true when one failed
+fn runShutdown(allocator: std.mem.Allocator, vm: *VM) !bool {
+    vm.runShutdownCallbacks() catch {
+        if (vm.exit_requested and vm.pending_exception == null) return false;
+        try reportRuntimeError(allocator, vm);
+        return true;
+    };
+    return false;
 }
 
 // the script stopped on an error: an uncaught exception is reported as php
