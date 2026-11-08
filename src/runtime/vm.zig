@@ -8153,7 +8153,10 @@ pub const VM = struct {
                     if (target != .array) continue;
 
                     if (src == .object and self.hasMethod(src.object.class_name, "getIterator")) {
-                        src = self.callMethod(src.object, "getIterator", &.{}) catch .null;
+                        src = self.callMethod(src.object, "getIterator", &.{}) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                     }
 
                     // an integer-keyed element appended past maxInt is php's
