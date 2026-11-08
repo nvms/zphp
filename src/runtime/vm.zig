@@ -7831,8 +7831,10 @@ pub const VM = struct {
                     const exception = self.popTransfer();
                     // if finally was triggered by a propagating exception and that
                     // exception is still on the stack below this throw, chain it
-                    // as `previous` to match PHP's exception chaining behavior
-                    if (exception == .object and self.sp > 0) {
+                    // as `previous` to match PHP's exception chaining behavior. only
+                    // this frame's operands count: a destructor or callback run
+                    // while its caller holds a throwable must not take it
+                    if (exception == .object and self.sp > self.currentFrame().entry_sp) {
                         const below = self.stack[self.sp - 1];
                         if (below == .object and self.isInstanceOf(below.object.class_name, "Throwable")) {
                             if (try self.chainPrevious(exception.object, below.object)) _ = self.pop();
