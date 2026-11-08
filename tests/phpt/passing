@@ -1471,6 +1471,7 @@ Zend/tests/inheritance/bug41961.phpt
 Zend/tests/inheritance/bug42211.phpt
 Zend/tests/inheritance/bug43200_2.phpt
 Zend/tests/inheritance/bug43703.phpt
+Zend/tests/inheritance/bug44414.phpt
 Zend/tests/inheritance/bug48215.phpt
 Zend/tests/inheritance/bug48215_2.phpt
 Zend/tests/inheritance/bug53727.phpt
@@ -2204,8 +2205,11 @@ Zend/tests/prop_const_expr/static_property_initializer.phpt
 Zend/tests/property_exists.phpt
 Zend/tests/property_guard_hash_val.phpt
 Zend/tests/property_hooks/abstract_hook.phpt
+Zend/tests/property_hooks/abstract_hook_in_non_abstract_class.phpt
+Zend/tests/property_hooks/abstract_hook_not_implemented.phpt
 Zend/tests/property_hooks/abstract_prop_final.phpt
 Zend/tests/property_hooks/abstract_prop_hooks.phpt
+Zend/tests/property_hooks/abstract_prop_not_implemented.phpt
 Zend/tests/property_hooks/abstract_prop_plain.phpt
 Zend/tests/property_hooks/abstract_prop_without_hooks.phpt
 Zend/tests/property_hooks/array_access.phpt
@@ -2255,6 +2259,7 @@ Zend/tests/property_hooks/gh19548.phpt
 Zend/tests/property_hooks/gh19548_002.phpt
 Zend/tests/property_hooks/hooked_with_magic_method.phpt
 Zend/tests/property_hooks/inheritance.phpt
+Zend/tests/property_hooks/interface.phpt
 Zend/tests/property_hooks/interface_explicit_abstract.phpt
 Zend/tests/property_hooks/interface_final_hook.phpt
 Zend/tests/property_hooks/interface_final_prop.phpt
@@ -2263,11 +2268,14 @@ Zend/tests/property_hooks/interface_get_by_ref_plain.phpt
 Zend/tests/property_hooks/interface_get_only.phpt
 Zend/tests/property_hooks/interface_get_only_readonly.phpt
 Zend/tests/property_hooks/interface_invalid_explicitly_abstract.phpt
+Zend/tests/property_hooks/interface_not_implemented.phpt
 Zend/tests/property_hooks/interface_not_public.phpt
 Zend/tests/property_hooks/interface_set_only.phpt
 Zend/tests/property_hooks/invalid_abstract.phpt
 Zend/tests/property_hooks/invalid_abstract_body.phpt
 Zend/tests/property_hooks/invalid_abstract_final.phpt
+Zend/tests/property_hooks/invalid_abstract_indirect.phpt
+Zend/tests/property_hooks/invalid_abstract_indirect_2.phpt
 Zend/tests/property_hooks/invalid_abstract_private.phpt
 Zend/tests/property_hooks/invalid_empty_hooks.phpt
 Zend/tests/property_hooks/invalid_final_private.phpt
@@ -2327,6 +2335,7 @@ Zend/tests/property_hooks/simple_get_result_type_inference_verification.phpt
 Zend/tests/property_hooks/static_variables.phpt
 Zend/tests/property_hooks/syntax.phpt
 Zend/tests/property_hooks/trait_scope.phpt
+Zend/tests/property_hooks/traits_abstract.phpt
 Zend/tests/property_hooks/type_compatibility.phpt
 Zend/tests/property_hooks/unknown_hook.phpt
 Zend/tests/property_hooks/unknown_hook_private.phpt
@@ -2577,6 +2586,7 @@ Zend/tests/traits/inheritance001.phpt
 Zend/tests/traits/inheritance002.phpt
 Zend/tests/traits/inheritance003.phpt
 Zend/tests/traits/interface_001.phpt
+Zend/tests/traits/interface_002.phpt
 Zend/tests/traits/interface_003.phpt
 Zend/tests/traits/language001.phpt
 Zend/tests/traits/language002.phpt
@@ -6158,6 +6168,8 @@ tests/classes/__set__get_003.phpt
 tests/classes/__set__get_004.phpt
 tests/classes/__set__get_005.phpt
 tests/classes/__set_data_corrupt.phpt
+tests/classes/abstract_by_interface_001.phpt
+tests/classes/abstract_by_interface_002.phpt
 tests/classes/abstract_class.phpt
 tests/classes/abstract_derived.phpt
 tests/classes/abstract_inherit.phpt
@@ -6242,10 +6254,12 @@ tests/classes/interface_constant_inheritance_005.phpt
 tests/classes/interface_doubled.phpt
 tests/classes/interface_implemented.phpt
 tests/classes/interface_instantiate.phpt
+tests/classes/interface_must_be_implemented.phpt
 tests/classes/interface_optional_arg.phpt
 tests/classes/interface_optional_arg_002.phpt
 tests/classes/interface_optional_arg_003.phpt
 tests/classes/interfaces_001.phpt
+tests/classes/interfaces_002.phpt
 tests/classes/iterators_003.phpt
 tests/classes/iterators_004.phpt
 tests/classes/iterators_006.phpt
