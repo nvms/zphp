@@ -969,12 +969,6 @@ pub const PhpObject = struct {
     // from "null". needed by PHP's lazy-init via `unset($this->x); ... $this->x`
     // pattern that triggers __get. owns its keys like properties
     unset_slots: std.StringHashMapUnmanaged(void) = .{},
-    // PHP's __set recursion guard. when __set is invoked for prop X on this
-    // object, writes to X from inside __set skip __set and write directly,
-    // matching PHP's behavior where the first write inside __set establishes
-    // a dynamic property and stops re-entry
-    magic_set_active: std.StringHashMapUnmanaged(void) = .{},
-    magic_get_active: std.StringHashMapUnmanaged(void) = .{},
     lazy: ?*LazyState = null,
 
     // the object's handle, or a resource's number
@@ -1077,8 +1071,6 @@ pub const PhpObject = struct {
         var unset_names = self.unset_slots.keyIterator();
         while (unset_names.next()) |name| allocator.free(name.*);
         self.unset_slots.deinit(allocator);
-        self.magic_set_active.deinit(allocator);
-        self.magic_get_active.deinit(allocator);
         if (self.slots) |s| allocator.free(s);
     }
 

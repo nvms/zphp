@@ -791,11 +791,10 @@ pub const VM = struct {
     // runUntilFrame; popFrame skips deinit and leaves the slot intact so
     // the require handler can read the include frame's locals/vars
     require_merge_depth: usize = 0,
-    magic_get_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, prop_name: []const u8 }) = .empty,
+    // php's property guards: the property magic methods running for an
+    // object and property name, which aren't entered again for the same pair
+    magic_guards: std.ArrayListUnmanaged(MagicGuard) = .empty,
     magic_call_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, method_name: []const u8 }) = .empty,
-    // __isset calls running, so one asked about its own property isn't
-    // called again (php's IN_ISSET guard)
-    magic_isset_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, prop_name: []const u8 }) = .empty,
     prop_hook_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, prop_name: []const u8 }) = .empty,
     user_error_handler: ?Value = null,
     user_error_handler_mask: i64 = -1,
@@ -3078,9 +3077,8 @@ pub const VM = struct {
         self.ob_stack.deinit(self.allocator);
         self.request_vars.deinit(self.allocator);
         self.autoload_callbacks.deinit(self.allocator);
-        self.magic_get_guard.deinit(self.allocator);
+        self.magic_guards.deinit(self.allocator);
         self.magic_call_guard.deinit(self.allocator);
-        self.magic_isset_guard.deinit(self.allocator);
         self.prop_hook_guard.deinit(self.allocator);
         for (self.serve_cache_keys.items) |k| self.allocator.free(k);
         self.serve_cache_keys.deinit(self.allocator);
@@ -3237,9 +3235,8 @@ pub const VM = struct {
         }
         self.clearRealDirCache();
         self.clearStreamWrappers();
-        self.magic_get_guard.clearRetainingCapacity();
+        self.magic_guards.clearRetainingCapacity();
         self.magic_call_guard.clearRetainingCapacity();
-        self.magic_isset_guard.clearRetainingCapacity();
         if (self.serve_mode) {
             self.functions.clearRetainingCapacity();
             if (self.ic) |ic_ptr| {
@@ -6125,7 +6122,11 @@ pub const VM = struct {
                     // ($obj->prop[]=x, $obj->prop[k] op= v). COW-separate it
                     // from co-holders and write the unshared array back to the
                     // property; vivify null/false to a fresh array
-                    const prop_name = if (op == .ensure_array_prop_dynamic) try self.valueToString(self.pop()) else blk: {
+                    // the name stays held until the handler ends: a magic method or
+                    // hook gets it borrowed, and a temporary would be freed by the pop
+                    var name_hold: Value = .null;
+                    defer self.stackRelease(name_hold);
+                    const prop_name = if (op == .ensure_array_prop_dynamic) try self.popHeldName(&name_hold) else blk: {
                         const name_idx = self.readU16();
                         break :blk self.currentChunk().constants.items[name_idx].string.bytes();
                     };
@@ -6779,7 +6780,7 @@ pub const VM = struct {
                         }
                         const has_prop = obj_ptr.properties.contains(prop_name) or (obj_ptr.slots != null and obj_ptr.getSlotIndex(prop_name) != null);
                         const ref_hook = self.hasPropHook(obj_ptr.class_name, prop_name, .get) and !self.inPropHook(obj_ptr, prop_name);
-                        if (ref_hook or (!has_prop and self.hasMethod(obj_ptr.class_name, "__get"))) {
+                        if (ref_hook or (!has_prop and self.magicApplies(obj_ptr, prop_name, .get))) {
                             obj_ptr.refcount +%= 1;
                             defer self.releaseValue(.{ .object = obj_ptr });
                             self.setReturnRef(null);
@@ -6865,7 +6866,7 @@ pub const VM = struct {
                         }
                         const has_prop = obj_ptr.properties.contains(prop_owned) or (obj_ptr.slots != null and obj_ptr.getSlotIndex(prop_owned) != null);
                         const ref_hook = self.hasPropHook(obj_ptr.class_name, prop_owned, .get) and !self.inPropHook(obj_ptr, prop_owned);
-                        if (ref_hook or (!has_prop and self.hasMethod(obj_ptr.class_name, "__get"))) {
+                        if (ref_hook or (!has_prop and self.magicApplies(obj_ptr, prop_owned, .get))) {
                             obj_ptr.refcount +%= 1;
                             defer self.releaseValue(.{ .object = obj_ptr });
                             self.setReturnRef(null);
@@ -7077,7 +7078,9 @@ pub const VM = struct {
                             return error.RuntimeError;
                         };
                         obj = obj.storage();
-                        if (!obj.isUnset(prop_name)) {
+                        // an unset property is __unset's to handle, unless it
+                        // is already running for this property
+                        if (!(obj.isUnset(prop_name) and self.magicApplies(obj, prop_name, .unset))) {
                             if (try self.checkPropertyMutation(obj, prop_name, .unset)) continue;
                         }
                         {
@@ -7090,7 +7093,9 @@ pub const VM = struct {
                             }
                         }
                         if (self.shouldCallMagicUnset(obj, prop_name)) {
-                            _ = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMethod(obj, "__unset", &.{.{ .string = Value.String.borrowed(prop_name) }}) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
+                            _ = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicProperty(obj, .unset, prop_name, .null) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
+                        } else if (try self.propertyAccessDenied(obj, prop_name)) {
+                            continue;
                         } else {
                             // mark the property as unset so subsequent reads
                             // fall through to __get (matching PHP's lazy-init
@@ -7110,7 +7115,8 @@ pub const VM = struct {
                     if (self.hasPendingReleases()) self.drainPendingDestruct();
                 },
                 .unset_prop_dynamic => {
-                    const name_val = self.pop();
+                    const name_val = self.popTransfer();
+                    defer self.stackRelease(name_val);
                     const obj_val = self.pop();
                     if (obj_val == .object and name_val == .string) {
                         var obj = obj_val.object;
@@ -7120,7 +7126,9 @@ pub const VM = struct {
                         };
                         obj = obj.storage();
                         const prop_name = name_val.string.bytes();
-                        if (!obj.isUnset(prop_name)) {
+                        // an unset property is __unset's to handle, unless it
+                        // is already running for this property
+                        if (!(obj.isUnset(prop_name) and self.magicApplies(obj, prop_name, .unset))) {
                             if (try self.checkPropertyMutation(obj, prop_name, .unset)) continue;
                         }
                         const vr = self.findPropertyVisibility(obj.class_name, prop_name);
@@ -7131,7 +7139,9 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
                         if (self.shouldCallMagicUnset(obj, prop_name)) {
-                            _ = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMethod(obj, "__unset", &.{.{ .string = Value.String.borrowed(prop_name) }}) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
+                            _ = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicProperty(obj, .unset, prop_name, .null) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
+                        } else if (try self.propertyAccessDenied(obj, prop_name)) {
+                            continue;
                         } else {
                             try obj.markUnset(self.allocator, prop_name);
                             // release the object the property held (Stage 1)
@@ -7527,9 +7537,9 @@ pub const VM = struct {
                         const reachable = self.checkVisibility(vr.defining_class, vr.visibility) and !obj.isUnset(prop_name);
                         if (reachable and (obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndexForScope(prop_name, vr.defining_class) != null))) {
                             self.push(.{ .bool = obj.getForScope(prop_name, vr.defining_class) != .null });
-                        } else if (self.hasMethod(obj.class_name, "__isset")) {
-                            const result = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicIsset(obj, prop_name) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
-                            self.push(.{ .bool = result orelse false });
+                        } else if (self.magicApplies(obj, prop_name, .isset)) {
+                            const result = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicProperty(obj, .isset, prop_name, .null) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
+                            self.push(.{ .bool = result.isTruthy() });
                         } else {
                             self.push(.{ .bool = false });
                         }
@@ -7538,7 +7548,8 @@ pub const VM = struct {
                     }
                 },
                 .isset_prop_dynamic => {
-                    const prop_name_val = self.pop();
+                    const prop_name_val = self.popTransfer();
+                    defer self.stackRelease(prop_name_val);
                     const obj_val = self.pop();
                     if (obj_val == .object and prop_name_val == .string) {
                         var obj = obj_val.object;
@@ -7564,9 +7575,9 @@ pub const VM = struct {
                         const reachable = self.checkVisibility(vr.defining_class, vr.visibility) and !obj.isUnset(prop_name);
                         if (reachable and (obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndexForScope(prop_name, vr.defining_class) != null))) {
                             self.push(.{ .bool = obj.getForScope(prop_name, vr.defining_class) != .null });
-                        } else if (self.hasMethod(obj.class_name, "__isset")) {
-                            const result = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicIsset(obj, prop_name) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
-                            self.push(.{ .bool = result orelse false });
+                        } else if (self.magicApplies(obj, prop_name, .isset)) {
+                            const result = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicProperty(obj, .isset, prop_name, .null) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
+                            self.push(.{ .bool = result.isTruthy() });
                         } else {
                             self.push(.{ .bool = false });
                         }
@@ -9098,7 +9109,11 @@ pub const VM = struct {
                     const capturing = self.arg_capture_pending;
                     self.arg_capture_pending = false;
                     const gp_ip = self.currentFrame().ip;
-                    const prop_name = if (op == .get_prop_dynamic) try self.valueToString(self.pop()) else blk: {
+                    // the name stays held until the handler ends: a magic method or
+                    // hook gets it borrowed, and a temporary would be freed by the pop
+                    var name_hold: Value = .null;
+                    defer self.stackRelease(name_hold);
+                    const prop_name = if (op == .get_prop_dynamic) try self.popHeldName(&name_hold) else blk: {
                         const name_idx = self.readU16();
                         break :blk self.currentChunk().constants.items[name_idx].string.bytes();
                     };
@@ -9173,7 +9188,7 @@ pub const VM = struct {
                         if (is_present) {
                             const vr = gp_vr;
                             if (!self.checkVisibility(vr.defining_class, vr.visibility)) {
-                                if (self.hasMethod(obj.class_name, "__get")) {
+                                if (self.magicApplies(obj, prop_name, .get)) {
                                     const result = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicGet(obj, prop_name) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
                                     self.push(result);
                                     continue;
@@ -9214,9 +9229,12 @@ pub const VM = struct {
                                 }
                             }
                             self.push(val);
-                        } else if (self.hasMethod(obj.class_name, "__get")) {
+                        } else if (self.magicApplies(obj, prop_name, .get)) {
                             const result = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicGet(obj, prop_name) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
                             self.push(result);
+                        } else if (badPropertyName(prop_name)) {
+                            if (try self.throwBuiltinException("Error", bad_property_name_message)) continue;
+                            return error.RuntimeError;
                         } else {
                             // a declared typed property with no value present
                             // (never written, or explicitly unset) is in PHP's
@@ -9253,7 +9271,11 @@ pub const VM = struct {
                     // non-throwing property read for `??` / `??=`. an
                     // uninitialized typed property reads as a null slot value,
                     // which `??` then routes to the RHS - no error
-                    const prop_name = if (op == .get_prop_coalesce_dynamic) try self.valueToString(self.pop()) else blk: {
+                    // the name stays held until the handler ends: a magic method or
+                    // hook gets it borrowed, and a temporary would be freed by the pop
+                    var name_hold: Value = .null;
+                    defer self.stackRelease(name_hold);
+                    const prop_name = if (op == .get_prop_coalesce_dynamic) try self.popHeldName(&name_hold) else blk: {
                         const name_idx = self.readU16();
                         break :blk self.currentChunk().constants.items[name_idx].string.bytes();
                     };
@@ -9288,12 +9310,12 @@ pub const VM = struct {
                             // raw value (a parent's private prop must not leak
                             // to a subclass scope)
                             if (!self.checkVisibility(cvr.defining_class, cvr.visibility)) {
-                                self.push((implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.magicCoalesceRead(obj, prop_name) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; }));
+                                self.push((implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.coalesceMagic(obj, prop_name, true) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; }));
                             } else {
                                 self.push(val);
                             }
                         } else {
-                            self.push((implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.magicCoalesceRead(obj, prop_name) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; }));
+                            self.push((implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.coalesceMagic(obj, prop_name, false) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; }));
                         }
                     } else {
                         self.push(.null);
@@ -9302,7 +9324,11 @@ pub const VM = struct {
 
                 .set_prop, .set_prop_dynamic => {
                     const sp_ip = self.currentFrame().ip;
-                    const prop_name = if (op == .set_prop_dynamic) try self.valueToString(self.pop()) else blk: {
+                    // the name stays held until the handler ends: a magic method or
+                    // hook gets it borrowed, and a temporary would be freed by the pop
+                    var name_hold: Value = .null;
+                    defer self.stackRelease(name_hold);
+                    const prop_name = if (op == .set_prop_dynamic) try self.popHeldName(&name_hold) else blk: {
                         const name_idx = self.readU16();
                         break :blk self.currentChunk().constants.items[name_idx].string.bytes();
                     };
@@ -13870,6 +13896,13 @@ pub const VM = struct {
 
     // a value's string form for use right away: the bytes last until the next
     // statement boundary
+    // pops a name operand, keeping its reference in `hold` for the caller to
+    // release once the bytes are no longer used
+    fn popHeldName(self: *VM, hold: *Value) RuntimeError![]const u8 {
+        hold.* = self.popTransfer();
+        return self.valueToString(hold.*);
+    }
+
     fn valueToString(self: *VM, v: Value) RuntimeError![]const u8 {
         if (v == .string) return v.string.bytes();
         if (v == .object) return self.objectToString(v.object);
@@ -17638,8 +17671,51 @@ pub const VM = struct {
         return self.isInstanceOf(caller_class, target_class) or self.isInstanceOf(target_class, caller_class);
     }
 
+    // a `??` read of a property that isn't there for the scope, as php's
+    // read_property with BP_VAR_IS: __isset decides (unless it is running
+    // for this property), then __get gives the value. with only __get and it
+    // already running, an inaccessible property is an access error
+    fn coalesceMagic(self: *VM, obj: *PhpObject, name: []const u8, inaccessible: bool) RuntimeError!Value {
+        if (self.hasMethod(obj.class_name, "__isset")) {
+            if (!self.magicGuarded(obj, name, .isset)) {
+                const present = try self.callMagicProperty(obj, .isset, name, .null);
+                if (!present.isTruthy()) return .null;
+            }
+            if (self.magicApplies(obj, name, .get)) return self.callMagicGet(obj, name);
+            return .null;
+        }
+        if (self.hasMethod(obj.class_name, "__get")) {
+            if (!self.magicGuarded(obj, name, .get)) return self.callMagicGet(obj, name);
+            if (inaccessible) {
+                if (try self.accessDeniedMessage(obj, name)) |msg| {
+                    defer self.allocator.free(msg);
+                    try self.setPendingException("Error", msg);
+                    return error.RuntimeError;
+                }
+            }
+        }
+        return .null;
+    }
+
+    // an access the magic methods don't take: a property the scope can't
+    // reach, or a name no property can have, is an Error. true when it was
+    // raised and dispatched
+    fn propertyAccessDenied(self: *VM, obj: *PhpObject, name: []const u8) RuntimeError!bool {
+        const msg = try self.accessDeniedMessage(obj, name) orelse return false;
+        defer self.allocator.free(msg);
+        if (try self.throwBuiltinException("Error", msg)) return true;
+        return error.RuntimeError;
+    }
+
+    fn accessDeniedMessage(self: *VM, obj: *PhpObject, name: []const u8) RuntimeError!?[]u8 {
+        if (badPropertyName(name)) return try self.allocator.dupe(u8, bad_property_name_message);
+        const vr = self.findPropertyVisibility(obj.class_name, name);
+        if (!vr.declared or self.checkVisibility(vr.defining_class, vr.visibility)) return null;
+        return try std.fmt.allocPrint(self.allocator, "Cannot access {s} property {s}::${s}", .{ @tagName(vr.visibility), obj.class_name, name });
+    }
+
     fn shouldCallMagicUnset(self: *VM, obj: *PhpObject, name: []const u8) bool {
-        if (!self.hasMethod(obj.class_name, "__unset")) return false;
+        if (!self.magicApplies(obj, name, .unset)) return false;
         const vr = self.findPropertyVisibility(obj.class_name, name);
         return obj.isUnset(name) or !self.checkVisibility(vr.defining_class, vr.visibility) or
             (obj.getSlotIndex(name) == null and !obj.properties.contains(name));
@@ -17671,7 +17747,7 @@ pub const VM = struct {
         // asymmetric or readonly declaration can ever deny a write
         const vr = self.findPropertyVisibility(obj.class_name, prop_name);
         if (vr.is_readonly or vr.set_visibility != vr.visibility) {
-            if (!(obj.isUnset(prop_name) and self.hasMethod(obj.class_name, "__set"))) {
+            if (!(obj.isUnset(prop_name) and self.magicApplies(obj, prop_name, .set))) {
                 if (try self.checkPropertyMutationVis(obj, prop_name, action, vr)) return .{ .step = .dispatched };
             }
         }
@@ -17774,17 +17850,13 @@ pub const VM = struct {
     // and the write itself. val may be coerced to the declared type
     fn propertyWriteStore(self: *VM, obj: *PhpObject, prop_name: []const u8, val: *Value, vr: VisResult, action: MutationAction, base_frame: usize) RuntimeError!PropWriteOutcome {
         const has_prop = !obj.isUnset(prop_name) and (obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndexForScope(prop_name, vr.defining_class) != null));
-        if (!has_prop and self.hasMethod(obj.class_name, "__set") and !obj.magic_set_active.contains(prop_name)) {
-            try obj.magic_set_active.put(self.allocator, prop_name, {});
-            _ = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMethod(obj, "__set", &.{ .{ .string = Value.String.borrowed(prop_name) }, val.* }) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) return .dispatched; return error.RuntimeError; }; });
-            _ = obj.magic_set_active.remove(prop_name);
+        if (!has_prop and self.magicApplies(obj, prop_name, .set)) {
+            _ = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicProperty(obj, .set, prop_name, val.*) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) return .dispatched; return error.RuntimeError; }; });
             return .magic;
         }
         if (!self.checkVisibility(vr.defining_class, vr.visibility)) {
-            if (self.hasMethod(obj.class_name, "__set") and !obj.magic_set_active.contains(prop_name)) {
-                try obj.magic_set_active.put(self.allocator, prop_name, {});
-                _ = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMethod(obj, "__set", &.{ .{ .string = Value.String.borrowed(prop_name) }, val.* }) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) return .dispatched; return error.RuntimeError; }; });
-                _ = obj.magic_set_active.remove(prop_name);
+            if (self.magicApplies(obj, prop_name, .set)) {
+                _ = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicProperty(obj, .set, prop_name, val.*) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) return .dispatched; return error.RuntimeError; }; });
                 return .magic;
             }
             const msg = try std.fmt.allocPrint(self.allocator, "Cannot access {s} property {s}::${s}", .{
@@ -17807,6 +17879,10 @@ pub const VM = struct {
             }
         }
         if (!has_prop and !vr.declared) {
+            if (badPropertyName(prop_name)) {
+                if (try self.throwBuiltinException("Error", bad_property_name_message)) return .dispatched;
+                return error.RuntimeError;
+            }
             if (try self.checkDynamicProperty(obj, prop_name)) return .dispatched;
         }
         // typed property: coerce/enforce the declared type before storing
@@ -20684,67 +20760,71 @@ pub const VM = struct {
         } else return error.RuntimeError;
     }
 
-    fn callMagicGet(self: *VM, obj: *PhpObject, prop_name: []const u8) RuntimeError!Value {
-        const obj_id = @intFromPtr(obj);
-        for (self.magic_get_guard.items) |e| {
-            if (e.obj_ptr == obj_id and std.mem.eql(u8, e.prop_name, prop_name)) return .null;
+    pub const MagicKind = enum { get, set, isset, unset };
+    pub const MagicGuard = struct { obj: usize, name: []const u8, kind: MagicKind };
+
+    pub fn magicGuarded(self: *VM, obj: *PhpObject, name: []const u8, kind: MagicKind) bool {
+        for (self.magic_guards.items) |guard| {
+            if (guard.obj == @intFromPtr(obj) and guard.kind == kind and std.mem.eql(u8, guard.name, name)) return true;
         }
-        try self.magic_get_guard.append(self.allocator, .{ .obj_ptr = obj_id, .prop_name = prop_name });
-        const result = self.callMethod(obj, "__get", &.{.{ .string = Value.String.borrowed(prop_name) }}) catch |err| blk: {
-            self.removeMagicGetGuard(obj_id, prop_name);
-            if (err == error.RuntimeError) return error.RuntimeError;
-            break :blk .null;
+        return false;
+    }
+
+    // the class has the magic method and it isn't already running for this
+    // object and property: inside __get, reading the same property reads the
+    // property itself (with its warnings) instead of calling __get again
+    pub fn magicApplies(self: *VM, obj: *PhpObject, name: []const u8, kind: MagicKind) bool {
+        const method = switch (kind) {
+            .get => "__get",
+            .set => "__set",
+            .isset => "__isset",
+            .unset => "__unset",
         };
-        self.removeMagicGetGuard(obj_id, prop_name);
-        return result;
+        return self.hasMethod(obj.class_name, method) and !self.magicGuarded(obj, name, kind);
     }
 
-    // a `??` read of a property the scope can't see or that doesn't exist
-    // (zend_std_read_property with BP_VAR_IS): __isset decides first when the
-    // class has one, then __get supplies the value
-    fn magicCoalesceRead(self: *VM, obj: *PhpObject, prop_name: []const u8) RuntimeError!Value {
-        if (self.hasMethod(obj.class_name, "__isset")) {
-            if (try self.callMagicIsset(obj, prop_name)) |present| {
-                if (!present) return .null;
-            }
-        }
-        if (self.hasMethod(obj.class_name, "__get")) return self.callMagicGet(obj, prop_name);
-        return .null;
+    // runs __get, __set, __isset or __unset for a property under its guard.
+    // the method gets its own copy of the name: the caller's may be a
+    // temporary, and __get may return it
+    pub fn callMagicProperty(self: *VM, obj: *PhpObject, kind: MagicKind, name: []const u8, value: Value) RuntimeError!Value {
+        const owned = try Value.String.create(self.allocator, name);
+        defer self.stackRelease(.{ .string = owned });
+        try self.magic_guards.append(self.allocator, .{ .obj = @intFromPtr(obj), .name = owned.bytes(), .kind = kind });
+        defer self.dropMagicGuard(owned.bytes());
+        const name_value: Value = .{ .string = owned };
+        return switch (kind) {
+            .get => self.callMethod(obj, "__get", &.{name_value}),
+            .set => self.callMethod(obj, "__set", &.{ name_value, value }),
+            .isset => self.callMethod(obj, "__isset", &.{name_value}),
+            .unset => self.callMethod(obj, "__unset", &.{name_value}),
+        };
     }
 
-    // null when an __isset for this object and property is already running:
-    // php's IN_ISSET guard skips the call, so the property reads as unset
-    fn callMagicIsset(self: *VM, obj: *PhpObject, prop_name: []const u8) RuntimeError!?bool {
-        const obj_id = @intFromPtr(obj);
-        for (self.magic_isset_guard.items) |e| {
-            if (e.obj_ptr == obj_id and std.mem.eql(u8, e.prop_name, prop_name)) return null;
-        }
-        try self.magic_isset_guard.append(self.allocator, .{ .obj_ptr = obj_id, .prop_name = prop_name });
-        defer {
-            var i: usize = self.magic_isset_guard.items.len;
-            while (i > 0) {
-                i -= 1;
-                const g = self.magic_isset_guard.items[i];
-                if (g.obj_ptr == obj_id and std.mem.eql(u8, g.prop_name, prop_name)) {
-                    _ = self.magic_isset_guard.swapRemove(i);
-                    break;
-                }
-            }
-        }
-        const result = try self.callMethod(obj, "__isset", &.{.{ .string = Value.String.borrowed(prop_name) }});
-        return result.isTruthy();
-    }
-
-    fn removeMagicGetGuard(self: *VM, obj_id: usize, prop_name: []const u8) void {
-        var i: usize = self.magic_get_guard.items.len;
+    fn dropMagicGuard(self: *VM, name: []const u8) void {
+        var i: usize = self.magic_guards.items.len;
         while (i > 0) {
             i -= 1;
-            if (self.magic_get_guard.items[i].obj_ptr == obj_id and std.mem.eql(u8, self.magic_get_guard.items[i].prop_name, prop_name)) {
-                _ = self.magic_get_guard.swapRemove(i);
+            if (self.magic_guards.items[i].name.ptr == name.ptr) {
+                _ = self.magic_guards.orderedRemove(i);
                 return;
             }
         }
     }
+
+    fn callMagicGet(self: *VM, obj: *PhpObject, prop_name: []const u8) RuntimeError!Value {
+        return self.callMagicProperty(obj, .get, prop_name, .null) catch |err| {
+            if (err == error.RuntimeError) return error.RuntimeError;
+            return .null;
+        };
+    }
+
+    // php's zend_bad_property_name: a property name can't start with a nul
+    // byte (that is how mangled private and protected names begin)
+    pub fn badPropertyName(name: []const u8) bool {
+        return name.len > 0 and name[0] == 0;
+    }
+
+    pub const bad_property_name_message = "Cannot access property starting with \"\\0\"";
 
     fn removeCallGuard(self: *VM, obj_id: usize, method_name: []const u8) void {
         var i: usize = self.magic_call_guard.items.len;
