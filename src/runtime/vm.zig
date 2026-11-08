@@ -12206,6 +12206,111 @@ pub const VM = struct {
         return entry;
     }
 
+    const AbstractCandidate = struct { name: []const u8, scope: []const u8 };
+
+    // php's zend_verify_abstract_class: a class that isn't abstract implements
+    // every abstract method its parents and interfaces leave it, property
+    // hooks included. the error counts what is missing and names the first
+    // three in php's order (the class's method table, then its hooks)
+    fn verifyAbstractClass(self: *VM, class_name: []const u8, def: *const ClassDef) RuntimeError!void {
+        var candidates = std.ArrayListUnmanaged(AbstractCandidate).empty;
+        defer candidates.deinit(self.allocator);
+        var seen = std.StringHashMapUnmanaged(void){};
+        defer seen.deinit(self.allocator);
+        for (def.method_order.items) |m| {
+            const info = def.methods.get(m) orelse continue;
+            try seen.put(self.allocator, m, {});
+            if (info.is_abstract) try candidates.append(self.allocator, .{ .name = m, .scope = class_name });
+        }
+        var current_parent: ?[]const u8 = def.parent;
+        while (current_parent) |pn| {
+            const pc = self.classes.getPtr(pn) orelse break;
+            for (pc.method_order.items) |m| {
+                const info = pc.methods.get(m) orelse continue;
+                if (!info.is_abstract or seen.contains(m)) continue;
+                try seen.put(self.allocator, m, {});
+                try candidates.append(self.allocator, .{ .name = m, .scope = pn });
+            }
+            current_parent = pc.parent;
+        }
+        // the interfaces of the class and of its parents
+        var walk: ?*const ClassDef = def;
+        while (walk) |cd| {
+            // a built-in class satisfies its own interfaces even when zphp
+            // registers no method entry for some of them
+            if (cd.is_internal) break;
+            for (cd.interfaces.items) |iname| try self.collectInterfaceMethods(iname, &candidates, &seen, 0);
+            walk = if (cd.parent) |p| self.classes.getPtr(p) else null;
+        }
+
+        var missing = std.ArrayListUnmanaged(AbstractCandidate).empty;
+        defer missing.deinit(self.allocator);
+        var hooks = std.ArrayListUnmanaged(AbstractCandidate).empty;
+        defer hooks.deinit(self.allocator);
+        for (candidates.items) |c| {
+            if (try self.implementsAbstract(def, c.name)) continue;
+            try (if (std.mem.indexOf(u8, c.name, "$hook_") != null) &hooks else &missing).append(self.allocator, c);
+        }
+        try missing.appendSlice(self.allocator, hooks.items);
+        if (missing.items.len == 0) return;
+
+        var names = std.ArrayListUnmanaged(u8).empty;
+        defer names.deinit(self.allocator);
+        for (missing.items[0..@min(missing.items.len, 3)], 0..) |c, i| {
+            if (i > 0) try names.appendSlice(self.allocator, ", ");
+            try names.print(self.allocator, "{s}::{s}", .{ c.scope, try self.phpMethodName(c.name) });
+        }
+        if (missing.items.len > 3) try names.appendSlice(self.allocator, ", ...");
+        const plural: []const u8 = if (missing.items.len > 1) "s" else "";
+        const msg = try std.fmt.allocPrint(self.allocator, "Class {s} contains {d} abstract method{s} and must therefore be declared abstract or implement the remaining method{s} ({s})", .{ class_name, missing.items.len, plural, plural, names.items });
+        defer self.allocator.free(msg);
+        return self.raiseFatal(msg);
+    }
+
+    fn collectInterfaceMethods(self: *VM, iface: []const u8, out: *std.ArrayListUnmanaged(AbstractCandidate), seen: *std.StringHashMapUnmanaged(void), depth: u8) RuntimeError!void {
+        if (depth > 64) return;
+        const idef = self.interfaces.getPtr(iface) orelse return;
+        for (idef.methods.items) |m| {
+            if (seen.contains(m)) continue;
+            try seen.put(self.allocator, m, {});
+            try out.append(self.allocator, .{ .name = m, .scope = idef.name });
+        }
+        if (idef.parent) |p| try self.collectInterfaceMethods(p, out, seen, depth + 1);
+        for (idef.parents.items) |p| try self.collectInterfaceMethods(p, out, seen, depth + 1);
+    }
+
+    // whether the class (or a parent) has a concrete method for an abstract
+    // one; a hook contract may also be met by a plain public property
+    fn implementsAbstract(self: *VM, def: *const ClassDef, name: []const u8) RuntimeError!bool {
+        if (std.mem.indexOf(u8, name, "$hook_")) |split| {
+            if (self.resolvePropertyHook(def, name)) |hook| {
+                if (!hook.info.is_abstract) return true;
+            } else {
+                var current: ?*const ClassDef = def;
+                while (current) |cls| {
+                    for (cls.properties.items) |prop| {
+                        if (!std.mem.eql(u8, prop.name, name[0..split])) continue;
+                        if (!prop.is_virtual and prop.visibility == .public and
+                            !(std.mem.endsWith(u8, name, "$hook_set") and prop.is_readonly)) return true;
+                    }
+                    current = if (cls.parent) |parent| self.classes.getPtr(parent) else null;
+                }
+            }
+        }
+        // native methods need not have entries in ClassDef.methods, so check
+        // their registry at each level, but never skip an abstract
+        // redeclaration to reach a concrete implementation further up
+        var cls: ?*const ClassDef = def;
+        while (cls) |c| {
+            if (c.methods.get(name)) |method| return !method.is_abstract;
+            const full = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ c.name, name });
+            defer self.allocator.free(full);
+            if (self.native_fns.contains(full)) return true;
+            cls = if (c.parent) |parent| self.classes.getPtr(parent) else null;
+        }
+        return false;
+    }
+
     // the name php gives a method: a property hook zphp registers as
     // "prop$hook_get" is "$prop::get"
     pub fn phpMethodName(self: *VM, method: []const u8) ![]const u8 {
@@ -13967,16 +14072,6 @@ pub const VM = struct {
         self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
 
-        const hook_guard_count = self.prop_hook_guard.items.len;
-        if (std.mem.endsWith(u8, gen.func.name, "$hook_get")) {
-            const name_start = if (std.mem.lastIndexOf(u8, gen.func.name, "::")) |sep| sep + 2 else 0;
-            const prop_name = gen.func.name[name_start .. gen.func.name.len - "$hook_get".len];
-            const receiver = self.currentFrame().vars.get("$this") orelse .null;
-            if (receiver == .object) {
-                try self.prop_hook_guard.append(self.allocator, .{ .obj_ptr = @intFromPtr(receiver.object), .prop_name = prop_name });
-            }
-        }
-        defer self.prop_hook_guard.shrinkRetainingCapacity(hook_guard_count);
         try self.restoreGeneratorHandlers(gen);
 
         if (gen.ip > 0) {
@@ -15183,7 +15278,8 @@ pub const VM = struct {
         if (!def.is_abstract) {
             var di = def.methods.iterator();
             while (di.next()) |e| {
-                if (e.value_ptr.is_abstract) {
+                // an abstract hook is verifyAbstractClass's
+                if (e.value_ptr.is_abstract and std.mem.indexOf(u8, e.key_ptr.*, "$hook_") == null) {
                     const msg = try std.fmt.allocPrint(self.allocator, "Class {s} declares abstract method {s}() and must therefore be declared abstract", .{ class_name, e.key_ptr.* });
                     try self.strings.append(self.allocator, msg);
                     self.error_msg = msg;
@@ -15202,95 +15298,7 @@ pub const VM = struct {
         // unless this class is itself abstract, every abstract method inherited
         // from the parent chain (and required by any implemented interface)
         // must be implemented by a non-abstract method
-        if (!def.is_abstract) {
-            var seen_abstract = std.StringHashMapUnmanaged([]const u8){};
-            defer seen_abstract.deinit(self.allocator);
-            var current_parent: ?[]const u8 = def.parent;
-            while (current_parent) |pn| {
-                if (self.classes.get(pn)) |pc| {
-                    var pi = pc.methods.iterator();
-                    while (pi.next()) |pe| {
-                        if (!pe.value_ptr.is_abstract) continue;
-                        if (seen_abstract.contains(pe.key_ptr.*)) continue;
-                        try seen_abstract.put(self.allocator, pe.key_ptr.*, pn);
-                    }
-                    current_parent = pc.parent;
-                } else break;
-            }
-            // walk both the class's direct interfaces AND any interfaces
-            // declared by its parent chain (an `abstract class Foo implements Bar`
-            // means subclasses of Foo must satisfy Bar even though Foo's subclass
-            // doesn't `implements Bar` directly)
-            var iface_walk_parent: ?[]const u8 = class_name;
-            while (iface_walk_parent) |cn| {
-                if (if (std.mem.eql(u8, cn, class_name)) @as(?ClassDef, def) else self.classes.get(cn)) |cd| {
-                    // a built-in class satisfies its own interfaces even when
-                    // zphp registers no method entry for some of them
-                    if (cd.is_internal) break;
-                    for (cd.interfaces.items) |iname| {
-                        var current_iface: ?[]const u8 = iname;
-                        while (current_iface) |in| {
-                            if (self.interfaces.get(in)) |idef| {
-                                for (idef.methods.items) |mname| {
-                                    if (seen_abstract.contains(mname)) continue;
-                                    try seen_abstract.put(self.allocator, mname, in);
-                                }
-                                current_iface = idef.parent;
-                            } else break;
-                        }
-                    }
-                    iface_walk_parent = cd.parent;
-                } else break;
-            }
-            var sa_iter = seen_abstract.iterator();
-            while (sa_iter.next()) |se| {
-                if (std.mem.indexOf(u8, se.key_ptr.*, "$hook_") != null) {
-                    if (self.resolvePropertyHook(&def, se.key_ptr.*)) |hook| {
-                        if (!hook.info.is_abstract) continue;
-                    } else {
-                        // Only a declared property can satisfy a hook contract.
-                        const split = std.mem.indexOf(u8, se.key_ptr.*, "$hook_").?;
-                        var current: ?*const ClassDef = &def;
-                        var has_property = false;
-                        while (current) |cls| {
-                            for (cls.properties.items) |prop| {
-                                if (std.mem.eql(u8, prop.name, se.key_ptr.*[0..split])) {
-                                    if (!prop.is_virtual and prop.visibility == .public and
-                                        !(std.mem.endsWith(u8, se.key_ptr.*, "$hook_set") and prop.is_readonly)) has_property = true;
-                                }
-                            }
-                            current = if (cls.parent) |parent| self.classes.getPtr(parent) else null;
-                        }
-                        if (has_property) continue;
-                    }
-                }
-                // Start with the in-progress definition: it is not in classes yet.
-                // Native methods need not have entries in ClassDef.methods, so
-                // check their registry at each level, but never skip an abstract
-                // redeclaration to reach a concrete implementation further up.
-                var found_concrete = false;
-                var implementation_class: ?*const ClassDef = &def;
-                while (implementation_class) |cls| {
-                    if (cls.methods.get(se.key_ptr.*)) |method| {
-                        found_concrete = !method.is_abstract;
-                        break;
-                    }
-                    const full = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ cls.name, se.key_ptr.* });
-                    defer self.allocator.free(full);
-                    if (self.native_fns.contains(full)) {
-                        found_concrete = true;
-                        break;
-                    }
-                    implementation_class = if (cls.parent) |parent| self.classes.getPtr(parent) else null;
-                }
-                if (!found_concrete) {
-                    const msg = try std.fmt.allocPrint(self.allocator, "Class {s} contains abstract method {s}::{s} and must therefore be declared abstract or implement it", .{ class_name, se.value_ptr.*, se.key_ptr.* });
-                    try self.strings.append(self.allocator, msg);
-                    self.error_msg = msg;
-                    return error.RuntimeError;
-                }
-            }
-        }
+        if (!def.is_abstract) try self.verifyAbstractClass(class_name, &def);
 
         // composer's autoloader uses `include` (not require_once), so a class
         // file can be re-executed multiple times during a single autoload chain;
@@ -19253,7 +19261,17 @@ pub const VM = struct {
         return func.returns_ref;
     }
 
+    // whether an access to the property reaches its storage instead of its
+    // hooks: inside the property's own hook (php's zend_is_in_hook, whatever
+    // the object), or for reflection's raw access
     pub fn inPropHook(self: *VM, obj: *PhpObject, prop_name: []const u8) bool {
+        if (self.frame_count > 0) if (self.currentFrame().func) |func| {
+            if (std.mem.lastIndexOf(u8, func.name, "::")) |sep| {
+                const method = func.name[sep + 2 ..];
+                if (method.len > prop_name.len and std.mem.startsWith(u8, method, prop_name) and
+                    (std.mem.eql(u8, method[prop_name.len..], "$hook_get") or std.mem.eql(u8, method[prop_name.len..], "$hook_set"))) return true;
+            }
+        };
         const obj_id = @intFromPtr(obj);
         for (self.prop_hook_guard.items) |g| {
             if (g.obj_ptr == obj_id and std.mem.eql(u8, g.prop_name, prop_name)) return true;
@@ -19265,19 +19283,6 @@ pub const VM = struct {
         if (self.inPropHook(obj, prop_name)) return null;
         if (!self.hasPropHook(obj.class_name, prop_name, if (kind == .get) .get else .set)) return null;
         const hook_name = try self.propHookName(prop_name, if (kind == .get) .get else .set);
-        const obj_id = @intFromPtr(obj);
-        try self.prop_hook_guard.append(self.allocator, .{ .obj_ptr = obj_id, .prop_name = prop_name });
-        defer {
-            var i: usize = self.prop_hook_guard.items.len;
-            while (i > 0) {
-                i -= 1;
-                const g = self.prop_hook_guard.items[i];
-                if (g.obj_ptr == obj_id and std.mem.eql(u8, g.prop_name, prop_name)) {
-                    _ = self.prop_hook_guard.swapRemove(i);
-                    break;
-                }
-            }
-        }
         const args: []const Value = if (kind == .set) &.{value} else &.{};
         return try self.callMethod(obj, hook_name, args);
     }
