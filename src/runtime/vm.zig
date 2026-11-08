@@ -19926,19 +19926,24 @@ pub const VM = struct {
         if (self.uncatchable_fatal) return;
         const exc = self.pending_exception orelse return;
         const handler = self.user_exception_handler orelse return;
+        // php's zend_user_exception_handler: while it runs the handler sits
+        // on the handler stack, so restore_exception_handler() inside it
+        // reaches the handlers below; afterwards, unless something was
+        // installed, whatever is on top of the stack is installed again
+        self.exception_handler_stack.append(self.allocator, handler) catch return;
         self.user_exception_handler = null;
         self.pending_exception = null;
         defer self.stackRelease(exc);
+        retainValue(handler);
+        defer self.releaseValue(handler);
         var engine = self.engineCall();
         self.native_call = &engine;
         defer self.native_call = engine.outer;
         var ctx = self.makeContext(null);
         _ = ctx.invokeCallable(handler, &.{exc}) catch {};
-        // the handler stays installed for later uncaught exceptions (one a
-        // shutdown function throws) unless it installed another
         if (self.user_exception_handler == null) {
-            self.user_exception_handler = handler;
-        } else self.releaseValue(handler);
+            if (self.exception_handler_stack.pop()) |top| self.user_exception_handler = top;
+        }
     }
 
     // an uncaught throwable ends everything but the main frame, above which
