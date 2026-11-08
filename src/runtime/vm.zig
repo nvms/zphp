@@ -20715,6 +20715,13 @@ pub const VM = struct {
     }
 
     pub fn callMethod(self: *VM, obj: *PhpObject, method_name: []const u8, args: []const Value) RuntimeError!Value {
+        return self.callMethodAs(obj, method_name, null, args);
+    }
+
+    // calls a method on obj. registered ("Class::method") names the method
+    // already resolved, which a callable naming a class (["$this",
+    // "Parent::m"]) picks instead of the object's own override
+    pub fn callMethodAs(self: *VM, obj: *PhpObject, method_name: []const u8, registered: ?[]const u8, args: []const Value) RuntimeError!Value {
         // A native callback may execute calls at the same VM frame depth.
         // Restore the enclosing call's output-argument destinations afterwards.
         const saved_sources_count = self.ic.?.active_arg_count;
@@ -20730,7 +20737,7 @@ pub const VM = struct {
         }
 
         try self.ensureCallRoom();
-        const full_name = self.resolveMethod(obj.class_name, method_name) catch {
+        const full_name = registered orelse self.resolveMethod(obj.class_name, method_name) catch {
             // Internal IteratorIterator-derived classes forward missing methods
             // to the current object exposed by their wrapped iterator.
             const wrapped = if (obj.get("__ii_inner") != .null) obj.get("__ii_inner") else obj.get("__fi_inner");
@@ -21291,10 +21298,14 @@ pub const VM = struct {
     // by-ref params - without writeback, array_walk + an object-method
     // callback can't mutate the array entries
     pub fn callMethodRef(self: *VM, obj: *PhpObject, method_name: []const u8, args: []Value) RuntimeError!Value {
-        const full_name = self.resolveMethod(obj.class_name, method_name) catch return error.RuntimeError;
+        return self.callMethodRefAs(obj, method_name, null, args);
+    }
+
+    pub fn callMethodRefAs(self: *VM, obj: *PhpObject, method_name: []const u8, registered: ?[]const u8, args: []Value) RuntimeError!Value {
+        const full_name = registered orelse self.resolveMethod(obj.class_name, method_name) catch return error.RuntimeError;
         if (self.functions.get(full_name)) |func| {
             if (func.ref_params.len == 0) {
-                return self.callMethod(obj, method_name, args);
+                return self.callMethodAs(obj, method_name, registered, args);
             }
             const bind_count = @min(args.len, func.arity);
             var new_vars = self.acquireFrameVars();
@@ -21326,7 +21337,7 @@ pub const VM = struct {
             }
             return result;
         }
-        return self.callMethod(obj, method_name, args);
+        return self.callMethodAs(obj, method_name, registered, args);
     }
 
     pub fn callByNameRef(self: *VM, raw_name: []const u8, args: []Value) RuntimeError!Value {

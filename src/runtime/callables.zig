@@ -22,8 +22,10 @@ pub const Callee = union(enum) {
     closure: *PhpObject,
     // an object called through __invoke
     invoke: *PhpObject,
-    // an instance method, by the name it was asked for
-    method: struct { object: *PhpObject, name: []const u8 },
+    // an instance method, by the name it was asked for. registered is the
+    // method found in a class the callable names, which is called even when
+    // the object's class overrides it
+    method: struct { object: *PhpObject, name: []const u8, registered: ?[]const u8 = null },
     // a static method by its registered "Class::method", and the class
     // static:: names inside it
     static_method: struct { registered: []const u8, called_class: []const u8 },
@@ -159,7 +161,7 @@ fn resolveMethod(vm: *VM, site: *Site, method: []const u8, origin: ?[]const u8) 
     const callee: Callee = if (static_call)
         .{ .static_method = .{ .registered = m.registered, .called_class = if (site.object) |obj| obj.class_name else site.called orelse calling } }
     else
-        .{ .method = .{ .object = site.object.?, .name = m.name } };
+        .{ .method = .{ .object = site.object.?, .name = m.name, .registered = if (std.mem.eql(u8, calling, site.object.?.class_name)) null else m.registered } };
     if (m.visibility != .public and !vm.checkVisibility(m.class, m.visibility)) {
         return .{ .failure = .{ .inaccessible = .{ .visibility = m.visibility, .class = vm.declaredClassName(calling), .method = m.name, .scope = scope, .direct = callee } } };
     }
@@ -397,7 +399,7 @@ pub fn invoke(vm: *VM, callee: Callee, args: []const Value) RuntimeError!Value {
         .function => |name| return vm.callByName(name, args),
         .closure => |obj| return vm.callValueCallable(obj.get("__callable"), args),
         .invoke => |obj| return vm.callMethod(obj, "__invoke", args),
-        .method => |m| return vm.callMethod(m.object, m.name, args),
+        .method => |m| return vm.callMethodAs(m.object, m.name, m.registered, args),
         .static_method => |m| return vm.callByNameAs(m.registered, args, m.called_class),
         .magic => |m| {
             const packed_args = try vm.allocArray();
@@ -417,7 +419,7 @@ pub fn invokeRef(vm: *VM, callee: Callee, args: []Value) RuntimeError!Value {
     switch (callee) {
         .function => |name| return vm.callByNameRef(name, args),
         .invoke => |obj| return vm.callMethodRef(obj, "__invoke", args),
-        .method => |m| return vm.callMethodRef(m.object, m.name, args),
+        .method => |m| return vm.callMethodRefAs(m.object, m.name, m.registered, args),
         .static_method => |m| return vm.callByNameRefAs(m.registered, args, m.called_class),
         .closure, .magic => return invoke(vm, callee, args),
     }
