@@ -1641,16 +1641,17 @@ const Formatter = struct {
 
     fn formatClosure(self: *Formatter, node: Ast.Node) void {
         const is_arrow = self.ast.tokens[node.main_token].tag == .kw_fn;
-        if (is_arrow) {
-            self.write("fn(");
-        } else {
-            self.write("function(");
-        }
+        // rhs -> {body (bit 31 = generator, bit 30 = static, bit 29 = returns
+        // by reference), use_count, use_vars...}
+        const flags = self.ast.extra_data[node.data.rhs];
+        if (flags & (1 << 30) != 0) self.write("static ");
+        self.write(if (is_arrow) "fn" else "function");
+        if (flags & (1 << 29) != 0) self.write("&");
+        self.write("(");
         self.formatParamList(node.data.lhs);
         self.write(")");
 
-        // rhs -> {body (bit 31 = generator), use_count, use_vars...}
-        const body = self.ast.extra_data[node.data.rhs] & 0x7FFFFFFF;
+        const body = flags & 0x1FFFFFFF;
         const use_count = self.ast.extra_data[node.data.rhs + 1];
 
         if (!is_arrow and use_count != 0xFFFFFFFF and use_count > 0) {

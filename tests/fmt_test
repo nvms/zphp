@@ -162,6 +162,22 @@ content=$(cat "$WORKDIR/closure.php")
 check_contains "closure formatted" 'function($x)' "$content"
 check_contains "arrow function formatted" 'fn($x) => $x + 1' "$content"
 
+# test: static and by-reference closures keep their modifiers
+cat > "$WORKDIR/closure_modifiers.php" << 'EOFPHP'
+<?php
+$a=static function($x){return $x;};
+$b=static fn($x)=>$x;
+$c=function&()use($a){return $a;};
+$d=fn&($x)=>$x;
+EOFPHP
+
+"$ZPHP" fmt "$WORKDIR/closure_modifiers.php" 2>/dev/null
+content=$(cat "$WORKDIR/closure_modifiers.php")
+check_contains "static closure formatted" 'static function($x)' "$content"
+check_contains "static arrow function formatted" 'static fn($x) => $x' "$content"
+check_contains "by-reference closure formatted" 'function&() use ($a)' "$content"
+check_contains "by-reference arrow function formatted" 'fn&($x) => $x' "$content"
+
 # test: formatted code produces same output as original
 for f in "$SCRIPT_DIR/arithmetic.php" "$SCRIPT_DIR/arrays.php" "$SCRIPT_DIR/classes_basic.php" "$SCRIPT_DIR/closures.php" "$SCRIPT_DIR/if_else.php" "$SCRIPT_DIR/functions.php" "$SCRIPT_DIR/switch.php"; do
     if [ ! -f "$f" ]; then continue; fi
