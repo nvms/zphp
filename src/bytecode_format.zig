@@ -18,7 +18,7 @@ const MAGIC = "ZPHPC\x00";
 // v18 adds defer_prop_defaults; v19 gives interface, trait and enum
 // declarations their start line, end line and doc comment. v20 gives class
 // constants their own opcodes.
-pub const FORMAT_VERSION: u16 = 42;
+pub const FORMAT_VERSION: u16 = 43;
 
 // tag bytes for serialized values
 const TAG_NULL: u8 = 0;

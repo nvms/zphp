@@ -7,6 +7,7 @@ const platform = @import("../platform.zig");
 const php_version = @import("../php_version.zig");
 const class_names = @import("class_names.zig");
 const includes = @import("includes.zig");
+const php_types = @import("../pipeline/php_types.zig");
 pub const stack_limit = @import("stack_limit.zig");
 const Value = @import("value.zig").Value;
 const value_mod = @import("value.zig");
@@ -318,6 +319,8 @@ pub const ClassDef = struct {
     alias_of: ?[]const u8 = null,
     // its hidden initializer still has to install some instance defaults
     defaults_pending: bool = false,
+    // constants whose expression waits for first access hold `.undef`
+    lazy_constants: bool = false,
     is_abstract: bool = false,
     is_final: bool = false,
     is_readonly: bool = false,
@@ -863,6 +866,20 @@ pub const VM = struct {
     // classes whose constant expressions are being evaluated, innermost
     // last: php evaluates them in the class's scope
     initializer_scopes: std.ArrayListUnmanaged(InitializerScope) = .empty,
+    // class constants being evaluated by another constant's expression
+    // (php's IS_CONSTANT_VISITED), and how deep evaluation is nested
+    constants_visited: std.ArrayListUnmanaged([2][]const u8) = .empty,
+    constant_eval_depth: u32 = 0,
+    // trait constants waiting for the using class's own value
+    trait_constant_checks: std.ArrayListUnmanaged(struct { class: []const u8, name: []const u8, trait: []const u8, value: Value }) = .empty,
+    // while traits compose into a class, which trait first gave each
+    // constant it didn't declare itself
+    trait_constant_sources: std.StringHashMapUnmanaged([]const u8) = .{},
+    // classes marked lazy_constants
+    lazy_constant_classes: usize = 0,
+    // the class a class constant fetch names, as written: php's
+    // self-reference error quotes it
+    class_const_written: []const u8 = "",
     handler_room: Region(ExceptionHandler) = .{},
     handler_count: usize = 0,
     handler_floor: usize = 0,
@@ -3030,6 +3047,9 @@ pub const VM = struct {
         self.weak_references.deinit(self.allocator);
         self.held_exceptions.deinit(self.allocator);
         self.initializer_scopes.deinit(self.allocator);
+        self.constants_visited.deinit(self.allocator);
+        self.trait_constant_checks.deinit(self.allocator);
+        self.trait_constant_sources.deinit(self.allocator);
         self.cycle_candidates.deinit(self.allocator);
         self.cycle_array_candidates.deinit(self.allocator);
         self.cycle_work.deinit(self.allocator);
@@ -3207,6 +3227,11 @@ pub const VM = struct {
         self.weak_references.clearRetainingCapacity();
         self.held_exceptions.clearRetainingCapacity();
         self.initializer_scopes.clearRetainingCapacity();
+        self.constants_visited.clearRetainingCapacity();
+        self.trait_constant_checks.clearRetainingCapacity();
+        self.trait_constant_sources.clearRetainingCapacity();
+        self.constant_eval_depth = 0;
+        self.lazy_constant_classes = 0;
         for (self.shutdown_callbacks.items) |cb| self.allocator.free(cb.args);
         self.shutdown_callbacks.clearRetainingCapacity();
         self.cycle_candidates.clearRetainingCapacity();
@@ -4015,6 +4040,28 @@ pub const VM = struct {
                 .op_null => self.push(.null),
                 .op_true => self.push(.{ .bool = true }),
                 .op_false => self.push(.{ .bool = false }),
+                .defer_class_const => {
+                    const class_name = self.currentChunk().constants.items[self.readU16()].string.bytes();
+                    const const_name = self.currentChunk().constants.items[self.readU16()].string.bytes();
+                    if (self.classes.getPtr(class_name)) |cls| {
+                        if (!cls.constants.contains(const_name)) try cls.constant_order.append(self.allocator, const_name);
+                        if (try cls.constants.fetchPut(self.allocator, const_name, .undef)) |old| self.releaseValue(old.value);
+                        self.markLazyConstants(cls);
+                    }
+                    // php evaluates a constant to compare it with a trait's
+                    if (self.trait_constant_checks.items.len > 0) {
+                        for (self.trait_constant_checks.items) |check| {
+                            if (std.mem.eql(u8, check.class, class_name) and std.mem.eql(u8, check.name, const_name)) {
+                                const value = self.evaluateClassConstant(class_name, const_name) catch {
+                                    if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                    return error.RuntimeError;
+                                };
+                                try self.settleTraitConstantChecks(class_name, const_name, value);
+                                break;
+                            }
+                        }
+                    }
+                },
                 .enter_class_scope => {
                     const class = self.currentChunk().constants.items[self.readU16()].string.bytes();
                     try self.initializer_scopes.append(self.allocator, .{ .class = self.declaredClassName(class), .frame = self.frame_count - 1, .handlers = self.handler_count });
@@ -10966,7 +11013,9 @@ pub const VM = struct {
                 .get_class_const => {
                     const class_idx = self.readU16();
                     const const_idx = self.readU16();
-                    const class_name = self.resolveStaticClassName(self.currentChunk().constants.items[class_idx].string.bytes());
+                    const written_class = self.currentChunk().constants.items[class_idx].string.bytes();
+                    self.class_const_written = written_class;
+                    const class_name = self.resolveStaticClassName(written_class);
                     const const_name = self.currentChunk().constants.items[const_idx].string.bytes();
                     if (!std.mem.eql(u8, const_name, "class")) {
                         if (self.getClassConstant(class_name, const_name)) |val| {
@@ -10985,6 +11034,10 @@ pub const VM = struct {
                             if (!deprecated and visibility.level == .public) self.rememberClassConstant(class_name, val);
                             self.push(val);
                             continue;
+                        }
+                        // its expression failed to evaluate
+                        if (self.pending_exception != null) {
+                            if (try self.resumeRaised()) continue;
                         }
                     }
                     if (try self.pushClassConstant(class_name, const_name)) continue;
@@ -11026,6 +11079,7 @@ pub const VM = struct {
                         const old = try cls.constants.fetchPut(self.allocator, const_name, val);
                         if (old) |kv| self.releaseValue(kv.value);
                     } else self.releaseValue(val);
+                    if (self.trait_constant_checks.items.len > 0) try self.settleTraitConstantChecks(class_name, const_name, val);
                 },
 
                 .get_static_prop_dyn_name, .get_static_prop_dyn_name_quiet => {
@@ -11704,7 +11758,10 @@ pub const VM = struct {
         var parent: ?[]const u8 = null;
         {
             const cls = self.classes.getPtr(cn) orelse return null;
-            if (cls.constants.get(const_name)) |val| return .{ .found = self.enumCase(val), .parent = null };
+            if (cls.constants.get(const_name)) |val| {
+                if (val == .undef) return .{ .found = self.evaluateClassConstant(cn, const_name) catch null, .parent = null };
+                return .{ .found = self.enumCase(val), .parent = null };
+            }
             n = @min(cls.interfaces.items.len, ifaces.len);
             @memcpy(ifaces[0..n], cls.interfaces.items[0..n]);
             parent = cls.parent;
@@ -11723,7 +11780,12 @@ pub const VM = struct {
             self.push(.{ .string = Value.String.borrowed(class_name) });
             return false;
         }
-        if (self.getClassConstant(class_name, const_name)) |val| {
+        const found = self.getClassConstant(class_name, const_name);
+        if (found == null and self.pending_exception != null) {
+            if (self.dispatchPendingException(self.run_base_frame)) return true;
+            return error.RuntimeError;
+        }
+        if (found) |val| {
             const visibility = self.classConstantVisibility(class_name, const_name);
             if (visibility.denied) return self.refuseClassConstant(class_name, const_name, visibility.level);
             _ = try self.warnDeprecatedClassConstant(class_name, const_name);
@@ -12970,6 +13032,132 @@ pub const VM = struct {
             const fresh = try self.newRefCell();
             self.setCell(fresh, value);
             break :blk fresh;
+        };
+    }
+
+    // a class constant's expression evaluated on its first access, as php's
+    // zval_update_constant_ex does: the value is type checked and kept. a
+    // constant read again while another constant's expression evaluates it
+    // is php's self-reference error. on failure the error is pending and the
+    // constant stays unevaluated
+    pub fn evaluateClassConstant(self: *VM, class_name: []const u8, const_name: []const u8) RuntimeError!Value {
+        const declared = self.declaredClassName(class_name);
+        const written = if (self.class_const_written.len > 0) self.class_const_written else declared;
+        self.class_const_written = "";
+        const nested = self.constant_eval_depth > 0;
+        if (nested) {
+            for (self.constants_visited.items) |v| {
+                if (std.mem.eql(u8, v[0], declared) and std.mem.eql(u8, v[1], const_name)) {
+                    const msg = try std.fmt.allocPrint(self.allocator, "Cannot declare self-referencing constant {s}::{s}", .{ written, const_name });
+                    defer self.allocator.free(msg);
+                    try self.setPendingException("Error", msg);
+                    return error.RuntimeError;
+                }
+            }
+            try self.constants_visited.append(self.allocator, .{ declared, const_name });
+        }
+        defer if (nested) {
+            _ = self.constants_visited.pop();
+        };
+        self.constant_eval_depth += 1;
+        defer self.constant_eval_depth -= 1;
+        const name = try bytecode.constInitializerName(self.allocator, declared, const_name);
+        defer self.allocator.free(name);
+        const floor = self.handler_floor;
+        self.handler_floor = self.handler_count;
+        defer self.handler_floor = floor;
+        const evaluating = self.frame_count;
+        var value = self.callByName(name, &.{}) catch |err| {
+            // the expression belongs to the access, not a frame of its own
+            if (self.pending_exception) |exc| if (exc == .object) try self.stampThrowableBelow(exc.object, evaluating);
+            return err;
+        };
+        const cls = self.classes.getPtr(declared) orelse return value;
+        if (cls.constant_types.get(const_name)) |type_text| {
+            const t = php_types.parse(self.allocator, type_text, declared, cls.parent) catch return error.OutOfMemory;
+            defer t.deinit(self.allocator);
+            value = (try self.constantValueFits(value, t, declared)) orelse {
+                const shown = php_types.format(self.allocator, t) catch return error.OutOfMemory;
+                defer self.allocator.free(shown);
+                const given: []const u8 = switch (value) {
+                    .object => |o| o.class_name,
+                    .null => "null",
+                    .bool => "bool",
+                    .int => "int",
+                    .float => "float",
+                    .string => "string",
+                    .array => "array",
+                    else => "mixed",
+                };
+                const msg = try std.fmt.allocPrint(self.allocator, "Cannot assign {s} to class constant {s}::{s} of type {s}", .{ given, declared, const_name, shown });
+                defer self.allocator.free(msg);
+                try self.setPendingException("TypeError", msg);
+                return error.RuntimeError;
+            };
+        }
+        const kept = try self.copyDefault(value);
+        try cls.constants.put(self.allocator, const_name, kept);
+        return self.enumCase(kept);
+    }
+
+    // a class constant's value against its declared type, as php checks it:
+    // strictly, an int widening to float. null when it doesn't fit
+    fn constantValueFits(self: *VM, value: Value, t: php_types.Type, class_name: []const u8) RuntimeError!?Value {
+        const fits = switch (value) {
+            .null => t.mask & php_types.NULL != 0,
+            .bool => |b| t.mask & (if (b) php_types.TRUE else php_types.FALSE) != 0,
+            .int => |i| if (t.mask & php_types.LONG != 0) true else if (t.mask & php_types.DOUBLE != 0) return Value{ .float = @floatFromInt(i) } else false,
+            .float => t.mask & php_types.DOUBLE != 0,
+            .string => t.mask & php_types.STRING != 0,
+            .array => t.mask & php_types.ARRAY != 0,
+            .object => |o| blk: {
+                if (t.mask & php_types.OBJECT != 0) break :blk true;
+                // `static` on a constant is the class declaring it
+                if (t.mask & php_types.STATIC != 0 and self.isInstanceOf(o.class_name, class_name)) break :blk true;
+                if (t.iterable and self.isInstanceOf(o.class_name, "Traversable")) break :blk true;
+                for (t.names) |n| if (self.isInstanceOf(o.class_name, n)) break :blk true;
+                for (t.intersections) |group| {
+                    var all = true;
+                    for (group) |n| if (!self.isInstanceOf(o.class_name, n)) {
+                        all = false;
+                        break;
+                    };
+                    if (all) break :blk true;
+                }
+                break :blk false;
+            },
+            else => false,
+        };
+        return if (fits) value else null;
+    }
+
+    // a class whose constants (its own or a parent's) wait for evaluation:
+    // its first instantiation or static access evaluates them
+    fn markLazyConstants(self: *VM, cls: *ClassDef) void {
+        if (cls.lazy_constants) return;
+        cls.lazy_constants = true;
+        self.lazy_constant_classes += 1;
+        if (cls.slot_layout) |layout| layout.defaults_ready = false;
+    }
+
+    // php's zend_update_class_constants on a class's first use: every
+    // constant still waiting is evaluated
+    pub fn updateClassConstants(self: *VM, class_name: []const u8) RuntimeError!void {
+        const cls = self.classes.getPtr(class_name) orelse return;
+        if (!cls.lazy_constants) return;
+        if (cls.parent) |parent| try self.updateClassConstants(parent);
+        var i: usize = 0;
+        while (true) : (i += 1) {
+            const def = self.classes.getPtr(class_name) orelse return;
+            if (i >= def.constant_order.items.len) break;
+            const name = def.constant_order.items[i];
+            if (def.constants.get(name)) |v| if (v == .undef) {
+                _ = try self.evaluateClassConstant(class_name, name);
+            };
+        }
+        if (self.classes.getPtr(class_name)) |def| if (def.lazy_constants) {
+            def.lazy_constants = false;
+            self.lazy_constant_classes -= 1;
         };
     }
 
@@ -14590,6 +14778,7 @@ pub const VM = struct {
             }
         }
 
+        self.trait_constant_sources.clearRetainingCapacity();
         for (trait_names[0..trait_count]) |trait_name| {
             try self.applyTrait(&def, class_name, trait_name, alias_rules[0..alias_count], insteadof_rules[0..insteadof_count]);
             try def.used_traits.append(self.allocator, self.declaredClassName(trait_name));
@@ -14863,6 +15052,11 @@ pub const VM = struct {
         if (def.has_prop_hooks) self.any_prop_hooks = true;
         try self.classes.put(self.allocator, class_name, def);
         registered = true;
+        // a parent's constants still waiting are evaluated on this class's
+        // first use too
+        if (def.parent) |parent_name| if (self.classes.getPtr(parent_name)) |parent_def| if (parent_def.lazy_constants) {
+            if (self.classes.getPtr(class_name)) |own| self.markLazyConstants(own);
+        };
 
         // #[Override] enforcement - runs after class is registered so class
         // loading state stays consistent even if the error is caught
@@ -15375,7 +15569,12 @@ pub const VM = struct {
 
         if (self.trait_constants.get(trait_name)) |consts| {
             for (consts) |c| {
-                if (!def.constants.contains(c.name)) {
+                if (def.constants.contains(c.name)) {
+                    try self.checkTraitConstant(def, class_name, trait_name, c);
+                    continue;
+                }
+                try self.trait_constant_sources.put(self.allocator, c.name, trait_name);
+                {
                     try def.constant_order.append(self.allocator, c.name);
                     // each using class gets its own refcounted copy
                     try def.constants.put(self.allocator, c.name, try self.copyDefault(c.value));
@@ -15385,6 +15584,61 @@ pub const VM = struct {
                     if (c.flags & 0x10 != 0) try def.const_final.put(self.allocator, c.name, {});
                     if (c.type_str.len > 0) try def.constant_types.put(self.allocator, c.name, c.type_str);
                 }
+            }
+        }
+    }
+
+    // php's do_trait_constant_check: a trait constant the class (or an
+    // earlier trait) also has must agree in visibility, final, type and
+    // value. the class's own value is set after its declaration, so that
+    // comparison waits for it (`trait_constant_checks`)
+    fn checkTraitConstant(self: *VM, def: *ClassDef, class_name: []const u8, trait_name: []const u8, c: TraitStaticProp) RuntimeError!void {
+        const first = self.trait_constant_sources.get(c.name) orelse class_name;
+        const vis_mismatch = (c.flags & 0x03) != @intFromEnum(def.const_visibility.get(c.name) orelse .public);
+        const final_mismatch = (c.flags & 0x10 != 0) != def.const_final.contains(c.name);
+        const own_type = def.constant_types.get(c.name) orelse "";
+        const type_mismatch = !try self.sameConstantType(own_type, class_name, c.type_str, trait_name);
+        if (vis_mismatch or final_mismatch or type_mismatch) return self.traitConstantConflict(def, class_name, trait_name, first, c.name);
+        if (first.ptr == class_name.ptr) {
+            try self.trait_constant_checks.append(self.allocator, .{ .class = class_name, .name = c.name, .trait = trait_name, .value = c.value });
+        } else if (!Value.identical(def.constants.get(c.name) orelse .null, c.value)) {
+            return self.traitConstantConflict(def, class_name, trait_name, first, c.name);
+        }
+    }
+
+    fn sameConstantType(self: *VM, a: []const u8, a_scope: []const u8, b: []const u8, b_scope: []const u8) RuntimeError!bool {
+        if (a.len == 0 or b.len == 0) return a.len == b.len;
+        const ta = php_types.parse(self.allocator, a, a_scope, null) catch return error.OutOfMemory;
+        defer ta.deinit(self.allocator);
+        const tb = php_types.parse(self.allocator, b, b_scope, null) catch return error.OutOfMemory;
+        defer tb.deinit(self.allocator);
+        const fa = php_types.format(self.allocator, ta) catch return error.OutOfMemory;
+        defer self.allocator.free(fa);
+        const fb = php_types.format(self.allocator, tb) catch return error.OutOfMemory;
+        defer self.allocator.free(fb);
+        return std.ascii.eqlIgnoreCase(fa, fb);
+    }
+
+    fn traitConstantConflict(self: *VM, def: *const ClassDef, class_name: []const u8, trait_name: []const u8, first: []const u8, name: []const u8) RuntimeError {
+        const msg = try std.fmt.allocPrint(self.allocator, "{s} and {s} define the same constant ({s}) in the composition of {s}. However, the definition differs and is considered incompatible. Class was composed", .{ first, trait_name, name, class_name });
+        defer self.allocator.free(msg);
+        return self.raiseCompileFatal(msg, .{ .file = def.file_path, .line = def.start_line });
+    }
+
+    // a class constant's value is set: what a trait it uses declared for the
+    // same name must be identical
+    fn settleTraitConstantChecks(self: *VM, class_name: []const u8, const_name: []const u8, value: Value) RuntimeError!void {
+        var i: usize = 0;
+        while (i < self.trait_constant_checks.items.len) {
+            const check = self.trait_constant_checks.items[i];
+            if (!std.mem.eql(u8, check.class, class_name) or !std.mem.eql(u8, check.name, const_name)) {
+                i += 1;
+                continue;
+            }
+            _ = self.trait_constant_checks.orderedRemove(i);
+            if (!Value.identical(value, check.value)) {
+                const def = self.classes.getPtr(class_name) orelse return;
+                return self.traitConstantConflict(def, class_name, check.trait, class_name, const_name);
             }
         }
     }
@@ -18452,6 +18706,11 @@ pub const VM = struct {
     }
 
     fn parentResolvingClass(self: *VM) ?[]const u8 {
+        // a class's constant expression, evaluated in the declaring frame
+        if (self.initializer_scopes.items.len > 0) {
+            const scope = self.initializer_scopes.items[self.initializer_scopes.items.len - 1];
+            if (scope.frame + 1 == self.frame_count) return scope.class;
+        }
         // a closure's parent:: is its declaring class's parent, wherever it
         // is called from
         if (self.frame_count > 0) {
@@ -19074,6 +19333,8 @@ pub const VM = struct {
 
     // returns whether the class is throwable, so the caller stamps it once
     fn initPropertyDefaults(self: *VM, obj: *PhpObject, class_name: []const u8) RuntimeError!bool {
+        // a class without properties has no layout to mark
+        if (self.lazy_constant_classes > 0) try self.updateClassConstants(class_name);
         const cls = self.classes.get(class_name) orelse return false;
         if (cls.slot_layout) |layout| {
             if (!layout.defaults_ready) try self.resolveClassDefaults(class_name);
@@ -19124,6 +19385,7 @@ pub const VM = struct {
     // initializers root first, then copies the resolved inherited defaults
     // into this class's layout
     pub fn resolveClassDefaults(self: *VM, class_name: []const u8) RuntimeError!void {
+        try self.updateClassConstants(class_name);
         const cls = self.classes.getPtr(class_name) orelse return;
         const layout = cls.slot_layout;
         if (layout) |l| {
@@ -19268,7 +19530,7 @@ pub const VM = struct {
     // a static property read or write uses the class, which resolves its
     // deferred defaults first
     pub inline fn resolveStaticDefaults(self: *VM, class_name: []const u8) RuntimeError!void {
-        if (self.ic.?.pending_defaults == 0) return;
+        if (self.ic.?.pending_defaults == 0 and self.lazy_constant_classes == 0) return;
         try self.resolveClassDefaults(class_name);
     }
 

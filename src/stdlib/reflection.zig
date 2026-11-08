@@ -1986,7 +1986,9 @@ fn appendInterfaceConstants(ctx: *NativeContext, name: []const u8, out: *std.Arr
 }
 
 fn appendConstant(ctx: *NativeContext, cls: ClassDef, declaring: []const u8, cname: []const u8, is_own: bool, out: *std.ArrayListUnmanaged(VisibleConstant)) RuntimeError!void {
-    const value = ctx.vm.enumCase(cls.constants.get(cname) orelse return);
+    const stored = cls.constants.get(cname) orelse return;
+    // an interface's constant still waiting for its expression
+    const value = if (stored == .undef) try ctx.vm.evaluateClassConstant(declaring, cname) else ctx.vm.enumCase(stored);
     if (!is_own and (cls.const_visibility.get(cname) orelse .public) == .private) return;
     for (out.items) |seen| if (std.mem.eql(u8, seen.name, cname)) return;
     try out.append(ctx.allocator, .{ .declaring = declaring, .name = cname, .value = value });
@@ -1995,6 +1997,8 @@ fn appendConstant(ctx: *NativeContext, cls: ClassDef, declaring: []const u8, cna
 fn rcGetConstants(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
+    // php evaluates the class's constant expressions first
+    try ctx.vm.updateClassConstants(class_name);
     var constants: std.ArrayListUnmanaged(VisibleConstant) = .empty;
     defer constants.deinit(ctx.allocator);
     try visibleConstants(ctx, class_name, &constants);
@@ -2006,6 +2010,8 @@ fn rcGetConstants(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
 fn rcGetReflectionConstants(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
+    // php evaluates the class's constant expressions first
+    try ctx.vm.updateClassConstants(class_name);
     var constants: std.ArrayListUnmanaged(VisibleConstant) = .empty;
     defer constants.deinit(ctx.allocator);
     try visibleConstants(ctx, class_name, &constants);
@@ -2017,6 +2023,8 @@ fn rcGetReflectionConstants(ctx: *NativeContext, _: []const Value) RuntimeError!
 fn rcGetReflectionConstant(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    // php evaluates the class's constant expressions first
+    try ctx.vm.updateClassConstants(class_name);
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const target = args[0].string.bytes();
 
@@ -2051,6 +2059,8 @@ fn rcHasConstant(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
 fn rcGetConstant(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    // php evaluates the class's constant expressions first
+    try ctx.vm.updateClassConstants(class_name);
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const target = args[0].string.bytes();
 
@@ -2128,7 +2138,10 @@ fn rccGetValue(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult 
     var current: ?[]const u8 = class_name;
     while (current) |name| {
         const cls = ctx.vm.classes.get(name) orelse break;
-        if (cls.constants.get(const_name)) |val| return NativeResult.share(ctx.vm.enumCase(val));
+        if (cls.constants.get(const_name)) |val| {
+            if (val == .undef) return NativeResult.share(try ctx.vm.evaluateClassConstant(name, const_name));
+            return NativeResult.share(ctx.vm.enumCase(val));
+        }
         current = cls.parent;
     }
     return NativeResult.scalar(.null);

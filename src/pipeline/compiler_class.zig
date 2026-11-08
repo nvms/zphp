@@ -870,6 +870,9 @@ fn defaultFits(kind: DefaultKind, t: php_types.Type) struct { bool, []const u8 }
 // php's zend_compile_class_const_decl checks: a private constant can't be
 // final, and a typed constant's literal value must fit its type
 fn checkConstDecls(self: *Compiler, class_name: []const u8, members: []const u32) Error!void {
+    const outer_class = self.current_class;
+    self.current_class = class_name;
+    defer self.current_class = outer_class;
     for (members) |m_idx| {
         const m = self.ast.nodes[m_idx];
         if (m.tag != .const_decl) continue;
@@ -879,10 +882,15 @@ fn checkConstDecls(self: *Compiler, class_name: []const u8, members: []const u32
         }
         const type_extra = m.data.rhs >> 16;
         if (type_extra == 0) continue;
-        const kind = foldedDefault(self, m.data.lhs) orelse continue;
         const text = try buildTypeString(self, self.ast.extra_data[type_extra - 1], self.ast.extra_data[type_extra]);
         const t = php_types.parse(self.allocator, text, class_name, null) catch return error.OutOfMemory;
         defer t.deinit(self.allocator);
+        if (t.mask & (php_types.CALLABLE | php_types.VOID | php_types.NEVER) != 0) {
+            const shown = php_types.format(self.allocator, t) catch return error.OutOfMemory;
+            defer self.allocator.free(shown);
+            return self.failFmt(m.main_token, "Class constant {s}::{s} cannot have type {s}", .{ class_name, name, shown });
+        }
+        const kind = foldedDefault(self, m.data.lhs) orelse continue;
         const accepted, const kind_name = defaultFits(kind, t);
         if (accepted) continue;
         const type_text = php_types.format(self.allocator, t) catch return error.OutOfMemory;
@@ -2425,15 +2433,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitU16(cname_idx);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
-        if (member.tag == .const_decl) {
-            try self.compileNode(member.data.lhs);
-            const const_name = self.ast.tokenSlice(member.main_token);
-            const cprop_idx = try self.addConstant(.{ .string = Value.String.borrowed(const_name) });
-            try self.emitOp(.set_class_const);
-            try self.emitU16(cname_idx);
-            try self.emitU16(cprop_idx);
-            try self.emitOp(.pop);
-        }
+        if (member.tag == .const_decl) try emitClassConstant(self, class_name, cname_idx, member);
     }
     // set static-property defaults after the constants block so a default
     // expression like `public static $x = self::CONST` sees the class and
@@ -2932,15 +2932,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitU16(name_idx);
     for (members) |m| {
         const member = self.ast.nodes[m];
-        if (member.tag == .const_decl) {
-            try self.compileNode(member.data.lhs);
-            const cname = self.ast.tokenSlice(member.main_token);
-            const cprop_idx = try self.addConstant(.{ .string = Value.String.borrowed(cname) });
-            try self.emitOp(.set_class_const);
-            try self.emitU16(name_idx);
-            try self.emitU16(cprop_idx);
-            try self.emitOp(.pop);
-        }
+        if (member.tag == .const_decl) try emitClassConstant(self, iface_name, name_idx, member);
     }
     try self.emitOp(.leave_class_scope);
 
@@ -3161,6 +3153,9 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
 
 pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
     const enum_name = self.declaredName(self.ast.tokenSlice(node.main_token));
+    const outer_class = self.current_class;
+    self.current_class = enum_name;
+    defer self.current_class = outer_class;
     const members = self.ast.extraSlice(node.data.lhs);
 
     const rhs_base = node.data.rhs;
@@ -3340,22 +3335,11 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     const cname_idx = try self.addConstant(.{ .string = Value.String.borrowed(enum_name) });
-    const prev_class = self.current_class;
-    self.current_class = enum_name;
-    defer self.current_class = prev_class;
     try self.emitOp(.enter_class_scope);
     try self.emitU16(cname_idx);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
-        if (member.tag == .const_decl) {
-            try self.compileNode(member.data.lhs);
-            const const_name = self.ast.tokenSlice(member.main_token);
-            const cprop_idx = try self.addConstant(.{ .string = Value.String.borrowed(const_name) });
-            try self.emitOp(.set_class_const);
-            try self.emitU16(cname_idx);
-            try self.emitU16(cprop_idx);
-            try self.emitOp(.pop);
-        }
+        if (member.tag == .const_decl) try emitClassConstant(self, enum_name, cname_idx, member);
     }
     try self.emitOp(.leave_class_scope);
 }
@@ -3636,6 +3620,96 @@ fn checkMagicMethod(self: *Compiler, class_name: []const u8, member: Ast.Node, m
 fn isDeferredDefault(ast: *const Ast, member: Ast.Node) bool {
     if (member.tag != .class_property and member.tag != .static_class_property) return false;
     return member.data.lhs != 0 and !defaultExprIsLiteral(ast, member.data.lhs);
+}
+
+// a class constant's value: a constant expression folded while compiling
+// is set now; any other waits for the constant's first access, as php
+// evaluates it, through its own initializer function
+fn emitClassConstant(self: *Compiler, class_name: []const u8, class_idx: u16, member: Ast.Node) Error!void {
+    const const_name = self.ast.tokenSlice(member.main_token);
+    const cprop_idx = try self.addConstant(.{ .string = Value.String.borrowed(const_name) });
+    if (foldsAtCompileTime(self.ast, member.data.lhs)) {
+        try self.compileNode(member.data.lhs);
+        // an int for a constant typed float without int is a float, as php
+        // converts it while compiling
+        const type_extra = member.data.rhs >> 16;
+        if (type_extra != 0 and foldedDefault(self, member.data.lhs) == .int) {
+            const text = try buildTypeString(self, self.ast.extra_data[type_extra - 1], self.ast.extra_data[type_extra]);
+            const t = php_types.parse(self.allocator, text, class_name, null) catch return error.OutOfMemory;
+            defer t.deinit(self.allocator);
+            if (t.mask & php_types.DOUBLE != 0 and t.mask & php_types.LONG == 0) try self.emitOp(.cast_float);
+        }
+        try self.emitOp(.set_class_const);
+        try self.emitU16(class_idx);
+        try self.emitU16(cprop_idx);
+        try self.emitOp(.pop);
+        return;
+    }
+    try compileConstInitializer(self, class_name, member);
+    try self.emitOp(.defer_class_const);
+    try self.emitU16(class_idx);
+    try self.emitU16(cprop_idx);
+}
+
+fn compileConstInitializer(self: *Compiler, class_name: []const u8, member: Ast.Node) Error!void {
+    const name = try @import("bytecode.zig").constInitializerName(self.allocator, class_name, self.ast.tokenSlice(member.main_token));
+    try self.string_allocs.append(self.allocator, name);
+    var sub = Compiler{
+        .ast = self.ast,
+        .diagnostic = self.diagnostic,
+        .chunk = .{},
+        .functions = .empty,
+        .string_allocs = .empty,
+        .allocator = self.allocator,
+        .scope_depth = self.scope_depth + 1,
+        .loop_start = null,
+        .break_jumps = .empty,
+        .continue_jumps = .empty,
+        .closure_count = self.closure_count,
+        .cond_fn_count = self.cond_fn_count,
+        .hoistable = false,
+        .file_path = self.file_path,
+        .file_dir = self.file_dir,
+        .namespace = self.namespace,
+        .use_aliases = self.use_aliases,
+        .use_fn_aliases = self.use_fn_aliases,
+        .use_const_aliases = self.use_const_aliases,
+        .current_class = class_name,
+        .current_parent = self.current_parent,
+        .current_function = self.current_function,
+        .in_trait = self.in_trait,
+        .relative_const_classes = true,
+    };
+    defer sub.deinitScratch();
+    errdefer sub.discardOutput();
+    const cname_idx = try sub.addConstant(.{ .string = Value.String.borrowed(class_name) });
+    try sub.emitOp(.enter_class_scope);
+    try sub.emitU16(cname_idx);
+    try sub.compileNode(member.data.lhs);
+    try sub.emitOp(.leave_class_scope);
+    try sub.emitOp(.return_val);
+    self.closure_count = sub.closure_count;
+    self.cond_fn_count = sub.cond_fn_count;
+    try self.functions.ensureUnusedCapacity(self.allocator, 1);
+    const slot_names = try sub.buildSlotNames();
+    const local_count = sub.next_slot;
+    self.functions.appendAssumeCapacity(.{
+        .name = name,
+        .arity = 0,
+        .required_params = 0,
+        .is_static = true,
+        .params = &.{},
+        .defaults = &.{},
+        .ref_params = &.{},
+        .chunk = sub.takeChunk(),
+        .static_vars = try sub.takeStaticVars(),
+        .local_count = local_count,
+        .slot_names = slot_names,
+        .file_path = self.file_path,
+        .start_line = lineForToken(self, member.main_token),
+        .end_line = lineForToken(self, member.main_token),
+    });
+    try self.adopt(&sub);
 }
 
 fn compileDeferredPropDefaults(self: *Compiler, class_name: []const u8, members: []const u32) Error!bool {

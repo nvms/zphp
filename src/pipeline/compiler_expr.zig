@@ -1876,9 +1876,11 @@ fn compileStaticPropRead(self: *Compiler, node: Ast.Node, quiet: bool) Error!voi
         return;
     }
 
-    const class_name = try resolveNodeClassName(self, class_node);
     const raw = self.ast.tokenSlice(node.main_token);
     const is_static_prop = raw.len > 0 and raw[0] == '$';
+    const written_class = if (class_node.tag == .identifier) self.ast.tokenSlice(class_node.main_token) else "";
+    const keep_written = self.relative_const_classes and !is_static_prop and (std.ascii.eqlIgnoreCase(written_class, "self") or std.ascii.eqlIgnoreCase(written_class, "parent"));
+    const class_name = if (keep_written) written_class else try resolveNodeClassName(self, class_node);
     const prop_name = if (is_static_prop) raw[1..] else raw;
     const class_idx = try self.addConstant(.{ .string = Value.String.borrowed(class_name) });
     const prop_idx = try self.addConstant(.{ .string = Value.String.borrowed(prop_name) });

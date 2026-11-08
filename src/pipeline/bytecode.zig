@@ -421,6 +421,9 @@ pub const OpCode = enum(u8) {
     // container is php's error (u8: 0 an assignment operator, 1 an increment
     // or decrement)
     check_rw_container,
+    // u16 class, u16 constant: the constant's expression waits for its first
+    // access (its initializer function evaluates it)
+    defer_class_const,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -504,6 +507,7 @@ pub const OpCode = enum(u8) {
             .make_var_static_prop_ref => 7,
             .arg_guard_static_prop => 8,
             .check_rw_container => 2,
+            .defer_class_const => 5,
             .static_call => 6,
             .less_local_local_jif => 7,
             .require, .call_indirect, .call_indirect_spread, .method_call_dynamic, .static_call_dyn_both, .bury => 2,
@@ -697,6 +701,12 @@ pub const DeferredExpr = struct {
 pub const DEFERRED_EXPR_PREFIX = "\x00DX\x00";
 
 // the hidden function holding a class's deferred property defaults
+// the hidden function that evaluates a class constant's expression on first
+// access
+pub fn constInitializerName(allocator: std.mem.Allocator, class_name: []const u8, const_name: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "\x00const\x00{s}::{s}", .{ class_name, const_name });
+}
+
 pub fn propDefaultsInitializerName(allocator: std.mem.Allocator, class_name: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "\x00propdefaults\x00{s}", .{class_name});
 }
