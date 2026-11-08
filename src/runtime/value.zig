@@ -1462,6 +1462,8 @@ pub const Value = union(enum) {
     pub fn modulo(a: Value, b: Value) Value {
         const bi = toInt(b);
         if (bi == 0) return .{ .float = std.math.nan(f64) };
+        // php answers 0 for any % -1 instead of trapping on PHP_INT_MIN % -1
+        if (bi == -1) return .{ .int = 0 };
         return .{ .int = @rem(toInt(a), bi) };
     }
 

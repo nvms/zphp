@@ -1176,7 +1176,7 @@ pub const Compiler = struct {
                         .star => Value{ .int = lhs.int *% rhs.int },
                         .lt_lt => if (rhs.int >= 0 and rhs.int < 64) Value{ .int = lhs.int << @intCast(rhs.int) } else Value.null,
                         .gt_gt => if (rhs.int >= 0 and rhs.int < 64) Value{ .int = lhs.int >> @intCast(rhs.int) } else Value.null,
-                        .percent => if (rhs.int != 0) Value{ .int = @rem(lhs.int, rhs.int) } else Value.null,
+                        .percent => if (rhs.int == -1) Value{ .int = 0 } else if (rhs.int != 0) Value{ .int = @rem(lhs.int, rhs.int) } else Value.null,
                         .star_star => blk2: {
                             if (rhs.int < 0) break :blk2 Value.null;
                             var acc: i64 = 1;
