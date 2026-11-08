@@ -2163,7 +2163,8 @@ const Parser = struct {
                         };
                     }
                     var alias_tok: u32 = 0;
-                    if (self.peek() == .identifier) {
+                    // an alias may be any name, a keyword too
+                    if (self.peek() == .identifier or isSemiReserved(self.peek())) {
                         alias_tok = self.advance();
                     } else if (vis_seen) {
                         alias_tok = method_tok;
