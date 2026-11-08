@@ -1555,7 +1555,16 @@ fn compactValue(ctx: *NativeContext, arg: Value, arr: *PhpArray, frame: anytype)
             try ctx.vm.emitWarning(w);
         }
     } else if (arg == .array) {
-        for (arg.array.entries.items) |entry| try compactValue(ctx, entry.value, arr, frame);
+        // an array of names that contains itself is php's "Recursion detected"
+        const names = arg.array;
+        const Recursion = @import("../runtime/value.zig").Recursion;
+        if (names.recursion & Recursion.gc != 0) {
+            try ctx.vm.setPendingException("Error", "Recursion detected");
+            return error.RuntimeError;
+        }
+        names.recursion |= Recursion.gc;
+        defer names.recursion &= ~Recursion.gc;
+        for (names.entries.items) |entry| try compactValue(ctx, entry.value, arr, frame);
     }
 }
 
@@ -2002,6 +2011,14 @@ fn mergeRecursiveInto(ctx: *NativeContext, dest: *PhpArray, src: *PhpArray) Runt
                     continue;
                 }
                 const existing = dest.get(entry.key);
+                // the array being merged into is protected while its merge
+                // runs: meeting it again is php's "Recursion detected"
+                const Recursion = @import("../runtime/value.zig").Recursion;
+                const protected: ?*PhpArray = if (existing == .array) existing.array else null;
+                if (protected) |arr| if (arr.recursion & Recursion.gc != 0) {
+                    try ctx.vm.setPendingException("Error", "Recursion detected");
+                    return error.RuntimeError;
+                };
                 const target = try ctx.vm.allocArray();
                 switch (existing) {
                     .array => |arr| for (arr.entries.items) |e| try target.set(ctx.allocator, e.key, if (e.ref) |ref| ref.* else e.value),
@@ -2014,6 +2031,10 @@ fn mergeRecursiveInto(ctx: *NativeContext, dest: *PhpArray, src: *PhpArray) Runt
                 try ctx.vm.arraySetOwned(dest, entry.key, .{ .array = target });
                 const incoming = if (value == .object) try ctx.vm.castToArray(value) else value;
                 if (incoming == .array) {
+                    if (protected) |arr| arr.recursion |= Recursion.gc;
+                    defer if (protected) |arr| {
+                        arr.recursion &= ~Recursion.gc;
+                    };
                     try mergeRecursiveInto(ctx, target, incoming.array);
                 } else if (!try target.appendNew(ctx.allocator, incoming)) {
                     _ = try nextElementOccupied(ctx);

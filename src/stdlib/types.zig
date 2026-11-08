@@ -251,11 +251,20 @@ fn native_get_defined_constants(ctx: *NativeContext, args: []const Value) Runtim
     return NativeResult.borrowed(.{ .array = flat });
 }
 
-fn countRecursive(a: *const PhpArray) i64 {
+// php's php_count_recursive: an array met again inside its own count warns
+// and counts as nothing
+fn countRecursive(ctx: *NativeContext, a: *PhpArray) RuntimeError!i64 {
+    const Recursion = @import("../runtime/value.zig").Recursion;
+    if (a.recursion & Recursion.gc != 0) {
+        try ctx.vm.emitWarning("count(): Recursion detected");
+        return 0;
+    }
+    a.recursion |= Recursion.gc;
+    defer a.recursion &= ~Recursion.gc;
     var total: i64 = a.length();
     for (a.entries.items) |entry| {
         if (entry.value == .array) {
-            total += countRecursive(entry.value.array);
+            total += try countRecursive(ctx, entry.value.array);
         }
     }
     return total;
@@ -265,7 +274,7 @@ fn count(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(.{ .int = 0 });
     const recursive = args.len >= 2 and args[1] == .int and args[1].int == 1;
     return switch (args[0]) {
-        .array => |a| NativeResult.scalar(.{ .int = if (recursive) countRecursive(a) else a.length() }),
+        .array => |a| NativeResult.scalar(.{ .int = if (recursive) try countRecursive(ctx, a) else a.length() }),
         .object => |obj| {
             if (ctx.vm.hasMethod(obj.class_name, "count")) {
                 return NativeResult.share(try ctx.vm.callMethod(obj, "count", &.{}));
