@@ -2123,6 +2123,7 @@ fn latin1NamedEntity(cp: u21) ?[]const u8 {
 fn native_get_html_translation_table(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const table_kind: i64 = if (args.len >= 1) Value.toInt(args[0]) else 0;
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 3;
+    _ = try htmlCharset(ctx, "get_html_translation_table", args, 2);
     const escape_double = (flags & 2) != 0;
     const escape_single = (flags & 1) != 0;
 
@@ -2167,9 +2168,9 @@ fn native_htmlentities(ctx: *NativeContext, args: []const Value) RuntimeError!Na
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else ent_quotes | ent_substitute;
     const escape_double = (flags & 2) != 0;
     const escape_single = (flags & 1) != 0;
-    const charset: []const u8 = if (args.len >= 3 and args[2] == .string) args[2].string.bytes() else "";
-    const utf8 = charset.len == 0 or isUtf8Encoding(charset);
-    const latin1 = !utf8 and isLatin1Encoding(charset);
+    const charset = try htmlCharset(ctx, "htmlentities", args, 2);
+    const utf8 = charset == .utf_8;
+    const latin1 = charset == .iso_8859_1;
 
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
@@ -2219,12 +2220,129 @@ fn native_htmlentities(ctx: *NativeContext, args: []const Value) RuntimeError!Na
     return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
 }
 
+// php's html charsets (html_tables.h charset_map), matched case-insensitively
+const HtmlCharset = enum { utf_8, iso_8859_1, iso_8859_15, cp1252, big5, gb2312, big5hkscs, sjis, eucjp, koi8r, cp1251, iso_8859_5, cp866, macroman };
+
+const html_charset_names = [_]struct { []const u8, HtmlCharset }{
+    .{ "ISO-8859-1", .iso_8859_1 },  .{ "ISO8859-1", .iso_8859_1 },  .{ "ISO-8859-15", .iso_8859_15 },
+    .{ "ISO8859-15", .iso_8859_15 }, .{ "utf-8", .utf_8 },           .{ "cp1252", .cp1252 },
+    .{ "Windows-1252", .cp1252 },    .{ "1252", .cp1252 },           .{ "BIG5", .big5 },
+    .{ "950", .big5 },               .{ "GB2312", .gb2312 },         .{ "936", .gb2312 },
+    .{ "BIG5-HKSCS", .big5hkscs },   .{ "Shift_JIS", .sjis },        .{ "SJIS", .sjis },
+    .{ "932", .sjis },               .{ "SJIS-win", .sjis },         .{ "CP932", .sjis },
+    .{ "EUCJP", .eucjp },            .{ "EUC-JP", .eucjp },          .{ "eucJP-win", .eucjp },
+    .{ "KOI8-R", .koi8r },           .{ "koi8-ru", .koi8r },         .{ "koi8r", .koi8r },
+    .{ "cp1251", .cp1251 },          .{ "Windows-1251", .cp1251 },   .{ "win-1251", .cp1251 },
+    .{ "iso8859-5", .iso_8859_5 },   .{ "iso-8859-5", .iso_8859_5 }, .{ "cp866", .cp866 },
+    .{ "866", .cp866 },              .{ "ibm866", .cp866 },          .{ "MacRoman", .macroman },
+};
+
+// the charset an html function's encoding argument names (determine_charset):
+// UTF-8 when it is null or empty, and with php's warning for a name it lacks
+fn htmlCharset(ctx: *NativeContext, func: []const u8, args: []const Value, index: usize) RuntimeError!HtmlCharset {
+    if (index >= args.len or args[index] == .null) return .utf_8;
+    const given = try coerceToString(ctx, args[index]);
+    // php reads the name as a C string
+    const hint = given[0 .. std.mem.indexOfScalar(u8, given, 0) orelse given.len];
+    if (hint.len == 0) return .utf_8;
+    for (html_charset_names) |entry| {
+        if (std.ascii.eqlIgnoreCase(hint, entry[0])) return entry[1];
+    }
+    const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Charset \"{s}\" is not supported, assuming UTF-8", .{ func, hint });
+    defer ctx.allocator.free(msg);
+    try ctx.vm.emitWarning(msg);
+    return .utf_8;
+}
+
+// one character of a multibyte charset other than UTF-8 as php's
+// get_next_char reads it: an ill-formed sequence is skipped by the length
+// php gives it
+fn htmlMultibyteStep(charset: HtmlCharset, s: []const u8, i: usize) Utf8Step {
+    const avail = s.len - i;
+    const c = s[i];
+    const ok = struct {
+        fn f(len: usize) Utf8Step {
+            return .{ .len = len, .valid = true };
+        }
+    }.f;
+    const bad = struct {
+        fn f(len: usize) Utf8Step {
+            return .{ .len = len, .valid = false };
+        }
+    }.f;
+    switch (charset) {
+        .big5, .big5hkscs => {
+            if (c < 0x81 or c > 0xFE) return ok(1);
+            if (avail < 2) return bad(1);
+            const n = s[i + 1];
+            if ((n >= 0x40 and n <= 0x7E) or (n >= 0xA1 and n <= 0xFE)) return ok(2);
+            if (charset == .big5hkscs and (n == 0x80 or n == 0xFF)) return bad(2);
+            return bad(1);
+        },
+        .gb2312 => {
+            const lead = struct {
+                fn f(b: u8) bool {
+                    return b != 0x8E and b != 0x8F and b != 0xA0 and b != 0xFF;
+                }
+            }.f;
+            if (c >= 0xA1 and c <= 0xFE) {
+                if (avail < 2) return bad(1);
+                const n = s[i + 1];
+                if (n >= 0xA1 and n <= 0xFE) return ok(2);
+                return bad(if (lead(n)) 1 else 2);
+            }
+            return if (lead(c)) ok(1) else bad(1);
+        },
+        .sjis => {
+            if ((c >= 0x81 and c <= 0x9F) or (c >= 0xE0 and c <= 0xFC)) {
+                if (avail < 2) return bad(1);
+                const n = s[i + 1];
+                if (n >= 0x40 and n != 0x7F and n < 0xFD) return ok(2);
+                return bad(if (n != 0x80 and n != 0xA0 and n < 0xFD) 1 else 2);
+            }
+            return if (c < 0x80 or (c >= 0xA1 and c <= 0xDF)) ok(1) else bad(1);
+        },
+        .eucjp => {
+            const edge = struct {
+                fn f(b: u8) bool {
+                    return b == 0xA0 or b == 0xFF;
+                }
+            }.f;
+            if ((c >= 0xA1 and c <= 0xFE) or c == 0x8E) {
+                if (avail < 2) return bad(1);
+                const n = s[i + 1];
+                const hi: u8 = if (c == 0x8E) 0xDF else 0xFE;
+                if (n >= 0xA1 and n <= hi) return ok(2);
+                return bad(if (edge(n)) 2 else 1);
+            }
+            if (c == 0x8F) {
+                const in = struct {
+                    fn f(b: u8) bool {
+                        return b >= 0xA1 and b <= 0xFE;
+                    }
+                }.f;
+                if (avail >= 3 and in(s[i + 1]) and in(s[i + 2])) return ok(3);
+                if (avail < 2 or !edge(s[i + 1])) return bad(1);
+                if (avail < 3 or !edge(s[i + 2])) return bad(2);
+                return bad(3);
+            }
+            return if (edge(c)) bad(1) else ok(1);
+        },
+        else => return ok(1),
+    }
+}
+
 fn native_htmlspecialchars(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.literal("");
     if (args[0] == .null) return NativeResult.literal("");
     const s = try coerceToString(ctx, args[0]);
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else ent_quotes | ent_substitute;
-    const utf8 = args.len < 3 or args[2] == .null or isUtf8Encoding(args[2].string.bytes()) or args[2].string.len == 0;
+    const charset = try htmlCharset(ctx, "htmlspecialchars", args, 2);
+    const utf8 = charset == .utf_8;
+    const multibyte = switch (charset) {
+        .big5, .big5hkscs, .gb2312, .sjis, .eucjp => true,
+        else => false,
+    };
     const escape_double = (flags & 2) != 0;
     const escape_single = (flags & 1) != 0;
     // PHP outputs &apos; for single quotes when ENT_HTML5 (or XHTML/XML1) is set
@@ -2259,6 +2377,16 @@ fn native_htmlspecialchars(ctx: *NativeContext, args: []const Value) RuntimeErro
                     try buf.appendSlice(ctx.allocator, "\xEF\xBF\xBD");
                 } else if ((flags & ent_ignore) == 0) {
                     // ill-formed input without ENT_SUBSTITUTE or ENT_IGNORE
+                    return NativeResult.literal("");
+                }
+                i += step.len - 1;
+            } else if (multibyte) {
+                const step = htmlMultibyteStep(charset, s, i);
+                if (step.valid) {
+                    try buf.appendSlice(ctx.allocator, s[i .. i + step.len]);
+                } else if ((flags & ent_substitute) != 0) {
+                    try buf.appendSlice(ctx.allocator, "&#xFFFD;");
+                } else if ((flags & ent_ignore) == 0) {
                     return NativeResult.literal("");
                 }
                 i += step.len - 1;
@@ -2449,6 +2577,7 @@ fn native_html_entity_decode(ctx: *NativeContext, args: []const Value) RuntimeEr
     if (args.len == 0) return NativeResult.literal("");
     const s = if (args[0] == .string) args[0].string.bytes() else return NativeResult.literal("");
     const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 11;
+    _ = try htmlCharset(ctx, "html_entity_decode", args, 2);
     // HTML5/XHTML/XML1 modes (bits 4-5) recognize &apos;; HTML401 default does not
     const html5_mode = (flags & 48) != 0;
     var buf = std.ArrayListUnmanaged(u8).empty;
