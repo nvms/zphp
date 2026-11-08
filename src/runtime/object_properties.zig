@@ -143,7 +143,8 @@ pub fn appendOwn(vm: *VM, obj: *PhpObject, purpose: Purpose, listing: *Listing, 
             if (i >= slots.len) break;
             // a lazy object's property not yet initialized: the debug view
             // lists a typed one as uninitialized, as php does
-            if (obj.isLazySlot(name, layout.declaring_classes[i])) {
+            // so is a typed property that was unset
+            if (obj.isLazySlot(name, layout.declaring_classes[i]) or obj.isUnset(name)) {
                 if (purpose != .debug or isInternalState(vm, obj, name)) continue;
                 const declared = vm.propertyDeclaration(layout.declaring_classes[i], name);
                 if (declared.type_str.len == 0) continue;
