@@ -15,4 +15,5 @@ PoolException: LogicException: bootstrap broke
 20 pools
 int(1)
 bool(true)
+Maximum call stack size of N bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
 end

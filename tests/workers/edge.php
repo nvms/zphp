@@ -51,4 +51,8 @@ $r = [$sel->readiness()]; $w = null; $e = null;
 $n = stream_select($r, $w, $e, 5);
 var_dump($n, $sel->collect(0) === $f);
 $sel->shutdown();
+// a worker thread's own stack has the limit: endless recursion is an Error there too
+$deep = new Zphp\Pool(1, __DIR__ . "/worker.php");
+echo $deep->submit('deep_recursion')->await(), "\n";
+$deep->shutdown();
 echo "end\n";

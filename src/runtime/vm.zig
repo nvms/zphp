@@ -7,6 +7,7 @@ const platform = @import("../platform.zig");
 const php_version = @import("../php_version.zig");
 const class_names = @import("class_names.zig");
 const includes = @import("includes.zig");
+pub const stack_limit = @import("stack_limit.zig");
 const Value = @import("value.zig").Value;
 const Region = @import("region.zig").Region;
 const MemoryAccount = @import("memory.zig").MemoryAccount;
@@ -3880,6 +3881,10 @@ pub const VM = struct {
     // those frames catches resumes at its handler; any other leaves with the
     // error, for the loop that owns the handler
     fn runUntilFrame(self: *VM, base_frame: usize) RuntimeError!void {
+        if (stack_limit.overflowed()) {
+            try self.raiseStackLimit();
+            if (!self.dispatchPendingException(base_frame)) return error.RuntimeError;
+        }
         while (self.frame_count > base_frame) {
             self.runLoop(base_frame) catch |err| {
                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -3908,6 +3913,15 @@ pub const VM = struct {
             self.discardArgTransport(entry_sp);
             self.sp = entry_sp;
         }
+    }
+
+    // php's zend_call_stack_size_error, raised where php code would be entered
+    // again with too little native stack left. as in php's execute_ex, the
+    // frame being entered is already pushed and is where the Error is raised
+    pub fn raiseStackLimit(self: *VM) RuntimeError!void {
+        var buf: [192]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, stack_limit.message_format, .{stack_limit.allowedSize()}) catch unreachable;
+        try self.setPendingException("Error", msg);
     }
 
     fn runFailure(self: *VM, err: RuntimeError) RuntimeError {
@@ -3953,7 +3967,7 @@ pub const VM = struct {
             self.handler_count = saved_handlers;
             self.handler_floor = saved_floor;
         }
-        if (fast) try self.fastLoop();
+        if (fast and !stack_limit.overflowed()) try self.fastLoop();
         // fastLoop may bail in a descendant, not just the constructor frame.
         if (self.frame_count > base_frame) try self.runUntilFrame(base_frame);
         _ = self.pop(); // only a normally returned constructor has a result
@@ -13892,7 +13906,7 @@ pub const VM = struct {
             self.frame_count += 1;
             self.retainFrameObjects(self.frame_count - 1);
             if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
-            try self.runLoop(self.frame_count - 1);
+            try self.runUntilFrame(self.frame_count - 1);
             return self.ownedString(self.popTransfer());
         }
         if (self.native_fns.get(method_name)) |native| {
@@ -21124,7 +21138,8 @@ pub const VM = struct {
         self.frame_count += 1;
         self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
-        self.fastLoop() catch |err| {
+        // with too little native stack left, runUntilFrame raises php's Error
+        if (!stack_limit.overflowed()) self.fastLoop() catch |err| {
             self.handler_count = base_handler;
             self.handler_floor = prev_floor;
             self.unwindFailedCall(base_frame);
