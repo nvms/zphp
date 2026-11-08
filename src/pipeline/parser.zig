@@ -1376,130 +1376,7 @@ const Parser = struct {
 
         var members = std.ArrayListUnmanaged(u32).empty;
         defer members.deinit(self.allocator);
-        while (self.peek() != .r_brace and self.peek() != .eof) {
-            var is_static = false;
-            var is_abstract = false;
-            var is_final = false;
-            var is_readonly = false;
-            var visibility: u32 = 0;
-            var set_visibility: u32 = 0;
-            var has_set_vis = false;
-            var has_read_vis = false;
-            // `var` declares a public property and takes no other modifier
-            const is_var = self.peek() == .kw_var;
-            if (is_var) _ = self.advance();
-            if (is_var and (self.peek() == .kw_static or !(self.peek() == .variable or self.isTypeName() or self.peek() == .question or self.peek() == .l_paren))) {
-                try self.addError(.unexpected_token);
-                return error.ParseError;
-            }
-            while (!is_var and (self.peek() == .kw_public or self.peek() == .kw_protected or
-                self.peek() == .kw_private or self.peek() == .kw_static or
-                self.peek() == .kw_abstract or self.peek() == .kw_final or self.peek() == .kw_readonly))
-            {
-                if (self.peek() == .kw_static) {
-                    is_static = true;
-                    _ = self.advance();
-                    continue;
-                }
-                if (self.peek() == .kw_abstract) {
-                    is_abstract = true;
-                    _ = self.advance();
-                    continue;
-                }
-                if (self.peek() == .kw_final) {
-                    is_final = true;
-                    _ = self.advance();
-                    continue;
-                }
-                if (self.peek() == .kw_readonly) {
-                    is_readonly = true;
-                    _ = self.advance();
-                    continue;
-                }
-                const vis_val: u32 = if (self.peek() == .kw_protected) 1 else if (self.peek() == .kw_private) 2 else 0;
-                _ = self.advance();
-                if (self.peek() == .l_paren and self.peekAt(1) == .identifier and std.mem.eql(u8, self.lexemeAt(1), "set") and self.peekAt(2) == .r_paren) {
-                    _ = self.advance();
-                    _ = self.advance();
-                    _ = self.advance();
-                    if (has_set_vis) {
-                        try self.addError(.unexpected_token);
-                        return error.ParseError;
-                    }
-                    set_visibility = vis_val;
-                    has_set_vis = true;
-                } else {
-                    if (has_read_vis) {
-                        try self.addError(.unexpected_token);
-                        return error.ParseError;
-                    }
-                    has_read_vis = true;
-                    visibility = vis_val;
-                }
-            }
-            if (!has_set_vis) set_visibility = visibility;
-
-            // asymmetric visibility needs a property (static ones too, since
-            // php 8.5), and set visibility may not be wider than read visibility
-            const starts_property = self.peek() == .variable or self.isTypeName() or
-                self.peek() == .question or self.peek() == .l_paren;
-            if (has_set_vis and (!starts_property or set_visibility < visibility)) {
-                try self.addError(.unexpected_token);
-                return error.ParseError;
-            }
-
-            if (self.peek() == .kw_use) {
-                try members.append(self.allocator, try self.parseTraitUse());
-            } else if (self.peek() == .kw_function) {
-                if (is_abstract) {
-                    try members.append(self.allocator, try self.parseInterfaceMethod(is_static));
-                } else {
-                    const method = try self.parseClassMethod();
-                    if (is_static) {
-                        self.nodes.items[method].tag = .static_class_method;
-                    }
-                    self.nodes.items[method].data.rhs = self.nodes.items[method].data.rhs | (visibility << 30);
-                    try members.append(self.allocator, method);
-                }
-            } else if (self.peek() == .variable) {
-                // Asymmetric set visibility requires an explicit property type.
-                if (has_set_vis) {
-                    try self.addError(.unexpected_token);
-                    return error.ParseError;
-                }
-                const prop = try self.parseClassProperty();
-                if (is_static) {
-                    self.nodes.items[prop].tag = .static_class_property;
-                }
-                self.nodes.items[prop].data.rhs = encodePropertyFlags(visibility, set_visibility, has_set_vis, is_readonly, is_final);
-                try members.append(self.allocator, prop);
-                try self.continuePropertyList(&members, prop);
-            } else if (self.peek() == .kw_const) {
-                try self.parseConstMembers(&members, visibility | (if (is_final) @as(u32, 1) << 4 else 0));
-            } else if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
-                const tr = self.collectTypeHint();
-                if (self.peek() == .variable) {
-                    const prop = try self.parseClassProperty();
-                    if (is_static) {
-                        self.nodes.items[prop].tag = .static_class_property;
-                    }
-                    var rhs: u32 = encodePropertyFlags(visibility, set_visibility, has_set_vis, is_readonly, is_final);
-                    if (tr[0] != tr[1]) {
-                        const ext = try self.addExtra(&tr);
-                        rhs |= (ext + 1) << 16;
-                    }
-                    self.nodes.items[prop].data.rhs = rhs;
-                    try members.append(self.allocator, prop);
-                    try self.continuePropertyList(&members, prop);
-                } else {
-                    try self.addError(.unexpected_token);
-                    return error.ParseError;
-                }
-            } else {
-                try self.addError(.unexpected_token);
-                return error.ParseError;
-            }
-        }
+        try self.parseClassMembers(&members);
         _ = try self.expect(.r_brace);
 
         const members_extra = try self.addExtraList(members.items);
@@ -1548,40 +1425,24 @@ const Parser = struct {
         return self.addNode(.{ .tag = .yield_expr, .main_token = tok, .data = .{ .lhs = expr } });
     }
 
-    fn parseClassDecl(self: *Parser) Error!u32 {
-        var class_modifiers: u32 = 0;
-        while (self.peek() == .kw_abstract or self.peek() == .kw_final or self.peek() == .kw_readonly) {
-            if (self.peek() == .kw_abstract) class_modifiers |= 1;
-            if (self.peek() == .kw_final) class_modifiers |= 2;
-            if (self.peek() == .kw_readonly) class_modifiers |= 4;
-            _ = self.advance();
+    // attributes written before a group (`const A = 1, B = 2;`, `public $a,
+    // $b;`) belong to every member, not only the first
+    fn shareGroupAttributes(self: *Parser, ranges_before: usize, rest: []const u32) Error!void {
+        if (self.attr_ranges.items.len != ranges_before + 1) return;
+        const range = self.attr_ranges.items[ranges_before];
+        for (rest) |member| {
+            var copy = range;
+            copy.target_tok = self.nodes.items[member].main_token;
+            try self.attr_ranges.append(self.allocator, copy);
         }
-        _ = self.advance(); // class
-        const name_tok = if (self.peek() == .kw_enum) self.advance() else try self.expect(.identifier);
+    }
 
-        var parent: u32 = 0;
-        if (self.peek() == .kw_extends) {
-            _ = self.advance();
-            parent = try self.parseQualifiedName();
-        }
-
-        var implements = std.ArrayListUnmanaged(u32).empty;
-        defer implements.deinit(self.allocator);
-        if (self.peek() == .kw_implements) {
-            _ = self.advance();
-            try implements.append(self.allocator, try self.parseQualifiedName());
-            while (self.peek() == .comma) {
-                _ = self.advance();
-                try implements.append(self.allocator, try self.parseQualifiedName());
-            }
-        }
-
-        _ = try self.expect(.l_brace);
-
-        var members = std.ArrayListUnmanaged(u32).empty;
-        defer members.deinit(self.allocator);
-
+    // the members of a class body up to its closing brace, named or anonymous
+    fn parseClassMembers(self: *Parser, members: *std.ArrayListUnmanaged(u32)) Error!void {
         while (self.peek() != .r_brace and self.peek() != .eof) {
+            const ranges_before = self.attr_ranges.items.len;
+            const members_before = members.items.len;
+            defer self.shareGroupAttributes(ranges_before, members.items[@min(members_before + 1, members.items.len)..]) catch {};
             try self.parseAttributes();
             var is_static = false;
             var is_abstract = false;
@@ -1684,9 +1545,9 @@ const Parser = struct {
                 // Property flags are encoded by encodePropertyFlags(); type metadata remains in bits 16+.
                 self.nodes.items[prop].data.rhs = encodePropertyFlags(visibility, set_visibility, has_set_vis, is_readonly, is_final);
                 try members.append(self.allocator, prop);
-                try self.continuePropertyList(&members, prop);
+                try self.continuePropertyList(members, prop);
             } else if (self.peek() == .kw_const) {
-                try self.parseConstMembers(&members, visibility | (if (is_final) @as(u32, 1) << 4 else 0));
+                try self.parseConstMembers(members, visibility | (if (is_final) @as(u32, 1) << 4 else 0));
             } else if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
                 const tr = self.collectTypeHint();
                 if (self.peek() == .variable) {
@@ -1701,7 +1562,7 @@ const Parser = struct {
                     }
                     self.nodes.items[prop].data.rhs = rhs;
                     try members.append(self.allocator, prop);
-                    try self.continuePropertyList(&members, prop);
+                    try self.continuePropertyList(members, prop);
                 } else {
                     try self.addError(.unexpected_token);
                     return error.ParseError;
@@ -1711,6 +1572,42 @@ const Parser = struct {
                 return error.ParseError;
             }
         }
+    }
+
+    fn parseClassDecl(self: *Parser) Error!u32 {
+        var class_modifiers: u32 = 0;
+        while (self.peek() == .kw_abstract or self.peek() == .kw_final or self.peek() == .kw_readonly) {
+            if (self.peek() == .kw_abstract) class_modifiers |= 1;
+            if (self.peek() == .kw_final) class_modifiers |= 2;
+            if (self.peek() == .kw_readonly) class_modifiers |= 4;
+            _ = self.advance();
+        }
+        _ = self.advance(); // class
+        const name_tok = if (self.peek() == .kw_enum) self.advance() else try self.expect(.identifier);
+
+        var parent: u32 = 0;
+        if (self.peek() == .kw_extends) {
+            _ = self.advance();
+            parent = try self.parseQualifiedName();
+        }
+
+        var implements = std.ArrayListUnmanaged(u32).empty;
+        defer implements.deinit(self.allocator);
+        if (self.peek() == .kw_implements) {
+            _ = self.advance();
+            try implements.append(self.allocator, try self.parseQualifiedName());
+            while (self.peek() == .comma) {
+                _ = self.advance();
+                try implements.append(self.allocator, try self.parseQualifiedName());
+            }
+        }
+
+        _ = try self.expect(.l_brace);
+
+        var members = std.ArrayListUnmanaged(u32).empty;
+        defer members.deinit(self.allocator);
+
+        try self.parseClassMembers(&members);
         _ = try self.expect(.r_brace);
 
         const extra = try self.addExtraList(members.items);
