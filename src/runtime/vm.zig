@@ -652,7 +652,7 @@ pub const VM = struct {
     gc_enabled: bool = true,
     gc_runs: usize = 0,
     gc_collected: usize = 0,
-    gc_threshold: usize = 10001,
+    gc_threshold: usize = gc_threshold_default,
     // ref-returning function call mechanism: a `&function` sets these on
     // return_ref - the cell it's returning a reference to + the bindings
     // that propagate writes through the cell back to underlying storage
@@ -22636,7 +22636,27 @@ pub const VM = struct {
     inline fn collectCyclesIfNeeded(self: *VM) void {
         if (!self.gc_enabled) return;
         const roots = self.cycle_candidates.items.len + self.cycle_array_candidates.items.len;
-        if (roots >= self.gc_threshold) _ = self.collectCycles();
+        if (roots >= self.gc_threshold) self.collectCyclesAtThreshold();
+    }
+
+    const gc_threshold_default: usize = 10001;
+    const gc_threshold_step: usize = 10000;
+    const gc_threshold_max: usize = 1_000_000_000;
+
+    // a run the root count triggered, then php's gc_adjust_threshold: a run
+    // that frees little, or leaves the buffer as full as it found it (its
+    // destructors made as many roots again), raises the threshold, so
+    // collection can't chase garbage it keeps creating
+    noinline fn collectCyclesAtThreshold(self: *VM) void {
+        // no run starts inside another or inside the destructor drain
+        if (self.draining_destructors or self.collecting_cycles) return;
+        const collected = self.collectCycles();
+        const roots = self.cycle_candidates.items.len + self.cycle_array_candidates.items.len;
+        if (collected < 100 or roots >= self.gc_threshold) {
+            self.gc_threshold = @min(self.gc_threshold + gc_threshold_step, gc_threshold_max);
+        } else if (self.gc_threshold > gc_threshold_default) {
+            self.gc_threshold = @max(self.gc_threshold - gc_threshold_step, gc_threshold_default);
+        }
     }
 
     fn cycleVisit(self: *VM, obj: *PhpObject, vo: anytype, va: anytype) void {
