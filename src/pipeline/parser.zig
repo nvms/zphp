@@ -301,18 +301,19 @@ const Parser = struct {
         const tok = self.advance(); // global
         var vars = std.ArrayListUnmanaged(u32).empty;
         defer vars.deinit(self.allocator);
-        try vars.append(self.allocator, try self.addNode(.{
-            .tag = .variable,
-            .main_token = try self.expect(.variable),
-            .data = .{},
-        }));
-        while (self.peek() == .comma) {
+        while (true) {
+            // `global $$name` and `global ${expr}` name the variable at run time
+            if (self.peek() == .dollar) {
+                try vars.append(self.allocator, try self.parseVariableVariable());
+            } else {
+                try vars.append(self.allocator, try self.addNode(.{
+                    .tag = .variable,
+                    .main_token = try self.expect(.variable),
+                    .data = .{},
+                }));
+            }
+            if (self.peek() != .comma) break;
             _ = self.advance();
-            try vars.append(self.allocator, try self.addNode(.{
-                .tag = .variable,
-                .main_token = try self.expect(.variable),
-                .data = .{},
-            }));
         }
         _ = try self.expect(.semicolon);
         const extra = try self.addExtraList(vars.items);

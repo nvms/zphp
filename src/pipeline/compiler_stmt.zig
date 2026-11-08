@@ -731,6 +731,11 @@ fn compileFinallyCopy(self: *Compiler, finally_node: u32) Error!void {
 pub fn compileGlobal(self: *Compiler, node: Ast.Node) Error!void {
     for (self.ast.extraSlice(node.data.lhs)) |var_idx| {
         const var_node = self.ast.nodes[var_idx];
+        if (var_node.tag == .variable_variable) {
+            try self.compileNode(var_node.data.lhs);
+            try self.emitOp(.get_global_dynamic);
+            continue;
+        }
         const name = self.ast.tokenSlice(var_node.main_token);
         if (Compiler.isSuperglobal(name)) continue;
         const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });

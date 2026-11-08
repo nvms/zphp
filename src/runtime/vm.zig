@@ -7968,65 +7968,20 @@ pub const VM = struct {
                 .get_global => {
                     if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
                     const name_idx = self.readU16();
-                    const name = self.currentChunk().constants.items[name_idx].string.bytes();
-                    // resolve or allocate the shared cell. picks up the current
-                    // value from the top-frame's view (locals + ref_slots + vars
-                    // + constants) so this is the first read after a value was
-                    // set there
-                    var cell = self.globals_cells.get(name);
-                    if (isSuperglobal(name) and cell == null) cell = try self.superglobalCell(name);
-                    if (cell == null) {
-                        if (self.frames[0].ref_slots.get(name)) |top_cell| {
-                            try self.bindRefSlot(&self.globals_cells, try self.internName(name), top_cell);
-                            cell = top_cell;
-                        }
-                    }
-                    if (cell == null) {
-                        const initial: Value = blk: {
-                            // a file required at global scope IS the global
-                            // scope, so scan every global-scope frame on the
-                            // stack (func == null: the top script + nested
-                            // require-include frames), innermost first. this
-                            // lets `global $x` see a var a still-executing
-                            // required file set at its top level
-                            var fi: usize = self.frame_count;
-                            while (fi > 0) {
-                                fi -= 1;
-                                const gf = &self.frames[fi];
-                                if (gf.func != null) continue;
-                                if (gf.ref_slots.get(name)) |c| break :blk c.*;
-                                for (gf.slot_names, 0..) |sn, i| {
-                                    if (std.mem.eql(u8, sn, name) and i < gf.locals.len) {
-                                        const v = gf.locals[i];
-                                        if (v != .null and v != .undef) break :blk v;
-                                    }
-                                }
-                                if (gf.vars.get(name)) |v| {
-                                    if (v != .null) break :blk v;
-                                }
-                            }
-                            if (self.frames[0].ref_slots.get(name)) |c| break :blk c.*;
-                            if (self.frames[0].vars.get(name)) |v| break :blk v;
-                            if (self.php_constants.get(name)) |v| break :blk v;
-                            break :blk .null;
-                        };
-                        const c = try self.newRefCell();
-                        self.setCell(c, initial);
-                        try self.bindRefSlot(&self.globals_cells, try self.internName(name), c);
-                        cell = c;
-                    }
-                    // bind the local name to the cell so set_var/get_var on this
-                    // frame routes through ref_slots and stays in sync across
-                    // recursive calls. also point the top frame at the cell so
-                    // top-level reads of $name pick up writes done by function
-                    // frames sharing the cell
-                    try self.bindRefSlot(&self.currentFrame().ref_slots, name, cell.?);
-                    // vars/locals are one owning mirror, even for a cell.
-                    retainValue(cell.?.*);
-                    try self.setVariableByName(self.currentFrame(), name, cell.?.*);
-                    if (self.frame_count > 1) {
-                        try self.bindRefSlot(&self.frames[0].ref_slots, name, cell.?);
-                    }
+                    try self.bindGlobalVariable(self.currentChunk().constants.items[name_idx].string.bytes());
+                },
+
+                .get_global_dynamic => {
+                    if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
+                    var name_hold: Value = .null;
+                    defer self.stackRelease(name_hold);
+                    const text = self.popHeldName(&name_hold) catch {
+                        if (try self.resumeRaised()) continue;
+                        return error.RuntimeError;
+                    };
+                    const name = try std.fmt.allocPrint(self.allocator, "${s}", .{text});
+                    defer self.allocator.free(name);
+                    try self.bindGlobalVariable(try self.internName(name));
                 },
 
                 .get_static => {
@@ -12915,6 +12870,69 @@ pub const VM = struct {
         const msg = try self.redeclarationMessage(name) orelse return;
         defer self.allocator.free(msg);
         return self.raiseFatal(msg);
+    }
+
+    // `global $name`: the variable becomes a reference to the global of that
+    // name, created when it doesn't exist. `name` must outlive the frame
+    fn bindGlobalVariable(self: *VM, name: []const u8) RuntimeError!void {
+        // resolve or allocate the shared cell. picks up the current
+        // value from the top-frame's view (locals + ref_slots + vars
+        // + constants) so this is the first read after a value was
+        // set there
+        var cell = self.globals_cells.get(name);
+        if (isSuperglobal(name) and cell == null) cell = try self.superglobalCell(name);
+        if (cell == null) {
+            if (self.frames[0].ref_slots.get(name)) |top_cell| {
+                try self.bindRefSlot(&self.globals_cells, try self.internName(name), top_cell);
+                cell = top_cell;
+            }
+        }
+        if (cell == null) {
+            const initial: Value = blk: {
+                // a file required at global scope IS the global
+                // scope, so scan every global-scope frame on the
+                // stack (func == null: the top script + nested
+                // require-include frames), innermost first. this
+                // lets `global $x` see a var a still-executing
+                // required file set at its top level
+                var fi: usize = self.frame_count;
+                while (fi > 0) {
+                    fi -= 1;
+                    const gf = &self.frames[fi];
+                    if (gf.func != null) continue;
+                    if (gf.ref_slots.get(name)) |c| break :blk c.*;
+                    for (gf.slot_names, 0..) |sn, i| {
+                        if (std.mem.eql(u8, sn, name) and i < gf.locals.len) {
+                            const v = gf.locals[i];
+                            if (v != .null and v != .undef) break :blk v;
+                        }
+                    }
+                    if (gf.vars.get(name)) |v| {
+                        if (v != .null) break :blk v;
+                    }
+                }
+                if (self.frames[0].ref_slots.get(name)) |c| break :blk c.*;
+                if (self.frames[0].vars.get(name)) |v| break :blk v;
+                if (self.php_constants.get(name)) |v| break :blk v;
+                break :blk .null;
+            };
+            const c = try self.newRefCell();
+            self.setCell(c, initial);
+            try self.bindRefSlot(&self.globals_cells, try self.internName(name), c);
+            cell = c;
+        }
+        // bind the local name to the cell so set_var/get_var on this
+        // frame routes through ref_slots and stays in sync across
+        // recursive calls. also point the top frame at the cell so
+        // top-level reads of $name pick up writes done by function
+        // frames sharing the cell
+        try self.bindRefSlot(&self.currentFrame().ref_slots, name, cell.?);
+        // vars/locals are one owning mirror, even for a cell.
+        retainValue(cell.?.*);
+        try self.setVariableByName(self.currentFrame(), name, cell.?.*);
+        if (self.frame_count > 1) {
+            try self.bindRefSlot(&self.frames[0].ref_slots, name, cell.?);
+        }
     }
 
     // what php reported while compiling a file, raised before the file runs

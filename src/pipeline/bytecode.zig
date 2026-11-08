@@ -412,6 +412,8 @@ pub const OpCode = enum(u8) {
     // u16 constant, as php evaluates a class's constant expressions
     enter_class_scope,
     leave_class_scope,
+    // `global ${expr}`: pops the variable's name
+    get_global_dynamic,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
