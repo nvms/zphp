@@ -884,6 +884,10 @@ pub const VM = struct {
     handler_count: usize = 0,
     handler_floor: usize = 0,
     pending_exception: ?Value = null,
+    // set while attribute arguments are resolved at declaration: php
+    // evaluates them only when reflection asks, so nothing may run or throw
+    // then, and an argument that needs either stays deferred
+    resolving_quietly: bool = false,
     // when true, the current pending_exception is a fatal that cannot be caught
     // by user try/catch. used for execution-deadline timeouts; PHP's
     // `Maximum execution time exceeded` is an uncatchable fatal there too
@@ -11744,7 +11748,7 @@ pub const VM = struct {
     pub fn getClassConstant(self: *VM, class_name: []const u8, const_name: []const u8) ?Value {
         var current: ?[]const u8 = class_name;
         while (current) |cn| {
-            if (!self.classes.contains(cn)) self.tryAutoload(cn) catch {};
+            if (!self.classes.contains(cn) and !self.resolving_quietly) self.tryAutoload(cn) catch {};
             const step = self.classConstStep(cn, const_name) orelse break;
             if (step.found) |val| return val;
             current = step.parent;
@@ -11759,7 +11763,10 @@ pub const VM = struct {
         {
             const cls = self.classes.getPtr(cn) orelse return null;
             if (cls.constants.get(const_name)) |val| {
-                if (val == .undef) return .{ .found = self.evaluateClassConstant(cn, const_name) catch null, .parent = null };
+                if (val == .undef) {
+                    if (self.resolving_quietly) return .{ .found = null, .parent = null };
+                    return .{ .found = self.evaluateClassConstant(cn, const_name) catch null, .parent = null };
+                }
                 return .{ .found = self.enumCase(val), .parent = null };
             }
             n = @min(cls.interfaces.items.len, ifaces.len);
@@ -15340,10 +15347,12 @@ pub const VM = struct {
                     // php evaluates attribute arguments when reflection asks for
                     // them; one that cannot be resolved yet stays deferred and
                     // ReflectionAttribute resolves it (or raises) then
+                    const quiet = self.resolving_quietly;
+                    self.resolving_quietly = true;
+                    defer self.resolving_quietly = quiet;
                     const raw = self.resolveAttrConstant(self.readAttrValue());
                     args[ai] = self.resolveDefault(raw) catch |err| blk: {
-                        if (self.pending_exception == null) return err;
-                        self.discardPending();
+                        if (err != error.RuntimeError) return err;
                         break :blk raw;
                     };
                 }
@@ -20069,6 +20078,7 @@ pub const VM = struct {
     }
 
     fn unresolvedDefault(self: *VM, comptime fmt: []const u8, args: anytype) RuntimeError!Value {
+        if (self.resolving_quietly) return error.RuntimeError;
         const msg = try std.fmt.allocPrint(self.allocator, fmt, args);
         defer self.allocator.free(msg);
         const at: ?SourcePosition = if (self.ic.?.default_site) |func| .{ .file = func.file_path, .line = func.start_line } else null;
@@ -20131,6 +20141,7 @@ pub const VM = struct {
             }
             // deferred new-expression default: "\x00NW\x00<8 byte ptr>"
             if (bytecode.newDefaultPtr(s)) |nd| {
+                if (self.resolving_quietly) return error.RuntimeError;
                 return self.instantiateForDefault(nd);
             }
             // deferred compound const-expression default: "\x00DX\x00<8 byte ptr>"
