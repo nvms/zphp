@@ -9,6 +9,7 @@ const class_names = @import("class_names.zig");
 const includes = @import("includes.zig");
 pub const stack_limit = @import("stack_limit.zig");
 const Value = @import("value.zig").Value;
+const value_mod = @import("value.zig");
 const Region = @import("region.zig").Region;
 const MemoryAccount = @import("memory.zig").MemoryAccount;
 const PhpArray = @import("value.zig").PhpArray;
@@ -4562,15 +4563,14 @@ pub const VM = struct {
                     };
                     self.push(.{ .bool = !compared });
                 },
-                .identical => {
+                .identical, .not_identical => {
                     const b = self.pop();
                     const a = self.pop();
-                    self.push(.{ .bool = Value.identical(a, b) });
-                },
-                .not_identical => {
-                    const b = self.pop();
-                    const a = self.pop();
-                    self.push(.{ .bool = !Value.identical(a, b) });
+                    const same = if (a == .array and b == .array) (self.identicalArrays(a, b) catch {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    }) else Value.identical(a, b);
+                    self.push(.{ .bool = if (op == .identical) same else !same });
                 },
                 .less => {
                     const b = self.pop();
@@ -17497,8 +17497,37 @@ pub const VM = struct {
         }
     }
 
+    // a comparison php fails with an Error (Value.compare leaves the reason
+    // in the per-thread hooks): raised once the comparison has returned
+    fn raiseCompareFailure(self: *VM) RuntimeError!void {
+        const hooks = value_mod.hooks();
+        const failure = hooks.compare_failure;
+        if (failure == .none) return;
+        hooks.compare_failure = .none;
+        try self.setPendingException("Error", switch (failure) {
+            .nesting => "Nesting level too deep - recursive dependency?",
+            .stack => "Maximum call stack size reached during object comparison",
+            .none => unreachable,
+        });
+        return error.RuntimeError;
+    }
+
+    fn identicalArrays(self: *VM, a: Value, b: Value) RuntimeError!bool {
+        value_mod.hooks().compare_failure = .none;
+        const same = Value.identical(a, b);
+        try self.raiseCompareFailure();
+        return same;
+    }
+
     // mirror of looseEqualWithStringable for ordered comparisons
     pub fn compareWithStringable(self: *VM, a: Value, b: Value) RuntimeError!i64 {
+        value_mod.hooks().compare_failure = .none;
+        const order = try self.compareWithStringableInner(a, b);
+        try self.raiseCompareFailure();
+        return order;
+    }
+
+    fn compareWithStringableInner(self: *VM, a: Value, b: Value) RuntimeError!i64 {
         if (try self.objectBinop(.compare, a, b)) |r| return r.int;
         if (a == .object and b == .string) {
             if (self.hasMethod(a.object.class_name, "__toString")) {
@@ -17518,6 +17547,13 @@ pub const VM = struct {
     // __toString and compares as strings. Value.equal can't reach into the VM
     // to call methods, so this wrapper does that coercion before delegating
     pub fn looseEqualWithStringable(self: *VM, a: Value, b: Value) RuntimeError!bool {
+        value_mod.hooks().compare_failure = .none;
+        const same = try self.looseEqualWithStringableInner(a, b);
+        try self.raiseCompareFailure();
+        return same;
+    }
+
+    fn looseEqualWithStringableInner(self: *VM, a: Value, b: Value) RuntimeError!bool {
         if (try self.objectBinop(.compare, a, b)) |r| return r.int == 0;
         if (a == .object and b == .string) {
             if (self.hasMethod(a.object.class_name, "__toString")) {

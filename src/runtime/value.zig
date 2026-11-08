@@ -1,4 +1,5 @@
 const std = @import("std");
+const stack_limit = @import("stack_limit.zig");
 
 // the VM installs this so container stores can release the value they
 // replace without knowing the VM: overwrite-release at the store choke point
@@ -32,6 +33,8 @@ pub const ObjectHooks = struct {
 // object and compiles this file a second time, so it reaches the main
 // object's record through an exported symbol instead of its own copy
 pub const Hooks = struct {
+    // set by a comparison that php fails with an Error; the vm raises it
+    compare_failure: CompareFailure = .none,
     cell_unbind: ?CellUnbindHook = null,
     release: ?ReleaseHook = null,
     object: ?ObjectHooks = null,
@@ -39,6 +42,28 @@ pub const Hooks = struct {
     trace_rc_verbose: bool = false,
 };
 threadlocal var hooks_record: Hooks = .{};
+
+// why php's zend_compare gave up: an array or object met again while it was
+// being compared ("Nesting level too deep"), or object comparison out of
+// native stack. compare returns php's ZEND_UNCOMPARABLE (1) and leaves the
+// failure for the vm to throw
+pub const CompareFailure = enum(u8) { none, nesting, stack };
+
+fn compareFailed(kind: CompareFailure) void {
+    const h = hooks();
+    if (h.compare_failure == .none) h.compare_failure = kind;
+}
+
+// php's recursion protection flags (GC_PROTECT_RECURSION on an array or
+// object, and the per-kind recursion guards of an object whose class uses
+// guards): set while a native walks the value, so meeting it again, from the
+// same walk or a nested call, is recursion
+pub const Recursion = struct {
+    pub const gc: u8 = 1;
+    pub const debug: u8 = 2;
+    pub const export_: u8 = 4;
+    pub const json: u8 = 8;
+};
 extern fn zphp_value_hooks() callconv(.c) *anyopaque;
 
 pub inline fn hooks() *Hooks {
@@ -111,6 +136,8 @@ pub const PhpArray = struct {
     // (array_walk, sort): counted in refcount but not a value copy, so a
     // write through the reference set must not separate because of them
     byref_pins: u8 = 0,
+    // Recursion flags
+    recursion: u8 = 0,
 
     pub const Entry = struct {
         key: Key,
@@ -1002,6 +1029,8 @@ pub const PhpObject = struct {
     ref_mirrored: bool = false,
     // a WeakReference names this object (vm.weak_references)
     weakly_referenced: bool = false,
+    // Recursion flags
+    recursion: u8 = 0,
     // native pointers behind a builtin or extension class live here, never
     // in properties, so php code cannot read or forge them
     native: NativeHandle = .{},
@@ -1504,6 +1533,14 @@ pub const Value = union(enum) {
 
     fn arrayEqual(a: *PhpArray, b: *PhpArray, strict: bool) bool {
         if (a == b) return true;
+        // php's zend_hash_compare protects the first array only: the second
+        // may be reached from the first without being recursive
+        if (a.recursion & Recursion.gc != 0) {
+            compareFailed(.nesting);
+            return false;
+        }
+        a.recursion |= Recursion.gc;
+        defer a.recursion &= ~Recursion.gc;
         if (a.entries.items.len != b.entries.items.len) return false;
         if (strict) {
             // strict: same key/value pairs in the same order
@@ -1543,7 +1580,7 @@ pub const Value = union(enum) {
             if (a.object == b.object) return true;
             if (nativeCompare(a, b)) |order| return order == 0;
             if (!std.mem.eql(u8, a.object.class_name, b.object.class_name)) return false;
-            return objectsCompare(a.object, b.object) == 0;
+            return objectsCompareGuarded(a.object, b.object) == 0;
         }
         if (a == .object or b == .object or a == .fiber or b == .fiber) {
             if (nativeCompare(a, b)) |order| return order == 0;
@@ -1638,13 +1675,20 @@ pub const Value = union(enum) {
             if (a.object == b.object) return 0;
             if (nativeCompare(a, b)) |order| return order;
             if (!std.mem.eql(u8, a.object.class_name, b.object.class_name)) return 1;
-            return objectsCompare(a.object, b.object);
+            return objectsCompareGuarded(a.object, b.object);
         }
         if (a == .object or b == .object or a == .generator or b == .generator or a == .fiber or b == .fiber) {
             if (nativeCompare(a, b)) |order| return order;
             return 0;
         }
         if (a == .array and b == .array) {
+            if (a.array == b.array) return 0;
+            if (a.array.recursion & Recursion.gc != 0) {
+                compareFailed(.nesting);
+                return 1;
+            }
+            a.array.recursion |= Recursion.gc;
+            defer a.array.recursion &= ~Recursion.gc;
             const al = a.array.entries.items.len;
             const bl = b.array.entries.items.len;
             if (al != bl) return if (al < bl) -1 else 1;
@@ -1731,6 +1775,22 @@ pub const Value = union(enum) {
             }
         }
         return false;
+    }
+
+    // php's zend_std_compare_objects: out of native stack is an Error, and
+    // so is meeting the first object again inside its own comparison
+    fn objectsCompareGuarded(a: *PhpObject, b: *PhpObject) i64 {
+        if (stack_limit.overflowed()) {
+            compareFailed(.stack);
+            return 1;
+        }
+        if (a.recursion & Recursion.gc != 0) {
+            compareFailed(.nesting);
+            return 1;
+        }
+        a.recursion |= Recursion.gc;
+        defer a.recursion &= ~Recursion.gc;
+        return objectsCompare(a, b);
     }
 
     fn objectsCompare(a: *PhpObject, b: *PhpObject) i64 {

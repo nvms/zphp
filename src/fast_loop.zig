@@ -178,7 +178,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const b = stack[sp - 1];
                     const a = stack[sp - 2];
                     const result = if (a == .int and b == .int) a.int < b.int else if (a == .float and b == .float) a.float < b.float else blk: {
-                        if (a == .object or b == .object or a == .resource or b == .resource) {
+                        if (a == .object or b == .object or a == .resource or b == .resource or a == .array or b == .array) {
                             frame.ip = ip - 1;
                             self.sp = sp;
                             return;
@@ -198,7 +198,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const b = stack[sp - 1];
                     const a = stack[sp - 2];
                     const result = if (a == .int and b == .int) a.int <= b.int else blk: {
-                        if (a == .object or b == .object or a == .resource or b == .resource) {
+                        if (a == .object or b == .object or a == .resource or b == .resource or a == .array or b == .array) {
                             frame.ip = ip - 1;
                             self.sp = sp;
                             return;
@@ -218,7 +218,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const b = stack[sp - 1];
                     const a = stack[sp - 2];
                     const result = if (a == .int and b == .int) a.int > b.int else blk: {
-                        if (a == .object or b == .object or a == .resource or b == .resource) {
+                        if (a == .object or b == .object or a == .resource or b == .resource or a == .array or b == .array) {
                             frame.ip = ip - 1;
                             self.sp = sp;
                             return;
@@ -238,7 +238,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const b = stack[sp - 1];
                     const a = stack[sp - 2];
                     const result = if (a == .int and b == .int) a.int >= b.int else blk: {
-                        if (a == .object or b == .object or a == .resource or b == .resource) {
+                        if (a == .object or b == .object or a == .resource or b == .resource or a == .array or b == .array) {
                             frame.ip = ip - 1;
                             self.sp = sp;
                             return;
@@ -267,6 +267,12 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .identical => {
                     const b_id = stack[sp - 1];
                     const a_id = stack[sp - 2];
+                    // comparing two arrays may throw (recursion), which runLoop does
+                    if (a_id == .array and b_id == .array) {
+                        frame.ip = ip - 1;
+                        self.sp = sp;
+                        return;
+                    }
                     sp -= 2;
                     self.stackRelease(a_id);
                     self.stackRelease(b_id);
@@ -279,6 +285,12 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .not_identical => {
                     const b_ni = stack[sp - 1];
                     const a_ni = stack[sp - 2];
+                    // comparing two arrays may throw (recursion), which runLoop does
+                    if (a_ni == .array and b_ni == .array) {
+                        frame.ip = ip - 1;
+                        self.sp = sp;
+                        return;
+                    }
                     sp -= 2;
                     self.stackRelease(a_ni);
                     self.stackRelease(b_ni);
