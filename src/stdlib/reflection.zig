@@ -1,4 +1,5 @@
 const std = @import("std");
+const php_types = @import("../pipeline/php_types.zig");
 const object_properties = @import("../runtime/object_properties.zig");
 const deprecations = @import("deprecations_generated.zig");
 const Value = @import("../runtime/value.zig").Value;
@@ -914,6 +915,17 @@ fn createNamedTypeObj(ctx: *NativeContext, type_name: []const u8, nullable: bool
     return obj;
 }
 
+// the type objects a union hands out borrow from this text, so it lives as
+// long as the request, as the declarations' own type strings do
+fn canonicalUnion(ctx: *NativeContext, text: []const u8, self_class: ?[]const u8) ![]const u8 {
+    const t = php_types.parse(ctx.allocator, text, self_class, null) catch return text;
+    defer t.deinit(ctx.allocator);
+    const formatted = try php_types.format(ctx.allocator, t);
+    errdefer ctx.allocator.free(formatted);
+    try ctx.vm.strings.append(ctx.allocator, formatted);
+    return formatted;
+}
+
 fn createTypeObj(ctx: *NativeContext, type_name: []const u8, nullable: bool, self_class: ?[]const u8) !*PhpObject {
     var clean = type_name;
     var is_nullable = nullable;
@@ -953,7 +965,8 @@ fn createTypeObj(ctx: *NativeContext, type_name: []const u8, nullable: bool, sel
             return createNamedTypeObj(ctx, resolved, true);
         }
         const obj = try ctx.createObject("ReflectionUnionType");
-        try obj.set(ctx.allocator, "type_str", .{ .string = Value.String.borrowed(clean) });
+        // printed as php's zend_type_to_string orders a union
+        try obj.set(ctx.allocator, "type_str", .{ .string = Value.String.borrowed(try canonicalUnion(ctx, clean, self_class)) });
         if (has_null) is_nullable = true;
         try obj.set(ctx.allocator, "nullable", .{ .bool = is_nullable });
         try obj.set(ctx.allocator, "_self_class", .{ .string = Value.String.borrowed(self_class orelse "") });
@@ -2888,6 +2901,10 @@ fn rutGetTypes(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult 
     var it = std.mem.splitScalar(u8, ts_v.string.bytes(), '|');
     while (it.next()) |part| {
         if (part.len == 0) continue;
+        if (part[0] == '(') {
+            try arr.append(ctx.allocator, .{ .object = try createTypeObj(ctx, std.mem.trim(u8, part, "()"), false, self_class) });
+            continue;
+        }
         const obj = try createNamedTypeObj(ctx, part, false);
         if (self_class) |sc| {
             if (std.mem.eql(u8, part, "self")) {
