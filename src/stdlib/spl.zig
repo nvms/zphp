@@ -2486,6 +2486,11 @@ fn faFromArray(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
             if (entry.key.int > max_idx) max_idx = entry.key.int;
         }
     }
+    // php's max_index + 1 wraps negative for a PHP_INT_MAX key
+    if (max_idx == std.math.maxInt(i64)) {
+        try ctx.vm.setPendingException("InvalidArgumentException", "integer overflow detected");
+        return error.RuntimeError;
+    }
     const size: usize = if (preserve_keys and max_idx >= 0)
         @intCast(max_idx + 1)
     else
