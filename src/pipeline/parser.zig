@@ -3261,6 +3261,13 @@ const Parser = struct {
             return self.addNode(.{ .tag = tag, .main_token = 0, .data = .{ .lhs = object, .rhs = expr } });
         }
 
+        // `->$$name` and `->${expr}`: the member named by a variable variable
+        if (self.peek() == .dollar) {
+            const expr = try self.parseVariableVariable();
+            const tag: Ast.Node.Tag = if (nullsafe) .nullsafe_property_access else .property_access;
+            return self.addNode(.{ .tag = tag, .main_token = 0, .data = .{ .lhs = object, .rhs = expr } });
+        }
+
         if (self.peek() != .identifier and self.peek() != .variable and !isSemiReserved(self.peek())) {
             try self.addError(.expected_identifier);
             return error.ParseError;
