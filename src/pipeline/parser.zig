@@ -179,7 +179,9 @@ const Parser = struct {
             .kw_return => self.parseReturnStmt(),
             .kw_break => self.parseBreakContinue(.break_stmt),
             .kw_continue => self.parseBreakContinue(.continue_stmt),
-            .kw_class, .kw_abstract, .kw_final, .kw_readonly => self.parseClassDecl(),
+            // `readonly(...)` calls a function named readonly
+            .kw_readonly => if (self.peekAt(1) == .l_paren) self.parseExpressionStmt() else self.parseClassDecl(),
+            .kw_class, .kw_abstract, .kw_final => self.parseClassDecl(),
             .kw_interface => self.parseInterfaceDecl(),
             .kw_trait => self.parseTraitDecl(),
             .kw_enum => self.parseEnumDecl(),
@@ -2893,6 +2895,11 @@ const Parser = struct {
             .variable => self.addLiteral(.variable),
             .dollar => self.parseVariableVariable(),
             .identifier => if (self.peekAt(1) == .backslash) self.parseQualifiedName() else self.addLiteral(.identifier),
+            // php's grammar takes `readonly` followed by arguments as a call
+            .kw_readonly => if (self.peekAt(1) == .l_paren) self.addLiteral(.identifier) else blk: {
+                try self.addError(.unexpected_token);
+                break :blk error.ParseError;
+            },
             .backslash => blk: {
                 // PHP treats `\true`, `\false`, `\null` as the literal values
                 // regardless of namespace (they're not namespaceable)
