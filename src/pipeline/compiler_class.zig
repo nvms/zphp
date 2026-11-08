@@ -853,6 +853,44 @@ fn foldedDefault(self: *Compiler, idx: u32) ?DefaultKind {
     };
 }
 
+// zend_is_valid_default_value: whether a folded value fits a declared type
+// (an int fits a float), and the value's type name for the error
+fn defaultFits(kind: DefaultKind, t: php_types.Type) struct { bool, []const u8 } {
+    return switch (kind) {
+        .null => .{ t.mask & php_types.NULL != 0, "null" },
+        .true => .{ t.mask & php_types.TRUE != 0, "bool" },
+        .false => .{ t.mask & php_types.FALSE != 0, "bool" },
+        .int => .{ t.mask & (php_types.LONG | php_types.DOUBLE) != 0, "int" },
+        .float => .{ t.mask & php_types.DOUBLE != 0, "float" },
+        .string => .{ t.mask & php_types.STRING != 0, "string" },
+        .array => .{ t.mask & php_types.ARRAY != 0, "array" },
+    };
+}
+
+// php's zend_compile_class_const_decl checks: a private constant can't be
+// final, and a typed constant's literal value must fit its type
+fn checkConstDecls(self: *Compiler, class_name: []const u8, members: []const u32) Error!void {
+    for (members) |m_idx| {
+        const m = self.ast.nodes[m_idx];
+        if (m.tag != .const_decl) continue;
+        const name = self.ast.tokenSlice(m.main_token);
+        if (m.data.rhs & 0x3 == 2 and m.data.rhs & 0x10 != 0) {
+            return self.failFmt(m.main_token, "Private constant {s}::{s} cannot be final as it is not visible to other classes", .{ class_name, name });
+        }
+        const type_extra = m.data.rhs >> 16;
+        if (type_extra == 0) continue;
+        const kind = foldedDefault(self, m.data.lhs) orelse continue;
+        const text = try buildTypeString(self, self.ast.extra_data[type_extra - 1], self.ast.extra_data[type_extra]);
+        const t = php_types.parse(self.allocator, text, class_name, null) catch return error.OutOfMemory;
+        defer t.deinit(self.allocator);
+        const accepted, const kind_name = defaultFits(kind, t);
+        if (accepted) continue;
+        const type_text = php_types.format(self.allocator, t) catch return error.OutOfMemory;
+        defer self.allocator.free(type_text);
+        return self.failFmt(m.main_token, "Cannot use {s} as value for class constant {s}::{s} of type {s}", .{ kind_name, class_name, name, type_text });
+    }
+}
+
 fn foldsAtCompileTime(ast: *const Ast, idx: u32) bool {
     const node = ast.nodes[idx];
     return switch (node.tag) {
@@ -921,15 +959,7 @@ fn checkParams(self: *Compiler, func_name: []const u8, at: u32, param_nodes: []c
             if (t.mask & php_types.VOID != 0) return self.fail(at, "void cannot be used as a parameter type");
             if (t.mask & php_types.NEVER != 0) return self.fail(at, "never cannot be used as a parameter type");
             if (default) |kind_of| if (!force_nullable) {
-                const accepted: bool, const kind: []const u8 = switch (kind_of) {
-                    .null => .{ t.mask & php_types.NULL != 0, "null" },
-                    .true => .{ t.mask & php_types.TRUE != 0, "bool" },
-                    .false => .{ t.mask & php_types.FALSE != 0, "bool" },
-                    .int => .{ t.mask & (php_types.LONG | php_types.DOUBLE) != 0, "int" },
-                    .float => .{ t.mask & php_types.DOUBLE != 0, "float" },
-                    .string => .{ t.mask & php_types.STRING != 0, "string" },
-                    .array => .{ t.mask & php_types.ARRAY != 0, "array" },
-                };
+                const accepted, const kind = defaultFits(kind_of, t);
                 if (!accepted) {
                     const type_text = php_types.format(self.allocator, t) catch return error.OutOfMemory;
                     defer self.allocator.free(type_text);
@@ -1826,6 +1856,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     const members = self.ast.extraSlice(node.data.lhs);
     try checkImportCollision(self, node.main_token, .class, class_name);
     try checkDuplicateMembers(self, class_name, members);
+    try checkConstDecls(self, class_name, members);
 
     const prev_class = self.current_class;
     self.current_class = class_name;
@@ -2451,6 +2482,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
 
     const members = self.ast.extraSlice(node.data.lhs);
     try checkDuplicateMembers(self, anon_name, members);
+    try checkConstDecls(self, anon_name, members);
     const rhs_base = node.data.rhs;
 
     // decode rhs: {ctor_arg_count, ctor_args..., parent, impl_count, impls...}
@@ -2754,6 +2786,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     const members = self.ast.extraSlice(node.data.lhs);
     try checkImportCollision(self, node.main_token, .class, iface_name);
     try checkDuplicateMembers(self, iface_name, members);
+    try checkConstDecls(self, iface_name, members);
 
     const prev_class = self.current_class;
     self.current_class = iface_name;
@@ -2924,6 +2957,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     const members = self.ast.extraSlice(node.data.lhs);
     try checkImportCollision(self, node.main_token, .class, trait_name);
     try checkDuplicateMembers(self, trait_name, members);
+    try checkConstDecls(self, trait_name, members);
 
     // compile trait methods as TraitName::methodName functions
     const prev_in_trait = self.in_trait;
@@ -3136,6 +3170,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
     try checkImportCollision(self, node.main_token, .class, enum_name);
     try checkDuplicateMembers(self, enum_name, members);
+    try checkConstDecls(self, enum_name, members);
 
     var method_count: u16 = 0;
     for (members) |member_idx| {
