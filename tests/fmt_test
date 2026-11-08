@@ -178,6 +178,17 @@ check_contains "static arrow function formatted" 'static fn($x) => $x' "$content
 check_contains "by-reference closure formatted" 'function&() use ($a)' "$content"
 check_contains "by-reference arrow function formatted" 'fn&($x) => $x' "$content"
 
+# test: variable variables keep their braces where they need them
+cat > "$WORKDIR/varvar.php" << 'EOFPHP'
+<?php
+function f(){global $$n,${"x"};return $o->$$b+$o->${"c"}+${"e".$f};}
+EOFPHP
+
+"$ZPHP" fmt "$WORKDIR/varvar.php" 2>/dev/null
+content=$(cat "$WORKDIR/varvar.php")
+check_contains "global variable variables formatted" 'global $$n, ${"x"};' "$content"
+check_contains "member variable variables formatted" '$o->$$b + $o->${"c"} + ${"e" . $f}' "$content"
+
 # test: formatted code produces same output as original
 for f in "$SCRIPT_DIR/arithmetic.php" "$SCRIPT_DIR/arrays.php" "$SCRIPT_DIR/classes_basic.php" "$SCRIPT_DIR/closures.php" "$SCRIPT_DIR/if_else.php" "$SCRIPT_DIR/functions.php" "$SCRIPT_DIR/switch.php"; do
     if [ ! -f "$f" ]; then continue; fi

@@ -468,8 +468,16 @@ const Formatter = struct {
             .null_literal => self.write("null"),
             .variable => self.write(self.ast.tokens[node.main_token].lexeme(self.source)),
             .variable_variable => {
-                self.write("$");
-                self.formatNode(node.data.lhs);
+                // $$name, or ${expr} for anything else
+                const inner = self.ast.nodes[node.data.lhs];
+                if (inner.tag == .variable or inner.tag == .variable_variable) {
+                    self.write("$");
+                    self.formatNode(node.data.lhs);
+                } else {
+                    self.write("${");
+                    self.formatNode(node.data.lhs);
+                    self.write("}");
+                }
             },
             .identifier => self.write(self.ast.tokens[node.main_token].lexeme(self.source)),
 
@@ -1057,7 +1065,11 @@ const Formatter = struct {
         const vars = self.ast.extraSlice(node.data.lhs);
         for (vars, 0..) |v, i| {
             if (i > 0) self.write(", ");
-            self.write(self.ast.tokens[self.ast.nodes[v].main_token].lexeme(self.source));
+            if (self.ast.nodes[v].tag == .variable_variable) {
+                self.formatNode(v);
+            } else {
+                self.write(self.ast.tokens[self.ast.nodes[v].main_token].lexeme(self.source));
+            }
         }
         self.write(";");
     }
