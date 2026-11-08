@@ -50,6 +50,7 @@ const Pending = struct {
     vm: *VM,
     name: []const u8,
     def: *const ClassDef,
+    is_interface: bool = false,
     // an error an autoloader raised while a check looked a class up; the
     // variance callbacks can only answer yes or no, so it is raised after
     failure: ?RuntimeError = null,
@@ -455,4 +456,122 @@ pub fn checkClass(vm: *VM, class_name: []const u8, def: *const ClassDef) Runtime
         const proto = (methodOf(p, arena, iface, name, true) catch return error.OutOfMemory) orelse continue;
         try checkMethod(p, arena, child, proto, std.ascii.eqlIgnoreCase(name, "__construct"));
     }
+    checkConstants(p, arena) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else err;
+}
+
+// the checks php makes while linking an interface: its constants against
+// the interfaces it extends
+pub fn checkInterface(vm: *VM, name: []const u8, def: *const ClassDef) RuntimeError!void {
+    var arena_state = std.heap.ArenaAllocator.init(vm.allocator);
+    defer arena_state.deinit();
+    var pending: Pending = .{ .vm = vm, .name = name, .def = def, .is_interface = true };
+    checkConstants(&pending, arena_state.allocator()) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else err;
+}
+
+const ConstantOwners = std.StringHashMapUnmanaged([]const u8);
+
+// php's do_inherit_constant_check, for every constant a class or interface
+// gets: one it declares against the one it overrides (final, visibility,
+// type), and one it would inherit from two declarations (ambiguous)
+fn checkConstants(p: *Pending, arena: std.mem.Allocator) (RuntimeError || error{OutOfMemory})!void {
+    const vm = p.vm;
+    const def = p.def;
+    // the class or interface whose declaration of each constant this one has
+    var owners: ConstantOwners = .{};
+    var it = def.constants.keyIterator();
+    while (it.next()) |name| try owners.put(arena, name.*, p.name);
+    var checked: std.StringHashMapUnmanaged(void) = .{};
+    var current = def.parent;
+    while (current) |class| {
+        const cdef = vm.classes.getPtr(class) orelse break;
+        var cit = cdef.constants.keyIterator();
+        while (cit.next()) |key| {
+            const name = key.*;
+            if (owners.get(name)) |owner| {
+                if (owner.ptr == p.name.ptr and !checked.contains(name)) {
+                    try checked.put(arena, name, {});
+                    try checkConstant(p, name, cdef);
+                }
+            } else try owners.put(arena, name, cdef.name);
+        }
+        current = cdef.parent;
+    }
+    // what the parents get from their interfaces
+    var seen: std.StringHashMapUnmanaged(void) = .{};
+    current = def.parent;
+    while (current) |class| {
+        const cdef = vm.classes.getPtr(class) orelse break;
+        for (cdef.interfaces.items) |iface| try recordInterfaceConstants(p, arena, iface, &owners, &seen);
+        current = cdef.parent;
+    }
+    for (def.interfaces.items) |iface| try linkInterfaceConstants(p, arena, iface, &owners, &seen);
+}
+
+fn recordInterfaceConstants(p: *Pending, arena: std.mem.Allocator, iface: []const u8, owners: *ConstantOwners, seen: *std.StringHashMapUnmanaged(void)) error{OutOfMemory}!void {
+    if (seen.contains(iface)) return;
+    try seen.put(arena, iface, {});
+    if (p.vm.classes.getPtr(iface)) |idef| {
+        var it = idef.constants.keyIterator();
+        while (it.next()) |name| if (!owners.contains(name.*)) try owners.put(arena, name.*, idef.name);
+    }
+    if (p.vm.interfaces.getPtr(iface)) |info| {
+        for (info.parents.items) |parent| try recordInterfaceConstants(p, arena, parent, owners, seen);
+    }
+}
+
+fn linkInterfaceConstants(p: *Pending, arena: std.mem.Allocator, iface: []const u8, owners: *ConstantOwners, seen: *std.StringHashMapUnmanaged(void)) (RuntimeError || error{OutOfMemory})!void {
+    if (seen.contains(iface)) return;
+    try seen.put(arena, iface, {});
+    if (p.vm.interfaces.getPtr(iface)) |info| {
+        for (info.parents.items) |parent| try linkInterfaceConstants(p, arena, parent, owners, seen);
+    }
+    const idef = p.vm.classes.getPtr(iface) orelse return;
+    var it = idef.constants.keyIterator();
+    while (it.next()) |key| {
+        const name = key.*;
+        const owner = owners.get(name) orelse {
+            try owners.put(arena, name, idef.name);
+            continue;
+        };
+        if (owner.ptr == p.name.ptr) {
+            try checkConstant(p, name, idef);
+        } else if (!std.mem.eql(u8, owner, idef.name)) {
+            const kind: []const u8 = if (p.is_interface) "Interface" else "Class";
+            return constantFatal(p, "{s} {s} inherits both {s}::{s} and {s}::{s}, which is ambiguous", .{ kind, p.name, owner, name, idef.name, name });
+        }
+    }
+}
+
+fn checkConstant(p: *Pending, name: []const u8, parent: *const ClassDef) (RuntimeError || error{OutOfMemory})!void {
+    const def = p.def;
+    if (parent.const_final.contains(name)) {
+        return constantFatal(p, "{s}::{s} cannot override final constant {s}::{s}", .{ p.name, name, parent.name, name });
+    }
+    const child_vis = def.const_visibility.get(name) orelse .public;
+    const parent_vis = parent.const_visibility.get(name) orelse .public;
+    if (@intFromEnum(child_vis) > @intFromEnum(parent_vis)) {
+        const kind: []const u8 = if (p.vm.interfaces.contains(parent.name)) "interface" else if (parent.is_enum) "enum" else "class";
+        return constantFatal(p, "Access level to {s}::{s} must be {s} (as in {s} {s}){s}", .{ p.name, name, visibilityName(parent_vis), kind, parent.name, if (parent_vis == .public) "" else " or weaker" });
+    }
+    if (parent_vis == .private) return;
+    const parent_type = parent.constant_types.get(name) orelse return;
+    var arena_state = std.heap.ArenaAllocator.init(p.vm.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const proto = try parseType(p, arena, parent_type, parent.name);
+    const child_text = def.constant_types.get(name) orelse "";
+    const compatible = child_text.len > 0 and switch (php_types.covariant(classes(p), p.name, try parseType(p, arena, child_text, p.name), proto)) {
+        .failure => false,
+        else => true,
+    };
+    if (!compatible) {
+        const shown = try php_types.format(arena, proto);
+        return constantFatal(p, "Type of {s}::{s} must be compatible with {s}::{s} of type {s}", .{ p.name, name, parent.name, name, shown });
+    }
+}
+
+fn constantFatal(p: *Pending, comptime fmt: []const u8, args: anytype) (RuntimeError || error{OutOfMemory}) {
+    const msg = try std.fmt.allocPrint(p.vm.allocator, fmt, args);
+    defer p.vm.allocator.free(msg);
+    return p.vm.raiseCompileFatal(msg, .{ .file = p.def.file_path, .line = p.def.start_line });
 }
