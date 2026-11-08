@@ -86,6 +86,20 @@ pub const Lexer = struct {
         const start = self.pos;
         const c = self.advance();
 
+        // php's binary string prefix (b"...", b'...', b<<<): the string is
+        // the same, and its token starts after the prefix
+        if ((c == 'b' or c == 'B') and self.pos < self.source.len) {
+            const quote = self.source[self.pos];
+            if (quote == '\'' or quote == '"') {
+                self.pos += 1;
+                return self.lexStringBody(quote, start + 1);
+            }
+            if (std.mem.startsWith(u8, self.source[self.pos..], "<<<")) {
+                self.pos += 3;
+                return self.lexHeredoc(start + 1);
+            }
+        }
+
         return switch (c) {
             'a'...'z', 'A'...'Z', '_', 0x80...0xff => self.lexIdentifier(start),
 
