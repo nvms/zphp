@@ -643,6 +643,8 @@ pub const VM = struct {
     // here; on object destruct we walk this list to remove entries whose key
     // is the just-destructed object (weak semantics)
     weakmaps: std.ArrayListUnmanaged(*PhpObject) = .empty,
+    // each object's WeakReference, which php creates once per target
+    weak_references: std.AutoHashMapUnmanaged(*PhpObject, *PhpObject) = .{},
     // cycle collector candidate roots whose refcount decremented without
     // hitting 0. arrays need their own roots so pure array cycles are visible
     cycle_candidates: std.ArrayListUnmanaged(*PhpObject) = .empty,
@@ -3001,6 +3003,7 @@ pub const VM = struct {
         self.pending_gen_release.deinit(self.allocator);
         self.pending_fiber_release.deinit(self.allocator);
         self.weakmaps.deinit(self.allocator);
+        self.weak_references.deinit(self.allocator);
         self.held_exceptions.deinit(self.allocator);
         self.cycle_candidates.deinit(self.allocator);
         self.cycle_array_candidates.deinit(self.allocator);
@@ -3175,6 +3178,7 @@ pub const VM = struct {
         self.pending_fiber_release.clearRetainingCapacity();
         self.fiber_release_cursor = 0;
         self.weakmaps.clearRetainingCapacity();
+        self.weak_references.clearRetainingCapacity();
         self.held_exceptions.clearRetainingCapacity();
         self.shutdown_callbacks.clearRetainingCapacity();
         self.cycle_candidates.clearRetainingCapacity();
@@ -21804,6 +21808,7 @@ pub const VM = struct {
         // now-destructed object so iteration / count / offsetGet see
         // the entry as gone (Stage 2)
         self.weakmapsOnObjectDestruct(obj);
+        self.forgetWeakReferences(obj);
         // collapse the object tree: release the objects this object's
         // property slots held. runs after __destruct (PHP tears
         // properties down after)
@@ -22740,6 +22745,35 @@ pub const VM = struct {
     // mirrors the same set of object handles for iteration. both get pruned.
     // also prunes the weakmaps registry of any destructed WeakMap instances
     // (a one-shot scan keeps the list small without per-WM lifecycle hooks)
+    // php's zend_weakrefs_notify: a freed object's WeakReference now finds
+    // nothing, and a freed WeakReference stops naming its target
+    fn forgetWeakReferences(self: *VM, dead: *PhpObject) void {
+        if (dead.weakly_referenced) {
+            dead.weakly_referenced = false;
+            if (self.weak_references.fetchRemove(dead)) |entry| entry.value.native.ptr = 0;
+        }
+        if (dead.native.kind == .weak_reference) {
+            if (dead.native.ptr != 0) {
+                const target: *PhpObject = @ptrFromInt(dead.native.ptr);
+                if (self.weak_references.get(target)) |ref| if (ref == dead) {
+                    _ = self.weak_references.remove(target);
+                    target.weakly_referenced = false;
+                };
+            }
+            dead.native = .{};
+        }
+    }
+
+    // the WeakReference php hands out for an object, one per object, borrowed
+    pub fn weakReferenceFor(self: *VM, target: *PhpObject) RuntimeError!*PhpObject {
+        if (self.weak_references.get(target)) |ref| return ref;
+        const ref = try self.allocObject(.{ .class_name = "WeakReference" });
+        ref.native = .{ .kind = .weak_reference, .ptr = @intFromPtr(target) };
+        try self.weak_references.put(self.allocator, target, ref);
+        target.weakly_referenced = true;
+        return ref;
+    }
+
     fn weakmapsOnObjectDestruct(self: *VM, dead_obj: *PhpObject) void {
         const target_int: i64 = @intCast(@intFromPtr(dead_obj));
         var i: usize = 0;

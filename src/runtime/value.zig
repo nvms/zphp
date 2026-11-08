@@ -921,6 +921,8 @@ pub const NativeHandle = struct {
         channel,
         buffer,
         list_formatter,
+        // a WeakReference: ptr is its target until the target is freed
+        weak_reference,
         _,
     };
 
@@ -1004,6 +1006,8 @@ pub const PhpObject = struct {
     // a reference cell has targeted one of this object's properties; the
     // release path must detach those weak mirrors before the address is reused
     ref_mirrored: bool = false,
+    // a WeakReference names this object (vm.weak_references)
+    weakly_referenced: bool = false,
     // native pointers behind a builtin or extension class live here, never
     // in properties, so php code cannot read or forge them
     native: NativeHandle = .{},

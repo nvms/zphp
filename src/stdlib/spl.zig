@@ -592,9 +592,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "SplObjectStorage::offsetExists", sosOffsetExists);
     try vm.native_fns.put(a, "SplObjectStorage::offsetUnset", sosOffsetUnset);
 
-    // WeakReference: holds the target. zphp is request-scoped so the target
-    // never goes away mid-request. get() always returns the target.
-    var wr_def = ClassDef{ .name = "WeakReference", .is_final = true };
+    var wr_def = ClassDef{ .name = "WeakReference", .is_final = true, .uncloneable = true, .native_properties = weakRefProperties };
     try wr_def.methods.put(a, "create", .{ .name = "create", .arity = 1, .is_static = true });
     try wr_def.methods.put(a, "get", .{ .name = "get", .arity = 0 });
     try wr_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
@@ -676,14 +674,22 @@ fn wmiValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
 
 fn weakRefCreate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .object) return NativeResult.scalar(.null);
-    const ref = try ctx.vm.allocObject(.{ .class_name = "WeakReference" });
-    try ref.set(ctx.vm.allocator, "__target", args[0]);
-    return NativeResult.borrowed(.{ .object = ref });
+    return NativeResult.borrowed(.{ .object = try ctx.vm.weakReferenceFor(args[0].object) });
 }
 
 fn weakRefGet(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    return NativeResult.share(this.get("__target"));
+    const target = this.native.get(PhpObject, .weak_reference) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(.{ .object = target });
+}
+
+// php 8.5's debug view names the target, or null once it is gone
+fn weakRefProperties(ctx: *NativeContext, obj: *PhpObject, purpose: object_properties.Purpose) RuntimeError!?*PhpArray {
+    if (purpose != .debug) return null;
+    const arr = try object_properties.ownTable(ctx.vm, obj);
+    const target: Value = if (obj.native.get(PhpObject, .weak_reference)) |t| .{ .object = t } else .null;
+    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("object") }, target);
+    return arr;
 }
 
 fn weakRefConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
