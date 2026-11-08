@@ -688,6 +688,11 @@ pub const VM = struct {
     // a fiber started inside the destructor suspends within itself, so
     // each fiber run starts unblocked
     fiber_switch_blocked: u32 = 0,
+    // php's GC_G(dtor_fiber): garbage found while a fiber runs has its
+    // destructors called in a fiber of their own, so one may suspend. the
+    // fiber is kept for the next collection until a destructor suspends it
+    gc_dtor_fiber: ?*Fiber = null,
+    gc_dtors_in_fiber: bool = false,
     // objects the destructors of the current collection revived
     gc_revived: usize = 0,
     fiber_suspend_value: Value = .null,
@@ -3143,6 +3148,7 @@ pub const VM = struct {
         }
         self.generators.clearRetainingCapacity();
         self.fibers.clearRetainingCapacity();
+        self.gc_dtor_fiber = null;
         self.ref_cells.clearRetainingCapacity();
         self.free_cells.clearRetainingCapacity();
         self.last_return_ref = null;
@@ -21742,6 +21748,63 @@ pub const VM = struct {
         };
     }
 
+    // runs a user __destruct as the body of the gc's destructor fiber (php's
+    // gc_call_destructors_in_fiber). a destructor that suspends keeps that
+    // fiber, resumable through Fiber::getCurrent(), and the next destructor
+    // gets a new one. false when the destructor is not user code
+    fn callDestructorInGcFiber(self: *VM, obj: *PhpObject) bool {
+        const full_name = self.resolveMethod(obj.class_name, "__destruct") catch return false;
+        const func = self.functions.get(full_name) orelse return false;
+        const fiber = self.gc_dtor_fiber orelse blk: {
+            const created = self.free_fibers.pop() orelse created: {
+                const fresh = self.allocator.create(Fiber) catch return false;
+                self.fibers.append(self.allocator, fresh) catch {
+                    self.allocator.destroy(fresh);
+                    return false;
+                };
+                break :created fresh;
+            };
+            created.* = .{ .handle = self.allocHandle() catch return false };
+            // the vm's own reference
+            fiberRetain(created);
+            self.gc_dtor_fiber = created;
+            break :blk created;
+        };
+        var vars = self.acquireFrameVars();
+        vars.put(self.allocator, "$this", .{ .object = obj }) catch return false;
+        self.ensureCallRoom() catch return false;
+        const base_frame = self.frame_count;
+        const base_sp = self.sp;
+        const base_handler = self.handler_count;
+        const locals = self.allocLocals(func, &vars) catch return false;
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = locals, .func = func, .called_class = obj.class_name };
+        self.frames[self.frame_count].entry_sp = self.sp;
+        self.markArgsUnsaved();
+        self.frame_count += 1;
+        self.retainFrameObjects(self.frame_count - 1);
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
+        fiber.state = .running;
+        // what the destructor releases is destructed as usual, not in this
+        // fiber, which is busy
+        self.gc_dtors_in_fiber = false;
+        const result = self.executeFiber(fiber, base_frame, base_sp, base_handler) catch blk: {
+            // a throwing destructor must not corrupt the drop site
+            self.discardPending();
+            break :blk Value.null;
+        };
+        self.gc_dtors_in_fiber = true;
+        self.releaseValue(result);
+        if (fiber.state == .suspended) {
+            // the destructor holds this fiber now; the application may
+            // keep it or let it go
+            self.gc_dtor_fiber = null;
+            self.fiberRelease(fiber);
+        } else {
+            fiber.state = .created;
+        }
+        return true;
+    }
+
     fn destroyReleasedObject(self: *VM, obj: *PhpObject, deferred_stack_arrays: *std.ArrayListUnmanaged(*PhpArray)) void {
         if (obj.refcount != 0 or obj.destructed) return;
         // the in-flight exception is a VM-level root: while it
@@ -21761,7 +21824,10 @@ pub const VM = struct {
         const outer_log = self.release_log;
         if (self.release_depth < max_release_depth) self.release_log = &dropped;
         defer self.release_log = outer_log;
-        if (obj.ownsDestructor() and !obj.destructor_called and self.hasMethod(obj.class_name, "__destruct")) {
+        if (obj.ownsDestructor() and !obj.destructor_called and self.hasMethod(obj.class_name, "__destruct")) destruct: {
+            if (self.gc_dtors_in_fiber) {
+                if (self.callDestructorInGcFiber(obj)) break :destruct;
+            }
             self.fiber_switch_blocked += 1;
             defer self.fiber_switch_blocked -= 1;
             _ = self.callMethod(obj, "__destruct", &.{}) catch {
@@ -22186,7 +22252,11 @@ pub const VM = struct {
         for (self.cycle_array_candidates.items) |arr| arr.cycle_queued = false;
         self.cycle_candidates.clearRetainingCapacity();
         self.cycle_array_candidates.clearRetainingCapacity();
+        // inside a fiber, php calls the garbage's destructors in its gc fiber
+        const prev_in_fiber = self.gc_dtors_in_fiber;
+        self.gc_dtors_in_fiber = self.current_fiber != null;
         self.drainPendingDestruct();
+        self.gc_dtors_in_fiber = prev_in_fiber;
         for (self.cycle_closures.keys(), self.cycle_closures.values()) |owner, scratch| {
             if (scratch == 0) self.releaseClosureByName(owner.bytes);
         }
