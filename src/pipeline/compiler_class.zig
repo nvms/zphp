@@ -96,7 +96,7 @@ const CallAttrs = struct { no_discard: ?[]const u8 = null, deprecated: ?[]const 
 fn callAttributes(self: *Compiler, main_token: u32, return_type: []const u8, comptime kind: []const u8) Error!CallAttrs {
     var out: CallAttrs = .{};
     if (self.ast.attr_ranges.len == 0) return out;
-    const attrs = try extractAttributes(self, main_token);
+    const attrs = try extractAttributes(self, main_token, .unchecked);
     defer freeParsedAttrs(self.allocator, attrs);
     for (attrs) |pa| {
         const name = if (pa.name.len > 0 and pa.name[0] == '\\') pa.name[1..] else pa.name;
@@ -119,6 +119,21 @@ fn callAttributes(self: *Compiler, main_token: u32, return_type: []const u8, com
         }
     }
     return out;
+}
+
+// a function's parameter attributes, filed with its own under
+// paramAttributesName
+fn appendParamAttributes(self: *Compiler, func_name: []const u8, param_nodes: []const u32) Error!void {
+    for (param_nodes) |p| {
+        const attrs = try extractAttributes(self, self.ast.nodes[p].main_token, AttrTarget.parameter);
+        if (attrs.len == 0) continue;
+        defer self.allocator.free(attrs);
+        const defs = try self.allocator.alloc(AttributeDef, attrs.len);
+        for (attrs, 0..) |pa, i| defs[i] = .{ .name = pa.name, .args = pa.args, .arg_names = pa.arg_names };
+        const key = try @import("bytecode.zig").paramAttributesName(self.allocator, func_name, paramName(self, p));
+        try self.string_allocs.append(self.allocator, key);
+        try self.function_attrs.append(self.allocator, .{ .name = key, .attrs = defs });
+    }
 }
 
 fn keepString(self: *Compiler, owned: []u8) Error![]const u8 {
@@ -163,7 +178,115 @@ fn freeParsedAttrValue(allocator: Allocator, value: Value) void {
     allocator.destroy(value.array);
 }
 
-fn extractAttributes(self: *Compiler, main_token: u32) Error![]const ParsedAttr {
+// what an attribute list is written on, for php's checks of its internal
+// attributes (zend_compile_attributes): a target's Attribute::TARGET_* bit,
+// or a class declaration, which its validators also look at
+pub const AttrTarget = union(enum) {
+    // read again for something other than declaring it
+    unchecked,
+    flags: u8,
+    class: struct { kind: ClassKind, name: []const u8, modifiers: u8 = 0 },
+
+    pub const ClassKind = enum { class, interface, trait, @"enum" };
+    pub const function: AttrTarget = .{ .flags = 2 };
+    pub const method: AttrTarget = .{ .flags = 4 };
+    pub const property: AttrTarget = .{ .flags = 8 };
+    pub const class_constant: AttrTarget = .{ .flags = 16 };
+    pub const parameter: AttrTarget = .{ .flags = 32 };
+    // a promoted constructor parameter is a parameter and a property
+    pub const promoted: AttrTarget = .{ .flags = 32 | 8 };
+};
+
+// the internal attributes and the targets their #[Attribute] allows
+const internal_attributes = [_]struct { name: []const u8, flags: u8, repeatable: bool = false }{
+    .{ .name = "Attribute", .flags = 1 },
+    .{ .name = "ReturnTypeWillChange", .flags = 4 },
+    .{ .name = "AllowDynamicProperties", .flags = 1 },
+    .{ .name = "SensitiveParameter", .flags = 32 },
+    .{ .name = "Override", .flags = 12 },
+    .{ .name = "Deprecated", .flags = 87 },
+    .{ .name = "NoDiscard", .flags = 6 },
+    .{ .name = "DelayedTargetValidation", .flags = 127 },
+};
+
+fn bareAttributeName(name: []const u8) []const u8 {
+    return if (name.len > 0 and name[0] == '\\') name[1..] else name;
+}
+
+fn targetNames(buf: []u8, flags: u8) []const u8 {
+    const names = [_][]const u8{ "class", "function", "method", "property", "class constant", "parameter", "constant" };
+    var len: usize = 0;
+    for (names, 0..) |n, bit| {
+        if (flags & (@as(u8, 1) << @intCast(bit)) == 0) continue;
+        const sep: []const u8 = if (len > 0) ", " else "";
+        if (len + sep.len + n.len > buf.len) break;
+        @memcpy(buf[len..][0..sep.len], sep);
+        len += sep.len;
+        @memcpy(buf[len..][0..n.len], n);
+        len += n.len;
+    }
+    return buf[0..len];
+}
+
+fn checkInternalAttributes(self: *Compiler, attrs: []const ParsedAttr, target: AttrTarget, at: u32) Error!void {
+    const target_flags: u8 = switch (target) {
+        .unchecked => return,
+        .flags => |f| f,
+        .class => 1,
+    };
+    var delayed = false;
+    for (attrs) |pa| {
+        if (std.ascii.eqlIgnoreCase(bareAttributeName(pa.name), "DelayedTargetValidation")) delayed = true;
+    }
+    for (attrs, 0..) |pa, i| {
+        const name = bareAttributeName(pa.name);
+        const config = for (internal_attributes) |ia| {
+            if (std.ascii.eqlIgnoreCase(ia.name, name)) break ia;
+        } else continue;
+        var run_validator = true;
+        if (target_flags & config.flags == 0) {
+            if (!delayed) {
+                var where_buf: [96]u8 = undefined;
+                var allowed_buf: [96]u8 = undefined;
+                return self.failFmt(at, "Attribute \"{s}\" cannot target {s} (allowed targets: {s})", .{ name, targetNames(&where_buf, target_flags), targetNames(&allowed_buf, config.flags) });
+            }
+            run_validator = false;
+        }
+        if (!config.repeatable) {
+            for (attrs[i + 1 ..]) |other| {
+                if (std.ascii.eqlIgnoreCase(bareAttributeName(other.name), name)) return self.failFmt(at, "Attribute \"{s}\" must not be repeated", .{name});
+            }
+        }
+        if (run_validator and target == .class) try validateClassAttribute(self, config.name, target.class, at);
+    }
+}
+
+// the validators php runs for an internal attribute on a class
+fn validateClassAttribute(self: *Compiler, attribute: []const u8, class: @FieldType(AttrTarget, "class"), at: u32) Error!void {
+    const readonly = class.modifiers & 4 != 0;
+    const abstract = class.modifiers & 1 != 0;
+    const refused: ?[]const u8 = if (std.mem.eql(u8, attribute, "AllowDynamicProperties")) switch (class.kind) {
+        .trait => "trait",
+        .interface => "interface",
+        .@"enum" => "enum",
+        .class => if (readonly) "readonly class" else null,
+    } else if (std.mem.eql(u8, attribute, "Attribute")) switch (class.kind) {
+        .trait => "trait",
+        .interface => "interface",
+        .@"enum" => "enum",
+        .class => if (abstract) "abstract class" else null,
+    } else if (std.mem.eql(u8, attribute, "Deprecated")) switch (class.kind) {
+        .trait => null,
+        .interface => "interface",
+        .@"enum" => "enum",
+        .class => "class",
+    } else null;
+    const kind = refused orelse return;
+    const shown = if (std.mem.startsWith(u8, class.name, "class@anonymous")) "class@anonymous" else class.name;
+    return self.failFmt(at, "Cannot apply #[\\{s}] to {s} {s}", .{ attribute, kind, shown });
+}
+
+fn extractAttributes(self: *Compiler, main_token: u32, target: AttrTarget) Error![]const ParsedAttr {
     const ar = findAttrRangeForToken(self.ast.attr_ranges, self.ast.tokens, main_token) orelse return &.{};
     const items = self.ast.extraSlice(ar.items);
     var all_attrs = std.ArrayListUnmanaged(ParsedAttr).empty;
@@ -212,6 +335,7 @@ fn extractAttributes(self: *Compiler, main_token: u32) Error![]const ParsedAttr 
             args[ai] = try attributeArgument(self, value_idx, main_token);
         }
     }
+    try checkInternalAttributes(self, all_attrs.items, target, main_token);
     return all_attrs.toOwnedSlice(self.allocator);
 }
 
@@ -219,6 +343,7 @@ fn extractAttributes(self: *Compiler, main_token: u32) Error![]const ParsedAttr 
 // initializer the vm runs when reflection asks, in the scope of the class
 // the attribute is in
 fn attributeArgument(self: *Compiler, idx: u32, target: u32) Error!Value {
+    if (!allowedInConstExpr(self.ast, idx)) return self.fail(target, "Constant expression contains invalid operations");
     if (findStaticClass(self.ast, idx) != null) return self.fail(target, "static::class cannot be used for compile-time class name resolution");
     if (namedClassName(self, idx)) |name| return .{ .string = Value.String.borrowed(name) };
     if (attrArgFolds(self, idx)) return self.evalConstExpr(idx);
@@ -228,8 +353,55 @@ fn attributeArgument(self: *Compiler, idx: u32, target: u32) Error!Value {
     for (self.functions.items) |f| {
         if (std.mem.eql(u8, f.name, name)) compiled = true;
     }
-    if (!compiled) try compileInitializer(self, name, self.current_class, idx, self.ast.nodes[idx].main_token);
+    if (!compiled) try compileInitializer(self, name, .argument, idx, self.ast.nodes[idx].main_token);
     return .{ .string = Value.String.borrowed(name) };
+}
+
+// php's zend_is_allowed_in_const_expr over the whole expression: literals,
+// constants, class constants, operators, arrays, `new`, property reads,
+// casts, closures and first-class callables
+fn allowedInConstExpr(ast: *const Ast, idx: u32) bool {
+    if (idx == 0) return true;
+    const node = ast.nodes[idx];
+    return switch (node.tag) {
+        .integer_literal, .float_literal, .string_literal, .true_literal, .false_literal, .null_literal => true,
+        .identifier, .qualified_name, .closure_expr, .callable_ref => true,
+        .binary_op, .logical_and, .logical_or, .null_coalesce, .array_access => allowedInConstExpr(ast, node.data.lhs) and allowedInConstExpr(ast, node.data.rhs),
+        .grouped_expr, .cast_expr => allowedInConstExpr(ast, node.data.lhs),
+        .prefix_op => switch (ast.tokens[node.main_token].tag) {
+            .plus_plus, .minus_minus => false,
+            else => allowedInConstExpr(ast, node.data.lhs),
+        },
+        .ternary => allowedInConstExpr(ast, node.data.lhs) and
+            node.data.rhs + 1 < ast.extra_data.len and
+            allowedInConstExpr(ast, ast.extra_data[node.data.rhs]) and
+            allowedInConstExpr(ast, ast.extra_data[node.data.rhs + 1]),
+        .property_access, .nullsafe_property_access => allowedInConstExpr(ast, node.data.lhs) and
+            (ast.nodes[node.data.rhs].tag == .identifier or allowedInConstExpr(ast, node.data.rhs)),
+        // Class::CONST and Class::class, not Class::$property
+        .static_prop_access => !std.mem.startsWith(u8, ast.tokenSlice(node.main_token), "$") and
+            allowedInConstExpr(ast, node.data.lhs),
+        .array_literal => {
+            for (ast.extraSlice(node.data.lhs)) |el_idx| {
+                const el = ast.nodes[el_idx];
+                switch (el.tag) {
+                    .array_element => if (!allowedInConstExpr(ast, el.data.lhs) or !allowedInConstExpr(ast, el.data.rhs)) return false,
+                    .array_spread => if (!allowedInConstExpr(ast, el.data.lhs)) return false,
+                    else => return false,
+                }
+            }
+            return true;
+        },
+        .new_expr => {
+            for (ast.extraSlice(node.data.lhs)) |arg_idx| {
+                const arg = ast.nodes[arg_idx];
+                const value = if (arg.tag == .named_arg or arg.tag == .splat_expr) arg.data.lhs else arg_idx;
+                if (!allowedInConstExpr(ast, value)) return false;
+            }
+            return true;
+        },
+        else => false,
+    };
 }
 
 // the token of a static::class inside a constant expression
@@ -1203,7 +1375,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
 
     // function-level attributes
     if (!std.mem.startsWith(u8, name, "__closure_")) {
-        const func_attrs = try extractAttributes(self, node.main_token);
+        const func_attrs = try extractAttributes(self, node.main_token, AttrTarget.function);
         if (func_attrs.len > 0) {
             const attr_defs = try self.allocator.alloc(AttributeDef, func_attrs.len);
             for (func_attrs, 0..) |pa, i| {
@@ -1212,6 +1384,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
             try self.function_attrs.append(self.allocator, .{ .name = name, .attrs = attr_defs });
             self.allocator.free(func_attrs);
         }
+        try appendParamAttributes(self, name, param_nodes);
     }
 
     try self.adopt(&sub);
@@ -1406,7 +1579,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     // closure-level attributes
-    const closure_attrs = try extractAttributes(self, node.main_token);
+    const closure_attrs = try extractAttributes(self, node.main_token, AttrTarget.function);
     if (closure_attrs.len > 0) {
         const attr_defs = try self.allocator.alloc(AttributeDef, closure_attrs.len);
         for (closure_attrs, 0..) |pa, i| {
@@ -1415,6 +1588,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         try self.function_attrs.append(self.allocator, .{ .name = owned_name, .attrs = attr_defs });
         self.allocator.free(closure_attrs);
     }
+    try appendParamAttributes(self, owned_name, param_nodes);
 
     try self.adopt(&sub);
 
@@ -1718,10 +1892,39 @@ fn checkDuplicateMembers(self: *Compiler, class_name: []const u8, members: []con
     }
 }
 
+// a class declaration, named or anonymous, as compileClass reads it
+const ClassShape = struct {
+    name: []const u8,
+    members: []const u32,
+    modifiers: u8,
+    parent_node: u32,
+    impl_nodes: []const u32,
+    // the token its line, doc comment and end line are found from
+    at: u32,
+    // the token its attributes precede
+    attributes_at: u32,
+};
+
 pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     const class_name = self.declaredName(self.ast.tokenSlice(node.main_token));
-    const members = self.ast.extraSlice(node.data.lhs);
     try checkImportCollision(self, node.main_token, .class, class_name);
+    // rhs: {class_modifiers, parent_node, implements_count, impl_nodes...}
+    const rhs_base = node.data.rhs;
+    const impl_count = self.ast.extra_data[rhs_base + 2];
+    try compileClass(self, .{
+        .name = class_name,
+        .members = self.ast.extraSlice(node.data.lhs),
+        .modifiers = @intCast(self.ast.extra_data[rhs_base] & 0xff),
+        .parent_node = self.ast.extra_data[rhs_base + 1],
+        .impl_nodes = self.ast.extra_data[rhs_base + 3 .. rhs_base + 3 + impl_count],
+        .at = node.main_token,
+        .attributes_at = node.main_token,
+    });
+}
+
+fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
+    const class_name = shape.name;
+    const members = shape.members;
     try checkDuplicateMembers(self, class_name, members);
     try checkConstDecls(self, class_name, members);
 
@@ -1729,14 +1932,13 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     self.current_class = class_name;
     defer self.current_class = prev_class;
 
-    // decode rhs: {class_modifiers, parent_node, implements_count, impl_nodes...}
-    const rhs_base = node.data.rhs;
-    const class_modifiers: u8 = @intCast(self.ast.extra_data[rhs_base] & 0xff);
-    const parent_node = self.ast.extra_data[rhs_base + 1];
-    const impl_count = self.ast.extra_data[rhs_base + 2];
-    var impl_names: [16][]const u8 = undefined;
-    for (0..impl_count) |i| {
-        const impl_node = self.ast.nodes[self.ast.extra_data[rhs_base + 3 + i]];
+    const class_modifiers = shape.modifiers;
+    const parent_node = shape.parent_node;
+    const impl_count = shape.impl_nodes.len;
+    const impl_names = try self.allocator.alloc([]const u8, impl_count);
+    defer self.allocator.free(impl_names);
+    for (shape.impl_nodes, 0..) |impl_idx, i| {
+        const impl_node = self.ast.nodes[impl_idx];
         try rejectReservedParent(self, impl_node, "interface");
         impl_names[i] = try resolveNodeClassName(self, impl_node);
     }
@@ -1901,9 +2103,9 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitOp(.class_decl);
     try self.emitByte(class_modifiers);
     try self.emitU16(name_idx);
-    try self.emitU32(lineForToken(self, node.main_token));
-    try self.emitU32(endLineForBlockStartingAt(self, node.main_token));
-    try self.emitU16(try docCommentConst(self, node.main_token));
+    try self.emitU32(lineForToken(self, shape.at));
+    try self.emitU32(endLineForBlockStartingAt(self, shape.at));
+    try self.emitU16(try docCommentConst(self, shape.at));
     try self.emitU16(method_count);
 
     for (members) |member_idx| {
@@ -2151,7 +2353,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     // class-level attributes
-    const class_attrs = try extractAttributes(self, node.main_token);
+    const class_attrs = try extractAttributes(self, shape.attributes_at, .{ .class = .{ .kind = .class, .name = class_name, .modifiers = class_modifiers } });
     try emitAttributeData(self, class_attrs);
     freeAttrSlice(self.allocator, class_attrs);
 
@@ -2162,7 +2364,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_method or member.tag == .static_class_method or member.tag == .interface_method) {
-            const mattrs = try extractAttributes(self, member.main_token);
+            const mattrs = try extractAttributes(self, member.main_token, AttrTarget.method);
             if (mattrs.len > 0) {
                 try methods_with_attrs.append(self.allocator, .{
                     .name = self.ast.tokenSlice(member.main_token),
@@ -2186,7 +2388,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_property) {
-            const pattrs = try extractAttributes(self, member.main_token);
+            const pattrs = try extractAttributes(self, member.main_token, AttrTarget.property);
             if (pattrs.len > 0) {
                 var prop_name = self.ast.tokenSlice(member.main_token);
                 if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
@@ -2201,7 +2403,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
         const pnode = self.ast.nodes[p];
         const promotion = (pnode.data.rhs >> 2) & 3;
         if (promotion == 0) continue;
-        const pattrs = try extractAttributes(self, pnode.main_token);
+        const pattrs = try extractAttributes(self, pnode.main_token, AttrTarget.promoted);
         if (pattrs.len == 0) continue;
         var pname = self.ast.tokenSlice(pnode.main_token);
         if (pname.len > 0 and pname[0] == '$') pname = pname[1..];
@@ -2224,7 +2426,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .const_decl) {
-            const cattrs = try extractAttributes(self, member.main_token);
+            const cattrs = try extractAttributes(self, member.main_token, AttrTarget.class_constant);
             if (cattrs.len > 0) {
                 try consts_with_attrs.append(self.allocator, .{
                     .name = self.ast.tokenSlice(member.main_token),
@@ -2253,7 +2455,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             var params_with_attrs = std.ArrayListUnmanaged(ParamAttr).empty;
             for (param_nodes) |pn| {
                 const pnode = self.ast.nodes[pn];
-                const pattrs = try extractAttributes(self, pnode.main_token);
+                const pattrs = try extractAttributes(self, pnode.main_token, if ((pnode.data.rhs >> 2) & 3 > 0) AttrTarget.promoted else AttrTarget.parameter);
                 if (pattrs.len > 0) {
                     var pname = self.ast.tokenSlice(pnode.main_token);
                     if (pname.len > 0 and pname[0] == '$') pname = pname[1..];
@@ -2342,291 +2544,42 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
     try self.string_allocs.append(self.allocator, anon_name);
     self.closure_count += 1;
 
-    const members = self.ast.extraSlice(node.data.lhs);
-    try checkDuplicateMembers(self, anon_name, members);
-    try checkConstDecls(self, anon_name, members);
+    // rhs: {ctor_arg_count, ctor_args..., parent, impl_count, impls...}
     const rhs_base = node.data.rhs;
-
-    // decode rhs: {ctor_arg_count, ctor_args..., parent, impl_count, impls...}
     const ctor_arg_count = self.ast.extra_data[rhs_base];
     const ctor_args_start = rhs_base + 1;
-    const parent_node = self.ast.extra_data[ctor_args_start + ctor_arg_count];
-    const impl_count = self.ast.extra_data[ctor_args_start + ctor_arg_count + 1];
-    var impl_names: [16][]const u8 = undefined;
-    for (0..impl_count) |i| {
-        const impl_node = self.ast.nodes[self.ast.extra_data[ctor_args_start + ctor_arg_count + 2 + i]];
-        impl_names[i] = try resolveNodeClassName(self, impl_node);
+    const parent_at = ctor_args_start + ctor_arg_count;
+    const impl_count = self.ast.extra_data[parent_at + 1];
+    // attributes written after `new` precede the class keyword
+    var attributes_at = node.main_token;
+    for (self.ast.attr_ranges) |ar| {
+        if (ar.start == node.main_token + 1) attributes_at = ar.target_tok;
     }
-
-    var method_count: u16 = 0;
-    for (members) |member_idx| {
-        const member = self.ast.nodes[member_idx];
-        if (member.tag == .class_method or member.tag == .static_class_method) {
-            try compileClassMethodBody(self, anon_name, member);
-            method_count += 1;
-        }
-    }
-
-    var promoted_count: u16 = 0;
-    var constructor_params: []const u32 = &.{};
-    for (members) |member_idx| {
-        const member = self.ast.nodes[member_idx];
-        if (member.tag == .class_method and std.mem.eql(u8, self.ast.tokenSlice(member.main_token), "__construct")) {
-            constructor_params = self.ast.extraSlice(member.data.lhs);
-            for (constructor_params) |p| {
-                const pnode = self.ast.nodes[p];
-                if ((pnode.data.rhs >> 2) & 3 > 0) promoted_count += 1;
-            }
-            break;
-        }
-    }
-
-    var trait_prop_members = std.ArrayListUnmanaged(u32).empty;
-    defer trait_prop_members.deinit(self.allocator);
-    for (members) |member_idx| {
-        const member = self.ast.nodes[member_idx];
-        if (member.tag == .trait_use) {
-            for (self.ast.extraSlice(member.data.lhs)) |tn| {
-                const tname = self.ast.tokenSlice(self.ast.nodes[tn].main_token);
-                if (self.trait_properties.get(tname)) |props| {
-                    for (props) |pi| try trait_prop_members.append(self.allocator, pi);
-                }
-            }
-        }
-    }
-
-    var prop_count: u16 = 0;
-    for (members) |member_idx| {
-        const member = self.ast.nodes[member_idx];
-        if (member.tag == .class_property) prop_count += 1;
-    }
-    prop_count += @intCast(trait_prop_members.items.len);
-    prop_count += promoted_count;
-    for (members) |member_idx| {
-        const member = self.ast.nodes[member_idx];
-        if (member.tag == .class_property) {
-            if (member.data.lhs != 0) {
-                try self.compileNode(member.data.lhs);
-            }
-        }
-    }
-    for (trait_prop_members.items) |tpi| {
-        const tmember = self.ast.nodes[tpi];
-        if (tmember.data.lhs != 0) {
-            try self.compileNode(tmember.data.lhs);
-        }
-    }
-    for (constructor_params) |p| {
-        const pnode = self.ast.nodes[p];
-        if ((pnode.data.rhs >> 2) & 3 > 0) {
-            try self.emitOp(.op_null);
-        }
-    }
-
-    var static_prop_count: u16 = 0;
-    for (members) |member_idx| {
-        const member = self.ast.nodes[member_idx];
-        if (member.tag == .static_class_property or member.tag == .const_decl) static_prop_count += 1;
-    }
-    for (members) |member_idx| {
-        const member = self.ast.nodes[member_idx];
-        if (member.tag == .static_class_property) {
-            if (member.data.lhs != 0) {
-                try self.compileNode(member.data.lhs);
-            }
-        } else if (member.tag == .const_decl) {
-            try self.compileNode(member.data.lhs);
-        }
-    }
-
     const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(anon_name) });
-    try self.emitOp(.class_decl);
-    try self.emitByte(0); // anonymous classes have no class modifiers
+    try self.emitOp(.jump_if_class_declared);
     try self.emitU16(name_idx);
-    try self.emitU32(lineForToken(self, node.main_token));
-    try self.emitU32(endLineForBlockStartingAt(self, node.main_token));
-    try self.emitU16(try docCommentConst(self, node.main_token));
-    try self.emitU16(method_count);
+    try self.emitU16(0xffff);
+    const declared_jump = self.chunk.offset() - 2;
+    // `new readonly class`: the modifier comes before the class keyword
+    const first = if (attributes_at != node.main_token) attributes_at else node.main_token + 1;
+    const modifiers: u8 = switch (self.ast.tokens[first].tag) {
+        .kw_abstract => 1,
+        .kw_final => 2,
+        .kw_readonly => 4,
+        else => 0,
+    };
+    try compileClass(self, .{
+        .name = anon_name,
+        .members = self.ast.extraSlice(node.data.lhs),
+        .modifiers = modifiers,
+        .parent_node = self.ast.extra_data[parent_at],
+        .impl_nodes = self.ast.extra_data[parent_at + 2 .. parent_at + 2 + impl_count],
+        .at = node.main_token,
+        .attributes_at = attributes_at,
+    });
 
-    for (members) |member_idx| {
-        const member = self.ast.nodes[member_idx];
-        if (member.tag == .class_method or member.tag == .static_class_method) {
-            const method_name_str = self.ast.tokenSlice(member.main_token);
-            const mname_idx = try self.addConstant(.{ .string = Value.String.borrowed(method_name_str) });
-            try self.emitU16(mname_idx);
-            const param_nodes = self.ast.extraSlice(member.data.lhs);
-            try self.emitByte(@intCast(param_nodes.len));
-            try self.emitByte(if (member.tag == .static_class_method) @as(u8, 1) else @as(u8, 0));
-            const vis: u8 = @intCast(member.data.rhs >> 30);
-            try self.emitByte(vis);
-            try self.emitByte(0); // anonymous classes don't have abstract/final methods
-        }
-    }
+    self.patchJump(declared_jump);
 
-    try self.emitU16(prop_count);
-    for (members) |member_idx| {
-        const member = self.ast.nodes[member_idx];
-        if (member.tag == .class_property) {
-            var prop_name = self.ast.tokenSlice(member.main_token);
-            if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
-            const pname_idx = try self.addConstant(.{ .string = Value.String.borrowed(prop_name) });
-            try self.emitU16(pname_idx);
-            try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
-            try self.emitByte(@intCast(member.data.rhs & 0xff));
-            try self.emitU16(try propertyTypeConst(self, member.data.rhs));
-            try self.emitU16(try docCommentConst(self, member.main_token));
-        }
-    }
-    for (trait_prop_members.items) |tpi| {
-        const tmember = self.ast.nodes[tpi];
-        var tprop_name = self.ast.tokenSlice(tmember.main_token);
-        if (tprop_name.len > 0 and tprop_name[0] == '$') tprop_name = tprop_name[1..];
-        const tpname_idx = try self.addConstant(.{ .string = Value.String.borrowed(tprop_name) });
-        try self.emitU16(tpname_idx);
-        try self.emitByte(if (tmember.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
-        try self.emitByte(@intCast(tmember.data.rhs & 0xff));
-        try self.emitU16(try propertyTypeConst(self, tmember.data.rhs));
-        try self.emitU16(try docCommentConst(self, tmember.main_token));
-    }
-    for (constructor_params) |p| {
-        const pnode = self.ast.nodes[p];
-        const promotion = (pnode.data.rhs >> 2) & 3;
-        if (promotion > 0) {
-            var param_name = self.ast.tokenSlice(pnode.main_token);
-            if (param_name.len > 0 and param_name[0] == '$') param_name = param_name[1..];
-            const pname_idx = try self.addConstant(.{ .string = Value.String.borrowed(param_name) });
-            try self.emitU16(pname_idx);
-            try self.emitByte(1);
-            const is_ro: u8 = if ((pnode.data.rhs & 16) != 0) 4 else 0;
-            const set_promo = (pnode.data.rhs >> 5) & 3;
-            const asymm_bits: u8 = if (set_promo > 0) (@as(u8, @intCast(set_promo - 1)) << 3) | 0x20 else 0;
-            const is_final: u8 = if ((pnode.data.rhs & 0x80) != 0) 0x80 else 0;
-            try self.emitByte(@as(u8, @intCast(promotion - 1)) | is_ro | asymm_bits | 0x40 | is_final);
-            const param_type_extra = pnode.data.rhs >> 8;
-            if (param_type_extra == 0) {
-                try self.emitU16(0xffff);
-            } else {
-                const start_tok = self.ast.extra_data[param_type_extra - 1];
-                const end_tok = self.ast.extra_data[param_type_extra];
-                const type_str = try buildTypeString(self, start_tok, end_tok);
-                try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(type_str) }));
-            }
-            try self.emitU16(0xffff);
-        }
-    }
-
-    try self.emitU16(static_prop_count);
-    for (members) |member_idx| {
-        const member = self.ast.nodes[member_idx];
-        if (member.tag == .static_class_property) {
-            var prop_name = self.ast.tokenSlice(member.main_token);
-            if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
-            const pname_idx = try self.addConstant(.{ .string = Value.String.borrowed(prop_name) });
-            try self.emitU16(pname_idx);
-            try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
-            try self.emitByte(@intCast(member.data.rhs & 0xff));
-            try self.emitByte(0); // 0 = static property
-            try self.emitU16(try propertyTypeConst(self, member.data.rhs));
-            try self.emitU16(try docCommentConst(self, member.main_token));
-        } else if (member.tag == .const_decl) {
-            const cname = self.ast.tokenSlice(member.main_token);
-            const cname_idx = try self.addConstant(.{ .string = Value.String.borrowed(cname) });
-            try self.emitU16(cname_idx);
-            try self.emitByte(1);
-            try self.emitByte(@intCast(member.data.rhs & 0x13)); // bits 0-1 visibility, bit 4 final
-            try self.emitByte(1); // 1 = constant
-            try self.emitU16(0xffff);
-            try self.emitU16(try docCommentConst(self, member.main_token));
-        }
-    }
-
-    if (parent_node != 0) {
-        const apnode = self.ast.nodes[parent_node];
-        try rejectReservedParent(self, apnode, "class");
-        const parent_name = try resolveNodeClassName(self, apnode);
-        const parent_idx = try self.addConstant(.{ .string = Value.String.borrowed(parent_name) });
-        try self.emitU16(parent_idx);
-    } else {
-        try self.emitU16(0xffff);
-    }
-
-    try self.emitByte(@intCast(impl_count));
-    for (0..impl_count) |i| {
-        const iname_idx = try self.addConstant(.{ .string = Value.String.borrowed(impl_names[i]) });
-        try self.emitU16(iname_idx);
-    }
-
-    var all_traits = std.ArrayListUnmanaged([]const u8).empty;
-    defer all_traits.deinit(self.allocator);
-    for (members) |member_idx| {
-        const member = self.ast.nodes[member_idx];
-        if (member.tag == .trait_use) {
-            for (self.ast.extraSlice(member.data.lhs)) |tn| {
-                const tn_node = self.ast.nodes[tn];
-                const is_absolute = tn_node.tag == .qualified_name and tn_node.data.rhs == 1;
-                const raw_name = if (tn_node.tag == .qualified_name) blk: {
-                    const parts = self.ast.extraSlice(tn_node.data.lhs);
-                    break :blk try self.buildQualifiedString(parts);
-                } else self.ast.tokenSlice(tn_node.main_token);
-                // FQN (had leading backslash): skip use-alias + namespace prefix
-                const resolved = if (is_absolute) raw_name else self.resolveClassName(raw_name);
-                try all_traits.append(self.allocator, resolved);
-            }
-        }
-    }
-    try self.emitByte(@intCast(all_traits.items.len));
-    for (all_traits.items) |tname| {
-        const tname_idx = try self.addConstant(.{ .string = Value.String.borrowed(tname) });
-        try self.emitU16(tname_idx);
-    }
-
-    const ConflictRule = struct { cnode: Ast.Node };
-    var all_conflicts = std.ArrayListUnmanaged(ConflictRule).empty;
-    defer all_conflicts.deinit(self.allocator);
-    for (members) |member_idx| {
-        const member = self.ast.nodes[member_idx];
-        if (member.tag == .trait_use and member.data.rhs != 0) {
-            for (self.ast.extraSlice(member.data.rhs)) |cn| {
-                try all_conflicts.append(self.allocator, .{ .cnode = self.ast.nodes[cn] });
-            }
-        }
-    }
-    try self.emitByte(@intCast(all_conflicts.items.len));
-    for (all_conflicts.items) |cr| {
-        const method_name = self.ast.tokenSlice(cr.cnode.main_token);
-        const trait_name = if (cr.cnode.data.lhs == 0) "" else self.ast.tokenSlice(self.ast.nodes[cr.cnode.data.lhs].main_token);
-        const method_idx = try self.addConstant(.{ .string = Value.String.borrowed(method_name) });
-        const trait_idx = try self.addConstant(.{ .string = Value.String.borrowed(trait_name) });
-        try self.emitU16(method_idx);
-        try self.emitU16(trait_idx);
-        if (cr.cnode.tag == .trait_insteadof) {
-            try self.emitByte(1);
-            const excluded = self.ast.extraSlice(cr.cnode.data.rhs);
-            try self.emitByte(@intCast(excluded.len));
-            for (excluded) |en| {
-                const ename = self.ast.tokenSlice(self.ast.nodes[en].main_token);
-                const eidx = try self.addConstant(.{ .string = Value.String.borrowed(ename) });
-                try self.emitU16(eidx);
-            }
-        } else {
-            try self.emitByte(2);
-            const alias_token: u32 = cr.cnode.data.rhs & 0x3FFFFFFF;
-            const vis_kind: u8 = @intCast(cr.cnode.data.rhs >> 30);
-            const alias = self.ast.tokenSlice(alias_token);
-            const aidx = try self.addConstant(.{ .string = Value.String.borrowed(alias) });
-            try self.emitU16(aidx);
-            try self.emitByte(vis_kind);
-        }
-    }
-
-    // anonymous classes don't support attributes yet, emit empty
-    try self.emitByte(0); // class attrs
-    try self.emitByte(0); // method attrs
-    try self.emitByte(0); // property attrs
-    try self.emitByte(0); // constant attrs
-    try self.emitByte(0); // param attrs
-
-    // now instantiate with constructor args
     const ctor_args_slice = self.ast.extra_data[ctor_args_start .. ctor_args_start + ctor_arg_count];
     try self.emitOp(.new_reserve);
     defer self.emitOp(.new_end) catch {};
@@ -2634,9 +2587,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
         var guards = try @import("compiler_expr.zig").emitSpreadArgs(self, ctor_args_slice);
         try @import("compiler_expr.zig").emitSpreadCallOp(self, &guards, .new_obj, name_idx, 0xFF);
     } else {
-        for (0..ctor_arg_count) |i| {
-            try self.compileNode(self.ast.extra_data[ctor_args_start + i]);
-        }
+        for (ctor_args_slice) |arg| try self.compileNode(arg);
         try self.emitOp(.new_obj);
         try self.emitU16(name_idx);
         try self.emitByte(@intCast(ctor_arg_count));
@@ -2714,7 +2665,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     // interface-level attributes
-    const iface_attrs = try extractAttributes(self, node.main_token);
+    const iface_attrs = try extractAttributes(self, node.main_token, .{ .class = .{ .kind = .interface, .name = iface_name } });
     try emitAttributeData(self, iface_attrs);
     freeAttrSlice(self.allocator, iface_attrs);
 
@@ -2725,7 +2676,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (members) |m| {
         const member = self.ast.nodes[m];
         if (member.tag == .interface_method) {
-            const mattrs = try extractAttributes(self, member.main_token);
+            const mattrs = try extractAttributes(self, member.main_token, AttrTarget.method);
             if (mattrs.len > 0) {
                 try methods_with_attrs.append(self.allocator, .{
                     .name = self.ast.tokenSlice(member.main_token),
@@ -2765,7 +2716,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
             try self.string_allocs.append(self.allocator, hook);
             try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(hook) }));
         }
-        const attrs = try extractAttributes(self, member.main_token);
+        const attrs = try extractAttributes(self, member.main_token, AttrTarget.property);
         try emitAttributeData(self, attrs);
         freeAttrSlice(self.allocator, attrs);
     }
@@ -2776,7 +2727,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (members) |m| {
         const member = self.ast.nodes[m];
         if (member.tag != .const_decl) continue;
-        const cattrs = try extractAttributes(self, member.main_token);
+        const cattrs = try extractAttributes(self, member.main_token, AttrTarget.class_constant);
         if (cattrs.len > 0) try consts_with_attrs.append(self.allocator, .{ .name = self.ast.tokenSlice(member.main_token), .attrs = cattrs });
     }
     try self.emitByte(@intCast(consts_with_attrs.items.len));
@@ -2956,7 +2907,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     // trait-level attributes
-    const trait_attrs = try extractAttributes(self, node.main_token);
+    const trait_attrs = try extractAttributes(self, node.main_token, .{ .class = .{ .kind = .trait, .name = trait_name } });
     try emitAttributeData(self, trait_attrs);
     freeAttrSlice(self.allocator, trait_attrs);
 
@@ -2967,7 +2918,11 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_method or member.tag == .static_class_method or member.tag == .interface_method) {
-            const mattrs = try extractAttributes(self, member.main_token);
+            // a class using the trait reads its parameters' from here
+            const method_key = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ trait_name, self.ast.tokenSlice(member.main_token) });
+            try self.string_allocs.append(self.allocator, method_key);
+            try appendParamAttributes(self, method_key, self.ast.extraSlice(member.data.lhs));
+            const mattrs = try extractAttributes(self, member.main_token, AttrTarget.method);
             if (mattrs.len > 0) {
                 try methods_with_attrs.append(self.allocator, .{
                     .name = self.ast.tokenSlice(member.main_token),
@@ -2990,7 +2945,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_property) {
-            const pattrs = try extractAttributes(self, member.main_token);
+            const pattrs = try extractAttributes(self, member.main_token, AttrTarget.property);
             if (pattrs.len > 0) {
                 var prop_name = self.ast.tokenSlice(member.main_token);
                 if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
@@ -3121,7 +3076,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     // enum-level attributes
-    const enum_attrs = try extractAttributes(self, node.main_token);
+    const enum_attrs = try extractAttributes(self, node.main_token, .{ .class = .{ .kind = .@"enum", .name = enum_name } });
     try emitAttributeData(self, enum_attrs);
     freeAttrSlice(self.allocator, enum_attrs);
 
@@ -3132,7 +3087,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_method or member.tag == .static_class_method or member.tag == .interface_method) {
-            const mattrs = try extractAttributes(self, member.main_token);
+            const mattrs = try extractAttributes(self, member.main_token, AttrTarget.method);
             if (mattrs.len > 0) {
                 try methods_with_attrs.append(self.allocator, .{
                     .name = self.ast.tokenSlice(member.main_token),
@@ -3158,7 +3113,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .enum_case) {
-            const cattrs = try extractAttributes(self, member.main_token);
+            const cattrs = try extractAttributes(self, member.main_token, AttrTarget.class_constant);
             if (cattrs.len > 0) {
                 try cases_with_attrs.append(self.allocator, .{
                     .name = self.ast.tokenSlice(member.main_token),
@@ -3513,13 +3468,27 @@ fn emitClassConstant(self: *Compiler, class_name: []const u8, class_idx: u16, me
 fn compileConstInitializer(self: *Compiler, class_name: []const u8, member: Ast.Node) Error!void {
     const name = try @import("bytecode.zig").constInitializerName(self.allocator, class_name, self.ast.tokenSlice(member.main_token));
     try self.string_allocs.append(self.allocator, name);
-    try compileInitializer(self, name, class_name, member.data.lhs, member.main_token);
+    try compileInitializer(self, name, .{ .class = class_name }, member.data.lhs, member.main_token);
 }
 
 // a static function named `name` returning the expression's value, run in
 // the class's scope (none for "") with self and parent resolved then, the
 // way php evaluates a constant expression it couldn't fold
-fn compileInitializer(self: *Compiler, name: []const u8, class_name: []const u8, expr: u32, at: u32) Error!void {
+const scope_param = "\x00scope";
+
+const InitializerScope = union(enum) {
+    // a class known where the expression is written
+    class: []const u8,
+    // the class passed as the initializer's argument when it runs (none
+    // for ""), for an expression whose scope depends on where it is read
+    argument,
+};
+
+fn compileInitializer(self: *Compiler, name: []const u8, scope: InitializerScope, expr: u32, at: u32) Error!void {
+    const class_name = switch (scope) {
+        .class => |c| c,
+        .argument => self.current_class,
+    };
     var sub = Compiler{
         .ast = self.ast,
         .diagnostic = self.diagnostic,
@@ -3548,13 +3517,20 @@ fn compileInitializer(self: *Compiler, name: []const u8, class_name: []const u8,
     };
     defer sub.deinitScratch();
     errdefer sub.discardOutput();
-    if (class_name.len > 0) {
-        const cname_idx = try sub.addConstant(.{ .string = Value.String.borrowed(class_name) });
-        try sub.emitOp(.enter_class_scope);
-        try sub.emitU16(cname_idx);
+    const scoped = scope == .argument or class_name.len > 0;
+    switch (scope) {
+        .argument => {
+            _ = sub.getOrCreateSlot(scope_param);
+            try sub.emitOp(.enter_class_scope_arg);
+        },
+        .class => if (scoped) {
+            const cname_idx = try sub.addConstant(.{ .string = Value.String.borrowed(class_name) });
+            try sub.emitOp(.enter_class_scope);
+            try sub.emitU16(cname_idx);
+        },
     }
     try sub.compileNode(expr);
-    if (class_name.len > 0) try sub.emitOp(.leave_class_scope);
+    if (scoped) try sub.emitOp(.leave_class_scope);
     try sub.emitOp(.return_val);
     self.closure_count = sub.closure_count;
     self.cond_fn_count = sub.cond_fn_count;
@@ -3563,10 +3539,10 @@ fn compileInitializer(self: *Compiler, name: []const u8, class_name: []const u8,
     const local_count = sub.next_slot;
     self.functions.appendAssumeCapacity(.{
         .name = name,
-        .arity = 0,
-        .required_params = 0,
+        .arity = if (scope == .argument) 1 else 0,
+        .required_params = if (scope == .argument) 1 else 0,
         .is_static = true,
-        .params = &.{},
+        .params = if (scope == .argument) try self.allocator.dupe([]const u8, &.{scope_param}) else &.{},
         .defaults = &.{},
         .ref_params = &.{},
         .chunk = sub.takeChunk(),

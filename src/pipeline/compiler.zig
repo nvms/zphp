@@ -83,6 +83,7 @@ pub const CompileResult = struct {
             if (th.param_types.len > 0) self.allocator.free(th.param_types);
         }
         self.type_hints.deinit(self.allocator);
+        for (self.function_attrs.items) |fa| @import("../runtime/vm.zig").ClassDef.freeFunctionAttributeDefs(self.allocator, fa.attrs);
         self.function_attrs.deinit(self.allocator);
         for (self.new_defaults.items) |nd| {
             for (nd.args) |a| freeDefaultValue(self.allocator, a);

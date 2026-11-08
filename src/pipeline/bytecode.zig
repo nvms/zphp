@@ -424,10 +424,18 @@ pub const OpCode = enum(u8) {
     // u16 class, u16 constant: the constant's expression waits for its first
     // access (its initializer function evaluates it)
     defer_class_const,
+    // enter_class_scope for the class named by the function's first
+    // argument (no scope for ""), as an attribute's arguments are evaluated
+    // in the class reflection reads them from
+    enter_class_scope_arg,
+    // u16 class, u16 forward offset: jumps when the class is declared, so
+    // an anonymous class is declared only the first time its `new` runs
+    jump_if_class_declared,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
             .arg_variable => 6,
+            .jump_if_class_declared => 5,
             .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim, .arg_append => 4,
             .reference_source,
             .enter_class_scope,
@@ -705,6 +713,11 @@ pub const DEFERRED_EXPR_PREFIX = "\x00DX\x00";
 // access
 pub fn constInitializerName(allocator: std.mem.Allocator, class_name: []const u8, const_name: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "\x00const\x00{s}::{s}", .{ class_name, const_name });
+}
+
+// the function attribute entry holding a function's parameter's attributes
+pub fn paramAttributesName(allocator: std.mem.Allocator, func_name: []const u8, param: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ func_name, param });
 }
 
 // an attribute argument php evaluates when reflection asks for it: the

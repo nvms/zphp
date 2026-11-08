@@ -4,6 +4,7 @@ const object_properties = @import("../runtime/object_properties.zig");
 const deprecations = @import("deprecations_generated.zig");
 const Value = @import("../runtime/value.zig").Value;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
+const bytecode = @import("../pipeline/bytecode.zig");
 const php_version = @import("../php_version.zig");
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const vm_mod = @import("../runtime/vm.zig");
@@ -1636,7 +1637,8 @@ fn emitInterfaceDeep(ctx: *NativeContext, arr: *PhpArray, seen: *std.StringHashM
     }
 }
 
-fn buildReflectionAttribute(ctx: *NativeContext, attr: AttributeDef, target: i64, is_repeated: bool) RuntimeError!Value {
+// scope: the class the arguments are evaluated in ("" for none)
+fn buildReflectionAttribute(ctx: *NativeContext, attr: AttributeDef, target: i64, is_repeated: bool, scope: []const u8) RuntimeError!Value {
     const obj = try ctx.createObject("ReflectionAttribute");
     try obj.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(attr.name) });
     const args_arr = try ctx.createArray();
@@ -1656,6 +1658,9 @@ fn buildReflectionAttribute(ctx: *NativeContext, attr: AttributeDef, target: i64
     try obj.set(ctx.allocator, "_arguments", .{ .array = args_arr });
     try obj.set(ctx.allocator, "_target", .{ .int = target });
     try obj.set(ctx.allocator, "_is_repeated", .{ .bool = is_repeated });
+    // the reflector the scope name came from may be gone by the time the
+    // arguments are read
+    try obj.set(ctx.allocator, "__scope", .{ .string = Value.String.borrowed(try ctx.createString(scope)) });
     return .{ .object = obj };
 }
 
@@ -1663,11 +1668,11 @@ fn buildReflectionAttribute(ctx: *NativeContext, attr: AttributeDef, target: i64
 // filter matches any attribute whose class extends/implements the given name.
 const REFLECTION_ATTRIBUTE_IS_INSTANCEOF: i64 = 2;
 
-fn buildAttributeArray(ctx: *NativeContext, attrs: []const AttributeDef, filter: ?[]const u8, target: i64) RuntimeError!NativeResult {
-    return buildAttributeArrayWithFlags(ctx, attrs, filter, target, 0);
+fn buildAttributeArray(ctx: *NativeContext, attrs: []const AttributeDef, filter: ?[]const u8, target: i64, scope: []const u8) RuntimeError!NativeResult {
+    return buildAttributeArrayWithFlags(ctx, attrs, filter, target, 0, scope);
 }
 
-fn buildAttributeArrayWithFlags(ctx: *NativeContext, attrs: []const AttributeDef, filter: ?[]const u8, target: i64, flags: i64) RuntimeError!NativeResult {
+fn buildAttributeArrayWithFlags(ctx: *NativeContext, attrs: []const AttributeDef, filter: ?[]const u8, target: i64, flags: i64, scope: []const u8) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
     for (attrs) |attr| {
         if (filter) |f| {
@@ -1690,7 +1695,7 @@ fn buildAttributeArrayWithFlags(ctx: *NativeContext, attrs: []const AttributeDef
         for (attrs) |other| {
             if (std.mem.eql(u8, other.name, attr.name)) count += 1;
         }
-        try arr.append(ctx.allocator, try buildReflectionAttribute(ctx, attr, target, count > 1));
+        try arr.append(ctx.allocator, try buildReflectionAttribute(ctx, attr, target, count > 1, scope));
     }
     return NativeResult.borrowed(.{ .array = arr });
 }
@@ -1729,7 +1734,7 @@ fn rcGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     const cls = ctx.vm.classes.get(class_name) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else null;
     const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
-    return buildAttributeArrayWithFlags(ctx, cls.attributes.items, filter, 1, flags);
+    return buildAttributeArrayWithFlags(ctx, cls.attributes.items, filter, 1, flags, class_name);
 }
 
 fn rcGetProperties(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -2211,7 +2216,7 @@ fn rccGetAttributes(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRe
         return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     };
     if (cls.constant_attributes.get(const_name)) |attrs| {
-        return try buildAttributeArray(ctx, attrs, null, 16);
+        return try buildAttributeArray(ctx, attrs, null, 16, class_name);
     }
     return NativeResult.borrowed(.{ .array = try ctx.createArray() });
 }
@@ -2819,18 +2824,37 @@ fn rpGetDefaultValueConstantName(ctx: *NativeContext, _: []const Value) RuntimeE
 fn rpGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const param_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-    const class_name = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+    const filter_arg: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else null;
+    const flags_arg: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
+    if (this.get("_declaring_class") != .string) {
+        // a function's or closure's parameter
+        const function = this.get("_function");
+        if (function != .string) return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+        const key = try bytecode.paramAttributesName(ctx.allocator, compiledFunctionName(ctx.vm, function.string.bytes()), param_name);
+        defer ctx.allocator.free(key);
+        const attrs = ctx.vm.function_attributes.get(key) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+        const scope = this.get("__attribute_scope");
+        return buildAttributeArrayWithFlags(ctx, attrs, filter_arg, 32, flags_arg, if (scope == .string) scope.string.bytes() else "");
+    }
+    const class_name = this.get("_declaring_class").string.bytes();
     const method_name = if (this.get("_method_name") == .string) this.get("_method_name").string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-
-    const cls = ctx.vm.classes.get(class_name) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
 
     var key_buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&key_buf, "{s}:{s}", .{ method_name, param_name }) catch return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-    const attrs = cls.param_attributes.get(key) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+    const own = if (ctx.vm.classes.get(class_name)) |cls| cls.param_attributes.get(key) else null;
+    const attrs = own orelse blk: {
+        // a method taken from a trait: its parameters' are filed under the
+        // trait's method
+        const method_key = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ class_name, method_name }) catch break :blk null;
+        const func = ctx.vm.functions.get(method_key) orelse break :blk null;
+        const trait_key = try bytecode.paramAttributesName(ctx.allocator, func.name, param_name);
+        defer ctx.allocator.free(trait_key);
+        break :blk ctx.vm.function_attributes.get(trait_key);
+    } orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
 
     const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else null;
     const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
-    return buildAttributeArrayWithFlags(ctx, attrs, filter, 32, flags);
+    return buildAttributeArrayWithFlags(ctx, attrs, filter, 32, flags, class_name);
 }
 
 fn rpGetDeclaringClass(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -3051,7 +3075,26 @@ fn rfGetParameters(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
         if (native_params.get(func_name)) |sig| return NativeResult.borrowed(try buildNativeParamArray(ctx, sig, func_name));
         return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     };
-    return NativeResult.borrowed(try buildParamArray(ctx, func, func_name));
+    const params = try buildParamArray(ctx, func, func_name);
+    const scope = functionAttributeScope(ctx, this, func_name);
+    if (params == .array) for (params.array.entries.items) |entry| {
+        if (entry.value == .object) try entry.value.object.setCopiedString(ctx.allocator, "__attribute_scope", scope);
+    };
+    return NativeResult.borrowed(params);
+}
+
+// the name a function was compiled under, which its attributes are filed
+// by: a closure instance (bound ones included) shares its function
+fn compiledFunctionName(vm: *VM, name: []const u8) []const u8 {
+    if (vm.functions.get(name)) |func| return func.name;
+    return vm.getOrigClosureName(name);
+}
+
+// the class a function's attributes are evaluated in: a closure's scope,
+// none for a plain function
+fn functionAttributeScope(ctx: *NativeContext, this: *PhpObject, func_name: []const u8) []const u8 {
+    if (this.get("__scope_class") == .string) return this.get("__scope_class").string.bytes();
+    return ctx.vm.closureScopeByName(func_name) orelse "";
 }
 
 fn rfGetReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -3278,11 +3321,11 @@ fn rfGetClosureCalledClass(ctx: *NativeContext, _: []const Value) RuntimeError!N
 fn rfGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const func_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-    const compile_name = ctx.vm.getOrigClosureName(func_name);
+    const compile_name = compiledFunctionName(ctx.vm, func_name);
     const attrs = ctx.vm.function_attributes.get(compile_name) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else null;
     const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
-    return buildAttributeArrayWithFlags(ctx, attrs, filter, 2, flags);
+    return buildAttributeArrayWithFlags(ctx, attrs, filter, 2, flags, functionAttributeScope(ctx, this, func_name));
 }
 
 fn rfGetClosureScopeClass(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -4336,7 +4379,7 @@ fn rpropGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     const attrs = cls.property_attributes.get(prop_name) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else null;
     const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
-    return buildAttributeArrayWithFlags(ctx, attrs, filter, 8, flags);
+    return buildAttributeArrayWithFlags(ctx, attrs, filter, 8, flags, declaring);
 }
 
 fn rpropGetDocComment(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -4530,11 +4573,26 @@ fn rmGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     const this = getThis(ctx) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const method_name = methodLookupName(this) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-    const cls = ctx.vm.classes.get(declaring) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-    const attrs = cls.method_attributes.get(method_name) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+    const attrs = methodAttributes(ctx.vm, declaring, method_name) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else null;
     const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
-    return buildAttributeArrayWithFlags(ctx, attrs, filter, 4, flags);
+    return buildAttributeArrayWithFlags(ctx, attrs, filter, 4, flags, declaring);
+}
+
+// a method's attributes, read from the trait that declared it when the
+// class took the method from one
+fn methodAttributes(vm: *VM, class_name: []const u8, method_name: []const u8) ?[]const AttributeDef {
+    if (vm.classes.get(class_name)) |cls| {
+        if (cls.method_attributes.get(method_name)) |attrs| return attrs;
+    }
+    var key_buf: [512]u8 = undefined;
+    const key = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ class_name, method_name }) catch return null;
+    const func = vm.functions.get(key) orelse return null;
+    const sep = std.mem.indexOf(u8, func.name, "::") orelse return null;
+    const origin = func.name[0..sep];
+    if (std.mem.eql(u8, origin, class_name) or !vm.traits.contains(origin)) return null;
+    const trait = vm.classes.get(origin) orelse return null;
+    return trait.method_attributes.get(method_name);
 }
 
 fn rpIsPromoted(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -4587,16 +4645,20 @@ fn raGetName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
 fn raGetArguments(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const args = this.get("_arguments");
-    if (args == .array) return NativeResult.borrowed(.{ .array = try resolvedArguments(ctx, args.array) });
+    if (args == .array) return NativeResult.borrowed(.{ .array = try resolvedArguments(ctx, this, args.array) });
     return NativeResult.borrowed(.{ .array = try ctx.createArray() });
 }
 
 // the attribute's arguments with any that were deferred at declaration
 // resolved now, as php evaluates them when asked; one that still cannot be
 // resolved raises php's error here
-fn resolvedArguments(ctx: *NativeContext, stored: *PhpArray) RuntimeError!*PhpArray {
+fn resolvedArguments(ctx: *NativeContext, this: *PhpObject, stored: *PhpArray) RuntimeError!*PhpArray {
+    const scope = this.get("__scope");
     const out = try ctx.createArray();
-    for (stored.entries.items) |entry| try out.set(ctx.allocator, entry.key, try ctx.vm.resolveDefault(entry.value));
+    for (stored.entries.items) |entry| {
+        const value = try ctx.vm.attributeArgumentValue(entry.value, if (scope == .string) scope.string.bytes() else "");
+        try out.set(ctx.allocator, entry.key, value);
+    }
     return out;
 }
 
@@ -4626,7 +4688,7 @@ fn getAttributeFlags(vm: *VM, class_name: []const u8) RuntimeError!i64 {
     for (cls.attributes.items) |attr| {
         if (std.mem.eql(u8, attr.name, "Attribute")) {
             if (attr.args.len == 0) return 127; // TARGET_ALL
-            const flags = try vm.resolveDefault(attr.args[0]);
+            const flags = try vm.attributeArgumentValue(attr.args[0], class_name);
             return if (flags == .int) flags.int else 127;
         }
     }
@@ -4692,7 +4754,7 @@ fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
 
     const obj = try ctx.createObject(attr_name);
     const stored_args = this.get("_arguments");
-    const args_val: Value = if (stored_args == .array) .{ .array = try resolvedArguments(ctx, stored_args.array) } else stored_args;
+    const args_val: Value = if (stored_args == .array) .{ .array = try resolvedArguments(ctx, this, stored_args.array) } else stored_args;
     // without a constructor php drops positional arguments and refuses
     // named ones
     if (!ctx.vm.hasMethod(attr_name, "__construct")) {
@@ -5108,7 +5170,7 @@ fn rfIsDeprecated(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const func_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
     if (ctx.vm.native_fns.get(func_name)) |native| return NativeResult.scalar(.{ .bool = native.deprecated != null });
-    const attrs = ctx.vm.function_attributes.get(ctx.vm.getOrigClosureName(func_name)) orelse return NativeResult.scalar(.{ .bool = false });
+    const attrs = ctx.vm.function_attributes.get(compiledFunctionName(ctx.vm, func_name)) orelse return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = hasDeprecatedAttribute(attrs) });
 }
 

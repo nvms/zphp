@@ -427,7 +427,7 @@ pub const ClassDef = struct {
         allocator.destroy(value.array);
     }
 
-    fn freeFunctionAttributeDefs(allocator: Allocator, attrs: []const AttributeDef) void {
+    pub fn freeFunctionAttributeDefs(allocator: Allocator, attrs: []const AttributeDef) void {
         for (attrs) |a| {
             for (a.args) |arg| freeFunctionAttributeValue(allocator, arg);
             if (a.args.len > 0) allocator.free(a.args);
@@ -1638,7 +1638,7 @@ pub const VM = struct {
     const HeldException = struct { frame: usize, slot: usize, exception: *PhpObject };
     // `handlers` is how many exception handlers were in place, so entering
     // one of those leaves the scope
-    const InitializerScope = struct { class: []const u8, frame: usize, handlers: usize };
+    const InitializerScope = struct { class: ?[]const u8, frame: usize, handlers: usize };
 
     const ExceptionHandler = struct {
         catch_ip: usize, // absolute IP to jump to on throw
@@ -3012,8 +3012,7 @@ pub const VM = struct {
         }
         self.phar_cache.deinit(self.allocator);
         self.profile_calls.deinit(self.allocator);
-        var fa_iter = self.function_attributes.valueIterator();
-        while (fa_iter.next()) |attrs| ClassDef.freeFunctionAttributeDefs(self.allocator, attrs.*);
+        // the compile results own the attributes
         self.function_attributes.deinit(self.allocator);
         self.native_fns.deinit(self.allocator);
         self.output.deinit(self.allocator);
@@ -3374,9 +3373,6 @@ pub const VM = struct {
         for (result.type_hints.items) |th| {
             try g_type_info.put(self.allocator, th.name, .{ .param_types = th.param_types, .return_type = th.return_type });
         }
-        for (result.function_attrs.items) |fa| {
-            try self.function_attributes.put(self.allocator, fa.name, fa.attrs);
-        }
         var vars: std.StringHashMapUnmanaged(Value) = .{};
         var it = self.request_vars.iterator();
         while (it.next()) |entry| {
@@ -3712,6 +3708,12 @@ pub const VM = struct {
     // declare_fn can find its function from the executing frame's chunk
     pub fn registerResultFunctions(self: *VM, result: *const CompileResult) RuntimeError!void {
         try self.chunk_to_result.put(self.allocator, @intFromPtr(&result.chunk), result);
+        // a script compiled again (an include run twice) brings the same
+        // attributes; reflection may hold the first copy's arguments
+        for (result.function_attrs.items) |fa| {
+            const entry = try self.function_attributes.getOrPut(self.allocator, fa.name);
+            if (!entry.found_existing) entry.value_ptr.* = fa.attrs;
+        }
         for (result.functions.items) |*func| {
             try self.chunk_to_result.put(self.allocator, @intFromPtr(&func.chunk), result);
             if (func.cond_id == 0) try self.registerFunction(func);
@@ -4069,6 +4071,12 @@ pub const VM = struct {
                 .enter_class_scope => {
                     const class = self.currentChunk().constants.items[self.readU16()].string.bytes();
                     try self.initializer_scopes.append(self.allocator, .{ .class = self.declaredClassName(class), .frame = self.frame_count - 1, .handlers = self.handler_count });
+                },
+                .enter_class_scope_arg => {
+                    const frame = self.currentFrame();
+                    const arg = frame.locals[0];
+                    const class: ?[]const u8 = if (arg == .string and arg.string.len > 0) self.declaredClassName(arg.string.bytes()) else null;
+                    try self.initializer_scopes.append(self.allocator, .{ .class = class, .frame = self.frame_count - 1, .handlers = self.handler_count });
                 },
                 .leave_class_scope => {
                     _ = self.initializer_scopes.pop();
@@ -4719,6 +4727,11 @@ pub const VM = struct {
                 .jump_if_false => {
                     const offset = self.readU16();
                     if (!self.peek().isTruthy()) self.currentFrame().ip += offset;
+                },
+                .jump_if_class_declared => {
+                    const class = self.currentChunk().constants.items[self.readU16()].string.bytes();
+                    const offset = self.readU16();
+                    if (self.classes.contains(class)) self.currentFrame().ip += offset;
                 },
                 .jump_if_true => {
                     const offset = self.readU16();
@@ -11814,7 +11827,7 @@ pub const VM = struct {
         const msg = if (!self.classes.contains(class_name) and !self.interfaces.contains(class_name))
             try std.fmt.allocPrint(self.allocator, "Class \"{s}\" not found", .{class_name})
         else
-            try std.fmt.allocPrint(self.allocator, "Undefined constant {s}::{s}", .{ class_name, const_name });
+            try std.fmt.allocPrint(self.allocator, "Undefined constant {s}::{s}", .{ if (self.inInitializer() and self.class_const_written.len > 0) self.class_const_written else class_name, const_name });
         defer self.allocator.free(msg);
         if (try self.throwBuiltinException("Error", msg)) return true;
         return error.RuntimeError;
@@ -12769,8 +12782,11 @@ pub const VM = struct {
             var since: []const u8 = "";
             for (attr.args, 0..) |stored, i| {
                 const arg_name: ?[]const u8 = if (i < attr.arg_names.len) attr.arg_names[i] else null;
-                const arg = try self.resolveDefault(stored);
-                if (arg != .string) continue;
+                // read at declaration: an argument still deferred (a
+                // sentinel or an initializer, both starting with a nul) has
+                // no text yet
+                if (stored != .string or (stored.string.len > 0 and stored.string.bytes()[0] == 0)) continue;
+                const arg = stored;
                 const is_since = if (arg_name) |n| std.mem.eql(u8, n, "since") else i == 1;
                 if (is_since) since = arg.string.bytes() else message = arg.string.bytes();
             }
@@ -18713,6 +18729,13 @@ pub const VM = struct {
         return .null;
     }
 
+    // the current frame evaluates a constant expression (an initializer),
+    // where php names classes as the expression wrote them
+    fn inInitializer(self: *VM) bool {
+        const scopes = self.initializer_scopes.items;
+        return scopes.len > 0 and scopes[scopes.len - 1].frame + 1 == self.frame_count;
+    }
+
     fn parentResolvingClass(self: *VM) ?[]const u8 {
         // a class's constant expression, evaluated in the declaring frame
         if (self.initializer_scopes.items.len > 0) {
@@ -20138,10 +20161,6 @@ pub const VM = struct {
                     return self.unresolvedDefault("Undefined constant {s}::{s}", .{ class_name, const_name });
                 }
             }
-            if (bytecode.attrArgumentInitializerName(s)) |name| {
-                if (self.resolving_quietly) return error.RuntimeError;
-                return self.evaluateAttributeArgument(name);
-            }
             // deferred new-expression default: "\x00NW\x00<8 byte ptr>"
             if (bytecode.newDefaultPtr(s)) |nd| {
                 if (self.resolving_quietly) return error.RuntimeError;
@@ -20155,12 +20174,21 @@ pub const VM = struct {
         return val;
     }
 
-    fn evaluateAttributeArgument(self: *VM, name: []const u8) RuntimeError!Value {
+    // an attribute's argument as stored: a value, a deferred default, or
+    // the initializer of an expression, run in the scope class ("" for none)
+    pub fn attributeArgumentValue(self: *VM, stored: Value, scope: []const u8) RuntimeError!Value {
+        if (stored == .string) {
+            if (bytecode.attrArgumentInitializerName(stored.string.bytes())) |name| return self.evaluateAttributeArgument(name, scope);
+        }
+        return self.resolveDefault(stored);
+    }
+
+    fn evaluateAttributeArgument(self: *VM, name: []const u8, scope: []const u8) RuntimeError!Value {
         const floor = self.handler_floor;
         self.handler_floor = self.handler_count;
         defer self.handler_floor = floor;
         const evaluating = self.frame_count;
-        const value = self.callByName(name, &.{}) catch |err| {
+        const value = self.callByName(name, &.{.{ .string = Value.String.borrowed(scope) }}) catch |err| {
             // the expression belongs to the reflection call, not a frame of its own
             if (self.pending_exception) |exc| if (exc == .object) try self.stampThrowableBelow(exc.object, evaluating);
             return err;
