@@ -18,6 +18,10 @@ const SerCtx = struct {
     arrays: std.AutoHashMapUnmanaged(*PhpArray, usize) = .{},
     cells: std.AutoHashMapUnmanaged(*Value, usize) = .{},
     next_slot: usize = 1,
+    // the value serialize() was called with, and the references its native
+    // call holds to it, which php's refcount doesn't see
+    call_value: ?*PhpObject = null,
+    call_holds: u32 = 0,
 
     // the table keeps the objects it records alive until the outermost
     // serialize() ends, as php's does, so a temporary written by a nested
@@ -177,7 +181,9 @@ fn native_serialize(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
         try ctx.vm.setPendingException("Exception", "Serialization of 'Fiber' is not allowed");
         return error.RuntimeError;
     }
-    return try serializeToString(ctx, args[0]);
+    // invokeNative holds each argument twice for the call (a retain and an
+    // operand-stack hold); php's argument is one reference
+    return try serializeWith(ctx, args[0], 1);
 }
 
 // php refuses to serialize the internal classes whose state lives outside
@@ -227,6 +233,12 @@ threadlocal var serialize_lock: u32 = 0;
 threadlocal var shared_uctx: ?*UnserCtx = null;
 
 pub fn serializeToString(ctx: *NativeContext, val: Value) RuntimeError!NativeResult {
+    return serializeWith(ctx, val, 0);
+}
+
+// `call_holds`: the references the native call that received `val` holds to
+// it beyond the one php's argument has
+fn serializeWith(ctx: *NativeContext, val: Value, call_holds: u32) RuntimeError!NativeResult {
     var buf = std.ArrayListUnmanaged(u8).empty;
     errdefer buf.deinit(ctx.allocator);
     var own = SerCtx{};
@@ -238,6 +250,14 @@ pub fn serializeToString(ctx: *NativeContext, val: Value) RuntimeError!NativeRes
     defer if (owner) {
         shared_ctx = null;
     };
+    const outer_value = sctx.call_value;
+    const outer_holds = sctx.call_holds;
+    sctx.call_value = if (val == .object) val.object.storage() else null;
+    sctx.call_holds = call_holds;
+    defer {
+        sctx.call_value = outer_value;
+        sctx.call_holds = outer_holds;
+    }
     try serializeValue(ctx, &buf, sctx, val);
     const result = try buf.toOwnedSlice(ctx.allocator);
     return NativeResult.takeString(try Value.String.adopt(ctx.allocator, result));
@@ -414,7 +434,8 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
             // php's php_add_var_hash: an object nothing else holds can't
             // appear again, so it isn't recorded (and isn't kept alive),
             // unless __serialize or __sleep could hand it out again
-            if (obj.refcount > 1 or ctx.vm.hasMethod(obj.class_name, "__serialize") or ctx.vm.hasMethod(obj.class_name, "__sleep")) {
+            const call_holds: u32 = if (sctx.call_value == obj) sctx.call_holds else 0;
+            if (obj.refcount -| call_holds > 1 or ctx.vm.hasMethod(obj.class_name, "__serialize") or ctx.vm.hasMethod(obj.class_name, "__sleep")) {
                 try sctx.objects.put(a, obj, sctx.next_slot - 1);
                 @import("../runtime/vm.zig").VM.objRetain(obj);
             }
