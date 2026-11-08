@@ -11160,14 +11160,10 @@ pub const VM = struct {
 
                     if (iterable == .generator) {
                         const inner = iterable.generator;
-                        if (inner.state == .created) {
-                            self.resumeGenerator(inner, .null) catch {
-                                if (self.dispatchPendingException(base_frame)) continue;
-                                return error.RuntimeError;
-                            };
-                        }
-
-                        if (inner.state == .suspended) {
+                        // a generator not started yet becomes the delegate
+                        // as it is: resumeGenerator, which runs this one,
+                        // starts it next, without nesting a native call
+                        if (inner.state == .suspended or inner.state == .created) {
                             // delegate.gen holds a real ref to the inner gen
                             // across the yield-from window. without this
                             // retain the pop() above is the only handle and
@@ -11175,7 +11171,7 @@ pub const VM = struct {
                             // drain, dying before the second yield (Stage 2)
                             genRetain(inner);
                             outer_gen.delegate = .{ .gen = inner };
-                            self.setGeneratorCurrent(outer_gen, inner.current_key, inner.current_value, false);
+                            if (inner.state == .suspended) self.setGeneratorCurrent(outer_gen, inner.current_key, inner.current_value, false);
                             // save ip past the yield_from opcode so we resume here
                             outer_gen.ip = self.currentFrame().ip;
                             outer_gen.vars = self.currentFrame().vars;
@@ -11920,9 +11916,27 @@ pub const VM = struct {
             if (self.frames[i].func) |f| if (f.name.len > 0) {
                 const called_by_native = next_native < native_count and natives[next_native].depth == i;
                 const call_site: ?SourcePosition = if (i > 0 and !called_by_native) self.framePosition(i - 1) else null;
-                const entry = try self.newTraceEntry(f, call_site);
-                try self.appendPassedArgs(try self.traceArgs(entry), i, f);
+                // a generator running as a delegate was reached through the
+                // generators waiting in yield from, which php lists between
+                // it and the frame that resumed them
+                const delegator = if (self.frames[i].generator) |g| g.delegator else null;
+                const entry = try self.newTraceEntry(f, if (delegator) |d| self.generatorPosition(d) else call_site);
+                const entry_args = try self.traceArgs(entry);
+                if (self.frames[i].generator != null) {
+                    // a resumed generator's frame has no saved arguments: its
+                    // parameters hold them
+                    const declared = if (f.is_variadic) f.params.len - 1 else f.params.len;
+                    for (f.params[0..declared]) |pname| try entry_args.append(self.allocator, frameParamValue(&self.frames[i], f, pname));
+                } else try self.appendPassedArgs(entry_args, i, f);
                 try arr.append(self.allocator, .{ .array = entry });
+                var waiting = delegator;
+                while (waiting) |g| : (waiting = g.delegator) {
+                    const waiting_entry = try self.newTraceEntry(g.func, if (g.delegator) |d| self.generatorPosition(d) else call_site);
+                    const args = try self.traceArgs(waiting_entry);
+                    const declared = if (g.func.is_variadic) g.func.params.len - 1 else g.func.params.len;
+                    for (g.func.params[0..declared]) |pname| try args.append(self.allocator, generatorParamValue(g, pname));
+                    try arr.append(self.allocator, .{ .array = waiting_entry });
+                }
             };
             try self.tryAppendRequireFrame(arr, i);
             if (i == 0) break;
@@ -12020,9 +12034,24 @@ pub const VM = struct {
         try exc.setForScope(self.allocator, "trace", .{ .array = trace }, scope);
     }
 
+    // where a suspended generator waits: the instruction it last ran
+    pub fn generatorPosition(self: *VM, g: *const Generator) ?SourcePosition {
+        const loc = self.sourceLocation(&g.func.chunk, if (g.ip > 0) g.ip - 1 else 0) orelse return null;
+        return .{ .file = if (g.func.file_path.len > 0) g.func.file_path else self.file_path, .line = @intCast(loc.line) };
+    }
+
+    pub fn generatorParamValue(g: *const Generator, param_name: []const u8) Value {
+        if (g.vars.get(param_name)) |v| return v;
+        for (g.func.slot_names, 0..) |sn, si| {
+            if (!std.mem.eql(u8, sn, param_name)) continue;
+            return if (si < g.locals.items.len) g.locals.items[si] else .null;
+        }
+        return .null;
+    }
+
     // a live frame's bound parameter: the vars map first, then the locals
     // that locals-only frames keep parameters in
-    fn frameParamValue(frame: *const CallFrame, f: *const ObjFunction, param_name: []const u8) Value {
+    pub fn frameParamValue(frame: *const CallFrame, f: *const ObjFunction, param_name: []const u8) Value {
         if (frame.vars.get(param_name)) |v| return v;
         for (f.slot_names, 0..) |sn, si| {
             if (!std.mem.eql(u8, sn, param_name)) continue;
@@ -13171,49 +13200,104 @@ pub const VM = struct {
         return true;
     }
 
+    // runs a generator to its next yield. a generator delegating with yield
+    // from doesn't run itself: as in php's generator tree, the innermost
+    // delegate runs, its yields become the current value of every generator
+    // on the way to it, its return value resumes its parent, and its
+    // exception is thrown into its parent at the yield from. the walk is a
+    // loop over that path, so a long chain of delegations takes no native
+    // stack per level
     pub fn resumeGenerator(self: *VM, gen: *Generator, sent_value: Value) RuntimeError!void {
         if (gen.state == .completed) return;
-
-        // if delegating, advance the delegate instead of resuming bytecode
-        if (gen.delegate) |*del| {
-            switch (del.*) {
-                .gen => |inner| {
-                    // throw() on the outer generator forwards into the inner
-                    // delegate so try/catch around `yield from` works PHP-style
-                    if (gen.pending_throw) |ex| {
-                        gen.pending_throw = null;
-                        inner.pending_throw = ex;
-                    }
-                    try self.resumeGenerator(inner, sent_value);
-                    if (inner.state == .suspended) {
-                        self.setGeneratorCurrent(gen, inner.current_key, inner.current_value, false);
-                        return;
-                    }
-                    // inner exhausted - clear delegate and resume outer with return value
-                    const ret_val = inner.return_value;
-                    gen.delegate = null;
-                    self.genRelease(inner);
-                    return self.resumeGeneratorWithValue(gen, ret_val);
-                },
-                .array => |*arr_state| {
-                    if (arr_state.index < arr_state.arr.entries.items.len) {
-                        const entry = arr_state.arr.entries.items[arr_state.index];
-                        arr_state.index += 1;
-                        self.setGeneratorCurrent(gen, switch (entry.key) {
-                            .int => |i| .{ .int = i },
-                            .string => |s| .{ .string = s },
-                        }, entry.value, false);
-                        return;
-                    }
-                    const arr = arr_state.arr;
-                    gen.delegate = null;
-                    self.arrayRelease(arr);
-                    return self.resumeGeneratorWithValue(gen, .null);
-                },
+        // the path lives on the stack until a chain outgrows it
+        var inline_path: [16]*Generator = undefined;
+        var path: std.ArrayListUnmanaged(*Generator) = .initBuffer(&inline_path);
+        defer if (path.items.ptr != &inline_path) path.deinit(self.allocator);
+        path.appendAssumeCapacity(gen);
+        defer for (path.items[1..]) |delegate| {
+            delegate.delegator = null;
+        };
+        var sent = sent_value;
+        while (true) {
+            var leaf = path.items[path.items.len - 1];
+            while (leaf.delegate) |delegate| {
+                if (delegate != .gen) break;
+                const inner = delegate.gen;
+                // throw() on an outer generator is thrown into the innermost
+                // one, so try/catch around `yield from` works php-style
+                if (leaf.pending_throw) |ex| {
+                    leaf.pending_throw = null;
+                    inner.pending_throw = ex;
+                }
+                if (path.items.len == path.capacity and path.items.ptr == &inline_path) {
+                    var grown = try std.ArrayListUnmanaged(*Generator).initCapacity(self.allocator, 2 * path.capacity);
+                    grown.appendSliceAssumeCapacity(path.items);
+                    path = grown;
+                }
+                try path.append(self.allocator, inner);
+                inner.delegator = leaf;
+                leaf = inner;
             }
-        }
 
-        return self.resumeGeneratorWithValue(gen, sent_value);
+            var step = leaf.state != .completed;
+            if (step) if (leaf.delegate) |*delegate| {
+                const arr_state = &delegate.array;
+                if (arr_state.index < arr_state.arr.entries.items.len) {
+                    const entry = arr_state.arr.entries.items[arr_state.index];
+                    arr_state.index += 1;
+                    self.setGeneratorCurrent(leaf, switch (entry.key) {
+                        .int => |i| .{ .int = i },
+                        .string => |str| .{ .string = str },
+                    }, entry.value, false);
+                    step = false;
+                } else {
+                    const arr = arr_state.arr;
+                    leaf.delegate = null;
+                    self.arrayRelease(arr);
+                    sent = .null;
+                }
+            };
+            if (step) self.resumeGeneratorWithValue(leaf, sent) catch |err| {
+                if (path.items.len == 1 or self.pending_exception == null or self.exit_requested or self.fiber_suspend_pending) return err;
+                // the delegate's exception leaves it and is thrown into its
+                // parent where the parent waits in yield from
+                const ex = self.pending_exception.?;
+                self.pending_exception = null;
+                _ = path.pop();
+                leaf.delegator = null;
+                const parent = path.items[path.items.len - 1];
+                parent.delegate = null;
+                self.genRelease(leaf);
+                parent.pending_throw = ex;
+                sent = .null;
+                continue;
+            };
+
+            if (leaf.state == .suspended) {
+                // a yield from that has just taken a generator not yet
+                // started: run that one next
+                if (leaf.delegate) |delegate| if (delegate == .gen and delegate.gen.state == .created) {
+                    sent = .null;
+                    continue;
+                };
+                var i = path.items.len - 1;
+                while (i > 0) : (i -= 1) {
+                    const child = path.items[i];
+                    self.setGeneratorCurrent(path.items[i - 1], child.current_key, child.current_value, false);
+                }
+                return;
+            }
+            if (path.items.len == 1) return;
+            // the delegate finished: its return value is what yield from
+            // gives its parent, which runs on
+            _ = path.pop();
+            leaf.delegator = null;
+            const parent = path.items[path.items.len - 1];
+            const ret_val = leaf.return_value;
+            parent.delegate = null;
+            self.genRelease(leaf);
+            sent = ret_val;
+        }
     }
 
     fn resumeGeneratorWithValue(self: *VM, gen: *Generator, sent_value: Value) RuntimeError!void {

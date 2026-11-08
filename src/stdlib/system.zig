@@ -761,14 +761,24 @@ fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bool, 
         count += 1;
     }) {
         var entry = try ctx.createArray();
-        try entry.set(alloc, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(vm.frameFile(i - 1)) });
-
-        const caller = &vm.frames[i - 1];
-        if (vm.sourceLocation(caller.chunk, caller.ip)) |loc| {
-            try entry.set(alloc, .{ .string = Value.String.borrowed("line") }, .{ .int = @intCast(loc.line) });
+        const frame = &vm.frames[i];
+        // a generator running as a yield from delegate is listed as called
+        // from the generator waiting in it, and those waiting generators
+        // follow it, as php lists them
+        const delegator = if (frame.generator) |g| g.delegator else null;
+        if (delegator) |d| {
+            if (vm.generatorPosition(d)) |site| {
+                try entry.set(alloc, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(site.file) });
+                try entry.set(alloc, .{ .string = Value.String.borrowed("line") }, .{ .int = site.line });
+            }
+        } else {
+            try entry.set(alloc, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(vm.frameFile(i - 1)) });
+            const caller = &vm.frames[i - 1];
+            if (vm.sourceLocation(caller.chunk, caller.ip)) |loc| {
+                try entry.set(alloc, .{ .string = Value.String.borrowed("line") }, .{ .int = @intCast(loc.line) });
+            }
         }
 
-        const frame = &vm.frames[i];
         if (frame.func) |func| {
             const type_str: []const u8 = if (func.is_static) "::" else "->";
             if (std.mem.indexOf(u8, func.name, "::")) |sep| {
@@ -786,7 +796,13 @@ fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bool, 
 
         if (!ignore_args) {
             var args_arr = try ctx.createArray();
-            if (vm.ic) |ic| {
+            // a resumed generator's frame has no saved arguments: its
+            // parameters hold them
+            if (frame.generator != null and frame.func != null) {
+                const func = frame.func.?;
+                const declared = if (func.is_variadic) func.params.len - 1 else func.params.len;
+                for (func.params[0..declared]) |pname| try args_arr.append(alloc, @TypeOf(vm.*).frameParamValue(frame, func, pname));
+            } else if (vm.ic) |ic| {
                 const ac = ic.arg_counts[i];
                 if (ac != 0xFF) {
                     const offset: usize = ic.fga_offsets[i];
@@ -811,6 +827,40 @@ fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bool, 
         }
 
         try result.append(alloc, .{ .array = entry });
+
+        var waiting = delegator;
+        while (waiting) |g| : (waiting = g.delegator) {
+            if (limit > 0 and result.entries.items.len >= limit) break;
+            count += 1;
+            var w = try ctx.createArray();
+            if (g.delegator) |d| {
+                if (vm.generatorPosition(d)) |site| {
+                    try w.set(alloc, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(site.file) });
+                    try w.set(alloc, .{ .string = Value.String.borrowed("line") }, .{ .int = site.line });
+                }
+            } else {
+                try w.set(alloc, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(vm.frameFile(i - 1)) });
+                const caller = &vm.frames[i - 1];
+                if (vm.sourceLocation(caller.chunk, caller.ip)) |loc| {
+                    try w.set(alloc, .{ .string = Value.String.borrowed("line") }, .{ .int = @intCast(loc.line) });
+                }
+            }
+            const func = g.func;
+            if (std.mem.indexOf(u8, func.name, "::")) |sep| {
+                try w.set(alloc, .{ .string = Value.String.borrowed("class") }, .{ .string = Value.String.borrowed(func.name[0..sep]) });
+                try w.set(alloc, .{ .string = Value.String.borrowed("function") }, .{ .string = Value.String.borrowed(func.name[sep + 2 ..]) });
+                try w.set(alloc, .{ .string = Value.String.borrowed("type") }, .{ .string = Value.String.borrowed(if (func.is_static) "::" else "->") });
+            } else {
+                try w.set(alloc, .{ .string = Value.String.borrowed("function") }, .{ .string = Value.String.borrowed(try vm.funcDisplayName(func)) });
+            }
+            if (!ignore_args) {
+                const args_arr = try ctx.createArray();
+                const declared = if (func.is_variadic) func.params.len - 1 else func.params.len;
+                for (func.params[0..declared]) |pname| try args_arr.append(alloc, @TypeOf(vm.*).generatorParamValue(g, pname));
+                try w.set(alloc, .{ .string = Value.String.borrowed("args") }, .{ .array = args_arr });
+            }
+            try result.append(alloc, .{ .array = w });
+        }
     }
 
     return result;

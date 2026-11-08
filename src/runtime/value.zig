@@ -812,6 +812,9 @@ pub const Generator = struct {
     handler_count: usize = 0,
     saved_handlers: std.ArrayListUnmanaged(SavedHandler) = .empty,
     delegate: ?DelegateState = null,
+    // while this generator runs as the delegate of a yield from, the
+    // generator waiting in it (backtraces show the chain, as php's do)
+    delegator: ?*Generator = null,
     pending_throw: ?Value = null,
     pooled: bool = false,
 
