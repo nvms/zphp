@@ -211,6 +211,8 @@ fn formatUncaughtException(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM
 // recorded, unless fatal_error_backtraces is off
 fn writeFatalTrace(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM, err: *const PhpObject) void {
     if (!vm.fatalErrorBacktraces()) return;
+    // a compile error php's parser raises
+    if (err.get("__no_trace") == .bool) return;
     write(buf, alloc, "Stack trace:\n");
     writeTrace(buf, alloc, err.getForScope("trace", vm.exceptionTraceScope(err)));
     write(buf, alloc, "\n");

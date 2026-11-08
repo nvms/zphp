@@ -13,6 +13,23 @@ pub const AttrRange = struct {
     pub const no_args = std.math.maxInt(u32);
 };
 
+// a class_property_hooks node's extra data: default, get body, set body,
+// set parameter token, get flags, set flags, set type start and end, then
+// the hooks as written (four u32 each: name token, the flags below, the
+// parameter list or no_params, the first modifier besides final and
+// abstract, 0 for none)
+pub const PropertyHooks = struct {
+    pub const hook_final: u32 = 1;
+    pub const hook_abstract: u32 = 2;
+    pub const hook_ref: u32 = 4;
+    pub const hook_bodyless: u32 = 8;
+    pub const no_hook_params: u32 = std.math.maxInt(u32);
+    // property bits beside the vm's flag byte: declared abstract, and static
+    // with hooks
+    pub const prop_abstract: u32 = 1 << 8;
+    pub const prop_static_hooked: u32 = 1 << 9;
+};
+
 pub const Ast = struct {
     source: []const u8,
     tokens: []const Token,

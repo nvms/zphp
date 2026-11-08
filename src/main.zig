@@ -233,7 +233,7 @@ fn compileFrom(allocator: std.mem.Allocator, source: []const u8, origin: compile
 
     if (ast.errors.len > 0) {
         const found = try error_format.syntaxError(allocator, &ast);
-        exitOnCompileFailure(allocator, "ParseError", found.message, .{ .file = path, .line = found.line });
+        exitOnCompileFailure(allocator, "ParseError", found.message, .{ .file = path, .line = found.line }, false);
     }
 
     var diag: ?compiler.Diagnostic = null;
@@ -241,14 +241,14 @@ fn compileFrom(allocator: std.mem.Allocator, source: []const u8, origin: compile
     diagnosed.diagnostic = &diag;
     return compiler.compileWithOrigin(&ast, allocator, diagnosed) catch |err| {
         const d = diag orelse return err;
-        exitOnCompileFailure(allocator, "CompileError", d.message(), .{ .file = path, .line = error_format.compileErrorLine(&ast, d) });
+        exitOnCompileFailure(allocator, "CompileError", d.message(), .{ .file = path, .line = error_format.compileErrorLine(&ast, d) }, d.trace);
     };
 }
 
 // the script never starts: php reports its syntax error or compile-time fatal
 // as an uncaught ParseError or CompileError, through the same log and display
 // copies as any other, and exits with 255
-fn exitOnCompileFailure(allocator: std.mem.Allocator, class_name: []const u8, message: []const u8, at: VM.SourcePosition) noreturn {
+fn exitOnCompileFailure(allocator: std.mem.Allocator, class_name: []const u8, message: []const u8, at: VM.SourcePosition, trace: bool) noreturn {
     const vm = VM.initOnHeap(allocator) catch std.process.exit(255);
     report: {
         vm.setPendingException(class_name, message) catch break :report;
@@ -256,6 +256,7 @@ fn exitOnCompileFailure(allocator: std.mem.Allocator, class_name: []const u8, me
         if (exc == .object) {
             exc.object.setCopiedString(vm.allocator, "file", at.file) catch break :report;
             exc.object.set(vm.allocator, "line", .{ .int = at.line }) catch break :report;
+            if (!trace) exc.object.set(vm.allocator, "__no_trace", .{ .bool = true }) catch break :report;
         }
         vm.uncatchable_fatal = true;
         reportRuntimeError(allocator, vm) catch {};
@@ -488,7 +489,7 @@ fn loadFile(path: []const u8, allocator: std.mem.Allocator, vm: *@import("runtim
 
     var diag: ?compiler.Diagnostic = null;
     var result = compiler.compileWithOrigin(&ast, allocator, .{ .file_path = abs_path, .diagnostic = &diag }) catch {
-        if (diag) |d| vm.recordIncludeCompileError(d.message(), abs_path, error_format.compileErrorLine(&ast, d));
+        if (diag) |d| vm.recordIncludeCompileError(d.message(), abs_path, error_format.compileErrorLine(&ast, d), d.trace);
         ast.deinit();
         allocator.free(source);
         allocator.free(abs_path);

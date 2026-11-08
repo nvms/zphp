@@ -5,6 +5,7 @@ pub const const_continuation: u32 = 1 << 5;
 const ast_mod = @import("ast.zig");
 const Ast = ast_mod.Ast;
 const AttrRange = ast_mod.AttrRange;
+const PropertyHooks = ast_mod.PropertyHooks;
 const Token = @import("token.zig").Token;
 const Lexer = @import("lexer.zig").Lexer;
 
@@ -1539,11 +1540,13 @@ const Parser = struct {
                     return error.ParseError;
                 }
                 const prop = try self.parseClassProperty();
-                if (is_static) {
+                const hooked = self.nodes.items[prop].tag == .class_property_hooks;
+                if (is_static and !hooked) {
                     self.nodes.items[prop].tag = .static_class_property;
                 }
                 // Property flags are encoded by encodePropertyFlags(); type metadata remains in bits 16+.
-                self.nodes.items[prop].data.rhs = encodePropertyFlags(visibility, set_visibility, has_set_vis, is_readonly, is_final);
+                self.nodes.items[prop].data.rhs = encodePropertyFlags(visibility, set_visibility, has_set_vis, is_readonly, is_final) |
+                    (if (is_abstract) PropertyHooks.prop_abstract else 0) | (if (is_static and hooked) PropertyHooks.prop_static_hooked else 0);
                 try members.append(self.allocator, prop);
                 try self.continuePropertyList(members, prop);
             } else if (self.peek() == .kw_const) {
@@ -1552,10 +1555,12 @@ const Parser = struct {
                 const tr = self.collectTypeHint();
                 if (self.peek() == .variable) {
                     const prop = try self.parseClassProperty();
-                    if (is_static) {
+                    const hooked = self.nodes.items[prop].tag == .class_property_hooks;
+                    if (is_static and !hooked) {
                         self.nodes.items[prop].tag = .static_class_property;
                     }
-                    var rhs: u32 = encodePropertyFlags(visibility, set_visibility, has_set_vis, is_readonly, is_final);
+                    var rhs: u32 = encodePropertyFlags(visibility, set_visibility, has_set_vis, is_readonly, is_final) |
+                        (if (is_abstract) PropertyHooks.prop_abstract else 0) | (if (is_static and hooked) PropertyHooks.prop_static_hooked else 0);
                     if (tr[0] != tr[1]) {
                         const ext = try self.addExtra(&tr);
                         rhs |= (ext + 1) << 16;
@@ -1649,12 +1654,20 @@ const Parser = struct {
             try self.parseAttributes();
             var is_static = false;
             var is_final = false;
+            var is_abstract = false;
+            var visibility: u32 = 0;
             while (self.peek() == .kw_public or self.peek() == .kw_protected or
                 self.peek() == .kw_private or self.peek() == .kw_static or
                 self.peek() == .kw_abstract or self.peek() == .kw_final)
             {
-                if (self.peek() == .kw_static) is_static = true;
-                if (self.peek() == .kw_final) is_final = true;
+                switch (self.peek()) {
+                    .kw_static => is_static = true,
+                    .kw_final => is_final = true,
+                    .kw_abstract => is_abstract = true,
+                    .kw_protected => visibility = 1,
+                    .kw_private => visibility = 2,
+                    else => {},
+                }
                 _ = self.advance();
             }
             if (self.peek() == .kw_function) {
@@ -1678,10 +1691,14 @@ const Parser = struct {
                     try self.addErrorAt(prop_token, .unexpected_token);
                     return error.ParseError;
                 }
+                // the modifiers stay for the compiler to refuse
+                var rhs: u32 = encodePropertyFlags(visibility, visibility, false, false, is_final) |
+                    (if (is_abstract) PropertyHooks.prop_abstract else 0) | (if (is_static) PropertyHooks.prop_static_hooked else 0);
                 if (tr[0] != tr[1]) {
                     const ext = try self.addExtra(&tr);
-                    self.nodes.items[prop].data.rhs = (ext + 1) << 16;
+                    rhs |= (ext + 1) << 16;
                 }
+                self.nodes.items[prop].data.rhs = rhs;
                 try methods.append(self.allocator, prop);
             }
         }
@@ -2174,85 +2191,97 @@ const Parser = struct {
         var set_short: u32 = 0;
         var set_type_start: u32 = 0;
         var set_type_end: u32 = 0;
+        var have_get = false;
+        var have_set = false;
+        // every hook as written, for the compiler's checks (see
+        // ast.PropertyHooks)
+        var written = std.ArrayListUnmanaged(u32).empty;
+        defer written.deinit(self.allocator);
         const hook_nodes_start = self.nodes.items.len;
         while (self.peek() != .r_brace and self.peek() != .eof) {
-            // skip attributes / final / & before the hook name
             try self.parseAttributes();
-            const is_final = self.peek() == .kw_final;
-            if (is_final) _ = self.advance();
+            var flags: u32 = 0;
+            var other_modifier: u32 = 0;
+            while (true) {
+                switch (self.peek()) {
+                    .kw_final => flags |= PropertyHooks.hook_final,
+                    .kw_public, .kw_protected, .kw_private, .kw_static, .kw_readonly, .kw_var, .kw_abstract => {
+                        if (other_modifier == 0) other_modifier = self.pos;
+                    },
+                    else => break,
+                }
+                _ = self.advance();
+            }
             const is_ref = self.peek() == .amp;
-            if (is_ref) _ = self.advance();
-            if (self.peek() != .identifier) {
+            if (is_ref) {
+                flags |= PropertyHooks.hook_ref;
                 _ = self.advance();
-                continue;
             }
-            const hook_name = self.tokens[self.pos].lexeme(self.source);
-            const is_get = std.mem.eql(u8, hook_name, "get");
-            const is_set = std.mem.eql(u8, hook_name, "set");
-            if (!is_get and !is_set) {
-                _ = self.advance();
-                continue;
-            }
-            _ = self.advance(); // get/set
+            const hook_tok = try self.expect(.identifier);
+            const hook_name = self.tokens[hook_tok].lexeme(self.source);
+            // only the first hook of each kind compiles; a repeated one is
+            // the compiler's error
+            const is_get = std.ascii.eqlIgnoreCase(hook_name, "get") and !have_get;
+            const is_set = std.ascii.eqlIgnoreCase(hook_name, "set") and !have_set;
+            if (is_get) have_get = true;
+            if (is_set) have_set = true;
 
-            // optional set parameter list: set(type? $value)
-            var local_set_param: u32 = 0;
-            if (is_set and self.peek() == .l_paren) {
+            var params: u32 = PropertyHooks.no_hook_params;
+            if (self.peek() == .l_paren) {
                 _ = self.advance();
-                try self.parseAttributes();
-                if (self.peek() != .r_paren) {
-                    set_type_start = self.pos;
-                    self.skipTypeHint();
-                    set_type_end = self.pos;
-                    if (self.peek() == .amp) _ = self.advance();
-                    if (self.peek() == .variable) {
-                        local_set_param = self.advance();
-                    }
+                var list = std.ArrayListUnmanaged(u32).empty;
+                defer list.deinit(self.allocator);
+                while (self.peek() != .r_paren) {
+                    try list.append(self.allocator, try self.parseParam());
+                    if (self.peek() != .comma) break;
+                    _ = self.advance();
                 }
                 _ = try self.expect(.r_paren);
+                params = try self.addExtraList(list.items);
+                if (is_set and list.items.len > 0) {
+                    const pnode = self.nodes.items[list.items[0]];
+                    set_param_tok = pnode.main_token;
+                    const type_extra = pnode.data.rhs >> 8;
+                    if (type_extra != 0) {
+                        set_type_start = self.extra_data.items[type_extra - 1];
+                        set_type_end = self.extra_data.items[type_extra];
+                    }
+                }
             }
 
             const prev_yield = self.found_yield;
             self.found_yield = false;
             defer self.found_yield = prev_yield;
 
+            var body: u32 = 0;
+            var short: u32 = 0;
             if (self.peek() == .fat_arrow) {
                 _ = self.advance();
-                const expr = try self.parseExpression();
+                body = try self.parseExpression();
                 _ = try self.expect(.semicolon);
-                if (is_get) {
-                    get_body = expr;
-                    get_short = 1;
-                } else {
-                    set_body = expr;
-                    set_short = 1;
-                    set_param_tok = local_set_param;
-                }
+                short = 1;
             } else if (self.peek() == .l_brace) {
-                const block = try self.parseBlock();
-                if (is_get) {
-                    get_body = block;
-                } else {
-                    set_body = block;
-                    set_param_tok = local_set_param;
-                }
-            } else if (self.peek() == .semicolon) {
-                // Preserve body-less hooks independently from absent hooks.
-                if (is_get) get_short |= 8 else set_short |= 8;
-                if (is_set) set_param_tok = local_set_param;
-                _ = self.advance();
+                body = try self.parseBlock();
             } else {
-                _ = self.advance();
+                _ = try self.expect(.semicolon);
+                // Preserve body-less hooks independently from absent hooks.
+                short = 8;
+                flags |= PropertyHooks.hook_bodyless;
             }
-            if (is_final) {
-                if (is_get) get_short |= 16 else set_short |= 16;
-            }
-            if (is_get and is_ref) get_short |= 4;
+            if (flags & PropertyHooks.hook_final != 0) short |= 16;
+            if (is_get and is_ref) short |= 4;
             // Hook flags: bit 0 = short expression, bit 1 = generator, bit 2 = reference.
-            if (self.found_yield) {
-                if (is_get) get_short |= 2 else set_short |= 2;
+            if (self.found_yield) short |= 2;
+            if (is_get) {
+                get_body = body;
+                get_short = short;
+            } else if (is_set) {
+                set_body = body;
+                set_short = short;
             }
+            try written.appendSlice(self.allocator, &.{ hook_tok, flags, params, other_modifier });
         }
+        const written_idx = try self.addExtraList(written.items);
         _ = try self.expect(.r_brace);
 
         // Backing is a syntactic access to this property's storage in either body.
@@ -2269,7 +2298,7 @@ const Parser = struct {
         }
         if (backed) get_short |= 32;
 
-        const extra_idx = try self.addExtra(&[_]u32{ default, get_body, set_body, set_param_tok, get_short, set_short, set_type_start, set_type_end });
+        const extra_idx = try self.addExtra(&[_]u32{ default, get_body, set_body, set_param_tok, get_short, set_short, set_type_start, set_type_end, written_idx });
         return self.addNode(.{ .tag = .class_property_hooks, .main_token = name_tok, .data = .{ .lhs = extra_idx } });
     }
 

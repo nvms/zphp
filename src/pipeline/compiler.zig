@@ -149,6 +149,9 @@ pub const Diagnostic = struct {
     text: [256]u8 = undefined,
     len: usize = 0,
     token: u32,
+    // php raises some compile errors while it parses (a modifier where none
+    // is allowed); those print no stack trace
+    trace: bool = true,
 
     pub fn message(d: *const Diagnostic) []const u8 {
         return d.text[0..d.len];
@@ -394,6 +397,15 @@ pub const Compiler = struct {
     // stop compiling at a php compile-time fatal, recording the first one
     pub fn fail(self: *Compiler, token: u32, message: []const u8) error{CompileError} {
         return self.failFmt(token, "{s}", .{message});
+    }
+
+    // a compile error php's parser raises, reported without a stack trace
+    pub fn failParse(self: *Compiler, token: u32, comptime fmt: []const u8, args: anytype) error{CompileError} {
+        const err = self.failFmt(token, fmt, args);
+        if (self.diagnostic) |slot| if (slot.*) |*d| if (d.token == token) {
+            d.trace = false;
+        };
+        return err;
     }
 
     // the diagnostic keeps its own copy, so the message may name things

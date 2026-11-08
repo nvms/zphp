@@ -3813,7 +3813,9 @@ pub const VM = struct {
                 const caller = self.currentSourcePosition();
                 const where = try std.fmt.allocPrint(self.allocator, "{s}({d}) : eval()'d code", .{ caller.file, caller.line });
                 defer self.allocator.free(where);
-                return self.raiseCompileFatal(d.message(), .{ .file = where, .line = line });
+                const raised = self.raiseCompileFatal(d.message(), .{ .file = where, .line = line });
+                if (!d.trace) if (self.pending_exception) |exc| if (exc == .object) try exc.object.set(self.allocator, "__no_trace", .{ .bool = true });
+                return raised;
             }
             self.setErrorMsg("eval(): compile error", .{});
             return error.RuntimeError;
@@ -8279,7 +8281,9 @@ pub const VM = struct {
                                 return error.RuntimeError;
                             } else if (self.ic.?.include_compile_error) |compile_error| {
                                 defer self.dropIncludeError(&self.ic.?.include_compile_error);
-                                return self.raiseCompileFatal(compile_error.message, compile_error.at);
+                                const raised = self.raiseCompileFatal(compile_error.message, compile_error.at);
+                                if (!compile_error.trace) if (self.pending_exception) |exc| if (exc == .object) try exc.object.set(self.allocator, "__no_trace", .{ .bool = true });
+                                return raised;
                             } else {
                                 self.includeNotOpened(kind, path, "Permission denied") catch if (try self.resumeRaised()) continue;
                                 self.push(.{ .bool = false });
@@ -13660,7 +13664,7 @@ pub const VM = struct {
         const line: i64 = if (self.sourceLocation(frame.chunk, if (ip > 0) ip - 1 else 0)) |loc| @intCast(loc.line) else 0;
         return .{ .file = self.frameFile(fi), .line = line };
     }
-    pub const SourcePositionMessage = struct { message: []const u8, at: SourcePosition };
+    pub const SourcePositionMessage = struct { message: []const u8, at: SourcePosition, trace: bool = true };
 
     // the file loader could not compile an included file: remembered until the
     // include opcode raises it
@@ -13669,9 +13673,10 @@ pub const VM = struct {
         self.ic.?.include_parse_error = self.ownedPositionMessage(message, file, line);
     }
 
-    pub fn recordIncludeCompileError(self: *VM, message: []const u8, file: []const u8, line: i64) void {
+    pub fn recordIncludeCompileError(self: *VM, message: []const u8, file: []const u8, line: i64, trace: bool) void {
         self.dropIncludeError(&self.ic.?.include_compile_error);
         self.ic.?.include_compile_error = self.ownedPositionMessage(message, file, line);
+        if (self.ic.?.include_compile_error) |*e| e.trace = trace;
     }
 
     fn ownedPositionMessage(self: *VM, message: []const u8, file: []const u8, line: i64) ?SourcePositionMessage {

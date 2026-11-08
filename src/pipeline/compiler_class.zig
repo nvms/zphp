@@ -1237,6 +1237,112 @@ fn docCommentConst(self: *Compiler, tok_idx: u32) Error!u16 {
     return @intCast(try self.addConstant(.{ .string = Value.String.borrowed(doc) }));
 }
 
+// zend_compile_prop_decl's and zend_compile_property_hooks' checks of a
+// hooked or abstract property, before anything is emitted
+fn checkPropertyDeclaration(self: *Compiler, class_name: []const u8, member: Ast.Node, in_interface: bool) Error!void {
+    const H = ast_mod.PropertyHooks;
+    const flags = member.data.rhs;
+    const at = member.main_token;
+    const raw = self.ast.tokenSlice(at);
+    const prop = if (raw.len > 0 and raw[0] == '$') raw[1..] else raw;
+    const visibility = flags & 3;
+    if (in_interface and member.tag == .class_property_hooks) {
+        if (flags & H.prop_abstract != 0) return self.fail(at, "Property in interface cannot be explicitly abstract. All interface members are implicitly abstract");
+        if (visibility != 0) return self.fail(at, "Property in interface cannot be protected or private");
+        if (flags & (1 << 7) != 0) return self.fail(at, "Property in interface cannot be final");
+    }
+    if (member.tag != .class_property_hooks) {
+        if (member.tag == .class_property and flags & H.prop_abstract != 0) return self.fail(at, "Only hooked properties may be declared abstract");
+        return;
+    }
+    const ext = member.data.lhs;
+    const written = self.ast.extraSlice(self.ast.extra_data[ext + 8]);
+    const is_abstract = flags & H.prop_abstract != 0;
+    if (is_abstract and flags & (1 << 7) != 0) return self.failParse(at, "Cannot use the final modifier on an abstract property", .{});
+    if (flags & (1 << 7) != 0 and visibility == 2) return self.fail(at, "Property cannot be both final and private");
+    if (flags & H.prop_static_hooked != 0) return self.fail(at, "Cannot declare hooks for static property");
+    if (flags & (1 << 2) != 0) return self.fail(at, "Hooked properties cannot be readonly");
+    if (written.len == 0) return self.fail(at, "Property hook list must not be empty");
+
+    var seen_get = false;
+    var seen_set = false;
+    var any_abstract = false;
+    var i: usize = 0;
+    while (i + 3 < written.len) : (i += 4) {
+        const hook_tok = written[i];
+        const hook_flags = written[i + 1];
+        const params = written[i + 2];
+        const other_modifier = written[i + 3];
+        const name = self.ast.tokenSlice(hook_tok);
+        if (other_modifier != 0) return self.failParse(other_modifier, "Cannot use the {s} modifier on a property hook", .{self.ast.tokenSlice(other_modifier)});
+        const is_get = std.ascii.eqlIgnoreCase(name, "get");
+        const is_set = std.ascii.eqlIgnoreCase(name, "set");
+        if (!is_get and !is_set) return self.failFmt(hook_tok, "Unknown hook \"{s}\" for property {s}::${s}, expected \"get\" or \"set\"", .{ name, class_name, prop });
+        if ((is_get and seen_get) or (is_set and seen_set)) return self.failFmt(hook_tok, "Cannot redeclare property hook \"{s}\"", .{name});
+        if (is_get) seen_get = true else seen_set = true;
+        const hook_abstract = hook_flags & H.hook_abstract != 0 or ((is_abstract or in_interface) and hook_flags & H.hook_bodyless != 0);
+        if (hook_abstract) any_abstract = true;
+        if (hook_abstract and hook_flags & H.hook_final != 0) return self.fail(hook_tok, "Property hook cannot be both abstract and final");
+        if (hook_flags & H.hook_final != 0 and visibility == 2) return self.fail(hook_tok, "Property hook cannot be both final and private");
+        if (hook_abstract and visibility == 2) return self.fail(hook_tok, "Property hook cannot be both abstract and private");
+        if (params == H.no_hook_params) continue;
+        const param_nodes = self.ast.extraSlice(params);
+        if (is_get) return self.failFmt(hook_tok, "get hook of property {s}::${s} must not have a parameter list", .{ class_name, prop });
+        if (param_nodes.len != 1) return self.failFmt(hook_tok, "set hook of property {s}::${s} must accept exactly one parameters", .{ class_name, prop });
+        const param = self.ast.nodes[param_nodes[0]];
+        const pname = self.ast.tokenSlice(param.main_token);
+        if (param.data.rhs & 1 != 0) return self.failFmt(param.main_token, "Parameter {s} of set hook {s}::${s} must not be variadic", .{ pname, class_name, prop });
+        if (param.data.rhs & 2 != 0) return self.failFmt(param.main_token, "Parameter {s} of set hook {s}::${s} must not be pass-by-reference", .{ pname, class_name, prop });
+        if (param.data.lhs != 0) return self.failFmt(param.main_token, "Parameter {s} of set hook {s}::${s} must not have a default value", .{ pname, class_name, prop });
+        try checkSetHookParamType(self, class_name, prop, flags, param);
+    }
+    if (is_abstract and !in_interface and !any_abstract) return self.failFmt(at, "Abstract property {s}::${s} must specify at least one abstract hook", .{ class_name, prop });
+    // a virtual property (no hook reaches its storage) has no default. a
+    // parent's property may give it storage, which only the declaration
+    // knows
+    const backed = self.ast.extra_data[ext + 4] & 32 != 0;
+    if (!backed and self.current_parent.len == 0 and self.ast.extra_data[ext] != 0) return self.failFmt(at, "Cannot specify default value for virtual hooked property {s}::${s}", .{ class_name, prop });
+}
+
+// a set hook's parameter takes at least what the property holds; a check
+// that needs to know classes is left to the declaration, as php defers it
+fn checkSetHookParamType(self: *Compiler, class_name: []const u8, prop: []const u8, prop_flags: u32, param: Ast.Node) Error!void {
+    const prop_extra = prop_flags >> 16;
+    if (prop_extra == 0) return;
+    const prop_type = try buildTypeString(self, self.ast.extra_data[prop_extra - 1], self.ast.extra_data[prop_extra]);
+    const param_extra = param.data.rhs >> 8;
+    const incompatible = if (param_extra == 0) true else blk: {
+        const param_type = try buildTypeString(self, self.ast.extra_data[param_extra - 1], self.ast.extra_data[param_extra]);
+        const parent: ?[]const u8 = if (self.current_parent.len > 0) self.current_parent else null;
+        const p = php_types.parse(self.allocator, prop_type, class_name, parent) catch return error.OutOfMemory;
+        defer p.deinit(self.allocator);
+        const q = php_types.parse(self.allocator, param_type, class_name, parent) catch return error.OutOfMemory;
+        defer q.deinit(self.allocator);
+        break :blk php_types.covariant(no_classes, class_name, p, q) == .failure;
+    };
+    if (incompatible) return self.failFmt(param.main_token, "Type of parameter {s} of hook {s}::${s}::set must be compatible with property type", .{ self.ast.tokenSlice(param.main_token), class_name, prop });
+}
+
+// the compiler knows no classes: a question about one is unresolved
+const no_classes: php_types.Classes = .{
+    .context = undefined,
+    .exists = struct {
+        fn f(_: *anyopaque, _: []const u8) bool {
+            return false;
+        }
+    }.f,
+    .subtype = struct {
+        fn f(_: *anyopaque, _: []const u8, _: []const u8) bool {
+            return false;
+        }
+    }.f,
+    .is_final = struct {
+        fn f(_: *anyopaque, _: []const u8) bool {
+            return false;
+        }
+    }.f,
+};
+
 fn propertyTypeConst(self: *Compiler, prop_rhs: u32) Error!u16 {
     const type_extra = prop_rhs >> 16;
     if (type_extra == 0) return 0xffff;
@@ -2014,6 +2120,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
         break :blk try resolveNodeClassName(self, pnode);
     } else "";
     defer self.current_parent = prev_parent;
+    for (members) |m| try checkPropertyDeclaration(self, class_name, self.ast.nodes[m], false);
 
     var method_count: u16 = 0;
     for (members) |member_idx| {
@@ -2679,6 +2786,7 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
 
 pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     const iface_name = self.declaredName(self.ast.tokenSlice(node.main_token));
+    for (self.ast.extraSlice(node.data.lhs)) |m| try checkPropertyDeclaration(self, iface_name, self.ast.nodes[m], true);
     const members = self.ast.extraSlice(node.data.lhs);
     try checkImportCollision(self, node.main_token, .class, iface_name);
     try checkDuplicateMembers(self, iface_name, members);
