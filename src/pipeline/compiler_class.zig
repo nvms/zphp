@@ -110,6 +110,11 @@ fn callAttributes(self: *Compiler, main_token: u32, return_type: []const u8, com
             // the texts outlive the attribute list
             out.no_discard = try keepString(self, try self.allocator.dupe(u8, attrArg(pa, 0, "message") orelse ""));
         } else if (std.ascii.eqlIgnoreCase(name, "Deprecated")) {
+            for (pa.args) |arg| {
+                const plain = arg == .null or (arg == .string and (arg.string.len == 0 or arg.string.bytes()[0] != 0));
+                if (!plain) out.deprecated = @import("bytecode.zig").deferred_deprecation;
+            }
+            if (out.deprecated != null) continue;
             const message = attrArg(pa, 0, "message") orelse "";
             const since = attrArg(pa, 1, "since") orelse "";
             out.deprecated = try keepString(self, try std.fmt.allocPrint(self.allocator, "{s}{s}{s}{s}", .{

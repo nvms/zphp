@@ -728,6 +728,11 @@ pub fn constantAttributesName(allocator: std.mem.Allocator, file_path: []const u
     return std.fmt.allocPrint(allocator, "\x00constant\x00{s}\x00{d}", .{ file_path, token });
 }
 
+// the deprecation text of a #[\Deprecated] whose arguments aren't plain
+// strings: php builds the attribute when the deprecation fires, so the vm
+// evaluates it then (vm.deprecationText)
+pub const deferred_deprecation = "\x00deferred deprecation";
+
 // an attribute argument php evaluates when reflection asks for it: the
 // value stored for the argument names the initializer that computes it
 const attr_argument_prefix = "\x00AI\x00";

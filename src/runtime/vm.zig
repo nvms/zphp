@@ -739,6 +739,12 @@ pub const VM = struct {
     free_closure_names: std.ArrayListUnmanaged(struct { compile_name: []const u8, name: []const u8 }) = .empty,
     php_constants: std.StringHashMapUnmanaged(Value) = .{},
     user_constants: std.StringHashMapUnmanaged(void) = .{},
+    // traits declared #[\Deprecated], with what the warning adds after
+    // "is deprecated"
+    deprecated_traits: std.StringHashMapUnmanaged([]const u8) = .{},
+    // the constant whose #[\Deprecated] message is being evaluated: reading
+    // it there doesn't warn again
+    describing_deprecated: ?struct { class: []const u8, name: []const u8 } = null,
     // a global constant's attribute entry in function_attributes, set when
     // the `const` declaring it defines it
     constant_attributes: std.StringHashMapUnmanaged([]const u8) = .{},
@@ -3032,6 +3038,7 @@ pub const VM = struct {
         self.free_closure_names.deinit(self.allocator);
         self.php_constants.deinit(self.allocator);
         self.user_constants.deinit(self.allocator);
+        self.deprecated_traits.deinit(self.allocator);
         self.constant_attributes.deinit(self.allocator);
         self.deprecated_globals.deinit(self.allocator);
         self.ini_settings.deinit(self.allocator);
@@ -3312,6 +3319,7 @@ pub const VM = struct {
             self.chunk_to_func_names.clearRetainingCapacity();
             self.php_constants.clearRetainingCapacity();
             self.user_constants.clearRetainingCapacity();
+            self.deprecated_traits.clearRetainingCapacity();
             self.constant_attributes.clearRetainingCapacity();
             self.deprecated_globals.clearRetainingCapacity();
             initConstants(&self.php_constants, self.allocator) catch {};
@@ -7343,7 +7351,13 @@ pub const VM = struct {
                         const func = self.currentFrame().func.?;
                         const kind: []const u8 = if (std.mem.indexOf(u8, func.name, "::") != null) "Method" else "Function";
                         const shown = if (func.display_name.len > 0) func.display_name else func.name;
-                        const msg = try std.fmt.allocPrint(self.allocator, "{s} {s}() is deprecated{s}", .{ kind, shown, func.deprecated orelse "" });
+                        const declared = self.functionAttributesOf(func);
+                        const suffix = self.deprecationText(func.deprecated orelse "", declared.attrs, declared.scope) catch |err| {
+                            if (try self.resumeRaised()) continue;
+                            return err;
+                        };
+                        defer self.allocator.free(suffix);
+                        const msg = try std.fmt.allocPrint(self.allocator, "{s} {s}() is deprecated{s}", .{ kind, shown, suffix });
                         defer self.allocator.free(msg);
                         const caller = &self.frames[self.frame_count - 2];
                         const line: i64 = if (self.sourceLocation(caller.chunk, if (caller.ip > 0) caller.ip - 1 else 0)) |loc| @intCast(loc.line) else 0;
@@ -8666,6 +8680,8 @@ pub const VM = struct {
                         trait_prop_attrs[tpi] = .{ .name = tpa_name, .attrs = tpa_attrs };
                     }
 
+                    if (try self.deprecationOf(trait_attrs)) |suffix| try self.deprecated_traits.put(self.allocator, trait_name, suffix);
+                    if (self.trait_uses.get(trait_name)) |subs| for (subs) |sub| try self.warnDeprecatedTraitUse(sub, trait_name);
                     if (trait_attrs.len > 0 or trait_method_attr_count > 0 or trait_prop_attr_count > 0) {
                         var tdef = ClassDef{ .name = trait_name, .is_internal = false };
                         for (trait_attrs) |a| try tdef.attributes.append(self.allocator, a);
@@ -12817,13 +12833,15 @@ pub const VM = struct {
             if (!std.ascii.eqlIgnoreCase(name, "Deprecated")) continue;
             var message: []const u8 = "";
             var since: []const u8 = "";
-            for (attr.args, 0..) |stored, i| {
+            for (attr.args) |stored| {
+                // anything but a plain string is evaluated when the
+                // deprecation fires
+                const plain = stored == .null or (stored == .string and (stored.string.len == 0 or stored.string.bytes()[0] != 0));
+                if (!plain) return bytecode.deferred_deprecation;
+            }
+            for (attr.args, 0..) |arg, i| {
                 const arg_name: ?[]const u8 = if (i < attr.arg_names.len) attr.arg_names[i] else null;
-                // read at declaration: an argument still deferred (a
-                // sentinel or an initializer, both starting with a nul) has
-                // no text yet
-                if (stored != .string or (stored.string.len > 0 and stored.string.bytes()[0] == 0)) continue;
-                const arg = stored;
+                if (arg != .string) continue;
                 const is_since = if (arg_name) |n| std.mem.eql(u8, n, "since") else i == 1;
                 if (is_since) since = arg.string.bytes() else message = arg.string.bytes();
             }
@@ -12834,12 +12852,68 @@ pub const VM = struct {
         return null;
     }
 
+    // what a deprecation adds after "is deprecated": the text known at
+    // compile time, or, for deferred_deprecation, the #[\Deprecated] among
+    // attrs built now as php does, its message and since read back. caller
+    // frees
+    fn deprecationText(self: *VM, suffix: []const u8, attrs: ?[]const AttributeDef, scope: []const u8) RuntimeError![]u8 {
+        if (!std.mem.eql(u8, suffix, bytecode.deferred_deprecation)) return self.allocator.dupe(u8, suffix);
+        const attr = for (attrs orelse &.{}) |a| {
+            const name = if (a.name.len > 0 and a.name[0] == '\\') a.name[1..] else a.name;
+            if (std.ascii.eqlIgnoreCase(name, "Deprecated")) break a;
+        } else return self.allocator.dupe(u8, "");
+        var placed: [2]Value = .{ .null, .null };
+        for (attr.args, 0..) |stored, i| {
+            const arg_name: ?[]const u8 = if (i < attr.arg_names.len) attr.arg_names[i] else null;
+            const slot: usize = if (arg_name) |n| (if (std.mem.eql(u8, n, "message")) 0 else if (std.mem.eql(u8, n, "since")) 1 else {
+                const msg = try std.fmt.allocPrint(self.allocator, "Unknown named parameter ${s}", .{n});
+                defer self.allocator.free(msg);
+                try self.setPendingException("Error", msg);
+                return error.RuntimeError;
+            }) else i;
+            if (slot >= placed.len) continue;
+            placed[slot] = try self.attributeArgumentValue(stored, scope);
+        }
+        const obj = try self.allocObject(.{ .class_name = try self.stableClassName("Deprecated") });
+        defer self.releaseValue(.{ .object = obj });
+        try self.initObjectProperties(obj, "Deprecated");
+        _ = try self.callMethod(obj, "__construct", &placed);
+        const message = obj.get("message");
+        const since = obj.get("since");
+        const m = if (message == .string) message.string.bytes() else "";
+        const s = if (since == .string) since.string.bytes() else "";
+        return std.fmt.allocPrint(self.allocator, "{s}{s}{s}{s}", .{ if (s.len > 0) " since " else "", s, if (m.len > 0) ", " else "", m });
+    }
+
+    // the attributes declared on a compiled function or method, and the
+    // class its expressions are evaluated in
+    fn functionAttributesOf(self: *VM, func: *const ObjFunction) struct { attrs: ?[]const AttributeDef, scope: []const u8 } {
+        if (self.function_attributes.get(func.name)) |attrs| return .{ .attrs = attrs, .scope = "" };
+        const sep = std.mem.indexOf(u8, func.name, "::") orelse return .{ .attrs = null, .scope = "" };
+        const class = func.name[0..sep];
+        const cls = self.classes.get(class) orelse return .{ .attrs = null, .scope = class };
+        return .{ .attrs = cls.method_attributes.get(func.name[sep + 2 ..]), .scope = class };
+    }
+
+    fn warnDeprecatedTraitUse(self: *VM, trait: []const u8, user: []const u8) RuntimeError!void {
+        const declared = self.traits.getKey(trait) orelse return;
+        const raw = self.deprecated_traits.get(declared) orelse return;
+        const suffix = try self.deprecationText(raw, if (self.classes.get(declared)) |c| c.attributes.items else null, declared);
+        defer self.allocator.free(suffix);
+        const msg = try std.fmt.allocPrint(self.allocator, "Trait {s} used by {s} is deprecated{s}", .{ declared, user, suffix });
+        defer self.allocator.free(msg);
+        try self.raiseError(E_USER_DEPRECATED, msg);
+    }
+
     // #[\Deprecated] and #[\NoDiscard] on a generator function, at its call
     fn checkGeneratorCall(self: *VM, func: *const ObjFunction) RuntimeError!void {
         if (func.deprecated == null and func.no_discard == null) return;
         const is_method = std.mem.indexOf(u8, func.name, "::") != null;
         const shown = if (func.display_name.len > 0) func.display_name else func.name;
-        if (func.deprecated) |suffix| {
+        if (func.deprecated) |raw| {
+            const declared = self.functionAttributesOf(func);
+            const suffix = try self.deprecationText(raw, declared.attrs, declared.scope);
+            defer self.allocator.free(suffix);
             const msg = try std.fmt.allocPrint(self.allocator, "{s} {s}() is deprecated{s}", .{ if (is_method) "Method" else "Function", shown, suffix });
             defer self.allocator.free(msg);
             try self.raiseError(E_USER_DEPRECATED, msg);
@@ -12863,7 +12937,17 @@ pub const VM = struct {
             return self.raiseError(E_DEPRECATED, msg);
         }
         if (!self.has_deprecated_constants) return;
-        const suffix = self.deprecated_globals.get(name) orelse return;
+        const raw = self.deprecated_globals.get(name) orelse return;
+        if (self.describing_deprecated) |d| if (d.class.len == 0 and std.mem.eql(u8, d.name, name)) return;
+        const attrs = if (self.constant_attributes.get(name)) |key| self.function_attributes.get(key) else null;
+        const outer = self.describing_deprecated;
+        self.describing_deprecated = .{ .class = "", .name = name };
+        const suffix = self.deprecationText(raw, attrs, "") catch |err| {
+            self.describing_deprecated = outer;
+            return err;
+        };
+        self.describing_deprecated = outer;
+        defer self.allocator.free(suffix);
         const msg = try std.fmt.allocPrint(self.allocator, "Constant {s} is deprecated{s}", .{ name, suffix });
         defer self.allocator.free(msg);
         try self.raiseError(E_USER_DEPRECATED, msg);
@@ -12877,7 +12961,17 @@ pub const VM = struct {
     pub fn warnDeprecatedClassConstant(self: *VM, class_name: []const u8, const_name: []const u8) RuntimeError!bool {
         const found = self.constantDeprecation(class_name, const_name, 0) orelse return false;
         const kind: []const u8 = if (found.is_case) "Enum case" else "Constant";
-        const msg = try std.fmt.allocPrint(self.allocator, "{s} {s}::{s} is deprecated{s}", .{ kind, found.owner, const_name, found.suffix });
+        if (self.describing_deprecated) |d| if (std.mem.eql(u8, d.class, found.owner) and std.mem.eql(u8, d.name, const_name)) return true;
+        const attrs = if (self.classes.get(found.owner)) |c| c.constant_attributes.get(const_name) else null;
+        const outer = self.describing_deprecated;
+        self.describing_deprecated = .{ .class = found.owner, .name = const_name };
+        const suffix = self.deprecationText(found.suffix, attrs, found.owner) catch |err| {
+            self.describing_deprecated = outer;
+            return err;
+        };
+        self.describing_deprecated = outer;
+        defer self.allocator.free(suffix);
+        const msg = try std.fmt.allocPrint(self.allocator, "{s} {s}::{s} is deprecated{s}", .{ kind, found.owner, const_name, suffix });
         defer self.allocator.free(msg);
         try self.raiseError(if (found.internal) E_DEPRECATED else E_USER_DEPRECATED, msg);
         return true;
@@ -13470,9 +13564,18 @@ pub const VM = struct {
     // the file and line the executing frame is at
     pub fn currentSourcePosition(self: *VM) SourcePosition {
         if (self.frame_count == 0) return .{ .file = self.file_path, .line = 0 };
-        const ip = self.currentFrame().ip;
-        const line: i64 = if (self.sourceLocation(self.currentChunk(), if (ip > 0) ip - 1 else 0)) |loc| @intCast(loc.line) else 0;
-        return .{ .file = self.frameFile(self.frame_count - 1), .line = line };
+        // an initializer (a constant expression: "\x00const...", attribute
+        // arguments, deferred defaults) runs for the code that needed its
+        // value, which php reports
+        var fi = self.frame_count - 1;
+        while (fi > 0) : (fi -= 1) {
+            const func = self.frames[fi].func orelse break;
+            if (func.name.len == 0 or func.name[0] != 0) break;
+        }
+        const frame = &self.frames[fi];
+        const ip = frame.ip;
+        const line: i64 = if (self.sourceLocation(frame.chunk, if (ip > 0) ip - 1 else 0)) |loc| @intCast(loc.line) else 0;
+        return .{ .file = self.frameFile(fi), .line = line };
     }
     pub const SourcePositionMessage = struct { message: []const u8, at: SourcePosition };
 
@@ -14852,6 +14955,7 @@ pub const VM = struct {
         }
 
         self.trait_constant_sources.clearRetainingCapacity();
+        for (trait_names[0..trait_count]) |trait_name| try self.warnDeprecatedTraitUse(trait_name, class_name);
         for (trait_names[0..trait_count]) |trait_name| {
             try self.applyTrait(&def, class_name, trait_name, alias_rules[0..alias_count], insteadof_rules[0..insteadof_count]);
             try def.used_traits.append(self.allocator, self.declaredClassName(trait_name));
@@ -15287,6 +15391,7 @@ pub const VM = struct {
         for (0..enum_trait_count) |ti| {
             enum_trait_names[ti] = self.currentChunk().constants.items[self.readU16()].string.bytes();
         }
+        for (enum_trait_names[0..enum_trait_count]) |trait_name| try self.warnDeprecatedTraitUse(trait_name, enum_name);
         for (enum_trait_names[0..enum_trait_count]) |trait_name| {
             try self.applyTrait(&def, enum_name, trait_name, &.{}, &.{});
         }
@@ -20718,7 +20823,7 @@ pub const VM = struct {
         return call.depth == self.frame_count;
     }
 
-    fn topFrameStrict(self: *VM) bool {
+    pub fn topFrameStrict(self: *VM) bool {
         if (self.frame_count >= 1) {
             if (self.frames[self.frame_count - 1].func) |cf| return cf.strict_types;
         }

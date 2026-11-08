@@ -115,7 +115,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try nd_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
     try nd_def.attributes.append(a, .{ .name = "Attribute", .args = try attributeTargets(a, 6) });
     try vm.classes.put(a, "NoDiscard", nd_def);
-    try vm.native_fns.put(a, "NoDiscard::__construct", deprecatedConstruct);
+    try vm.native_fns.put(a, "NoDiscard::__construct", noDiscardConstruct);
 
     // PHP 8.4 #[Deprecated]: reflection reports it through isDeprecated(),
     // the compiler and vm raise its warnings
@@ -5224,9 +5224,51 @@ fn attributeTargets(a: Allocator, flags: i64) ![]Value {
 // the readonly properties of the same names
 fn deprecatedConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len > 0 and args[0] == .string) try this.set(ctx.allocator, "message", args[0]);
-    if (args.len > 1 and args[1] == .string) try this.set(ctx.allocator, "since", args[1]);
+    try refuseReconstruction(ctx, this, "Deprecated");
+    try setNullableStringParam(ctx, this, args, 0, "Deprecated", "message");
+    try setNullableStringParam(ctx, this, args, 1, "Deprecated", "since");
+    try this.set(ctx.allocator, "__constructed", .{ .bool = true });
     return NativeResult.scalar(.null);
+}
+
+fn noDiscardConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    try refuseReconstruction(ctx, this, "NoDiscard");
+    try setNullableStringParam(ctx, this, args, 0, "NoDiscard", "message");
+    try this.set(ctx.allocator, "__constructed", .{ .bool = true });
+    return NativeResult.scalar(.null);
+}
+
+// the properties are readonly: a second __construct() call writes them again
+fn refuseReconstruction(ctx: *NativeContext, this: *PhpObject, comptime class: []const u8) RuntimeError!void {
+    if (this.get("__constructed") != .bool) return;
+    try ctx.vm.setPendingException("Error", "Cannot modify readonly property " ++ class ++ "::$message");
+    return error.RuntimeError;
+}
+
+// a `?string $name = null` constructor parameter stored as the property of
+// that name, with php's checks: scalars become strings unless the caller is
+// strict, anything else is a TypeError
+fn setNullableStringParam(ctx: *NativeContext, this: *PhpObject, args: []const Value, index: usize, comptime class: []const u8, comptime name: []const u8) RuntimeError!void {
+    if (index >= args.len) return;
+    const arg = args[index];
+    const value: Value = switch (arg) {
+        .null, .string => arg,
+        .int, .float, .bool => if (ctx.vm.topFrameStrict()) .undef else {
+            var buf = std.ArrayListUnmanaged(u8).empty;
+            defer buf.deinit(ctx.allocator);
+            try arg.format(&buf, ctx.allocator);
+            return this.setCopiedString(ctx.allocator, name, buf.items);
+        },
+        else => .undef,
+    };
+    if (value == .undef) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, class ++ "::__construct(): Argument #{d} ($" ++ name ++ ") must be of type ?string, {s} given", .{ index + 1, arg.valueName() });
+        defer ctx.allocator.free(msg);
+        try ctx.vm.setPendingException("TypeError", msg);
+        return error.RuntimeError;
+    }
+    try this.set(ctx.allocator, name, value);
 }
 
 fn rfIsDeprecated(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
