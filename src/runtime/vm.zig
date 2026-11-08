@@ -14820,7 +14820,7 @@ pub const VM = struct {
         for (0..count) |i| {
             const name_idx = self.readU16();
             const name = self.currentChunk().constants.items[name_idx].string.bytes();
-            const arg_count = self.readByte();
+            const arg_count = self.readU32();
             if (arg_count > 0) {
                 const args = try self.allocator.alloc(Value, arg_count);
                 const names = try self.allocator.alloc(?[]const u8, arg_count);

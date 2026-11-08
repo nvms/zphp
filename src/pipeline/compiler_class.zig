@@ -447,7 +447,8 @@ fn emitAttributeData(self: *Compiler, attrs: []const ParsedAttr) Error!void {
     for (attrs) |attr| {
         const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(attr.name) });
         try self.emitU16(name_idx);
-        try self.emitByte(@intCast(attr.args.len));
+        // an attribute can take any number of arguments
+        try self.emitU32(@intCast(attr.args.len));
         for (attr.args, 0..) |arg, i| {
             // emit named arg flag: 0 = positional, 1 = named (followed by name constant index)
             if (i < attr.arg_names.len) {
