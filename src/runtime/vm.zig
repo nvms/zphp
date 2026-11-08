@@ -7073,6 +7073,10 @@ pub const VM = struct {
                     const obj_val = self.pop();
                     if (obj_val == .object) {
                         var obj = obj_val.object;
+                        if (self.lazyMagicFirst(obj, prop_name, .unset)) {
+                            _ = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicProperty(obj, .unset, prop_name, .null) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
+                            continue;
+                        }
                         self.triggerLazyAccess(obj, prop_name) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
@@ -7120,6 +7124,10 @@ pub const VM = struct {
                     const obj_val = self.pop();
                     if (obj_val == .object and name_val == .string) {
                         var obj = obj_val.object;
+                        if (self.lazyMagicFirst(obj, name_val.string.bytes(), .unset)) {
+                            _ = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicProperty(obj, .unset, name_val.string.bytes(), .null) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
+                            continue;
+                        }
                         self.triggerLazyAccess(obj, name_val.string.bytes()) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
@@ -7516,6 +7524,11 @@ pub const VM = struct {
                     const obj_val = self.pop();
                     if (obj_val == .object) {
                         var obj = obj_val.object;
+                        if (self.lazyMagicFirst(obj, prop_name, .isset)) {
+                            const result = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicProperty(obj, .isset, prop_name, .null) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
+                            self.push(.{ .bool = result.isTruthy() });
+                            continue;
+                        }
                         self.triggerLazyAccess(obj, prop_name) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
@@ -7553,6 +7566,11 @@ pub const VM = struct {
                     const obj_val = self.pop();
                     if (obj_val == .object and prop_name_val == .string) {
                         var obj = obj_val.object;
+                        if (self.lazyMagicFirst(obj, prop_name_val.string.bytes(), .isset)) {
+                            const result = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicProperty(obj, .isset, prop_name_val.string.bytes(), .null) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
+                            self.push(.{ .bool = result.isTruthy() });
+                            continue;
+                        }
                         self.triggerLazyAccess(obj, prop_name_val.string.bytes()) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
@@ -9130,6 +9148,11 @@ pub const VM = struct {
                         obj.refcount +%= 1;
                         defer self.releaseValue(obj_val);
 
+                        if (self.lazyMagicFirst(obj, prop_name, .get)) {
+                            const result = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicGet(obj, prop_name) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
+                            self.push(result);
+                            continue;
+                        }
                         self.triggerLazyAccess(obj, prop_name) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
@@ -9284,6 +9307,10 @@ pub const VM = struct {
                         var obj = obj_val.object;
                         obj.refcount +%= 1;
                         defer self.releaseValue(obj_val);
+                        if (self.lazyMagicFirst(obj, prop_name, .isset) or self.lazyMagicFirst(obj, prop_name, .get)) {
+                            self.push((implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.coalesceMagic(obj, prop_name, false) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; }));
+                            continue;
+                        }
                         self.triggerLazyAccess(obj, prop_name) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
@@ -20901,11 +20928,31 @@ pub const VM = struct {
     pub const MagicKind = enum { get, set, isset, unset };
     pub const MagicGuard = struct { obj: usize, name: []const u8, kind: MagicKind };
 
+    // a guard set on a lazy proxy covers its instance too: the access the
+    // proxy's magic method makes is forwarded there with the same guard
     pub fn magicGuarded(self: *VM, obj: *PhpObject, name: []const u8, kind: MagicKind) bool {
         for (self.magic_guards.items) |guard| {
-            if (guard.obj == @intFromPtr(obj) and guard.kind == kind and std.mem.eql(u8, guard.name, name)) return true;
+            if (guard.kind != kind or !std.mem.eql(u8, guard.name, name)) continue;
+            if (guard.obj == @intFromPtr(obj)) return true;
+            const holder: *PhpObject = @ptrFromInt(guard.obj);
+            if (holder.lazy) |state| if (state.backing == obj) return true;
         }
         return false;
+    }
+
+    // php runs a lazy object's property magic method on the lazy object
+    // itself, before initializing it, for a name its class doesn't declare;
+    // only the access that magic method makes initializes it. an
+    // initialized proxy forwards instead while its instance's own magic
+    // method runs for the name (php's GH-21478)
+    fn lazyMagicFirst(self: *VM, obj: *PhpObject, name: []const u8, kind: MagicKind) bool {
+        const state = obj.lazy orelse return false;
+        if (state.running) return false;
+        if (state.initializer == .null and state.backing == null) return false;
+        if (obj.getSlotIndexForScope(name, self.currentDefiningClass()) != null) return false;
+        if (!self.magicApplies(obj, name, kind)) return false;
+        if (state.backing) |instance| if (self.magicGuarded(instance, name, kind)) return false;
+        return true;
     }
 
     // the class has the magic method and it isn't already running for this
