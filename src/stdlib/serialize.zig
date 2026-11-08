@@ -212,12 +212,27 @@ fn refuseNotSerializable(ctx: *NativeContext, class_name: []const u8, direction:
     return error.RuntimeError;
 }
 
+// php's BG(serialize): a serialize() nested in a Serializable::serialize()
+// method shares the outer call's reference table, so the objects the outer
+// call has written are back references there. __serialize and __sleep run
+// under serialize_lock, where a nested call starts its own table
+threadlocal var shared_ctx: ?*SerCtx = null;
+threadlocal var serialize_lock: u32 = 0;
+threadlocal var shared_uctx: ?*UnserCtx = null;
+
 pub fn serializeToString(ctx: *NativeContext, val: Value) RuntimeError!NativeResult {
     var buf = std.ArrayListUnmanaged(u8).empty;
     errdefer buf.deinit(ctx.allocator);
-    var sctx = SerCtx{};
-    defer sctx.deinit(ctx.allocator);
-    try serializeValue(ctx, &buf, &sctx, val);
+    var own = SerCtx{};
+    defer own.deinit(ctx.allocator);
+    const outer = if (serialize_lock == 0) shared_ctx else null;
+    const sctx = outer orelse &own;
+    const owner = outer == null and serialize_lock == 0;
+    if (owner) shared_ctx = &own;
+    defer if (owner) {
+        shared_ctx = null;
+    };
+    try serializeValue(ctx, &buf, sctx, val);
     const result = try buf.toOwnedSlice(ctx.allocator);
     return NativeResult.takeString(try Value.String.adopt(ctx.allocator, result));
 }
@@ -460,7 +475,12 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
 
             // PHP 7.4+ __serialize: returns the array used as the object's serialized payload
             if (ctx.vm.hasMethod(obj.class_name, "__serialize")) {
-                const ser_result = try ctx.vm.callMethod(obj, "__serialize", &.{});
+                serialize_lock += 1;
+                const ser_result = ctx.vm.callMethod(obj, "__serialize", &.{}) catch |err| {
+                    serialize_lock -= 1;
+                    return err;
+                };
+                serialize_lock -= 1;
                 @import("../runtime/vm.zig").VM.retainValue(ser_result);
                 defer ctx.vm.releaseValue(ser_result);
                 if (ser_result == .array) {
@@ -495,7 +515,12 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
             var sleep_props: ?*PhpArray = null;
             defer if (sleep_props) |props| ctx.vm.releaseValue(.{ .array = props });
             if (ctx.vm.hasMethod(obj.class_name, "__sleep")) {
-                const sleep_result = try ctx.vm.callMethod(obj, "__sleep", &.{});
+                serialize_lock += 1;
+                const sleep_result = ctx.vm.callMethod(obj, "__sleep", &.{}) catch |err| {
+                    serialize_lock -= 1;
+                    return err;
+                };
+                serialize_lock -= 1;
                 if (sleep_result == .array) {
                     @import("../runtime/vm.zig").VM.retainValue(sleep_result);
                     sleep_props = sleep_result.array;
@@ -548,8 +573,33 @@ fn native_unserialize(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     const s = args[0].string.bytes();
     // PHP returns false silently for empty input - no warning
     if (s.len == 0) return NativeResult.scalar(.{ .bool = false });
-    var uctx = UnserCtx{};
-    defer uctx.deinit(ctx.allocator);
+    // nested in a Serializable::unserialize() method, the call shares the
+    // outer call's back-reference table (php's BG(unserialize)) with its own
+    // options and error state
+    var own = UnserCtx{};
+    defer own.deinit(ctx.allocator);
+    const outer = if (serialize_lock == 0) shared_uctx else null;
+    const uctx: *UnserCtx = outer orelse &own;
+    const saved = uctx.*;
+    if (outer != null) {
+        uctx.allowed = .all;
+        uctx.threw = false;
+        uctx.depth_exceeded = false;
+        uctx.err_pos = 0;
+    }
+    defer if (outer != null) {
+        uctx.allowed = saved.allowed;
+        uctx.threw = saved.threw;
+        uctx.max_depth = saved.max_depth;
+        uctx.depth = saved.depth;
+        uctx.depth_exceeded = saved.depth_exceeded;
+        uctx.err_pos = saved.err_pos;
+    };
+    const owner = outer == null and serialize_lock == 0;
+    if (owner) shared_uctx = &own;
+    defer if (owner) {
+        shared_uctx = null;
+    };
     var name_storage: std.ArrayListUnmanaged([]const u8) = .empty;
     defer name_storage.deinit(ctx.allocator);
     if (args.len >= 2 and args[1] == .array) {
@@ -566,9 +616,14 @@ fn native_unserialize(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
             else => {},
         }
         const md = opts.get(.{ .string = Value.String.borrowed("max_depth") });
-        if (md == .int and md.int >= 0) uctx.max_depth = @intCast(md.int);
+        // a nested call keeps counting the outer call's depth unless it
+        // sets its own limit
+        if (md == .int and md.int >= 0) {
+            uctx.max_depth = @intCast(md.int);
+            uctx.depth = 0;
+        }
     }
-    const result = unserializeValue(ctx, &uctx, s, 0) catch {
+    const result = unserializeValue(ctx, uctx, s, 0) catch {
         // an exception from __unserialize, __wakeup, or Serializable::unserialize
         // propagates; only a parse failure is a warning
         if (uctx.threw or ctx.vm.pending_exception != null) return error.RuntimeError;
@@ -845,9 +900,13 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
 
             if (has_unserialize) {
                 if (collected) |arr| {
+                    serialize_lock += 1;
+                    defer serialize_lock -= 1;
                     _ = try ctx.vm.callMethod(obj, "__unserialize", &.{.{ .array = arr }});
                 }
             } else if (ctx.vm.hasMethod(class_name, "__wakeup")) {
+                serialize_lock += 1;
+                defer serialize_lock -= 1;
                 _ = try ctx.vm.callMethod(obj, "__wakeup", &.{});
             }
 
