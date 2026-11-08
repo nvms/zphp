@@ -434,11 +434,17 @@ pub const OpCode = enum(u8) {
     // u16 constant name, u16 attribute entry: right after a define_const,
     // which skips it when the constant was already defined
     bind_const_attributes,
+    // u16 property, u8 0 get / 1 set, u8 argc, u16 skip: parent::$p::get()
+    // or ::set() in a property hook. with a parent hook it calls it, pushes
+    // the result and skips the get_prop/set_prop that follows; with a plain
+    // parent property it leaves $this (and the value) for that instruction
+    parent_hook_call,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
             .arg_variable => 6,
             .jump_if_class_declared, .bind_const_attributes => 5,
+            .parent_hook_call => 7,
             .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim, .arg_append => 4,
             .reference_source,
             .enter_class_scope,

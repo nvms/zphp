@@ -3735,6 +3735,11 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
     const suffix = if (kind == .get) "$hook_get" else "$hook_set";
     const full_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}{s}", .{ class_name, prop_name, suffix });
     try self.string_allocs.append(self.allocator, full_name);
+    // what php calls the hook: "$prop::get", shown as "Class::$prop::get"
+    const php_name = try std.fmt.allocPrint(self.allocator, "${s}::{s}", .{ prop_name, if (kind == .get) "get" else "set" });
+    try self.string_allocs.append(self.allocator, php_name);
+    const shown_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, php_name });
+    try self.string_allocs.append(self.allocator, shown_name);
 
     const type_extra = member.data.rhs >> 16;
     const prop_type = if (type_extra != 0)
@@ -3792,7 +3797,9 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
         .is_generator = is_generator,
         .returns_ref = (hook_flags & 4) != 0,
         .current_class = class_name,
-        .current_function = full_name,
+        .current_function = php_name,
+        .hook_property = prop_name,
+        .hook_is_set = kind == .set,
     };
     defer sub.deinitScratch();
     errdefer sub.discardOutput();
@@ -3834,6 +3841,7 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
 
     self.functions.appendAssumeCapacity(.{
         .name = full_name,
+        .display_name = shown_name,
         .arity = @intCast(param_names.len),
         .required_params = @intCast(param_names.len),
         .params = param_names,

@@ -783,7 +783,7 @@ fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bool, 
             const type_str: []const u8 = if (func.is_static) "::" else "->";
             if (std.mem.indexOf(u8, func.name, "::")) |sep| {
                 try entry.set(alloc, .{ .string = Value.String.borrowed("class") }, .{ .string = Value.String.borrowed(func.name[0..sep]) });
-                try entry.set(alloc, .{ .string = Value.String.borrowed("function") }, .{ .string = Value.String.borrowed(func.name[sep + 2 ..]) });
+                try entry.set(alloc, .{ .string = Value.String.borrowed("function") }, .{ .string = Value.String.borrowed(try vm.phpMethodName(func.name[sep + 2 ..])) });
                 try entry.set(alloc, .{ .string = Value.String.borrowed("type") }, .{ .string = Value.String.borrowed(type_str) });
             } else {
                 try entry.set(alloc, .{ .string = Value.String.borrowed("function") }, .{ .string = Value.String.borrowed(try vm.funcDisplayName(func)) });

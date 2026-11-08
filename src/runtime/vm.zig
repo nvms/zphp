@@ -7922,6 +7922,16 @@ pub const VM = struct {
                         }
                     }
                 },
+                .parent_hook_call => {
+                    const prop = self.currentChunk().constants.items[self.readU16()].string.bytes();
+                    const is_set = self.readByte() == 1;
+                    const argc = self.readByte();
+                    const skip = self.readU16();
+                    self.parentHookCall(prop, is_set, argc, skip) catch |err| {
+                        if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                        return err;
+                    };
+                },
                 .bind_const_attributes => {
                     const name = self.currentChunk().constants.items[self.readU16()].string.bytes();
                     const key = self.currentChunk().constants.items[self.readU16()].string.bytes();
@@ -12192,6 +12202,15 @@ pub const VM = struct {
         return entry;
     }
 
+    // the name php gives a method: a property hook zphp registers as
+    // "prop$hook_get" is "$prop::get"
+    pub fn phpMethodName(self: *VM, method: []const u8) ![]const u8 {
+        const hook = std.mem.indexOf(u8, method, "$hook_") orelse return method;
+        const s = try std.fmt.allocPrint(self.allocator, "${s}::{s}", .{ method[0..hook], method[hook + "$hook_".len ..] });
+        defer self.allocator.free(s);
+        return self.internName(s);
+    }
+
     // keys in php's order: file, line, function, class, type, then args
     fn newTraceEntry(self: *VM, f: *const ObjFunction, call_site: ?SourcePosition) !*PhpArray {
         const entry = try self.allocArray();
@@ -12200,7 +12219,7 @@ pub const VM = struct {
             try entry.set(self.allocator, .{ .string = Value.String.borrowed("line") }, .{ .int = site.line });
         }
         if (std.mem.indexOf(u8, f.name, "::")) |sep| {
-            try entry.set(self.allocator, .{ .string = Value.String.borrowed("function") }, .{ .string = Value.String.borrowed(f.name[sep + 2 ..]) });
+            try entry.set(self.allocator, .{ .string = Value.String.borrowed("function") }, .{ .string = Value.String.borrowed(try self.phpMethodName(f.name[sep + 2 ..])) });
             try entry.set(self.allocator, .{ .string = Value.String.borrowed("class") }, .{ .string = Value.String.borrowed(f.name[0..sep]) });
             try entry.set(self.allocator, .{ .string = Value.String.borrowed("type") }, .{ .string = Value.String.borrowed(if (f.is_static) "::" else "->") });
         } else {
@@ -12893,6 +12912,70 @@ pub const VM = struct {
         const class = func.name[0..sep];
         const cls = self.classes.get(class) orelse return .{ .attrs = null, .scope = class };
         return .{ .attrs = cls.method_attributes.get(func.name[sep + 2 ..]), .scope = class };
+    }
+
+    // php's ZEND_INIT_PARENT_PROPERTY_HOOK_CALL: the parent's hook for the
+    // property when it has one, else the parent property's own storage
+    // through the get_prop/set_prop the compiler put after this op (the
+    // running hook's guard makes it reach the backing value)
+    fn parentHookCall(self: *VM, prop: []const u8, is_set: bool, argc: u8, skip: u16) RuntimeError!void {
+        const kind: []const u8 = if (is_set) "set" else "get";
+        const scope = self.currentDefiningClass() orelse {
+            try self.setPendingException("Error", "Cannot use \"parent\" when no class scope is active");
+            return error.RuntimeError;
+        };
+        const parent = (if (self.classes.get(scope)) |c| c.parent else null) orelse {
+            try self.setPendingException("Error", "Cannot use \"parent\" when current class scope has no parent");
+            return error.RuntimeError;
+        };
+        const decl = self.propertyDeclaration(parent, prop);
+        if (!decl.declared) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Undefined property {s}::${s}", .{ parent, prop });
+            defer self.allocator.free(msg);
+            try self.setPendingException("Error", msg);
+            return error.RuntimeError;
+        }
+        if (decl.visibility == .private) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Cannot access private property {s}::${s}", .{ decl.defining_class, prop });
+            defer self.allocator.free(msg);
+            try self.setPendingException("Error", msg);
+            return error.RuntimeError;
+        }
+        const this = self.getLocalByName("$this");
+        if (this != .object) {
+            try self.setPendingException("Error", "Using $this when not in object context");
+            return error.RuntimeError;
+        }
+        const hook = try self.propHookName(prop, if (is_set) .set else .get);
+        const parent_def = self.classes.getPtr(parent) orelse return error.RuntimeError;
+        if (self.resolvePropertyHook(parent_def, hook)) |found| if (!found.info.is_abstract) {
+            const registered = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ found.declaring, hook });
+            defer self.allocator.free(registered);
+            const args = try self.allocator.dupe(Value, self.stack[self.sp - argc .. self.sp]);
+            defer self.allocator.free(args);
+            const result = try self.callMethodAs(this.object, hook, try self.internName(registered), args);
+            self.dropN(argc);
+            self.push(result);
+            self.currentFrame().ip += skip;
+            return;
+        };
+        // the implicit hook is an internal function and checks its arguments
+        const expected: u8 = if (is_set) 1 else 0;
+        if (argc != expected) {
+            const msg = try std.fmt.allocPrint(self.allocator, "{s}::${s}::{s}() expects exactly {d} argument{s}, {d} given", .{ decl.defining_class, prop, kind, expected, if (expected == 1) "" else "s", argc });
+            defer self.allocator.free(msg);
+            try self.setPendingException("ArgumentCountError", msg);
+            return error.RuntimeError;
+        }
+        if (is_set) {
+            const value = self.pop();
+            stackRetain(this);
+            self.push(this);
+            self.push(value);
+        } else {
+            stackRetain(this);
+            self.push(this);
+        }
     }
 
     fn warnDeprecatedTraitUse(self: *VM, trait: []const u8, user: []const u8) RuntimeError!void {

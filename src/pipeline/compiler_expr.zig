@@ -1721,7 +1721,41 @@ pub fn compileNullsafeMethodCall(self: *Compiler, node: Ast.Node) Error!void {
     try self.nullsafe_chain_jumps.?.append(self.allocator, end_jump);
 }
 
+// parent::$prop::get() / parent::$prop::set($v) inside that property's own
+// hook (zend_compile_parent_property_hook_call); written in parentheses it
+// is an ordinary static call on the static property's value
+fn compileParentHookCall(self: *Compiler, node: Ast.Node) Error!bool {
+    const class_node = self.ast.nodes[node.data.lhs];
+    if (class_node.tag != .static_prop_access or class_node.main_token == 0) return false;
+    const written = self.ast.tokenSlice(class_node.main_token);
+    if (written.len < 2 or written[0] != '$') return false;
+    const parent_node = self.ast.nodes[class_node.data.lhs];
+    if (parent_node.tag != .identifier or !std.ascii.eqlIgnoreCase(self.ast.tokenSlice(parent_node.main_token), "parent")) return false;
+    const method = self.ast.tokenSlice(node.main_token);
+    const is_set = std.ascii.eqlIgnoreCase(method, "set");
+    if (!is_set and !std.ascii.eqlIgnoreCase(method, "get")) return false;
+    const prop = written[1..];
+    const kind: []const u8 = if (is_set) "set" else "get";
+    if (self.current_class.len == 0) return self.fail(node.main_token, "Cannot use \"parent\" when no class scope is active");
+    if (self.hook_property.len == 0) return self.failFmt(node.main_token, "Must not use parent::${s}::{s}() outside a property hook", .{ prop, kind });
+    if (!std.mem.eql(u8, prop, self.hook_property)) return self.failFmt(node.main_token, "Must not use parent::${s}::{s}() in a different property (${s})", .{ prop, kind, self.hook_property });
+    if (is_set != self.hook_is_set) return self.failFmt(node.main_token, "Must not use parent::${s}::{s}() in a different property hook ({s})", .{ prop, kind, if (self.hook_is_set) "set" else "get" });
+
+    const args = self.ast.extraSlice(node.data.rhs);
+    for (args) |a| try self.compileNode(a);
+    const prop_idx = try self.addConstant(.{ .string = Value.String.borrowed(prop) });
+    try self.emitOp(.parent_hook_call);
+    try self.emitU16(prop_idx);
+    try self.emitByte(@intFromBool(is_set));
+    try self.emitByte(@intCast(args.len));
+    try self.emitU16(3);
+    try self.emitOp(if (is_set) .set_prop else .get_prop);
+    try self.emitU16(prop_idx);
+    return true;
+}
+
 pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
+    if (try compileParentHookCall(self, node)) return;
     // unwrap (grouped_expr) wrapping so (new X())::foo() is dispatched as a
     // dynamic static call against the inner new-expression
     var class_lhs_idx = node.data.lhs;
@@ -1733,7 +1767,10 @@ pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
     const method_name = self.ast.tokenSlice(node.main_token);
     const args = self.ast.extraSlice(node.data.rhs);
 
-    if (class_node.tag == .variable) {
+    // `$var::m()` and `A::$prop::m()`: the class is the value
+    const static_prop = class_node.tag == .static_prop_access and class_node.main_token != 0 and
+        std.mem.startsWith(u8, self.ast.tokenSlice(class_node.main_token), "$");
+    if (class_node.tag == .variable or static_prop) {
         try self.compileNode(class_lhs_idx);
         const method_idx = try self.addConstant(.{ .string = Value.String.borrowed(method_name) });
         if (hasSplatOrNamed(self.ast, args)) return emitDynStaticSpread(self, method_idx, args);

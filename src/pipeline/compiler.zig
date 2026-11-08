@@ -331,6 +331,10 @@ pub const Compiler = struct {
     // a class constant's initializer: self and parent stay as written in
     // class constant fetches, resolved as it runs (its errors name them so)
     relative_const_classes: bool = false,
+    // inside a property hook: the property and whether it is the set hook,
+    // for parent::$prop::get()/set()
+    hook_property: []const u8 = "",
+    hook_is_set: bool = false,
     finally_nodes: [8]u32 = @as([8]u32, @splat(0)),
     finally_loop_depth: [8]u32 = @as([8]u32, @splat(0)),
     finally_depth: u32 = 0,
