@@ -789,6 +789,9 @@ pub const VM = struct {
     require_merge_depth: usize = 0,
     magic_get_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, prop_name: []const u8 }) = .empty,
     magic_call_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, method_name: []const u8 }) = .empty,
+    // __isset calls running, so one asked about its own property isn't
+    // called again (php's IN_ISSET guard)
+    magic_isset_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, prop_name: []const u8 }) = .empty,
     prop_hook_guard: std.ArrayListUnmanaged(struct { obj_ptr: usize, prop_name: []const u8 }) = .empty,
     user_error_handler: ?Value = null,
     user_error_handler_mask: i64 = -1,
@@ -3068,6 +3071,7 @@ pub const VM = struct {
         self.autoload_callbacks.deinit(self.allocator);
         self.magic_get_guard.deinit(self.allocator);
         self.magic_call_guard.deinit(self.allocator);
+        self.magic_isset_guard.deinit(self.allocator);
         self.prop_hook_guard.deinit(self.allocator);
         for (self.serve_cache_keys.items) |k| self.allocator.free(k);
         self.serve_cache_keys.deinit(self.allocator);
@@ -3225,6 +3229,7 @@ pub const VM = struct {
         self.clearStreamWrappers();
         self.magic_get_guard.clearRetainingCapacity();
         self.magic_call_guard.clearRetainingCapacity();
+        self.magic_isset_guard.clearRetainingCapacity();
         if (self.serve_mode) {
             self.functions.clearRetainingCapacity();
             if (self.ic) |ic_ptr| {
@@ -7491,8 +7496,8 @@ pub const VM = struct {
                         if (reachable and (obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndexForScope(prop_name, vr.defining_class) != null))) {
                             self.push(.{ .bool = obj.getForScope(prop_name, vr.defining_class) != .null });
                         } else if (self.hasMethod(obj.class_name, "__isset")) {
-                            const result = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMethod(obj, "__isset", &.{.{ .string = Value.String.borrowed(prop_name) }}) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
-                            self.push(.{ .bool = result.isTruthy() });
+                            const result = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicIsset(obj, prop_name) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
+                            self.push(.{ .bool = result orelse false });
                         } else {
                             self.push(.{ .bool = false });
                         }
@@ -7528,8 +7533,8 @@ pub const VM = struct {
                         if (reachable and (obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndexForScope(prop_name, vr.defining_class) != null))) {
                             self.push(.{ .bool = obj.getForScope(prop_name, vr.defining_class) != .null });
                         } else if (self.hasMethod(obj.class_name, "__isset")) {
-                            const result = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMethod(obj, "__isset", &.{.{ .string = Value.String.borrowed(prop_name) }}) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
-                            self.push(.{ .bool = result.isTruthy() });
+                            const result = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicIsset(obj, prop_name) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
+                            self.push(.{ .bool = result orelse false });
                         } else {
                             self.push(.{ .bool = false });
                         }
@@ -9251,38 +9256,12 @@ pub const VM = struct {
                             // raw value (a parent's private prop must not leak
                             // to a subclass scope)
                             if (!self.checkVisibility(cvr.defining_class, cvr.visibility)) {
-                                if (self.hasMethod(obj.class_name, "__get")) {
-                                    if (self.hasMethod(obj.class_name, "__isset")) {
-                                        const present = self.callMethod(obj, "__isset", &.{.{ .string = Value.String.borrowed(prop_name) }}) catch {
-                                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
-                                            return error.RuntimeError;
-                                        };
-                                        if (!present.isTruthy()) {
-                                            self.push(.null);
-                                            continue;
-                                        }
-                                    }
-                                    self.push((implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicGet(obj, prop_name) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; }));
-                                } else {
-                                    self.push(.null);
-                                }
+                                self.push((implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.magicCoalesceRead(obj, prop_name) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; }));
                             } else {
                                 self.push(val);
                             }
-                        } else if (self.hasMethod(obj.class_name, "__get")) {
-                            if (self.hasMethod(obj.class_name, "__isset")) {
-                                const present = self.callMethod(obj, "__isset", &.{.{ .string = Value.String.borrowed(prop_name) }}) catch {
-                                    if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
-                                    return error.RuntimeError;
-                                };
-                                if (!present.isTruthy()) {
-                                    self.push(.null);
-                                    continue;
-                                }
-                            }
-                            self.push((implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicGet(obj, prop_name) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; }));
                         } else {
-                            self.push(.null);
+                            self.push((implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.magicCoalesceRead(obj, prop_name) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; }));
                         }
                     } else {
                         self.push(.null);
@@ -20640,6 +20619,42 @@ pub const VM = struct {
         };
         self.removeMagicGetGuard(obj_id, prop_name);
         return result;
+    }
+
+    // a `??` read of a property the scope can't see or that doesn't exist
+    // (zend_std_read_property with BP_VAR_IS): __isset decides first when the
+    // class has one, then __get supplies the value
+    fn magicCoalesceRead(self: *VM, obj: *PhpObject, prop_name: []const u8) RuntimeError!Value {
+        if (self.hasMethod(obj.class_name, "__isset")) {
+            if (try self.callMagicIsset(obj, prop_name)) |present| {
+                if (!present) return .null;
+            }
+        }
+        if (self.hasMethod(obj.class_name, "__get")) return self.callMagicGet(obj, prop_name);
+        return .null;
+    }
+
+    // null when an __isset for this object and property is already running:
+    // php's IN_ISSET guard skips the call, so the property reads as unset
+    fn callMagicIsset(self: *VM, obj: *PhpObject, prop_name: []const u8) RuntimeError!?bool {
+        const obj_id = @intFromPtr(obj);
+        for (self.magic_isset_guard.items) |e| {
+            if (e.obj_ptr == obj_id and std.mem.eql(u8, e.prop_name, prop_name)) return null;
+        }
+        try self.magic_isset_guard.append(self.allocator, .{ .obj_ptr = obj_id, .prop_name = prop_name });
+        defer {
+            var i: usize = self.magic_isset_guard.items.len;
+            while (i > 0) {
+                i -= 1;
+                const g = self.magic_isset_guard.items[i];
+                if (g.obj_ptr == obj_id and std.mem.eql(u8, g.prop_name, prop_name)) {
+                    _ = self.magic_isset_guard.swapRemove(i);
+                    break;
+                }
+            }
+        }
+        const result = try self.callMethod(obj, "__isset", &.{.{ .string = Value.String.borrowed(prop_name) }});
+        return result.isTruthy();
     }
 
     fn removeMagicGetGuard(self: *VM, obj_id: usize, prop_name: []const u8) void {
