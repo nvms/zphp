@@ -343,6 +343,7 @@ fn extractAttributes(self: *Compiler, main_token: u32, target: AttrTarget) Error
 // initializer the vm runs when reflection asks, in the scope of the class
 // the attribute is in
 fn attributeArgument(self: *Compiler, idx: u32, target: u32) Error!Value {
+    if (hasEmptyArrayElement(self.ast, idx)) return self.fail(target, "Cannot use empty array elements in arrays");
     if (!allowedInConstExpr(self.ast, idx)) return self.fail(target, "Constant expression contains invalid operations");
     if (findStaticClass(self.ast, idx) != null) return self.fail(target, "static::class cannot be used for compile-time class name resolution");
     if (namedClassName(self, idx)) |name| return .{ .string = Value.String.borrowed(name) };
@@ -355,6 +356,23 @@ fn attributeArgument(self: *Compiler, idx: u32, target: u32) Error!Value {
     }
     if (!compiled) try compileInitializer(self, name, .argument, idx, self.ast.nodes[idx].main_token);
     return .{ .string = Value.String.borrowed(name) };
+}
+
+// `[,]` anywhere in the expression, which php refuses before anything else
+fn hasEmptyArrayElement(ast: *const Ast, idx: u32) bool {
+    if (idx == 0) return false;
+    const node = ast.nodes[idx];
+    return switch (node.tag) {
+        .array_literal => for (ast.extraSlice(node.data.lhs)) |el_idx| {
+            if (el_idx == 0) break true;
+            const el = ast.nodes[el_idx];
+            if (hasEmptyArrayElement(ast, el.data.lhs)) break true;
+            if (el.tag == .array_element and hasEmptyArrayElement(ast, el.data.rhs)) break true;
+        } else false,
+        .binary_op, .logical_and, .logical_or, .null_coalesce, .array_access => hasEmptyArrayElement(ast, node.data.lhs) or hasEmptyArrayElement(ast, node.data.rhs),
+        .grouped_expr, .cast_expr, .prefix_op, .property_access, .nullsafe_property_access => hasEmptyArrayElement(ast, node.data.lhs),
+        else => false,
+    };
 }
 
 // php's zend_is_allowed_in_const_expr over the whole expression: literals,
