@@ -727,6 +727,11 @@ fn runShutdown(allocator: std.mem.Allocator, vm: *VM) !bool {
 // zphp's own fatals print their diagnostic to stderr
 // the display copy joins the script's buffered output so it lands in order
 fn reportRuntimeError(allocator: std.mem.Allocator, vm: *VM) !void {
+    // a check that stopped the script with a bare message is php's fatal
+    // error: reported like any other, per display_errors and log_errors
+    if (vm.pending_exception == null) if (vm.error_msg) |msg| if (!error_format.hasFatalPrefix(msg)) {
+        _ = vm.raiseFatal(msg) catch {};
+    };
     if ((vm.error_reporting_level & uncaughtSeverity(vm)) == 0) return;
     if (vm.pending_exception == null) {
         const msg = error_format.formatRuntimeError(allocator, vm);

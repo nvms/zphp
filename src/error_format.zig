@@ -59,6 +59,11 @@ pub fn compileErrorLine(ast: *const Ast, diag: Diagnostic) i64 {
     return @intCast(Chunk.locationFromOffset(ast.source, ast.tokens[diag.token].start).line);
 }
 
+// an error_msg that carries php's own prefix and is printed as it is
+pub fn hasFatalPrefix(msg: []const u8) bool {
+    return std.mem.startsWith(u8, msg, "PHP ") or std.mem.startsWith(u8, msg, "Fatal error:") or std.mem.startsWith(u8, msg, "\nFatal error:");
+}
+
 pub fn formatRuntimeError(alloc: std.mem.Allocator, vm: *const VM) []const u8 {
     var buf: Writer = .empty;
 
