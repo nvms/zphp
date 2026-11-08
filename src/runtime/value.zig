@@ -2056,14 +2056,16 @@ pub const Value = union(enum) {
             .string => |s| {
                 if (s.len == 0) return .{ .string = Value.String.borrowed("1") };
                 if (isNumericString(s.bytes())) {
-                    if (isNumericIntString(s.bytes())) {
-                        const parsed = std.fmt.parseInt(i64, s.bytes(), 10) catch {
-                            const f = std.fmt.parseFloat(f64, s.bytes()) catch 0.0;
+                    // a numeric string may carry leading and trailing whitespace
+                    const digits = std.mem.trim(u8, s.bytes(), " \t\n\r");
+                    if (isNumericIntString(digits)) {
+                        const parsed = std.fmt.parseInt(i64, digits, 10) catch {
+                            const f = std.fmt.parseFloat(f64, digits) catch 0.0;
                             return .{ .float = f + 1.0 };
                         };
                         return intInc(parsed);
                     }
-                    const f = std.fmt.parseFloat(f64, s.bytes()) catch 0.0;
+                    const f = std.fmt.parseFloat(f64, digits) catch 0.0;
                     return .{ .float = f + 1.0 };
                 }
                 return .{ .string = try Value.String.adopt(allocator, try incrementAlphaString(allocator, s.bytes())) };
@@ -2082,14 +2084,16 @@ pub const Value = union(enum) {
             .string => |s| {
                 if (s.len == 0) return a;
                 if (isNumericString(s.bytes())) {
-                    if (isNumericIntString(s.bytes())) {
-                        const parsed = std.fmt.parseInt(i64, s.bytes(), 10) catch {
-                            const f = std.fmt.parseFloat(f64, s.bytes()) catch 0.0;
+                    // a numeric string may carry leading and trailing whitespace
+                    const digits = std.mem.trim(u8, s.bytes(), " \t\n\r");
+                    if (isNumericIntString(digits)) {
+                        const parsed = std.fmt.parseInt(i64, digits, 10) catch {
+                            const f = std.fmt.parseFloat(f64, digits) catch 0.0;
                             return .{ .float = f - 1.0 };
                         };
                         return intDec(parsed);
                     }
-                    const f = std.fmt.parseFloat(f64, s.bytes()) catch 0.0;
+                    const f = std.fmt.parseFloat(f64, digits) catch 0.0;
                     return .{ .float = f - 1.0 };
                 }
                 return a;
