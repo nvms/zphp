@@ -13613,7 +13613,22 @@ pub const VM = struct {
                 self.emitWarning(msg) catch return if (try self.resumeRaised()) null else unreachable;
                 return v;
             },
-            .string => |str| if (!up and str.len == 0) return .{ .int = -1 },
+            .string => |str| {
+                const numeric = str.len > 0 and Value.isNumericString(str.bytes());
+                if (up) {
+                    // a perl-style string increment, "" included
+                    if (!numeric) self.raiseError(E_DEPRECATED, "Increment on non-numeric string is deprecated, use str_increment() instead") catch return if (try self.resumeRaised()) null else unreachable;
+                } else if (str.len == 0) {
+                    self.raiseError(E_DEPRECATED, "Decrement on empty string is deprecated as non-numeric") catch return if (try self.resumeRaised()) null else unreachable;
+                    return .{ .int = -1 };
+                } else if (!numeric) {
+                    self.raiseError(E_DEPRECATED, "Decrement on non-numeric string has no effect and is deprecated") catch return if (try self.resumeRaised()) null else unreachable;
+                    // callers release a stepped string once they have stored
+                    // it, so the unchanged one is handed back with its own count
+                    VM.retainValue(v);
+                    return v;
+                }
+            },
             .array, .resource => return self.throwStepError(verb, Value.typeName(v)),
             .object => |obj| {
                 const overloaded = self.objectBinop(if (up) .add else .sub, v, .{ .int = 1 }) catch return if (try self.resumeRaised()) null else unreachable;
