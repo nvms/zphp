@@ -20796,6 +20796,17 @@ pub const VM = struct {
         } else return error.RuntimeError;
     }
 
+    // php's ZEND_ACC_USE_GUARDS: a class with a property magic method or
+    // __debugInfo, or one implementing JsonSerializable, keeps a recursion
+    // flag per kind of walk (var_dump, var_export, json_encode) where other
+    // objects share one (value.Recursion)
+    pub fn usesRecursionGuards(self: *VM, obj: *PhpObject) bool {
+        const class = obj.class_name;
+        return self.hasMethod(class, "__get") or self.hasMethod(class, "__set") or
+            self.hasMethod(class, "__isset") or self.hasMethod(class, "__unset") or
+            self.hasMethod(class, "__debugInfo") or self.isInstanceOf(class, "JsonSerializable");
+    }
+
     pub const MagicKind = enum { get, set, isset, unset };
     pub const MagicGuard = struct { obj: usize, name: []const u8, kind: MagicKind };
 

@@ -1,6 +1,7 @@
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
+const value_mod = @import("../runtime/value.zig");
 const vm_mod = @import("../runtime/vm.zig");
 const NativeContext = vm_mod.NativeContext;
 const NativeResult = vm_mod.NativeResult;
@@ -41,11 +42,9 @@ fn json_encode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     const depth: usize = if (args.len >= 3) @intCast(@max(1, Value.toInt(args[2]))) else 512;
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
-    var visited = std.ArrayListUnmanaged(usize).empty;
-    defer visited.deinit(ctx.allocator);
     last_error = 0;
     last_error_msg = "No error";
-    encodeValue(&buf, ctx.allocator, args[0], 0, depth, flags, ctx.vm, &visited) catch {
+    encodeValue(&buf, ctx.allocator, args[0], 0, depth, flags, ctx.vm) catch {
         if (last_error == 0) {
             last_error = 5;
             last_error_msg = "Malformed UTF-8 characters, possibly incorrectly encoded";
@@ -61,39 +60,30 @@ fn json_encode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     return NativeResult.takeString(try Value.String.adopt(ctx.allocator, result));
 }
 
-fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Value, depth: usize, max_depth: usize, flags: i64, vm: ?*vm_mod.VM, visited: *std.ArrayListUnmanaged(usize)) !void {
+// php's recursion protection: the flag is on the array or object itself, so
+// a json_encode nested inside jsonSerialize sees what the outer one is in
+const Recursion = value_mod.Recursion;
+
+// a value met again while it is being encoded. with partial output it
+// encodes as null and the rest carries on
+fn recursionFound(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, flags: i64) !void {
+    if ((flags & 0x200) != 0) { // JSON_PARTIAL_OUTPUT_ON_ERROR
+        try buf.appendSlice(a, "null");
+        return;
+    }
+    last_error = 6;
+    last_error_msg = "Recursion detected";
+    return error.RuntimeError;
+}
+
+fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Value, depth: usize, max_depth: usize, flags: i64, vm: ?*vm_mod.VM) !void {
     const pretty = (flags & JSON_PRETTY_PRINT) != 0;
-    if ((val == .array or val == .object) and depth >= max_depth) {
+    // php_json_check_stack_limit: out of native stack is a depth error
+    if ((val == .array or val == .object) and (depth >= max_depth or vm_mod.stack_limit.overflowed())) {
         last_error = 1;
         last_error_msg = "Maximum stack depth exceeded";
         return error.RuntimeError;
     }
-    var pushed_visited = false;
-    if (val == .array or val == .object) {
-        const ptr: usize = switch (val) {
-            .array => |arr| @intFromPtr(arr),
-            .object => |obj| @intFromPtr(obj),
-            else => 0,
-        };
-        for (visited.items) |seen| {
-            if (seen == ptr) {
-                if ((flags & 0x200) != 0) { // JSON_PARTIAL_OUTPUT_ON_ERROR
-                    // replace the cyclic value with null so the rest of the
-                    // structure still encodes - matches PHP behavior
-                    try buf.appendSlice(a, "null");
-                    return;
-                }
-                last_error = 6;
-                last_error_msg = "Recursion detected";
-                return error.RuntimeError;
-            }
-        }
-        try visited.append(a, ptr);
-        pushed_visited = true;
-    }
-    defer if (pushed_visited) {
-        _ = visited.pop();
-    };
     const unescape_slashes = (flags & JSON_UNESCAPED_SLASHES) != 0;
     const unescape_unicode = (flags & JSON_UNESCAPED_UNICODE) != 0;
     switch (val) {
@@ -271,6 +261,9 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
             try buf.append(a, '"');
         },
         .array => |arr| {
+            if (arr.recursion & Recursion.gc != 0) return recursionFound(buf, a, flags);
+            arr.recursion |= Recursion.gc;
+            defer arr.recursion &= ~Recursion.gc;
             const force_object = (flags & JSON_FORCE_OBJECT) != 0;
             if (!force_object and isSequential(arr)) {
                 try buf.append(a, '[');
@@ -280,7 +273,7 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                         try buf.append(a, '\n');
                         try appendIndent(buf, a, depth + 1);
                     }
-                    try encodeValue(buf, a, entry.value, depth + 1, max_depth, flags, vm, visited);
+                    try encodeValue(buf, a, entry.value, depth + 1, max_depth, flags, vm);
                 }
                 if (pretty and arr.entries.items.len > 0) {
                     try buf.append(a, '\n');
@@ -299,7 +292,7 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                         .string => |s| {
                             // route through encodeValue so the key gets the
                             // same escaping (\n, \t, unicode etc) as values
-                            try encodeValue(buf, a, .{ .string = s }, depth, max_depth, flags, vm, visited);
+                            try encodeValue(buf, a, .{ .string = s }, depth, max_depth, flags, vm);
                         },
                         .int => |ki| {
                             try buf.append(a, '"');
@@ -311,7 +304,7 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                     }
                     try buf.append(a, ':');
                     if (pretty) try buf.append(a, ' ');
-                    try encodeValue(buf, a, entry.value, depth + 1, max_depth, flags, vm, visited);
+                    try encodeValue(buf, a, entry.value, depth + 1, max_depth, flags, vm);
                 }
                 if (pretty and arr.entries.items.len > 0) {
                     try buf.append(a, '\n');
@@ -331,7 +324,7 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                             return error.RuntimeError;
                         }
                         const enum_val = obj.get("value");
-                        try encodeValue(buf, a, enum_val, depth, max_depth, flags, vm, visited);
+                        try encodeValue(buf, a, enum_val, depth, max_depth, flags, vm);
                         return;
                     }
                 }
@@ -349,31 +342,45 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                         };
                         const built = @import("simplexml.zig").elementToJsonValue(&nctx, obj) catch null;
                         if (built) |bv| {
-                            try encodeValue(buf, a, bv, depth, max_depth, flags, vm, visited);
+                            try encodeValue(buf, a, bv, depth, max_depth, flags, vm);
                             return;
                         }
                     }
                 }
                 if (v.isInstanceOf(obj.class_name, "JsonSerializable")) {
+                    // php's JSON recursion guard: jsonSerialize isn't run for
+                    // an object whose jsonSerialize is running
+                    if (obj.recursion & Recursion.json != 0) return recursionFound(buf, a, flags);
+                    obj.recursion |= Recursion.json;
+                    var guarded = true;
+                    defer if (guarded) {
+                        obj.recursion &= ~Recursion.json;
+                    };
                     const result = v.callMethod(obj, "jsonSerialize", &.{}) catch {
                         try buf.appendSlice(a, "{}");
                         return;
                     };
                     // an object that serializes to itself is encoded by its
-                    // properties
+                    // properties, with the guard already lifted
                     if (!(result == .object and result.object.storage() == obj)) {
-                        try encodeValue(buf, a, result, depth, max_depth, flags, vm, visited);
+                        try encodeValue(buf, a, result, depth, max_depth, flags, vm);
                         return;
                     }
+                    obj.recursion &= ~Recursion.json;
+                    guarded = false;
                 }
                 if (std.mem.eql(u8, obj.class_name, "SplFixedArray")) {
                     const data = obj.get("__data");
                     if (data == .array) {
-                        try encodeValue(buf, a, data, depth, max_depth, flags, vm, visited);
+                        try encodeValue(buf, a, data, depth, max_depth, flags, vm);
                         return;
                     }
                 }
             }
+
+            if (obj.recursion & Recursion.gc != 0) return recursionFound(buf, a, flags);
+            obj.recursion |= Recursion.gc;
+            defer obj.recursion &= ~Recursion.gc;
 
             // the public properties, or the table the object's class builds
             // for json (ArrayObject's storage); a json encoder without a vm
@@ -407,12 +414,12 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                     try appendIndent(buf, a, depth + 1);
                 }
                 switch (prop.key) {
-                    .name => |name| try encodeValue(buf, a, .{ .string = Value.String.borrowed(name) }, depth, max_depth, flags, vm, visited),
+                    .name => |name| try encodeValue(buf, a, .{ .string = Value.String.borrowed(name) }, depth, max_depth, flags, vm),
                     .int => |i| try buf.print(a, "\"{d}\"", .{i}),
                 }
                 try buf.append(a, ':');
                 if (pretty) try buf.append(a, ' ');
-                try encodeValue(buf, a, prop.value, depth + 1, max_depth, flags, vm, visited);
+                try encodeValue(buf, a, prop.value, depth + 1, max_depth, flags, vm);
             }
             if (pretty) {
                 try buf.append(a, '\n');

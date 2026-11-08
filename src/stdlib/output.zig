@@ -7,14 +7,24 @@ const ClassDef = @import("../runtime/vm.zig").ClassDef;
 const object_properties = @import("../runtime/object_properties.zig");
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
-// Per-call visited-pointer stack used to detect recursion during dump operations.
-// Single-threaded, so a module-level scratch list is fine. Cleared at the start of
-// each public entry point (var_dump / print_r / var_export).
-var visited_ptrs: std.ArrayListUnmanaged(usize) = .empty;
+// recursion is detected with php's protection flags on the array or object
+// itself (value.Recursion), so a dump nested in a __debugInfo or jsonSerialize
+// sees what the outer one is inside. an object whose class uses guards has a
+// flag per kind of walk; any other object, like an array, has the one flag
+// every walk shares
+const Recursion = value_mod.Recursion;
 
-fn visitedContains(p: usize) bool {
-    for (visited_ptrs.items) |x| if (x == p) return true;
-    return false;
+fn objectFlag(vm: ?*@import("../runtime/vm.zig").VM, obj: *value_mod.PhpObject, kind: u8) u8 {
+    if (vm) |v| if (v.usesRecursionGuards(obj)) return kind;
+    return Recursion.gc;
+}
+
+fn walking(v: Value, flag: u8) bool {
+    return switch (v) {
+        .array => |arr| arr.recursion & flag != 0,
+        .object => |obj| obj.recursion & flag != 0,
+        else => false,
+    };
 }
 
 pub const entries = .{
@@ -27,12 +37,6 @@ fn var_dump(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     // php has already freed what the last statements dropped, so a reference
     // that lost its other holders shows unmarked
     if (ctx.vm.hasPendingReleases()) ctx.vm.drainPendingDestruct();
-    visited_ptrs.deinit(ctx.allocator);
-    visited_ptrs = .empty;
-    defer {
-        visited_ptrs.deinit(ctx.allocator);
-        visited_ptrs = .empty;
-    }
     for (args) |arg| try varDumpValue(ctx, arg, 0);
     return NativeResult.scalar(.null);
 }
@@ -92,14 +96,13 @@ fn varDumpMarked(ctx: *NativeContext, val: Value, depth: usize, marker: []const 
             try out.appendSlice(a, "\"\n");
         },
         .array => |arr| {
-            const arr_ptr = @intFromPtr(arr);
-            if (visitedContains(arr_ptr)) {
+            if (arr.recursion & Recursion.gc != 0) {
                 try appendIndent(out, a, indent);
                 try out.appendSlice(a, "*RECURSION*\n");
                 return;
             }
-            try visited_ptrs.append(a, arr_ptr);
-            defer _ = visited_ptrs.pop();
+            arr.recursion |= Recursion.gc;
+            defer arr.recursion &= ~Recursion.gc;
 
             try appendIndent(out, a, indent);
             try out.appendSlice(a, marker);
@@ -130,14 +133,14 @@ fn varDumpMarked(ctx: *NativeContext, val: Value, depth: usize, marker: []const 
             try out.appendSlice(a, "}\n");
         },
         .object => |obj| {
-            const obj_ptr = @intFromPtr(obj);
-            if (visitedContains(obj_ptr)) {
+            const flag = objectFlag(ctx.vm, obj, Recursion.debug);
+            if (obj.recursion & flag != 0) {
                 try appendIndent(out, a, indent);
                 try out.appendSlice(a, "*RECURSION*\n");
                 return;
             }
-            try visited_ptrs.append(a, obj_ptr);
-            defer _ = visited_ptrs.pop();
+            obj.recursion |= flag;
+            defer obj.recursion &= ~flag;
 
             // PHP enum cases dump as `enum(ClassName::CaseName)\n`
             if (ctx.vm.classes.get(obj.class_name)) |cls_def| {
@@ -251,12 +254,6 @@ fn referenceShared(ctx: *NativeContext, cell: *Value) bool {
 fn print_r(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(.null);
     const return_str = args.len >= 2 and args[1].isTruthy();
-    visited_ptrs.deinit(ctx.allocator);
-    visited_ptrs = .empty;
-    defer {
-        visited_ptrs.deinit(ctx.allocator);
-        visited_ptrs = .empty;
-    }
     if (return_str) {
         var buf = std.ArrayListUnmanaged(u8).empty;
         defer buf.deinit(ctx.allocator);
@@ -291,13 +288,12 @@ fn printRValueImpl(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: 
             try out.appendSlice(a, s.bytes());
         },
         .array => |arr| {
-            const arr_ptr = @intFromPtr(arr);
-            if (visitedContains(arr_ptr)) {
+            if (arr.recursion & Recursion.gc != 0) {
                 try out.appendSlice(a, "Array\n *RECURSION*");
                 return;
             }
-            try visited_ptrs.append(a, arr_ptr);
-            defer _ = visited_ptrs.pop();
+            arr.recursion |= Recursion.gc;
+            defer arr.recursion &= ~Recursion.gc;
 
             try out.appendSlice(a, "Array\n");
             try appendIndent(out, a, depth * 4);
@@ -326,14 +322,14 @@ fn printRValueImpl(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: 
             try out.appendSlice(a, ")\n");
         },
         .object => |obj| {
-            const obj_ptr = @intFromPtr(obj);
-            if (visitedContains(obj_ptr)) {
+            const flag = objectFlag(vm, obj, Recursion.debug);
+            if (obj.recursion & flag != 0) {
                 try out.appendSlice(a, obj.class_name);
                 try out.appendSlice(a, " Object\n *RECURSION*");
                 return;
             }
-            try visited_ptrs.append(a, obj_ptr);
-            defer _ = visited_ptrs.pop();
+            obj.recursion |= flag;
+            defer obj.recursion &= ~flag;
 
             try out.appendSlice(a, obj.class_name);
             // enums print as "ClassName Enum:type" (or "ClassName Enum" for non-backed)
@@ -393,12 +389,6 @@ fn printRValueImpl(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: 
 fn var_export(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(.null);
     const return_str = args.len >= 2 and args[1].isTruthy();
-    visited_ptrs.deinit(ctx.allocator);
-    visited_ptrs = .empty;
-    defer {
-        visited_ptrs.deinit(ctx.allocator);
-        visited_ptrs = .empty;
-    }
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     try varExportValue(ctx.allocator, &buf, args[0], 0, ctx);
@@ -494,13 +484,13 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
             try varExportString(a, out, s.bytes());
         },
         .array => |arr| {
-            const arr_ptr = @intFromPtr(arr);
-            if (visitedContains(arr_ptr)) {
+            if (arr.recursion & Recursion.gc != 0) {
                 try out.appendSlice(a, "NULL");
+                try ctx.vm.emitWarning("var_export does not handle circular references");
                 return;
             }
-            try visited_ptrs.append(a, arr_ptr);
-            defer _ = visited_ptrs.pop();
+            arr.recursion |= Recursion.gc;
+            defer arr.recursion &= ~Recursion.gc;
             try out.appendSlice(a, "array (\n");
             for (arr.entries.items) |entry| {
                 for (0..(depth + 1) * 2) |_| try out.append(a, ' ');
@@ -514,8 +504,8 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
                 }
                 try out.appendSlice(a, " => ");
                 const ev_recurses = switch (entry.value) {
-                    .array => |aa| visitedContains(@intFromPtr(aa)),
-                    .object => |oo| visitedContains(@intFromPtr(oo)),
+                    .array => walking(entry.value, Recursion.gc),
+                    .object => |oo| walking(entry.value, objectFlag(ctx.vm, oo, Recursion.export_)),
                     else => false,
                 };
                 if ((entry.value == .array or entry.value == .object) and !ev_recurses) {
@@ -529,13 +519,14 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
             try out.append(a, ')');
         },
         .object => |obj| {
-            const obj_ptr = @intFromPtr(obj);
-            if (visitedContains(obj_ptr)) {
+            const flag = objectFlag(ctx.vm, obj, Recursion.export_);
+            if (obj.recursion & flag != 0) {
                 try out.appendSlice(a, "NULL");
+                try ctx.vm.emitWarning("var_export does not handle circular references");
                 return;
             }
-            try visited_ptrs.append(a, obj_ptr);
-            defer _ = visited_ptrs.pop();
+            obj.recursion |= flag;
+            defer obj.recursion &= ~flag;
             if (ctx.vm.classes.get(obj.class_name)) |cls| {
                 if (cls.is_enum) {
                     const case_name = obj.get("name");
@@ -567,8 +558,8 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
                 }
                 try out.appendSlice(a, " => ");
                 const seen = switch (prop.value) {
-                    .array => |aa| visitedContains(@intFromPtr(aa)),
-                    .object => |oo| visitedContains(@intFromPtr(oo)),
+                    .array => walking(prop.value, Recursion.gc),
+                    .object => |oo| walking(prop.value, objectFlag(ctx.vm, oo, Recursion.export_)),
                     else => false,
                 };
                 if ((prop.value == .array or prop.value == .object) and !seen) {
