@@ -11787,6 +11787,18 @@ pub const VM = struct {
             self.push(.{ .string = Value.String.borrowed(class_name) });
             return false;
         }
+        // self, parent or static left unresolved: there is no class to name
+        for ([_][]const u8{ "self", "parent", "static" }) |relative| {
+            if (!std.mem.eql(u8, class_name, relative)) continue;
+            const msg = if (self.currentDefiningClass() != null)
+                try std.fmt.allocPrint(self.allocator, "Cannot access \"{s}\" when current class scope has no parent", .{relative})
+            else
+                try std.fmt.allocPrint(self.allocator, "Cannot access \"{s}\" when no class scope is active", .{relative});
+            defer self.allocator.free(msg);
+            try self.setPendingException("Error", msg);
+            if (self.dispatchPendingException(self.run_base_frame)) return true;
+            return error.RuntimeError;
+        }
         const found = self.getClassConstant(class_name, const_name);
         if (found == null and self.pending_exception != null) {
             if (self.dispatchPendingException(self.run_base_frame)) return true;
@@ -12755,8 +12767,9 @@ pub const VM = struct {
             if (!std.ascii.eqlIgnoreCase(name, "Deprecated")) continue;
             var message: []const u8 = "";
             var since: []const u8 = "";
-            for (attr.args, 0..) |arg, i| {
+            for (attr.args, 0..) |stored, i| {
                 const arg_name: ?[]const u8 = if (i < attr.arg_names.len) attr.arg_names[i] else null;
+                const arg = try self.resolveDefault(stored);
                 if (arg != .string) continue;
                 const is_since = if (arg_name) |n| std.mem.eql(u8, n, "since") else i == 1;
                 if (is_since) since = arg.string.bytes() else message = arg.string.bytes();
@@ -15350,7 +15363,7 @@ pub const VM = struct {
                     const quiet = self.resolving_quietly;
                     self.resolving_quietly = true;
                     defer self.resolving_quietly = quiet;
-                    const raw = self.resolveAttrConstant(self.readAttrValue());
+                    const raw = self.readAttrValue();
                     args[ai] = self.resolveDefault(raw) catch |err| blk: {
                         if (err != error.RuntimeError) return err;
                         break :blk raw;
@@ -15362,20 +15375,6 @@ pub const VM = struct {
             }
         }
         return attrs;
-    }
-
-    fn resolveAttrConstant(self: *VM, val: Value) Value {
-        if (val != .string) return val;
-        const s = val.string.bytes();
-        if (s.len == 0) return val;
-        if (std.mem.indexOf(u8, s, "::")) |sep| {
-            const class_name = s[0..sep];
-            const const_name = s[sep + 2 ..];
-            if (self.getClassConstant(class_name, const_name)) |v| return v;
-        }
-        // check if it's a PHP constant
-        if (self.php_constants.get(s)) |v| return v;
-        return val;
     }
 
     fn readMethodInfo(self: *VM) struct { []const u8, ClassDef.MethodInfo } {
@@ -20139,6 +20138,10 @@ pub const VM = struct {
                     return self.unresolvedDefault("Undefined constant {s}::{s}", .{ class_name, const_name });
                 }
             }
+            if (bytecode.attrArgumentInitializerName(s)) |name| {
+                if (self.resolving_quietly) return error.RuntimeError;
+                return self.evaluateAttributeArgument(name);
+            }
             // deferred new-expression default: "\x00NW\x00<8 byte ptr>"
             if (bytecode.newDefaultPtr(s)) |nd| {
                 if (self.resolving_quietly) return error.RuntimeError;
@@ -20150,6 +20153,19 @@ pub const VM = struct {
             }
         }
         return val;
+    }
+
+    fn evaluateAttributeArgument(self: *VM, name: []const u8) RuntimeError!Value {
+        const floor = self.handler_floor;
+        self.handler_floor = self.handler_count;
+        defer self.handler_floor = floor;
+        const evaluating = self.frame_count;
+        const value = self.callByName(name, &.{}) catch |err| {
+            // the expression belongs to the reflection call, not a frame of its own
+            if (self.pending_exception) |exc| if (exc == .object) try self.stampThrowableBelow(exc.object, evaluating);
+            return err;
+        };
+        return value;
     }
 
     fn resolveDeferredExpr(self: *VM, de: *const bytecode.DeferredExpr) RuntimeError!Value {

@@ -707,6 +707,18 @@ pub fn constInitializerName(allocator: std.mem.Allocator, class_name: []const u8
     return std.fmt.allocPrint(allocator, "\x00const\x00{s}::{s}", .{ class_name, const_name });
 }
 
+// an attribute argument php evaluates when reflection asks for it: the
+// value stored for the argument names the initializer that computes it
+const attr_argument_prefix = "\x00AI\x00";
+
+pub fn attrArgumentInitializer(allocator: std.mem.Allocator, file_path: []const u8, token: u32) ![]u8 {
+    return std.fmt.allocPrint(allocator, attr_argument_prefix ++ "{s}\x00{d}", .{ file_path, token });
+}
+
+pub fn attrArgumentInitializerName(value: []const u8) ?[]const u8 {
+    return if (std.mem.startsWith(u8, value, attr_argument_prefix)) value else null;
+}
+
 pub fn propDefaultsInitializerName(allocator: std.mem.Allocator, class_name: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "\x00propdefaults\x00{s}", .{class_name});
 }

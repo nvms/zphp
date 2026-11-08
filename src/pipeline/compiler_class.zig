@@ -67,189 +67,6 @@ fn isTypeToken(tag: Token.Tag) bool {
     };
 }
 
-fn parseAttrArgValue(self: *Compiler, tokens: []const Token, source: []const u8, pos: *usize, allocator: Allocator) Value {
-    var lhs = parseAttrArgAtom(self, tokens, source, pos, allocator);
-    // chain bitwise OR / AND / XOR (left-associative, no precedence between them
-    // since attribute args are simple flag expressions)
-    while (pos.* < tokens.len) {
-        const t = tokens[pos.*].tag;
-        if (t != .pipe and t != .amp and t != .caret) break;
-        pos.* += 1;
-        const rhs = parseAttrArgAtom(self, tokens, source, pos, allocator);
-        const li = resolveAttrFlag(lhs);
-        const ri = resolveAttrFlag(rhs);
-        if (li) |lv| if (ri) |rv| {
-            lhs = .{ .int = switch (t) {
-                .pipe => lv | rv,
-                .amp => lv & rv,
-                .caret => lv ^ rv,
-                else => unreachable,
-            } };
-            continue;
-        };
-        // one or both sides reference user-defined constants we can't fold
-        // at compile time - emit a DeferredExpr sentinel so the op is applied
-        // when the attribute is materialized
-        const op: @import("bytecode.zig").DeferredExpr.Op = switch (t) {
-            .pipe => .bor,
-            .amp => .band,
-            .caret => .bxor,
-            else => unreachable,
-        };
-        const lhs_norm: Value = if (resolveAttrFlag(lhs)) |v| .{ .int = v } else lhs;
-        const rhs_norm: Value = if (resolveAttrFlag(rhs)) |v| .{ .int = v } else rhs;
-        lhs = makeAttrDeferredOp(self, op, lhs_norm, rhs_norm) orelse lhs;
-    }
-    return lhs;
-}
-
-fn makeAttrDeferredOp(self: *Compiler, op: @import("bytecode.zig").DeferredExpr.Op, lhs: Value, rhs: Value) ?Value {
-    const bytecode = @import("bytecode.zig");
-    const de = self.allocator.create(bytecode.DeferredExpr) catch return null;
-    de.* = .{ .op = op, .lhs = lhs, .rhs = rhs };
-    self.deferred_exprs.append(self.allocator, de) catch {
-        self.allocator.destroy(de);
-        return null;
-    };
-    const sentinel = bytecode.encodeDeferredExprSentinel(self.allocator, de) catch return null;
-    self.string_allocs.append(self.allocator, sentinel) catch return null;
-    return .{ .string = Value.String.borrowed(sentinel) };
-}
-
-fn resolveAttrFlag(v: Value) ?i64 {
-    if (v == .int) return v.int;
-    if (v == .string) {
-        if (std.mem.startsWith(u8, v.string.bytes(), "Attribute::")) {
-            const cn = v.string.bytes()[11..];
-            const known = [_]struct { n: []const u8, v: i64 }{
-                .{ .n = "TARGET_CLASS", .v = 1 },
-                .{ .n = "TARGET_FUNCTION", .v = 2 },
-                .{ .n = "TARGET_METHOD", .v = 4 },
-                .{ .n = "TARGET_PROPERTY", .v = 8 },
-                .{ .n = "TARGET_CLASS_CONSTANT", .v = 16 },
-                .{ .n = "TARGET_PARAMETER", .v = 32 },
-                .{ .n = "TARGET_ALL", .v = 127 },
-                .{ .n = "IS_REPEATABLE", .v = 128 },
-            };
-            for (known) |k| if (std.mem.eql(u8, k.n, cn)) return k.v;
-        }
-    }
-    return null;
-}
-
-fn parseAttrArgAtom(self: *Compiler, tokens: []const Token, source: []const u8, pos: *usize, allocator: Allocator) Value {
-    if (pos.* >= tokens.len) return .null;
-    const tag = tokens[pos.*].tag;
-    switch (tag) {
-        .string => {
-            const raw = tokens[pos.*].lexeme(source);
-            pos.* += 1;
-            if (raw.len >= 2) return .{ .string = Value.String.borrowed(raw[1 .. raw.len - 1]) };
-            return .{ .string = Value.String.borrowed(raw) };
-        },
-        .integer => {
-            const text = tokens[pos.*].lexeme(source);
-            pos.* += 1;
-            return .{ .int = std.fmt.parseInt(i64, text, 0) catch 0 };
-        },
-        .float => {
-            const text = tokens[pos.*].lexeme(source);
-            pos.* += 1;
-            return .{ .float = std.fmt.parseFloat(f64, text) catch 0.0 };
-        },
-        .kw_true => {
-            pos.* += 1;
-            return .{ .bool = true };
-        },
-        .kw_false => {
-            pos.* += 1;
-            return .{ .bool = false };
-        },
-        .kw_null => {
-            pos.* += 1;
-            return .null;
-        },
-        .identifier, .backslash => {
-            // a name may be qualified (Foo\Bar) or fully qualified (\Foo), and
-            // its segments arrive as separate tokens
-            const first = pos.*;
-            if (tokens[pos.*].tag == .backslash) pos.* += 1;
-            if (pos.* >= tokens.len or tokens[pos.*].tag != .identifier) return .null;
-            while (pos.* + 2 < tokens.len and tokens[pos.* + 1].tag == .backslash and tokens[pos.* + 2].tag == .identifier) pos.* += 2;
-            const text = source[tokens[first].start..tokens[pos.*].end];
-            if (std.mem.eql(u8, text, "true") or std.mem.eql(u8, text, "TRUE")) {
-                pos.* += 1;
-                return .{ .bool = true };
-            }
-            if (std.mem.eql(u8, text, "false") or std.mem.eql(u8, text, "FALSE")) {
-                pos.* += 1;
-                return .{ .bool = false };
-            }
-            if (std.mem.eql(u8, text, "null") or std.mem.eql(u8, text, "NULL")) {
-                pos.* += 1;
-                return .null;
-            }
-            // check for Class::CONST, Class::class, or Enum::Case pattern
-            if (pos.* + 2 < tokens.len and tokens[pos.* + 1].tag == .colon_colon and
-                (tokens[pos.* + 2].tag == .identifier or tokens[pos.* + 2].tag == .kw_class))
-            {
-                const member = tokens[pos.* + 2].lexeme(source);
-                pos.* += 3;
-                if (std.mem.eql(u8, member, "class")) return .{ .string = Value.String.borrowed(self.resolveClassName(text)) };
-                const sentinel = std.fmt.allocPrint(allocator, "\x00CC\x00{s}\x00{s}", .{ self.resolveClassName(text), member }) catch return .null;
-                self.string_allocs.append(allocator, sentinel) catch return .null;
-                return .{ .string = Value.String.borrowed(sentinel) };
-            }
-            pos.* += 1;
-            // bare identifier: a user-defined constant. emit a deferred class
-            // constant sentinel so resolveDefault can fold it at attribute load
-            // time (otherwise a bare `FLAG_A` string fed into a DeferredExpr
-            // would coerce to 0 via toInt instead of resolving the constant)
-            // qualified the way a parameter default is: an unqualified name
-            // in a namespace falls back to the global constant at resolution
-            const sentinel = std.fmt.allocPrint(allocator, "\x00CC\x00\x00{s}", .{self.resolveClassName(text)}) catch return .{ .string = Value.String.borrowed(text) };
-            self.string_allocs.append(allocator, sentinel) catch return .{ .string = Value.String.borrowed(text) };
-            return .{ .string = Value.String.borrowed(sentinel) };
-        },
-        .minus => {
-            pos.* += 1;
-            const inner = parseAttrArgValue(self, tokens, source, pos, allocator);
-            return switch (inner) {
-                .int => |v| .{ .int = -v },
-                .float => |v| .{ .float = -v },
-                else => .null,
-            };
-        },
-        .l_bracket => {
-            pos.* += 1;
-            const arr = allocator.create(PhpArray) catch return .null;
-            arr.* = .{};
-            while (pos.* < tokens.len and tokens[pos.*].tag != .r_bracket) {
-                const val = parseAttrArgValue(self, tokens, source, pos, allocator);
-                if (pos.* < tokens.len and tokens[pos.*].tag == .fat_arrow) {
-                    pos.* += 1;
-                    const map_val = parseAttrArgValue(self, tokens, source, pos, allocator);
-                    const key: PhpArray.Key = switch (val) {
-                        .string => |s| .{ .string = s },
-                        .int => |i| .{ .int = i },
-                        else => .{ .int = @intCast(arr.entries.items.len) },
-                    };
-                    arr.set(allocator, key, map_val) catch break;
-                } else {
-                    arr.append(allocator, val) catch break;
-                }
-                if (pos.* < tokens.len and tokens[pos.*].tag == .comma) pos.* += 1;
-            }
-            if (pos.* < tokens.len and tokens[pos.*].tag == .r_bracket) pos.* += 1;
-            return .{ .array = arr };
-        },
-        else => {
-            pos.* += 1;
-            return .null;
-        },
-    }
-}
-
 const ast_mod = @import("ast.zig");
 
 fn findAttrRangeForToken(attr_ranges: []const ast_mod.AttrRange, tokens: []const Token, main_token: u32) ?ast_mod.AttrRange {
@@ -279,7 +96,7 @@ const CallAttrs = struct { no_discard: ?[]const u8 = null, deprecated: ?[]const 
 fn callAttributes(self: *Compiler, main_token: u32, return_type: []const u8, comptime kind: []const u8) Error!CallAttrs {
     var out: CallAttrs = .{};
     if (self.ast.attr_ranges.len == 0) return out;
-    const attrs = extractAttributes(self, main_token);
+    const attrs = try extractAttributes(self, main_token);
     defer freeParsedAttrs(self.allocator, attrs);
     for (attrs) |pa| {
         const name = if (pa.name.len > 0 and pa.name[0] == '\\') pa.name[1..] else pa.name;
@@ -321,7 +138,10 @@ fn attrArg(pa: ParsedAttr, position: usize, name: []const u8) ?[]const u8 {
     for (pa.args, 0..) |arg, i| {
         const arg_name: ?[]const u8 = if (i < pa.arg_names.len) pa.arg_names[i] else null;
         const matches = if (arg_name) |n| std.mem.eql(u8, n, name) else i == position;
-        if (matches) return if (arg == .string) arg.string.bytes() else null;
+        if (!matches or arg != .string) continue;
+        // an argument evaluated at run time has no text here
+        if (@import("bytecode.zig").attrArgumentInitializerName(arg.string.bytes()) != null) return null;
+        return arg.string.bytes();
     }
     return null;
 }
@@ -343,103 +163,142 @@ fn freeParsedAttrValue(allocator: Allocator, value: Value) void {
     allocator.destroy(value.array);
 }
 
-fn extractAttributes(self: *Compiler, main_token: u32) []const ParsedAttr {
+fn extractAttributes(self: *Compiler, main_token: u32) Error![]const ParsedAttr {
     const ar = findAttrRangeForToken(self.ast.attr_ranges, self.ast.tokens, main_token) orelse return &.{};
-
+    const items = self.ast.extraSlice(ar.items);
     var all_attrs = std.ArrayListUnmanaged(ParsedAttr).empty;
-    var pos: usize = ar.start;
-    const end: usize = ar.end;
-    while (pos < end) {
-        if (self.ast.tokens[pos].tag != .hash_bracket) {
-            pos += 1;
-            continue;
+    errdefer {
+        for (all_attrs.items) |a| {
+            for (a.args) |v| freeParsedAttrValue(self.allocator, v);
+            self.allocator.free(a.args);
+            self.allocator.free(a.arg_names);
         }
-        pos += 1;
-        var rb_pos: usize = pos;
-        var depth: u32 = 1;
-        while (rb_pos < end and depth > 0) {
-            if (self.ast.tokens[rb_pos].tag == .l_bracket) depth += 1 else if (self.ast.tokens[rb_pos].tag == .r_bracket) depth -= 1;
-            if (depth > 0) rb_pos += 1;
-        }
-
-        var inner: usize = pos;
-        while (inner < rb_pos) {
-            var name_parts = std.ArrayListUnmanaged(u8).empty;
-            while (inner < rb_pos and (self.ast.tokens[inner].tag == .identifier or self.ast.tokens[inner].tag == .backslash)) {
-                if (self.ast.tokens[inner].tag == .backslash) {
-                    // emit a backslash separator only if one isn't already at
-                    // the tail (`\Foo` produces a single leading `\`; `Foo\Bar`
-                    // produces a single `\` between segments)
-                    if (name_parts.items.len == 0 or name_parts.items[name_parts.items.len - 1] != '\\') {
-                        name_parts.appendSlice(self.allocator, "\\") catch break;
-                    }
-                    inner += 1;
-                    continue;
-                }
-                // identifier: separator handled by the backslash branch already
-                name_parts.appendSlice(self.allocator, self.ast.tokens[inner].lexeme(self.ast.source)) catch break;
-                inner += 1;
-            }
-            if (name_parts.items.len == 0) {
-                inner += 1;
-                continue;
-            }
-
-            const raw_name = name_parts.toOwnedSlice(self.allocator) catch "";
-            self.string_allocs.append(self.allocator, @constCast(raw_name)) catch {};
-            // apply namespace + use-alias resolution so #[Assert\NotBlank]
-            // inside `use ... as Assert` becomes the fully-qualified class name
-            const owned_name = self.resolveClassName(raw_name);
-
-            var args = std.ArrayListUnmanaged(Value).empty;
-            var arg_names = std.ArrayListUnmanaged(?[]const u8).empty;
-            if (inner < rb_pos and self.ast.tokens[inner].tag == .l_paren) {
-                inner += 1;
-                while (inner < rb_pos and self.ast.tokens[inner].tag != .r_paren) {
-                    var arg_name: ?[]const u8 = null;
-                    if (inner + 1 < rb_pos and self.ast.tokens[inner].tag == .identifier and self.ast.tokens[inner + 1].tag == .colon) {
-                        arg_name = self.ast.tokens[inner].lexeme(self.ast.source);
-                        inner += 2;
-                    }
-                    const val = parseAttrArgValue(self, self.ast.tokens, self.ast.source, &inner, self.allocator);
-                    args.append(self.allocator, val) catch break;
-                    arg_names.append(self.allocator, arg_name) catch break;
-                    if (inner < rb_pos and self.ast.tokens[inner].tag == .comma) inner += 1;
-                }
-                if (inner < rb_pos and self.ast.tokens[inner].tag == .r_paren) inner += 1;
-            }
-
-            all_attrs.append(self.allocator, .{
-                .name = owned_name,
-                .args = args.toOwnedSlice(self.allocator) catch &.{},
-                .arg_names = arg_names.toOwnedSlice(self.allocator) catch &.{},
-            }) catch break;
-
-            if (inner < rb_pos and self.ast.tokens[inner].tag == .comma) inner += 1;
-        }
-
-        pos = rb_pos + 1;
+        all_attrs.deinit(self.allocator);
     }
-    return all_attrs.toOwnedSlice(self.allocator) catch &.{};
+    var i: usize = 0;
+    while (i + 2 < items.len) : (i += 3) {
+        var raw_name = std.ArrayListUnmanaged(u8).empty;
+        defer raw_name.deinit(self.allocator);
+        for (items[i]..items[i + 1]) |t| try raw_name.appendSlice(self.allocator, self.ast.tokenSlice(@intCast(t)));
+        const kept = try self.allocator.dupe(u8, raw_name.items);
+        try self.string_allocs.append(self.allocator, kept);
+        // apply namespace + use-alias resolution so #[Assert\NotBlank]
+        // inside `use ... as Assert` becomes the fully-qualified class name
+        const name = self.resolveClassName(kept);
+
+        const arg_nodes: []const u32 = if (items[i + 2] == ast_mod.AttrRange.no_args) &.{} else self.ast.extraSlice(items[i + 2]);
+        const args = try self.allocator.alloc(Value, arg_nodes.len);
+        @memset(args, .null);
+        const arg_names = try self.allocator.alloc(?[]const u8, arg_nodes.len);
+        @memset(arg_names, null);
+        try all_attrs.append(self.allocator, .{ .name = name, .args = args, .arg_names = arg_names });
+        var named = false;
+        for (arg_nodes, 0..) |arg_idx, ai| {
+            const arg = self.ast.nodes[arg_idx];
+            var value_idx = arg_idx;
+            switch (arg.tag) {
+                .splat_expr => return self.fail(main_token, "Cannot use unpacking in attribute argument list"),
+                .named_arg => {
+                    const arg_name = self.ast.tokenSlice(arg.main_token);
+                    for (arg_names[0..ai]) |earlier| {
+                        if (earlier) |e| if (std.mem.eql(u8, e, arg_name)) return self.failFmt(main_token, "Duplicate named parameter ${s}", .{arg_name});
+                    }
+                    arg_names[ai] = arg_name;
+                    named = true;
+                    value_idx = arg.data.lhs;
+                },
+                else => if (named) return self.fail(main_token, "Cannot use positional argument after named argument"),
+            }
+            args[ai] = try attributeArgument(self, value_idx, main_token);
+        }
+    }
+    return all_attrs.toOwnedSlice(self.allocator);
+}
+
+// an argument that folds is stored as its value; anything else becomes an
+// initializer the vm runs when reflection asks, in the scope of the class
+// the attribute is in
+fn attributeArgument(self: *Compiler, idx: u32, target: u32) Error!Value {
+    if (findStaticClass(self.ast, idx) != null) return self.fail(target, "static::class cannot be used for compile-time class name resolution");
+    if (namedClassName(self, idx)) |name| return .{ .string = Value.String.borrowed(name) };
+    if (attrArgFolds(self, idx)) return self.evalConstExpr(idx);
+    const name = try @import("bytecode.zig").attrArgumentInitializer(self.allocator, self.file_path, self.ast.nodes[idx].main_token);
+    try self.string_allocs.append(self.allocator, name);
+    var compiled = false;
+    for (self.functions.items) |f| {
+        if (std.mem.eql(u8, f.name, name)) compiled = true;
+    }
+    if (!compiled) try compileInitializer(self, name, self.current_class, idx, self.ast.nodes[idx].main_token);
+    return .{ .string = Value.String.borrowed(name) };
+}
+
+// the token of a static::class inside a constant expression
+fn findStaticClass(ast: *const Ast, idx: u32) ?u32 {
+    const node = ast.nodes[idx];
+    switch (node.tag) {
+        .static_prop_access => {
+            const class_node = ast.nodes[node.data.lhs];
+            if (class_node.tag == .identifier and std.ascii.eqlIgnoreCase(ast.tokenSlice(class_node.main_token), "static") and
+                std.ascii.eqlIgnoreCase(ast.tokenSlice(node.main_token), "class")) return node.main_token;
+            return null;
+        },
+        .prefix_op, .grouped_expr => return findStaticClass(ast, node.data.lhs),
+        .binary_op => return findStaticClass(ast, node.data.lhs) orelse findStaticClass(ast, node.data.rhs),
+        .array_literal => {
+            for (ast.extraSlice(node.data.lhs)) |el_idx| {
+                const el = ast.nodes[el_idx];
+                if (el.tag != .array_element) continue;
+                if (findStaticClass(ast, el.data.lhs)) |t| return t;
+                if (el.data.rhs != 0) if (findStaticClass(ast, el.data.rhs)) |t| return t;
+            }
+            return null;
+        },
+        else => return null,
+    }
+}
+
+// Name::class for a name that isn't self, parent or static
+fn namedClassName(self: *Compiler, idx: u32) ?[]const u8 {
+    const node = self.ast.nodes[idx];
+    if (node.tag != .static_prop_access or !std.mem.eql(u8, self.ast.tokenSlice(node.main_token), "class")) return null;
+    const class_node = self.ast.nodes[node.data.lhs];
+    if (class_node.tag != .identifier) return null;
+    const written = self.ast.tokenSlice(class_node.main_token);
+    for ([_][]const u8{ "self", "parent", "static" }) |relative| {
+        if (std.ascii.eqlIgnoreCase(written, relative)) return null;
+    }
+    return self.resolveClassName(written);
+}
+
+fn attrArgFolds(self: *Compiler, idx: u32) bool {
+    const node = self.ast.nodes[idx];
+    return switch (node.tag) {
+        .integer_literal, .float_literal, .true_literal, .false_literal, .null_literal => true,
+        .string_literal => true,
+        .prefix_op, .grouped_expr => attrArgFolds(self, node.data.lhs),
+        .binary_op => attrArgFolds(self, node.data.lhs) and attrArgFolds(self, node.data.rhs),
+        .array_literal => {
+            for (self.ast.extraSlice(node.data.lhs)) |el_idx| {
+                const el = self.ast.nodes[el_idx];
+                if (el.tag != .array_element) return false;
+                if (!attrArgFolds(self, el.data.lhs)) return false;
+                if (el.data.rhs != 0 and !attrArgFolds(self, el.data.rhs)) return false;
+            }
+            return true;
+        },
+        // Attribute's own target flags, which php folds too
+        .static_prop_access => blk: {
+            const class_node = self.ast.nodes[node.data.lhs];
+            if (class_node.tag != .identifier) break :blk false;
+            const class_name = self.ast.tokenSlice(class_node.main_token);
+            break :blk std.mem.eql(u8, class_name, "Attribute") or std.mem.eql(u8, class_name, "\\Attribute");
+        },
+        else => false,
+    };
 }
 
 fn freeAttrSlice(allocator: Allocator, attrs: []const ParsedAttr) void {
-    for (attrs) |attr| {
-        // parseAttrArgAtom allocates PhpArrays directly via the compiler's
-        // allocator (it doesn't have a vm.arrays handle). those arrays get
-        // serialized into the bytecode by emitAttributeData and then read back
-        // into fresh PhpArrays at runtime, so the compile-time allocations
-        // are throwaway and must be cleaned up here
-        for (attr.args) |v| {
-            if (v == .array) {
-                v.array.deinit(allocator);
-                allocator.destroy(v.array);
-            }
-        }
-        if (attr.args.len > 0) allocator.free(attr.args);
-        if (attr.arg_names.len > 0) allocator.free(attr.arg_names);
-    }
-    if (attrs.len > 0) allocator.free(attrs);
+    freeParsedAttrs(allocator, attrs);
 }
 
 fn emitAttributeData(self: *Compiler, attrs: []const ParsedAttr) Error!void {
@@ -1344,7 +1203,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
 
     // function-level attributes
     if (!std.mem.startsWith(u8, name, "__closure_")) {
-        const func_attrs = extractAttributes(self, node.main_token);
+        const func_attrs = try extractAttributes(self, node.main_token);
         if (func_attrs.len > 0) {
             const attr_defs = try self.allocator.alloc(AttributeDef, func_attrs.len);
             for (func_attrs, 0..) |pa, i| {
@@ -1547,7 +1406,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     // closure-level attributes
-    const closure_attrs = extractAttributes(self, node.main_token);
+    const closure_attrs = try extractAttributes(self, node.main_token);
     if (closure_attrs.len > 0) {
         const attr_defs = try self.allocator.alloc(AttributeDef, closure_attrs.len);
         for (closure_attrs, 0..) |pa, i| {
@@ -2292,7 +2151,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     // class-level attributes
-    const class_attrs = extractAttributes(self, node.main_token);
+    const class_attrs = try extractAttributes(self, node.main_token);
     try emitAttributeData(self, class_attrs);
     freeAttrSlice(self.allocator, class_attrs);
 
@@ -2303,7 +2162,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_method or member.tag == .static_class_method or member.tag == .interface_method) {
-            const mattrs = extractAttributes(self, member.main_token);
+            const mattrs = try extractAttributes(self, member.main_token);
             if (mattrs.len > 0) {
                 try methods_with_attrs.append(self.allocator, .{
                     .name = self.ast.tokenSlice(member.main_token),
@@ -2327,7 +2186,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_property) {
-            const pattrs = extractAttributes(self, member.main_token);
+            const pattrs = try extractAttributes(self, member.main_token);
             if (pattrs.len > 0) {
                 var prop_name = self.ast.tokenSlice(member.main_token);
                 if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
@@ -2342,7 +2201,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
         const pnode = self.ast.nodes[p];
         const promotion = (pnode.data.rhs >> 2) & 3;
         if (promotion == 0) continue;
-        const pattrs = extractAttributes(self, pnode.main_token);
+        const pattrs = try extractAttributes(self, pnode.main_token);
         if (pattrs.len == 0) continue;
         var pname = self.ast.tokenSlice(pnode.main_token);
         if (pname.len > 0 and pname[0] == '$') pname = pname[1..];
@@ -2365,7 +2224,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .const_decl) {
-            const cattrs = extractAttributes(self, member.main_token);
+            const cattrs = try extractAttributes(self, member.main_token);
             if (cattrs.len > 0) {
                 try consts_with_attrs.append(self.allocator, .{
                     .name = self.ast.tokenSlice(member.main_token),
@@ -2394,7 +2253,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             var params_with_attrs = std.ArrayListUnmanaged(ParamAttr).empty;
             for (param_nodes) |pn| {
                 const pnode = self.ast.nodes[pn];
-                const pattrs = extractAttributes(self, pnode.main_token);
+                const pattrs = try extractAttributes(self, pnode.main_token);
                 if (pattrs.len > 0) {
                     var pname = self.ast.tokenSlice(pnode.main_token);
                     if (pname.len > 0 and pname[0] == '$') pname = pname[1..];
@@ -2855,7 +2714,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     // interface-level attributes
-    const iface_attrs = extractAttributes(self, node.main_token);
+    const iface_attrs = try extractAttributes(self, node.main_token);
     try emitAttributeData(self, iface_attrs);
     freeAttrSlice(self.allocator, iface_attrs);
 
@@ -2866,7 +2725,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (members) |m| {
         const member = self.ast.nodes[m];
         if (member.tag == .interface_method) {
-            const mattrs = extractAttributes(self, member.main_token);
+            const mattrs = try extractAttributes(self, member.main_token);
             if (mattrs.len > 0) {
                 try methods_with_attrs.append(self.allocator, .{
                     .name = self.ast.tokenSlice(member.main_token),
@@ -2906,7 +2765,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
             try self.string_allocs.append(self.allocator, hook);
             try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(hook) }));
         }
-        const attrs = extractAttributes(self, member.main_token);
+        const attrs = try extractAttributes(self, member.main_token);
         try emitAttributeData(self, attrs);
         freeAttrSlice(self.allocator, attrs);
     }
@@ -2917,7 +2776,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (members) |m| {
         const member = self.ast.nodes[m];
         if (member.tag != .const_decl) continue;
-        const cattrs = extractAttributes(self, member.main_token);
+        const cattrs = try extractAttributes(self, member.main_token);
         if (cattrs.len > 0) try consts_with_attrs.append(self.allocator, .{ .name = self.ast.tokenSlice(member.main_token), .attrs = cattrs });
     }
     try self.emitByte(@intCast(consts_with_attrs.items.len));
@@ -3097,7 +2956,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     // trait-level attributes
-    const trait_attrs = extractAttributes(self, node.main_token);
+    const trait_attrs = try extractAttributes(self, node.main_token);
     try emitAttributeData(self, trait_attrs);
     freeAttrSlice(self.allocator, trait_attrs);
 
@@ -3108,7 +2967,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_method or member.tag == .static_class_method or member.tag == .interface_method) {
-            const mattrs = extractAttributes(self, member.main_token);
+            const mattrs = try extractAttributes(self, member.main_token);
             if (mattrs.len > 0) {
                 try methods_with_attrs.append(self.allocator, .{
                     .name = self.ast.tokenSlice(member.main_token),
@@ -3131,7 +2990,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_property) {
-            const pattrs = extractAttributes(self, member.main_token);
+            const pattrs = try extractAttributes(self, member.main_token);
             if (pattrs.len > 0) {
                 var prop_name = self.ast.tokenSlice(member.main_token);
                 if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
@@ -3262,7 +3121,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     // enum-level attributes
-    const enum_attrs = extractAttributes(self, node.main_token);
+    const enum_attrs = try extractAttributes(self, node.main_token);
     try emitAttributeData(self, enum_attrs);
     freeAttrSlice(self.allocator, enum_attrs);
 
@@ -3273,7 +3132,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_method or member.tag == .static_class_method or member.tag == .interface_method) {
-            const mattrs = extractAttributes(self, member.main_token);
+            const mattrs = try extractAttributes(self, member.main_token);
             if (mattrs.len > 0) {
                 try methods_with_attrs.append(self.allocator, .{
                     .name = self.ast.tokenSlice(member.main_token),
@@ -3299,7 +3158,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .enum_case) {
-            const cattrs = extractAttributes(self, member.main_token);
+            const cattrs = try extractAttributes(self, member.main_token);
             if (cattrs.len > 0) {
                 try cases_with_attrs.append(self.allocator, .{
                     .name = self.ast.tokenSlice(member.main_token),
@@ -3654,6 +3513,13 @@ fn emitClassConstant(self: *Compiler, class_name: []const u8, class_idx: u16, me
 fn compileConstInitializer(self: *Compiler, class_name: []const u8, member: Ast.Node) Error!void {
     const name = try @import("bytecode.zig").constInitializerName(self.allocator, class_name, self.ast.tokenSlice(member.main_token));
     try self.string_allocs.append(self.allocator, name);
+    try compileInitializer(self, name, class_name, member.data.lhs, member.main_token);
+}
+
+// a static function named `name` returning the expression's value, run in
+// the class's scope (none for "") with self and parent resolved then, the
+// way php evaluates a constant expression it couldn't fold
+fn compileInitializer(self: *Compiler, name: []const u8, class_name: []const u8, expr: u32, at: u32) Error!void {
     var sub = Compiler{
         .ast = self.ast,
         .diagnostic = self.diagnostic,
@@ -3682,11 +3548,13 @@ fn compileConstInitializer(self: *Compiler, class_name: []const u8, member: Ast.
     };
     defer sub.deinitScratch();
     errdefer sub.discardOutput();
-    const cname_idx = try sub.addConstant(.{ .string = Value.String.borrowed(class_name) });
-    try sub.emitOp(.enter_class_scope);
-    try sub.emitU16(cname_idx);
-    try sub.compileNode(member.data.lhs);
-    try sub.emitOp(.leave_class_scope);
+    if (class_name.len > 0) {
+        const cname_idx = try sub.addConstant(.{ .string = Value.String.borrowed(class_name) });
+        try sub.emitOp(.enter_class_scope);
+        try sub.emitU16(cname_idx);
+    }
+    try sub.compileNode(expr);
+    if (class_name.len > 0) try sub.emitOp(.leave_class_scope);
     try sub.emitOp(.return_val);
     self.closure_count = sub.closure_count;
     self.cond_fn_count = sub.cond_fn_count;
@@ -3706,8 +3574,8 @@ fn compileConstInitializer(self: *Compiler, class_name: []const u8, member: Ast.
         .local_count = local_count,
         .slot_names = slot_names,
         .file_path = self.file_path,
-        .start_line = lineForToken(self, member.main_token),
-        .end_line = lineForToken(self, member.main_token),
+        .start_line = lineForToken(self, at),
+        .end_line = lineForToken(self, at),
     });
     try self.adopt(&sub);
 }

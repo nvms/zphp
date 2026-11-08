@@ -4621,12 +4621,13 @@ fn isAttributeClass(vm: *VM, class_name: []const u8) bool {
     return false;
 }
 
-fn getAttributeFlags(vm: *VM, class_name: []const u8) i64 {
+fn getAttributeFlags(vm: *VM, class_name: []const u8) RuntimeError!i64 {
     const cls = vm.classes.get(class_name) orelse return 127;
     for (cls.attributes.items) |attr| {
         if (std.mem.eql(u8, attr.name, "Attribute")) {
-            if (attr.args.len > 0 and attr.args[0] == .int) return attr.args[0].int;
-            return 127; // TARGET_ALL
+            if (attr.args.len == 0) return 127; // TARGET_ALL
+            const flags = try vm.resolveDefault(attr.args[0]);
+            return if (flags == .int) flags.int else 127;
         }
     }
     return 127;
@@ -4659,7 +4660,7 @@ fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
     const target_val = this.get("_target");
     if (target_val == .int) {
         const target = target_val.int;
-        const flags = getAttributeFlags(ctx.vm, attr_name);
+        const flags = try getAttributeFlags(ctx.vm, attr_name);
         if (flags != 127 and (flags & target) == 0) {
             const used = targetName(target);
             var allowed_buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -4680,7 +4681,7 @@ fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
 
     const is_repeated_val = this.get("_is_repeated");
     if (is_repeated_val == .bool and is_repeated_val.bool) {
-        const flags = getAttributeFlags(ctx.vm, attr_name);
+        const flags = try getAttributeFlags(ctx.vm, attr_name);
         if ((flags & 128) == 0) {
             const msg = std.fmt.allocPrint(ctx.allocator, "Attribute \"{s}\" must not be repeated", .{attr_name}) catch return error.OutOfMemory;
             defer ctx.allocator.free(msg);

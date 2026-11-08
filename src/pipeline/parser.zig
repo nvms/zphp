@@ -144,7 +144,7 @@ const Parser = struct {
 
     fn parseStatement(self: *Parser) Error!u32 {
         if (self.peek() == .hash_bracket) {
-            self.skipAttributes();
+            try self.parseAttributes();
             return self.parseStatement();
         }
         // handle inline HTML tokens anywhere in statement context
@@ -1168,7 +1168,7 @@ const Parser = struct {
         // skip the attributes (parseAnonymousClass picks them up via the
         // shared attr_ranges target_tok mechanism)
         if (self.peek() == .hash_bracket) {
-            self.skipAttributes();
+            try self.parseAttributes();
         }
 
         // anonymous class: new class (...) { ... }, or new readonly|abstract|final class ...
@@ -1582,7 +1582,7 @@ const Parser = struct {
         defer members.deinit(self.allocator);
 
         while (self.peek() != .r_brace and self.peek() != .eof) {
-            self.skipAttributes();
+            try self.parseAttributes();
             var is_static = false;
             var is_abstract = false;
             var is_final = false;
@@ -1749,7 +1749,7 @@ const Parser = struct {
         defer methods.deinit(self.allocator);
 
         while (self.peek() != .r_brace and self.peek() != .eof) {
-            self.skipAttributes();
+            try self.parseAttributes();
             var is_static = false;
             var is_final = false;
             while (self.peek() == .kw_public or self.peek() == .kw_protected or
@@ -1843,7 +1843,7 @@ const Parser = struct {
         defer members.deinit(self.allocator);
 
         while (self.peek() != .r_brace and self.peek() != .eof) {
-            self.skipAttributes();
+            try self.parseAttributes();
 
             var is_static = false;
             var is_abstract = false;
@@ -2033,7 +2033,7 @@ const Parser = struct {
         defer members.deinit(self.allocator);
 
         while (self.peek() != .r_brace and self.peek() != .eof) {
-            self.skipAttributes();
+            try self.parseAttributes();
             if (self.peek() == .kw_case) {
                 _ = self.advance();
                 // PHP allows reserved words as enum case names (Array, Bool, Int, etc.)
@@ -2280,7 +2280,7 @@ const Parser = struct {
         const hook_nodes_start = self.nodes.items.len;
         while (self.peek() != .r_brace and self.peek() != .eof) {
             // skip attributes / final / & before the hook name
-            self.skipAttributes();
+            try self.parseAttributes();
             const is_final = self.peek() == .kw_final;
             if (is_final) _ = self.advance();
             const is_ref = self.peek() == .amp;
@@ -2302,7 +2302,7 @@ const Parser = struct {
             var local_set_param: u32 = 0;
             if (is_set and self.peek() == .l_paren) {
                 _ = self.advance();
-                self.skipAttributes();
+                try self.parseAttributes();
                 if (self.peek() != .r_paren) {
                     set_type_start = self.pos;
                     self.skipTypeHint();
@@ -2628,26 +2628,54 @@ const Parser = struct {
         return .{ start, self.pos };
     }
 
-    fn skipAttributes(self: *Parser) void {
+    fn parseAttributes(self: *Parser) Error!void {
         if (self.peek() != .hash_bracket) return;
         const start = self.pos;
+        var items = std.ArrayListUnmanaged(u32).empty;
+        defer items.deinit(self.allocator);
         while (self.peek() == .hash_bracket) {
             _ = self.advance();
-            var depth: u32 = 1;
-            while (depth > 0 and self.peek() != .eof) {
-                const tok = self.advance();
-                if (self.tokens[tok].tag == .l_bracket) depth += 1 else if (self.tokens[tok].tag == .r_bracket) depth -= 1;
+            while (true) {
+                const name_start = self.pos;
+                if (self.peek() == .backslash) _ = self.advance();
+                if (self.peek() != .identifier and !self.isNamedArgKeyword()) _ = try self.expect(.identifier);
+                _ = self.advance();
+                while (self.peek() == .backslash) {
+                    _ = self.advance();
+                    if (self.peek() != .identifier and !self.isNamedArgKeyword()) _ = try self.expect(.identifier);
+                    _ = self.advance();
+                }
+                const name_end = self.pos;
+                var args: u32 = AttrRange.no_args;
+                if (self.peek() == .l_paren) {
+                    _ = self.advance();
+                    var list = std.ArrayListUnmanaged(u32).empty;
+                    defer list.deinit(self.allocator);
+                    while (self.peek() != .r_paren) {
+                        try list.append(self.allocator, try self.parseCallArg());
+                        if (self.peek() != .comma) break;
+                        _ = self.advance();
+                    }
+                    _ = try self.expect(.r_paren);
+                    args = try self.addExtraList(list.items);
+                }
+                try items.appendSlice(self.allocator, &.{ name_start, name_end, args });
+                if (self.peek() != .comma) break;
+                _ = self.advance();
+                if (self.peek() == .r_bracket) break;
             }
+            _ = try self.expect(.r_bracket);
         }
-        self.attr_ranges.append(self.allocator, .{
+        try self.attr_ranges.append(self.allocator, .{
             .target_tok = self.pos,
             .start = start,
             .end = self.pos,
-        }) catch {};
+            .items = try self.addExtraList(items.items),
+        });
     }
 
     fn parseParam(self: *Parser) Error!u32 {
-        self.skipAttributes();
+        try self.parseAttributes();
         // constructor property promotion: visibility keyword before param
         // read-side promotion: 0 = none, 1 = public, 2 = protected, 3 = private
         // set-side promotion: 0 = no asymmetric override (use read), 1/2/3 same encoding
@@ -2947,7 +2975,7 @@ const Parser = struct {
             .kw_function => self.parseClosureExpr(),
             .kw_fn => self.parseArrowFunc(false),
             .hash_bracket => {
-                self.skipAttributes();
+                try self.parseAttributes();
                 return self.parsePrimaryExpr();
             },
             .l_paren => if (self.isCastExpr()) self.parseCastExpr() else self.parseGroupedExpr(),

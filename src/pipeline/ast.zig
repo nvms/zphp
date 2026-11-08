@@ -5,6 +5,12 @@ pub const AttrRange = struct {
     target_tok: u32,
     start: u32,
     end: u32,
+    // extra list of triples, one per attribute: the first and one past the
+    // last token of its name, then the extra list of its argument nodes
+    // (no_args without parentheses)
+    items: u32 = 0,
+
+    pub const no_args = std.math.maxInt(u32);
 };
 
 pub const Ast = struct {
