@@ -688,6 +688,8 @@ pub const VM = struct {
     // a fiber started inside the destructor suspends within itself, so
     // each fiber run starts unblocked
     fiber_switch_blocked: u32 = 0,
+    // objects the destructors of the current collection revived
+    gc_revived: usize = 0,
     fiber_suspend_value: Value = .null,
     captures: std.ArrayListUnmanaged(CaptureEntry) = .empty,
     capture_index: std.StringHashMapUnmanaged(CaptureRange) = .{},
@@ -3437,7 +3439,7 @@ pub const VM = struct {
             if (obj.destructed) continue;
             if (self.pendingExceptionIs(obj)) continue;
             obj.destructed = true;
-            if (obj.ownsDestructor() and self.hasMethod(obj.class_name, "__destruct")) {
+            if (obj.ownsDestructor() and !obj.destructor_called and self.hasMethod(obj.class_name, "__destruct")) {
                 _ = self.callMethod(obj, "__destruct", &.{}) catch {
                     self.discardPending();
                 };
@@ -21697,7 +21699,11 @@ pub const VM = struct {
     }
 
     pub fn objRelease(self: *VM, obj: *PhpObject) void {
-        if (obj.refcount == 0) return;
+        if (obj.refcount == 0) {
+            // a garbage peer dropping its edge to this object
+            if (obj.gc_internal_refs > 0) obj.gc_internal_refs -= 1;
+            return;
+        }
         obj.refcount -= 1;
         @import("value.zig").traceObjRc(obj, "release");
         if (obj.refcount != 0) {
@@ -21755,7 +21761,7 @@ pub const VM = struct {
         const outer_log = self.release_log;
         if (self.release_depth < max_release_depth) self.release_log = &dropped;
         defer self.release_log = outer_log;
-        if (obj.ownsDestructor() and self.hasMethod(obj.class_name, "__destruct")) {
+        if (obj.ownsDestructor() and !obj.destructor_called and self.hasMethod(obj.class_name, "__destruct")) {
             self.fiber_switch_blocked += 1;
             defer self.fiber_switch_blocked -= 1;
             _ = self.callMethod(obj, "__destruct", &.{}) catch {
@@ -21763,10 +21769,26 @@ pub const VM = struct {
                 // it was called from - swallow (revisit for fidelity)
                 self.discardPending();
             };
-            // a destructor that stored $this resurrected the object:
-            // it stays alive with its properties and is never pooled
-            if (obj.refcount != 0) return;
         }
+        // a destructor that kept the object alive (stored $this, or a
+        // suspended fiber holds its frame) revived it: it lives on with its
+        // properties and is freed, with no second destructor call, when it
+        // is released or collected again
+        if (obj.refcount != 0) {
+            obj.destructed = false;
+            obj.destructor_called = true;
+            if (obj.gc_internal_refs > 0) {
+                obj.refcount += obj.gc_internal_refs;
+                obj.gc_internal_refs = 0;
+                self.gc_revived += 1;
+                if (!obj.cycle_queued) {
+                    self.cycle_candidates.append(self.allocator, obj) catch {};
+                    obj.cycle_queued = true;
+                }
+            }
+            return;
+        }
+        obj.gc_internal_refs = 0;
         // PHP's WeakMap drops entries whose key object is unreachable.
         // walk registered WeakMaps and remove entries keyed by this
         // now-destructed object so iteration / count / offsetGet see
@@ -22121,6 +22143,7 @@ pub const VM = struct {
             if (obj.scratch_rc == 0 and !obj.destructed) {
                 // force refcount to 0 so the destruct drain processes it
                 // (the cycle's internal refs keep refcount > 0 otherwise)
+                obj.gc_internal_refs = obj.refcount;
                 obj.refcount = 0;
                 self.pending_destruct.append(self.allocator, obj) catch {};
                 collected += 1;
@@ -22168,6 +22191,9 @@ pub const VM = struct {
             if (scratch == 0) self.releaseClosureByName(owner.bytes);
         }
         self.drainPendingDestruct();
+        // php counts what it freed: an object its destructor revived stays
+        collected -|= self.gc_revived;
+        self.gc_revived = 0;
         self.gc_collected += collected;
         if (self.debug_gc_verify) {
             self.gcVerifyDangling(collected);

@@ -991,6 +991,14 @@ pub const PhpObject = struct {
     // set once __destruct has run, so it never runs twice (refcount-zero path
     // and the end-of-request safety sweep must not double-fire it)
     destructed: bool = false,
+    // __destruct ran and the object lived on (it stored $this somewhere, or
+    // its destructor suspended a fiber): it is freed later without another
+    // destructor call
+    destructor_called: bool = false,
+    // the references a garbage cycle held to this object when the cycle
+    // collector set its refcount to 0, less those released since; an object
+    // its destructor revives gets them back, so a later run can collect it
+    gc_internal_refs: u32 = 0,
     pooled: bool = false,
     cycle_queued: bool = false,
     // a reference cell has targeted one of this object's properties; the
