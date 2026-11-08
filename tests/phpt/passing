@@ -113,8 +113,13 @@ Zend/tests/asymmetric_visibility/scope_rebinding.phpt
 Zend/tests/asymmetric_visibility/unset.phpt
 Zend/tests/asymmetric_visibility/unshared_rw_cache_slot.phpt
 Zend/tests/attributes/002_rfcexample.phpt
+Zend/tests/attributes/003_ast_nodes.phpt
 Zend/tests/attributes/004_name_resolution.phpt
 Zend/tests/attributes/007_self_reflect_attribute.phpt
+Zend/tests/attributes/009_doctrine_annotations_example.phpt
+Zend/tests/attributes/019_variable_attribute_name.phpt
+Zend/tests/attributes/023_ast_node_in_validation.phpt
+Zend/tests/attributes/026_unpack_in_args.phpt
 Zend/tests/attributes/027_trailing_comma_args.phpt
 Zend/tests/attributes/028_grouped.phpt
 Zend/tests/attributes/029_reflect_internal_symbols.phpt
@@ -143,6 +148,7 @@ Zend/tests/attributes/deprecated/functions/throwing_error_handler_002.phpt
 Zend/tests/attributes/deprecated/functions/throwing_error_handler_003.phpt
 Zend/tests/attributes/deprecated/message_001.phpt
 Zend/tests/attributes/deprecated/message_002.phpt
+Zend/tests/attributes/deprecated/message_003.phpt
 Zend/tests/attributes/deprecated/property_readonly_001.phpt
 Zend/tests/attributes/deprecated/property_readonly_002.phpt
 Zend/tests/attributes/gh8421.phpt
@@ -518,6 +524,9 @@ Zend/tests/closures/closure_064.phpt
 Zend/tests/closures/closure_066.phpt
 Zend/tests/closures/closure_bindTo_preserves_used_variables.phpt
 Zend/tests/closures/closure_call_leak_with_exception.phpt
+Zend/tests/closures/closure_const_expr/attributes.phpt
+Zend/tests/closures/closure_const_expr/attributes_autoload.phpt
+Zend/tests/closures/closure_const_expr/attributes_scope_001.phpt
 Zend/tests/closures/closure_const_expr/class_const.phpt
 Zend/tests/closures/closure_const_expr/property_initializer.phpt
 Zend/tests/closures/closure_const_expr/static_property_initializer.phpt
@@ -629,6 +638,9 @@ Zend/tests/constexpr/constant_expressions_coalesce_empty_dim.phpt
 Zend/tests/constexpr/constant_expressions_exceptions_001.phpt
 Zend/tests/constexpr/constant_expressions_exceptions_002.phpt
 Zend/tests/constexpr/constant_expressions_invalid_offset_type_error.phpt
+Zend/tests/constexpr/gh10014.phpt
+Zend/tests/constexpr/gh9138.phpt
+Zend/tests/constexpr/gh9138_2.phpt
 Zend/tests/constexpr/new_allowed.phpt
 Zend/tests/constexpr/new_arg_unpack.phpt
 Zend/tests/constexpr/new_dynamic_class_name.phpt
@@ -914,6 +926,8 @@ Zend/tests/fibers/suspend-in-nested-function.phpt
 Zend/tests/fibers/throw.phpt
 Zend/tests/fibers/unfinished-fiber.phpt
 Zend/tests/fibers/unstarted-fiber.phpt
+Zend/tests/first_class_callable/constexpr/attributes.phpt
+Zend/tests/first_class_callable/constexpr/attributes_scope_001.phpt
 Zend/tests/first_class_callable/constexpr/autoload.phpt
 Zend/tests/first_class_callable/constexpr/basic.phpt
 Zend/tests/first_class_callable/constexpr/class_const.phpt
@@ -1426,6 +1440,7 @@ Zend/tests/interface_exists_001.phpt
 Zend/tests/interface_exists_002.phpt
 Zend/tests/interface_exists_basic.phpt
 Zend/tests/interface_extends_static.phpt
+Zend/tests/invalid_parent_const_ref_leak.phpt
 Zend/tests/is_callable_trampoline_uaf.phpt
 Zend/tests/isset/bug29883.phpt
 Zend/tests/isset/bug62680.phpt
@@ -1837,8 +1852,10 @@ Zend/tests/name_collision/name_collision_06.phpt
 Zend/tests/name_collision/name_collision_07.phpt
 Zend/tests/name_collision/name_collision_08.phpt
 Zend/tests/named_params/attributes.phpt
+Zend/tests/named_params/attributes_duplicate_named_param.phpt
 Zend/tests/named_params/attributes_named_flags.phpt
 Zend/tests/named_params/attributes_named_flags_incorrect.phpt
+Zend/tests/named_params/attributes_positional_after_named.phpt
 Zend/tests/named_params/basic.phpt
 Zend/tests/named_params/func_get_args.phpt
 Zend/tests/named_params/internal.phpt
@@ -2092,6 +2109,7 @@ Zend/tests/pipe_operator/wrapped_chains.phpt
 Zend/tests/pipe_operator_reference_context.phpt
 Zend/tests/pow_array_leak.phpt
 Zend/tests/pow_ref.phpt
+Zend/tests/prop_const_expr/attributes.phpt
 Zend/tests/prop_const_expr/basic.phpt
 Zend/tests/prop_const_expr/class_const.phpt
 Zend/tests/prop_const_expr/enum_initializer.phpt
@@ -3764,6 +3782,7 @@ ext/reflection/tests/gh22905/ReflectionProperty_construct_property.phpt
 ext/reflection/tests/gh22905/ReflectionZendExtension_construct.phpt
 ext/reflection/tests/gh8080.phpt
 ext/reflection/tests/internal_parameter_default_value/ReflectionParameter_isDefaultValueAvailable_Internal.phpt
+ext/reflection/tests/new_in_attributes.phpt
 ext/reflection/tests/property_hooks/ReflectionClass_getMethods.phpt
 ext/reflection/tests/property_hooks/ReflectionProperty_isInitialized.phpt
 ext/reflection/tests/readonly_class.phpt
