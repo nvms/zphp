@@ -2540,6 +2540,7 @@ Zend/tests/traits/bug74922b.phpt
 Zend/tests/traits/bug75607.phpt
 Zend/tests/traits/bug75607a.phpt
 Zend/tests/traits/bug76539.phpt
+Zend/tests/traits/bug76700.phpt
 Zend/tests/traits/bug77966.phpt
 Zend/tests/traits/bug78776.phpt
 Zend/tests/traits/bug78787.phpt
@@ -2549,10 +2550,13 @@ Zend/tests/traits/bugs/abstract-methods02.phpt
 Zend/tests/traits/bugs/abstract-methods03.phpt
 Zend/tests/traits/bugs/alias-semantics.phpt
 Zend/tests/traits/bugs/alias01.phpt
+Zend/tests/traits/bugs/case-sensitive.phpt
 Zend/tests/traits/bugs/interfaces.phpt
 Zend/tests/traits/bugs/overridding-conflicting-methods.phpt
 Zend/tests/traits/bugs/overridding-static-property-with-doc-block.phpt
+Zend/tests/traits/conflict001.phpt
 Zend/tests/traits/conflict002.phpt
+Zend/tests/traits/conflict003.phpt
 Zend/tests/traits/constant_001.phpt
 Zend/tests/traits/constant_002.phpt
 Zend/tests/traits/constant_003.phpt
@@ -2566,6 +2570,7 @@ Zend/tests/traits/constant_014.phpt
 Zend/tests/traits/constant_015.phpt
 Zend/tests/traits/constant_016.phpt
 Zend/tests/traits/constant_017.phpt
+Zend/tests/traits/error_011.phpt
 Zend/tests/traits/error_012.phpt
 Zend/tests/traits/error_014.phpt
 Zend/tests/traits/flattening001.phpt
@@ -2598,9 +2603,13 @@ Zend/tests/traits/language007.phpt
 Zend/tests/traits/language008a.phpt
 Zend/tests/traits/language008b.phpt
 Zend/tests/traits/language009.phpt
+Zend/tests/traits/language010.phpt
+Zend/tests/traits/language011.phpt
 Zend/tests/traits/language012.phpt
+Zend/tests/traits/language014.phpt
 Zend/tests/traits/language020.phpt
 Zend/tests/traits/methods_001.phpt
+Zend/tests/traits/methods_002.phpt
 Zend/tests/traits/methods_003.phpt
 Zend/tests/traits/no_static_arg_binding.phpt
 Zend/tests/traits/property001.phpt
