@@ -408,12 +408,17 @@ pub const OpCode = enum(u8) {
     // iter_begin for a foreach by reference, which php refuses for iterators
     // (php's get_iterator with by_ref)
     iter_begin_ref,
+    // the code between these runs in the scope of the class named by the
+    // u16 constant, as php evaluates a class's constant expressions
+    enter_class_scope,
+    leave_class_scope,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
             .arg_variable => 6,
             .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim, .arg_append => 4,
             .reference_source,
+            .enter_class_scope,
             .constant,
             .get_var,
             .get_var_quiet,

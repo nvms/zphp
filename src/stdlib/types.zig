@@ -214,6 +214,7 @@ fn native_constant(ctx: *NativeContext, args: []const Value) RuntimeError!Native
         const class_name = name[0..sep];
         const prop_name = name[sep + 2 ..];
         if (ctx.vm.getClassConstant(class_name, prop_name)) |v| {
+            try ctx.vm.checkClassConstantAccess(class_name, prop_name);
             _ = try ctx.vm.warnDeprecatedClassConstant(class_name, prop_name);
             return NativeResult.share(v);
         }

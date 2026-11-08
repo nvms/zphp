@@ -860,6 +860,9 @@ pub const VM = struct {
     // cleanup_live_vars). each sits at `slot` on the operand stack of frame
     // `frame` until the block rethrows it
     held_exceptions: std.ArrayListUnmanaged(HeldException) = .empty,
+    // classes whose constant expressions are being evaluated, innermost
+    // last: php evaluates them in the class's scope
+    initializer_scopes: std.ArrayListUnmanaged(InitializerScope) = .empty,
     handler_room: Region(ExceptionHandler) = .{},
     handler_count: usize = 0,
     handler_floor: usize = 0,
@@ -1612,6 +1615,9 @@ pub const VM = struct {
     };
 
     const HeldException = struct { frame: usize, slot: usize, exception: *PhpObject };
+    // `handlers` is how many exception handlers were in place, so entering
+    // one of those leaves the scope
+    const InitializerScope = struct { class: []const u8, frame: usize, handlers: usize };
 
     const ExceptionHandler = struct {
         catch_ip: usize, // absolute IP to jump to on throw
@@ -3023,6 +3029,7 @@ pub const VM = struct {
         self.weakmaps.deinit(self.allocator);
         self.weak_references.deinit(self.allocator);
         self.held_exceptions.deinit(self.allocator);
+        self.initializer_scopes.deinit(self.allocator);
         self.cycle_candidates.deinit(self.allocator);
         self.cycle_array_candidates.deinit(self.allocator);
         self.cycle_work.deinit(self.allocator);
@@ -3199,6 +3206,7 @@ pub const VM = struct {
         self.weakmaps.clearRetainingCapacity();
         self.weak_references.clearRetainingCapacity();
         self.held_exceptions.clearRetainingCapacity();
+        self.initializer_scopes.clearRetainingCapacity();
         for (self.shutdown_callbacks.items) |cb| self.allocator.free(cb.args);
         self.shutdown_callbacks.clearRetainingCapacity();
         self.cycle_candidates.clearRetainingCapacity();
@@ -4007,6 +4015,13 @@ pub const VM = struct {
                 .op_null => self.push(.null),
                 .op_true => self.push(.{ .bool = true }),
                 .op_false => self.push(.{ .bool = false }),
+                .enter_class_scope => {
+                    const class = self.currentChunk().constants.items[self.readU16()].string.bytes();
+                    try self.initializer_scopes.append(self.allocator, .{ .class = self.declaredClassName(class), .frame = self.frame_count - 1, .handlers = self.handler_count });
+                },
+                .leave_class_scope => {
+                    _ = self.initializer_scopes.pop();
+                },
                 .hold_exception => {
                     const held = self.stack[self.sp - 1];
                     if (held == .object) try self.held_exceptions.append(self.allocator, .{ .frame = self.frame_count - 1, .slot = self.sp - 1, .exception = held.object });
@@ -10996,13 +11011,19 @@ pub const VM = struct {
                     const const_name = self.currentChunk().constants.items[const_idx].string.bytes();
                     if (!std.mem.eql(u8, const_name, "class")) {
                         if (self.getClassConstant(class_name, const_name)) |val| {
-                            // a deprecated constant warns on every read, so it
-                            // stays out of the inline cache the fast loop uses
+                            const visibility = self.classConstantVisibility(class_name, const_name);
+                            if (visibility.denied) {
+                                if (try self.refuseClassConstant(class_name, const_name, visibility.level)) continue;
+                            }
+                            // a deprecated constant warns on every read, and a
+                            // non-public one depends on the scope reading it,
+                            // so both stay out of the inline cache the fast
+                            // loop uses
                             const deprecated = self.warnDeprecatedClassConstant(class_name, const_name) catch blk: {
                                 if (try self.resumeRaised()) continue;
                                 break :blk true;
                             };
-                            if (!deprecated) self.rememberClassConstant(class_name, val);
+                            if (!deprecated and visibility.level == .public) self.rememberClassConstant(class_name, val);
                             self.push(val);
                             continue;
                         }
@@ -11744,6 +11765,8 @@ pub const VM = struct {
             return false;
         }
         if (self.getClassConstant(class_name, const_name)) |val| {
+            const visibility = self.classConstantVisibility(class_name, const_name);
+            if (visibility.denied) return self.refuseClassConstant(class_name, const_name, visibility.level);
             _ = try self.warnDeprecatedClassConstant(class_name, const_name);
             self.push(val);
             return false;
@@ -11758,6 +11781,45 @@ pub const VM = struct {
     }
 
     // the executing get_class_const site now reads `value` for `class_name`
+    // php's zend_verify_const_access: a private constant is readable in the
+    // class that declares it, a protected one in a class of the same
+    // inheritance chain
+    fn classConstantVisibility(self: *VM, class_name: []const u8, const_name: []const u8) struct { level: ClassDef.Visibility, denied: bool } {
+        var current: ?[]const u8 = class_name;
+        const declarer: *const ClassDef = while (current) |cn| {
+            const cls = self.classes.getPtr(cn) orelse return .{ .level = .public, .denied = false };
+            if (cls.constants.contains(const_name)) break cls;
+            current = cls.parent;
+        } else return .{ .level = .public, .denied = false };
+        const level = declarer.const_visibility.get(const_name) orelse .public;
+        if (level == .public) return .{ .level = level, .denied = false };
+        const scope = self.currentDefiningClass() orelse return .{ .level = level, .denied = true };
+        const allowed = switch (level) {
+            .public => true,
+            .private => std.ascii.eqlIgnoreCase(scope, declarer.name),
+            .protected => self.isInstanceOf(scope, declarer.name) or self.isInstanceOf(declarer.name, scope),
+        };
+        return .{ .level = level, .denied = !allowed };
+    }
+
+    // for natives (constant()): a constant the calling scope can't see is
+    // the pending Error
+    pub fn checkClassConstantAccess(self: *VM, class_name: []const u8, const_name: []const u8) RuntimeError!void {
+        const visibility = self.classConstantVisibility(class_name, const_name);
+        if (!visibility.denied) return;
+        const msg = try std.fmt.allocPrint(self.allocator, "Cannot access {s} constant {s}::{s}", .{ @tagName(visibility.level), self.declaredClassName(class_name), const_name });
+        defer self.allocator.free(msg);
+        try self.setPendingException("Error", msg);
+        return error.RuntimeError;
+    }
+
+    fn refuseClassConstant(self: *VM, class_name: []const u8, const_name: []const u8, level: ClassDef.Visibility) RuntimeError!bool {
+        const msg = try std.fmt.allocPrint(self.allocator, "Cannot access {s} constant {s}::{s}", .{ @tagName(level), self.declaredClassName(class_name), const_name });
+        defer self.allocator.free(msg);
+        if (try self.throwBuiltinException("Error", msg)) return true;
+        return error.RuntimeError;
+    }
+
     fn rememberClassConstant(self: *VM, class_name: []const u8, value: Value) void {
         const ic = self.ic orelse return;
         const site = self.currentFrame().ip - 5;
@@ -13201,6 +13263,10 @@ pub const VM = struct {
     // and pushes the exception for its catch
     fn enterHandler(self: *VM, handler: ExceptionHandler, exc: Value, comptime ownership: enum { owned, borrowed }) void {
         self.chainHeldExceptions(exc, handler.frame_count, handler.sp);
+        // initializers the exception left
+        while (self.initializer_scopes.items.len > 0 and self.initializer_scopes.items[self.initializer_scopes.items.len - 1].handlers >= self.handler_count) {
+            _ = self.initializer_scopes.pop();
+        }
         self.handler_count -= 1;
         while (self.frame_count > handler.frame_count) {
             self.frame_count -= 1;
@@ -18388,6 +18454,11 @@ pub const VM = struct {
     }
 
     pub fn currentDefiningClass(self: *VM) ?[]const u8 {
+        // a class's constant expression, evaluated in the declaring frame
+        if (self.initializer_scopes.items.len > 0) {
+            const scope = self.initializer_scopes.items[self.initializer_scopes.items.len - 1];
+            if (scope.frame + 1 == self.frame_count) return scope.class;
+        }
         // bound closure scope takes priority over frame walk
         if (self.frame_count > 0) {
             if (self.closureDefClassForFrame(&self.frames[self.frame_count - 1])) |scope|

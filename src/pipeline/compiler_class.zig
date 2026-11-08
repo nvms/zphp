@@ -2421,6 +2421,8 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
 
     // set class constants after class_decl so self:: references resolve
     const cname_idx = try self.addConstant(.{ .string = Value.String.borrowed(class_name) });
+    try self.emitOp(.enter_class_scope);
+    try self.emitU16(cname_idx);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .const_decl) {
@@ -2450,6 +2452,7 @@ pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitOp(.pop);
         }
     }
+    try self.emitOp(.leave_class_scope);
     // set instance-property defaults after class_decl + constants so a default
     // expression like `public int $x = self::CONST` resolves against the
     // now-registered class (the prelude pushed null placeholders). defaults,
@@ -2925,6 +2928,8 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (consts_with_attrs.items) |ca| freeAttrSlice(self.allocator, ca.attrs);
 
     // set interface constants after interface_decl so self:: references resolve
+    try self.emitOp(.enter_class_scope);
+    try self.emitU16(name_idx);
     for (members) |m| {
         const member = self.ast.nodes[m];
         if (member.tag == .const_decl) {
@@ -2937,6 +2942,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitOp(.pop);
         }
     }
+    try self.emitOp(.leave_class_scope);
 
     // register stub functions so reflection can introspect interface method signatures
     for (members) |m| {
@@ -3337,6 +3343,8 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
     const prev_class = self.current_class;
     self.current_class = enum_name;
     defer self.current_class = prev_class;
+    try self.emitOp(.enter_class_scope);
+    try self.emitU16(cname_idx);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .const_decl) {
@@ -3349,6 +3357,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitOp(.pop);
         }
     }
+    try self.emitOp(.leave_class_scope);
 }
 
 fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.Node) Error!void {
