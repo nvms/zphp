@@ -402,6 +402,9 @@ pub const OpCode = enum(u8) {
     // under the result
     new_reserve,
     new_end,
+    // the exception on top of the stack is the one the finally block about
+    // to run holds until it rethrows it
+    hold_exception,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {

@@ -839,6 +839,11 @@ pub const VM = struct {
     // entries can pile up GBs of redundant reads otherwise)
     phar_cache: std.StringHashMapUnmanaged(*PharCacheEntry) = .{},
     exception_handlers: []ExceptionHandler = &.{},
+    // exceptions finally blocks are running for: one that unwinds out of the
+    // block becomes the previous of the exception unwinding it (php's
+    // cleanup_live_vars). each sits at `slot` on the operand stack of frame
+    // `frame` until the block rethrows it
+    held_exceptions: std.ArrayListUnmanaged(HeldException) = .empty,
     handler_room: Region(ExceptionHandler) = .{},
     handler_count: usize = 0,
     handler_floor: usize = 0,
@@ -1589,6 +1594,8 @@ pub const VM = struct {
         var_name: []const u8,
         frame_depth: usize,
     };
+
+    const HeldException = struct { frame: usize, slot: usize, exception: *PhpObject };
 
     const ExceptionHandler = struct {
         catch_ip: usize, // absolute IP to jump to on throw
@@ -2994,6 +3001,7 @@ pub const VM = struct {
         self.pending_gen_release.deinit(self.allocator);
         self.pending_fiber_release.deinit(self.allocator);
         self.weakmaps.deinit(self.allocator);
+        self.held_exceptions.deinit(self.allocator);
         self.cycle_candidates.deinit(self.allocator);
         self.cycle_array_candidates.deinit(self.allocator);
         self.array_ref_bindings.deinit(self.allocator);
@@ -3167,6 +3175,7 @@ pub const VM = struct {
         self.pending_fiber_release.clearRetainingCapacity();
         self.fiber_release_cursor = 0;
         self.weakmaps.clearRetainingCapacity();
+        self.held_exceptions.clearRetainingCapacity();
         self.shutdown_callbacks.clearRetainingCapacity();
         self.cycle_candidates.clearRetainingCapacity();
         self.cycle_array_candidates.clearRetainingCapacity();
@@ -3872,6 +3881,7 @@ pub const VM = struct {
         if (self.fiber_suspend_pending or self.exit_requested) return;
         if (self.frame_count <= base_frame) return;
         const entry_sp = self.frames[base_frame].entry_sp;
+        if (self.pending_exception) |exc| self.chainHeldExceptions(exc, base_frame, entry_sp);
         while (self.frame_count > base_frame) {
             self.frame_count -= 1;
             self.deinitFrameSlot(self.frame_count);
@@ -3960,6 +3970,10 @@ pub const VM = struct {
                 .op_null => self.push(.null),
                 .op_true => self.push(.{ .bool = true }),
                 .op_false => self.push(.{ .bool = false }),
+                .hold_exception => {
+                    const held = self.stack[self.sp - 1];
+                    if (held == .object) try self.held_exceptions.append(self.allocator, .{ .frame = self.frame_count - 1, .slot = self.sp - 1, .exception = held.object });
+                },
                 .pop, .pop_boundary => {
                     // run any destructors queued by the discarded value's
                     // expression
@@ -7836,18 +7850,9 @@ pub const VM = struct {
                 },
 
                 .throw => {
+                    // a finally block rethrowing what it held no longer holds it
+                    if (self.held_exceptions.items.len > 0) self.releaseHeldAt(self.frame_count - 1, self.sp - 1);
                     const exception = self.popTransfer();
-                    // if finally was triggered by a propagating exception and that
-                    // exception is still on the stack below this throw, chain it
-                    // as `previous` to match PHP's exception chaining behavior. only
-                    // this frame's operands count: a destructor or callback run
-                    // while its caller holds a throwable must not take it
-                    if (exception == .object and self.sp > self.currentFrame().entry_sp) {
-                        const below = self.stack[self.sp - 1];
-                        if (below == .object and self.isInstanceOf(below.object.class_name, "Throwable")) {
-                            if (try self.chainPrevious(exception.object, below.object)) _ = self.pop();
-                        }
-                    }
                     if (self.handler_count <= self.handler_floor) {
                         self.setPendingOwned(exception);
                         return error.RuntimeError;
@@ -7861,20 +7866,7 @@ pub const VM = struct {
                         return error.RuntimeError;
                     }
 
-                    self.handler_count -= 1;
-
-                    // unwind frames back to where handler was set
-                    while (self.frame_count > handler.frame_count) {
-                        self.frame_count -= 1;
-                        self.deinitFrameSlot(self.frame_count);
-                    }
-
-                    self.discardArgTransport(handler.sp);
-
-                    self.sp = handler.sp;
-                    self.pushTransfer(exception);
-
-                    self.currentFrame().ip = handler.catch_ip;
+                    self.enterHandler(handler, exception, .owned);
                 },
 
                 .push_handler => {
@@ -8108,15 +8100,7 @@ pub const VM = struct {
                                             const handler = self.exception_handlers[self.handler_count - 1];
                                             if (handler.frame_count > base_frame or base_frame == 0) {
                                                 self.pending_exception = null;
-                                                self.handler_count -= 1;
-                                                while (self.frame_count > handler.frame_count) {
-                                                    self.frame_count -= 1;
-                                                    self.deinitFrameSlot(self.frame_count);
-                                                }
-                                                self.discardArgTransport(handler.sp);
-                                                self.sp = handler.sp;
-                                                self.pushTransfer(exc);
-                                                self.currentFrame().ip = handler.catch_ip;
+                                                self.enterHandler(handler, exc, .owned);
                                                 continue;
                                             }
                                         }
@@ -8728,15 +8712,7 @@ pub const VM = struct {
                                     self.pending_exception = null;
                                     if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
                                         const handler = self.exception_handlers[self.handler_count - 1];
-                                        self.handler_count -= 1;
-                                        while (self.frame_count > handler.frame_count) {
-                                            self.frame_count -= 1;
-                                            self.deinitFrameSlot(self.frame_count);
-                                        }
-                                        self.discardArgTransport(handler.sp);
-                                        self.sp = handler.sp;
-                                        self.pushTransfer(exc);
-                                        self.currentFrame().ip = handler.catch_ip;
+                                        self.enterHandler(handler, exc, .owned);
                                         continue;
                                     }
                                     self.pending_exception = exc;
@@ -8962,15 +8938,7 @@ pub const VM = struct {
                                     self.pending_exception = null;
                                     if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
                                         const handler = self.exception_handlers[self.handler_count - 1];
-                                        self.handler_count -= 1;
-                                        while (self.frame_count > handler.frame_count) {
-                                            self.frame_count -= 1;
-                                            self.deinitFrameSlot(self.frame_count);
-                                        }
-                                        self.discardArgTransport(handler.sp);
-                                        self.sp = handler.sp;
-                                        self.pushTransfer(exc);
-                                        self.currentFrame().ip = handler.catch_ip;
+                                        self.enterHandler(handler, exc, .owned);
                                         continue;
                                     }
                                     self.pending_exception = exc;
@@ -9873,15 +9841,7 @@ pub const VM = struct {
                                 self.pending_exception = null;
                                 if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
                                     const handler = self.exception_handlers[self.handler_count - 1];
-                                    self.handler_count -= 1;
-                                    while (self.frame_count > handler.frame_count) {
-                                        self.frame_count -= 1;
-                                        self.deinitFrameSlot(self.frame_count);
-                                    }
-                                    self.discardArgTransport(handler.sp);
-                                    self.sp = handler.sp;
-                                    self.pushTransfer(exc);
-                                    self.currentFrame().ip = handler.catch_ip;
+                                    self.enterHandler(handler, exc, .owned);
                                     continue;
                                 }
                                 self.pending_exception = exc;
@@ -10151,15 +10111,7 @@ pub const VM = struct {
                                 self.pending_exception = null;
                                 if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
                                     const handler = self.exception_handlers[self.handler_count - 1];
-                                    self.handler_count -= 1;
-                                    while (self.frame_count > handler.frame_count) {
-                                        self.frame_count -= 1;
-                                        self.deinitFrameSlot(self.frame_count);
-                                    }
-                                    self.discardArgTransport(handler.sp);
-                                    self.sp = handler.sp;
-                                    self.pushTransfer(exc);
-                                    self.currentFrame().ip = handler.catch_ip;
+                                    self.enterHandler(handler, exc, .owned);
                                     continue;
                                 }
                                 self.pending_exception = exc;
@@ -10310,15 +10262,7 @@ pub const VM = struct {
                                 self.pending_exception = null;
                                 if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
                                     const handler = self.exception_handlers[self.handler_count - 1];
-                                    self.handler_count -= 1;
-                                    while (self.frame_count > handler.frame_count) {
-                                        self.frame_count -= 1;
-                                        self.deinitFrameSlot(self.frame_count);
-                                    }
-                                    self.discardArgTransport(handler.sp);
-                                    self.sp = handler.sp;
-                                    self.pushTransfer(exc);
-                                    self.currentFrame().ip = handler.catch_ip;
+                                    self.enterHandler(handler, exc, .owned);
                                     continue;
                                 }
                                 self.pending_exception = exc;
@@ -10489,15 +10433,7 @@ pub const VM = struct {
                                 self.pending_exception = null;
                                 if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
                                     const handler = self.exception_handlers[self.handler_count - 1];
-                                    self.handler_count -= 1;
-                                    while (self.frame_count > handler.frame_count) {
-                                        self.frame_count -= 1;
-                                        self.deinitFrameSlot(self.frame_count);
-                                    }
-                                    self.discardArgTransport(handler.sp);
-                                    self.sp = handler.sp;
-                                    self.pushTransfer(exc);
-                                    self.currentFrame().ip = handler.catch_ip;
+                                    self.enterHandler(handler, exc, .owned);
                                     continue;
                                 }
                                 self.pending_exception = exc;
@@ -10777,15 +10713,7 @@ pub const VM = struct {
                                         self.pending_exception = null;
                                         if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
                                             const handler = self.exception_handlers[self.handler_count - 1];
-                                            self.handler_count -= 1;
-                                            while (self.frame_count > handler.frame_count) {
-                                                self.frame_count -= 1;
-                                                self.deinitFrameSlot(self.frame_count);
-                                            }
-                                            self.discardArgTransport(handler.sp);
-                                            self.sp = handler.sp;
-                                            self.pushTransfer(exc);
-                                            self.currentFrame().ip = handler.catch_ip;
+                                            self.enterHandler(handler, exc, .owned);
                                             continue;
                                         }
                                         self.pending_exception = exc;
@@ -13194,19 +13122,49 @@ pub const VM = struct {
             return false;
         }
 
-        self.handler_count -= 1;
+        self.enterHandler(handler, .{ .object = obj }, .borrowed);
+        return true;
+    }
 
+    // enters an exception handler: unwinds the frames and operands above it
+    // and pushes the exception for its catch
+    fn enterHandler(self: *VM, handler: ExceptionHandler, exc: Value, comptime ownership: enum { owned, borrowed }) void {
+        self.chainHeldExceptions(exc, handler.frame_count, handler.sp);
+        self.handler_count -= 1;
         while (self.frame_count > handler.frame_count) {
             self.frame_count -= 1;
             self.deinitFrameSlot(self.frame_count);
         }
-
         self.discardArgTransport(handler.sp);
-
         self.sp = handler.sp;
-        self.push(.{ .object = obj });
+        if (ownership == .owned) self.pushTransfer(exc) else self.push(exc);
         self.currentFrame().ip = handler.catch_ip;
-        return true;
+    }
+
+    // an exception unwinding to `frame_count` frames and `sp` operands takes
+    // the exceptions finally blocks above that point held as its previous,
+    // innermost first
+    fn chainHeldExceptions(self: *VM, exc: Value, frame_count: usize, sp: usize) void {
+        var i = self.held_exceptions.items.len;
+        while (i > 0) {
+            i -= 1;
+            const held = self.held_exceptions.items[i];
+            const in_place = held.frame < self.frame_count and held.slot < self.sp and self.stack[held.slot] == .object and self.stack[held.slot].object == held.exception;
+            const unwound = held.frame >= frame_count or (frame_count > 0 and held.frame == frame_count - 1 and held.slot >= sp);
+            if (in_place and !unwound) continue;
+            _ = self.held_exceptions.orderedRemove(i);
+            if (in_place and exc == .object) _ = self.chainPrevious(exc.object, held.exception) catch {};
+        }
+    }
+
+    // the exception a finally block holds at `slot` of frame `frame` is gone
+    fn releaseHeldAt(self: *VM, frame: usize, slot: usize) void {
+        var i = self.held_exceptions.items.len;
+        while (i > 0) {
+            i -= 1;
+            const held = self.held_exceptions.items[i];
+            if (held.frame >= frame and held.slot >= slot) _ = self.held_exceptions.orderedRemove(i);
+        }
     }
 
     fn dispatchPendingException(self: *VM, base_frame: usize) bool {
@@ -13216,15 +13174,7 @@ pub const VM = struct {
         const handler = self.exception_handlers[self.handler_count - 1];
         if (handler.frame_count <= base_frame and base_frame > 0) return false;
         self.pending_exception = null;
-        self.handler_count -= 1;
-        while (self.frame_count > handler.frame_count) {
-            self.frame_count -= 1;
-            self.deinitFrameSlot(self.frame_count);
-        }
-        self.discardArgTransport(handler.sp);
-        self.sp = handler.sp;
-        self.pushTransfer(exc);
-        self.currentFrame().ip = handler.catch_ip;
+        self.enterHandler(handler, exc, .owned);
         return true;
     }
 
@@ -16405,6 +16355,7 @@ pub const VM = struct {
     }
 
     pub fn deinitFrameSlot(self: *VM, idx: usize) void {
+        if (self.held_exceptions.items.len > 0) self.releaseHeldAt(idx, 0);
         self.forgetFrameArgs(idx);
         const frame_generator = self.frames[idx].generator;
         self.deinitRefSlots(&self.frames[idx].ref_slots);
@@ -19993,6 +19944,7 @@ pub const VM = struct {
     // an uncaught throwable ends everything but the main frame, above which
     // the report, the exception handler and shutdown functions run
     fn unwindToMain(self: *VM) void {
+        if (self.pending_exception) |exc| self.chainHeldExceptions(exc, 0, 0);
         while (self.frame_count > 1) {
             self.frame_count -= 1;
             self.deinitFrameSlot(self.frame_count);
@@ -20347,15 +20299,7 @@ pub const VM = struct {
                     self.pending_exception = null;
                     if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
                         const handler = self.exception_handlers[self.handler_count - 1];
-                        self.handler_count -= 1;
-                        while (self.frame_count > handler.frame_count) {
-                            self.frame_count -= 1;
-                            self.deinitFrameSlot(self.frame_count);
-                        }
-                        self.discardArgTransport(handler.sp);
-                        self.sp = handler.sp;
-                        self.pushTransfer(exc);
-                        self.currentFrame().ip = handler.catch_ip;
+                        self.enterHandler(handler, exc, .owned);
                         return;
                     }
                     self.pending_exception = exc;

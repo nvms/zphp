@@ -680,6 +680,7 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
     if (finally_node != 0) {
         // no catch matched: pop catch-body handler, run finally, re-throw
         try self.emitOp(.pop_handler);
+        try self.emitOp(.hold_exception);
         try compileFinallyCopy(self, finally_node);
         try self.emitOp(.throw);
 
@@ -691,6 +692,7 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
         // exception from catch body: patch the catch-body handler to here
         // exception is on the stack, run finally then re-throw
         self.patchJump(finally_handler_offset);
+        try self.emitOp(.hold_exception);
         try compileFinallyCopy(self, finally_node);
         try self.emitOp(.throw);
 
