@@ -78,6 +78,9 @@ const Parser = struct {
     attr_ranges: std.ArrayListUnmanaged(AttrRange) = .empty,
     allocator: Allocator,
     found_yield: bool = false,
+    // a property declaration ended in a comma: another property follows
+    property_list_continues: bool = false,
+    in_property_list: bool = false,
     // the token where a list() may stand without an `=` after it: the start
     // of an array element or a foreach target. anywhere else php's grammar
     // has list() only as the left side of an assignment
@@ -1387,9 +1390,16 @@ const Parser = struct {
             var set_visibility: u32 = 0;
             var has_set_vis = false;
             var has_read_vis = false;
-            while (self.peek() == .kw_public or self.peek() == .kw_protected or
+            // `var` declares a public property and takes no other modifier
+            const is_var = self.peek() == .kw_var;
+            if (is_var) _ = self.advance();
+            if (is_var and (self.peek() == .kw_static or !(self.peek() == .variable or self.isTypeName() or self.peek() == .question or self.peek() == .l_paren))) {
+                try self.addError(.unexpected_token);
+                return error.ParseError;
+            }
+            while (!is_var and (self.peek() == .kw_public or self.peek() == .kw_protected or
                 self.peek() == .kw_private or self.peek() == .kw_static or
-                self.peek() == .kw_abstract or self.peek() == .kw_final or self.peek() == .kw_readonly)
+                self.peek() == .kw_abstract or self.peek() == .kw_final or self.peek() == .kw_readonly))
             {
                 if (self.peek() == .kw_static) {
                     is_static = true;
@@ -1468,6 +1478,7 @@ const Parser = struct {
                 }
                 self.nodes.items[prop].data.rhs = encodePropertyFlags(visibility, set_visibility, has_set_vis, is_readonly, is_final);
                 try members.append(self.allocator, prop);
+                try self.continuePropertyList(&members, prop);
             } else if (self.peek() == .kw_const) {
                 try self.parseConstMembers(&members, visibility | (if (is_final) @as(u32, 1) << 4 else 0));
             } else if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
@@ -1484,6 +1495,7 @@ const Parser = struct {
                     }
                     self.nodes.items[prop].data.rhs = rhs;
                     try members.append(self.allocator, prop);
+                    try self.continuePropertyList(&members, prop);
                 } else {
                     try self.addError(.unexpected_token);
                     return error.ParseError;
@@ -1584,9 +1596,16 @@ const Parser = struct {
             var set_visibility: u32 = 0;
             var has_set_vis = false;
             var has_read_vis = false;
-            while (self.peek() == .kw_public or self.peek() == .kw_protected or
+            // `var` declares a public property and takes no other modifier
+            const is_var = self.peek() == .kw_var;
+            if (is_var) _ = self.advance();
+            if (is_var and (self.peek() == .kw_static or !(self.peek() == .variable or self.isTypeName() or self.peek() == .question or self.peek() == .l_paren))) {
+                try self.addError(.unexpected_token);
+                return error.ParseError;
+            }
+            while (!is_var and (self.peek() == .kw_public or self.peek() == .kw_protected or
                 self.peek() == .kw_private or self.peek() == .kw_static or
-                self.peek() == .kw_abstract or self.peek() == .kw_final or self.peek() == .kw_readonly)
+                self.peek() == .kw_abstract or self.peek() == .kw_final or self.peek() == .kw_readonly))
             {
                 if (self.peek() == .kw_static) {
                     is_static = true;
@@ -1670,6 +1689,7 @@ const Parser = struct {
                 // Property flags are encoded by encodePropertyFlags(); type metadata remains in bits 16+.
                 self.nodes.items[prop].data.rhs = encodePropertyFlags(visibility, set_visibility, has_set_vis, is_readonly, is_final);
                 try members.append(self.allocator, prop);
+                try self.continuePropertyList(&members, prop);
             } else if (self.peek() == .kw_const) {
                 try self.parseConstMembers(&members, visibility | (if (is_final) @as(u32, 1) << 4 else 0));
             } else if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
@@ -1686,6 +1706,7 @@ const Parser = struct {
                     }
                     self.nodes.items[prop].data.rhs = rhs;
                     try members.append(self.allocator, prop);
+                    try self.continuePropertyList(&members, prop);
                 } else {
                     try self.addError(.unexpected_token);
                     return error.ParseError;
@@ -1831,9 +1852,16 @@ const Parser = struct {
             var has_set_vis = false;
             var has_read_vis = false;
 
-            while (self.peek() == .kw_public or self.peek() == .kw_protected or
+            // `var` declares a public property and takes no other modifier
+            const is_var = self.peek() == .kw_var;
+            if (is_var) _ = self.advance();
+            if (is_var and (self.peek() == .kw_static or !(self.peek() == .variable or self.isTypeName() or self.peek() == .question or self.peek() == .l_paren))) {
+                try self.addError(.unexpected_token);
+                return error.ParseError;
+            }
+            while (!is_var and (self.peek() == .kw_public or self.peek() == .kw_protected or
                 self.peek() == .kw_private or self.peek() == .kw_static or
-                self.peek() == .kw_abstract or self.peek() == .kw_final or self.peek() == .kw_readonly)
+                self.peek() == .kw_abstract or self.peek() == .kw_final or self.peek() == .kw_readonly))
             {
                 if (self.peek() == .kw_static) {
                     is_static = true;
@@ -1928,6 +1956,7 @@ const Parser = struct {
                     is_final,
                 );
                 try members.append(self.allocator, prop);
+                try self.continuePropertyList(&members, prop);
             } else if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
                 const tr = self.collectTypeHint();
 
@@ -1951,6 +1980,7 @@ const Parser = struct {
 
                     self.nodes.items[prop].data.rhs = rhs;
                     try members.append(self.allocator, prop);
+                    try self.continuePropertyList(&members, prop);
                 } else {
                     try self.addError(.unexpected_token);
                     return error.ParseError;
@@ -2197,18 +2227,40 @@ const Parser = struct {
         return self.addNode(.{ .tag = .class_method, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = rhs } });
     }
 
+    // one property of a declaration; a comma after it (property_list)
+    // leaves more for continuePropertyList, which only a property without
+    // hooks may have
     fn parseClassProperty(self: *Parser) Error!u32 {
-        const tok = self.advance(); // $variable
+        const tok = try self.expect(.variable);
         var default: u32 = 0;
         if (self.peek() == .equal) {
             _ = self.advance();
             default = try self.parseExpression();
         }
-        if (self.peek() == .l_brace) {
+        self.property_list_continues = false;
+        if (self.peek() == .l_brace and !self.in_property_list) {
             return self.parsePropertyHooks(tok, default);
         }
-        _ = try self.expect(.semicolon);
+        if (self.peek() == .comma) {
+            _ = self.advance();
+            self.property_list_continues = true;
+        } else {
+            _ = try self.expect(.semicolon);
+        }
         return self.addNode(.{ .tag = .class_property, .main_token = tok, .data = .{ .lhs = default } });
+    }
+
+    // the rest of `public int $a = 1, $b;`: each property shares the first
+    // one's modifiers and type
+    fn continuePropertyList(self: *Parser, members: *std.ArrayListUnmanaged(u32), first: u32) Error!void {
+        self.in_property_list = true;
+        defer self.in_property_list = false;
+        while (self.property_list_continues) {
+            const prop = try self.parseClassProperty();
+            self.nodes.items[prop].tag = self.nodes.items[first].tag;
+            self.nodes.items[prop].data.rhs = self.nodes.items[first].data.rhs;
+            try members.append(self.allocator, prop);
+        }
     }
 
     fn parsePropertyHooks(self: *Parser, name_tok: u32, default: u32) Error!u32 {
