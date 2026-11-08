@@ -19,7 +19,13 @@ const SerCtx = struct {
     cells: std.AutoHashMapUnmanaged(*Value, usize) = .{},
     next_slot: usize = 1,
 
-    fn deinit(self: *SerCtx, a: Allocator) void {
+    // the table keeps the objects it records alive until the outermost
+    // serialize() ends, as php's does, so a temporary written by a nested
+    // Serializable::serialize() can't be freed and its address reused
+    fn deinit(self: *SerCtx, ctx: *NativeContext) void {
+        const a = ctx.allocator;
+        var it = self.objects.keyIterator();
+        while (it.next()) |obj| ctx.vm.objRelease(obj.*);
         self.cells.deinit(a);
         self.objects.deinit(a);
         self.arrays.deinit(a);
@@ -224,7 +230,7 @@ pub fn serializeToString(ctx: *NativeContext, val: Value) RuntimeError!NativeRes
     var buf = std.ArrayListUnmanaged(u8).empty;
     errdefer buf.deinit(ctx.allocator);
     var own = SerCtx{};
-    defer own.deinit(ctx.allocator);
+    defer own.deinit(ctx);
     const outer = if (serialize_lock == 0) shared_ctx else null;
     const sctx = outer orelse &own;
     const owner = outer == null and serialize_lock == 0;
@@ -405,7 +411,13 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
                 try buf.append(a, ';');
                 return;
             }
-            try sctx.objects.put(a, obj, sctx.next_slot - 1);
+            // php's php_add_var_hash: an object nothing else holds can't
+            // appear again, so it isn't recorded (and isn't kept alive),
+            // unless __serialize or __sleep could hand it out again
+            if (obj.refcount > 1 or ctx.vm.hasMethod(obj.class_name, "__serialize") or ctx.vm.hasMethod(obj.class_name, "__sleep")) {
+                try sctx.objects.put(a, obj, sctx.next_slot - 1);
+                @import("../runtime/vm.zig").VM.objRetain(obj);
+            }
 
             // enum: emit E:<len>:"Class:Case"; per PHP 8.1
             if (ctx.vm.classes.get(obj.class_name)) |cdef| {
@@ -987,7 +999,7 @@ pub fn serializeSplArray(ctx: *NativeContext, obj: *PhpObject) RuntimeError!Nati
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(ctx.allocator);
     var refs: SerCtx = .{};
-    defer refs.deinit(ctx.allocator);
+    defer refs.deinit(ctx);
     try buf.appendSlice(ctx.allocator, "x:");
     const flags = @import("spl.zig").serializedFlags(obj);
     try serializeValue(ctx, &buf, &refs, .{ .int = flags });
