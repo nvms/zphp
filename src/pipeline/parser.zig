@@ -2299,6 +2299,7 @@ const Parser = struct {
             var local_set_param: u32 = 0;
             if (is_set and self.peek() == .l_paren) {
                 _ = self.advance();
+                self.skipAttributes();
                 if (self.peek() != .r_paren) {
                     set_type_start = self.pos;
                     self.skipTypeHint();
