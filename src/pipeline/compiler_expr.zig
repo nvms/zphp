@@ -66,14 +66,24 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
         return;
     }
 
-    if (op_tag != .equal and op_tag != .question_question_equal) {
-        if (try emitPlaceOperands(self, node.data.lhs)) |place| {
-            try emitPlaceRead(self, place);
+    if (op_tag != .equal and op_tag != .question_question_equal and isPlaceTarget(self, node.data.lhs)) {
+        // php fetches the target after the right side (zend_delayed_compile_var):
+        // only calls in the target run before it
+        if (!chainHasCall(self, node.data.lhs)) {
             try self.compileNode(node.data.rhs);
-            try emitCompoundOp(self, op_tag);
-            try emitPlaceWrite(self, place, true);
+            const place = (try emitPlaceOperands(self, node.data.lhs)).?;
+            try emitPlaceCombine(self, place, op_tag);
             return;
         }
+        const place = (try emitPlaceOperands(self, node.data.lhs)).?;
+        try self.compileNode(node.data.rhs);
+        // [operands, value] -> [value, operands]
+        if (place.operandCount() > 0) {
+            try self.emitOp(.bury);
+            try self.emitByte(place.operandCount());
+        }
+        try emitPlaceCombine(self, place, op_tag);
+        return;
     }
 
     if (target.tag == .array_access) {
@@ -216,21 +226,19 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                 try self.emitOp(.get_prop_coalesce_dynamic);
                 return emitCoalesceAssignTail(self, node.data.rhs, .set_prop_dynamic);
             }
-            // php evaluates the name once, before the value
-            if (target.main_token == 0) {
-                try self.compileNode(target.data.rhs);
-            } else {
+            // a name in a variable (`->$name = v`) is read as the assignment
+            // runs, after the value, as php reads its operand; any other
+            // name is evaluated once, before the value
+            // compound operators went through emitPlaceCombine
+            if (target.main_token != 0) {
                 const prop_node = self.ast.nodes[target.data.rhs];
+                try self.compileNode(node.data.rhs);
                 try self.emitGetVar(self.ast.tokenSlice(prop_node.main_token));
+                try self.emitOp(.set_prop_dynamic);
+                return;
             }
-            if (op_tag != .equal) {
-                try self.emitOp(.dup2);
-                try self.emitOp(.get_prop_dynamic);
-            }
+            try self.compileNode(target.data.rhs);
             try self.compileNode(node.data.rhs);
-            if (op_tag != .equal) {
-                try emitCompoundOp(self, op_tag);
-            }
             // set_prop_dynamic takes the name above the value
             try self.emitOp(.swap);
             try self.emitOp(.set_prop_dynamic);
@@ -371,13 +379,12 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
         return;
     }
 
-    if (op_tag != .equal) {
-        try self.compileGetVar(target);
-    }
-
     try self.compileNode(node.data.rhs);
-
     if (op_tag != .equal) {
+        // php reads the variable after evaluating the right side
+        try self.compileGetVar(target);
+        try self.emitOp(.bury);
+        try self.emitByte(1);
         try emitCompoundOp(self, op_tag);
     }
 
@@ -572,6 +579,33 @@ fn emitCoalesceAssignTail(self: *Compiler, rhs: u32, store: OpCode) Error!void {
     try self.emitOp(.pop);
     try self.emitOp(.pop);
     self.patchJump(end_jump);
+}
+
+// whether emitPlaceOperands takes the target
+fn isPlaceTarget(self: *Compiler, target_idx: u32) bool {
+    const target = self.ast.nodes[target_idx];
+    return switch (target.tag) {
+        .variable_variable, .property_access, .static_prop_access => true,
+        .array_access => target.data.rhs != 0,
+        else => false,
+    };
+}
+
+// [value, operands] -> [result] for `place op= value`: the target is read
+// as the operator runs, after the right side, as php does
+fn emitPlaceCombine(self: *Compiler, place: Place, op_tag: Token.Tag) Error!void {
+    const k = place.operandCount();
+    // -> [value, operands, current]
+    try emitPlaceRead(self, place);
+    // -> [current, value, operands] -> [operands, current, value]
+    try self.emitOp(.bury);
+    try self.emitByte(k + 1);
+    for (0..k) |_| {
+        try self.emitOp(.bury);
+        try self.emitByte(k + 1);
+    }
+    try emitCompoundOp(self, op_tag);
+    try emitPlaceWrite(self, place, true);
 }
 
 // [operands] -> [operands, value]
