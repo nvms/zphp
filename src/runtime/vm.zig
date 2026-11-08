@@ -360,6 +360,9 @@ pub const ClassDef = struct {
     attributes: std.ArrayListUnmanaged(AttributeDef) = .empty,
     method_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
     property_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
+    // properties the class took from a trait, and which trait: their
+    // attributes stay in the trait's tables
+    trait_property_origins: std.StringHashMapUnmanaged([]const u8) = .{},
     param_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
     // class constants and enum cases, a namespace of their own: php lets
     // `const X` and `static $X` coexist on one class
@@ -458,6 +461,7 @@ pub const ClassDef = struct {
         var pa_iter = self.property_attributes.valueIterator();
         while (pa_iter.next()) |attrs| freeAttributeDefs(allocator, attrs.*);
         self.property_attributes.deinit(allocator);
+        self.trait_property_origins.deinit(allocator);
         var pra_it = self.param_attributes.iterator();
         while (pra_it.next()) |entry| {
             allocator.free(entry.key_ptr.*);
@@ -735,6 +739,9 @@ pub const VM = struct {
     free_closure_names: std.ArrayListUnmanaged(struct { compile_name: []const u8, name: []const u8 }) = .empty,
     php_constants: std.StringHashMapUnmanaged(Value) = .{},
     user_constants: std.StringHashMapUnmanaged(void) = .{},
+    // a global constant's attribute entry in function_attributes, set when
+    // the `const` declaring it defines it
+    constant_attributes: std.StringHashMapUnmanaged([]const u8) = .{},
     ini_settings: std.StringHashMapUnmanaged([]const u8) = .{},
     ini_callbacks: std.StringHashMapUnmanaged(Value) = .{},
     // register_shutdown_function's callables with the arguments they get
@@ -3025,6 +3032,7 @@ pub const VM = struct {
         self.free_closure_names.deinit(self.allocator);
         self.php_constants.deinit(self.allocator);
         self.user_constants.deinit(self.allocator);
+        self.constant_attributes.deinit(self.allocator);
         self.deprecated_globals.deinit(self.allocator);
         self.ini_settings.deinit(self.allocator);
         self.ini_callbacks.deinit(self.allocator);
@@ -3304,6 +3312,7 @@ pub const VM = struct {
             self.chunk_to_func_names.clearRetainingCapacity();
             self.php_constants.clearRetainingCapacity();
             self.user_constants.clearRetainingCapacity();
+            self.constant_attributes.clearRetainingCapacity();
             self.deprecated_globals.clearRetainingCapacity();
             initConstants(&self.php_constants, self.allocator) catch {};
             extension.applyConstants(self) catch {};
@@ -7888,8 +7897,21 @@ pub const VM = struct {
                     const name_idx = self.readU16();
                     const name = self.currentChunk().constants.items[name_idx].string.bytes();
                     const val = self.pop();
-                    retainValue(val);
-                    try self.php_constants.put(self.allocator, name, val);
+                    if (!try self.defineConstant(name, val)) {
+                        // the attributes and deprecation that follow belong to
+                        // the declaration that lost
+                        const frame = self.currentFrame();
+                        while (true) {
+                            const next: OpCode = @enumFromInt(frame.chunk.code.items[frame.ip]);
+                            if (next != .bind_const_attributes and next != .deprecate_const) break;
+                            frame.ip += next.width();
+                        }
+                    }
+                },
+                .bind_const_attributes => {
+                    const name = self.currentChunk().constants.items[self.readU16()].string.bytes();
+                    const key = self.currentChunk().constants.items[self.readU16()].string.bytes();
+                    try self.constant_attributes.put(self.allocator, name, key);
                 },
 
                 .declare_fn => {
@@ -12763,6 +12785,21 @@ pub const VM = struct {
     pub const E_USER_DEPRECATED: i64 = 16384;
     pub const E_DEPRECATED: i64 = 8192;
 
+    // defines a global constant (`const`, define()); one already defined
+    // keeps its value, with php's warning. takes a reference to the value
+    // only when it defines
+    pub fn defineConstant(self: *VM, name: []const u8, value: Value) RuntimeError!bool {
+        if (self.php_constants.contains(name)) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Constant {s} already defined, this will be an error in PHP 9", .{name});
+            defer self.allocator.free(msg);
+            try self.emitWarning(msg);
+            return false;
+        }
+        retainValue(value);
+        try self.php_constants.put(self.allocator, name, value);
+        return true;
+    }
+
     pub fn emitWarning(self: *VM, msg: []const u8) RuntimeError!void {
         return self.raiseError(E_WARNING, msg);
     }
@@ -15577,6 +15614,7 @@ pub const VM = struct {
                 }
                 if (!exists) {
                     try def.properties.append(self.allocator, prop);
+                    try def.trait_property_origins.put(self.allocator, prop.name, trait_name);
                 }
             }
         }

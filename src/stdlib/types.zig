@@ -178,11 +178,13 @@ pub const entries = .{
 
 fn native_define(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    if (ctx.vm.php_constants.contains(args[0].string.bytes())) return NativeResult.scalar(.{ .bool = false });
+    if (ctx.vm.php_constants.contains(args[0].string.bytes())) {
+        _ = try ctx.vm.defineConstant(args[0].string.bytes(), args[1]);
+        return NativeResult.scalar(.{ .bool = false });
+    }
     const name = try ctx.createString(args[0].string.bytes());
     try ctx.vm.user_constants.put(ctx.allocator, name, {});
-    try ctx.vm.php_constants.put(ctx.allocator, name, args[1]);
-    VM.retainValue(args[1]);
+    _ = try ctx.vm.defineConstant(name, args[1]);
     return NativeResult.scalar(.{ .bool = true });
 }
 

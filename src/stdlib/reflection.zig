@@ -140,7 +140,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionConstant::getShortName", rconstGetShortName);
     try vm.native_fns.put(a, "ReflectionConstant::getNamespaceName", rconstGetNamespaceName);
     try vm.native_fns.put(a, "ReflectionConstant::isDeprecated", rconstIsDeprecated);
-    try vm.native_fns.put(a, "ReflectionConstant::getAttributes", reflectionEmptyArray);
+    try vm.native_fns.put(a, "ReflectionConstant::getAttributes", rconstGetAttributes);
     try vm.native_fns.put(a, "ReflectionConstant::getFileName", reflectionFalse);
     try vm.native_fns.put(a, "ReflectionConstant::__toString", rconstToString);
 
@@ -1044,6 +1044,11 @@ const PropertyDefResult = struct {
 };
 
 fn findPropertyDef(vm: *VM, class_name: []const u8, prop_name: []const u8) ?PropertyDefResult {
+    if (vm.trait_props.get(class_name)) |props| {
+        for (props) |prop| {
+            if (std.mem.eql(u8, prop.name, prop_name)) return .{ .prop = prop, .declaring_class = class_name };
+        }
+    }
     var current: ?[]const u8 = class_name;
     while (current) |name| {
         const cls = vm.classes.get(name) orelse break;
@@ -1655,9 +1660,9 @@ fn buildReflectionAttribute(ctx: *NativeContext, attr: AttributeDef, target: i64
         }
         try args_arr.append(ctx.allocator, arg);
     }
-    try obj.set(ctx.allocator, "_arguments", .{ .array = args_arr });
-    try obj.set(ctx.allocator, "_target", .{ .int = target });
-    try obj.set(ctx.allocator, "_is_repeated", .{ .bool = is_repeated });
+    try obj.set(ctx.allocator, "__arguments", .{ .array = args_arr });
+    try obj.set(ctx.allocator, "__target", .{ .int = target });
+    try obj.set(ctx.allocator, "__is_repeated", .{ .bool = is_repeated });
     // the reflector the scope name came from may be gone by the time the
     // arguments are read
     try obj.set(ctx.allocator, "__scope", .{ .string = Value.String.borrowed(try ctx.createString(scope)) });
@@ -1667,6 +1672,28 @@ fn buildReflectionAttribute(ctx: *NativeContext, attr: AttributeDef, target: i64
 // IS_INSTANCEOF = 2 in PHP's ReflectionAttribute constants. When set, the
 // filter matches any attribute whose class extends/implements the given name.
 const REFLECTION_ATTRIBUTE_IS_INSTANCEOF: i64 = 2;
+
+// php's reflect_attributes refuses an unknown filter flag, and with
+// IS_INSTANCEOF a filter class that doesn't exist, before looking at any
+// attribute
+fn checkAttributeFilter(ctx: *NativeContext, args: []const Value, comptime owner: []const u8) RuntimeError!void {
+    const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
+    if (flags & ~REFLECTION_ATTRIBUTE_IS_INSTANCEOF != 0) {
+        try ctx.vm.setPendingException("ValueError", owner ++ "::getAttributes(): Argument #2 ($flags) must be a valid attribute filter flag");
+        return error.RuntimeError;
+    }
+    if (flags & REFLECTION_ATTRIBUTE_IS_INSTANCEOF == 0 or args.len == 0 or args[0] != .string) return;
+    const name = args[0].string.bytes();
+    const bare = if (name.len > 0 and name[0] == '\\') name[1..] else name;
+    if (ctx.vm.classes.contains(bare) or ctx.vm.interfaces.contains(bare) or ctx.vm.traits.contains(bare)) return;
+    try ctx.vm.tryAutoload(bare);
+    if (ctx.vm.pending_exception != null) return error.RuntimeError;
+    if (ctx.vm.classes.contains(bare) or ctx.vm.interfaces.contains(bare) or ctx.vm.traits.contains(bare)) return;
+    const msg = try std.fmt.allocPrint(ctx.allocator, "Class \"{s}\" not found", .{bare});
+    defer ctx.allocator.free(msg);
+    try ctx.vm.setPendingException("Error", msg);
+    return error.RuntimeError;
+}
 
 fn buildAttributeArray(ctx: *NativeContext, attrs: []const AttributeDef, filter: ?[]const u8, target: i64, scope: []const u8) RuntimeError!NativeResult {
     return buildAttributeArrayWithFlags(ctx, attrs, filter, target, 0, scope);
@@ -1729,6 +1756,7 @@ fn reflectionGetDocCommentFalse(_: *NativeContext, _: []const Value) RuntimeErro
 }
 
 fn rcGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    try checkAttributeFilter(ctx, args, "ReflectionClass");
     const this = getThis(ctx) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const cls = ctx.vm.classes.get(class_name) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
@@ -2207,7 +2235,8 @@ fn bindClassConstant(ctx: *NativeContext, args: []const Value) RuntimeError![]co
     return owner;
 }
 
-fn rccGetAttributes(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+fn rccGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    try checkAttributeFilter(ctx, args, "ReflectionClassConstant");
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const class_name = if (this.get("class") == .string) this.get("class").string.bytes() else return NativeResult.scalar(.null);
     const const_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
@@ -2822,6 +2851,7 @@ fn rpGetDefaultValueConstantName(ctx: *NativeContext, _: []const Value) RuntimeE
 }
 
 fn rpGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    try checkAttributeFilter(ctx, args, "ReflectionParameter");
     const this = getThis(ctx) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const param_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const filter_arg: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else null;
@@ -3319,6 +3349,7 @@ fn rfGetClosureCalledClass(ctx: *NativeContext, _: []const Value) RuntimeError!N
 }
 
 fn rfGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    try checkAttributeFilter(ctx, args, "ReflectionFunctionAbstract");
     const this = getThis(ctx) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const func_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const compile_name = compiledFunctionName(ctx.vm, func_name);
@@ -4372,14 +4403,23 @@ fn rpropGetModifiers(ctx: *NativeContext, _: []const Value) RuntimeError!NativeR
 }
 
 fn rpropGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    try checkAttributeFilter(ctx, args, "ReflectionProperty");
     const this = getThis(ctx) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const prop_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-    const cls = ctx.vm.classes.get(declaring) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-    const attrs = cls.property_attributes.get(prop_name) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+    const attrs = propertyAttributes(ctx.vm, declaring, prop_name) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else null;
     const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
     return buildAttributeArrayWithFlags(ctx, attrs, filter, 8, flags, declaring);
+}
+
+// a property's attributes, read from the trait that declared it when the
+// class took the property from one
+fn propertyAttributes(vm: *VM, class_name: []const u8, prop_name: []const u8) ?[]const AttributeDef {
+    const cls = vm.classes.get(class_name) orelse return null;
+    if (cls.property_attributes.get(prop_name)) |attrs| return attrs;
+    const trait = cls.trait_property_origins.get(prop_name) orelse return null;
+    return propertyAttributes(vm, trait, prop_name);
 }
 
 fn rpropGetDocComment(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -4570,6 +4610,7 @@ fn reflectionGetModifierNames(ctx: *NativeContext, args: []const Value) RuntimeE
 }
 
 fn rmGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    try checkAttributeFilter(ctx, args, "ReflectionFunctionAbstract");
     const this = getThis(ctx) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const method_name = methodLookupName(this) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
@@ -4644,7 +4685,7 @@ fn raGetName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
 
 fn raGetArguments(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-    const args = this.get("_arguments");
+    const args = this.get("__arguments");
     if (args == .array) return NativeResult.borrowed(.{ .array = try resolvedArguments(ctx, this, args.array) });
     return NativeResult.borrowed(.{ .array = try ctx.createArray() });
 }
@@ -4670,6 +4711,7 @@ fn targetName(t: i64) []const u8 {
         8 => "property",
         16 => "class constant",
         32 => "parameter",
+        64 => "constant",
         else => "this declaration",
     };
 }
@@ -4688,8 +4730,19 @@ fn getAttributeFlags(vm: *VM, class_name: []const u8) RuntimeError!i64 {
     for (cls.attributes.items) |attr| {
         if (std.mem.eql(u8, attr.name, "Attribute")) {
             if (attr.args.len == 0) return 127; // TARGET_ALL
+            // php's zend_attribute_attribute_get_flags
             const flags = try vm.attributeArgumentValue(attr.args[0], class_name);
-            return if (flags == .int) flags.int else 127;
+            if (flags != .int) {
+                const msg = try std.fmt.allocPrint(vm.allocator, "Attribute::__construct(): Argument #1 ($flags) must be of type int, {s} given", .{flags.valueName()});
+                defer vm.allocator.free(msg);
+                try vm.setPendingException("Error", msg);
+                return error.RuntimeError;
+            }
+            if (flags.int & ~@as(i64, 255) != 0) {
+                try vm.setPendingException("Error", "Invalid attribute flags specified");
+                return error.RuntimeError;
+            }
+            return flags.int;
         }
     }
     return 127;
@@ -4719,7 +4772,7 @@ fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
         return error.RuntimeError;
     }
 
-    const target_val = this.get("_target");
+    const target_val = this.get("__target");
     if (target_val == .int) {
         const target = target_val.int;
         const flags = try getAttributeFlags(ctx.vm, attr_name);
@@ -4727,7 +4780,7 @@ fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
             const used = targetName(target);
             var allowed_buf: std.ArrayListUnmanaged(u8) = .empty;
             defer allowed_buf.deinit(ctx.allocator);
-            const bits = [_]i64{ 1, 2, 4, 8, 16, 32 };
+            const bits = [_]i64{ 1, 2, 4, 8, 16, 32, 64 };
             for (bits) |b| {
                 if ((flags & b) != 0) {
                     if (allowed_buf.items.len > 0) try allowed_buf.appendSlice(ctx.allocator, ", ");
@@ -4741,7 +4794,7 @@ fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
         }
     }
 
-    const is_repeated_val = this.get("_is_repeated");
+    const is_repeated_val = this.get("__is_repeated");
     if (is_repeated_val == .bool and is_repeated_val.bool) {
         const flags = try getAttributeFlags(ctx.vm, attr_name);
         if ((flags & 128) == 0) {
@@ -4752,8 +4805,18 @@ fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
         }
     }
 
+    // the attribute is built from no class's scope
+    if (ctx.vm.hasMethod(attr_name, "__construct")) {
+        const ctor = ctx.vm.findMethodVisibility(attr_name, "__construct");
+        if (ctor.visibility != .public) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Call to {s} {s}::__construct() from global scope", .{ if (ctor.visibility == .private) "private" else "protected", ctor.defining_class });
+            defer ctx.allocator.free(msg);
+            try ctx.vm.setPendingException("Error", msg);
+            return error.RuntimeError;
+        }
+    }
     const obj = try ctx.createObject(attr_name);
-    const stored_args = this.get("_arguments");
+    const stored_args = this.get("__arguments");
     const args_val: Value = if (stored_args == .array) .{ .array = try resolvedArguments(ctx, this, stored_args.array) } else stored_args;
     // without a constructor php drops positional arguments and refuses
     // named ones
@@ -4771,7 +4834,7 @@ fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
     // (e.g. Symfony's Constraint::__construct does `unset($this->groups)`
     // to set up lazy default-group handling)
     if (args_val != .array or args_val.array.entries.items.len == 0) {
-        _ = ctx.callMethod(obj, "__construct", &.{}) catch {};
+        _ = try ctx.callMethod(obj, "__construct", &.{});
         return NativeResult.borrowed(.{ .object = obj });
     }
     if (args_val == .array) {
@@ -4859,13 +4922,13 @@ fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
 
 fn raGetTarget(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
-    const target = this.get("_target");
+    const target = this.get("__target");
     return if (target == .int) NativeResult.share(target) else NativeResult.scalar(.{ .int = 0 });
 }
 
 fn raIsRepeated(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const repeated = this.get("_is_repeated");
+    const repeated = this.get("__is_repeated");
     return if (repeated == .bool) NativeResult.share(repeated) else NativeResult.scalar(.{ .bool = false });
 }
 
@@ -5207,6 +5270,18 @@ fn rconstIsDeprecated(ctx: *NativeContext, _: []const Value) RuntimeError!Native
     const name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
     if (deprecations.constants.has(name)) return NativeResult.scalar(.{ .bool = true });
     return NativeResult.scalar(.{ .bool = ctx.vm.deprecated_globals.contains(name) });
+}
+
+fn rconstGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    try checkAttributeFilter(ctx, args, "ReflectionConstant");
+    const this = getThis(ctx) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+    const name = this.get("name");
+    if (name != .string) return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+    const key = ctx.vm.constant_attributes.get(name.string.bytes()) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+    const attrs = ctx.vm.function_attributes.get(key) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+    const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else null;
+    const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
+    return buildAttributeArrayWithFlags(ctx, attrs, filter, 64, flags, "");
 }
 
 fn rconstConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

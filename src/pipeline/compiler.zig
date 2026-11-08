@@ -597,6 +597,12 @@ pub const Compiler = struct {
                 }
             },
             .block => {
+                // `const A = 1, B = 2;` is a block opened by the const keyword
+                if (self.ast.tokens[node.main_token].tag == .kw_const) {
+                    for (self.ast.attr_ranges) |ar| {
+                        if (ar.target_tok == node.main_token) return self.fail(node.main_token, "Cannot apply attributes to multiple constants at once");
+                    }
+                }
                 for (self.ast.extraSlice(node.data.lhs)) |stmt| {
                     try self.compileNode(stmt);
                 }
@@ -619,6 +625,7 @@ pub const Compiler = struct {
                 const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });
                 try self.emitOp(.define_const);
                 try self.emitU16(name_idx);
+                try compiler_class.emitConstantAttributes(self, node.main_token, name_idx);
                 // php 8.5 allows #[\Deprecated] on a global constant
                 if (try compiler_class.deprecationOfDecl(self, node.main_token)) |suffix| {
                     try self.emitOp(.deprecate_const);

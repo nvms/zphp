@@ -142,6 +142,23 @@ fn keepString(self: *Compiler, owned: []u8) Error![]const u8 {
     return owned;
 }
 
+// a global constant's attributes, filed with the functions' under
+// constantAttributesName and bound to the constant when its definition
+// (the define_const just emitted) succeeds
+pub fn emitConstantAttributes(self: *Compiler, main_token: u32, name_idx: u16) Error!void {
+    const attrs = try extractAttributes(self, main_token, AttrTarget.constant);
+    if (attrs.len == 0) return;
+    defer self.allocator.free(attrs);
+    const defs = try self.allocator.alloc(AttributeDef, attrs.len);
+    for (attrs, 0..) |pa, i| defs[i] = .{ .name = pa.name, .args = pa.args, .arg_names = pa.arg_names };
+    const key = try @import("bytecode.zig").constantAttributesName(self.allocator, self.file_path, main_token);
+    try self.string_allocs.append(self.allocator, key);
+    try self.function_attrs.append(self.allocator, .{ .name = key, .attrs = defs });
+    try self.emitOp(.bind_const_attributes);
+    try self.emitU16(name_idx);
+    try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(key) }));
+}
+
 // what a #[\Deprecated] on the declaration at main_token adds after "is
 // deprecated" (" since 2.0, use X", or ""), null without the attribute
 pub fn deprecationOfDecl(self: *Compiler, main_token: u32) Error!?[]const u8 {
@@ -193,6 +210,7 @@ pub const AttrTarget = union(enum) {
     pub const property: AttrTarget = .{ .flags = 8 };
     pub const class_constant: AttrTarget = .{ .flags = 16 };
     pub const parameter: AttrTarget = .{ .flags = 32 };
+    pub const constant: AttrTarget = .{ .flags = 64 };
     // a promoted constructor parameter is a parameter and a property
     pub const promoted: AttrTarget = .{ .flags = 32 | 8 };
 };
@@ -344,6 +362,7 @@ fn extractAttributes(self: *Compiler, main_token: u32, target: AttrTarget) Error
 // the attribute is in
 fn attributeArgument(self: *Compiler, idx: u32, target: u32) Error!Value {
     if (hasEmptyArrayElement(self.ast, idx)) return self.fail(target, "Cannot use empty array elements in arrays");
+    if (hasDynamicClassConstant(self.ast, idx)) return self.fail(target, "Dynamic class names are not allowed in compile-time class constant references");
     if (!allowedInConstExpr(self.ast, idx)) return self.fail(target, "Constant expression contains invalid operations");
     if (findStaticClass(self.ast, idx) != null) return self.fail(target, "static::class cannot be used for compile-time class name resolution");
     if (namedClassName(self, idx)) |name| return .{ .string = Value.String.borrowed(name) };
@@ -371,6 +390,28 @@ fn hasEmptyArrayElement(ast: *const Ast, idx: u32) bool {
         } else false,
         .binary_op, .logical_and, .logical_or, .null_coalesce, .array_access => hasEmptyArrayElement(ast, node.data.lhs) or hasEmptyArrayElement(ast, node.data.rhs),
         .grouped_expr, .cast_expr, .prefix_op, .property_access, .nullsafe_property_access => hasEmptyArrayElement(ast, node.data.lhs),
+        else => false,
+    };
+}
+
+// `expr::CONST` with a class that isn't a name
+fn hasDynamicClassConstant(ast: *const Ast, idx: u32) bool {
+    if (idx == 0) return false;
+    const node = ast.nodes[idx];
+    return switch (node.tag) {
+        .static_prop_access => switch (ast.nodes[node.data.lhs].tag) {
+            .identifier, .qualified_name => false,
+            else => !std.mem.startsWith(u8, ast.tokenSlice(node.main_token), "$"),
+        },
+        .dynamic_class_const => true,
+        .array_literal => for (ast.extraSlice(node.data.lhs)) |el_idx| {
+            if (el_idx == 0) continue;
+            const el = ast.nodes[el_idx];
+            if (hasDynamicClassConstant(ast, el.data.lhs)) break true;
+            if (el.tag == .array_element and hasDynamicClassConstant(ast, el.data.rhs)) break true;
+        } else false,
+        .binary_op, .logical_and, .logical_or, .null_coalesce, .array_access => hasDynamicClassConstant(ast, node.data.lhs) or hasDynamicClassConstant(ast, node.data.rhs),
+        .grouped_expr, .cast_expr, .prefix_op, .property_access, .nullsafe_property_access => hasDynamicClassConstant(ast, node.data.lhs),
         else => false,
     };
 }
@@ -2429,6 +2470,25 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
             .name = pname,
             .attrs = pattrs,
         });
+    }
+    // a trait's property the class doesn't declare itself keeps the trait's
+    // attributes
+    trait_props: for (trait_prop_members.items) |tpi| {
+        const tmember = self.ast.nodes[tpi];
+        var tname = self.ast.tokenSlice(tmember.main_token);
+        if (tname.len > 0 and tname[0] == '$') tname = tname[1..];
+        for (props_with_attrs.items) |existing| {
+            if (std.mem.eql(u8, existing.name, tname)) continue :trait_props;
+        }
+        for (members) |member_idx| {
+            const member = self.ast.nodes[member_idx];
+            if (member.tag != .class_property and member.tag != .class_property_hooks) continue;
+            const own = self.ast.tokenSlice(member.main_token);
+            if (std.mem.eql(u8, if (own.len > 0 and own[0] == '$') own[1..] else own, tname)) continue :trait_props;
+        }
+        const tattrs = try extractAttributes(self, tmember.main_token, .unchecked);
+        if (tattrs.len == 0) continue;
+        try props_with_attrs.append(self.allocator, .{ .name = tname, .attrs = tattrs });
     }
     try self.emitByte(@intCast(props_with_attrs.items.len));
     for (props_with_attrs.items) |pa| {

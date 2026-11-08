@@ -431,11 +431,14 @@ pub const OpCode = enum(u8) {
     // u16 class, u16 forward offset: jumps when the class is declared, so
     // an anonymous class is declared only the first time its `new` runs
     jump_if_class_declared,
+    // u16 constant name, u16 attribute entry: right after a define_const,
+    // which skips it when the constant was already defined
+    bind_const_attributes,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
             .arg_variable => 6,
-            .jump_if_class_declared => 5,
+            .jump_if_class_declared, .bind_const_attributes => 5,
             .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim, .arg_append => 4,
             .reference_source,
             .enter_class_scope,
@@ -718,6 +721,11 @@ pub fn constInitializerName(allocator: std.mem.Allocator, class_name: []const u8
 // the function attribute entry holding a function's parameter's attributes
 pub fn paramAttributesName(allocator: std.mem.Allocator, func_name: []const u8, param: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}\x00{s}", .{ func_name, param });
+}
+
+// the function attribute entry holding a global constant's attributes
+pub fn constantAttributesName(allocator: std.mem.Allocator, file_path: []const u8, token: u32) ![]u8 {
+    return std.fmt.allocPrint(allocator, "\x00constant\x00{s}\x00{d}", .{ file_path, token });
 }
 
 // an attribute argument php evaluates when reflection asks for it: the
