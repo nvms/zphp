@@ -238,6 +238,7 @@ Zend/tests/bug34617.phpt
 Zend/tests/bug34678.phpt
 Zend/tests/bug35017.phpt
 Zend/tests/bug35163_2.phpt
+Zend/tests/bug35470.phpt
 Zend/tests/bug35509.phpt
 Zend/tests/bug35634.phpt
 Zend/tests/bug36568.phpt
@@ -686,6 +687,7 @@ Zend/tests/dynamic_call/dynamic_call_to_ref_returning_function.phpt
 Zend/tests/dynamic_call/dynamic_fully_qualified_call.phpt
 Zend/tests/dynamic_call/dynamic_method_calls.phpt
 Zend/tests/dynamic_call/variable_variables_curly_syntax.phpt
+Zend/tests/dynamic_call/variable_variables_function_names.phpt
 Zend/tests/e_strict-deprecated.phpt
 Zend/tests/empty_with_expr.phpt
 Zend/tests/entry_block_with_predecessors.phpt
@@ -1205,6 +1207,8 @@ Zend/tests/gh7958.phpt
 Zend/tests/ghsa-rwp7-7vc6-8477_001.phpt
 Zend/tests/ghsa-rwp7-7vc6-8477_002.phpt
 Zend/tests/ghsa-rwp7-7vc6-8477_003.phpt
+Zend/tests/global_to_string_exception.phpt
+Zend/tests/global_with_side_effect_name.phpt
 Zend/tests/globals_005.phpt
 Zend/tests/grammar/alternative_offset_syntax_compile_error_in_const_expr.phpt
 Zend/tests/grammar/alternative_offset_syntax_compile_error_outside_const_expr.phpt
@@ -1218,6 +1222,7 @@ Zend/tests/grammar/bug77993.phpt
 Zend/tests/grammar/bug78363.phpt
 Zend/tests/grammar/bug78441.phpt
 Zend/tests/grammar/gh14961.phpt
+Zend/tests/grammar/readonly_function.phpt
 Zend/tests/grammar/regression_001.phpt
 Zend/tests/grammar/regression_006.phpt
 Zend/tests/grammar/regression_008.phpt
@@ -1227,7 +1232,9 @@ Zend/tests/grammar/regression_013.phpt
 Zend/tests/grammar/semi_reserved_001.phpt
 Zend/tests/grammar/semi_reserved_003.phpt
 Zend/tests/grammar/semi_reserved_005.phpt
+Zend/tests/grammar/semi_reserved_006.phpt
 Zend/tests/grammar/semi_reserved_007.phpt
+Zend/tests/grammar/semi_reserved_008.phpt
 Zend/tests/grammar/semi_reserved_009.phpt
 Zend/tests/grammar/semi_reserved_010.phpt
 Zend/tests/group_use/ns_trailing_comma_01.phpt
@@ -6156,6 +6163,7 @@ tests/lang/bug23524.phpt
 tests/lang/bug23584.phpt
 tests/lang/bug23624.phpt
 tests/lang/bug24054.phpt
+tests/lang/bug24396.phpt
 tests/lang/bug24436.phpt
 tests/lang/bug24499.phpt
 tests/lang/bug24652.phpt
