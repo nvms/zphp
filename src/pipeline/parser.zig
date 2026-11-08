@@ -838,20 +838,12 @@ const Parser = struct {
     // carrying the declared type
     fn parseConstList(self: *Parser, out: *std.ArrayListUnmanaged(u32)) Error!void {
         _ = self.advance(); // const
-        // PHP 8.3 typed class constants: `const string NAME = "hi";`. detect
-        // `?T NAME = ...` or `T NAME = ...` by looking past an optional `?` and
-        // a type token to see whether a const name + `=` follows
+        // php 8.3 typed class constants (`const int|string NAME = 1;`): a
+        // name followed by `=` is an untyped constant, anything else a type
         const at0 = self.peek();
         var type_range: [2]u32 = .{ 0, 0 };
-        if (at0 == .question or (self.isTypeName() and at0 != .identifier) or
-            (at0 == .identifier and (self.peekAt(1) == .identifier or isSemiReserved(self.peekAt(1))) and self.peekAt(2) == .equal))
-        {
-            const probe: u32 = if (at0 == .question) 2 else 1;
-            const next_tag = self.peekAt(probe);
-            const after_tag = self.peekAt(probe + 1);
-            if ((next_tag == .identifier or isSemiReserved(next_tag)) and after_tag == .equal) {
-                type_range = self.collectTypeHint();
-            }
+        if (!((at0 == .identifier or isSemiReserved(at0)) and self.peekAt(1) == .equal)) {
+            type_range = self.collectTypeHint();
         }
         var rhs: u32 = 0;
         if (type_range[0] != type_range[1]) {
