@@ -1343,6 +1343,41 @@ const no_classes: php_types.Classes = .{
     }.f,
 };
 
+// the insteadof and as rules of a declaration's `use` statements: a count,
+// then per rule the method, the trait (or ""), and 1 with the excluded traits
+// or 2 with the alias and its visibility
+fn emitTraitRules(self: *Compiler, members: []const u32) Error!void {
+    var rules = std.ArrayListUnmanaged(Ast.Node).empty;
+    defer rules.deinit(self.allocator);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag == .trait_use and member.data.rhs != 0) {
+            for (self.ast.extraSlice(member.data.rhs)) |cn| try rules.append(self.allocator, self.ast.nodes[cn]);
+        }
+    }
+    try self.emitByte(@intCast(rules.items.len));
+    for (rules.items) |rule| {
+        const method_name = self.ast.tokenSlice(rule.main_token);
+        const trait_name = if (rule.data.lhs == 0) "" else self.ast.tokenSlice(self.ast.nodes[rule.data.lhs].main_token);
+        try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(method_name) }));
+        try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(trait_name) }));
+        if (rule.tag == .trait_insteadof) {
+            try self.emitByte(1);
+            const excluded = self.ast.extraSlice(rule.data.rhs);
+            try self.emitByte(@intCast(excluded.len));
+            for (excluded) |en| {
+                const ename = self.ast.tokenSlice(self.ast.nodes[en].main_token);
+                try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(ename) }));
+            }
+        } else {
+            try self.emitByte(2);
+            const alias_token: u32 = rule.data.rhs & 0x3FFFFFFF;
+            try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(self.ast.tokenSlice(alias_token)) }));
+            try self.emitByte(@intCast(rule.data.rhs >> 30));
+        }
+    }
+}
+
 fn propertyTypeConst(self: *Compiler, prop_rhs: u32) Error!u16 {
     const type_extra = prop_rhs >> 16;
     if (type_extra == 0) return 0xffff;
@@ -2483,45 +2518,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
         try self.emitU16(tname_idx);
     }
 
-    // collect conflict resolution rules from trait_use statements
-    const ConflictRule = struct { node: Ast.Node };
-    var all_conflicts = std.ArrayListUnmanaged(ConflictRule).empty;
-    defer all_conflicts.deinit(self.allocator);
-    for (members) |member_idx| {
-        const member = self.ast.nodes[member_idx];
-        if (member.tag == .trait_use and member.data.rhs != 0) {
-            for (self.ast.extraSlice(member.data.rhs)) |cn| {
-                try all_conflicts.append(self.allocator, .{ .node = self.ast.nodes[cn] });
-            }
-        }
-    }
-    try self.emitByte(@intCast(all_conflicts.items.len));
-    for (all_conflicts.items) |cr| {
-        const method_name = self.ast.tokenSlice(cr.node.main_token);
-        const trait_name = if (cr.node.data.lhs == 0) "" else self.ast.tokenSlice(self.ast.nodes[cr.node.data.lhs].main_token);
-        const method_idx = try self.addConstant(.{ .string = Value.String.borrowed(method_name) });
-        const trait_idx = try self.addConstant(.{ .string = Value.String.borrowed(trait_name) });
-        try self.emitU16(method_idx);
-        try self.emitU16(trait_idx);
-        if (cr.node.tag == .trait_insteadof) {
-            try self.emitByte(1);
-            const excluded = self.ast.extraSlice(cr.node.data.rhs);
-            try self.emitByte(@intCast(excluded.len));
-            for (excluded) |en| {
-                const ename = self.ast.tokenSlice(self.ast.nodes[en].main_token);
-                const eidx = try self.addConstant(.{ .string = Value.String.borrowed(ename) });
-                try self.emitU16(eidx);
-            }
-        } else {
-            try self.emitByte(2);
-            const alias_token: u32 = cr.node.data.rhs & 0x3FFFFFFF;
-            const vis_kind: u8 = @intCast(cr.node.data.rhs >> 30);
-            const alias = self.ast.tokenSlice(alias_token);
-            const aidx = try self.addConstant(.{ .string = Value.String.borrowed(alias) });
-            try self.emitU16(aidx);
-            try self.emitByte(vis_kind);
-        }
-    }
+    try emitTraitRules(self, members);
 
     // class-level attributes
     const class_attrs = try extractAttributes(self, shape.attributes_at, .{ .class = .{ .kind = .class, .name = class_name, .modifiers = class_modifiers } });
@@ -3062,6 +3059,8 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         const st_idx = try self.addConstant(.{ .string = Value.String.borrowed(st) });
         try self.emitU16(st_idx);
     }
+    // a trait's own insteadof and as rules apply when it is composed
+    try emitTraitRules(self, members);
     try self.emitByte(@intCast(own_props.items.len));
     for (own_props.items) |pi| {
         const pmember = self.ast.nodes[pi];
