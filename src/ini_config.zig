@@ -250,6 +250,7 @@ pub fn applyToVm(vm: *VM) RuntimeError!void {
             if (vm.memoryLimitCap(@import("runtime/memory.zig").parseQuantity(d.value).value)) |cap| try vm.ini_settings.put(vm.allocator, d.name, cap.text);
         }
     }
+    vm.syncGcEnabled();
 }
 
 test "ini values are cooked the way php cooks them" {

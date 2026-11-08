@@ -1548,6 +1548,7 @@ fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "display_errors")) return "0";
     if (std.mem.eql(u8, name, "error_reporting")) return "30719";
     if (std.mem.eql(u8, name, "zend.assertions")) return "1";
+    if (std.mem.eql(u8, name, "zend.enable_gc")) return "1";
     if (std.mem.eql(u8, name, "assert.active")) return "1";
     if (std.mem.eql(u8, name, "assert.exception")) return "0";
     if (std.mem.eql(u8, name, "assert.bail")) return "0";
@@ -1595,6 +1596,7 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         const seconds = std.fmt.parseInt(i64, std.mem.trim(u8, new_val, " \t\r\n"), 10) catch 0;
         ctx.vm.setExecutionLimit(seconds);
     }
+    if (std.mem.eql(u8, name, "zend.enable_gc")) ctx.vm.syncGcEnabled();
     return result;
 }
 
@@ -1862,12 +1864,15 @@ fn native_gc_enabled(ctx: *NativeContext, _: []const Value) RuntimeError!NativeR
     return NativeResult.scalar(.{ .bool = ctx.vm.gc_enabled });
 }
 
+// php's gc_enable()/gc_disable() set zend.enable_gc
 fn native_gc_disable(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    _ = try ctx.vm.setIni("zend.enable_gc", "0");
     ctx.vm.gc_enabled = false;
     return NativeResult.scalar(.null);
 }
 
 fn native_gc_enable(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    _ = try ctx.vm.setIni("zend.enable_gc", "1");
     ctx.vm.gc_enabled = true;
     return NativeResult.scalar(.null);
 }
@@ -1892,6 +1897,7 @@ fn native_ini_restore(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     const name = args[0].string.bytes();
     try ctx.vm.restoreIni(name);
     if (std.mem.eql(u8, name, "memory_limit")) ctx.vm.applyConfiguredMemoryLimit(false);
+    if (std.mem.eql(u8, name, "zend.enable_gc")) ctx.vm.syncGcEnabled();
     return NativeResult.scalar(.null);
 }
 

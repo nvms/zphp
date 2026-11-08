@@ -12817,6 +12817,11 @@ pub const VM = struct {
         return !(std.ascii.eqlIgnoreCase(val, "off") or std.ascii.eqlIgnoreCase(val, "false") or std.ascii.eqlIgnoreCase(val, "no"));
     }
 
+    // gc_enabled mirrors zend.enable_gc, which gc_enable()/gc_disable() set too
+    pub fn syncGcEnabled(self: *VM) void {
+        self.gc_enabled = self.iniFlagOn("zend.enable_gc", "1");
+    }
+
     pub fn logErrorsEnabled(self: *const VM) bool {
         return self.iniFlagOn("log_errors", "1");
     }
