@@ -6287,7 +6287,8 @@ pub const VM = struct {
                     }
                 },
 
-                .iter_begin => {
+                .iter_begin, .iter_begin_ref => {
+                    const by_ref = op == .iter_begin_ref;
                     var iterable = self.stack[self.sp - 1];
                     if (iterable == .array) {
                         const src = iterable.array;
@@ -6322,6 +6323,10 @@ pub const VM = struct {
                         self.stackRelease(iterable);
                         iterable = .{ .array = copy };
                     }
+                    if (by_ref and iterable == .generator) if (self.foreachByRefRefusal(iterable)) |refusal| {
+                        if (try self.throwBuiltinException(refusal.class, refusal.message)) continue;
+                        return error.RuntimeError;
+                    };
                     if (iterable == .generator) {
                         if (iterable.generator.state == .completed) {
                             if (try self.throwBuiltinException("Exception", "Cannot traverse an already closed generator")) continue;
@@ -6359,6 +6364,10 @@ pub const VM = struct {
                         }
                         if (unwrap_dispatched) continue;
                         if (unwrap_failed) return error.RuntimeError;
+                        if (by_ref) if (self.foreachByRefRefusal(iterable)) |refusal| {
+                            if (try self.throwBuiltinException(refusal.class, refusal.message)) continue;
+                            return error.RuntimeError;
+                        };
                         // getIterator may have returned a generator; iterate it directly
                         if (iterable == .generator) {
                             try self.pushIteratorMarker();
@@ -11299,6 +11308,23 @@ pub const VM = struct {
     fn resolveRelativeClassName(self: *VM, name: []const u8) []const u8 {
         const relative = std.mem.eql(u8, name, "self") or std.mem.eql(u8, name, "static") or std.mem.eql(u8, name, "parent");
         return if (relative) self.resolveStaticClassName(name) else name;
+    }
+
+    // why php won't run a foreach by reference over this iterable, if it
+    // won't: an iterator can't hand out references, except an ArrayIterator
+    // whose current() is its own, and a generator only if it yields by
+    // reference
+    fn foreachByRefRefusal(self: *VM, iterable: Value) ?struct { class: []const u8, message: []const u8 } {
+        switch (iterable) {
+            .generator => |gen| if (!gen.func.returns_ref) return .{ .class = "Exception", .message = "You can only iterate a generator by-reference if it declared that it yields by-reference" },
+            .object => |obj| if (self.isInstanceOf(obj.class_name, "Traversable")) {
+                const own_current = self.isInstanceOf(obj.class_name, "ArrayIterator") and
+                    self.native_fns.contains(self.resolveMethod(obj.class_name, "current") catch "");
+                if (!own_current) return .{ .class = "Error", .message = "An iterator cannot be used with foreach by reference" };
+            },
+            else => {},
+        }
+        return null;
     }
 
     // a static call site and its inline cache entry

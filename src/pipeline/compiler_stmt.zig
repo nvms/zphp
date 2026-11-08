@@ -252,7 +252,7 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     } else {
         try self.compileNode(iter_n);
     }
-    try self.emitOp(.iter_begin);
+    try self.emitOp(if (val_by_ref) .iter_begin_ref else .iter_begin);
 
     const loop_top = self.chunk.offset();
     self.loop_start = loop_top;

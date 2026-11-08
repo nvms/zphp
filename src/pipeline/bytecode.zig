@@ -405,6 +405,9 @@ pub const OpCode = enum(u8) {
     // the exception on top of the stack is the one the finally block about
     // to run holds until it rethrows it
     hold_exception,
+    // iter_begin for a foreach by reference, which php refuses for iterators
+    // (php's get_iterator with by_ref)
+    iter_begin_ref,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
