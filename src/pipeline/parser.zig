@@ -1924,10 +1924,14 @@ const Parser = struct {
         _ = self.advance(); // enum
         const name_tok = try self.expect(.identifier);
 
+        // the backing type's first token; the compiler reads the whole type
+        // to refuse anything but int and string
         var backed_type_token: u32 = 0;
         if (self.peek() == .colon) {
             _ = self.advance();
-            backed_type_token = self.advance();
+            backed_type_token = self.pos;
+            self.skipTypeHint();
+            if (self.pos == backed_type_token) _ = self.advance();
         }
 
         var implements = std.ArrayListUnmanaged(u32).empty;
@@ -1973,17 +1977,30 @@ const Parser = struct {
             } else {
                 var is_static = false;
                 var is_final = false;
+                var is_abstract = false;
                 var visibility: u32 = 0;
                 while (self.peek() == .kw_public or self.peek() == .kw_protected or
-                    self.peek() == .kw_private or self.peek() == .kw_static or self.peek() == .kw_final)
+                    self.peek() == .kw_private or self.peek() == .kw_static or self.peek() == .kw_final or
+                    self.peek() == .kw_abstract or self.peek() == .kw_readonly or self.peek() == .kw_var)
                 {
                     if (self.peek() == .kw_static) is_static = true;
                     if (self.peek() == .kw_final) is_final = true;
+                    if (self.peek() == .kw_abstract) is_abstract = true;
                     if (self.peek() == .kw_protected) visibility = 1;
                     if (self.peek() == .kw_private) visibility = 2;
                     _ = self.advance();
                 }
-                if (self.peek() == .kw_function) {
+                // an abstract method or a property is the compiler's error
+                if (self.peek() == .kw_function and is_abstract) {
+                    try members.append(self.allocator, try self.parseInterfaceMethod(is_static));
+                } else if (self.peek() == .variable or (self.peek() != .kw_function and self.peek() != .kw_const and (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren))) {
+                    _ = self.collectTypeHint();
+                    if (self.peek() != .variable) {
+                        try self.addError(.unexpected_token);
+                        return error.ParseError;
+                    }
+                    try members.append(self.allocator, try self.parseClassProperty());
+                } else if (self.peek() == .kw_function) {
                     const method = try self.parseClassMethod();
                     if (is_static) {
                         self.nodes.items[method].tag = .static_class_method;

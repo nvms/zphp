@@ -3186,6 +3186,43 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (props_with_attrs.items) |pa| freeAttrSlice(self.allocator, pa.attrs);
 }
 
+// php's compile-time checks of an enum (zend_compile_enum_type and its
+// member compilation): the backing type, then each member in order
+fn checkEnumDecl(self: *Compiler, enum_name: []const u8, enum_tok: u32, backed_type_token: u32, members: []const u32) Error!void {
+    if (backed_type_token != 0) {
+        var end = backed_type_token;
+        while (end < self.ast.tokens.len and self.ast.tokens[end].tag != .l_brace and self.ast.tokens[end].tag != .kw_implements) end += 1;
+        const written = try buildTypeString(self, backed_type_token, end);
+        if (std.mem.eql(u8, written, "int") or std.mem.eql(u8, written, "string")) return checkEnumMembers(self, enum_name, enum_tok, true, members);
+        const shown = blk: {
+            const t = php_types.parse(self.allocator, written, enum_name, null) catch break :blk written;
+            defer t.deinit(self.allocator);
+            const text = php_types.format(self.allocator, t) catch break :blk written;
+            try self.string_allocs.append(self.allocator, text);
+            break :blk text;
+        };
+        return self.failFmt(backed_type_token, "Enum backing type must be int or string, {s} given", .{shown});
+    }
+    return checkEnumMembers(self, enum_name, enum_tok, false, members);
+}
+
+fn checkEnumMembers(self: *Compiler, enum_name: []const u8, enum_tok: u32, backed: bool, members: []const u32) Error!void {
+    for (members) |m| {
+        const member = self.ast.nodes[m];
+        switch (member.tag) {
+            .enum_case => {
+                const case = self.ast.tokenSlice(member.main_token);
+                if (!backed and member.data.lhs != 0) return self.failFmt(member.main_token, "Case {s} of non-backed enum {s} must not have a value", .{ case, enum_name });
+                if (backed and member.data.lhs == 0) return self.failFmt(member.main_token, "Case {s} of backed enum {s} must have a value", .{ case, enum_name });
+            },
+            .class_property, .static_class_property, .class_property_hooks => return self.failFmt(member.main_token, "Enum {s} cannot include properties", .{enum_name}),
+            .interface_method => return self.failFmt(member.main_token, "Enum method {s}::{s}() must not be abstract", .{ enum_name, self.ast.tokenSlice(member.main_token) }),
+            else => {},
+        }
+    }
+    _ = enum_tok;
+}
+
 pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
     const enum_name = self.declaredName(self.ast.tokenSlice(node.main_token));
     const outer_class = self.current_class;
@@ -3207,6 +3244,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
     try checkImportCollision(self, node.main_token, .class, enum_name);
+    try checkEnumDecl(self, enum_name, node.main_token, backed_type_token, members);
     try checkDuplicateMembers(self, enum_name, members);
     try checkConstDecls(self, enum_name, members);
 

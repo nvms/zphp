@@ -15444,6 +15444,13 @@ pub const VM = struct {
 
         var def = ClassDef{ .name = enum_name, .is_enum = true, .is_internal = false, .file_path = site.file, .start_line = site.start_line, .end_line = site.end_line, .doc_comment = site.doc_comment };
         def.backed_type = @enumFromInt(backed_type_byte);
+        // a case's name (and a backed case's value) is a public readonly
+        // property, and an enum takes no other
+        def.no_dynamic_properties = true;
+        // php declares them without the protected(set) user readonly
+        // properties imply
+        try def.properties.append(self.allocator, .{ .name = "name", .default = .null, .is_readonly = true, .has_set_visibility = true, .type_str = "string" });
+        if (def.backed_type != .none) try def.properties.append(self.allocator, .{ .name = "value", .default = .null, .is_readonly = true, .has_set_visibility = true, .type_str = if (def.backed_type == .int_type) "int" else "string" });
 
         const case_names = try self.allocator.alloc([]const u8, case_count);
         defer self.allocator.free(case_names);
@@ -15488,6 +15495,13 @@ pub const VM = struct {
         for (0..method_count) |_| {
             const mi = self.readMethodInfo();
             try def.addMethod(self.allocator, mi[1]);
+        }
+        // zend_verify_enum_magic_methods, in its order, as the enum links
+        for ([_][]const u8{ "__construct", "__destruct", "__clone", "__get", "__set", "__unset", "__isset", "__toString", "__debugInfo", "__serialize", "__unserialize", "__sleep", "__wakeup", "__set_state" }) |magic| {
+            if (!def.methods.contains(magic)) continue;
+            const msg = try std.fmt.allocPrint(self.allocator, "Enum {s} cannot include magic method {s}", .{ enum_name, magic });
+            defer self.allocator.free(msg);
+            return self.raiseCompileFatal(msg, .{ .file = site.file, .line = site.start_line });
         }
         // php adds an enum's own methods as it links the enum, refusing one
         // the enum declared itself
@@ -17937,7 +17951,7 @@ pub const VM = struct {
             else
                 try std.fmt.allocPrint(self.allocator, "Cannot indirectly modify {s}(set){s} property {s}::${s} from global scope", .{ @tagName(vr.set_visibility), ro, vr.defining_class, name });
         } else if (vr.is_readonly) {
-            denial = try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{ vr.defining_class, name });
+            denial = try std.fmt.allocPrint(self.allocator, "Cannot indirectly modify readonly property {s}::${s}", .{ vr.defining_class, name });
         }
         // the denial rides along with the argument's source until a write
         // raises it, so it is interned rather than owned by one copy
@@ -18848,7 +18862,7 @@ pub const VM = struct {
         } else if (action == .indirect and !self.checkVisibility(vr.defining_class, vr.visibility)) {
             msg = try std.fmt.allocPrint(self.allocator, "Cannot access {s} property {s}::${s}", .{ @tagName(vr.visibility), obj.class_name, name });
         } else if (action == .indirect and vr.is_readonly) {
-            msg = try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{ vr.defining_class, name });
+            msg = try std.fmt.allocPrint(self.allocator, "Cannot indirectly modify readonly property {s}::${s}", .{ vr.defining_class, name });
         }
         if (msg) |text| {
             defer self.allocator.free(text);
