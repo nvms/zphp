@@ -3,14 +3,13 @@
 // php throws an Error instead of crashing (zend.max_allowed_stack_size).
 // the size in the message depends on the thread's stack, so it is masked
 
-function report(Throwable $e)
+// which frame of a repeating cycle meets the limit depends on how much
+// native stack each frame takes, so only the cycle's presence is checked
+function report(Throwable $e, string $recursing)
 {
     echo get_class($e), ": ", preg_replace('/of \d+ bytes/', 'of N bytes', $e->getMessage()), "\n";
-    // the Error is raised in the frame being entered, before it runs
-    echo "  line ", $e->getLine(), "\n";
-    foreach (array_slice($e->getTrace(), 0, 3) as $frame) {
-        echo "  ", $frame['class'] ?? '', $frame['type'] ?? '', $frame['function'], " ", $frame['line'] ?? '-', "\n";
-    }
+    $names = array_map(fn($f) => ($f['class'] ?? '') . ($f['type'] ?? '') . $f['function'], $e->getTrace());
+    echo "  in the trace: ", var_export(in_array($recursing, $names, true), true), "\n";
 }
 
 function viaCallback($n)
@@ -21,7 +20,7 @@ function viaCallback($n)
 try {
     viaCallback(0);
 } catch (Error $e) {
-    report($e);
+    report($e, 'viaCallback');
 }
 
 class Chain
@@ -36,7 +35,7 @@ class Chain
 try {
     (new Chain())->a;
 } catch (Error $e) {
-    report($e);
+    report($e, 'Chain->__get');
 }
 
 function viaSort($n)
@@ -50,7 +49,7 @@ function viaSort($n)
 try {
     viaSort(0);
 } catch (Error $e) {
-    report($e);
+    report($e, 'viaSort');
 }
 
 class Stringy
@@ -64,7 +63,7 @@ class Stringy
 try {
     echo new Stringy();
 } catch (Error $e) {
-    report($e);
+    report($e, 'Stringy->__toString');
 }
 
 // the script carries on normally afterwards
