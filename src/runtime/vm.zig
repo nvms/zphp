@@ -481,7 +481,14 @@ pub const ClassDef = struct {
     }
 };
 
-const TraitStaticProp = struct { name: []const u8, value: Value, doc_comment: []const u8 = "" };
+const TraitStaticProp = struct {
+    name: []const u8,
+    value: Value,
+    doc_comment: []const u8 = "",
+    // a constant's bits 0-1 visibility and bit 4 final, and its type
+    flags: u8 = 0,
+    type_str: []const u8 = "",
+};
 
 // where a class-like was declared, for reflection
 pub const DeclSite = struct { file: []const u8 = "", start_line: u32 = 0, end_line: u32 = 0, doc_comment: []const u8 = "" };
@@ -8556,11 +8563,16 @@ pub const VM = struct {
                         var tc_names: [32][]const u8 = undefined;
                         var tc_has_default: [32]u8 = undefined;
                         var tc_docs: [32][]const u8 = undefined;
+                        var tc_flags: [32]u8 = undefined;
+                        var tc_types: [32][]const u8 = undefined;
                         for (0..tc_count) |ci| {
                             tc_names[ci] = self.currentChunk().constants.items[self.readU16()].string.bytes();
                             tc_has_default[ci] = self.readByte();
                             const doc_idx = self.readU16();
                             tc_docs[ci] = if (doc_idx == 0xffff) "" else self.currentChunk().constants.items[doc_idx].string.bytes();
+                            tc_flags[ci] = self.readByte();
+                            const type_idx = self.readU16();
+                            tc_types[ci] = if (type_idx == 0xffff) "" else self.currentChunk().constants.items[type_idx].string.bytes();
                         }
                         const tc_defaults = self.popDefaults(32, tc_has_default[0..tc_count]);
                         const tcs = try self.allocator.alloc(TraitStaticProp, tc_count);
@@ -8571,7 +8583,7 @@ pub const VM = struct {
                                 tcj += 1;
                                 break :blk v;
                             } else Value{ .null = {} };
-                            tcs[ci] = .{ .name = tc_names[ci], .value = cval, .doc_comment = tc_docs[ci] };
+                            tcs[ci] = .{ .name = tc_names[ci], .value = cval, .doc_comment = tc_docs[ci], .flags = tc_flags[ci], .type_str = tc_types[ci] };
                         }
                         try self.trait_constants.put(self.allocator, trait_name, tcs);
                     }
@@ -14923,6 +14935,12 @@ pub const VM = struct {
             const ec_name = self.currentChunk().constants.items[ec_name_idx].string.bytes();
             const doc_idx = self.readU16();
             if (doc_idx != 0xffff) try def.constant_docs.put(self.allocator, ec_name, self.currentChunk().constants.items[doc_idx].string.bytes());
+            const const_flags = self.readByte();
+            const type_idx = self.readU16();
+            const vis = const_flags & 0x03;
+            if (vis != 0) try def.const_visibility.put(self.allocator, ec_name, @enumFromInt(vis));
+            if (const_flags & 0x10 != 0) try def.const_final.put(self.allocator, ec_name, {});
+            if (type_idx != 0xffff) try def.constant_types.put(self.allocator, ec_name, self.currentChunk().constants.items[type_idx].string.bytes());
             if (!def.constants.contains(ec_name)) {
                 try def.constant_order.append(self.allocator, ec_name);
                 try def.constants.put(self.allocator, ec_name, .null);
@@ -15240,6 +15258,10 @@ pub const VM = struct {
                     // each using class gets its own refcounted copy
                     try def.constants.put(self.allocator, c.name, try self.copyDefault(c.value));
                     try def.constant_docs.put(self.allocator, c.name, c.doc_comment);
+                    const vis = c.flags & 0x03;
+                    if (vis != 0) try def.const_visibility.put(self.allocator, c.name, @enumFromInt(vis));
+                    if (c.flags & 0x10 != 0) try def.const_final.put(self.allocator, c.name, {});
+                    if (c.type_str.len > 0) try def.constant_types.put(self.allocator, c.name, c.type_str);
                 }
             }
         }

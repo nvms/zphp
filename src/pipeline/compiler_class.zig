@@ -3094,6 +3094,8 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitU16(pname_idx);
         try self.emitByte(if (pmember.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
         try self.emitU16(try docCommentConst(self, pmember.main_token));
+        try self.emitByte(@intCast(pmember.data.rhs & 0x13)); // bits 0-1 visibility, bit 4 final
+        try self.emitU16(try propertyTypeConst(self, pmember.data.rhs));
     }
 
     // trait-level attributes
@@ -3326,6 +3328,8 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
             const ec_idx = try self.addConstant(.{ .string = Value.String.borrowed(ec_name) });
             try self.emitU16(ec_idx);
             try self.emitU16(try docCommentConst(self, member.main_token));
+            try self.emitByte(@intCast(member.data.rhs & 0x13)); // bits 0-1 visibility, bit 4 final
+            try self.emitU16(try propertyTypeConst(self, member.data.rhs));
         }
     }
 

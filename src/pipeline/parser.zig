@@ -1985,7 +1985,7 @@ const Parser = struct {
                     return error.ParseError;
                 }
             } else if (self.peek() == .kw_const) {
-                try self.parseConstMembers(&members, 0);
+                try self.parseConstMembers(&members, visibility | (if (is_final) @as(u32, 1) << 4 else 0));
             } else if (self.peek() == .kw_use) {
                 try members.append(self.allocator, try self.parseTraitUse());
             } else {
@@ -2055,11 +2055,13 @@ const Parser = struct {
                 try members.append(self.allocator, try self.parseTraitUse());
             } else {
                 var is_static = false;
+                var is_final = false;
                 var visibility: u32 = 0;
                 while (self.peek() == .kw_public or self.peek() == .kw_protected or
-                    self.peek() == .kw_private or self.peek() == .kw_static)
+                    self.peek() == .kw_private or self.peek() == .kw_static or self.peek() == .kw_final)
                 {
                     if (self.peek() == .kw_static) is_static = true;
+                    if (self.peek() == .kw_final) is_final = true;
                     if (self.peek() == .kw_protected) visibility = 1;
                     if (self.peek() == .kw_private) visibility = 2;
                     _ = self.advance();
@@ -2069,10 +2071,10 @@ const Parser = struct {
                     if (is_static) {
                         self.nodes.items[method].tag = .static_class_method;
                     }
-                    self.nodes.items[method].data.rhs = self.nodes.items[method].data.rhs | (visibility << 30);
+                    self.nodes.items[method].data.rhs = self.nodes.items[method].data.rhs | (visibility << 30) | (if (is_final) @as(u32, 1) << 28 else 0);
                     try members.append(self.allocator, method);
                 } else if (self.peek() == .kw_const) {
-                    try self.parseConstMembers(&members, 0);
+                    try self.parseConstMembers(&members, visibility | (if (is_final) @as(u32, 1) << 4 else 0));
                 } else {
                     try self.addError(.unexpected_token);
                     return error.ParseError;
