@@ -4430,6 +4430,9 @@ fn rpropGetModifiers(ctx: *NativeContext, _: []const Value) RuntimeError!NativeR
         (is_ro and vis_val == 0 and !has_explicit_set);
     if (is_asym_prot_set) mods |= 2048;
 
+    // a property with an abstract hook is abstract
+    if ((try rpropIsAbstract(ctx, &.{})).value.bool) mods |= 64;
+
     return NativeResult.scalar(.{ .int = mods });
 }
 
