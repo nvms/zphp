@@ -1972,6 +1972,7 @@ Zend/tests/named_params/attributes_named_flags.phpt
 Zend/tests/named_params/attributes_named_flags_incorrect.phpt
 Zend/tests/named_params/attributes_positional_after_named.phpt
 Zend/tests/named_params/basic.phpt
+Zend/tests/named_params/bug80096.phpt
 Zend/tests/named_params/func_get_args.phpt
 Zend/tests/named_params/internal.phpt
 Zend/tests/named_params/internal_variadics.phpt
