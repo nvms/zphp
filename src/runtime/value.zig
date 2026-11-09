@@ -1365,6 +1365,11 @@ pub fn resourceClosed(r: *const PhpObject) bool {
     return open == .bool and !open.bool;
 }
 
+// php computes powers with c's pow, whose results std.math.pow doesn't
+// always reproduce (10.0 ** 23 is a tie between two doubles)
+extern "c" fn pow(x: f64, y: f64) f64;
+pub const c_pow = pow;
+
 pub const Value = union(enum) {
     pub const String = PhpString;
 
@@ -1492,35 +1497,33 @@ pub const Value = union(enum) {
     }
 
     pub fn power(a: Value, b: Value) Value {
-        // when both operands are int and exponent is non-negative, prefer int
-        // result if it fits in i64; matches PHP's behavior
+        // php's pow_function_base: int ** non-negative int by squaring, and
+        // on overflow the rest in double from where it stopped
         if (a == .int and b == .int and b.int >= 0) {
-            const exp_u: u64 = @intCast(b.int);
-            var result: i64 = 1;
-            var base: i64 = a.int;
-            var e = exp_u;
-            var overflowed = false;
-            while (e > 0 and !overflowed) : (e >>= 1) {
-                if ((e & 1) == 1) {
-                    const r = @mulWithOverflow(result, base);
+            var l1: i64 = 1;
+            var l2: i64 = a.int;
+            var i: i64 = b.int;
+            if (i == 0) return .{ .int = 1 };
+            if (l2 == 0) return .{ .int = 0 };
+            while (i >= 1) {
+                if (@mod(i, 2) != 0) {
+                    i -= 1;
+                    const r = @mulWithOverflow(l1, l2);
+                    if (r[1] != 0) return .{ .float = @as(f64, @floatFromInt(l1)) * @as(f64, @floatFromInt(l2)) * c_pow(@floatFromInt(l2), @floatFromInt(i)) };
+                    l1 = r[0];
+                } else {
+                    i = @divTrunc(i, 2);
+                    const r = @mulWithOverflow(l2, l2);
                     if (r[1] != 0) {
-                        overflowed = true;
-                        break;
+                        const dval = @as(f64, @floatFromInt(l2)) * @as(f64, @floatFromInt(l2));
+                        return .{ .float = @as(f64, @floatFromInt(l1)) * c_pow(dval, @floatFromInt(i)) };
                     }
-                    result = r[0];
-                }
-                if (e > 1) {
-                    const r = @mulWithOverflow(base, base);
-                    if (r[1] != 0) {
-                        overflowed = true;
-                        break;
-                    }
-                    base = r[0];
+                    l2 = r[0];
                 }
             }
-            if (!overflowed) return .{ .int = result };
+            return .{ .int = l1 };
         }
-        return .{ .float = std.math.pow(f64, toFloat(a), toFloat(b)) };
+        return .{ .float = c_pow(toFloat(a), toFloat(b)) };
     }
 
     pub fn negate(self: Value) Value {

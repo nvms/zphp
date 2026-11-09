@@ -116,59 +116,126 @@ fn native_ceil(_: *NativeContext, args: []const Value) RuntimeError!NativeResult
     return NativeResult.scalar(.{ .float = @ceil(Value.toFloat(args[0])) });
 }
 
-fn native_round(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+fn native_round(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(.{ .float = 0.0 });
-    const v = Value.toFloat(args[0]);
+    // Z_PARAM_NUMBER: a numeric string converts, anything else is refused
+    const num = args[0];
+    const numeric = switch (num) {
+        .int, .float, .bool, .null => true,
+        .string => |str| Value.isNumericString(str.bytes()),
+        else => false,
+    };
+    if (!numeric) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "round(): Argument #1 ($num) must be of type int|float, {s} given", .{num.valueName()});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.setPendingException("TypeError", msg);
+        return error.RuntimeError;
+    }
     const precision: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
-    // PHP 8.4 accepts a RoundingMode enum case for the mode arg; map case
-    // name to the legacy PHP_ROUND_HALF_* integer codes
-    var mode: i64 = 1;
+    const places: i32 = @intCast(std.math.clamp(precision, std.math.minInt(i32), std.math.maxInt(i32)));
+    var mode: i64 = round_half_up;
     if (args.len >= 3) {
         const m = args[2];
         if (m == .object and std.mem.eql(u8, m.object.class_name, "RoundingMode")) {
             const case_name = m.object.get("name");
-            if (case_name == .string) {
-                const n = case_name.string.bytes();
-                if (std.mem.eql(u8, n, "HalfAwayFromZero")) mode = 1 else if (std.mem.eql(u8, n, "HalfTowardsZero")) mode = 2 else if (std.mem.eql(u8, n, "HalfEven")) mode = 3 else if (std.mem.eql(u8, n, "HalfOdd")) mode = 4 else if (std.mem.eql(u8, n, "TowardsZero")) mode = 5 else if (std.mem.eql(u8, n, "AwayFromZero")) mode = 6 else if (std.mem.eql(u8, n, "NegativeInfinity")) mode = 7 else if (std.mem.eql(u8, n, "PositiveInfinity")) mode = 8;
-            }
+            if (case_name == .string) mode = roundingModeOfCase(case_name.string.bytes());
         } else {
             mode = Value.toInt(m);
         }
     }
-    const factor = std.math.pow(f64, 10.0, @floatFromInt(precision));
-    const scaled = v * factor;
-    const rounded = roundWithMode(scaled, mode);
-    return NativeResult.scalar(.{ .float = rounded / factor });
+    if (mode < round_half_up or mode > round_away_from_zero) {
+        try ctx.vm.setPendingException("ValueError", "round(): Argument #3 ($mode) must be a valid rounding mode (RoundingMode::*)");
+        return error.RuntimeError;
+    }
+    // an int that needs no rounding comes back as a float unchanged
+    if (args[0] == .int and places >= 0) return NativeResult.scalar(.{ .float = @floatFromInt(args[0].int) });
+    return NativeResult.scalar(.{ .float = phpRound(Value.toFloat(args[0]), places, mode) });
 }
 
-fn roundWithMode(v: f64, mode: i64) f64 {
-    if (std.math.isNan(v) or std.math.isInf(v)) return v;
-    const sign: f64 = if (std.math.signbit(v)) -1.0 else 1.0;
-    const av = @abs(v);
-    const floor = @floor(av);
-    const frac = av - floor;
-    // tolerance for half: use a tiny epsilon for FP noise on values like 1.35*10
-    const eps: f64 = 1e-9;
-    const is_half = @abs(frac - 0.5) < eps;
-    var out: f64 = undefined;
-    if (is_half) {
-        switch (mode) {
-            1 => out = floor + 1.0, // HALF_UP (away from zero)
-            2 => out = floor, // HALF_DOWN (toward zero)
-            3 => { // HALF_EVEN
-                out = if (@mod(floor, 2.0) == 0) floor else floor + 1.0;
-            },
-            4 => { // HALF_ODD
-                out = if (@mod(floor, 2.0) == 0) floor + 1.0 else floor;
-            },
-            else => out = floor + 1.0,
-        }
-    } else if (frac > 0.5) {
-        out = floor + 1.0;
+// php_math_round_mode.h
+const round_half_up = 1;
+const round_half_down = 2;
+const round_half_even = 3;
+const round_half_odd = 4;
+const round_ceiling = 5;
+const round_floor = 6;
+const round_toward_zero = 7;
+const round_away_from_zero = 8;
+
+fn roundingModeOfCase(name: []const u8) i64 {
+    const modes = [_]struct { []const u8, i64 }{
+        .{ "HalfAwayFromZero", round_half_up },  .{ "HalfTowardsZero", round_half_down }, .{ "HalfEven", round_half_even },
+        .{ "HalfOdd", round_half_odd },          .{ "TowardsZero", round_toward_zero },   .{ "AwayFromZero", round_away_from_zero },
+        .{ "NegativeInfinity", round_floor },    .{ "PositiveInfinity", round_ceiling },
+    };
+    for (modes) |m| if (std.mem.eql(u8, m[0], name)) return m[1];
+    return round_half_up;
+}
+
+const c_pow = @import("../runtime/value.zig").c_pow;
+
+fn intPow10(power: i32) f64 {
+    const powers = [_]f64{ 1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22 };
+    // php calls c's pow here, whose result for some powers (10^23 is a
+    // tie between two doubles) is not the correctly rounded literal
+    if (power < 0 or power > 22) return c_pow(10.0, @floatFromInt(power));
+    return powers[@intCast(power)];
+}
+
+// php's _php_math_round (ext/standard/math.c)
+pub fn phpRound(value: f64, places_in: i32, mode: i64) f64 {
+    if (!std.math.isFinite(value) or value == 0.0) return value;
+    if (places_in == 0 and value == @trunc(value)) return value;
+    const places = @max(places_in, std.math.minInt(i32) + 1);
+    const exponent = intPow10(@intCast(@abs(places)));
+    var tmp: f64 = undefined;
+    var tmp2: f64 = undefined;
+    // the scaled value can be one off as a decimal (0.285 * 1e10 is
+    // 2849999999.9999995): try the next integral and keep it when it scales
+    // back to the value exactly
+    if (value >= 0.0) {
+        tmp = @floor(if (places > 0) value * exponent else value / exponent);
+        tmp2 = tmp + 1.0;
     } else {
-        out = floor;
+        tmp = @ceil(if (places > 0) value * exponent else value / exponent);
+        tmp2 = tmp - 1.0;
     }
-    return out * sign;
+    if ((if (places > 0) tmp2 / exponent else tmp2 * exponent) == value) tmp = tmp2;
+    // beyond a double's precision rounding changes nothing
+    if (@abs(tmp) >= 1e16) return value;
+    tmp = roundHelper(tmp, value, exponent, places, mode);
+    if (@abs(places) < 23) return if (places > 0) tmp / exponent else tmp * exponent;
+    // php prints the integral with "%15fe%d" and parses it back
+    var buf: [64]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "{d:15.6}e{d}", .{ tmp, -places }) catch return value;
+    const back = std.fmt.parseFloat(f64, std.mem.trim(u8, text, " ")) catch return value;
+    // zend_strtod gives an unsigned zero
+    if (back == 0) return 0.0;
+    return if (std.math.isFinite(back)) back else value;
+}
+
+fn roundHelper(integral: f64, value: f64, exponent: f64, places: i32, mode: i64) f64 {
+    const value_abs = @abs(value);
+    const away = std.math.copysign(@as(f64, 1.0), integral);
+    const basic_edge = @abs(if (places > 0) (integral + std.math.copysign(@as(f64, 0.5), integral)) / exponent else (integral + std.math.copysign(@as(f64, 0.5), integral)) * exponent);
+    const zero_edge = @abs(if (places > 0) integral / exponent else integral * exponent);
+    return switch (mode) {
+        round_half_up => if (value_abs >= basic_edge) integral + away else integral,
+        round_half_down => if (value_abs > basic_edge) integral + away else integral,
+        round_ceiling => if (value > 0.0 and value_abs > zero_edge) integral + 1.0 else integral,
+        round_floor => if (value < 0.0 and value_abs > zero_edge) integral - 1.0 else integral,
+        round_toward_zero => integral,
+        round_away_from_zero => if (value_abs > zero_edge) integral + away else integral,
+        round_half_even, round_half_odd => blk: {
+            if (value_abs > basic_edge) break :blk integral + away;
+            if (value_abs == basic_edge) {
+                const even = @mod(integral, 2.0) == 0;
+                if (even != (mode == round_half_even)) break :blk integral + away;
+            }
+            break :blk integral;
+        },
+        else => integral,
+    };
 }
 
 fn native_min(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -559,7 +626,7 @@ fn native_is_nan(_: *NativeContext, args: []const Value) RuntimeError!NativeResu
 
 fn native_fpow(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2) return NativeResult.scalar(.{ .float = 0.0 });
-    return NativeResult.scalar(.{ .float = std.math.pow(f64, Value.toFloat(args[0]), Value.toFloat(args[1])) });
+    return NativeResult.scalar(.{ .float = c_pow(Value.toFloat(args[0]), Value.toFloat(args[1])) });
 }
 
 fn native_fdiv(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
