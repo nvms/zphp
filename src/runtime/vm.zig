@@ -6605,7 +6605,7 @@ pub const VM = struct {
                         self.push(.{ .int = 0 });
                     }
                 },
-                .iter_check => {
+                .iter_check, .iter_check_nokey => {
                     const offset = self.readU16();
                     const idx_val = self.stack[self.sp - 1];
                     const iterable = self.stack[self.sp - 2];
@@ -6629,16 +6629,20 @@ pub const VM = struct {
                         if (!valid.isTruthy()) {
                             self.currentFrame().ip += offset;
                         } else {
-                            const key = self.callMethod(iterable.object, "key", &.{}) catch {
-                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
-                                return error.RuntimeError;
-                            };
+                            // php fetches current() first, then key() only
+                            // when the loop names a key
                             const current = self.callMethod(iterable.object, "current", &.{}) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
-                            self.push(key);
                             self.push(current);
+                            const key = if (op == .iter_check_nokey) Value.null else self.callMethod(iterable.object, "key", &.{}) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            const held = self.popTransfer();
+                            self.push(key);
+                            self.pushTransfer(held);
                         }
                     } else if (iterable == .array) {
                         const idx = Value.toInt(idx_val);

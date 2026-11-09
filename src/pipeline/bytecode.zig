@@ -439,6 +439,9 @@ pub const OpCode = enum(u8) {
     // the result and skips the get_prop/set_prop that follows; with a plain
     // parent property it leaves $this (and the value) for that instruction
     parent_hook_call,
+    // iter_check for a foreach without a key variable: an Iterator's key()
+    // is not called, as php skips it
+    iter_check_nokey,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -475,6 +478,7 @@ pub const OpCode = enum(u8) {
             .closure_bind_ref,
             .define_const,
             .iter_check,
+            .iter_check_nokey,
             .inc_local,
             .dec_local,
             .get_static_prop_dynamic,

@@ -257,7 +257,7 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     const loop_top = self.chunk.offset();
     self.loop_start = loop_top;
 
-    const exit_jump = try self.emitJump(.iter_check);
+    const exit_jump = try self.emitJump(if (key_n == 0 and !val_by_ref) .iter_check_nokey else .iter_check);
 
     // iter_check pushed: key, value (value on top)
     const val_node = self.ast.nodes[val_n];
