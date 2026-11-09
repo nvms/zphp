@@ -9677,7 +9677,7 @@ pub const VM = struct {
                             };
                             self.push(if (gen.state == .completed) .null else gen.current_value);
                         } else if (std.mem.eql(u8, method_name, "rewind")) {
-                            if (gen.state == .completed or (gen.state == .suspended and gen.ip > 0)) {
+                            if (gen.resumes > 1) {
                                 try self.setPendingException("Exception", "Cannot rewind a generator that was already run");
                                 if (self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
@@ -14010,6 +14010,7 @@ pub const VM = struct {
     // stack per level
     pub fn resumeGenerator(self: *VM, gen: *Generator, sent_value: Value) RuntimeError!void {
         if (gen.state == .completed) return;
+        gen.resumes +|= 1;
         // the path lives on the stack until a chain outgrows it
         var inline_path: [16]*Generator = undefined;
         var path: std.ArrayListUnmanaged(*Generator) = .initBuffer(&inline_path);

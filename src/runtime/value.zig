@@ -818,6 +818,9 @@ pub const Generator = struct {
     delegator: ?*Generator = null,
     pending_throw: ?Value = null,
     pooled: bool = false,
+    // how often it has been resumed: php's AT_FIRST_YIELD holds while it is
+    // one, the only point a started generator may be rewound
+    resumes: u32 = 0,
 
     pub const SavedHandler = struct {
         catch_ip: usize,
