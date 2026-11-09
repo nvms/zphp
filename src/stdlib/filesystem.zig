@@ -19,6 +19,7 @@ const bundle = @import("../bundle.zig");
 const zlib = @import("c_zlib");
 const csv = @import("csv.zig");
 const html = @import("html.zig");
+const types = @import("types.zig");
 
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
@@ -29,8 +30,8 @@ pub const entries = common_entries ++ (if (platform.is_windows) @import("filesys
 const posix_entries = .{
     .{ "chown", native_chown },
     .{ "chgrp", native_chgrp },
-    .{ "lchown", native_chown },
-    .{ "lchgrp", native_chgrp },
+    .{ "lchown", native_lchown },
+    .{ "lchgrp", native_lchgrp },
     .{ "umask", native_umask },
     .{ "fileowner", native_fileowner },
     .{ "filegroup", native_filegroup },
@@ -3084,33 +3085,48 @@ fn native_fstat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     return NativeResult.borrowed(.{ .array = try wrapperStatArray(ctx, .{ .mode = platform.modeOf(stat), .size = @intCast(stat.size), .rdev = 0, .atime = sec(stat.atime orelse stat.mtime), .mtime = sec(stat.mtime), .ctime = sec(stat.ctime) }) });
 }
 
-fn native_touch(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+fn native_touch(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const filename = try strArg(ctx, args, "touch", 0, "filename", true);
+    const mtime_null = args.len < 2 or args[1] == .null;
+    const atime_null = args.len < 3 or args[2] == .null;
+    const mtime: i64 = if (mtime_null) 0 else try intArg(ctx, args, "touch", 1, "mtime", 0);
+    const atime: i64 = if (atime_null) mtime else try intArg(ctx, args, "touch", 2, "atime", 0);
+    if (filename.len == 0) return NativeResult.scalar(.{ .bool = false });
+    if (mtime_null and !atime_null) return throwValueError(ctx, "touch(): Argument #2 ($mtime) cannot be null when argument #3 ($atime) is an integer", .{});
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = bundle.osPath(&os_buf, args[0].string.bytes());
+    var path = bundle.osPath(&os_buf, filename);
+    if (std.ascii.startsWithIgnoreCase(path, "file://")) path = path[7..];
     bundle.prepareWrite(path, .edit);
 
-    // create the file if it doesn't already exist, then fall through to the
-    // timestamp-application path so explicit mtime/atime args take effect
-    // regardless of whether the file pre-existed
-    const created = std.Io.Dir.cwd().createFile(platform.io, path, .{ .exclusive = true }) catch |err| switch (err) {
-        error.PathAlreadyExists => null,
-        else => return NativeResult.scalar(.{ .bool = false }),
-    };
-    if (created) |c| c.close(platform.io);
+    // create the file if it doesn't exist already
+    if (std.Io.Dir.cwd().access(platform.io, path, .{})) |_| {} else |_| {
+        const created = std.Io.Dir.cwd().createFile(platform.io, path, .{ .truncate = true }) catch |err| {
+            try warn(ctx, "touch(): Unable to create file {s} because {s}", .{ filename, errorText(err) });
+            return NativeResult.scalar(.{ .bool = false });
+        };
+        created.close(platform.io);
+    }
 
-    const f = std.Io.Dir.cwd().openFile(platform.io, path, .{ .mode = .write_only }) catch return NativeResult.scalar(.{ .bool = false });
-    defer f.close(platform.io);
-    const now: i96 = @intCast(platform.nanoTimestamp());
-    const mtime: i96 = if (args.len >= 2 and args[1] != .null)
-        @as(i96, Value.toInt(args[1])) * 1_000_000_000
-    else
-        now;
-    const atime: i96 = if (args.len >= 3 and args[2] != .null)
-        @as(i96, Value.toInt(args[2])) * 1_000_000_000
-    else
-        mtime;
-    f.setTimestamps(platform.io, .{ .access_timestamp = .{ .new = .{ .nanoseconds = atime } }, .modify_timestamp = .{ .new = .{ .nanoseconds = mtime } } }) catch return NativeResult.scalar(.{ .bool = true });
+    const stamp = struct {
+        fn of(seconds: i64) std.Io.File.SetTimestamp {
+            return .{ .new = .{ .nanoseconds = @as(i96, seconds) * std.time.ns_per_s } };
+        }
+    }.of;
+    const modify: std.Io.File.SetTimestamp = if (mtime_null) .now else stamp(mtime);
+    const access: std.Io.File.SetTimestamp = if (mtime_null) .now else stamp(atime);
+    if (platform.is_windows) {
+        // std sets a path's times only through an open handle there
+        const f = std.Io.Dir.cwd().openFile(platform.io, path, .{ .mode = .write_only }) catch return NativeResult.scalar(.{ .bool = true });
+        defer f.close(platform.io);
+        f.setTimestamps(platform.io, .{ .access_timestamp = access, .modify_timestamp = modify }) catch {};
+        return NativeResult.scalar(.{ .bool = true });
+    }
+    // utime(2) on the path: setting the current time needs only ownership or
+    // write permission, and directories take it too
+    std.Io.Dir.cwd().setTimestamps(platform.io, path, .{ .access_timestamp = access, .modify_timestamp = modify }) catch |err| {
+        try warn(ctx, "touch(): Utime failed: {s}", .{errorText(err)});
+        return NativeResult.scalar(.{ .bool = false });
+    };
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -3139,52 +3155,58 @@ fn native_chmod(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     return NativeResult.scalar(.{ .bool = true });
 }
 
-// chown / chgrp: accept either a numeric uid/gid or a name and pass to the
-// posix chown(2) syscall. silently degrade to false on failure (most failures
-// are EPERM when not root)
+// chown, chgrp, lchown, lchgrp: a numeric id or a user or group name,
+// handed to chown(2) or lchown(2), with php's warnings when that fails
 fn native_chown(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    var os_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = bundle.osPath(&os_buf, args[0].string.bytes());
-    bundle.prepareWrite(path, .edit);
-    var path_z: [std.fs.max_path_bytes:0]u8 = undefined;
-    if (path.len >= path_z.len) return NativeResult.scalar(.{ .bool = false });
-    @memcpy(path_z[0..path.len], path);
-    path_z[path.len] = 0;
-    const uid: std.c.uid_t = if (args[1] == .int) @intCast(args[1].int) else blk: {
-        if (args[1] != .string) return NativeResult.scalar(.{ .bool = false });
-        const name_z = try ctx.allocator.dupeSentinel(u8, args[1].string.bytes(), 0);
-        defer ctx.allocator.free(name_z);
-        const pw = std.c.getpwnam(name_z.ptr) orelse return NativeResult.scalar(.{ .bool = false });
-        break :blk pw.uid;
-    };
-    if (chown_extern(@ptrCast(&path_z), uid, std.math.maxInt(std.c.gid_t)) != 0) return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.scalar(.{ .bool = true });
+    return changeOwner(ctx, args, "chown", false, false);
 }
 
 fn native_chgrp(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    var os_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = bundle.osPath(&os_buf, args[0].string.bytes());
-    bundle.prepareWrite(path, .edit);
-    var path_z: [std.fs.max_path_bytes:0]u8 = undefined;
-    if (path.len >= path_z.len) return NativeResult.scalar(.{ .bool = false });
-    @memcpy(path_z[0..path.len], path);
-    path_z[path.len] = 0;
-    const gid: std.c.gid_t = if (args[1] == .int) @intCast(args[1].int) else blk: {
-        if (args[1] != .string) return NativeResult.scalar(.{ .bool = false });
-        const name_z = try ctx.allocator.dupeSentinel(u8, args[1].string.bytes(), 0);
-        defer ctx.allocator.free(name_z);
-        const gr = std.c.getgrnam(name_z.ptr) orelse return NativeResult.scalar(.{ .bool = false });
-        break :blk gr.gid;
-    };
-    if (chown_extern(@ptrCast(&path_z), std.math.maxInt(std.c.uid_t), gid) != 0) return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.scalar(.{ .bool = true });
+    return changeOwner(ctx, args, "chgrp", true, false);
+}
+
+fn native_lchown(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return changeOwner(ctx, args, "lchown", false, true);
+}
+
+fn native_lchgrp(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return changeOwner(ctx, args, "lchgrp", true, true);
 }
 
 extern "c" fn chown(path: [*:0]const u8, owner: std.c.uid_t, group: std.c.gid_t) c_int;
-fn chown_extern(p: [*:0]const u8, o: std.c.uid_t, g: std.c.gid_t) c_int {
-    return chown(p, o, g);
+extern "c" fn lchown(path: [*:0]const u8, owner: std.c.uid_t, group: std.c.gid_t) c_int;
+
+fn changeOwner(ctx: *NativeContext, args: []const Value, comptime func: []const u8, comptime group: bool, comptime link: bool) RuntimeError!NativeResult {
+    const filename = try strArg(ctx, args, func, 0, "filename", true);
+    const param = if (group) "group" else "user";
+    const id_arg: Value = if (args.len > 1) args[1] else .null;
+    // string|int: a name, or an id
+    const name: ?[]const u8 = switch (id_arg) {
+        .string => |str| str.bytes(),
+        .int, .bool, .float => null,
+        else => return throwStreamArg(ctx, func ++ "(): Argument #2 ($" ++ param ++ ") must be of type string|int, {s} given", .{types.phpTypeName(id_arg)}),
+    };
+    var os_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = bundle.osPath(&os_buf, filename);
+    const id: u32 = if (name) |n| blk: {
+        const name_z = try ctx.allocator.dupeSentinel(u8, n, 0);
+        defer ctx.allocator.free(name_z);
+        if (group) {
+            if (std.c.getgrnam(name_z.ptr)) |gr| break :blk gr.gid;
+        } else {
+            if (std.c.getpwnam(name_z.ptr)) |pw| break :blk pw.uid;
+        }
+        try warn(ctx, func ++ "(): Unable to find " ++ (if (group) "gid" else "uid") ++ " for {s}", .{n});
+        return NativeResult.scalar(.{ .bool = false });
+    } else @truncate(@as(u64, @bitCast(Value.toInt(id_arg))));
+    bundle.prepareWrite(path, .edit);
+    const path_z = std.posix.toPosixPath(path) catch return linkFailure(ctx, func, "File name too long");
+    const keep = std.math.maxInt(u32);
+    const uid: std.c.uid_t = if (group) keep else id;
+    const gid: std.c.gid_t = if (group) id else keep;
+    const rc = if (link) lchown(&path_z, uid, gid) else chown(&path_z, uid, gid);
+    if (rc != 0) return linkFailure(ctx, func, sys.errnoText());
+    return NativeResult.scalar(.{ .bool = true });
 }
 
 fn native_stat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
