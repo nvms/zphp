@@ -347,10 +347,9 @@ pub fn compileSwitch(self: *Compiler, node: Ast.Node) Error!void {
     try self.pushJumpScope(false);
 
     try self.compileNode(node.data.lhs);
-    const temp_name = try std.fmt.allocPrint(self.allocator, "__switch_{d}", .{self.closure_count});
-    try self.string_allocs.append(self.allocator, temp_name);
-    self.closure_count += 1;
-    try self.emitSetVar(temp_name);
+    const temp = try self.tempSlot(node.main_token);
+    try self.emitOp(.set_local);
+    try self.emitU16(temp);
     try self.emitOp(.pop);
 
     const case_nodes = self.ast.extraSlice(node.data.rhs);
@@ -372,7 +371,8 @@ pub fn compileSwitch(self: *Compiler, node: Ast.Node) Error!void {
         defer hit_jumps.deinit(self.allocator);
 
         for (values, 0..) |val, vi| {
-            try self.emitGetVar(temp_name);
+            try self.emitOp(.get_local);
+            try self.emitU16(temp);
             try self.compileNode(val);
             try self.emitOp(.equal);
             if (vi < values.len - 1) {
@@ -443,10 +443,9 @@ pub fn compileSwitch(self: *Compiler, node: Ast.Node) Error!void {
 
 pub fn compileMatch(self: *Compiler, node: Ast.Node) Error!void {
     try self.compileNode(node.data.lhs);
-    const temp_name = try std.fmt.allocPrint(self.allocator, "__match_{d}", .{self.closure_count});
-    try self.string_allocs.append(self.allocator, temp_name);
-    self.closure_count += 1;
-    try self.emitSetVar(temp_name);
+    const temp = try self.tempSlot(node.main_token);
+    try self.emitOp(.set_local);
+    try self.emitU16(temp);
     try self.emitOp(.pop);
 
     const arm_nodes = self.ast.extraSlice(node.data.rhs);
@@ -467,7 +466,8 @@ pub fn compileMatch(self: *Compiler, node: Ast.Node) Error!void {
         defer hit_jumps.deinit(self.allocator);
 
         for (values, 0..) |val, vi| {
-            try self.emitGetVar(temp_name);
+            try self.emitOp(.get_local);
+            try self.emitU16(temp);
             try self.compileNode(val);
             try self.emitOp(.identical);
             if (vi < values.len - 1) {
@@ -493,7 +493,8 @@ pub fn compileMatch(self: *Compiler, node: Ast.Node) Error!void {
         // no default: format an UnhandledMatchError matching PHP's output
         //   "Unhandled match case 99" / "case 'foo'" / "case of type array"
         // by calling a runtime helper with the matched value
-        try self.emitGetVar(temp_name);
+        try self.emitOp(.get_local);
+        try self.emitU16(temp);
         const helper_idx = try self.addConstant(.{ .string = Value.String.borrowed("__zphp_match_unhandled_msg") });
         try self.emitOp(.call);
         try self.emitU16(helper_idx);

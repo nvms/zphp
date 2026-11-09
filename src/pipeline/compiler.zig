@@ -1644,6 +1644,19 @@ pub const Compiler = struct {
         return slot;
     }
 
+    const temp_slot_prefix = "\x00temp";
+
+    // a slot for a value the compiled code keeps between instructions (a
+    // switch or match subject). it has no variable name, so nothing that lists
+    // variables sees it. keyed by the token it belongs to: a temp is dead once
+    // its statement moves on, so only one nested in its own operands could
+    // otherwise share it
+    pub fn tempSlot(self: *Compiler, token: u32) Error!u16 {
+        const key = try std.fmt.allocPrint(self.allocator, temp_slot_prefix ++ "{d}", .{token});
+        try self.string_allocs.append(self.allocator, key);
+        return self.getOrCreateSlot(key);
+    }
+
     pub fn inFunctionScope(self: *Compiler) bool {
         return self.scope_depth > 0;
     }
@@ -1764,7 +1777,9 @@ pub const Compiler = struct {
         @memset(names, "");
         var it = self.local_slots.iterator();
         while (it.next()) |entry| {
-            names[entry.value_ptr.*] = entry.key_ptr.*;
+            const name = entry.key_ptr.*;
+            if (std.mem.startsWith(u8, name, temp_slot_prefix)) continue;
+            names[entry.value_ptr.*] = name;
         }
         return names;
     }
