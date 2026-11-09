@@ -873,6 +873,12 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         return;
                     }
                     const ci_name = ci_name_val.string.bytes();
+                    // a "Class::method" string is a static call, with its checks, in runLoop
+                    if (std.mem.indexOf(u8, ci_name, "::") != null) {
+                        frame.ip = ip - 2;
+                        self.sp = sp;
+                        return;
+                    }
                     const ci_func = self.functions.get(ci_name) orelse {
                         frame.ip = ip - 2;
                         self.sp = sp;

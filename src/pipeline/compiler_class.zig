@@ -1748,7 +1748,9 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     const slot_names = try sub.buildSlotNames();
     const local_count = sub.next_slot;
 
-    const closure_lo = !gen and !is_variadic and !has_any_ref and !has_ref_capture and !needsVarSync(&sub.chunk);
+    // a closure's captures live in its frame's variables, so one that captures
+    // them again for a closure of its own keeps them there
+    const closure_lo = !gen and !is_variadic and !has_any_ref and !has_ref_capture and !needsVarSync(&sub.chunk) and !hasOp(&sub.chunk, .closure_bind);
     // an arrow function has no braces of its own; it ends with its expression
     const arrow_end = if (is_arrow) endLineForChunk(self, &sub.chunk) else 0;
 
@@ -1816,6 +1818,9 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     for (use_vars) |use_var_node| {
         const use_node = self.ast.nodes[use_var_node];
         const var_name = self.ast.tokenSlice(use_node.main_token);
+        // inside an arrow function, a use of an outer variable captures it
+        // into the arrow, as a read in its body would
+        if (self.local_slots.get(var_name) == null) _ = self.arrowCaptureSlot(var_name);
         const var_idx = try self.addConstant(.{ .string = Value.String.borrowed(var_name) });
         const is_ref = use_node.data.rhs != 0;
         try self.emitOp(if (is_ref) .closure_bind_ref else .closure_bind);
@@ -4240,6 +4245,16 @@ fn needsVarSync(chunk: *const Chunk) bool {
         if (b == @intFromEnum(OpCode.concat_assign) or b == @intFromEnum(OpCode.get_global) or b == @intFromEnum(OpCode.get_static) or b == @intFromEnum(OpCode.closure_bind_ref))
             return true;
         i += opcodeWidth(b);
+    }
+    return false;
+}
+
+fn hasOp(chunk: *const Chunk, op: OpCode) bool {
+    var i: usize = 0;
+    const code = chunk.code.items;
+    while (i < code.len) {
+        if (code[i] == @intFromEnum(op)) return true;
+        i += opcodeWidth(code[i]);
     }
     return false;
 }
