@@ -137,8 +137,6 @@ pub const entries = .{
     .{ "stripcslashes", native_stripcslashes },
     .{ "strchr", native_strstr },
     .{ "strtr", native_strtr },
-    .{ "sscanf", native_sscanf },
-    .{ "fscanf", native_fscanf },
     .{ "levenshtein", native_levenshtein },
     .{ "similar_text", native_similar_text },
     .{ "soundex", native_soundex },
@@ -3170,6 +3168,30 @@ pub fn coerceToString(ctx: *NativeContext, v: Value) ![]const u8 {
     };
 }
 
+// a `string` parameter as php's argument parsing takes it: scalars and
+// Stringable objects convert in weak mode, null is deprecated there, and
+// anything else is a TypeError
+pub fn stringParam(ctx: *NativeContext, comptime func: []const u8, args: []const Value, index: usize, comptime name: []const u8) RuntimeError![]const u8 {
+    const v: Value = if (index < args.len) args[index] else .null;
+    if (v == .string) return v.string.bytes();
+    const strict = ctx.vm.script_strict_types;
+    switch (v) {
+        .null, .undef => if (!strict) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, func ++ "(): Passing null to parameter #{d} ($" ++ name ++ ") of type string is deprecated", .{index + 1});
+            defer ctx.allocator.free(msg);
+            try ctx.vm.raiseError(8192, msg);
+            return "";
+        },
+        .int, .float, .bool => if (!strict) return coerceToString(ctx, v),
+        .object => |o| if (!strict and ctx.vm.hasMethod(o.class_name, "__toString")) return ctx.vm.objectToString(o),
+        else => {},
+    }
+    const msg = try std.fmt.allocPrint(ctx.allocator, func ++ "(): Argument #{d} ($" ++ name ++ ") must be of type string, {s} given", .{ index + 1, phpTypeName(v) });
+    defer ctx.allocator.free(msg);
+    try ctx.vm.setPendingException("TypeError", msg);
+    return error.RuntimeError;
+}
+
 fn native_md5(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.literal("");
     const s = try coerceToString(ctx, args[0]);
@@ -4515,265 +4537,6 @@ fn native_strtr(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     }
 
     return NativeResult.scalar(.null);
-}
-
-fn native_fscanf(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    _ = try @import("filesystem.zig").streamArg(ctx, args, .{ .func = "fscanf" });
-    if (args.len < 2) return NativeResult.scalar(.null);
-    // read one line via fgets
-    const line = try ctx.vm.callByName("fgets", &.{args[0]});
-    if (line == .bool and !line.bool) return NativeResult.scalar(.{ .bool = false });
-    if (line != .string) return NativeResult.scalar(.null);
-    line.string.retain();
-    defer line.string.release();
-    // delegate to sscanf with the line as input
-    var sscanf_args = std.ArrayListUnmanaged(Value).empty;
-    defer sscanf_args.deinit(ctx.allocator);
-    try sscanf_args.append(ctx.allocator, line);
-    for (args[1..]) |a| try sscanf_args.append(ctx.allocator, a);
-    return native_sscanf(ctx, sscanf_args.items);
-}
-
-fn native_sscanf(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.null);
-    const input = args[0].string.bytes();
-    const fmt = args[1].string.bytes();
-
-    var captures = std.ArrayListUnmanaged(Value).empty;
-    defer {
-        for (captures.items) |value| if (value == .string) value.string.release();
-        captures.deinit(ctx.allocator);
-    }
-    var ip: usize = 0;
-    var fp: usize = 0;
-    while (fp < fmt.len) {
-        const c = fmt[fp];
-        if (c == ' ' or c == '\t' or c == '\n') {
-            // whitespace in format matches any whitespace
-            fp += 1;
-            while (ip < input.len and (input[ip] == ' ' or input[ip] == '\t' or input[ip] == '\n')) ip += 1;
-            continue;
-        }
-        if (c != '%') {
-            if (ip >= input.len or input[ip] != c) break;
-            fp += 1;
-            ip += 1;
-            continue;
-        }
-        // % spec
-        fp += 1;
-        if (fp >= fmt.len) break;
-        // skip optional width
-        var width: usize = 0;
-        var has_width = false;
-        while (fp < fmt.len and fmt[fp] >= '0' and fmt[fp] <= '9') {
-            width = width * 10 + (fmt[fp] - '0');
-            has_width = true;
-            fp += 1;
-        }
-        if (fp >= fmt.len) break;
-        const spec = fmt[fp];
-        fp += 1;
-        // %c, %% and %[ do not skip leading whitespace; everything else does
-        if (spec != 'c' and spec != '%' and spec != '[') {
-            while (ip < input.len and (input[ip] == ' ' or input[ip] == '\t' or input[ip] == '\n')) ip += 1;
-        }
-        switch (spec) {
-            'd', 'i' => {
-                const start = ip;
-                if (ip < input.len and (input[ip] == '+' or input[ip] == '-')) ip += 1;
-                while (ip < input.len and input[ip] >= '0' and input[ip] <= '9') {
-                    if (has_width and ip - start >= width) break;
-                    ip += 1;
-                }
-                if (ip == start or (ip == start + 1 and (input[start] == '+' or input[start] == '-'))) {
-                    break;
-                }
-                const v = std.fmt.parseInt(i64, input[start..ip], 10) catch 0;
-                try captures.append(ctx.allocator, .{ .int = v });
-            },
-            'f', 'e', 'g' => {
-                const start = ip;
-                if (ip < input.len and (input[ip] == '+' or input[ip] == '-')) ip += 1;
-                while (ip < input.len and ((input[ip] >= '0' and input[ip] <= '9') or input[ip] == '.' or input[ip] == 'e' or input[ip] == 'E' or input[ip] == '+' or input[ip] == '-')) {
-                    if (has_width and ip - start >= width) break;
-                    ip += 1;
-                }
-                if (ip == start or (ip == start + 1 and (input[start] == '+' or input[start] == '-'))) {
-                    break;
-                }
-                const v = std.fmt.parseFloat(f64, input[start..ip]) catch 0;
-                try captures.append(ctx.allocator, .{ .float = v });
-            },
-            's' => {
-                if (ip >= input.len) break;
-                const start = ip;
-                while (ip < input.len and input[ip] != ' ' and input[ip] != '\t' and input[ip] != '\n') {
-                    if (has_width and ip - start >= width) break;
-                    ip += 1;
-                }
-                const s = try ctx.allocator.dupe(u8, input[start..ip]);
-                const owned = try Value.String.adopt(ctx.allocator, s);
-                errdefer owned.release();
-                try captures.append(ctx.allocator, .{ .string = owned });
-            },
-            'c' => {
-                const want: usize = if (has_width) width else 1;
-                const end = @min(ip + want, input.len);
-                const s = try ctx.allocator.dupe(u8, input[ip..end]);
-                const owned = try Value.String.adopt(ctx.allocator, s);
-                errdefer owned.release();
-                ip = end;
-                try captures.append(ctx.allocator, .{ .string = owned });
-            },
-            'x', 'X' => {
-                // optional 0x / 0X prefix
-                if (ip + 1 < input.len and input[ip] == '0' and (input[ip + 1] == 'x' or input[ip + 1] == 'X')) ip += 2;
-                const start = ip;
-                while (ip < input.len and std.ascii.isHex(input[ip])) {
-                    if (has_width and ip - start >= width) break;
-                    ip += 1;
-                }
-                const v = std.fmt.parseInt(i64, input[start..ip], 16) catch 0;
-                try captures.append(ctx.allocator, .{ .int = v });
-            },
-            'o' => {
-                const start = ip;
-                while (ip < input.len and input[ip] >= '0' and input[ip] <= '7') {
-                    if (has_width and ip - start >= width) break;
-                    ip += 1;
-                }
-                const v = std.fmt.parseInt(i64, input[start..ip], 8) catch 0;
-                try captures.append(ctx.allocator, .{ .int = v });
-            },
-            'u' => {
-                // unsigned decimal. PHP parses an optional sign then digits and
-                // reinterprets the i64 result as u64 when negative, returning
-                // the value as a string if it overflows i64
-                const start = ip;
-                if (ip < input.len and (input[ip] == '+' or input[ip] == '-')) ip += 1;
-                while (ip < input.len and input[ip] >= '0' and input[ip] <= '9') {
-                    if (has_width and ip - start >= width) break;
-                    ip += 1;
-                }
-                if (ip == start or (ip == start + 1 and (input[start] == '+' or input[start] == '-'))) break;
-                const i_val = std.fmt.parseInt(i64, input[start..ip], 10) catch 0;
-                if (i_val >= 0) {
-                    try captures.append(ctx.allocator, .{ .int = i_val });
-                } else {
-                    const u_val: u64 = @bitCast(i_val);
-                    const s = try std.fmt.allocPrint(ctx.allocator, "{d}", .{u_val});
-                    const owned = try Value.String.adopt(ctx.allocator, s);
-                    errdefer owned.release();
-                    try captures.append(ctx.allocator, .{ .string = owned });
-                }
-            },
-            'n' => {
-                // consumed-byte-count. doesn't read from input
-                try captures.append(ctx.allocator, .{ .int = @intCast(ip) });
-            },
-            '%' => {
-                if (ip < input.len and input[ip] == '%') ip += 1;
-            },
-            '[' => {
-                // %[...] character class. supports leading ^ for negation and
-                // a-b ranges. terminated by literal ]; a leading ] is part of
-                // the set per traditional sscanf rules.
-                var negate = false;
-                if (fp < fmt.len and fmt[fp] == '^') {
-                    negate = true;
-                    fp += 1;
-                }
-                var class_set: [256]bool = @splat(false);
-                var first = true;
-                while (fp < fmt.len) {
-                    const cc = fmt[fp];
-                    if (cc == ']' and !first) break;
-                    first = false;
-                    if (fp + 2 < fmt.len and fmt[fp + 1] == '-' and fmt[fp + 2] != ']') {
-                        const lo = cc;
-                        const hi = fmt[fp + 2];
-                        var x: usize = lo;
-                        while (x <= hi) : (x += 1) class_set[x] = true;
-                        fp += 3;
-                    } else {
-                        class_set[cc] = true;
-                        fp += 1;
-                    }
-                }
-                if (fp < fmt.len) fp += 1; // skip ]
-                const start = ip;
-                while (ip < input.len) {
-                    const matches = class_set[input[ip]];
-                    if (negate == matches) break;
-                    if (has_width and ip - start >= width) break;
-                    ip += 1;
-                }
-                if (ip == start) {
-                    try captures.append(ctx.allocator, .null);
-                    continue;
-                }
-                const s = try ctx.allocator.dupe(u8, input[start..ip]);
-                const owned = try Value.String.adopt(ctx.allocator, s);
-                errdefer owned.release();
-                try captures.append(ctx.allocator, .{ .string = owned });
-            },
-            else => {
-                const msg = try std.fmt.allocPrint(ctx.allocator, "Bad scan conversion character \"{c}\"", .{spec});
-                defer ctx.allocator.free(msg);
-                try ctx.vm.setPendingException("ValueError", msg);
-                return error.RuntimeError;
-            },
-        }
-    }
-
-    const matched_count: i64 = @intCast(captures.items.len);
-
-    // if optional output args provided, write to them and return successful count
-    if (args.len > 2) {
-        for (captures.items, 0..) |v, i| {
-            if (2 + i >= args.len) break;
-            ctx.setCallerVar(2 + i, args.len, v);
-        }
-        return NativeResult.scalar(.{ .int = matched_count });
-    }
-
-    // PHP returns null in array mode only when the input was empty
-    if (matched_count == 0 and input.len == 0) return NativeResult.scalar(.null);
-
-    // array-return mode: pad with null up to the total number of capturing specs
-    var total_specs: usize = 0;
-    var sp: usize = 0;
-    while (sp < fmt.len) {
-        if (fmt[sp] != '%') {
-            sp += 1;
-            continue;
-        }
-        sp += 1;
-        while (sp < fmt.len and fmt[sp] >= '0' and fmt[sp] <= '9') sp += 1;
-        if (sp >= fmt.len) break;
-        const spec = fmt[sp];
-        sp += 1;
-        if (spec == '%') continue;
-        if (spec == '[') {
-            if (sp < fmt.len and fmt[sp] == '^') sp += 1;
-            var first = true;
-            while (sp < fmt.len) {
-                if (fmt[sp] == ']' and !first) {
-                    sp += 1;
-                    break;
-                }
-                first = false;
-                sp += 1;
-            }
-        }
-        total_specs += 1;
-    }
-    while (captures.items.len < total_specs) try captures.append(ctx.allocator, .null);
-
-    var arr = try ctx.createArray();
-    for (captures.items) |v| try arr.append(ctx.allocator, v);
-    return NativeResult.borrowed(.{ .array = arr });
 }
 
 fn native_levenshtein(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

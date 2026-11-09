@@ -1982,8 +1982,7 @@ pub fn streamReadInto(ctx: *NativeContext, obj: *PhpObject, dest: []u8) RuntimeE
 
 fn native_fwrite(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = try streamArg(ctx, args, .{ .func = "fwrite" });
-    if (args.len < 2 or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
-    var data = args[1].string.bytes();
+    var data = try @import("strings.zig").stringParam(ctx, "fwrite", args, 1, "data");
     if (args.len >= 3 and args[2] == .int) {
         const lim: i64 = args[2].int;
         if (lim >= 0 and @as(usize, @intCast(lim)) < data.len) data = data[0..@intCast(lim)];
@@ -2039,10 +2038,18 @@ pub fn streamWrite(ctx: *NativeContext, obj: *PhpObject, data: []const u8) Runti
 fn native_fgets(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = try streamArg(ctx, args, .{ .func = "fgets" });
     // PHP: fgets($f, length) reads up to length-1 bytes
-    const max_len: usize = if (args.len >= 2 and args[1] == .int) @intCast(@max(args[1].int - 1, 1)) else 1024;
+    const max_len: usize = if (args.len >= 2 and args[1] == .int) @intCast(@max(args[1].int - 1, 1)) else std.math.maxInt(usize);
+    const line = (try readLine(ctx, obj, max_len, "fgets")) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.takeString(line);
+}
+
+// php_stream_get_line: up to max_len bytes through the next newline, or null
+// at eof. a plain file opened without read access fails the read the way
+// php's does, with a notice naming the calling function
+pub fn readLine(ctx: *NativeContext, obj: *PhpObject, max_len: usize, comptime func: []const u8) RuntimeError!?Value.String {
     if (getBufferBacking(obj)) |buffer| {
         const pos = getBufferPos(obj);
-        if (pos >= buffer.len) return NativeResult.scalar(.{ .bool = false });
+        if (pos >= buffer.len) return null;
         var end = pos;
         while (end < buffer.len and end - pos < max_len) {
             const c = buffer[end];
@@ -2051,9 +2058,13 @@ fn native_fgets(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         }
         const slice = try ctx.allocator.dupe(u8, buffer[pos..end]);
         setBufferPos(obj, end);
-        return NativeResult.takeString(try Value.String.adopt(ctx.allocator, slice));
+        return try Value.String.adopt(ctx.allocator, slice);
     }
-    const io = streamIo(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    const io = streamIo(obj) orelse return null;
+    if (writeOnlyPlainFile(obj)) {
+        try ctx.vm.raiseError(8, func ++ "(): Read of 8192 bytes failed with errno=9 Bad file descriptor");
+        return null;
+    }
 
     var buf = std.ArrayListUnmanaged(u8).empty;
     var byte: [1]u8 = undefined;
@@ -2068,9 +2079,22 @@ fn native_fgets(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         if (byte[0] == '\n') break;
     }
     if (hit_eof) try obj.set(ctx.allocator, "__eof", .{ .bool = true });
-    if (buf.items.len == 0) return NativeResult.scalar(.{ .bool = false });
+    if (buf.items.len == 0) return null;
     const result = try buf.toOwnedSlice(ctx.allocator);
-    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, result));
+    return try Value.String.adopt(ctx.allocator, result);
+}
+
+// a file opened by path in a mode without read access (w, a, x, c and their
+// b/t variants); memory and temp streams read whatever their mode
+fn writeOnlyPlainFile(obj: *PhpObject) bool {
+    const path = obj.get("__path");
+    if (path != .string or std.mem.startsWith(u8, path.string.bytes(), "php://")) return false;
+    if (obj.get("__peek_eof") != .null) return false;
+    const mode = obj.get("__mode");
+    if (mode != .string or mode.string.bytes().len == 0) return false;
+    const m = mode.string.bytes();
+    if (std.mem.indexOfScalar(u8, m, '+') != null) return false;
+    return m[0] == 'w' or m[0] == 'a' or m[0] == 'x' or m[0] == 'c';
 }
 
 fn native_stream_get_line(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
