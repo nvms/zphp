@@ -2,6 +2,7 @@ const std = @import("std");
 const class_names = @import("../runtime/class_names.zig");
 const bundle = @import("../bundle.zig");
 const platform = @import("../platform.zig");
+const html = @import("html.zig");
 const php_version = @import("../php_version.zig");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
@@ -694,56 +695,76 @@ fn native_is_uploaded_file(_: *NativeContext, args: []const Value) RuntimeError!
 }
 
 fn native_sys_get_temp_dir(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    // honor TMPDIR / TEMP / TMP env vars like PHP does, fall back to /tmp
+    return NativeResult.copyString(ctx.allocator, systemTempDir());
+}
+
+// php's temporary directory: TMPDIR (TEMP, TMP) without a trailing slash,
+// or the platform's default
+fn systemTempDir() []const u8 {
     const env_keys = [_][]const u8{ "TMPDIR", "TEMP", "TMP" };
     for (env_keys) |k| {
         if (platform.getenv(k)) |v| {
-            if (v.len > 0) {
-                // strip a trailing slash to match PHP
-                const trimmed = if (v.len > 1 and v[v.len - 1] == '/') v[0 .. v.len - 1] else v;
-                return try NativeResult.copyString(ctx.allocator, trimmed);
-            }
+            if (v.len > 0) return if (v.len > 1 and v[v.len - 1] == '/') v[0 .. v.len - 1] else v;
         }
     }
-    return NativeResult.copyString(ctx.allocator, platform.tempDir());
+    return platform.tempDir();
 }
 
 fn native_tempnam(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    // php falls back to the system temp dir when the requested one is unusable
-    const requested = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else platform.tempDir();
-    bundle.ensureDir(requested);
-    const dir = if (std.Io.Dir.cwd().access(platform.io, requested, .{})) |_| requested else |_| blk: {
-        try ctx.vm.raiseError(8, "tempnam(): file created in the system's temporary directory");
-        break :blk platform.tempDir();
-    };
-    const prefix = if (args.len >= 2 and args[1] == .string) args[1].string.bytes() else "tmp";
-    var seed_bytes: [8]u8 = undefined;
-    platform.random.bytes(&seed_bytes);
-    var rng = std.Random.DefaultPrng.init(std.mem.readInt(u64, &seed_bytes, .little));
-    const r = rng.random();
-    var attempt: u8 = 0;
-    while (attempt < 16) : (attempt += 1) {
-        var hex_buf: [16]u8 = undefined;
-        const hex = "0123456789abcdef";
-        for (&hex_buf) |*b| b.* = hex[r.uintLessThan(u8, 16)];
-        const sep: []const u8 = if (dir.len > 0 and platform.isSep(dir[dir.len - 1])) "" else platform.sep_str;
-        const candidate = std.fmt.allocPrint(ctx.allocator, "{s}{s}{s}{s}", .{ dir, sep, prefix, &hex_buf }) catch continue;
-        if (std.Io.Dir.cwd().createFile(platform.io, candidate, .{ .exclusive = true, .permissions = platform.permissionsFromMode(0o600) })) |file| {
-            file.close(platform.io);
-            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const resolved = platform.realpath(candidate, &path_buf) catch {
-                return NativeResult.takeString(try Value.String.adopt(ctx.allocator, candidate));
-            };
-            const dup = ctx.allocator.dupe(u8, resolved) catch {
-                return NativeResult.takeString(try Value.String.adopt(ctx.allocator, candidate));
-            };
-            ctx.allocator.free(candidate);
-            return NativeResult.takeString(try Value.String.adopt(ctx.allocator, dup));
-        } else |_| {
-            ctx.allocator.free(candidate);
+    const params = html.Params{ .ctx = ctx, .func = "tempnam", .args = args };
+    const dir = try params.string(0, "directory", "");
+    const prefix_arg = try params.string(1, "prefix", "");
+    inline for (.{ .{ dir, 1, "directory" }, .{ prefix_arg, 2, "prefix" } }) |p| {
+        if (std.mem.indexOfScalar(u8, p[0], 0) != null) {
+            try ctx.vm.setPendingException("ValueError", std.fmt.comptimePrint("tempnam(): Argument #{d} (${s}) must not contain any null bytes", .{ p[1], p[2] }));
+            return error.RuntimeError;
         }
     }
+    // only the prefix's last path segment counts, cut to 63 bytes
+    var prefix = std.fs.path.basename(prefix_arg);
+    if (prefix.len > 63) prefix = prefix[0..63];
+
+    // an empty directory means the system's; one that cannot hold the file
+    // falls back to it with a notice
+    if (dir.len > 0) {
+        bundle.ensureDir(dir);
+        if (try createTempFile(ctx, dir, prefix)) |path| return NativeResult.takeString(path);
+        try ctx.vm.raiseError(8, "tempnam(): file created in the system's temporary directory");
+    }
+    if (try createTempFile(ctx, systemTempDir(), prefix)) |path| return NativeResult.takeString(path);
     return NativeResult.scalar(.{ .bool = false });
+}
+
+// php_do_open_temporary_file: in the real directory, the prefix with 13
+// base32 characters of randomness and mkstemp's six more, created 0600
+fn createTempFile(ctx: *NativeContext, dir: []const u8, prefix: []const u8) RuntimeError!?Value.String {
+    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const real = platform.realpath(dir, &real_buf) catch return null;
+    const base32 = "0123456789abcdefghijklmnopqrstuv";
+    const mkstemp_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    var random_bytes: [8]u8 = undefined;
+    platform.random.bytes(&random_bytes);
+    var random = std.mem.readInt(u64, &random_bytes, .little);
+    var suffix: [13]u8 = undefined;
+    for (&suffix) |*c| {
+        c.* = base32[random % base32.len];
+        random /= base32.len;
+    }
+    const sep: []const u8 = if (real.len > 0 and platform.isSep(real[real.len - 1])) "" else platform.sep_str;
+    var attempt: usize = 0;
+    while (attempt < 100) : (attempt += 1) {
+        var tail: [6]u8 = undefined;
+        for (&tail) |*c| c.* = mkstemp_chars[platform.random.uintLessThan(usize, mkstemp_chars.len)];
+        const candidate = try std.fmt.allocPrint(ctx.allocator, "{s}{s}{s}{s}{s}", .{ real, sep, prefix, &suffix, &tail });
+        if (std.Io.Dir.cwd().createFile(platform.io, candidate, .{ .exclusive = true, .permissions = platform.permissionsFromMode(0o600) })) |file| {
+            file.close(platform.io);
+            return try Value.String.adopt(ctx.allocator, candidate);
+        } else |err| {
+            ctx.allocator.free(candidate);
+            if (err != error.PathAlreadyExists) return null;
+        }
+    }
+    return null;
 }
 
 fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bool, limit: usize) RuntimeError!*PhpArray {

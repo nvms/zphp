@@ -32,3 +32,4 @@ touch_chown_warnings.php: ownership calls and directory times are posix; windows
 fread_fwrite_wrong_mode_notices.php: windows reports a read on a write-only handle as access denied rather than a bad descriptor
 stream_argument_validation.php: a non-blocking flock waits on windows, so the contended lock would hang
 disk_space_warnings.php: php on windows words a missing path with the system's message
+tempnam_names_fallback.php: php on windows names temporary files through GetTempFileName
