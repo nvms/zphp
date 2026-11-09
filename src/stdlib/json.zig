@@ -104,28 +104,12 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                 last_error_msg = "Inf and NaN cannot be JSON encoded";
                 return error.RuntimeError;
             }
-            const preserve_zero = (flags & JSON_PRESERVE_ZERO_FRACTION) != 0;
-            const abs_f = @abs(f);
-            if (f != 0 and (abs_f < 1e-4 or abs_f >= 1e17)) {
-                var tmp: [64]u8 = undefined;
-                const s = formatJsonScientific(&tmp, f);
-                try buf.appendSlice(a, s);
-            } else if (f == @trunc(f) and abs_f < 1e17) {
-                if (f == 0 and std.math.signbit(f)) {
-                    try buf.appendSlice(a, "-0");
-                    if (preserve_zero) try buf.appendSlice(a, ".0");
-                } else {
-                    const i: i64 = @intFromFloat(f);
-                    var tmp: [32]u8 = undefined;
-                    const s = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch return;
-                    try buf.appendSlice(a, s);
-                    if (preserve_zero) try buf.appendSlice(a, ".0");
-                }
-            } else {
-                var tmp: [64]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{d}", .{f}) catch return;
-                try buf.appendSlice(a, s);
-            }
+            // smart_str_append_double: the shortest round-trip digits with a
+            // lowercase exponent, ".0" only under JSON_PRESERVE_ZERO_FRACTION
+            var tmp: [64]u8 = undefined;
+            const text = @import("formatted_print.zig").gcvt(f, -1, '.', 'e', &tmp);
+            try buf.appendSlice(a, text);
+            if ((flags & JSON_PRESERVE_ZERO_FRACTION) != 0 and std.mem.indexOfAny(u8, text, ".eE") == null) try buf.appendSlice(a, ".0");
         },
         .string => |s| {
             if (std.mem.startsWith(u8, s.bytes(), "__closure_")) {

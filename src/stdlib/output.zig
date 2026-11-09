@@ -457,22 +457,11 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
             } else if (std.math.isInf(f)) {
                 try out.appendSlice(a, if (f > 0) "INF" else "-INF");
             } else {
-                const abs_f = @abs(f);
-                if (f != 0 and (abs_f < 1e-4 or abs_f >= 1e17)) {
-                    const s = formatScientific(&tmp, f);
-                    try out.appendSlice(a, s);
-                } else if (f == @trunc(f)) {
-                    const i: i64 = @intFromFloat(f);
-                    if (i == 0 and std.math.signbit(f)) {
-                        try out.appendSlice(a, "-0.0");
-                    } else {
-                        const s = std.fmt.bufPrint(&tmp, "{d}.0", .{i}) catch return;
-                        try out.appendSlice(a, s);
-                    }
-                } else {
-                    const s = std.fmt.bufPrint(&tmp, "{d}", .{f}) catch return;
-                    try out.appendSlice(a, s);
-                }
+                // smart_str_append_double with zero_frac: a float always
+                // reads back as one
+                const s = formatFloat(&tmp, f);
+                try out.appendSlice(a, s);
+                if (std.mem.indexOfAny(u8, s, ".eE") == null) try out.appendSlice(a, ".0");
             }
         },
         .string => |s| {
@@ -601,23 +590,12 @@ fn emitDumpKey(out: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, name: []c
     try out.appendSlice(a, "]=>\n");
 }
 
+// serialize_precision -1: zend_gcvt in mode 0, the shortest round-trip
+// digits, in exponent form past 17 integer digits or below 1e-4
 pub fn formatFloat(tmp: *[64]u8, f: f64) []const u8 {
     if (std.math.isNan(f)) return "NAN";
     if (std.math.isInf(f)) return if (f > 0) "INF" else "-INF";
-    const abs_f = @abs(f);
-    // serialize_precision -1 prints the shortest round-trip digits, in
-    // exponent form only past 17 integer digits or below 1e-4
-    if (f != 0 and (abs_f < 1e-4 or abs_f >= 1e17)) {
-        return formatScientific(tmp, f);
-    }
-    if (f == @trunc(f)) {
-        const i: i64 = @intFromFloat(f);
-        if (i == 0 and std.math.signbit(f)) {
-            return std.fmt.bufPrint(tmp, "-0", .{}) catch "0";
-        }
-        return std.fmt.bufPrint(tmp, "{d}", .{i}) catch "0";
-    }
-    return std.fmt.bufPrint(tmp, "{d}", .{f}) catch "0";
+    return @import("formatted_print.zig").gcvt(f, -1, '.', 'E', tmp);
 }
 
 fn formatScientific(buf: *[64]u8, f: f64) []const u8 {
