@@ -1486,6 +1486,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     var sub = Compiler{
         .ast = self.ast,
         .diagnostic = self.diagnostic,
+        .declared_return = try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len)),
         .chunk = .{},
         .functions = .empty,
         .string_allocs = .empty,
@@ -1666,6 +1667,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     var sub = Compiler{
         .ast = self.ast,
         .diagnostic = self.diagnostic,
+        .declared_return = try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len)),
         .chunk = .{},
         .functions = .empty,
         .string_allocs = .empty,
@@ -3466,6 +3468,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     var sub = Compiler{
         .ast = self.ast,
         .diagnostic = self.diagnostic,
+        .declared_return = try extractReturnType(self, member.data.lhs, @intCast(param_nodes.len)),
         .chunk = .{},
         .functions = .empty,
         .string_allocs = .empty,

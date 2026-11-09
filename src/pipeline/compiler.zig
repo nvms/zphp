@@ -191,6 +191,7 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
     // interface declarations that are self-sufficient at their declaration
     // point. emit those into a prelude first, then compile everything else with
     // the relocated declarations skipped at their original site
+    c.root_stmts = ast.extraSlice(root.data.lhs);
     try compiler_class.hoistEarlyClasses(&c, ast.extraSlice(root.data.lhs));
     c.namespace = "";
     c.use_aliases.clearRetainingCapacity();
@@ -337,6 +338,11 @@ pub const Compiler = struct {
     // inside a property hook: the property and whether it is the set hook,
     // for parent::$prop::get()/set()
     hook_property: []const u8 = "",
+    // the declared return type of the function being compiled, for
+    // zend_compile_return's checks
+    declared_return: []const u8 = "",
+    // the file's top-level statements, for declare(strict_types)'s placement
+    root_stmts: []const u32 = &.{},
     hook_is_set: bool = false,
     finally_nodes: [8]u32 = @as([8]u32, @splat(0)),
     finally_loop_depth: [8]u32 = @as([8]u32, @splat(0)),
@@ -397,6 +403,48 @@ pub const Compiler = struct {
     // stop compiling at a php compile-time fatal, recording the first one
     pub fn fail(self: *Compiler, token: u32, message: []const u8) error{CompileError} {
         return self.failFmt(token, "{s}", .{message});
+    }
+
+    // declare(strict_types=...) comes before anything but other declares,
+    // in the file itself, and has no body
+    fn checkStrictTypesDeclare(self: *Compiler, node: Ast.Node) Error!void {
+        var strict = false;
+        var t = node.main_token + 1;
+        while (t < node.data.lhs) : (t += 1) {
+            if (self.ast.tokens[t].tag == .identifier and std.ascii.eqlIgnoreCase(self.ast.tokenSlice(t), "strict_types")) strict = true;
+        }
+        if (!strict) return;
+        const first = for (self.root_stmts) |idx| {
+            const stmt = self.ast.nodes[idx];
+            if (stmt.tag == .declare_stmt and stmt.main_token == node.main_token) break true;
+            if (stmt.tag != .declare_stmt) break false;
+        } else false;
+        if (!first) return self.fail(node.main_token, "strict_types declaration must be the very first statement in the script");
+        if (node.data.rhs != 0) return self.fail(node.main_token, "strict_types declaration must not use block mode");
+    }
+
+    // zend_compile_return: a bare return in a function with a return type,
+    // a value from a void one, any return from a never one
+    fn checkReturn(self: *Compiler, node: Ast.Node) Error!void {
+        const t = self.declared_return;
+        if (t.len == 0 or self.is_generator) return;
+        // php says method for anything compiled inside a class
+        const kind: []const u8 = if (self.current_class.len > 0) "method" else "function";
+        if (std.ascii.eqlIgnoreCase(t, "never")) return self.failFmt(node.main_token, "A never-returning {s} must not return", .{kind});
+        if (std.ascii.eqlIgnoreCase(t, "void")) {
+            if (node.data.lhs == 0) return;
+            const null_literal = self.ast.nodes[node.data.lhs].tag == .null_literal;
+            return self.failFmt(node.main_token, "A void {s} must not return a value{s}", .{ kind, if (null_literal) " (did you mean \"return;\" instead of \"return null;\"?)" else "" });
+        }
+        if (node.data.lhs != 0) return;
+        const allows_null = t[0] == '?' or std.ascii.eqlIgnoreCase(t, "mixed") or containsTypeName(t, "null");
+        return self.failFmt(node.main_token, "A {s} with return type must return a value{s}", .{ kind, if (allows_null) " (did you mean \"return null;\" instead of \"return;\"?)" else "" });
+    }
+
+    fn containsTypeName(t: []const u8, name: []const u8) bool {
+        var it = std.mem.tokenizeAny(u8, t, "|()&?");
+        while (it.next()) |part| if (std.ascii.eqlIgnoreCase(part, name)) return true;
+        return false;
     }
 
     // a compile error php's parser raises, reported without a stack trace
@@ -479,6 +527,7 @@ pub const Compiler = struct {
                 }
             },
             .return_stmt => {
+                try self.checkReturn(node);
                 if (self.is_generator) {
                     if (node.data.lhs != 0) {
                         try self.compileNode(node.data.lhs);
@@ -768,7 +817,10 @@ pub const Compiler = struct {
                 }
             },
             // strict_types is read from the file's tokens; ticks and encoding have no effect
-            .declare_stmt => if (node.data.rhs != 0) try self.compileNode(node.data.rhs),
+            .declare_stmt => {
+                try self.checkStrictTypesDeclare(node);
+                if (node.data.rhs != 0) try self.compileNode(node.data.rhs);
+            },
             .goto_stmt => {
                 const label = self.ast.tokenSlice(node.main_token);
                 if (self.labels.get(label)) |target| {

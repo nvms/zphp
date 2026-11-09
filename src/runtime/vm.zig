@@ -11441,7 +11441,10 @@ pub const VM = struct {
                         if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                         return error.RuntimeError;
                     };
-                    const val = try self.copyValue(self.peek());
+                    var val = try self.copyValue(self.peek());
+                    if (op == .set_static_prop_default) if (cls.static_prop_types.get(prop_name)) |t| {
+                        val = try self.widenIntDefault(val, t, class_name);
+                    };
                     // Stage 2 overwrite-release for static prop set
                     const ssp_old = cls.static_props.get(prop_name) orelse Value.null;
                     try cls.static_props.put(self.allocator, prop_name, val);
@@ -11467,10 +11470,11 @@ pub const VM = struct {
                     const prop_idx = self.readU16();
                     const class_name = self.currentChunk().constants.items[class_idx].string.bytes();
                     const prop_name = self.currentChunk().constants.items[prop_idx].string.bytes();
-                    const val = try self.copyValue(self.peek());
+                    var val = try self.copyValue(self.peek());
                     if (self.classes.getPtr(class_name)) |cls| {
                         for (cls.properties.items) |*p| {
                             if (std.mem.eql(u8, p.name, prop_name)) {
+                                val = try self.widenIntDefault(val, p.type_str, class_name);
                                 p.default = val;
                                 p.has_default = true;
                                 break;
@@ -13124,6 +13128,16 @@ pub const VM = struct {
             stackRetain(this);
             self.push(this);
         }
+    }
+
+    // an int default of a property typed float (and not int) is a float, as
+    // php converts it when it declares the property
+    fn widenIntDefault(self: *VM, val: Value, type_str: []const u8, class_name: []const u8) RuntimeError!Value {
+        if (val != .int or type_str.len == 0) return val;
+        const t = php_types.parse(self.allocator, type_str, class_name, null) catch return error.OutOfMemory;
+        defer t.deinit(self.allocator);
+        if (t.mask & php_types.DOUBLE != 0 and t.mask & php_types.LONG == 0) return .{ .float = @floatFromInt(val.int) };
+        return val;
     }
 
     fn warnDeprecatedTraitUse(self: *VM, trait: []const u8, user: []const u8) RuntimeError!void {
