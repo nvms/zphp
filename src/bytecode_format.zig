@@ -437,8 +437,27 @@ const DeserializeError = error{ InvalidFormat, UnexpectedEof, OutOfMemory };
 fn relocate(allocator: Allocator, raw: []const u8, move: Relocation) ![]u8 {
     const under = std.mem.startsWith(u8, raw, move.from) and
         (raw.len == move.from.len or raw[move.from.len] == '/' or raw[move.from.len] == '\\');
-    if (!under) return allocator.dupe(u8, raw);
-    return std.mem.concat(allocator, u8, &.{ move.to, raw[move.from.len..] });
+    if (under) return std.mem.concat(allocator, u8, &.{ move.to, raw[move.from.len..] });
+    // an anonymous class's name holds the file it was declared in, after a
+    // NUL, and so does every string that embeds the name
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var copied: usize = 0;
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, raw, at, "@anonymous\x00")) |marker| {
+        const path = marker + "@anonymous\x00".len;
+        at = path;
+        const rest = raw[path..];
+        if (!std.mem.startsWith(u8, rest, move.from) or rest.len == move.from.len) continue;
+        if (rest[move.from.len] != '/' and rest[move.from.len] != '\\') continue;
+        try out.appendSlice(allocator, raw[copied..path]);
+        try out.appendSlice(allocator, move.to);
+        copied = path + move.from.len;
+        at = copied;
+    }
+    if (copied == 0) return allocator.dupe(u8, raw);
+    try out.appendSlice(allocator, raw[copied..]);
+    return out.toOwnedSlice(allocator);
 }
 
 const DeserCtx = struct {

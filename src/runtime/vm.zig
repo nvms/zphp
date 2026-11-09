@@ -12514,7 +12514,7 @@ pub const VM = struct {
     pub fn setPendingException(self: *VM, class_name: []const u8, message: []const u8) !void {
         const obj = try self.allocUserObject(class_name);
         try self.initObjectProperties(obj, class_name);
-        const owned_message = try Value.String.create(self.allocator, message);
+        const owned_message = try self.engineMessage(message);
         defer owned_message.release();
         try obj.set(self.allocator, "message", .{ .string = owned_message });
         try obj.set(self.allocator, "code", .{ .int = 0 });
@@ -13637,7 +13637,17 @@ pub const VM = struct {
         for (result.warnings.items) |w| try self.raiseErrorAt(w.level, w.message, .{ .file = result.file_path, .line = w.line });
     }
 
-    pub fn raiseErrorAt(self: *VM, level: i64, msg: []const u8, at: SourcePosition) RuntimeError!void {
+    pub fn raiseErrorAt(self: *VM, level: i64, raw_msg: []const u8, at: SourcePosition) RuntimeError!void {
+        // an engine message names classes with %s, which stops at an
+        // anonymous class's NUL
+        const stripped = try class_names.stripAnonymous(self.allocator, raw_msg);
+        defer if (stripped) |s| self.allocator.free(s);
+        return self.raiseMessageAt(level, stripped orelse raw_msg, at);
+    }
+
+    // raiseErrorAt for a message written by the script, which trigger_error
+    // passes on whole
+    pub fn raiseMessageAt(self: *VM, level: i64, msg: []const u8, at: SourcePosition) RuntimeError!void {
         if (try self.callUserErrorHandler(level, msg, at)) return;
         self.recordLastError(level, msg, at);
         const shown = self.error_silenced_depth == 0 and (self.error_reporting_level & level) != 0;
@@ -13704,7 +13714,7 @@ pub const VM = struct {
         const label = errorLabel(level);
         self.flushOutputToStdout();
         if (self.logErrorsEnabled()) {
-            const log_text = std.fmt.allocPrint(self.allocator, "PHP {s}:  {s} in {s} on line {d}\n", .{ label, msg, at.file, at.line }) catch return;
+            const log_text = std.fmt.allocPrint(self.allocator, "PHP {s}:  {s} in {s} on line {d}\n", .{ label, class_names.display(msg), at.file, at.line }) catch return;
             defer self.allocator.free(log_text);
             self.writeLog(log_text);
         }
@@ -13963,10 +13973,17 @@ pub const VM = struct {
         return self.throwObject(try self.newBuiltinException(class_name, message, at));
     }
 
+    // a message the engine formatted: php writes the class names in it with
+    // %s, so an anonymous class's stops at its NUL
+    fn engineMessage(self: *VM, message: []const u8) !Value.String {
+        if (try class_names.stripAnonymous(self.allocator, message)) |shown| return Value.String.adopt(self.allocator, shown);
+        return Value.String.create(self.allocator, message);
+    }
+
     fn newBuiltinException(self: *VM, class_name: []const u8, message: []const u8, at: ?SourcePosition) !*PhpObject {
         const obj = try self.allocUserObject(class_name);
         try self.initObjectProperties(obj, class_name);
-        const owned_message = try Value.String.create(self.allocator, message);
+        const owned_message = try self.engineMessage(message);
         defer owned_message.release();
         try obj.set(self.allocator, "message", .{ .string = owned_message });
         try obj.set(self.allocator, "code", .{ .int = 0 });
@@ -14973,7 +14990,7 @@ pub const VM = struct {
         const class_modifiers = self.readByte();
         const name_idx = self.readU16();
         const class_name = self.currentChunk().constants.items[name_idx].string.bytes();
-        if (!std.mem.startsWith(u8, class_name, "class@anonymous")) try self.refuseRedeclaration(class_name);
+        if (!class_names.isAnonymous(class_name)) try self.refuseRedeclaration(class_name);
         // PHP reserves the type keywords as class names
         {
             const reserved = [_][]const u8{ "int", "float", "bool", "string", "true", "false", "null", "void", "iterable", "object", "mixed", "never", "self", "parent" };
@@ -15421,7 +15438,7 @@ pub const VM = struct {
         // time the call site runs. their existing instances point at the old
         // slot_layout, so freeing it (as we do for regular re-registration)
         // would invalidate live objects. keep the first registration.
-        if (std.mem.startsWith(u8, class_name, "class@anonymous_") and self.classes.contains(class_name)) {
+        if (class_names.isAnonymous(class_name) and self.classes.contains(class_name)) {
             def.deinit(self.allocator);
             return;
         }
@@ -15458,7 +15475,7 @@ pub const VM = struct {
         }
         if (override_err) |method_name| {
             var buf2: [512]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf2, "{s}::{s}() has #[\\Override] attribute, but no matching parent method exists", .{ class_name, method_name }) catch "";
+            const msg = std.fmt.bufPrint(&buf2, "{s}::{s}() has #[\\Override] attribute, but no matching parent method exists", .{ class_names.display(class_name), method_name }) catch "";
             if (try self.throwBuiltinException("Error", msg)) return;
             return error.RuntimeError;
         }
@@ -15466,7 +15483,7 @@ pub const VM = struct {
         // zend_implement_serializable: every class that implements Serializable,
         // itself or through a parent, unless explicitly abstract or serializing
         // with __serialize and __unserialize
-        if (!def.is_abstract and !std.mem.startsWith(u8, class_name, "class@anonymous") and
+        if (!def.is_abstract and !class_names.isAnonymous(class_name) and
             self.isInstanceOf(class_name, "Serializable") and
             (!self.hasMethod(class_name, "__serialize") or !self.hasMethod(class_name, "__unserialize")))
         {
@@ -20621,7 +20638,7 @@ pub const VM = struct {
             const s = managed.bytes();
             if (s.len > 4 and s[0] == 0 and s[1] == 'C' and s[2] == 'C' and s[3] == 0) {
                 const rest = s[4..];
-                if (std.mem.indexOfScalar(u8, rest, 0)) |sep| {
+                if (std.mem.lastIndexOfScalar(u8, rest, 0)) |sep| {
                     const class_name = rest[0..sep];
                     const const_name = rest[sep + 1 ..];
                     if (class_name.len == 0) {

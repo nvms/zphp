@@ -120,7 +120,7 @@ fn userDefaultText(arena: std.mem.Allocator, value: Value) ![]const u8 {
             // a constant the compiler left to resolve: "\0CC\0<class>\0<name>"
             if (bytes.len > 4 and bytes[0] == 0 and bytes[1] == 'C' and bytes[2] == 'C' and bytes[3] == 0) {
                 const rest = bytes[4..];
-                const sep = std.mem.indexOfScalar(u8, rest, 0) orelse break :blk "<expression>";
+                const sep = std.mem.lastIndexOfScalar(u8, rest, 0) orelse break :blk "<expression>";
                 if (sep == 0) break :blk rest[1..];
                 break :blk try std.fmt.allocPrint(arena, "{s}::{s}", .{ rest[0..sep], rest[sep + 1 ..] });
             }

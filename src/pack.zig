@@ -102,6 +102,8 @@ fn compileFile(allocator: Allocator, source: []const u8, path: []const u8) !?[]u
     var ast = try parser.parse(allocator, source);
     defer ast.deinit();
     if (ast.errors.len > 0) return null;
+    // a file's names carry its path, so files numbered alike never clash
+    compiler.resetRtdKeys();
     var result = compiler.compileWithOrigin(&ast, allocator, .{ .file_path = path }) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => return null,

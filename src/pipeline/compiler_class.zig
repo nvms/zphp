@@ -1,6 +1,7 @@
 const std = @import("std");
 const php_types = @import("php_types.zig");
 const compiler = @import("compiler.zig");
+const class_names = @import("../runtime/class_names.zig");
 const Compiler = @import("compiler.zig").Compiler;
 const TypeHint = @import("compiler.zig").TypeHint;
 const FunctionAttrEntry = @import("compiler.zig").FunctionAttrEntry;
@@ -305,7 +306,7 @@ fn validateClassAttribute(self: *Compiler, attribute: []const u8, class: @FieldT
         .class => "class",
     } else null;
     const kind = refused orelse return;
-    const shown = if (std.mem.startsWith(u8, class.name, "class@anonymous")) "class@anonymous" else class.name;
+    const shown = class_names.display(class.name);
     return self.failFmt(at, "Cannot apply #[\\{s}] to {s} {s}", .{ attribute, kind, shown });
 }
 
@@ -739,7 +740,7 @@ fn readTypeName(self: *Compiler, tok: *u32, end_tok: u32) Error!TypeName {
         });
         if (builtin.get(lower)) |mask| return .{ .written = written, .mask = mask };
     }
-    const scope_known = self.current_class.len > 0 and !self.in_trait and !std.mem.startsWith(u8, self.current_class, "class@anonymous");
+    const scope_known = self.current_class.len > 0 and !self.in_trait and !class_names.isAnonymous(self.current_class);
     if (!qualified and scope_known and std.mem.eql(u8, lower, "self")) return .{ .written = written, .class = self.current_class };
     if (!qualified and scope_known and std.mem.eql(u8, lower, "parent") and self.current_parent.len > 0) return .{ .written = written, .class = self.current_parent };
     if (!qualified and (std.mem.eql(u8, lower, "self") or std.mem.eql(u8, lower, "parent"))) return .{ .written = written, .class = written };
@@ -1912,7 +1913,7 @@ fn classDeclEarlyBindable(self: *Compiler, node: Ast.Node) bool {
     // php early-binds a subclass only when its inheritance checks can run
     // with the classes known while compiling; one whose method types name
     // anything else is declared where it stands
-    if (parent_node != 0 and !methodTypesKnown(self, node)) return false;
+    if (parent_node != 0 and !methodTypesKnown(self, node, &self.hoisted_names)) return false;
     for (self.ast.extraSlice(node.data.lhs)) |m_idx| {
         const m = self.ast.nodes[m_idx];
         switch (m.tag) {
@@ -1935,7 +1936,7 @@ fn classDeclEarlyBindable(self: *Compiler, node: Ast.Node) bool {
 
 // whether every class a method of this class names in its parameter and
 // return types is built in or already early-bound in this file
-fn methodTypesKnown(self: *Compiler, node: Ast.Node) bool {
+fn methodTypesKnown(self: *Compiler, node: Ast.Node, known: *const std.StringHashMapUnmanaged(void)) bool {
     const own = self.declaredName(self.ast.tokenSlice(node.main_token));
     for (self.ast.extraSlice(node.data.lhs)) |m_idx| {
         const m = self.ast.nodes[m_idx];
@@ -1944,15 +1945,15 @@ fn methodTypesKnown(self: *Compiler, node: Ast.Node) bool {
         for (params) |p| {
             const type_extra = self.ast.nodes[p].data.rhs >> 8;
             if (type_extra == 0) continue;
-            if (!typeNamesKnown(self, own, self.ast.extra_data[type_extra - 1], self.ast.extra_data[type_extra])) return false;
+            if (!typeNamesKnown(self, own, self.ast.extra_data[type_extra - 1], self.ast.extra_data[type_extra], known)) return false;
         }
         const ret = m.data.lhs + 1 + @as(u32, @intCast(params.len));
-        if (!typeNamesKnown(self, own, self.ast.extra_data[ret], self.ast.extra_data[ret + 1])) return false;
+        if (!typeNamesKnown(self, own, self.ast.extra_data[ret], self.ast.extra_data[ret + 1], known)) return false;
     }
     return true;
 }
 
-fn typeNamesKnown(self: *Compiler, own: []const u8, start_tok: u32, end_tok: u32) bool {
+fn typeNamesKnown(self: *Compiler, own: []const u8, start_tok: u32, end_tok: u32, known: *const std.StringHashMapUnmanaged(void)) bool {
     var tok = start_tok;
     while (tok < end_tok) {
         const lexeme = self.ast.tokens[tok].lexeme(self.ast.source);
@@ -1979,7 +1980,7 @@ fn typeNamesKnown(self: *Compiler, own: []const u8, start_tok: u32, end_tok: u32
         }
         const name = if (written[0] == '\\') written[1..] else self.resolveClassName(written);
         if (std.ascii.eqlIgnoreCase(name, own)) continue;
-        if (self.hoisted_names.contains(name) or @import("../stdlib/builtin_classes.zig").contains(name)) continue;
+        if (known.contains(name) or @import("../stdlib/builtin_classes.zig").contains(name)) continue;
         return false;
     }
     return true;
@@ -2084,6 +2085,117 @@ pub fn hoistEarlyClasses(self: *Compiler, stmts: []const u32) Error!void {
     }
 }
 
+// php numbers, in the order it compiles them, each anonymous class and each
+// named class it cannot bind while compiling the file (CG(rtd_key_counter)),
+// and an anonymous class's name ends with its number. maps each anonymous
+// class's `new` token to its number. the numbers come from the whole file,
+// not from what zphp compiles first, so a class zphp hoists keeps php's order
+pub fn assignRtdKeys(self: *Compiler, stmts: []const u32, keys: *std.AutoHashMapUnmanaged(u32, u32)) Error!void {
+    const a = self.allocator;
+    var bound_names: std.StringHashMapUnmanaged(void) = .{};
+    defer bound_names.deinit(a);
+    var bound: std.AutoHashMapUnmanaged(u32, void) = .{};
+    defer bound.deinit(a);
+    try collectCompileTimeBound(self, stmts, &bound_names, &bound);
+
+    const none = std.math.maxInt(u32);
+    const Event = struct { pos: u32, anon: u32 };
+    var events: std.ArrayListUnmanaged(Event) = .empty;
+    defer events.deinit(a);
+    var seen: std.AutoHashMapUnmanaged(u32, void) = .{};
+    defer seen.deinit(a);
+    for (self.ast.nodes) |n| {
+        // an anonymous class is named before its body compiles, a named class
+        // gets its key after
+        const event: Event = switch (n.tag) {
+            .anonymous_class => .{ .pos = n.main_token, .anon = n.main_token },
+            .class_decl, .interface_decl, .trait_decl, .enum_decl => if (bound.contains(n.main_token))
+                continue
+            else
+                .{ .pos = blockEndToken(self, n.main_token), .anon = none },
+            else => continue,
+        };
+        if ((try seen.getOrPut(a, n.main_token)).found_existing) continue;
+        try events.append(a, event);
+    }
+    if (events.items.len == 0) return;
+    std.sort.pdq(Event, events.items, {}, struct {
+        fn lessThan(_: void, x: Event, y: Event) bool {
+            return x.pos < y.pos;
+        }
+    }.lessThan);
+    const base = compiler.reserveRtdKeys(@intCast(events.items.len));
+    for (events.items, 0..) |e, i| {
+        if (e.anon != none) try keys.put(a, e.anon, base +% @as(u32, @intCast(i)));
+    }
+}
+
+// the top-level declarations php binds while compiling (zend_compile_class_decl):
+// a class with no interfaces (__toString adds Stringable, an enum always has
+// some), no traits, and a parent, if any, already bound; an interface
+// extending none; a trait using none
+fn collectCompileTimeBound(self: *Compiler, stmts: []const u32, names: *std.StringHashMapUnmanaged(void), tokens: *std.AutoHashMapUnmanaged(u32, void)) Error!void {
+    for (stmts) |idx| {
+        const node = self.ast.nodes[idx];
+        const binds = switch (node.tag) {
+            .namespace_decl => {
+                try compiler_stmt.compileNamespace(self, node);
+                continue;
+            },
+            .use_stmt => {
+                try compiler_stmt.compileUse(self, node);
+                continue;
+            },
+            .block => {
+                try collectCompileTimeBound(self, self.ast.extraSlice(node.data.lhs), names, tokens);
+                continue;
+            },
+            .class_decl => classBindsAtCompileTime(self, node, names),
+            .interface_decl => node.data.rhs == 0 or self.ast.extra_data[node.data.rhs] == 0,
+            .trait_decl => !usesTraits(self, node),
+            else => continue,
+        };
+        if (!binds) continue;
+        const name = self.declaredName(self.ast.tokenSlice(node.main_token));
+        // a second declaration of a name is declared at runtime
+        if ((try names.getOrPut(self.allocator, name)).found_existing) continue;
+        try tokens.put(self.allocator, node.main_token, {});
+    }
+}
+
+fn classBindsAtCompileTime(self: *Compiler, node: Ast.Node, bound: *const std.StringHashMapUnmanaged(void)) bool {
+    const rhs_base = node.data.rhs;
+    if (self.ast.extra_data[rhs_base + 2] != 0) return false;
+    for (self.ast.extraSlice(node.data.lhs)) |m_idx| {
+        const m = self.ast.nodes[m_idx];
+        if (m.tag == .trait_use) return false;
+        if (m.tag == .class_method and std.ascii.eqlIgnoreCase(self.ast.tokenSlice(m.main_token), "__toString")) return false;
+    }
+    const parent_node = self.ast.extra_data[rhs_base + 1];
+    if (parent_node == 0) return true;
+    const parent_name = resolveNodeClassName(self, self.ast.nodes[parent_node]) catch return false;
+    if (!bound.contains(parent_name) and !@import("../stdlib/builtin_classes.zig").contains(parent_name)) return false;
+    // zend_try_early_bind gives up on inheritance checks naming unknown classes
+    return methodTypesKnown(self, node, bound);
+}
+
+// the token closing the body that starts after `start_tok`
+fn blockEndToken(self: *Compiler, start_tok: u32) u32 {
+    var depth: i32 = 0;
+    var i: u32 = start_tok;
+    while (i < self.ast.tokens.len) : (i += 1) {
+        switch (self.ast.tokens[i].tag) {
+            .l_brace => depth += 1,
+            .r_brace => {
+                depth -= 1;
+                if (depth == 0) return i;
+            },
+            else => {},
+        }
+    }
+    return i;
+}
+
 // php refuses to declare a class or function under a name a `use` statement
 // already imported as something else
 fn checkImportCollision(self: *Compiler, token: u32, comptime kind: enum { class, function }, full_name: []const u8) Error!void {
@@ -2105,7 +2217,7 @@ fn checkDuplicateMembers(self: *Compiler, class_name: []const u8, members: []con
     const arena = arena_state.allocator();
     var methods: std.StringHashMapUnmanaged(void) = .{};
     var props: std.StringHashMapUnmanaged(void) = .{};
-    const class = if (std.mem.startsWith(u8, class_name, "class@anonymous")) "class@anonymous" else class_name;
+    const class = class_names.display(class_name);
     for (members) |m_idx| {
         const m = self.ast.nodes[m_idx];
         switch (m.tag) {
@@ -2762,8 +2874,6 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
 }
 
 pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
-    const anon_name = try std.fmt.allocPrint(self.allocator, "class@anonymous_{d}", .{compiler.allocClosureId()});
-    try self.string_allocs.append(self.allocator, anon_name);
     self.closure_count += 1;
 
     // rhs: {ctor_arg_count, ctor_args..., parent, impl_count, impls...}
@@ -2772,6 +2882,17 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
     const ctor_args_start = rhs_base + 1;
     const parent_at = ctor_args_start + ctor_arg_count;
     const impl_count = self.ast.extra_data[parent_at + 1];
+
+    // zend_generate_anon_class_name: the parent or first interface, a NUL,
+    // then the file, the line of `class` and the runtime definition number,
+    // so messages, which stop at the NUL, read `Foo@anonymous`
+    const prefix_node = if (self.ast.extra_data[parent_at] != 0) self.ast.extra_data[parent_at] else if (impl_count > 0) self.ast.extra_data[parent_at + 2] else 0;
+    const prefix = if (prefix_node != 0) try resolveNodeClassName(self, self.ast.nodes[prefix_node]) else "class";
+    var class_tok = node.main_token;
+    while (class_tok < self.ast.tokens.len and self.ast.tokens[class_tok].tag != .kw_class) class_tok += 1;
+    const key = compiler.anon_class_keys.get(node.main_token) orelse compiler.reserveRtdKeys(1);
+    const anon_name = try std.fmt.allocPrint(self.allocator, "{s}@anonymous\x00{s}:{d}${x}", .{ prefix, self.file_path, lineForToken(self, class_tok), key });
+    try self.string_allocs.append(self.allocator, anon_name);
     // attributes written after `new` precede the class keyword
     var attributes_at = node.main_token;
     for (self.ast.attr_ranges) |ar| {
@@ -3638,7 +3759,7 @@ fn checkMagicMethod(self: *Compiler, class_name: []const u8, member: Ast.Node, m
     var lower_buf: [16]u8 = undefined;
     if (name.len > lower_buf.len) return;
     const rule = rules.get(std.ascii.lowerString(&lower_buf, name)) orelse return;
-    const class = if (std.mem.startsWith(u8, class_name, "class@anonymous")) "class@anonymous" else class_name;
+    const class = class_names.display(class_name);
     const token = member.main_token;
 
     var arg_count: u32 = 0;
@@ -4138,7 +4259,7 @@ fn closureDisplayName(self: *Compiler, line: u32) ![]const u8 {
     const name = if (std.mem.startsWith(u8, f, "{closure:"))
         try std.fmt.allocPrint(self.allocator, "{{closure:{s}:{d}}}", .{ f, line })
     else if (f.len > 0 and self.current_class.len > 0)
-        try std.fmt.allocPrint(self.allocator, "{{closure:{s}::{s}():{d}}}", .{ self.current_class, f, line })
+        try std.fmt.allocPrint(self.allocator, "{{closure:{s}::{s}():{d}}}", .{ class_names.display(self.current_class), f, line })
     else if (f.len > 0)
         try std.fmt.allocPrint(self.allocator, "{{closure:{s}():{d}}}", .{ f, line })
     else

@@ -8,6 +8,7 @@ const ObjFunction = bytecode.ObjFunction;
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const vm_mod = @import("../runtime/vm.zig");
+const class_names = @import("../runtime/class_names.zig");
 
 const compiler_strings = @import("compiler_strings.zig");
 const compiler_expr = @import("compiler_expr.zig");
@@ -37,6 +38,25 @@ pub fn setClosureCounter(value: u32) void {
 pub fn allocClosureId() u32 {
     return next_closure_id.fetchAdd(1, .monotonic);
 }
+
+// CG(rtd_key_counter): the numbers php gives runtime-declared classes, which
+// end an anonymous class's name. process-wide like the closure ids, so two
+// threads never mint one name
+var next_rtd_key = std.atomic.Value(u32).init(0);
+
+pub fn reserveRtdKeys(count: u32) u32 {
+    return next_rtd_key.fetchAdd(count, .monotonic);
+}
+
+// numbers from 0 again, for a build that compiles every file of a project
+// up front: each file then names its classes as it would compiled first
+pub fn resetRtdKeys() void {
+    next_rtd_key.store(0, .monotonic);
+}
+
+// the number of each anonymous class in the file being compiled, by its
+// `new` token; sub-compilers for function bodies read it too
+pub threadlocal var anon_class_keys: std.AutoHashMapUnmanaged(u32, u32) = .{};
 
 pub const TypeHint = struct {
     name: []const u8,
@@ -192,6 +212,15 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
     // point. emit those into a prelude first, then compile everything else with
     // the relocated declarations skipped at their original site
     c.root_stmts = ast.extraSlice(root.data.lhs);
+    const outer_keys = anon_class_keys;
+    anon_class_keys = .{};
+    defer {
+        anon_class_keys.deinit(allocator);
+        anon_class_keys = outer_keys;
+    }
+    try compiler_class.assignRtdKeys(&c, ast.extraSlice(root.data.lhs), &anon_class_keys);
+    c.namespace = "";
+    c.use_aliases.clearRetainingCapacity();
     try compiler_class.hoistEarlyClasses(&c, ast.extraSlice(root.data.lhs));
     c.namespace = "";
     c.use_aliases.clearRetainingCapacity();
@@ -464,6 +493,12 @@ pub const Compiler = struct {
                 var d: Diagnostic = .{ .token = token };
                 // a message too long for the buffer keeps what fits
                 d.len = if (std.fmt.bufPrint(&d.text, fmt, args)) |written| written.len else |_| d.text.len;
+                var buf: [1024]u8 = undefined;
+                var fba = std.heap.FixedBufferAllocator.init(&buf);
+                if (class_names.stripAnonymous(fba.allocator(), d.text[0..d.len]) catch null) |shown| {
+                    @memcpy(d.text[0..shown.len], shown);
+                    d.len = shown.len;
+                }
                 slot.* = d;
             }
         }

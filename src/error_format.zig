@@ -6,6 +6,7 @@ const PhpObject = @import("runtime/value.zig").PhpObject;
 const php_syntax = @import("pipeline/php_syntax.zig");
 const VM = @import("runtime/vm.zig").VM;
 const Diagnostic = @import("pipeline/compiler.zig").Diagnostic;
+const class_names = @import("runtime/class_names.zig");
 
 const Writer = std.ArrayListUnmanaged(u8);
 
@@ -67,7 +68,12 @@ pub fn hasFatalPrefix(msg: []const u8) bool {
 pub fn formatRuntimeError(alloc: std.mem.Allocator, vm: *const VM) []const u8 {
     var buf: Writer = .empty;
 
-    if (vm.error_msg) |msg| {
+    if (vm.error_msg) |raw_msg| {
+        // the engine's messages name classes with %s, which stops at an
+        // anonymous class's NUL
+        const stripped = class_names.stripAnonymous(alloc, raw_msg) catch null;
+        defer if (stripped) |s| alloc.free(s);
+        const msg = stripped orelse raw_msg;
         // some error_msg values already have a leading 'Fatal error:' or
         // similar prefix (set via setErrorMsg("Fatal error: ..."). detect
         // and pass through; otherwise treat as a bare message and add PHP's
@@ -185,7 +191,14 @@ fn formatUncaughtException(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM
         const line_v = exc.object.get("line");
         const where = displayPath(if (file_v == .string) file_v.string.bytes() else "");
         const line: i64 = if (line_v == .int) line_v.int else 0;
-        writeFmt(buf, alloc, "{s}Fatal error{s}Uncaught {s}\n  thrown in {s} on line {d}\n", .{ lead, gap, report.description orelse "", where, line });
+        const description = report.description orelse "";
+        // the log formats the description with %s, which ends at a NUL, the
+        // "thrown in" after it included; the display writes it whole
+        if (copy == .log) if (std.mem.indexOfScalar(u8, description, 0)) |nul| {
+            writeFmt(buf, alloc, "{s}Fatal error{s}Uncaught {s} in {s} on line {d}\n", .{ lead, gap, description[0..nul], where, line });
+            return;
+        };
+        writeFmt(buf, alloc, "{s}Fatal error{s}Uncaught {s}\n  thrown in {s} on line {d}\n", .{ lead, gap, description, where, line });
         return;
     }
 
@@ -285,10 +298,10 @@ fn writeFrameCallee(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM, frame
         const class = func.name[0..sep];
         const method = func.name[sep + 2 ..];
         const type_str: []const u8 = if (func.is_static) "::" else "->";
-        writeFmt(buf, alloc, "{s}{s}{s}(", .{ class, type_str, method });
+        writeFmt(buf, alloc, "{s}{s}{s}(", .{ class_names.display(class), type_str, method });
     } else if (frame.called_class) |cls| {
         const type_str: []const u8 = if (func.is_static) "::" else "->";
-        writeFmt(buf, alloc, "{s}{s}{s}(", .{ cls, type_str, func.name });
+        writeFmt(buf, alloc, "{s}{s}{s}(", .{ class_names.display(cls), type_str, func.name });
     } else {
         writeFmt(buf, alloc, "{s}(", .{func.name});
     }
@@ -345,7 +358,7 @@ pub fn writeTraceArg(buf: *Writer, alloc: std.mem.Allocator, v: Value) void {
             }
         },
         .array => write(buf, alloc, "Array"),
-        .object => |o| writeFmt(buf, alloc, "Object({s})", .{o.class_name}),
+        .object => |o| writeFmt(buf, alloc, "Object({s})", .{class_names.display(o.class_name)}),
         .generator => write(buf, alloc, "Object(Generator)"),
         .fiber => write(buf, alloc, "Object(Fiber)"),
         else => write(buf, alloc, "?"),
@@ -363,7 +376,7 @@ pub fn writeTrace(buf: *Writer, alloc: std.mem.Allocator, trace: Value) void {
         if (entry.value != .array) continue;
         const e = entry.value.array;
         const fn_s = stringField(e, "function") orelse "?";
-        const class_s = stringField(e, "class") orelse "";
+        const class_s = class_names.display(stringField(e, "class") orelse "");
         const type_s = stringField(e, "type") orelse "";
         const file_s = stringField(e, "file") orelse "";
         const line_v = e.get(.{ .string = Value.String.borrowed("line") });

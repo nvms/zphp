@@ -340,7 +340,7 @@ fn valueAsStringForCompare(ctx: *NativeContext, v: Value) RuntimeError!Value.Str
             }
         }
         var buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "Object of class {s} could not be converted to string", .{v.object.class_name}) catch "Object could not be converted to string";
+        const msg = std.fmt.bufPrint(&buf, "Object of class {s} could not be converted to string", .{@import("../runtime/class_names.zig").display(v.object.class_name)}) catch "Object could not be converted to string";
         try ctx.vm.setPendingException("Error", msg);
         return error.RuntimeError;
     }

@@ -110,7 +110,7 @@ fn appendEscaped(w: *Writer, s: []const u8) !void {
 fn constSentinel(s: []const u8) ?struct { class: []const u8, name: []const u8 } {
     if (s.len <= 4 or s[0] != 0 or s[1] != 'C' or s[2] != 'C' or s[3] != 0) return null;
     const rest = s[4..];
-    const sep = std.mem.indexOfScalar(u8, rest, 0) orelse return null;
+    const sep = std.mem.lastIndexOfScalar(u8, rest, 0) orelse return null;
     return .{ .class = rest[0..sep], .name = rest[sep + 1 ..] };
 }
 

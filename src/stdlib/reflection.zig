@@ -1547,7 +1547,7 @@ fn rcIsAnonymous(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const name = this.get("name");
     if (name != .string) return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.scalar(.{ .bool = std.mem.startsWith(u8, name.string.bytes(), "class@anonymous") });
+    return NativeResult.scalar(.{ .bool = class_names.isAnonymous(name.string.bytes()) });
 }
 
 // getInterfaces returns an array keyed by interface name with ReflectionClass
@@ -2846,7 +2846,7 @@ fn decodeConstSentinel(ctx: *NativeContext, v: Value) !?[]const u8 {
     const s = v.string.bytes();
     if (s.len <= 4 or s[0] != 0 or s[1] != 'C' or s[2] != 'C' or s[3] != 0) return null;
     const rest = s[4..];
-    const sep = std.mem.indexOfScalar(u8, rest, 0) orelse return null;
+    const sep = std.mem.lastIndexOfScalar(u8, rest, 0) orelse return null;
     const class_name = rest[0..sep];
     const const_name = rest[sep + 1 ..];
     if (class_name.len == 0) return const_name;

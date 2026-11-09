@@ -418,7 +418,7 @@ fn get_debug_type(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         .float => NativeResult.literal("float"),
         .string => |s| if (std.mem.startsWith(u8, s.bytes(), "__closure_")) NativeResult.literal("Closure") else NativeResult.literal("string"),
         .array => NativeResult.literal("array"),
-        .object => |o| try NativeResult.copyString(ctx.allocator, o.class_name),
+        .object => |o| try NativeResult.copyString(ctx.allocator, class_names.display(o.class_name)),
         .generator => NativeResult.literal("Generator"),
         .fiber => NativeResult.literal("Fiber"),
         .resource => |r| if (value_mod.resourceClosed(r))
@@ -2188,7 +2188,7 @@ fn native_trigger_error(ctx: *NativeContext, args: []const Value) RuntimeError!N
         },
     }
     if (level == 256) try ctx.vm.raiseError(8192, "Passing E_USER_ERROR to trigger_error() is deprecated since 8.4, throw an exception or call exit with a string message instead");
-    try ctx.vm.raiseError(level, args[0].string.bytes());
+    try ctx.vm.raiseMessageAt(level, args[0].string.bytes(), ctx.vm.currentSourcePosition());
     return NativeResult.scalar(.{ .bool = true });
 }
 

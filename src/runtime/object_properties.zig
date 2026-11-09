@@ -198,7 +198,9 @@ pub fn setMangled(vm: *VM, arr: *PhpArray, name: []const u8, visibility: ClassDe
 
 fn unmangle(key: []const u8, value: Value) Property {
     if (key.len > 0 and key[0] == 0) {
-        if (std.mem.indexOfScalarPos(u8, key, 1, 0)) |end| {
+        // an anonymous class's name holds a NUL of its own; the name follows the last
+        if (std.mem.lastIndexOfScalar(u8, key[1..], 0)) |last| {
+            const end = last + 1;
             const class = key[1..end];
             const name = key[end + 1 ..];
             if (std.mem.eql(u8, class, "*")) return .{ .key = .{ .name = name }, .value = value, .visibility = .protected };

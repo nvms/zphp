@@ -695,7 +695,8 @@ const ParseResult = struct {
 
 fn stripVisibilityPrefix(name: []const u8) []const u8 {
     if (name.len > 2 and name[0] == 0) {
-        if (std.mem.indexOfScalarPos(u8, name, 1, 0)) |second| {
+        if (std.mem.lastIndexOfScalar(u8, name[1..], 0)) |last| {
+            const second = last + 1;
             return name[second + 1 ..];
         }
     }

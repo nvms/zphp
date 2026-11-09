@@ -689,7 +689,7 @@ fn restoreCustomProperties(ctx: *NativeContext, obj: *PhpObject, data: *const Ph
         if (entry.key != .string or entry.ref != null) continue;
         const key = entry.key.string.bytes();
         for (internal) |name| if (std.mem.eql(u8, key, name)) continue :entries;
-        const name = if (key.len > 0 and key[0] == 0) if (std.mem.indexOfScalarPos(u8, key, 1, 0)) |end| key[end + 1 ..] else key else key;
+        const name = if (key.len > 0 and key[0] == 0) if (std.mem.lastIndexOfScalar(u8, key[1..], 0)) |end| key[end + 2 ..] else key else key;
         try obj.set(ctx.allocator, name, entry.value);
     }
 }
@@ -3462,7 +3462,7 @@ fn intervalUnserialize(ctx: *NativeContext, args: []const Value) RuntimeError!Na
     entries: for (args[0].array.entries.items) |entry| {
         if (entry.key != .string or entry.ref != null or isIntervalField(entry.key)) continue :entries;
         const key = entry.key.string.bytes();
-        const name = if (key.len > 0 and key[0] == 0) if (std.mem.indexOfScalarPos(u8, key, 1, 0)) |end| key[end + 1 ..] else key else key;
+        const name = if (key.len > 0 and key[0] == 0) if (std.mem.lastIndexOfScalar(u8, key[1..], 0)) |end| key[end + 2 ..] else key else key;
         try obj.set(ctx.allocator, name, entry.value);
     }
     return NativeResult.scalar(.null);

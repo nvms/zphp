@@ -42,6 +42,56 @@ fn fold(dst: []u8, src: []const u8) []const u8 {
     return dst[0..src.len];
 }
 
+// php names an anonymous class `<parent, first interface or class>@anonymous`,
+// a NUL, then the file, line and runtime definition number it was declared at
+pub fn isAnonymous(name: []const u8) bool {
+    return std.mem.indexOf(u8, name, anonymous_marker) != null;
+}
+
+const anonymous_marker = "@anonymous\x00";
+
+// a class name as php prints it in messages and dumps: as a C string, which
+// ends at an anonymous class's NUL
+pub fn display(name: []const u8) []const u8 {
+    return name[0 .. std.mem.indexOfScalar(u8, name, 0) orelse name.len];
+}
+
+// a message zphp formatted with class names in it, the way php's printf-style
+// formatting writes it: each anonymous class name stops at its NUL. null when
+// it names no anonymous class
+pub fn stripAnonymous(allocator: std.mem.Allocator, msg: []const u8) !?[]u8 {
+    var at = std.mem.indexOf(u8, msg, anonymous_marker) orelse return null;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var copied: usize = 0;
+    while (true) {
+        const nul = at + anonymous_marker.len - 1;
+        if (anonymousSuffixEnd(msg, nul + 1)) |end| {
+            try out.appendSlice(allocator, msg[copied..nul]);
+            copied = end;
+            at = end;
+        } else at = nul + 1;
+        at = std.mem.indexOfPos(u8, msg, at, anonymous_marker) orelse break;
+    }
+    try out.appendSlice(allocator, msg[copied..]);
+    return try out.toOwnedSlice(allocator);
+}
+
+// the end of `<file>:<line>$<hex>` starting at `from`. a file may hold `:`
+// and `$` itself, so the first `:digits$hex` run counts
+fn anonymousSuffixEnd(msg: []const u8, from: usize) ?usize {
+    var i = from;
+    while (std.mem.indexOfScalarPos(u8, msg, i, ':')) |colon| : (i = colon + 1) {
+        var j = colon + 1;
+        while (j < msg.len and std.ascii.isDigit(msg[j])) j += 1;
+        if (j == colon + 1 or j >= msg.len or msg[j] != '$') continue;
+        var k = j + 1;
+        while (k < msg.len and std.ascii.isHex(msg[k]) and !std.ascii.isUpper(msg[k])) k += 1;
+        if (k > j + 1) return k;
+    }
+    return null;
+}
+
 // "Class::member", the key methods, static variables and constants are found
 // under, written to `buf`. a key too long for it (an anonymous class's name
 // carries its file path) is kept in a process-wide table instead, so lookups
@@ -83,6 +133,18 @@ test "member keys of any length" {
     const key = memberKey(&buf, long, "method");
     try std.testing.expectEqualStrings(long ++ "::method", key);
     try std.testing.expectEqual(key.ptr, memberKey(&buf, long, "method").ptr);
+}
+
+test "anonymous class names print up to their NUL" {
+    const a = std.testing.allocator;
+    const name = "Foo@anonymous\x00/tmp/a:b.php:12$1f";
+    try std.testing.expect(isAnonymous(name));
+    try std.testing.expect(!isAnonymous("Foo"));
+    try std.testing.expectEqualStrings("Foo@anonymous", display(name));
+    const msg = try stripAnonymous(a, "Call to " ++ name ++ "::f() on class@anonymous\x00x.php:3$0");
+    defer if (msg) |m| a.free(m);
+    try std.testing.expectEqualStrings("Call to Foo@anonymous::f() on class@anonymous", msg.?);
+    try std.testing.expect((try stripAnonymous(a, "plain")) == null);
 }
 
 pub fn Map(comptime V: type) type {

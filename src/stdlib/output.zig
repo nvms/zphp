@@ -2,6 +2,7 @@ const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const value_mod = @import("../runtime/value.zig");
+const class_names = @import("../runtime/class_names.zig");
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const ClassDef = @import("../runtime/vm.zig").ClassDef;
 const object_properties = @import("../runtime/object_properties.zig");
@@ -166,7 +167,7 @@ fn varDumpMarked(ctx: *NativeContext, val: Value, depth: usize, marker: []const 
             try out.appendSlice(a, marker);
             try out.appendSlice(a, object_properties.lazyPrefix(obj));
             try out.appendSlice(a, "object(");
-            try out.appendSlice(a, obj.class_name);
+            try out.appendSlice(a, class_names.display(obj.class_name));
             var initialized: usize = 0;
             for (listing.items.items) |prop| initialized += @intFromBool(prop.uninitialized == null);
             try out.print(a, ")#{d} ({d}) {{\n", .{ obj.id, initialized });
@@ -324,14 +325,14 @@ fn printRValueImpl(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: 
         .object => |obj| {
             const flag = objectFlag(vm, obj, Recursion.debug);
             if (obj.recursion & flag != 0) {
-                try out.appendSlice(a, obj.class_name);
+                try out.appendSlice(a, class_names.display(obj.class_name));
                 try out.appendSlice(a, " Object\n *RECURSION*");
                 return;
             }
             obj.recursion |= flag;
             defer obj.recursion &= ~flag;
 
-            try out.appendSlice(a, obj.class_name);
+            try out.appendSlice(a, class_names.display(obj.class_name));
             // enums print as "ClassName Enum:type" (or "ClassName Enum" for non-backed)
             var label: []const u8 = " Object\n";
             if (vm) |v| {
@@ -362,7 +363,7 @@ fn printRValueImpl(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: 
                             switch (prop.visibility) {
                                 .public => {},
                                 .protected => try out.appendSlice(a, ":protected"),
-                                .private => try out.print(a, ":{s}:private", .{prop.declaring}),
+                                .private => try out.print(a, ":{s}:private", .{class_names.display(prop.declaring)}),
                             }
                         },
                     }
@@ -583,7 +584,7 @@ fn emitDumpKey(out: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, name: []c
         .protected => try out.appendSlice(a, ":protected"),
         .private => {
             try out.appendSlice(a, ":\"");
-            try out.appendSlice(a, class_name);
+            try out.appendSlice(a, class_names.display(class_name));
             try out.appendSlice(a, "\":private");
         },
     }

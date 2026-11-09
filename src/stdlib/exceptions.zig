@@ -7,6 +7,7 @@ const VM = vm_mod.VM;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
+const class_names = @import("../runtime/class_names.zig");
 
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
@@ -241,9 +242,9 @@ pub fn describe(ctx: *NativeContext, throwable: *PhpObject) RuntimeError![]u8 {
         const where = .{ if (file == .string) file.string.bytes() else "", if (line == .int) line.int else 0 };
         const next: []const u8 = if (text.len > 0) "\n\nNext " else "";
         const described = if (message_text.len > 0)
-            try std.fmt.allocPrint(ctx.allocator, "{s}: {s} in {s}:{d}\nStack trace:\n{s}{s}{s}", .{ e.class_name, message_text, where[0], where[1], trace, next, text })
+            try std.fmt.allocPrint(ctx.allocator, "{s}: {s} in {s}:{d}\nStack trace:\n{s}{s}{s}", .{ class_names.display(e.class_name), message_text, where[0], where[1], trace, next, text })
         else
-            try std.fmt.allocPrint(ctx.allocator, "{s} in {s}:{d}\nStack trace:\n{s}{s}{s}", .{ e.class_name, where[0], where[1], trace, next, text });
+            try std.fmt.allocPrint(ctx.allocator, "{s} in {s}:{d}\nStack trace:\n{s}{s}{s}", .{ class_names.display(e.class_name), where[0], where[1], trace, next, text });
         ctx.allocator.free(text);
         text = described;
         current = e.get("previous");

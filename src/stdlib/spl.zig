@@ -993,7 +993,7 @@ pub fn loadProperties(ctx: *NativeContext, obj: *PhpObject, members: *PhpArray) 
     for (members.entries.items) |entry| {
         var buf: [24]u8 = undefined;
         const key = tableKey(entry.key, &buf);
-        const name = if (key.len > 0 and key[0] == 0) if (std.mem.indexOfScalarPos(u8, key, 1, 0)) |end| key[end + 1 ..] else key else key;
+        const name = if (key.len > 0 and key[0] == 0) if (std.mem.lastIndexOfScalar(u8, key[1..], 0)) |end| key[end + 2 ..] else key else key;
         if (object_properties.isInternalState(ctx.vm, obj, name)) continue;
         if (!obj.properties.contains(name) and !ctx.vm.classDeclaresProperty(obj.class_name, name) and ctx.vm.dynamicPropertyRule(obj) == .deprecated) {
             const msg = try std.fmt.allocPrint(ctx.allocator, "Creation of dynamic property {s}::${s} is deprecated", .{ obj.class_name, name });
