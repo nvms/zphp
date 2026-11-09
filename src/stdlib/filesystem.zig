@@ -1095,20 +1095,91 @@ fn packedFileAt(path: []const u8) bool {
 }
 
 fn native_copy(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2 or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
-    const spelled_source = if (args[0] == .string) args[0].string.bytes() else if (args[0] == .object and ctx.vm.hasMethod(args[0].object.class_name, "__toString")) try ctx.vm.objectToString(args[0].object) else return NativeResult.scalar(.{ .bool = false });
+    const spelled_source = try strArg(ctx, args, "copy", 0, "from", true);
+    const spelled_dest = try strArg(ctx, args, "copy", 1, "to", true);
     try useContext(ctx, args, 2);
     var source_buf: [std.fs.max_path_bytes]u8 = undefined;
     var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const source = paths.streamPath(&source_buf, spelled_source);
-    const dest = paths.streamPath(&dest_buf, args[1].string.bytes());
-    bundle.prepareWrite(dest, .create);
+    var source = paths.streamPath(&source_buf, spelled_source);
+    var dest = paths.streamPath(&dest_buf, spelled_dest);
+    if (std.ascii.startsWithIgnoreCase(source, "file://")) source = source[7..];
+    if (std.ascii.startsWithIgnoreCase(dest, "file://")) dest = dest[7..];
+
+    // php_copy_file_ctx: a directory on either side is refused, and a file
+    // copied onto itself fails quietly
+    const plain_source = !paths.hasScheme(source);
+    const source_stat: ?WrapperStat = if (bundle.find(source)) |hit| packedStat(hit) else if (plain_source and source.len > 0) plainStat(source, false) else null;
+    if (source_stat) |st| if (st.mode & 0o170000 == 0o040000) {
+        try warn(ctx, "copy(): The first argument to copy() function cannot be a directory", .{});
+        return NativeResult.scalar(.{ .bool = false });
+    };
+    if (paths.hasScheme(dest)) return NativeResult.scalar(.{ .bool = false });
+    const dest_stat: ?WrapperStat = if (dest.len > 0) plainStat(dest, false) else null;
+    if (dest_stat) |st| if (st.mode & 0o170000 == 0o040000) {
+        try warn(ctx, "copy(): The second argument to copy() function cannot be a directory", .{});
+        return NativeResult.scalar(.{ .bool = false });
+    };
+    if (source_stat != null and dest_stat != null and source_stat.?.ino != 0 and source_stat.?.ino == dest_stat.?.ino and source_stat.?.dev == dest_stat.?.dev) {
+        return NativeResult.scalar(.{ .bool = false });
+    }
+
+    // the source opens first, then the destination is created or truncated
+    var wrapped: ?Value.String = null;
+    defer if (wrapped) |w| w.release();
+    var source_file: ?std.Io.File = null;
+    defer if (source_file) |f| f.close(platform.io);
+    try requirePath(ctx, source);
     if (bundle.find(source)) |hit| switch (hit) {
-        .file => |entry| std.Io.Dir.cwd().writeFile(platform.io, .{ .sub_path = dest, .data = entry.source }) catch return NativeResult.scalar(.{ .bool = false }),
-        .dir => return NativeResult.scalar(.{ .bool = false }),
-    } else std.Io.Dir.cwd().copyFile(source, std.Io.Dir.cwd(), dest, platform.io, .{}) catch return NativeResult.scalar(Value{ .bool = false });
-    transientStreams(ctx, 2);
+        .file => |entry| wrapped = try Value.String.create(ctx.allocator, entry.source),
+        .dir => unreachable,
+    } else if (!plain_source) {
+        wrapped = (try readPath(ctx, source)) orelse {
+            try warn(ctx, "copy({s}): Failed to open stream: operation failed", .{source});
+            return NativeResult.scalar(.{ .bool = false });
+        };
+    } else {
+        source_file = openPlain(source) catch |err| {
+            try warn(ctx, "copy({s}): Failed to open stream: {s}", .{ source, errorText(err) });
+            return NativeResult.scalar(.{ .bool = false });
+        };
+    }
+    transientStreams(ctx, 1);
+    try requirePath(ctx, dest);
+    bundle.prepareWrite(dest, .create);
+    const dest_file = createPlain(dest) catch |err| {
+        try warn(ctx, "copy({s}): Failed to open stream: {s}", .{ dest, errorText(err) });
+        return NativeResult.scalar(.{ .bool = false });
+    };
+    defer dest_file.close(platform.io);
+    transientStreams(ctx, 1);
+    if (wrapped) |w| {
+        platform.writeAll(dest_file, w.bytes()) catch return NativeResult.scalar(.{ .bool = false });
+    } else {
+        var buf: [64 * 1024]u8 = undefined;
+        while (true) {
+            const n = platform.read(source_file.?, &buf) catch return NativeResult.scalar(.{ .bool = false });
+            if (n == 0) break;
+            platform.writeAll(dest_file, buf[0..n]) catch return NativeResult.scalar(.{ .bool = false });
+        }
+    }
     return NativeResult.scalar(.{ .bool = true });
+}
+
+// php's stream opener refuses an empty path outright
+fn requirePath(ctx: *NativeContext, path: []const u8) RuntimeError!void {
+    if (path.len == 0) return throwValueError(ctx, "Path must not be empty", .{});
+}
+
+// a plain file opened for reading; an empty path names nothing
+fn openPlain(path: []const u8) !std.Io.File {
+    if (path.len == 0) return error.FileNotFound;
+    return std.Io.Dir.cwd().openFile(platform.io, path, .{});
+}
+
+// a plain file created or truncated for writing, mode "wb"
+fn createPlain(path: []const u8) !std.Io.File {
+    if (path.len == 0) return error.FileNotFound;
+    return std.Io.Dir.cwd().createFile(platform.io, path, .{ .truncate = true });
 }
 
 fn native_rename(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
