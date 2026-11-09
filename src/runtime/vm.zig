@@ -5792,10 +5792,22 @@ pub const VM = struct {
                         // inner element via offsetGet so the write is on the
                         // underlying stored value (or routed back through
                         // offsetSet for scalar inners)
+                        // the popped value and keys belong to no slot while a
+                        // user offsetGet runs, and its statements' release
+                        // drains would free them
+                        retainValue(v);
+                        retainValue(inner_key);
+                        retainValue(outer_key);
                         existing = self.offsetGetForWrite(base.object, outer_key) catch {
+                            self.releaseValue(v);
+                            self.releaseValue(inner_key);
+                            self.releaseValue(outer_key);
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
+                        self.releaseValue(v);
+                        self.releaseValue(inner_key);
+                        self.releaseValue(outer_key);
                         base_is_array_access_obj = true;
                     } else if (base == .object and outer_key == .string) {
                         self.triggerLazyAccess(base.object, outer_key.string.bytes()) catch {
