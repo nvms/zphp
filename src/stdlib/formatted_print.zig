@@ -321,6 +321,7 @@ fn dtoa(value: f64, ndigit: i32, d: *Dtoa) void {
         }
     }
     var tmp: [128]u8 = undefined;
+    if (ndigit > 0 and roundShortest(v, @intCast(ndigit), d)) return;
     const sci: []const u8 = if (ndigit < 0)
         std.fmt.float.render(&tmp, v, .{ .mode = .scientific }) catch unreachable
     else
@@ -333,6 +334,67 @@ fn dtoa(value: f64, ndigit: i32, d: *Dtoa) void {
     };
     while (d.len > 1 and d.buf[d.len - 1] == '0') d.len -= 1;
     d.decpt = (std.fmt.parseInt(i32, sci[e_at + 1 ..], 10) catch 0) + 1;
+}
+
+// mode 2 from the shortest round-trip digits, which are much cheaper than
+// snprintf's exact expansion. they differ from the exact value by less than
+// half an ulp, a few units at the 17th digit, so rounding them gives the
+// exact rounding unless the dropped digits are that close to a tie; then
+// false, and the caller expands exactly
+fn roundShortest(v: f64, ndigit: usize, d: *Dtoa) bool {
+    // a subnormal's shortest digits, and 16 or 17 requested, can be off by
+    // more than the margin below allows
+    if (ndigit > 15 or v < std.math.floatMin(f64)) return false;
+    var tmp: [64]u8 = undefined;
+    const sci = std.fmt.float.render(&tmp, v, .{ .mode = .scientific }) catch return false;
+    const e_at = std.mem.lastIndexOfScalar(u8, sci, 'e') orelse return false;
+    var digits: [32]u8 = undefined;
+    var len: usize = 0;
+    for (sci[0..e_at]) |c| if (c != '.') {
+        if (len == digits.len) return false;
+        digits[len] = c;
+        len += 1;
+    };
+    var decpt = (std.fmt.parseInt(i32, sci[e_at + 1 ..], 10) catch return false) + 1;
+    if (len > ndigit) {
+        // the dropped digits against half a unit of the last kept one, both
+        // scaled to the 17th significant digit
+        const dropped = digits[ndigit..len];
+        if (dropped.len > 17) return false;
+        var tail: u64 = 0;
+        for (dropped) |c| tail = tail * 10 + (c - '0');
+        const scale = std.math.pow(u64, 10, 17 - @min(17, len));
+        const half = 5 * std.math.pow(u64, 10, dropped.len - 1) * scale;
+        const t = tail * scale;
+        // a whole ulp in units of the 17th significant digit, plus one
+        const ulp = std.math.nextAfter(f64, v, std.math.inf(f64)) - v;
+        const unit = std.math.pow(f64, 10, @as(f64, @floatFromInt(decpt - 17)));
+        const margin: u64 = @as(u64, @intFromFloat(@ceil(ulp / unit))) + 1;
+        if (t + margin >= half and t <= half + margin) return false;
+        len = ndigit;
+        if (t > half) {
+            var i = len;
+            while (i > 0) {
+                i -= 1;
+                if (digits[i] == '9') {
+                    digits[i] = '0';
+                    if (i == 0) {
+                        digits[0] = '1';
+                        len = 1;
+                        decpt += 1;
+                    }
+                } else {
+                    digits[i] += 1;
+                    break;
+                }
+            }
+        }
+    }
+    while (len > 1 and digits[len - 1] == '0') len -= 1;
+    @memcpy(d.buf[0..len], digits[0..len]);
+    d.len = len;
+    d.decpt = decpt;
+    return true;
 }
 
 // zend_gcvt: %g style output, in buf
