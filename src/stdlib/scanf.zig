@@ -677,7 +677,7 @@ fn native_fscanf(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         return error.RuntimeError;
     }
 
-    const line = (try @import("filesystem.zig").readLine(ctx, r, std.math.maxInt(usize), "fscanf")) orelse
+    const line = (try @import("filesystem.zig").readLine(ctx, r, std.math.maxInt(usize))) orelse
         return NativeResult.scalar(.{ .bool = false });
     defer line.release();
     return scan(ctx, line.bytes(), format, args, 2);

@@ -77,12 +77,12 @@ fn native_stat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
 
 fn native_flock(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = try filesystem.streamArg(ctx, args, .{ .func = "flock" });
-    if (args.len < 2 or args[1] != .int) return NativeResult.scalar(.{ .bool = false });
+    const operation = try filesystem.flockOperation(ctx, args);
     const fd = obj.get("__fd");
     if (fd != .int) return NativeResult.scalar(.{ .bool = false });
     const file = @import("../platform.zig").fileFromFd(fd.int) orelse return NativeResult.scalar(.{ .bool = false });
-    const op = args[1].int & 0x3;
-    const non_block = (args[1].int & 4) != 0;
+    const op = operation.kind;
+    const non_block = operation.non_block;
     switch (op) {
         1, 2 => {
             // std's tryLock does not compile for windows in zig 0.15.1, so a

@@ -30,3 +30,4 @@ mkdir_rmdir_unlink_rename_warnings.php: php on windows words these failures with
 link_failure_warnings.php: symlink and link are posix calls; windows php needs privileges for them and words failures differently
 touch_chown_warnings.php: ownership calls and directory times are posix; windows php returns false from chown without a warning
 fread_fwrite_wrong_mode_notices.php: windows reports a read on a write-only handle as access denied rather than a bad descriptor
+stream_argument_validation.php: a non-blocking flock waits on windows, so the contended lock would hang

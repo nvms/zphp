@@ -2367,25 +2367,25 @@ pub fn streamWrite(ctx: *NativeContext, obj: *PhpObject, data: []const u8) Runti
 fn native_fgets(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = try streamArg(ctx, args, .{ .func = "fgets" });
     // PHP: fgets($f, length) reads up to length-1 bytes
-    const max_len: usize = if (args.len >= 2 and args[1] == .int) @intCast(@max(args[1].int - 1, 1)) else std.math.maxInt(usize);
-    const line = (try readLine(ctx, obj, max_len, "fgets")) orelse return NativeResult.scalar(.{ .bool = false });
+    const have_length = args.len >= 2 and args[1] != .null;
+    const length = if (have_length) try intArg(ctx, args, "fgets", 1, "length", 0) else 0;
+    if (have_length and length <= 0) return throwValueError(ctx, "fgets(): Argument #2 ($length) must be greater than 0", .{});
+    // without a length the whole line comes back, however long
+    const max_len: usize = if (have_length) @intCast(length - 1) else std.math.maxInt(usize);
+    if (max_len == 0) return NativeResult.scalar(.{ .bool = false });
+    const line = (try readLine(ctx, obj, max_len)) orelse return NativeResult.scalar(.{ .bool = false });
     return NativeResult.takeString(line);
 }
 
-// php_stream_get_line: up to max_len bytes through the next newline, or null
-// at eof. a plain file opened without read access fails the read the way
-// php's does, with a notice naming the calling function
-pub fn readLine(ctx: *NativeContext, obj: *PhpObject, max_len: usize, comptime func: []const u8) RuntimeError!?Value.String {
-    if (getBufferBacking(obj) == null and streamIo(obj) != null and writeOnlyPlainFile(obj)) {
-        try ctx.vm.raiseError(8, func ++ "(): Read of 8192 bytes failed with errno=9 Bad file descriptor");
-        return null;
-    }
+// php_stream_get_line as a string value, or null at eof
+pub fn readLine(ctx: *NativeContext, obj: *PhpObject, max_len: usize) RuntimeError!?Value.String {
     const line = (try streamReadLine(ctx, obj, max_len)) orelse return null;
     return try Value.String.adopt(ctx.allocator, line);
 }
 
 // the next line of a stream through its newline, at most max_len bytes,
-// owned by the caller; null at the end of the stream
+// owned by the caller; null at the end of the stream. a failed read warns
+// with php's errno notice, naming the calling function
 pub fn streamReadLine(ctx: *NativeContext, obj: *PhpObject, max_len: usize) RuntimeError!?[]u8 {
     if (getBufferBacking(obj)) |buffer| {
         const pos = getBufferPos(obj);
@@ -2424,19 +2424,6 @@ pub fn streamReadLine(ctx: *NativeContext, obj: *PhpObject, max_len: usize) Runt
         return null;
     }
     return try buf.toOwnedSlice(ctx.allocator);
-}
-
-// a file opened by path in a mode without read access (w, a, x, c and their
-// b/t variants); memory and temp streams read whatever their mode
-fn writeOnlyPlainFile(obj: *PhpObject) bool {
-    const path = obj.get("__path");
-    if (path != .string or std.mem.startsWith(u8, path.string.bytes(), "php://")) return false;
-    if (obj.get("__peek_eof") != .null) return false;
-    const mode = obj.get("__mode");
-    if (mode != .string or mode.string.bytes().len == 0) return false;
-    const m = mode.string.bytes();
-    if (std.mem.indexOfScalar(u8, m, '+') != null) return false;
-    return m[0] == 'w' or m[0] == 'a' or m[0] == 'x' or m[0] == 'c';
 }
 
 fn native_stream_get_line(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -2615,9 +2602,10 @@ fn native_fflush(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
 
 fn native_ftruncate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = try streamArg(ctx, args, .{ .func = "ftruncate" });
-    if (args.len < 2 or args[1] != .int) return NativeResult.scalar(.{ .bool = false });
+    const size_arg = try intArg(ctx, args, "ftruncate", 1, "size", 0);
+    if (size_arg < 0) return throwValueError(ctx, "ftruncate(): Argument #2 ($size) must be greater than or equal to 0", .{});
     const file = getFileHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
-    const size: u64 = @intCast(@max(args[1].int, 0));
+    const size: u64 = @intCast(size_arg);
     file.setLength(platform.io, size) catch return NativeResult.scalar(.{ .bool = false });
     // for php://memory / php://temp, snap the cursor to the new end rather than
     // leaving it past EOF where subsequent writes would create null-padded holes
@@ -2629,23 +2617,33 @@ fn native_ftruncate(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     return NativeResult.scalar(.{ .bool = true });
 }
 
+// php_flock_common: the operation must name LOCK_SH, LOCK_EX, or LOCK_UN
+// (LOCK_NB may be or'ed in), and $would_block starts out 0. returns the
+// operation's lock kind (1 shared, 2 exclusive, 3 unlock) and whether it
+// must not block
+pub fn flockOperation(ctx: *NativeContext, args: []const Value) RuntimeError!struct { kind: i64, non_block: bool } {
+    const operation = try intArg(ctx, args, "flock", 1, "operation", 0);
+    const kind = operation & 3;
+    if (kind < 1) return throwValueError(ctx, "flock(): Argument #2 ($operation) must be one of LOCK_SH, LOCK_EX, or LOCK_UN", .{});
+    if (args.len >= 3) ctx.setCallerVar(2, args.len, .{ .int = 0 });
+    return .{ .kind = kind, .non_block = (operation & 4) != 0 };
+}
+
 fn native_flock(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = try streamArg(ctx, args, .{ .func = "flock" });
-    if (args.len < 2 or args[1] != .int) return NativeResult.scalar(.{ .bool = false });
+    const op = try flockOperation(ctx, args);
     const file = getFileHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
-    // PHP renumbers the lock op constants: LOCK_SH=1, LOCK_EX=2, LOCK_UN=3,
-    // LOCK_NB=4. translate to the OS values (LOCK_SH=1, LOCK_EX=2, LOCK_NB=4,
-    // LOCK_UN=8) before handing to flock(2)
-    const php_op = args[1].int;
-    const non_block: i32 = if ((php_op & 4) != 0) 4 else 0;
-    const base = php_op & 0x3;
-    const os_base: i32 = switch (base) {
-        1 => 1, // LOCK_SH
-        2 => 2, // LOCK_EX
-        3 => 8, // LOCK_UN
-        else => 0,
+    if (getBufferBacking(obj) != null) return NativeResult.scalar(.{ .bool = false });
+    // flock(2) numbers them LOCK_SH=1, LOCK_EX=2, LOCK_UN=8, LOCK_NB=4
+    const os_op: i32 = @as(i32, switch (op.kind) {
+        1 => 1,
+        2 => 2,
+        else => 8,
+    }) | @as(i32, if (op.non_block) 4 else 0);
+    sys.flock(file.handle, os_op) catch |err| {
+        if (err == error.WouldBlock and args.len >= 3) ctx.setCallerVar(2, args.len, .{ .int = 1 });
+        return NativeResult.scalar(.{ .bool = false });
     };
-    sys.flock(file.handle, os_base | non_block) catch return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -3504,9 +3502,26 @@ fn makePopenWriteHandle(ctx: *NativeContext, command: []const u8) !*PhpObject {
 }
 
 pub fn native_popen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
-    const cmd = args[0].string.bytes();
-    const mode = args[1].string.bytes();
+    const cmd = try strArg(ctx, args, "popen", 0, "command", true);
+    const mode = try strArg(ctx, args, "popen", 1, "mode", false);
+    // posix popen takes no 'b'; php drops the first one and accepts only
+    // what is left of "r", "rb", "w", "wb"
+    var mode_buf: [3]u8 = undefined;
+    var posix_mode: []const u8 = mode;
+    if (!platform.is_windows and mode.len <= mode_buf.len) {
+        if (std.mem.indexOfScalar(u8, mode, 'b')) |b| {
+            @memcpy(mode_buf[0..b], mode[0..b]);
+            @memcpy(mode_buf[b .. mode.len - 1], mode[b + 1 ..]);
+            posix_mode = mode_buf[0 .. mode.len - 1];
+        }
+    }
+    const valid = switch (posix_mode.len) {
+        0 => true,
+        1 => posix_mode[0] == 'r' or posix_mode[0] == 'w',
+        2 => std.mem.eql(u8, posix_mode, "rb") or std.mem.eql(u8, posix_mode, "wb"),
+        else => false,
+    };
+    if (!valid) return throwValueError(ctx, "popen(): Argument #2 ($mode) must be one of \"r\", \"rb\", \"w\", or \"wb\"", .{});
     if (mode.len > 0 and (mode[0] == 'r')) {
         const result = runShellCapture(ctx.allocator, cmd, null) catch return NativeResult.scalar(.{ .bool = false });
         ctx.allocator.free(result.stderr);
