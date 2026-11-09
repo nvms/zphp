@@ -2668,7 +2668,7 @@ fn rmGetReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
 
     var buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return NativeResult.scalar(.null);
-    const return_type = if (vm_mod.getTypeInfo(key)) |ti| ti.return_type else nativeReturnType(ctx, key);
+    const return_type = if (methodTypeInfo(ctx.vm, key)) |ti| ti.return_type else nativeReturnType(ctx, key);
     if (return_type.len == 0) return NativeResult.scalar(.null);
 
     const obj = try createTypeObj(ctx, return_type, false, declaring);
@@ -2686,8 +2686,16 @@ fn rmHasReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
 
     var buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return NativeResult.scalar(.{ .bool = false });
-    const return_type = if (vm_mod.getTypeInfo(key)) |ti| ti.return_type else nativeReturnType(ctx, key);
+    const return_type = if (methodTypeInfo(ctx.vm, key)) |ti| ti.return_type else nativeReturnType(ctx, key);
     return NativeResult.scalar(.{ .bool = return_type.len > 0 });
+}
+
+// a method's declared types; one a class took from a trait is filed under
+// the trait's method
+pub fn methodTypeInfo(vm: *VM, key: []const u8) ?vm_mod.TypeInfo {
+    if (vm_mod.getTypeInfo(key)) |ti| return ti;
+    const func = vm.functions.get(key) orelse return null;
+    return vm_mod.getTypeInfo(func.name);
 }
 
 // php 8.1+ internal methods declare tentative return types that a user
@@ -3424,7 +3432,7 @@ fn populateRpFields(ctx: *NativeContext, obj: *PhpObject, func: *const ObjFuncti
         }
         break :blk type_key;
     } else type_key;
-    const type_info = vm_mod.getTypeInfo(effective_key) orelse vm_mod.getTypeInfo(type_key);
+    const type_info = vm_mod.getTypeInfo(effective_key) orelse vm_mod.getTypeInfo(type_key) orelse vm_mod.getTypeInfo(func.name);
 
     const param_name = func.params[i];
     const clean_name = if (param_name.len > 0 and param_name[0] == '$') param_name[1..] else param_name;
@@ -3585,7 +3593,7 @@ fn buildParamArray(ctx: *NativeContext, func: *const ObjFunction, type_key: []co
         }
         break :blk type_key;
     } else type_key;
-    const type_info = vm_mod.getTypeInfo(effective_key) orelse vm_mod.getTypeInfo(type_key);
+    const type_info = vm_mod.getTypeInfo(effective_key) orelse vm_mod.getTypeInfo(type_key) orelse vm_mod.getTypeInfo(func.name);
 
     for (func.params, 0..) |param_name, i| {
         const obj = try ctx.createObject("ReflectionParameter");
