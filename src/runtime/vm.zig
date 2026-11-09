@@ -12367,7 +12367,12 @@ pub const VM = struct {
         }
         if (missing.items.len > 3) try names.appendSlice(self.allocator, ", ...");
         const plural: []const u8 = if (missing.items.len > 1) "s" else "";
-        const msg = try std.fmt.allocPrint(self.allocator, "Class {s} contains {d} abstract method{s} and must therefore be declared abstract or implement the remaining method{s} ({s})", .{ class_name, missing.items.len, plural, plural, names.items });
+        // an anonymous class or an enum cannot be declared abstract, so php
+        // does not suggest it
+        const msg = if (class_names.isAnonymous(class_name) or def.is_enum)
+            try std.fmt.allocPrint(self.allocator, "{s} {s} must implement {d} abstract method{s} ({s})", .{ if (def.is_enum) "Enum" else "Class", class_name, missing.items.len, plural, names.items })
+        else
+            try std.fmt.allocPrint(self.allocator, "Class {s} contains {d} abstract method{s} and must therefore be declared abstract or implement the remaining method{s} ({s})", .{ class_name, missing.items.len, plural, plural, names.items });
         defer self.allocator.free(msg);
         return self.raiseFatal(msg);
     }
@@ -15411,7 +15416,10 @@ pub const VM = struct {
             while (di.next()) |e| {
                 // an abstract hook is verifyAbstractClass's
                 if (e.value_ptr.is_abstract and std.mem.indexOf(u8, e.key_ptr.*, "$hook_") == null) {
-                    const msg = try std.fmt.allocPrint(self.allocator, "Class {s} declares abstract method {s}() and must therefore be declared abstract", .{ class_name, e.key_ptr.* });
+                    const msg = if (class_names.isAnonymous(class_name))
+                        try std.fmt.allocPrint(self.allocator, "Anonymous class method {s}() must not be abstract", .{e.key_ptr.*})
+                    else
+                        try std.fmt.allocPrint(self.allocator, "Class {s} declares abstract method {s}() and must therefore be declared abstract", .{ class_name, e.key_ptr.* });
                     try self.strings.append(self.allocator, msg);
                     self.error_msg = msg;
                     return error.RuntimeError;
