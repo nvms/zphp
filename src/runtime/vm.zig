@@ -8165,7 +8165,7 @@ pub const VM = struct {
                     const func_name = self.currentFuncName() orelse "__main__";
                     if (self.capture_index.getPtr(func_name)) |range| range.has_statics = true;
                     var key_buf: [256]u8 = undefined;
-                    const key = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ func_name, var_name }) catch "";
+                    const key = class_names.memberKey(&key_buf, func_name, var_name);
                     var cell = self.statics_cells.get(key);
                     if (cell == null) {
                         const c = try self.newRefCell();
@@ -15489,7 +15489,7 @@ pub const VM = struct {
         // false positive that aborts class loading
         var current: ?[]const u8 = def.parent;
         while (current) |parent| {
-            const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ parent, method_name }) catch return true;
+            const full = class_names.memberKey(&buf, parent, method_name);
             if (self.functions.contains(full) or self.native_fns.contains(full)) return true;
             const pcls = self.classes.get(parent) orelse return true;
             if (pcls.methods.contains(method_name)) return true;
@@ -17838,7 +17838,7 @@ pub const VM = struct {
     fn classMethodByValue(self: *VM, class_name: []const u8, method: []const u8, pos: u8, magic: []const u8) ?bool {
         var buf: [512]u8 = undefined;
         if (self.classes.get(class_name) == null) {
-            const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ class_name, method }) catch return null;
+            const full = class_names.memberKey(&buf, class_name, method);
             if (self.native_fns.contains(full)) return nativeByValue(full, pos);
             return null;
         }
@@ -18424,7 +18424,7 @@ pub const VM = struct {
         // find current function name from the chunk pointer
         const func_name = self.currentFuncName() orelse "__main__";
         var key_buf: [256]u8 = undefined;
-        const key = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ func_name, var_name }) catch return .null;
+        const key = class_names.memberKey(&key_buf, func_name, var_name);
         // need to look up with a runtime key - use the statics table
         return self.statics.get(key) orelse .null;
     }
@@ -18432,7 +18432,7 @@ pub const VM = struct {
     fn setStaticVar(self: *VM, var_name: []const u8, val: Value) !void {
         const func_name = self.currentFuncName() orelse "__main__";
         var key_buf: [256]u8 = undefined;
-        const lookup = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ func_name, var_name }) catch return;
+        const lookup = class_names.memberKey(&key_buf, func_name, var_name);
         if (self.statics.getEntry(lookup)) |entry| {
             entry.value_ptr.* = val;
         } else {
@@ -19601,7 +19601,7 @@ pub const VM = struct {
         var current = class_name;
         var buf: [256]u8 = undefined;
         const result = while (true) {
-            const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ current, method_name }) catch break false;
+            const full = class_names.memberKey(&buf, current, method_name);
             if (self.functions.get(full) != null or self.native_fns.get(full) != null) break true;
             if (self.classes.getEntry(current)) |entry| {
                 const cls = entry.value_ptr;
@@ -19609,7 +19609,7 @@ pub const VM = struct {
                 // class and the method
                 current = entry.key_ptr.*;
                 if (cls.methods.getKey(method_name)) |declared| if (!std.mem.eql(u8, declared, method_name) or !std.mem.eql(u8, full[0..current.len], current)) {
-                    const canonical = std.fmt.bufPrint(&buf, "{s}::{s}", .{ current, declared }) catch break false;
+                    const canonical = class_names.memberKey(&buf, current, declared);
                     if (self.functions.get(canonical) != null or self.native_fns.get(canonical) != null) break true;
                 };
                 if (cls.parent) |p| {
@@ -19712,12 +19712,12 @@ pub const VM = struct {
         while (true) {
             // methods are registered under the declared spelling of the class
             current = self.classes.getKey(current) orelse current;
-            const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ current, method_name }) catch return error.RuntimeError;
+            const full = class_names.memberKey(&buf, current, method_name);
             if (self.functions.getEntry(full)) |entry| return entry.key_ptr.*;
             if (self.native_fns.getKey(full)) |key| return key;
             if (self.classes.get(current)) |cls| {
                 if (cls.methods.getKey(method_name)) |declared| {
-                    const canonical = std.fmt.bufPrint(&buf, "{s}::{s}", .{ current, declared }) catch return error.RuntimeError;
+                    const canonical = class_names.memberKey(&buf, current, declared);
                     if (self.functions.getEntry(canonical)) |entry| return entry.key_ptr.*;
                     if (self.native_fns.getKey(canonical)) |key| return key;
                 }
@@ -21765,7 +21765,7 @@ pub const VM = struct {
             .class_constant => |c| blk: {
                 if (self.getClassConstant(c.class, c.name)) |v| break :blk v;
                 var buf: [256]u8 = undefined;
-                const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ c.class, c.name }) catch break :blk .null;
+                const full = class_names.memberKey(&buf, c.class, c.name);
                 break :blk self.php_constants.get(full) orelse .null;
             },
         };

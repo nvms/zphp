@@ -1,4 +1,5 @@
 const std = @import("std");
+const class_names = @import("../runtime/class_names.zig");
 const Value = @import("../runtime/value.zig").Value;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
@@ -446,7 +447,7 @@ fn invokeCallable(ctx: *NativeContext, parser: *PhpObject, callable: Value, args
                 if (tgt == .object) return try ctx.vm.callMethod(tgt.object, mname.string.bytes(), args);
                 if (tgt == .string) {
                     var buf: [256]u8 = undefined;
-                    const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ tgt.string.bytes(), mname.string.bytes() }) catch return .null;
+                    const full = class_names.memberKey(&buf, tgt.string.bytes(), mname.string.bytes());
                     return try ctx.vm.callByName(full, args);
                 }
             }

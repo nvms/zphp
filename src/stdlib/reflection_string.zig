@@ -6,6 +6,7 @@
 // handle a later var_dump shows
 
 const std = @import("std");
+const class_names = @import("../runtime/class_names.zig");
 const reflection = @import("reflection.zig");
 const extensions = @import("extensions_generated.zig");
 const native_params = @import("native_params.zig");
@@ -366,7 +367,7 @@ fn classModule(vm: *VM, class_name: []const u8) ?[]const u8 {
 fn methodView(ctx: *NativeContext, class_name: []const u8, declaring: []const u8, name: []const u8) !FnView {
     const vm = ctx.vm;
     var key_buf: [1024]u8 = undefined;
-    const key = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ declaring, name }) catch return error.OutOfMemory;
+    const key = class_names.memberKey(&key_buf, declaring, name);
     _ = class_name;
     var view = FnView{ .name = name, .scope = declaring };
     view.user = vm.functions.get(key);
@@ -493,7 +494,7 @@ fn methodDeclarer(vm: *VM, class_name: []const u8, method: []const u8) ?Declarer
         const cls = vm.classes.get(name) orelse return null;
         if (cls.methods.getKey(method)) |declared| {
             var buf: [512]u8 = undefined;
-            const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ name, declared }) catch return null;
+            const key = class_names.memberKey(&buf, name, declared);
             if (vm.functions.contains(key) or vm.native_fns.contains(key) or cls.is_internal) {
                 return .{ .class = name, .info = cls.methods.get(method).? };
             }
@@ -1005,7 +1006,7 @@ fn collectTraitMethods(ctx: *NativeContext, trait_name: []const u8, out: *std.Ar
         trait: []const u8,
         fn line(self: @This(), m: MethodEntry) u32 {
             var buf: [512]u8 = undefined;
-            const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ self.trait, m.name }) catch return 0;
+            const key = class_names.memberKey(&buf, self.trait, m.name);
             return if (self.vm.functions.get(key)) |f| f.start_line else 0;
         }
         fn lessThan(self: @This(), a: MethodEntry, b: MethodEntry) bool {

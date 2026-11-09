@@ -3,6 +3,7 @@
 // spelling of the declaration, which is the name php reports back
 
 const std = @import("std");
+const sync = @import("../sync.zig");
 
 pub const Context = struct {
     pub fn hash(_: Context, name: []const u8) u64 {
@@ -39,6 +40,49 @@ fn fold(dst: []u8, src: []const u8) []const u8 {
     }
     while (i < src.len) : (i += 1) dst[i] = std.ascii.toLower(src[i]);
     return dst[0..src.len];
+}
+
+// "Class::member", the key methods, static variables and constants are found
+// under, written to `buf`. a key too long for it (an anonymous class's name
+// carries its file path) is kept in a process-wide table instead, so lookups
+// of long names work without every caller allocating. "" when out of memory
+pub fn memberKey(buf: []u8, class: []const u8, member: []const u8) []const u8 {
+    const len = class.len + 2 + member.len;
+    if (len <= buf.len) {
+        @memcpy(buf[0..class.len], class);
+        @memcpy(buf[class.len..][0..2], "::");
+        @memcpy(buf[class.len + 2 ..][0..member.len], member);
+        return buf[0..len];
+    }
+    return longMemberKey(class, member) catch "";
+}
+
+var long_keys_lock: sync.Mutex = .{};
+var long_keys_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+var long_keys: std.StringHashMapUnmanaged(void) = .{};
+var long_keys_scratch: std.ArrayListUnmanaged(u8) = .empty;
+
+fn longMemberKey(class: []const u8, member: []const u8) ![]const u8 {
+    long_keys_lock.lock();
+    defer long_keys_lock.unlock();
+    const a = long_keys_arena.allocator();
+    long_keys_scratch.clearRetainingCapacity();
+    try long_keys_scratch.appendSlice(a, class);
+    try long_keys_scratch.appendSlice(a, "::");
+    try long_keys_scratch.appendSlice(a, member);
+    if (long_keys.getKey(long_keys_scratch.items)) |kept| return kept;
+    const kept = try a.dupe(u8, long_keys_scratch.items);
+    try long_keys.put(a, kept, {});
+    return kept;
+}
+
+test "member keys of any length" {
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("A::b", memberKey(&buf, "A", "b"));
+    const long = "class@anonymous\x00/a/very/long/path.php:3$0";
+    const key = memberKey(&buf, long, "method");
+    try std.testing.expectEqualStrings(long ++ "::method", key);
+    try std.testing.expectEqual(key.ptr, memberKey(&buf, long, "method").ptr);
 }
 
 pub fn Map(comptime V: type) type {

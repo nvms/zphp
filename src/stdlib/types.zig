@@ -1,5 +1,6 @@
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
+const class_names = @import("../runtime/class_names.zig");
 const object_properties = @import("../runtime/object_properties.zig");
 const paths = @import("../paths.zig");
 const php_version = @import("../php_version.zig");
@@ -872,7 +873,7 @@ fn method_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         if (depth > 0 and private_at_this_class) {
             // skip this class's match; continue up
         } else {
-            const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ cn, canonical_method }) catch return NativeResult.scalar(Value{ .bool = false });
+            const full = class_names.memberKey(&buf, cn, canonical_method);
             if (ctx.vm.native_fns.contains(full)) return NativeResult.scalar(.{ .bool = true });
             if (ctx.vm.functions.contains(full)) return NativeResult.scalar(.{ .bool = true });
             if (!std.mem.eql(u8, canonical_method, method_name)) return NativeResult.scalar(.{ .bool = true });
@@ -960,7 +961,7 @@ fn native_is_callable(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     if (val == .object) {
         if (std.mem.eql(u8, val.object.class_name, "Closure")) return NativeResult.scalar(.{ .bool = true });
         var buf: [256]u8 = undefined;
-        const full = std.fmt.bufPrint(&buf, "{s}::__invoke", .{val.object.class_name}) catch "";
+        const full = class_names.memberKey(&buf, val.object.class_name, "__invoke");
         fillName(ctx, args, full);
         return NativeResult.scalar(.{ .bool = ctx.vm.hasMethod(val.object.class_name, "__invoke") });
     }
@@ -980,7 +981,7 @@ fn native_is_callable(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
         const class_name = if (raw_class.len > 0 and raw_class[0] == '\\') raw_class[1..] else raw_class;
         {
             var name_buf: [256]u8 = undefined;
-            const resolved = std.fmt.bufPrint(&name_buf, "{s}::{s}", .{ class_name, method }) catch "";
+            const resolved = class_names.memberKey(&name_buf, class_name, method);
             fillName(ctx, args, resolved);
         }
         if (syntax_only) return NativeResult.scalar(.{ .bool = true });

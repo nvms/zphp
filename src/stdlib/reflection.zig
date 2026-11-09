@@ -1,4 +1,5 @@
 const std = @import("std");
+const class_names = @import("../runtime/class_names.zig");
 const php_types = @import("../pipeline/php_types.zig");
 const object_properties = @import("../runtime/object_properties.zig");
 const deprecations = @import("deprecations_generated.zig");
@@ -993,7 +994,7 @@ fn buildMethodObj(ctx: *NativeContext, class_name: []const u8, method_name: []co
 
     // look up ObjFunction for parameter info
     var buf: [256]u8 = undefined;
-    const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring_class, method_name }) catch return obj;
+    const key = class_names.memberKey(&buf, declaring_class, method_name);
     if (ctx.vm.functions.get(key)) |func| {
         try obj.set(ctx.allocator, "__arity", .{ .int = func.arity });
         try obj.set(ctx.allocator, "__required_params", .{ .int = func.required_params });
@@ -1013,7 +1014,7 @@ pub fn findDeclaringClass(vm: *VM, class_name: []const u8, method_name: []const 
     var declaring: []const u8 = class_name;
     var buf: [256]u8 = undefined;
     while (true) {
-        const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ current, method_name }) catch break;
+        const key = class_names.memberKey(&buf, current, method_name);
         if (vm.functions.get(key) != null or vm.native_fns.get(key) != null) {
             declaring = current;
             break;
@@ -1134,7 +1135,7 @@ fn hasAbstractMethodInChain(vm: *VM, class_name: []const u8, method_name: []cons
 
 fn hasInterfaceMethod(vm: *VM, iface_name: []const u8, method_name: []const u8) bool {
     var buf: [256]u8 = undefined;
-    const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ iface_name, method_name }) catch return false;
+    const key = class_names.memberKey(&buf, iface_name, method_name);
     if (vm.functions.get(key) != null or vm.native_fns.get(key) != null) return true;
     const iface = vm.interfaces.get(iface_name) orelse return false;
     for (iface.methods.items) |m| {
@@ -2543,7 +2544,7 @@ fn initMethodReflection(ctx: *NativeContext, this: *PhpObject, args: []const Val
     try this.set(ctx.allocator, "__visibility", .{ .int = @intFromEnum(info.visibility) });
 
     var buf: [256]u8 = undefined;
-    const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return NativeResult.scalar(.null);
+    const key = class_names.memberKey(&buf, declaring, method_name);
     if (ctx.vm.functions.get(key)) |func| {
         try this.set(ctx.allocator, "__arity", .{ .int = func.arity });
         try this.set(ctx.allocator, "__required_params", .{ .int = func.required_params });
@@ -2568,7 +2569,7 @@ fn rmLookupFunc(ctx: *NativeContext) ?@TypeOf(ctx.vm.functions.get("").?) {
     const method_name = methodLookupName(this) orelse return null;
     const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return null;
     var buf: [256]u8 = undefined;
-    const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return null;
+    const key = class_names.memberKey(&buf, declaring, method_name);
     return ctx.vm.functions.get(key);
 }
 
@@ -2612,7 +2613,7 @@ fn rmGetParameters(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
     const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.null);
 
     var buf: [256]u8 = undefined;
-    const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return NativeResult.scalar(.null);
+    const key = class_names.memberKey(&buf, declaring, method_name);
     const func = ctx.vm.functions.get(key) orelse {
         if (native_params.get(key)) |sig| return NativeResult.borrowed(try buildNativeParamArray(ctx, sig, key));
         return NativeResult.borrowed(.{ .array = try ctx.createArray() });
@@ -2672,7 +2673,7 @@ fn rmGetReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
     const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.null);
 
     var buf: [256]u8 = undefined;
-    const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return NativeResult.scalar(.null);
+    const key = class_names.memberKey(&buf, declaring, method_name);
     const return_type = if (methodTypeInfo(ctx.vm, key)) |ti| ti.return_type else nativeReturnType(ctx, key);
     if (return_type.len == 0) return NativeResult.scalar(.null);
 
@@ -2690,7 +2691,7 @@ fn rmHasReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
     const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.{ .bool = false });
 
     var buf: [256]u8 = undefined;
-    const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return NativeResult.scalar(.{ .bool = false });
+    const key = class_names.memberKey(&buf, declaring, method_name);
     const return_type = if (methodTypeInfo(ctx.vm, key)) |ti| ti.return_type else nativeReturnType(ctx, key);
     return NativeResult.scalar(.{ .bool = return_type.len > 0 });
 }
@@ -2709,7 +2710,7 @@ fn methodTentativeReturnType(ctx: *NativeContext, this: *PhpObject) []const u8 {
     const method_name = methodLookupName(this) orelse return "";
     const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return "";
     var buf: [256]u8 = undefined;
-    const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return "";
+    const key = class_names.memberKey(&buf, declaring, method_name);
     if (ctx.vm.functions.contains(key)) return "";
     const sig = native_params.get(key) orelse return "";
     return sig.tentative_returns;
@@ -2894,7 +2895,7 @@ fn rpGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     const attrs = own orelse blk: {
         // a method taken from a trait: its parameters' are filed under the
         // trait's method
-        const method_key = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ class_name, method_name }) catch break :blk null;
+        const method_key = class_names.memberKey(&key_buf, class_name, method_name);
         const func = ctx.vm.functions.get(method_key) orelse break :blk null;
         const trait_key = try bytecode.paramAttributesName(ctx.allocator, func.name, param_name);
         defer ctx.allocator.free(trait_key);
@@ -3354,7 +3355,7 @@ fn appendStaticVariables(ctx: *NativeContext, result: *PhpArray, fn_name: []cons
     const func = ctx.vm.functions.get(fn_name) orelse return;
     for (func.static_vars) |sv| {
         var buf: [256]u8 = undefined;
-        const storage = std.fmt.bufPrint(&buf, "{s}::{s}", .{ fn_name, sv.name }) catch continue;
+        const storage = class_names.memberKey(&buf, fn_name, sv.name);
         const value = if (ctx.vm.statics_cells.get(storage)) |cell| cell.* else if (ctx.vm.statics.get(storage)) |v| v else try ctx.vm.resolveDefault(sv.initial);
         const key = if (sv.name.len > 0 and sv.name[0] == '$') sv.name[1..] else sv.name;
         try result.setCopiedKey(ctx.allocator, key, value);
@@ -3367,7 +3368,7 @@ fn rmGetStaticVariables(ctx: *NativeContext, _: []const Value) RuntimeError!Nati
     const method_name = methodLookupName(this) orelse return NativeResult.borrowed(.{ .array = result });
     const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.borrowed(.{ .array = result });
     var buf: [512]u8 = undefined;
-    const fn_name = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return NativeResult.borrowed(.{ .array = result });
+    const fn_name = class_names.memberKey(&buf, declaring, method_name);
     const registered = ctx.vm.resolveMethod(declaring, method_name) catch null;
     try appendStaticVariables(ctx, result, registered orelse fn_name);
     return NativeResult.borrowed(.{ .array = result });
@@ -3515,7 +3516,7 @@ fn rpConstructParam(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
                 .object => cls_val.object.class_name,
                 else => return throwReflection(ctx, "ReflectionParameter class must be a string or object"),
             };
-            lookup_key = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ cls_name, meth_val.string.bytes() }) catch return throwReflection(ctx, "ReflectionParameter name too long");
+            lookup_key = class_names.memberKey(&key_buf, cls_name, meth_val.string.bytes());
         },
         else => return throwReflection(ctx, "ReflectionParameter expects a function name or [class, method]"),
     }
@@ -3730,7 +3731,7 @@ fn closureInstanceTable(ctx: *NativeContext, table: *PhpArray, name: []const u8)
     }
     for (func.static_vars) |sv| {
         var buf: [256]u8 = undefined;
-        const storage = std.fmt.bufPrint(&buf, "{s}::{s}", .{ name, sv.name }) catch continue;
+        const storage = class_names.memberKey(&buf, name, sv.name);
         const value = if (vm.statics_cells.get(storage)) |cell| cell.* else if (vm.statics.get(storage)) |v| v else try vm.resolveDefault(sv.initial);
         const key = if (sv.name.len > 0 and sv.name[0] == '$') sv.name[1..] else sv.name;
         try statics.setCopiedKey(ctx.allocator, key, value);
@@ -3762,7 +3763,7 @@ fn callableClosureTable(ctx: *NativeContext, table: *PhpArray, callable: Value) 
                 else => return,
             };
             const registered = ctx.vm.resolveMethod(class, method.string.bytes()) catch null;
-            function = registered orelse (std.fmt.bufPrint(&buf, "{s}::{s}", .{ class, method.string.bytes() }) catch return);
+            function = registered orelse (class_names.memberKey(&buf, class, method.string.bytes()));
         },
         else => return,
     }
@@ -4515,7 +4516,7 @@ fn rmInvoke(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     // static call: target is null/missing, dispatch by ClassName::methodName
     const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.null);
     var buf: [256]u8 = undefined;
-    const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return NativeResult.scalar(.null);
+    const full = class_names.memberKey(&buf, declaring, method_name);
     const rest = if (args.len >= 1) args[1..] else args[0..];
     return NativeResult.share(ctx.vm.callByName(full, rest) catch .null);
 }
@@ -4541,7 +4542,7 @@ fn rmInvokeArgs(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     }
     const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.null);
     var buf: [256]u8 = undefined;
-    const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return NativeResult.scalar(.null);
+    const full = class_names.memberKey(&buf, declaring, method_name);
     return NativeResult.share(ctx.vm.callByName(full, call_args[0..count]) catch .null);
 }
 
@@ -4570,7 +4571,7 @@ fn rmIsAbstract(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
     }
 
     var buf: [256]u8 = undefined;
-    const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return NativeResult.scalar(.{ .bool = false });
+    const key = class_names.memberKey(&buf, declaring, method_name);
     if (ctx.vm.functions.get(key) == null and ctx.vm.native_fns.get(key) == null) return NativeResult.scalar(.{ .bool = true });
     return NativeResult.scalar(.{ .bool = false });
 }
@@ -4589,7 +4590,7 @@ fn rmFullName(ctx: *NativeContext) ?[]const u8 {
     const method_name = methodLookupName(this) orelse return null;
     const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return null;
     var buf: [256]u8 = undefined;
-    const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return null;
+    const key = class_names.memberKey(&buf, declaring, method_name);
     const owned = Value.String.create(ctx.allocator, key) catch return null;
     return ctx.vm.transientOwned(owned).bytes();
 }
@@ -4671,7 +4672,7 @@ fn methodAttributes(vm: *VM, class_name: []const u8, method_name: []const u8) ?[
         if (cls.method_attributes.get(method_name)) |attrs| return attrs;
     }
     var key_buf: [512]u8 = undefined;
-    const key = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ class_name, method_name }) catch return null;
+    const key = class_names.memberKey(&key_buf, class_name, method_name);
     const func = vm.functions.get(key) orelse return null;
     const sep = std.mem.indexOf(u8, func.name, "::") orelse return null;
     const origin = func.name[0..sep];
@@ -5330,7 +5331,7 @@ fn rmIsDeprecated(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
     const cls = ctx.vm.classes.get(declaring) orelse return NativeResult.scalar(.{ .bool = false });
     if (cls.is_internal) {
         var buf: [256]u8 = undefined;
-        const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return NativeResult.scalar(.{ .bool = false });
+        const key = class_names.memberKey(&buf, declaring, method_name);
         return NativeResult.scalar(.{ .bool = deprecations.functions.has(key) });
     }
     const attrs = cls.method_attributes.get(method_name) orelse return NativeResult.scalar(.{ .bool = false });
@@ -5344,7 +5345,7 @@ fn rccIsDeprecated(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
     const cls = ctx.vm.classes.get(class_name) orelse return NativeResult.scalar(.{ .bool = false });
     if (cls.is_internal) {
         var buf: [256]u8 = undefined;
-        const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ class_name, const_name }) catch return NativeResult.scalar(.{ .bool = false });
+        const key = class_names.memberKey(&buf, class_name, const_name);
         return NativeResult.scalar(.{ .bool = deprecations.class_constants.has(key) });
     }
     const attrs = cls.constant_attributes.get(const_name) orelse return NativeResult.scalar(.{ .bool = false });
