@@ -4129,25 +4129,31 @@ fn native_mime_content_type(ctx: *NativeContext, args: []const Value) RuntimeErr
 extern fn zphp_disk_space(path: [*:0]const u8, free_bytes: *u64, total_bytes: *u64) c_int;
 
 fn native_disk_free_space(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const path_z = try ctx.allocator.allocSentinel(u8, args[0].string.bytes().len, 0);
-    defer ctx.allocator.free(path_z);
-    @memcpy(path_z[0..args[0].string.bytes().len], args[0].string.bytes());
-    var free_bytes: u64 = 0;
-    var total_bytes: u64 = 0;
-    if (zphp_disk_space(path_z, &free_bytes, &total_bytes) != 0) return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.scalar(.{ .float = @floatFromInt(free_bytes) });
+    const space = (try diskSpace(ctx, args, "disk_free_space")) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .float = @floatFromInt(space.free) });
 }
 
 fn native_disk_total_space(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const path_z = try ctx.allocator.allocSentinel(u8, args[0].string.bytes().len, 0);
+    const space = (try diskSpace(ctx, args, "disk_total_space")) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .float = @floatFromInt(space.total) });
+}
+
+// statvfs of the filesystem holding a path, with php's warning when it fails
+// (diskfreespace() names itself in it)
+fn diskSpace(ctx: *NativeContext, args: []const Value, comptime func: []const u8) RuntimeError!?struct { free: u64, total: u64 } {
+    const name = ctx.call_name orelse func;
+    const path = try strArg(ctx, args, func, 0, "directory", false);
+    if (std.mem.indexOfScalar(u8, path, 0) != null) return throwValueError(ctx, "{s}(): Argument #1 ($directory) must not contain any null bytes", .{name});
+    const path_z = try ctx.allocator.dupeSentinel(u8, path, 0);
     defer ctx.allocator.free(path_z);
-    @memcpy(path_z[0..args[0].string.bytes().len], args[0].string.bytes());
     var free_bytes: u64 = 0;
     var total_bytes: u64 = 0;
-    if (zphp_disk_space(path_z, &free_bytes, &total_bytes) != 0) return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.scalar(.{ .float = @floatFromInt(total_bytes) });
+    if (zphp_disk_space(path_z, &free_bytes, &total_bytes) != 0) {
+        const reason = if (platform.is_windows) "No such file or directory" else sys.errnoText();
+        try warn(ctx, "{s}(): {s}", .{ name, reason });
+        return null;
+    }
+    return .{ .free = free_bytes, .total = total_bytes };
 }
 
 // the device of the link itself, -1 with a warning when it cannot be lstat'ed
