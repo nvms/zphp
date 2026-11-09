@@ -18,6 +18,7 @@ const includes = @import("../runtime/includes.zig");
 const bundle = @import("../bundle.zig");
 const zlib = @import("c_zlib");
 const csv = @import("csv.zig");
+const html = @import("html.zig");
 
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
@@ -448,6 +449,69 @@ fn throwStreamArg(ctx: *NativeContext, comptime fmt: []const u8, args: anytype) 
     defer ctx.allocator.free(msg);
     try ctx.vm.setPendingException("TypeError", msg);
     return error.RuntimeError;
+}
+
+fn warn(ctx: *NativeContext, comptime fmt: []const u8, args: anytype) RuntimeError!void {
+    const msg = try std.fmt.allocPrint(ctx.allocator, fmt, args);
+    defer ctx.allocator.free(msg);
+    try ctx.vm.emitWarning(msg);
+}
+
+fn notice(ctx: *NativeContext, comptime fmt: []const u8, args: anytype) RuntimeError!void {
+    const msg = try std.fmt.allocPrint(ctx.allocator, fmt, args);
+    defer ctx.allocator.free(msg);
+    try ctx.vm.raiseError(8, msg);
+}
+
+fn throwValueError(ctx: *NativeContext, comptime fmt: []const u8, args: anytype) RuntimeError {
+    const msg = try std.fmt.allocPrint(ctx.allocator, fmt, args);
+    defer ctx.allocator.free(msg);
+    try ctx.vm.setPendingException("ValueError", msg);
+    return error.RuntimeError;
+}
+
+// a string parameter as php's weak-mode parsing takes it: scalars and
+// stringable objects convert, null is deprecated, anything else is a
+// TypeError. a path (Z_PARAM_PATH) must also be free of nul bytes
+fn strArg(ctx: *NativeContext, args: []const Value, comptime func: []const u8, comptime index: usize, comptime param: []const u8, comptime path: bool) RuntimeError![]const u8 {
+    const bytes = try (html.Params{ .ctx = ctx, .func = func, .args = args }).string(index, param, "");
+    if (path and std.mem.indexOfScalar(u8, bytes, 0) != null) {
+        return throwValueError(ctx, func ++ "(): Argument #" ++ std.fmt.comptimePrint("{d}", .{index + 1}) ++ " ($" ++ param ++ ") must not contain any null bytes", .{});
+    }
+    return bytes;
+}
+
+// an int parameter as php's weak-mode parsing takes it
+fn intArg(ctx: *NativeContext, args: []const Value, comptime func: []const u8, comptime index: usize, comptime param: []const u8, default: i64) RuntimeError!i64 {
+    return (html.Params{ .ctx = ctx, .func = func, .args = args }).int(index, param, default);
+}
+
+// the text php prints for a failed filesystem call, strerror(errno) as glibc
+// words it, from the error std reports for that errno
+pub fn errorText(err: anyerror) []const u8 {
+    return switch (err) {
+        error.FileNotFound => "No such file or directory",
+        error.PathAlreadyExists => "File exists",
+        error.AccessDenied => "Permission denied",
+        error.PermissionDenied => "Operation not permitted",
+        error.IsDir => "Is a directory",
+        error.NotDir => "Not a directory",
+        error.DirNotEmpty => "Directory not empty",
+        error.NameTooLong => "File name too long",
+        error.SymLinkLoop => "Too many levels of symbolic links",
+        error.NoSpaceLeft => "No space left on device",
+        error.DiskQuota => "Disk quota exceeded",
+        error.ReadOnlyFileSystem => "Read-only file system",
+        error.FileBusy, error.DeviceBusy => "Device or resource busy",
+        error.CrossDevice => "Invalid cross-device link",
+        error.LinkQuotaExceeded => "Too many links",
+        error.NotLink, error.InvalidArgument, error.BadPathName => "Invalid argument",
+        error.NoDevice => "No such device",
+        error.SystemResources => "Cannot allocate memory",
+        error.ProcessFdQuotaExceeded => "Too many open files",
+        error.FileTooBig => "File too large",
+        else => "Unknown error",
+    };
 }
 
 // file read/write
@@ -1512,33 +1576,66 @@ fn statWrapped(ctx: *NativeContext, path: []const u8) RuntimeError!StatLookup {
     return .not_wrapped;
 }
 
-const StatField = enum { size, atime, mtime, ctime };
-
-// filesize/fileatime/filemtime/filectime: one field of the path's stat, with
-// php's warning when the path cannot be stat'ed
-fn statOne(ctx: *NativeContext, args: []const Value, comptime field: StatField, comptime fn_name: []const u8) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const spelled = args[0].string.bytes();
-    var os_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = bundle.osPath(&os_buf, spelled);
-    const value: ?i64 = switch (try statWrapped(ctx, path)) {
-        .found => |st| @field(st, @tagName(field)),
-        .missing => null,
-        .not_wrapped => blk: {
-            const st = platform.statPath(path) catch break :blk null;
-            break :blk switch (field) {
-                .size => @intCast(st.size),
-                .atime => @intCast(@divFloor((st.atime orelse st.mtime).nanoseconds, 1_000_000_000)),
-                .mtime => @intCast(@divFloor(st.mtime.nanoseconds, 1_000_000_000)),
-                .ctime => @intCast(@divFloor(st.ctime.nanoseconds, 1_000_000_000)),
-            };
-        },
+fn fromSysStat(st: sys.Stat) WrapperStat {
+    return .{
+        .dev = @bitCast(st.dev),
+        .ino = @bitCast(st.ino),
+        .mode = st.mode,
+        .nlink = @bitCast(st.nlink),
+        .uid = st.uid,
+        .gid = st.gid,
+        .rdev = @bitCast(st.rdev),
+        .size = st.size,
+        .atime = st.atime,
+        .mtime = st.mtime,
+        .ctime = st.ctime,
+        .blksize = st.blksize,
+        .blocks = st.blocks,
     };
-    if (value) |v| return NativeResult.scalar(.{ .int = v });
-    const msg = try std.fmt.allocPrint(ctx.allocator, fn_name ++ "(): stat failed for {s}", .{spelled});
-    defer ctx.allocator.free(msg);
-    try ctx.vm.emitWarning(msg);
-    return NativeResult.scalar(.{ .bool = false });
+}
+
+// the stat of a plain path; lstat when link is set. windows reports no
+// owner, inode, or block accounting
+fn plainStat(path: []const u8, link: bool) ?WrapperStat {
+    if (platform.is_windows) {
+        const st = platform.statPath(path) catch return null;
+        const sec = struct {
+            fn of(ts: std.Io.Timestamp) i64 {
+                return @intCast(@divFloor(ts.nanoseconds, 1_000_000_000));
+            }
+        }.of;
+        return .{ .mode = platform.modeOf(st), .size = @intCast(st.size), .rdev = 0, .atime = sec(st.atime orelse st.mtime), .mtime = sec(st.mtime), .ctime = sec(st.ctime) };
+    } else {
+        return fromSysStat((if (link) sys.lstat(path) else sys.stat(path)) catch return null);
+    }
+}
+
+// php_stat: the stat of a path through whichever wrapper serves it, or null
+// with php's "stat failed" warning (an empty name fails quietly)
+fn phpStat(ctx: *NativeContext, spelled: []const u8, comptime fn_name: []const u8, comptime link: bool) RuntimeError!?WrapperStat {
+    if (spelled.len == 0) return null;
+    if (std.mem.indexOfScalar(u8, spelled, 0) != null) {
+        try warn(ctx, fn_name ++ "(): Filename contains null byte", .{});
+        return null;
+    }
+    var os_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path = bundle.osPath(&os_buf, spelled);
+    if (std.ascii.startsWithIgnoreCase(path, "file://")) path = path[7..];
+    const found: ?WrapperStat = switch (try statWrapped(ctx, path)) {
+        .found => |st| st,
+        .missing => null,
+        .not_wrapped => plainStat(path, link),
+    };
+    if (found == null) try warn(ctx, fn_name ++ "(): " ++ (if (link) "Lstat" else "stat") ++ " failed for {s}", .{spelled});
+    return found;
+}
+
+const StatField = enum { size, atime, mtime, ctime, ino, mode, uid, gid };
+
+// filesize, fileinode, fileperms and the rest: one field of the path's stat
+fn statOne(ctx: *NativeContext, args: []const Value, comptime field: StatField, comptime fn_name: []const u8) RuntimeError!NativeResult {
+    const st = (try phpStat(ctx, try strArg(ctx, args, fn_name, 0, "filename", false), fn_name, false)) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .int = @field(st, @tagName(field)) });
 }
 
 fn native_filesize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -1557,26 +1654,26 @@ fn native_filectime(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     return statOne(ctx, args, .ctime, "filectime");
 }
 
-fn native_fileinode(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const stat = platform.statPath(args[0].string.bytes()) catch return NativeResult.scalar(Value{ .bool = false });
-    return NativeResult.scalar(.{ .int = @intCast(stat.inode) });
+fn native_fileinode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return statOne(ctx, args, .ino, "fileinode");
 }
 
 fn native_filetype(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const stat = platform.statPath(args[0].string.bytes()) catch {
-        // might be a directory
-        var dir = std.Io.Dir.cwd().openDir(platform.io, args[0].string.bytes(), .{}) catch return NativeResult.scalar(.{ .bool = false });
-        dir.close(platform.io);
-        return NativeResult.literal("dir");
+    const st = (try phpStat(ctx, try strArg(ctx, args, "filetype", 0, "filename", false), "filetype", true)) orelse return NativeResult.scalar(.{ .bool = false });
+    const name: []const u8 = switch (st.mode & 0o170000) {
+        0o120000 => "link",
+        0o010000 => "fifo",
+        0o020000 => "char",
+        0o040000 => "dir",
+        0o060000 => "block",
+        0o100000 => "file",
+        0o140000 => "socket",
+        else => {
+            try notice(ctx, "filetype(): Unknown file type ({d})", .{st.mode & 0o170000});
+            return NativeResult.literal("unknown");
+        },
     };
-    return try NativeResult.copyString(ctx.allocator, switch (stat.kind) {
-        .file => "file",
-        .directory => "dir",
-        .sym_link => "link",
-        else => "unknown",
-    });
+    return .{ .value = .{ .string = Value.String.borrowed(name) } };
 }
 
 // read file into array of lines
@@ -1772,7 +1869,7 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         anonymousFile() orelse return NativeResult.scalar(.{ .bool = false })
     else
         openWithMode(path, mode) catch |err| {
-            const reason = openErrorReason(err);
+            const reason = errorText(err);
             const msg = std.fmt.allocPrint(ctx.allocator, "fopen({s}): Failed to open stream: {s}", .{ path, reason }) catch return NativeResult.scalar(.{ .bool = false });
             defer ctx.allocator.free(msg);
             try ctx.vm.emitWarning(msg);
@@ -1786,21 +1883,6 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     try obj.setCopiedString(ctx.allocator, "__path", path);
     if (is_memory_stream) try obj.set(ctx.allocator, "__peek_eof", .{ .bool = true });
     return NativeResult.borrowed(.{ .resource = obj });
-}
-
-fn openErrorReason(err: anyerror) []const u8 {
-    return switch (err) {
-        error.FileNotFound => "No such file or directory",
-        error.PathAlreadyExists => "File exists",
-        error.AccessDenied, error.PermissionDenied => "Permission denied",
-        error.IsDir => "Is a directory",
-        error.NotDir => "Not a directory",
-        error.NameTooLong => "File name too long",
-        error.SymLinkLoop => "Too many levels of symbolic links",
-        error.NoSpaceLeft => "No space left on device",
-        error.ReadOnlyFileSystem => "Read-only file system",
-        else => "Unknown error",
-    };
 }
 
 pub fn openWithMode(spelled: []const u8, mode: []const u8) !std.Io.File {
@@ -2770,15 +2852,17 @@ fn stream_get_contents(ctx: *NativeContext, args: []const Value) RuntimeError!Na
 fn native_fstat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = try streamArg(ctx, args, .{ .func = "fstat" });
     const file = getFileHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    if (!platform.is_windows) {
+        const st = sys.fstat(file.handle) catch return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.borrowed(.{ .array = try wrapperStatArray(ctx, fromSysStat(st)) });
+    }
     const stat = file.stat(platform.io) catch return NativeResult.scalar(.{ .bool = false });
-    const result = try ctx.createArray();
-    const mode: i64 = @intCast(platform.modeOf(stat));
-    const size: i64 = @intCast(stat.size);
-    try result.set(ctx.allocator, .{ .string = Value.String.borrowed("mode") }, .{ .int = mode });
-    try result.set(ctx.allocator, .{ .string = Value.String.borrowed("size") }, .{ .int = size });
-    try result.set(ctx.allocator, .{ .int = 2 }, .{ .int = mode });
-    try result.set(ctx.allocator, .{ .int = 7 }, .{ .int = size });
-    return NativeResult.borrowed(.{ .array = result });
+    const sec = struct {
+        fn of(ts: std.Io.Timestamp) i64 {
+            return @intCast(@divFloor(ts.nanoseconds, 1_000_000_000));
+        }
+    }.of;
+    return NativeResult.borrowed(.{ .array = try wrapperStatArray(ctx, .{ .mode = platform.modeOf(stat), .size = @intCast(stat.size), .rdev = 0, .atime = sec(stat.atime orelse stat.mtime), .mtime = sec(stat.mtime), .ctime = sec(stat.ctime) }) });
 }
 
 fn native_touch(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -2889,22 +2973,8 @@ fn chown_extern(p: [*:0]const u8, o: std.c.uid_t, g: std.c.gid_t) c_int {
 }
 
 fn native_stat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const spelled = args[0].string.bytes();
-    var os_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = bundle.osPath(&os_buf, spelled);
-    switch (try statWrapped(ctx, path)) {
-        .found => |st| return NativeResult.borrowed(.{ .array = try wrapperStatArray(ctx, st) }),
-        .missing => {
-            const msg = try std.fmt.allocPrint(ctx.allocator, "stat(): stat failed for {s}", .{spelled});
-            defer ctx.allocator.free(msg);
-            try ctx.vm.emitWarning(msg);
-            return NativeResult.scalar(.{ .bool = false });
-        },
-        .not_wrapped => {},
-    }
-    const st = sys.stat(path) catch return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.borrowed(.{ .array = try buildStatArray(ctx, &st) });
+    const st = (try phpStat(ctx, try strArg(ctx, args, "stat", 0, "filename", false), "stat", false)) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.borrowed(.{ .array = try wrapperStatArray(ctx, st) });
 }
 
 fn native_chdir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -2980,24 +3050,16 @@ fn native_umask(_: *NativeContext, args: []const Value) RuntimeError!NativeResul
     return NativeResult.scalar(.{ .int = @intCast(current) });
 }
 
-fn native_fileperms(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const stat = platform.statPath(args[0].string.bytes()) catch return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.scalar(.{ .int = @intCast(platform.modeOf(stat)) });
+fn native_fileperms(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return statOne(ctx, args, .mode, "fileperms");
 }
 
-fn native_fileowner(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const path = args[0].string.bytes();
-    const st = sys.stat(path) catch return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.scalar(.{ .int = @intCast(st.uid) });
+fn native_fileowner(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return statOne(ctx, args, .uid, "fileowner");
 }
 
-fn native_filegroup(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const path = args[0].string.bytes();
-    const st = sys.stat(path) catch return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.scalar(.{ .int = @intCast(st.gid) });
+fn native_filegroup(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return statOne(ctx, args, .gid, "filegroup");
 }
 
 fn native_is_link(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -3049,43 +3111,9 @@ fn wrapperStatArray(ctx: *NativeContext, st: WrapperStat) !*PhpArray {
     return arr;
 }
 
-fn buildStatArray(ctx: *NativeContext, st: *const sys.Stat) !*PhpArray {
-    var arr = try ctx.createArray();
-    const dev: i64 = @intCast(st.dev);
-    const ino: i64 = @intCast(st.ino);
-    const mode: i64 = @intCast(st.mode);
-    const nlink: i64 = @intCast(st.nlink);
-    const uid: i64 = @intCast(st.uid);
-    const gid: i64 = @intCast(st.gid);
-    const size: i64 = @intCast(st.size);
-    const atime: i64 = st.atime;
-    const mtime: i64 = st.mtime;
-    const ctime: i64 = st.ctime;
-    const blksize: i64 = @intCast(st.blksize);
-    const blocks: i64 = @intCast(st.blocks);
-    const pairs = [_]struct { name: []const u8, val: i64 }{
-        .{ .name = "dev", .val = dev },       .{ .name = "ino", .val = ino },
-        .{ .name = "mode", .val = mode },     .{ .name = "nlink", .val = nlink },
-        .{ .name = "uid", .val = uid },       .{ .name = "gid", .val = gid },
-        .{ .name = "rdev", .val = 0 },        .{ .name = "size", .val = size },
-        .{ .name = "atime", .val = atime },   .{ .name = "mtime", .val = mtime },
-        .{ .name = "ctime", .val = ctime },   .{ .name = "blksize", .val = blksize },
-        .{ .name = "blocks", .val = blocks },
-    };
-    for (pairs, 0..) |p, i| {
-        try arr.set(ctx.allocator, .{ .int = @intCast(i) }, .{ .int = p.val });
-        try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(p.name) }, .{ .int = p.val });
-    }
-    return arr;
-}
-
 fn native_lstat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    var os_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = bundle.osPath(&os_buf, args[0].string.bytes());
-    if (bundle.find(path)) |hit| return NativeResult.borrowed(.{ .array = try wrapperStatArray(ctx, packedStat(hit)) });
-    const st = sys.lstat(path) catch return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.borrowed(.{ .array = try buildStatArray(ctx, &st) });
+    const st = (try phpStat(ctx, try strArg(ctx, args, "lstat", 0, "filename", false), "lstat", true)) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.borrowed(.{ .array = try wrapperStatArray(ctx, st) });
 }
 
 fn native_readlink(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

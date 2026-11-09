@@ -643,27 +643,28 @@ fn traverseForEntities(allocator: std.mem.Allocator, input: []const u8, all: boo
     }
 }
 
-// php's parameter parsing for the arguments of these functions, which
-// coerces scalars and rejects what a weak-mode call can't convert
-const Params = struct {
+// php's parameter parsing for the arguments of these functions (and the
+// filesystem natives), which coerces scalars and rejects what a weak-mode
+// call can't convert
+pub const Params = struct {
     ctx: *NativeContext,
     func: []const u8,
     args: []const Value,
 
-    fn typeError(self: Params, index: usize, name: []const u8, expected: []const u8) RuntimeError {
+    pub fn typeError(self: Params, index: usize, name: []const u8, expected: []const u8) RuntimeError {
         const msg = try std.fmt.allocPrint(self.ctx.allocator, "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given", .{ self.func, index + 1, name, expected, phpTypeName(self.args[index]) });
         defer self.ctx.allocator.free(msg);
         try self.ctx.vm.setPendingException("TypeError", msg);
         return error.RuntimeError;
     }
 
-    fn nullDeprecated(self: Params, index: usize, name: []const u8, expected: []const u8) RuntimeError!void {
+    pub fn nullDeprecated(self: Params, index: usize, name: []const u8, expected: []const u8) RuntimeError!void {
         const msg = try std.fmt.allocPrint(self.ctx.allocator, "{s}(): Passing null to parameter #{d} (${s}) of type {s} is deprecated", .{ self.func, index + 1, name, expected });
         defer self.ctx.allocator.free(msg);
         try self.ctx.vm.raiseError(e_deprecated, msg);
     }
 
-    fn string(self: Params, index: usize, name: []const u8, default: []const u8) RuntimeError![]const u8 {
+    pub fn string(self: Params, index: usize, name: []const u8, default: []const u8) RuntimeError![]const u8 {
         if (index >= self.args.len) return default;
         return switch (self.args[index]) {
             .null, .undef => {
@@ -676,7 +677,7 @@ const Params = struct {
         };
     }
 
-    fn optionalString(self: Params, index: usize, name: []const u8) RuntimeError!?[]const u8 {
+    pub fn optionalString(self: Params, index: usize, name: []const u8) RuntimeError!?[]const u8 {
         if (index >= self.args.len) return null;
         return switch (self.args[index]) {
             .null, .undef => null,
@@ -701,7 +702,7 @@ const Params = struct {
         return @intFromFloat(@trunc(f));
     }
 
-    fn int(self: Params, index: usize, name: []const u8, default: i64) RuntimeError!i64 {
+    pub fn int(self: Params, index: usize, name: []const u8, default: i64) RuntimeError!i64 {
         if (index >= self.args.len) return default;
         const v = self.args[index];
         switch (v) {
@@ -723,7 +724,7 @@ const Params = struct {
         }
     }
 
-    fn boolean(self: Params, index: usize, name: []const u8, default: bool) RuntimeError!bool {
+    pub fn boolean(self: Params, index: usize, name: []const u8, default: bool) RuntimeError!bool {
         if (index >= self.args.len) return default;
         return switch (self.args[index]) {
             .null, .undef => {

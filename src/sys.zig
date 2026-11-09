@@ -22,6 +22,19 @@ fn errnoOf(rc: anytype) E {
     return c.errno(rc);
 }
 
+extern "c" fn strerror(errnum: c_int) ?[*:0]const u8;
+
+// strerror(errno) after a failed libc call: the text php's filesystem
+// warnings carry
+pub fn errnoText() []const u8 {
+    if (is_windows) {
+        return "Unknown error";
+    } else {
+        const s = strerror(c._errno().*) orelse return "Unknown error";
+        return std.mem.span(s);
+    }
+}
+
 pub fn close(fd: posix.fd_t) void {
     _ = c.close(fd);
 }
@@ -191,6 +204,7 @@ pub const Stat = struct {
     dev: u64,
     ino: u64,
     mode: u32,
+    rdev: u64,
     nlink: u64,
     uid: u32,
     gid: u32,
@@ -214,40 +228,58 @@ pub fn lstat(path: []const u8) StatError!Stat {
 
 const c_lstat = @extern(*const fn (noalias [*:0]const u8, noalias *c.Stat) callconv(.c) c_int, .{ .name = "lstat" });
 
+// the stat of an open descriptor, what fstat() reports
+pub fn fstat(fd: posix.fd_t) StatError!Stat {
+    if (builtin.os.tag == .linux) return statx(fd, "", posix.AT.EMPTY_PATH);
+    var st: c.Stat = undefined;
+    switch (errnoOf(c.fstat(fd, &st))) {
+        .SUCCESS => {},
+        else => |err| return statError(err),
+    }
+    return fromCStat(&st);
+}
+
 fn statAt(path: []const u8, no_follow: bool) StatError!Stat {
     const path_z = posix.toPosixPath(path) catch return error.NameTooLong;
-    if (builtin.os.tag == .linux) {
-        const linux = std.os.linux;
-        var sx: linux.Statx = undefined;
-        const flags: u32 = if (no_follow) posix.AT.SYMLINK_NOFOLLOW else 0;
-        const mask: linux.STATX = .{ .TYPE = true, .MODE = true, .NLINK = true, .UID = true, .GID = true, .ATIME = true, .MTIME = true, .CTIME = true, .INO = true, .SIZE = true, .BLOCKS = true };
-        switch (errnoOf(c.statx(posix.AT.FDCWD, &path_z, flags, mask, &sx))) {
-            .SUCCESS => {},
-            else => |err| return statError(err),
-        }
-        return .{
-            .dev = makedev(sx.dev_major, sx.dev_minor),
-            .ino = sx.ino,
-            .mode = sx.mode,
-            .nlink = sx.nlink,
-            .uid = sx.uid,
-            .gid = sx.gid,
-            .size = @intCast(sx.size),
-            .blksize = sx.blksize,
-            .blocks = @intCast(sx.blocks),
-            .atime = sx.atime.sec,
-            .mtime = sx.mtime.sec,
-            .ctime = sx.ctime.sec,
-        };
-    }
+    if (builtin.os.tag == .linux) return statx(posix.AT.FDCWD, &path_z, if (no_follow) posix.AT.SYMLINK_NOFOLLOW else 0);
     var st: c.Stat = undefined;
     const rc = if (no_follow) c_lstat(&path_z, &st) else c.stat(&path_z, &st);
     switch (errnoOf(rc)) {
         .SUCCESS => {},
         else => |err| return statError(err),
     }
+    return fromCStat(&st);
+}
+
+fn statx(dirfd: posix.fd_t, path_z: [*:0]const u8, flags: u32) StatError!Stat {
+    const linux = std.os.linux;
+    var sx: linux.Statx = undefined;
+    const mask: linux.STATX = .{ .TYPE = true, .MODE = true, .NLINK = true, .UID = true, .GID = true, .ATIME = true, .MTIME = true, .CTIME = true, .INO = true, .SIZE = true, .BLOCKS = true };
+    switch (errnoOf(c.statx(dirfd, path_z, flags, mask, &sx))) {
+        .SUCCESS => {},
+        else => |err| return statError(err),
+    }
+    return .{
+        .dev = makedev(sx.dev_major, sx.dev_minor),
+        .rdev = makedev(sx.rdev_major, sx.rdev_minor),
+        .ino = sx.ino,
+        .mode = sx.mode,
+        .nlink = sx.nlink,
+        .uid = sx.uid,
+        .gid = sx.gid,
+        .size = @intCast(sx.size),
+        .blksize = sx.blksize,
+        .blocks = @intCast(sx.blocks),
+        .atime = sx.atime.sec,
+        .mtime = sx.mtime.sec,
+        .ctime = sx.ctime.sec,
+    };
+}
+
+fn fromCStat(st: *const c.Stat) Stat {
     return .{
         .dev = @intCast(st.dev),
+        .rdev = @intCast(st.rdev),
         .ino = @intCast(st.ino),
         .mode = @intCast(st.mode),
         .nlink = @intCast(st.nlink),
