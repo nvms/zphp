@@ -1141,6 +1141,8 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
         }
     }
 
+    if (!hasSplatOrNamed(self.ast, args) and isGlobalSprintf(self, callee) and try compileSprintfRope(self, args)) return;
+
     if (hasSplatOrNamed(self.ast, args)) {
         if (callee.tag == .property_access and self.isDynamicProp(callee)) {
             try self.compileNode(callee.data.lhs);
@@ -1254,6 +1256,112 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
         self.current_source_offset = call_offset;
         try emitCallOp(self, &guards, .call_indirect, .{ .argc = @intCast(args.len) });
     }
+}
+
+// a call that names php's own sprintf at compile time: unqualified outside a
+// namespace, imported, or fully qualified
+fn isGlobalSprintf(self: *Compiler, callee: Ast.Node) bool {
+    if (callee.tag == .identifier) {
+        return std.ascii.eqlIgnoreCase(self.resolveFunctionName(self.ast.tokenSlice(callee.main_token)), "sprintf");
+    }
+    // rhs 1 marks a leading backslash
+    if (callee.tag != .qualified_name or callee.data.rhs != 1) return false;
+    const parts = self.ast.extraSlice(callee.data.lhs);
+    return parts.len == 1 and std.ascii.eqlIgnoreCase(self.ast.tokenSlice(parts[0]), "sprintf");
+}
+
+// zend_compile_func_sprintf: a literal format of plain %s, %d and %% with one
+// value per placeholder compiles to string casts and concatenation, so the
+// call leaves no sprintf frame in traces and stops at the first exception.
+// false when the call doesn't qualify and nothing was emitted
+fn compileSprintfRope(self: *Compiler, args: []const u32) Error!bool {
+    if (args.len < 1) return false;
+    const fmt_node = self.ast.nodes[args[0]];
+    if (fmt_node.tag != .string_literal) return false;
+    const tok_tag = self.ast.tokens[fmt_node.main_token].tag;
+    if (tok_tag == .heredoc or tok_tag == .nowdoc) return false;
+    const lexeme = self.ast.tokenSlice(fmt_node.main_token);
+    if (lexeme.len < 2 or (lexeme[0] != '\'' and lexeme[0] != '"')) return false;
+    if (lexeme[0] == '"' and std.mem.indexOfScalar(u8, lexeme, '$') != null) return false;
+    const fmt_value = self.evalConstExpr(args[0]);
+    if (fmt_value != .string) return false;
+    const fmt = fmt_value.string.bytes();
+    if (fmt.len >= 256) return false;
+
+    var placeholders: usize = 0;
+    var i: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, fmt, i, '%')) |p| {
+        if (p + 1 == fmt.len) return false;
+        switch (fmt[p + 1]) {
+            's', 'd' => placeholders += 1,
+            '%' => {},
+            else => return false,
+        }
+        i = p + 2;
+    }
+    if (placeholders != args.len - 1) return false;
+
+    const call_offset = self.current_source_offset;
+    // the values are evaluated before any of them is converted
+    for (args[1..]) |arg| try self.compileNode(arg);
+    self.current_source_offset = call_offset;
+    // reverse them so the first one is on top
+    var depth = placeholders;
+    while (depth > 1) {
+        depth -= 1;
+        try self.emitOp(.bury);
+        try self.emitByte(@intCast(depth));
+    }
+
+    var literal = std.ArrayListUnmanaged(u8).empty;
+    defer literal.deinit(self.allocator);
+    var have_acc = false;
+    i = 0;
+    while (i < fmt.len) {
+        const p = std.mem.indexOfScalarPos(u8, fmt, i, '%') orelse {
+            try literal.appendSlice(self.allocator, fmt[i..]);
+            break;
+        };
+        try literal.appendSlice(self.allocator, fmt[i..p]);
+        const spec = fmt[p + 1];
+        i = p + 2;
+        if (spec == '%') {
+            try literal.append(self.allocator, '%');
+            continue;
+        }
+        // the stack holds the next value on top, with the result so far above it
+        if (have_acc) {
+            if (literal.items.len > 0) {
+                try emitRopeLiteral(self, literal.items);
+                try self.emitOp(.concat);
+            }
+            try self.emitOp(.swap);
+            try self.emitOp(if (spec == 'd') .cast_int else .cast_string);
+            try self.emitOp(.concat);
+        } else {
+            try self.emitOp(if (spec == 'd') .cast_int else .cast_string);
+            if (spec == 'd' or literal.items.len > 0) {
+                try emitRopeLiteral(self, literal.items);
+                try self.emitOp(.swap);
+                try self.emitOp(.concat);
+            }
+            have_acc = true;
+        }
+        literal.clearRetainingCapacity();
+    }
+    if (!have_acc) {
+        try emitRopeLiteral(self, literal.items);
+    } else if (literal.items.len > 0) {
+        try emitRopeLiteral(self, literal.items);
+        try self.emitOp(.concat);
+    }
+    return true;
+}
+
+fn emitRopeLiteral(self: *Compiler, text: []const u8) Error!void {
+    const owned = try self.allocator.dupe(u8, text);
+    try self.string_allocs.append(self.allocator, owned);
+    try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(owned) }));
 }
 
 // whether a call compiles to its spread form, which carries its arguments in

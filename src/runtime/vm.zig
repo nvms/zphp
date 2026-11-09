@@ -7893,6 +7893,13 @@ pub const VM = struct {
                         defer self.allocator.free(m);
                         self.emitWarning(m) catch if (try self.resumeRaised()) continue;
                     }
+                    // zend_dval_to_lval warns for nan, infinities and floats past the int range
+                    if (v == .float and !(v.float >= -9.2233720368547758e18 and v.float < 9.2233720368547758e18)) {
+                        var tmp: [64]u8 = undefined;
+                        const m = try std.fmt.allocPrint(self.allocator, "The float {s} is not representable as an int, cast occurred", .{@import("../stdlib/output.zig").formatFloat(&tmp, v.float)});
+                        defer self.allocator.free(m);
+                        self.emitWarning(m) catch if (try self.resumeRaised()) continue;
+                    }
                     self.push(.{ .int = Value.toInt(v) });
                 },
                 .cast_float => {
@@ -7916,6 +7923,7 @@ pub const VM = struct {
                         self.pushTransfer(.{ .string = try Value.String.create(self.allocator, s) });
                     } else {
                         if (v == .array) self.emitWarning("Array to string conversion") catch if (try self.resumeRaised()) continue;
+                        if (v == .float and std.math.isNan(v.float)) self.emitWarning("unexpected NAN value was coerced to string") catch if (try self.resumeRaised()) continue;
                         var buf = std.ArrayListUnmanaged(u8).empty;
                         defer buf.deinit(self.allocator);
                         try v.format(&buf, self.allocator);

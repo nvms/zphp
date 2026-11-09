@@ -549,7 +549,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 },
                 .cast_int => {
                     const v = stack[sp - 1];
-                    if (v == .object) {
+                    // objects and floats past the int range can warn: the slow path has them
+                    if (v == .object or (v == .float and !(v.float >= -9.2233720368547758e18 and v.float < 9.2233720368547758e18))) {
                         frame.ip = ip - 1;
                         self.sp = sp;
                         return;
