@@ -20118,6 +20118,46 @@ pub const VM = struct {
         return copy;
     }
 
+    // src's entries where keep is set, in order, carrying references as
+    // zend_array_dup does. inherit_next keeps src's next free index and
+    // internal pointer, as php's dup-then-delete results do; otherwise the
+    // next index follows the kept keys, as a freshly built array's does
+    pub fn copyKeptEntries(self: *VM, src: *PhpArray, keep: []const bool, inherit_next: bool) RuntimeError!*PhpArray {
+        // a callback may have changed src since keep was sized
+        const items = src.entries.items[0..@min(src.entries.items.len, keep.len)];
+        var kept: usize = 0;
+        var strings: usize = 0;
+        for (items, keep[0..items.len]) |entry, k| if (k) {
+            kept += 1;
+            if (entry.key == .string) strings += 1;
+        };
+        const copy = self.allocArray() catch return error.RuntimeError;
+        if (inherit_next) copy.* = .{ .next_int_key = src.next_int_key, .has_int_keys = src.has_int_keys };
+        copy.entries.ensureTotalCapacity(self.allocator, kept) catch return error.RuntimeError;
+        copy.reserveStringIndex(self.allocator, strings) catch return error.RuntimeError;
+        var cursor_set = false;
+        for (items, keep[0..items.len], 0..) |entry, k, i| {
+            if (!k) continue;
+            if (inherit_next and !cursor_set and i >= src.cursor) {
+                copy.cursor = copy.entries.items.len;
+                cursor_set = true;
+            }
+            if (entry.key == .string) entry.key.string.retain();
+            const ref = carriedRef(entry.ref, src);
+            const value = if (entry.ref) |cell| cell.* else entry.value;
+            copy.entries.appendAssumeCapacity(.{ .key = entry.key, .value = value, .ref = ref });
+            if (ref) |cell| self.bindCell(cell);
+            retainValue(value);
+            switch (entry.key) {
+                .string => |s| copy.string_index.putAssumeCapacity(s.bytes(), copy.entries.items.len - 1),
+                .int => |n| if (!inherit_next) copy.noteIntKey(n),
+            }
+        }
+        if (inherit_next and !cursor_set) copy.cursor = copy.entries.items.len;
+        try self.registerCloneRefs(copy);
+        return copy;
+    }
+
     // copy-on-write separation. if `arr` is shared (refcount > 1), return an
     // unshared shallow clone the caller can mutate in place; the caller MUST
     // store the result back into the owning slot/property/element. the original

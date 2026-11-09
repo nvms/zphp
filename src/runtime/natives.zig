@@ -78,6 +78,22 @@ pub fn callbackParams(name: []const u8) u32 {
     return positions;
 }
 
+// natives whose signature is (array $array, ...$rest) but whose argument
+// parsing ("+f", "+ff") takes one or two callbacks after the arrays, so php
+// counts them as required
+const variadic_callbacks = std.StaticStringMap(u16).initComptime(.{
+    .{ "array_udiff", 2 },
+    .{ "array_udiff_assoc", 2 },
+    .{ "array_udiff_uassoc", 3 },
+    .{ "array_uintersect", 2 },
+    .{ "array_uintersect_assoc", 2 },
+    .{ "array_uintersect_uassoc", 3 },
+    .{ "array_diff_ukey", 2 },
+    .{ "array_diff_uassoc", 2 },
+    .{ "array_intersect_ukey", 2 },
+    .{ "array_intersect_uassoc", 2 },
+});
+
 // how many arguments php lets a call pass; a native without a signature
 // accepts any number
 pub const Arity = struct {
@@ -87,6 +103,7 @@ pub const Arity = struct {
     pub const unbounded = std.math.maxInt(u16);
 
     pub fn of(name: []const u8) Arity {
+        if (variadic_callbacks.get(name)) |min| return .{ .min = min, .max = unbounded };
         const signature = native_params.get(name) orelse return .{};
         var arity: Arity = .{ .max = 0 };
         for (signature.params) |param| {
