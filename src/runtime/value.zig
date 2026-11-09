@@ -1624,7 +1624,7 @@ pub const Value = union(enum) {
 
     pub fn isNumericString(s: []const u8) bool {
         var i: usize = 0;
-        while (i < s.len and (s[i] == ' ' or s[i] == '\t' or s[i] == '\n' or s[i] == '\r')) i += 1;
+        while (i < s.len and (s[i] == ' ' or s[i] == '\t' or s[i] == '\n' or s[i] == '\r' or s[i] == 0x0b or s[i] == 0x0c)) i += 1;
         if (i >= s.len) return false;
         if (s[i] == '-' or s[i] == '+') i += 1;
         if (i >= s.len) return false;
@@ -1647,7 +1647,7 @@ pub const Value = union(enum) {
             while (i < s.len and s[i] >= '0' and s[i] <= '9') i += 1;
             if (i == exponent_start) return false;
         }
-        while (i < s.len and (s[i] == ' ' or s[i] == '\t' or s[i] == '\n' or s[i] == '\r')) i += 1;
+        while (i < s.len and (s[i] == ' ' or s[i] == '\t' or s[i] == '\n' or s[i] == '\r' or s[i] == 0x0b or s[i] == 0x0c)) i += 1;
         return has_digit and i == s.len;
     }
 
@@ -1880,7 +1880,7 @@ pub const Value = union(enum) {
 
     fn parseLeadingInt(s: []const u8) i64 {
         var i: usize = 0;
-        while (i < s.len and (s[i] == ' ' or s[i] == '\t' or s[i] == '\n' or s[i] == '\r')) i += 1;
+        while (i < s.len and (s[i] == ' ' or s[i] == '\t' or s[i] == '\n' or s[i] == '\r' or s[i] == 0x0b or s[i] == 0x0c)) i += 1;
         if (i >= s.len) return 0;
         const start = i;
         var neg = false;
@@ -1936,7 +1936,7 @@ pub const Value = union(enum) {
 
     fn parseLeadingFloat(s: []const u8) f64 {
         var start: usize = 0;
-        while (start < s.len and (s[start] == ' ' or s[start] == '\t' or s[start] == '\n' or s[start] == '\r')) start += 1;
+        while (start < s.len and (s[start] == ' ' or s[start] == '\t' or s[start] == '\n' or s[start] == '\r' or s[start] == 0x0b or s[start] == 0x0c)) start += 1;
         if (start >= s.len) return 0.0;
         var end = start;
         if (s[end] == '-' or s[end] == '+') end += 1;
@@ -1995,36 +1995,10 @@ pub const Value = union(enum) {
                     const s = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch return;
                     if (i == 0 and std.math.signbit(f)) try buf.append(allocator, '-');
                     try buf.appendSlice(allocator, s);
-                } else if (std.math.isNan(f)) {
-                    try buf.appendSlice(allocator, "NAN");
-                } else if (std.math.isInf(f)) {
-                    if (f < 0) try buf.append(allocator, '-');
-                    try buf.appendSlice(allocator, "INF");
                 } else {
-                    const abs_f = @abs(f);
-                    // very small or very large numbers use scientific notation.
-                    // PHP defaults precision=14 so values needing more than 14
-                    // significant digits go scientific.
-                    if (abs_f != 0 and (abs_f < 1e-4 or abs_f >= 1e14)) {
-                        var tmp: [64]u8 = undefined;
-                        const s = formatScientific(&tmp, f);
-                        try buf.appendSlice(allocator, s);
-                    } else {
-                        // PHP uses 14 significant digits
-                        const digits_before: usize = if (abs_f >= 1.0)
-                            @as(usize, @intFromFloat(@floor(@log10(abs_f)))) + 1
-                        else
-                            0;
-                        const precision: usize = if (digits_before < 14) 14 - digits_before else 0;
-                        var tmp: [64]u8 = undefined;
-                        const s = formatFloat(&tmp, f, precision);
-                        var end: usize = s.len;
-                        if (std.mem.indexOf(u8, s, ".")) |_| {
-                            while (end > 1 and s[end - 1] == '0') end -= 1;
-                            if (end > 0 and s[end - 1] == '.') end -= 1;
-                        }
-                        try buf.appendSlice(allocator, s[0..end]);
-                    }
+                    // php's zend_double_to_str: %.*G with the precision ini, 14
+                    var tmp: [64]u8 = undefined;
+                    try buf.appendSlice(allocator, @import("../stdlib/formatted_print.zig").gcvt(f, 14, '.', 'E', &tmp));
                 }
             },
             .string => |s| try buf.appendSlice(allocator, s.bytes()),
@@ -2037,39 +2011,6 @@ pub const Value = union(enum) {
                 try buf.appendSlice(allocator, std.fmt.bufPrint(&tmp, "Resource id #{d}", .{r.id}) catch unreachable);
             },
         }
-    }
-
-    fn formatFloat(buf: *[64]u8, f: f64, precision: usize) []const u8 {
-        const p: u4 = @intCast(@min(precision, 15));
-        switch (p) {
-            inline 0...15 => |cp| return std.fmt.bufPrint(buf, "{d:." ++ std.fmt.comptimePrint("{d}", .{@min(cp, 14)}) ++ "}", .{f}) catch "0",
-        }
-    }
-
-    fn formatScientific(buf: *[64]u8, f: f64) []const u8 {
-        // PHP format: [-]d.dddE[+-]d+  (uppercase E, 14 significant digits)
-        const abs_f = @abs(f);
-        const exp: i32 = if (abs_f != 0)
-            @intFromFloat(@floor(@log10(abs_f)))
-        else
-            0;
-        const mantissa = f / std.math.pow(f64, 10.0, @floatFromInt(exp));
-
-        // 14 significant digits total, 13 after the decimal in mantissa
-        var tmp: [64]u8 = undefined;
-        const m = formatFloat(&tmp, @abs(mantissa), 13);
-
-        // strip trailing zeros but keep at least one decimal place
-        var end: usize = m.len;
-        if (std.mem.indexOf(u8, m, ".")) |dot| {
-            while (end > dot + 2 and m[end - 1] == '0') end -= 1;
-        }
-
-        const sign: []const u8 = if (f < 0) "-" else "";
-        const exp_sign: u8 = if (exp >= 0) '+' else '-';
-        const exp_abs: u32 = @intCast(if (exp >= 0) exp else -exp);
-
-        return std.fmt.bufPrint(buf, "{s}{s}E{c}{d}", .{ sign, m[0..end], exp_sign, exp_abs }) catch "0";
     }
 
     // overflow-safe int arithmetic, promotes to float on overflow
@@ -2268,7 +2209,7 @@ pub const Value = union(enum) {
 
     fn classifyNumericString(s: []const u8) NumericValue {
         var start: usize = 0;
-        while (start < s.len and (s[start] == ' ' or s[start] == '\t' or s[start] == '\n' or s[start] == '\r')) start += 1;
+        while (start < s.len and (s[start] == ' ' or s[start] == '\t' or s[start] == '\n' or s[start] == '\r' or s[start] == 0x0b or s[start] == 0x0c)) start += 1;
         var i = start;
         var has_dot = false;
         var has_exp = false;
