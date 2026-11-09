@@ -564,10 +564,10 @@ fn native_strcmp(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     return NativeResult.scalar(.{ .int = 0 });
 }
 
-fn native_strcasecmp(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+fn native_strcasecmp(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2) return NativeResult.scalar(.{ .int = 0 });
-    const a = if (args[0] == .string) args[0].string.bytes() else "";
-    const b = if (args[1] == .string) args[1].string.bytes() else "";
+    const a = try coerceToString(ctx, args[0]);
+    const b = try coerceToString(ctx, args[1]);
     const min_len = @min(a.len, b.len);
     for (0..min_len) |i| {
         const ca = std.ascii.toLower(a[i]);
@@ -631,8 +631,8 @@ fn native_strnatcasecmp(_: *NativeContext, args: []const Value) RuntimeError!Nat
 
 fn native_strncasecmp(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 3) return NativeResult.scalar(.{ .int = 0 });
-    const a = if (args[0] == .string) args[0].string.bytes() else "";
-    const b = if (args[1] == .string) args[1].string.bytes() else "";
+    const a = try coerceToString(ctx, args[0]);
+    const b = try coerceToString(ctx, args[1]);
     const n_raw = Value.toInt(args[2]);
     if (n_raw < 0) {
         try ctx.vm.setPendingException("ValueError", "strncasecmp(): Argument #3 ($length) must be greater than or equal to 0");
@@ -653,8 +653,8 @@ fn native_strncasecmp(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
 
 fn native_strncmp(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 3) return NativeResult.scalar(.{ .int = 0 });
-    const a = if (args[0] == .string) args[0].string.bytes() else "";
-    const b = if (args[1] == .string) args[1].string.bytes() else "";
+    const a = try coerceToString(ctx, args[0]);
+    const b = try coerceToString(ctx, args[1]);
     const n_raw = Value.toInt(args[2]);
     if (n_raw < 0) {
         try ctx.vm.setPendingException("ValueError", "strncmp(): Argument #3 ($length) must be greater than or equal to 0");

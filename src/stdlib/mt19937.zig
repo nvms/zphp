@@ -79,7 +79,11 @@ pub const Mt19937 = struct {
     // mt19937 output (NOT the 31-bit form mt_rand() returns without arguments)
     // and rejection-samples to remove modulo bias. matches php_random_range32
     pub fn nextRange(self: *Mt19937, min: i64, max: i64) i64 {
-        if (min == max) return min;
+        // php draws a number even for an empty range
+        if (min == max) {
+            _ = self.nextU32();
+            return min;
+        }
         const umax_raw: u64 = @intCast(max - min);
         // mt_rand($min, $max) where max-min == UINT32_MAX returns the raw
         // 32-bit value directly

@@ -177,7 +177,8 @@ pub const PhpArray = struct {
         }
         if (i >= s.len) return key;
         if (s[i] == '0') {
-            if (s.len - i != 1) return key;
+            // "-0" stays a string key in php
+            if (s.len - i != 1 or i == 1) return key;
         } else if (s[i] < '1' or s[i] > '9') {
             return key;
         }
@@ -1706,7 +1707,16 @@ pub const Value = union(enum) {
             }
             return 0;
         }
-        if (a == .array or b == .array) return if (a == .array) 1 else -1;
+        if (a == .array or b == .array) {
+            // zend_compare: against null or a bool both sides compare as bools
+            const other = if (a == .array) b else a;
+            if (other == .null or other == .undef or other == .bool) {
+                const at: i64 = @intFromBool(a.isTruthy());
+                const bt: i64 = @intFromBool(b.isTruthy());
+                return at - bt;
+            }
+            return if (a == .array) 1 else -1;
+        }
         if (a == .string and b == .string) {
             // PHP: when both strings are numeric, compare numerically
             if (isNumericString(a.string.bytes()) and isNumericString(b.string.bytes())) {
