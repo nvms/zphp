@@ -1,4 +1,5 @@
 const std = @import("std");
+const class_names = @import("../runtime/class_names.zig");
 const bundle = @import("../bundle.zig");
 const platform = @import("../platform.zig");
 const php_version = @import("../php_version.zig");
@@ -910,11 +911,12 @@ fn native_debug_print_backtrace(ctx: *NativeContext, args: []const Value) Runtim
             }
             try out.appendSlice(alloc, ": ");
         }
+        // php appends these as C strings, which end at an anonymous class's NUL
         if (class == .string and call_type == .string) {
-            try out.appendSlice(alloc, class.string.bytes());
+            try out.appendSlice(alloc, class_names.display(class.string.bytes()));
             try out.appendSlice(alloc, call_type.string.bytes());
         }
-        try out.appendSlice(alloc, if (func == .string) func.string.bytes() else "{main}");
+        try out.appendSlice(alloc, if (func == .string) class_names.display(func.string.bytes()) else "{main}");
         try out.append(alloc, '(');
         if (call_args == .array) for (call_args.array.entries.items, 0..) |a, n| {
             if (n > 0) try out.appendSlice(alloc, ", ");

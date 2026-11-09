@@ -301,9 +301,9 @@ fn writeFrameCallee(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM, frame
         writeFmt(buf, alloc, "{s}{s}{s}(", .{ class_names.display(class), type_str, method });
     } else if (frame.called_class) |cls| {
         const type_str: []const u8 = if (func.is_static) "::" else "->";
-        writeFmt(buf, alloc, "{s}{s}{s}(", .{ class_names.display(cls), type_str, func.name });
+        writeFmt(buf, alloc, "{s}{s}{s}(", .{ class_names.display(cls), type_str, class_names.display(func.name) });
     } else {
-        writeFmt(buf, alloc, "{s}(", .{func.name});
+        writeFmt(buf, alloc, "{s}(", .{class_names.display(func.name)});
     }
     writeFrameArgs(buf, alloc, vm, frame_idx);
     write(buf, alloc, ")");
@@ -375,7 +375,8 @@ pub fn writeTrace(buf: *Writer, alloc: std.mem.Allocator, trace: Value) void {
     for (trace.array.entries.items, 0..) |entry, i| {
         if (entry.value != .array) continue;
         const e = entry.value.array;
-        const fn_s = stringField(e, "function") orelse "?";
+        // php appends these as C strings, which end at an anonymous class's NUL
+        const fn_s = class_names.display(stringField(e, "function") orelse "?");
         const class_s = class_names.display(stringField(e, "class") orelse "");
         const type_s = stringField(e, "type") orelse "";
         const file_s = stringField(e, "file") orelse "";

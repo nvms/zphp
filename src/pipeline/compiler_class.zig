@@ -4259,7 +4259,7 @@ fn closureDisplayName(self: *Compiler, line: u32) ![]const u8 {
     const name = if (std.mem.startsWith(u8, f, "{closure:"))
         try std.fmt.allocPrint(self.allocator, "{{closure:{s}:{d}}}", .{ f, line })
     else if (f.len > 0 and self.current_class.len > 0)
-        try std.fmt.allocPrint(self.allocator, "{{closure:{s}::{s}():{d}}}", .{ class_names.display(self.current_class), f, line })
+        try std.fmt.allocPrint(self.allocator, "{{closure:{s}::{s}():{d}}}", .{ self.current_class, f, line })
     else if (f.len > 0)
         try std.fmt.allocPrint(self.allocator, "{{closure:{s}():{d}}}", .{ f, line })
     else

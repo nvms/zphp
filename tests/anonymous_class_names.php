@@ -125,6 +125,13 @@ echo call_user_func([$long, 'resolveName'], 'c'), ' ', (new ReflectionMethod($lo
 echo strlen(get_class($long)) > 256 ? "long name\n" : "short name\n";
 echo get_debug_type($long) === str_repeat('VeryLongInterfaceName', 12) . '@anonymous' ? "debug type ok\n" : "debug type differs\n";
 
+// a closure's name keeps the whole class name; a backtrace prints up to the NUL
+$traced = new class {
+    public function run() { debug_print_backtrace(); return fn() => 1; }
+};
+$closure = $traced->run();
+echo show((new ReflectionFunction($closure))->getName()), "\n";
+
 $handler = set_error_handler(function ($no, $message) {
     echo "handler: ", show($message), "\n";
     return true;
