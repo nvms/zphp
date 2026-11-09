@@ -830,6 +830,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionFiber::getCallable", rfibGetCallable);
     try vm.native_fns.put(a, "ReflectionFiber::getFiber", rfibGetFiber);
     try vm.native_fns.put(a, "ReflectionFiber::getTrace", rfibGetTrace);
+
+    try @import("reflection_string.zig").register(vm, a);
 }
 
 fn rextConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -873,7 +875,7 @@ fn rextToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
     return rextGetName(ctx, &.{});
 }
 
-fn getThis(ctx: *NativeContext) ?*PhpObject {
+pub fn getThis(ctx: *NativeContext) ?*PhpObject {
     const v = ctx.vm.currentFrame().vars.get("$this") orelse return null;
     if (v != .object) return null;
     return v.object;
@@ -918,7 +920,7 @@ fn createNamedTypeObj(ctx: *NativeContext, type_name: []const u8, nullable: bool
 
 // the type objects a union hands out borrow from this text, so it lives as
 // long as the request, as the declarations' own type strings do
-fn canonicalUnion(ctx: *NativeContext, text: []const u8, self_class: ?[]const u8) ![]const u8 {
+pub fn canonicalUnion(ctx: *NativeContext, text: []const u8, self_class: ?[]const u8) ![]const u8 {
     const t = php_types.parse(ctx.allocator, text, self_class, null) catch return text;
     defer t.deinit(ctx.allocator);
     const formatted = try php_types.format(ctx.allocator, t);
@@ -1006,7 +1008,7 @@ fn buildMethodObj(ctx: *NativeContext, class_name: []const u8, method_name: []co
 }
 
 // find which class in the hierarchy actually declares a method
-fn findDeclaringClass(vm: *VM, class_name: []const u8, method_name: []const u8) []const u8 {
+pub fn findDeclaringClass(vm: *VM, class_name: []const u8, method_name: []const u8) []const u8 {
     var current: []const u8 = class_name;
     var declaring: []const u8 = class_name;
     var buf: [256]u8 = undefined;
@@ -1023,7 +1025,7 @@ fn findDeclaringClass(vm: *VM, class_name: []const u8, method_name: []const u8) 
 }
 
 // a static property's metadata in the shape instance properties use
-fn staticPropertyDef(cls: *const ClassDef, name: []const u8, default: Value) ClassDef.PropertyDef {
+pub fn staticPropertyDef(cls: *const ClassDef, name: []const u8, default: Value) ClassDef.PropertyDef {
     const vis = cls.static_prop_visibility.get(name) orelse .public;
     const set_vis = cls.static_prop_set_visibility.get(name);
     return .{
@@ -1043,7 +1045,7 @@ const PropertyDefResult = struct {
     is_static: bool = false,
 };
 
-fn findPropertyDef(vm: *VM, class_name: []const u8, prop_name: []const u8) ?PropertyDefResult {
+pub fn findPropertyDef(vm: *VM, class_name: []const u8, prop_name: []const u8) ?PropertyDefResult {
     if (vm.trait_props.get(class_name)) |props| {
         for (props) |prop| {
             if (std.mem.eql(u8, prop.name, prop_name)) return .{ .prop = prop, .declaring_class = class_name };
@@ -1168,6 +1170,9 @@ fn rcConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     try this.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(try ctx.vm.stableClassName(class_name)) });
     try this.set(ctx.allocator, "__is_interface", .{ .bool = ctx.vm.interfaces.contains(class_name) });
     try this.set(ctx.allocator, "__is_trait", .{ .bool = ctx.vm.traits.contains(class_name) });
+    // a ReflectionObject keeps the object it reflects, whose dynamic
+    // properties its string form lists
+    if (args[0] == .object and ctx.vm.isInstanceOf(this.class_name, "ReflectionObject")) try this.set(ctx.allocator, "__object", args[0]);
     return NativeResult.scalar(.null);
 }
 
@@ -1989,13 +1994,13 @@ fn rcIsEnum(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     return NativeResult.scalar(.{ .bool = cls.is_enum });
 }
 
-const VisibleConstant = struct { declaring: []const u8, name: []const u8, value: Value };
+pub const VisibleConstant = struct { declaring: []const u8, name: []const u8, value: Value };
 
 // what a class can see as its constants, in php's order: its own (trait
 // constants included) in declaration order, then its parents', then its
 // interfaces'. an override hides the inherited one and a parent's private
 // constant is not inherited
-fn visibleConstants(ctx: *NativeContext, class_name: []const u8, out: *std.ArrayListUnmanaged(VisibleConstant)) RuntimeError!void {
+pub fn visibleConstants(ctx: *NativeContext, class_name: []const u8, out: *std.ArrayListUnmanaged(VisibleConstant)) RuntimeError!void {
     var chain: std.ArrayListUnmanaged([]const u8) = .empty;
     defer chain.deinit(ctx.allocator);
     var current: ?[]const u8 = class_name;
@@ -2139,7 +2144,7 @@ fn rccGetDocComment(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRe
     return try NativeResult.copyString(ctx.allocator, doc);
 }
 
-fn findConstantOwner(ctx: *NativeContext, class_name: []const u8, name: []const u8, depth: usize) ?[]const u8 {
+pub fn findConstantOwner(ctx: *NativeContext, class_name: []const u8, name: []const u8, depth: usize) ?[]const u8 {
     if (depth >= 256) return null;
     if (ctx.vm.trait_constants.getEntry(class_name)) |entry| {
         for (entry.value_ptr.*) |constant| {
@@ -2159,7 +2164,7 @@ fn findConstantOwner(ctx: *NativeContext, class_name: []const u8, name: []const 
     return null;
 }
 
-fn findConstantDoc(ctx: *NativeContext, class_name: []const u8, name: []const u8, depth: usize) ?[]const u8 {
+pub fn findConstantDoc(ctx: *NativeContext, class_name: []const u8, name: []const u8, depth: usize) ?[]const u8 {
     const owner = findConstantOwner(ctx, class_name, name, depth) orelse return null;
     if (ctx.vm.classes.get(owner)) |cls| return cls.constant_docs.get(name) orelse "";
     if (ctx.vm.trait_constants.get(owner)) |constants| {
@@ -2346,7 +2351,7 @@ fn rcIsUserDefined(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
 }
 
 // a class, interface or trait the runtime declared rather than a script
-fn isInternalClassName(vm: *VM, name: []const u8) bool {
+pub fn isInternalClassName(vm: *VM, name: []const u8) bool {
     if (vm.classes.get(name)) |def| return def.is_internal;
     if (vm.interfaces.contains(name)) return vm.builtin_interfaces.contains(vm.declaredClassName(name));
     return false;
@@ -3176,7 +3181,7 @@ fn nativeReturnType(ctx: *NativeContext, name: []const u8) []const u8 {
     return sig.returns;
 }
 
-fn closureAwareTypeInfo(func_name: []const u8) ?@TypeOf(vm_mod.getTypeInfo("").?) {
+pub fn closureAwareTypeInfo(func_name: []const u8) ?@TypeOf(vm_mod.getTypeInfo("").?) {
     if (vm_mod.getTypeInfo(func_name)) |ti| return ti;
     if (std.mem.startsWith(u8, func_name, "__closure_")) {
         const after = func_name["__closure_".len..];
@@ -3481,6 +3486,11 @@ fn populateRpFields(ctx: *NativeContext, obj: *PhpObject, func: *const ObjFuncti
         const meth_name = try ctx.allocator.dupe(u8, type_key[sep + 2 ..]);
         defer ctx.allocator.free(meth_name);
         try obj.setCopiedString(ctx.allocator, "__method_name", meth_name);
+        try obj.setCopiedString(ctx.allocator, "__function", meth_name);
+    } else {
+        const fname = try ctx.allocator.dupe(u8, type_key);
+        defer ctx.allocator.free(fname);
+        try obj.setCopiedString(ctx.allocator, "__function", fname);
     }
 }
 
@@ -3873,7 +3883,7 @@ fn reflectionFalse(_: *NativeContext, _: []const Value) RuntimeError!NativeResul
     return NativeResult.scalar(.{ .bool = false });
 }
 
-fn methodLookupName(obj: *PhpObject) ?[]const u8 {
+pub fn methodLookupName(obj: *PhpObject) ?[]const u8 {
     const internal = obj.get("__hook_method");
     if (internal == .string) return internal.string.bytes();
     const name = obj.get("name");
@@ -5409,17 +5419,12 @@ fn rconstToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
     const this = getThis(ctx) orelse return NativeResult.literal("");
     const name_v = this.get("name");
     if (name_v != .string) return NativeResult.literal("");
-    const value = ctx.vm.php_constants.get(name_v.string.bytes()) orelse Value.null;
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(ctx.allocator);
-    try buf.appendSlice(ctx.allocator, "Constant [ ");
-    try buf.appendSlice(ctx.allocator, @tagName(value));
-    try buf.append(ctx.allocator, ' ');
-    try buf.appendSlice(ctx.allocator, name_v.string.bytes());
-    try buf.appendSlice(ctx.allocator, " ] { ");
-    try value.format(&buf, ctx.allocator);
-    try buf.appendSlice(ctx.allocator, " }\n");
-    return try NativeResult.copyString(ctx.allocator, buf.items);
+    const name = name_v.string.bytes();
+    const value = ctx.vm.php_constants.get(name) orelse Value.null;
+    // the runtime's own constants are php's persistent ones
+    const persistent = !ctx.vm.user_constants.contains(name);
+    const deprecated = deprecations.constants.has(name) or ctx.vm.deprecated_globals.contains(name);
+    return @import("reflection_string.zig").constantString(ctx, name, value, persistent, deprecated);
 }
 
 // resetAsLazyGhost / resetAsLazyProxy: an existing instance drops every
