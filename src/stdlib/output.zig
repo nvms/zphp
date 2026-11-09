@@ -601,7 +601,7 @@ fn emitDumpKey(out: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, name: []c
     try out.appendSlice(a, "]=>\n");
 }
 
-fn formatFloat(tmp: *[64]u8, f: f64) []const u8 {
+pub fn formatFloat(tmp: *[64]u8, f: f64) []const u8 {
     if (std.math.isNan(f)) return "NAN";
     if (std.math.isInf(f)) return if (f > 0) "INF" else "-INF";
     const abs_f = @abs(f);

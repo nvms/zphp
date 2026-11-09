@@ -1,0 +1,315 @@
+#!/usr/bin/env python3
+# Regenerates src/stdlib/html_tables_generated.zig: the charsets, the
+# single-byte charset maps to and from unicode, and the entity tables
+# (html 4.01, html 5, the basic five with and without &apos;) that php's
+# htmlentities, htmlspecialchars, html_entity_decode, htmlspecialchars_decode
+# and get_html_translation_table use.
+#
+# the data comes from ext/standard/html_tables.h in the php release tarball for
+# the version in src/php_version.zig. regenerate whenever that version moves:
+#
+#   make html-tables
+#
+# pass a tarball, an unpacked source tree or the header itself to skip the
+# download:
+#
+#   scripts/gen-html-tables ~/Downloads/php-8.5.12.tar.xz
+
+import os, re, sys, tarfile, tempfile, urllib.request
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUT = os.path.join(REPO, "src", "stdlib", "html_tables_generated.zig")
+MEMBER = "ext/standard/html_tables.h"
+
+
+def target_version():
+    text = open(os.path.join(REPO, "src", "php_version.zig")).read()
+    parts = [re.search(r"pub const %s = (\d+);" % name, text).group(1) for name in ("major", "minor", "release")]
+    return ".".join(parts)
+
+
+def header(version, given):
+    if given and os.path.isfile(given) and given.endswith(".h"):
+        return open(given).read()
+    if given and os.path.isdir(given):
+        return open(os.path.join(given, MEMBER)).read()
+    path = given
+    if not path:
+        path = os.path.join(tempfile.gettempdir(), "php-%s.tar.xz" % version)
+        if not os.path.exists(path):
+            url = "https://www.php.net/distributions/php-%s.tar.xz" % version
+            print("downloading " + url, file=sys.stderr)
+            urllib.request.urlretrieve(url, path)
+    with tarfile.open(path) as tar:
+        for member in tar.getmembers():
+            if member.name.endswith("/" + MEMBER):
+                return tar.extractfile(member).read().decode()
+    sys.exit("no %s in %s" % (MEMBER, path))
+
+
+def strip_comments(source):
+    return re.sub(r"/\*.*?\*/", "", source, flags=re.S)
+
+
+def arrays(source, ctype):
+    # every `static const <ctype> name[] = { ... };` as name -> body
+    found = {}
+    pattern = r"static const %s (\w+)\[(?:\w*)\] = \{(.*?)\};" % re.escape(ctype)
+    for m in re.finditer(pattern, source, flags=re.S):
+        found[m.group(1)] = m.group(2)
+    return found
+
+
+def c_int(text):
+    text = text.strip()
+    if text.startswith("0x") or text.startswith("0X"):
+        return int(text, 16)
+    if len(text) > 1 and text.startswith("0"):
+        return int(text, 8)
+    return int(text)
+
+
+def c_string(text):
+    text = text.strip()
+    if text == "NULL":
+        return None
+    assert text.startswith('"') and text.endswith('"'), text
+    body = text[1:-1]
+    assert "\\" not in body, body
+    return body
+
+
+def parse(source):
+    source = strip_comments(source)
+    data = {}
+
+    m = re.search(r"enum entity_charset \{(.*?)\};", source, flags=re.S)
+    charsets = [c.strip() for c in m.group(1).split(",") if c.strip()]
+    assert charsets[-1] == "cs_numelems"
+    data["charsets"] = charsets[:-1]
+
+    m = re.search(r"\} charset_map\[\] = \{(.*?)\n\};", source, flags=re.S)
+    data["charset_map"] = re.findall(r'\{\s*"([^"]+)",\s*sizeof\("[^"]+"\)-1,\s*(cs_\w+)\s*\}', m.group(1))
+
+    data["longest"] = int(re.search(r"#define LONGEST_ENTITY_LENGTH (\d+)", source).group(1))
+
+    # mappings to unicode: stage 2 blocks of 64, stage 1 of 4 blocks, one per charset
+    stage2 = {}
+    for m in re.finditer(r"static const enc_to_uni_stage2 (\w+) = \{ \{(.*?)\} \};", source, flags=re.S):
+        values = [c_int(v) for v in m.group(2).split(",") if v.strip()]
+        assert len(values) == 64, m.group(1)
+        stage2[m.group(1)] = values
+    stage1 = {}
+    for m in re.finditer(r"static const enc_to_uni (\w+) = \{ \{(.*?)\}\s*\};", source, flags=re.S):
+        names = [n.strip().lstrip("&") for n in m.group(2).split(",") if n.strip()]
+        assert len(names) == 4, m.group(1)
+        stage1[m.group(1)] = sum((stage2[n] for n in names), [])
+    m = re.search(r"enc_to_uni_index\[cs_numelems\] = \{(.*?)\};", source, flags=re.S)
+    index = [n.strip().lstrip("&") for n in m.group(1).split(",") if n.strip()]
+    tables = [None if n == "NULL" else stage1[n] for n in index]
+    data["to_unicode"] = tables + [None] * (len(data["charsets"]) - len(tables))
+
+    # mappings from unicode
+    data["from_unicode"] = {}
+    for name, body in arrays(source, "uni_to_enc").items():
+        pairs = [(c_int(a), c_int(b)) for a, b in re.findall(r"\{\s*(0x[0-9A-Fa-f]+),\s*(0x[0-9A-Fa-f]+)\s*\}", body)]
+        assert pairs == sorted(pairs), name
+        data["from_unicode"][name] = pairs
+
+    # code point -> entity: three stage tables, ambiguous rows point at a
+    # table of entities for two code points
+    multi = {}
+    for name, body in arrays(source, "entity_multicodepoint_row").items():
+        rows = re.findall(r'\{ \{(NULL|"[^"]*"),\s*(\w+),\s*(\d+)\} \}', body)
+        lead = rows[0]
+        size = c_int(lead[1])
+        assert size == len(rows) - 1, name
+        multi[name] = {
+            "default": c_string(lead[0]),
+            "seconds": [(c_int(cp), c_string(ent)) for ent, cp, _ in rows[1:]],
+        }
+    stage3 = {}
+    for name, body in arrays(source, "entity_stage3_row").items():
+        rows = re.findall(r'\{([01]), \{ \{(NULL|"[^"]*"|\(void \*\)\w+), (\d+)\} \} \}', body)
+        assert len(rows) == 64, name
+        parsed = []
+        for ambiguous, ent, _ in rows:
+            if ambiguous == "1":
+                parsed.append(("multi", multi[re.match(r"\(void \*\)(\w+)", ent).group(1)]))
+            else:
+                parsed.append(("plain", c_string(ent)))
+        stage3[name] = parsed
+    stage2_rows = {}
+    for name, body in arrays(source, "entity_stage2_row").items():
+        names = [n.strip() for n in body.split(",") if n.strip()]
+        assert len(names) == 64, name
+        stage2_rows[name] = names
+    stage1_rows = {}
+    for name, body in arrays(source, "entity_stage1_row").items():
+        stage1_rows[name] = [n.strip() for n in body.split(",") if n.strip()]
+
+    def flatten(ms_name):
+        entries = []
+        for i, s2 in enumerate(stage1_rows[ms_name]):
+            for j, s3 in enumerate(stage2_rows[s2]):
+                for k, row in enumerate(stage3[s3]):
+                    cp = (i << 12) | (j << 6) | k
+                    if row[0] == "plain":
+                        if row[1] is not None:
+                            entries.append((cp, row[1], None))
+                    else:
+                        entries.append((cp, row[1]["default"], row[1]["seconds"]))
+        return entries
+
+    def basic(stage3_name):
+        return [(cp, row[1], None) for cp, row in enumerate(stage3[stage3_name]) if row[1] is not None]
+
+    data["by_codepoint"] = {
+        "html5": flatten("entity_ms_table_html5"),
+        "html4": flatten("entity_ms_table_html4"),
+        "basic_noapos": basic("stage3_table_be_noapos_00000"),
+        "basic_apos": basic("stage3_table_be_apos_00000"),
+    }
+
+    # entity -> code points, from the hash buckets of each table
+    by_name = {"html5": [], "html4": [], "be_noapos": [], "be_apos": []}
+    for name, body in arrays(source, "entity_cp_map").items():
+        if name == "ht_bucket_empty":
+            continue
+        table = re.match(r"ht_bucket_(html5|html4|be_noapos|be_apos)_[0-9A-F]+$", name).group(1)
+        for ent, length, cp1, cp2 in re.findall(r'\{"([^"]*)", (\d+), (0x[0-9A-F]+), (0x[0-9A-F]+|0)\}', body):
+            assert int(length) == len(ent), ent
+            by_name[table].append((ent, c_int(cp1), c_int(cp2)))
+    for table, entries in by_name.items():
+        entries.sort(key=lambda e: e[0].encode())
+        names = [e[0] for e in entries]
+        assert len(names) == len(set(names)), table
+    data["by_name"] = by_name
+    assert len(by_name["html5"]) > 2000 and len(by_name["html4"]) == 253, {k: len(v) for k, v in by_name.items()}
+    return data
+
+
+ZIG_CHARSET = {
+    "cs_utf_8": "utf_8",
+    "cs_8859_1": "iso_8859_1",
+    "cs_cp1252": "cp1252",
+    "cs_8859_15": "iso_8859_15",
+    "cs_cp1251": "cp1251",
+    "cs_8859_5": "iso_8859_5",
+    "cs_cp866": "cp866",
+    "cs_macroman": "macroman",
+    "cs_koi8r": "koi8r",
+    "cs_big5": "big5",
+    "cs_gb2312": "gb2312",
+    "cs_big5hkscs": "big5hkscs",
+    "cs_sjis": "sjis",
+    "cs_eucjp": "eucjp",
+}
+
+FROM_UNICODE = {
+    "unimap_iso885915": "iso_8859_15",
+    "unimap_win1252": "cp1252",
+    "unimap_win1251": "cp1251",
+    "unimap_koi8r": "koi8r",
+    "unimap_cp866": "cp866",
+    "unimap_macroman": "macroman",
+}
+
+
+def emit(data, version):
+    out = []
+    w = out.append
+    w("// generated by scripts/gen-html-tables from php %s's ext/standard/html_tables.h; do not edit" % version)
+    w("")
+    w("// in php's order, which the charset predicates below depend on")
+    w("pub const Charset = enum(u8) { %s };" % ", ".join(ZIG_CHARSET[c] for c in data["charsets"]))
+    w("")
+    w("pub const CharsetName = struct { name: []const u8, charset: Charset };")
+    w("")
+    w("// the names determine_charset accepts, compared case-insensitively")
+    w("pub const charset_names = [_]CharsetName{")
+    for name, cs in data["charset_map"]:
+        w('    .{ .name = "%s", .charset = .%s },' % (name, ZIG_CHARSET[cs]))
+    w("};")
+    w("")
+    w("// longest entity name, not counting & and ;")
+    w("pub const longest_entity_length = %d;" % data["longest"])
+    w("")
+    w("// each byte of a single-byte charset as a unicode code point; 0xFFFF where the byte has none")
+    w("pub fn toUnicode(charset: Charset) ?*const [256]u16 {")
+    w("    return switch (charset) {")
+    for cs, table in zip(data["charsets"], data["to_unicode"]):
+        if table is not None:
+            w("        .%s => &to_unicode_%s," % (ZIG_CHARSET[cs], ZIG_CHARSET[cs]))
+    w("        else => null,")
+    w("    };")
+    w("}")
+    w("")
+    for cs, table in zip(data["charsets"], data["to_unicode"]):
+        if table is None:
+            continue
+        w("const to_unicode_%s = [256]u16{" % ZIG_CHARSET[cs])
+        for i in range(0, 256, 8):
+            w("    " + " ".join("0x%04X," % v for v in table[i : i + 8]))
+        w("};")
+        w("")
+    w("pub const FromUnicode = struct { code_point: u16, byte: u8 };")
+    w("")
+    w("// unicode code points to bytes of a single-byte charset, sorted by code point")
+    for name, pairs in data["from_unicode"].items():
+        w("pub const from_unicode_%s = [_]FromUnicode{" % FROM_UNICODE[name])
+        for cp, byte in pairs:
+            w("    .{ .code_point = 0x%04X, .byte = 0x%02X }," % (cp, byte))
+        w("};")
+        w("")
+    w("pub const SecondCodePoint = struct { code_point: u32, entity: []const u8 };")
+    w("")
+    w("// the entity for a code point. an ambiguous one also names entities for the")
+    w("// code point followed by another, and its entity is the one to use otherwise")
+    w("pub const CodePointEntity = struct {")
+    w("    code_point: u32,")
+    w("    entity: ?[]const u8,")
+    w("    ambiguous: bool = false,")
+    w("    seconds: []const SecondCodePoint = &.{},")
+    w("};")
+    w("")
+    w("// sorted by code point")
+    for table, entries in data["by_codepoint"].items():
+        w("pub const %s_by_code_point = [_]CodePointEntity{" % table)
+        for cp, ent, seconds in entries:
+            ent_text = "null" if ent is None else '"%s"' % ent
+            if seconds is None:
+                w("    .{ .code_point = 0x%05X, .entity = %s }," % (cp, ent_text))
+            else:
+                sec = ", ".join('.{ .code_point = 0x%05X, .entity = "%s" }' % (c, e) for c, e in seconds)
+                # zig fmt writes a one-element list without the inner spaces
+                sec = ("{%s}" if len(seconds) == 1 else "{ %s }") % sec
+                w("    .{ .code_point = 0x%05X, .entity = %s, .ambiguous = true, .seconds = &.%s }," % (cp, ent_text, sec))
+        w("};")
+        w("")
+    w("pub const NamedEntity = struct { name: []const u8, code_point: u32, second: u32 = 0 };")
+    w("")
+    w("// sorted by name bytes")
+    for table, entries in data["by_name"].items():
+        w("pub const %s_by_name = [_]NamedEntity{" % table)
+        for ent, cp1, cp2 in entries:
+            if cp2:
+                w('    .{ .name = "%s", .code_point = 0x%05X, .second = 0x%05X },' % (ent, cp1, cp2))
+            else:
+                w('    .{ .name = "%s", .code_point = 0x%05X },' % (ent, cp1))
+        w("};")
+        w("")
+    return "\n".join(out).rstrip("\n") + "\n"
+
+
+def main():
+    version = target_version()
+    given = sys.argv[1] if len(sys.argv) > 1 else None
+    data = parse(header(version, given))
+    with open(OUT, "w") as f:
+        f.write(emit(data, version))
+    print("wrote " + os.path.relpath(OUT, REPO))
+
+
+if __name__ == "__main__":
+    main()

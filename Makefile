@@ -56,6 +56,10 @@ php-metadata: build ## Regenerate native parameter lists and serialization rules
 php-deprecations: ## Regenerate the internal functions, methods and constants php marks #[\Deprecated], from the php release's stubs (run when src/php_version.zig moves)
 	python3 scripts/gen-php-deprecations
 
+.PHONY: html-tables
+html-tables: ## Regenerate the html entity and charset tables from php's ext/standard/html_tables.h (run when src/php_version.zig moves)
+	python3 scripts/gen-html-tables
+
 .PHONY: php-grammar
 php-grammar: ## Regenerate php's parser tables, used to word syntax errors as php does (run when src/php_version.zig moves)
 	python3 scripts/gen-php-grammar
