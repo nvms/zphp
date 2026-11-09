@@ -1502,16 +1502,32 @@ fn native_rewinddir(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     return NativeResult.scalar(.null);
 }
 
-fn native_fnmatch(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
-    const flags: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
-    return NativeResult.scalar(.{ .bool = globMatchFlags(args[0].string.bytes(), args[1].string.bytes(), flags) });
+extern "c" fn fnmatch(pattern: [*:0]const u8, string: [*:0]const u8, flags: c_int) c_int;
+
+fn native_fnmatch(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const pattern = try strArg(ctx, args, "fnmatch", 0, "pattern", true);
+    const filename = try strArg(ctx, args, "fnmatch", 1, "filename", true);
+    const flags = try intArg(ctx, args, "fnmatch", 2, "flags", 0);
+    if (filename.len >= std.fs.max_path_bytes) {
+        try warn(ctx, "fnmatch(): Filename exceeds the maximum allowed length of {d} characters", .{std.fs.max_path_bytes});
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    if (pattern.len >= std.fs.max_path_bytes) {
+        try warn(ctx, "fnmatch(): Pattern exceeds the maximum allowed length of {d} characters", .{std.fs.max_path_bytes});
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    // windows has no fnmatch(3); php brings its own bsd-style one there
+    if (platform.is_windows) return NativeResult.scalar(.{ .bool = globMatchFlags(pattern, filename, flags) });
+    const pattern_z = try ctx.allocator.dupeSentinel(u8, pattern, 0);
+    defer ctx.allocator.free(pattern_z);
+    const filename_z = try ctx.allocator.dupeSentinel(u8, filename, 0);
+    defer ctx.allocator.free(filename_z);
+    return NativeResult.scalar(.{ .bool = fnmatch(pattern_z.ptr, filename_z.ptr, @truncate(flags)) == 0 });
 }
 
 fn native_glob(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const pattern = args[0].string.bytes();
-    const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
+    const pattern = try strArg(ctx, args, "glob", 0, "pattern", true);
+    const flags = try intArg(ctx, args, "glob", 1, "flags", 0);
     const GLOB_BRACE: i64 = 128;
     const GLOB_ONLYDIR: i64 = 1073741824;
     const GLOB_NOSORT: i64 = 32;
@@ -1549,27 +1565,31 @@ fn native_glob(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
 }
 
 fn globAppend(ctx: *NativeContext, result: *PhpArray, pattern: []const u8, flags: i64) !void {
-    const dir_path = if (std.mem.lastIndexOf(u8, pattern, "/")) |pos| pattern[0..pos] else ".";
+    // a pattern without a directory matches in the working directory and
+    // names what it finds bare, as glob(3) does
+    const dir_path = if (std.mem.lastIndexOf(u8, pattern, "/")) |pos| pattern[0..pos] else "";
     const file_pattern = if (std.mem.lastIndexOf(u8, pattern, "/")) |pos| pattern[pos + 1 ..] else pattern;
+    // "/x*" lists the root directory
+    const rooted = dir_path.len == 0 and std.mem.startsWith(u8, pattern, "/");
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const os_dir = bundle.osPath(&os_buf, dir_path);
+    const os_dir = bundle.osPath(&os_buf, if (dir_path.len == 0 and !std.mem.startsWith(u8, pattern, "/")) "." else if (dir_path.len == 0) "/" else dir_path);
     var dir_opt: ?std.Io.Dir = std.Io.Dir.cwd().openDir(platform.io, os_dir, .{ .iterate = true }) catch null;
     defer if (dir_opt) |*d| d.close(platform.io);
     if (dir_opt) |*dir| {
         var iter = dir.iterate();
         while (iter.next(platform.io) catch null) |entry| {
-            try globAppendEntry(ctx, result, .{ .dir_path = dir_path, .pattern = file_pattern, .name = entry.name, .is_dir = entry.kind == .directory, .flags = flags });
+            try globAppendEntry(ctx, result, .{ .dir_path = dir_path, .pattern = file_pattern, .name = entry.name, .is_dir = entry.kind == .directory, .flags = flags, .rooted = rooted });
         }
     }
     // the executable's packed application contributes what the disk lacks
     var listing = bundle.listDir(os_dir) orelse return;
     while (listing.next()) |child| {
         if (dir_opt) |dir| if (dirHas(dir, child.name)) continue;
-        try globAppendEntry(ctx, result, .{ .dir_path = dir_path, .pattern = file_pattern, .name = child.name, .is_dir = child.kind == .dir, .flags = flags });
+        try globAppendEntry(ctx, result, .{ .dir_path = dir_path, .pattern = file_pattern, .name = child.name, .is_dir = child.kind == .dir, .flags = flags, .rooted = rooted });
     }
 }
 
-const GlobEntry = struct { dir_path: []const u8, pattern: []const u8, name: []const u8, is_dir: bool, flags: i64 };
+const GlobEntry = struct { dir_path: []const u8, pattern: []const u8, name: []const u8, is_dir: bool, flags: i64, rooted: bool = false };
 
 fn globAppendEntry(ctx: *NativeContext, result: *PhpArray, entry: GlobEntry) !void {
     const GLOB_ONLYDIR: i64 = 1073741824;
@@ -1580,7 +1600,10 @@ fn globAppendEntry(ctx: *NativeContext, result: *PhpArray, entry: GlobEntry) !vo
     if ((entry.flags & GLOB_ONLYDIR) != 0 and !entry.is_dir) return;
     var path_buf: [4096]u8 = undefined;
     const slash: []const u8 = if ((entry.flags & GLOB_MARK) != 0 and entry.is_dir) "/" else "";
-    const full = std.fmt.bufPrint(&path_buf, "{s}/{s}{s}", .{ entry.dir_path, entry.name, slash }) catch return;
+    const full = if (entry.dir_path.len == 0 and !entry.rooted)
+        std.fmt.bufPrint(&path_buf, "{s}{s}", .{ entry.name, slash }) catch return
+    else
+        std.fmt.bufPrint(&path_buf, "{s}/{s}{s}", .{ entry.dir_path, entry.name, slash }) catch return;
     try result.appendCopiedString(ctx.allocator, full);
 }
 

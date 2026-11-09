@@ -2389,8 +2389,10 @@ pub const VM = struct {
         try c.put(a, "XSD_INT", .{ .int = 135 });
         try c.put(a, "XSD_LONG", .{ .int = 134 });
         try c.put(a, "XSD_SHORT", .{ .int = 136 });
-        try c.put(a, "FNM_NOESCAPE", .{ .int = 1 });
-        try c.put(a, "FNM_PATHNAME", .{ .int = 2 });
+        // the platform's fnmatch(3) values: glibc swaps the bsd ones (and
+        // php's own windows fnmatch keeps those)
+        try c.put(a, "FNM_NOESCAPE", .{ .int = if (@import("builtin").os.tag == .linux) 2 else 1 });
+        try c.put(a, "FNM_PATHNAME", .{ .int = if (@import("builtin").os.tag == .linux) 1 else 2 });
         try c.put(a, "FNM_PERIOD", .{ .int = 4 });
         try c.put(a, "FNM_CASEFOLD", .{ .int = 16 });
         try c.put(a, "INI_SCANNER_NORMAL", .{ .int = 0 });
