@@ -198,6 +198,8 @@ const zphp_not_serializable = std.StaticStringMap(NotSerializable).initComptime(
 
 // the rule for this class or the nearest ancestor that has one
 fn notSerializable(vm: *VM, class_name: []const u8) ?NotSerializable {
+    // php marks every anonymous class ZEND_ACC_NOT_SERIALIZABLE
+    if (@import("../runtime/class_names.zig").isAnonymous(class_name)) return .always;
     var name: ?[]const u8 = class_name;
     while (name) |n| {
         if (serialization_generated.classes.get(n) orelse zphp_not_serializable.get(n)) |rule| return rule;
