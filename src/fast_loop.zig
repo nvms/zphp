@@ -38,6 +38,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
         // comes back through reenter
         const no_ref_cells = frame.ref_slots.count() == 0;
         const direct_slots = no_ref_cells and frame.include_parent == null;
+        const plain_writes = direct_slots and frame.ref_owner == 0;
         const names_local = namesOnlyInLocals(frame);
 
         while (true) {
@@ -50,7 +51,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     // value lives in a ref_slot cell (not locals[slot]). bail so
                     // runLoop can resolve the cell - common after calling a function
                     // with `&$var` from inside a locals_only closure or fiber body
-                    if (frame.ref_slots.count() > 0) {
+                    if (!no_ref_cells) {
                         frame.ip = ip - 1;
                         self.sp = sp;
                         return;
@@ -103,7 +104,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     // bail to runLoop when the frame has ref bindings — those need
                     // propagation through ref_slots / array bindings which fast_loop
                     // doesn't implement
-                    if (frame.ref_owner != 0 or frame.ref_slots.count() > 0 or frame.include_parent != null) {
+                    if (!plain_writes) {
                         frame.ip = ip - 1;
                         self.sp = sp;
                         return;
