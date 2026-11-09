@@ -138,13 +138,15 @@ pub fn lseek(fd: posix.fd_t, offset: i64, whence: Whence) SeekError!u64 {
     }
 }
 
-pub const MkdirError = error{ AccessDenied, PathAlreadyExists, FileNotFound, NotDir, NameTooLong, NoSpaceLeft, SymLinkLoop, Unexpected };
+pub const MkdirError = error{ AccessDenied, PermissionDenied, ReadOnlyFileSystem, PathAlreadyExists, FileNotFound, NotDir, NameTooLong, NoSpaceLeft, SymLinkLoop, Unexpected };
 
 pub fn mkdir(path: []const u8, mode: posix.mode_t) MkdirError!void {
     const path_z = posix.toPosixPath(path) catch return error.NameTooLong;
     switch (errnoOf(c.mkdir(&path_z, mode))) {
         .SUCCESS => {},
-        .ACCES, .PERM, .ROFS => return error.AccessDenied,
+        .ACCES => return error.AccessDenied,
+        .PERM => return error.PermissionDenied,
+        .ROFS => return error.ReadOnlyFileSystem,
         .EXIST => return error.PathAlreadyExists,
         .NOENT => return error.FileNotFound,
         .NOTDIR => return error.NotDir,

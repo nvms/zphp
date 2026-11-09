@@ -974,32 +974,38 @@ fn native_realpath(ctx: *NativeContext, args: []const Value) RuntimeError!Native
 // directory operations
 
 fn native_mkdir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const spelled = try strArg(ctx, args, "mkdir", 0, "directory", true);
+    const mode_arg = try intArg(ctx, args, "mkdir", 1, "permissions", 0o777);
+    const recursive = args.len >= 3 and args[2].isTruthy();
     try useContext(ctx, args, 3);
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = bundle.osPath(&os_buf, args[0].string.bytes());
-    const recursive = args.len >= 3 and args[2].isTruthy();
-    if (bundle.find(path) != null) return NativeResult.scalar(.{ .bool = false });
+    var path = bundle.osPath(&os_buf, spelled);
+    if (std.ascii.startsWithIgnoreCase(path, "file://")) path = path[7..];
+    if (bundle.find(path) != null) {
+        try warn(ctx, "mkdir(): File exists", .{});
+        return NativeResult.scalar(.{ .bool = false });
+    }
     bundle.prepareWrite(path, .create);
+    makeDirectory(path, @truncate(@as(u64, @bitCast(mode_arg))), recursive) catch |err| {
+        try warn(ctx, "mkdir(): {s}", .{errorText(err)});
+        return NativeResult.scalar(.{ .bool = false });
+    };
+    return NativeResult.scalar(.{ .bool = true });
+}
+
+fn makeDirectory(path: []const u8, mode: u32, recursive: bool) !void {
+    if (path.len == 0) return error.FileNotFound;
     if (platform.is_windows) {
-        if (recursive) {
-            // makePath succeeds on an existing directory; php's mkdir fails
-            if (std.Io.Dir.cwd().access(platform.io, path, .{})) |_| return NativeResult.scalar(Value{ .bool = false }) else |_| {}
-            std.Io.Dir.cwd().createDirPath(platform.io, path) catch return NativeResult.scalar(Value{ .bool = false });
-        } else {
-            std.Io.Dir.cwd().createDir(platform.io, path, .default_dir) catch return NativeResult.scalar(Value{ .bool = false });
-        }
-        return NativeResult.scalar(.{ .bool = true });
+        if (!recursive) return std.Io.Dir.cwd().createDir(platform.io, path, .default_dir);
+        // makePath succeeds on an existing directory; php's mkdir fails
+        if (std.Io.Dir.cwd().access(platform.io, path, .{})) |_| return error.PathAlreadyExists else |_| {}
+        return std.Io.Dir.cwd().createDirPath(platform.io, path);
     }
     // std.fs creates directories as 0755, php passes $mode (default 0777)
     // through to mkdir(2) and lets the umask narrow it
-    const mode: std.posix.mode_t = if (args.len >= 2) @intCast(Value.toInt(args[1]) & 0o7777) else 0o777;
-    if (recursive) {
-        makePathMode(path, mode) catch return NativeResult.scalar(Value{ .bool = false });
-    } else {
-        sys.mkdir(path, mode) catch return NativeResult.scalar(Value{ .bool = false });
-    }
-    return NativeResult.scalar(.{ .bool = true });
+    const m: std.posix.mode_t = @intCast(mode & 0o7777);
+    if (recursive) return makePathMode(path, m);
+    return sys.mkdir(path, m);
 }
 
 // every missing directory along the path gets the same mode, as in php. an
@@ -1018,27 +1024,36 @@ fn makePathMode(path: []const u8, mode: std.posix.mode_t) !void {
 }
 
 fn native_rmdir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const spelled = try strArg(ctx, args, "rmdir", 0, "directory", true);
     try useContext(ctx, args, 1);
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = bundle.osPath(&os_buf, args[0].string.bytes());
-    if (bundle.listDir(path)) |listing| {
-        var packed_names = listing;
-        if (packed_names.next() != null) return NativeResult.scalar(.{ .bool = false });
-    }
-    std.Io.Dir.cwd().deleteDir(platform.io, path) catch |err| {
-        if (err == error.FileNotFound and bundle.find(path) != null and bundle.remove(path)) return NativeResult.scalar(.{ .bool = true });
+    var path = bundle.osPath(&os_buf, spelled);
+    if (std.ascii.startsWithIgnoreCase(path, "file://")) path = path[7..];
+    removeDirectory(path) catch |err| {
+        try warn(ctx, "rmdir({s}): {s}", .{ path, errorText(err) });
         return NativeResult.scalar(.{ .bool = false });
     };
-    _ = bundle.remove(path);
     return NativeResult.scalar(.{ .bool = true });
 }
 
+fn removeDirectory(path: []const u8) !void {
+    if (path.len == 0) return error.FileNotFound;
+    if (bundle.listDir(path)) |listing| {
+        var packed_names = listing;
+        if (packed_names.next() != null) return error.DirNotEmpty;
+    }
+    std.Io.Dir.cwd().deleteDir(platform.io, path) catch |err| {
+        if (err == error.FileNotFound and bundle.find(path) != null and bundle.remove(path)) return;
+        return err;
+    };
+    _ = bundle.remove(path);
+}
+
 fn native_unlink(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const spelled = try strArg(ctx, args, "unlink", 0, "filename", true);
     try useContext(ctx, args, 1);
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = bundle.osPath(&os_buf, args[0].string.bytes());
+    var path = bundle.osPath(&os_buf, spelled);
     if (userWrapperFor(ctx.vm, path)) |class_name| {
         if (!ctx.vm.hasMethod(class_name, "unlink")) return NativeResult.scalar(.{ .bool = false });
         const wrapper = try ctx.createObject(class_name);
@@ -1051,17 +1066,27 @@ fn native_unlink(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     if (extractScheme(path)) |s| {
         if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return NativeResult.scalar(.{ .bool = false });
     }
-    return unlinkPath(path);
+    if (std.ascii.startsWithIgnoreCase(path, "file://")) path = path[7..];
+    deletePath(path) catch |err| {
+        try warn(ctx, "unlink({s}): {s}", .{ path, errorText(err) });
+        return NativeResult.scalar(.{ .bool = false });
+    };
+    return NativeResult.scalar(.{ .bool = true });
 }
 
 // deletes a file, hiding a packed copy the executable's application holds
 pub fn unlinkPath(path: []const u8) NativeResult {
+    deletePath(path) catch return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = true });
+}
+
+fn deletePath(path: []const u8) !void {
+    if (path.len == 0) return error.FileNotFound;
     std.Io.Dir.cwd().deleteFile(platform.io, path) catch |err| {
-        if (err == error.FileNotFound and packedFileAt(path) and bundle.remove(path)) return NativeResult.scalar(.{ .bool = true });
-        return NativeResult.scalar(.{ .bool = false });
+        if (err == error.FileNotFound and packedFileAt(path) and bundle.remove(path)) return;
+        return err;
     };
     _ = bundle.remove(path);
-    return NativeResult.scalar(.{ .bool = true });
 }
 
 fn packedFileAt(path: []const u8) bool {
@@ -1087,17 +1112,33 @@ fn native_copy(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
 }
 
 fn native_rename(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
+    const spelled_from = try strArg(ctx, args, "rename", 0, "from", true);
+    const spelled_to = try strArg(ctx, args, "rename", 1, "to", true);
     try useContext(ctx, args, 2);
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
     var to_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const from = bundle.osPath(&os_buf, args[0].string.bytes());
-    const to = bundle.osPath(&to_buf, args[1].string.bytes());
+    var from = bundle.osPath(&os_buf, spelled_from);
+    var to = bundle.osPath(&to_buf, spelled_to);
+    if (std.ascii.startsWithIgnoreCase(from, "file://")) from = from[7..];
+    if (std.ascii.startsWithIgnoreCase(to, "file://")) to = to[7..];
     bundle.prepareWrite(to, .create);
     bundle.prepareWrite(from, .edit);
-    std.Io.Dir.cwd().rename(from, std.Io.Dir.cwd(), to, platform.io) catch return NativeResult.scalar(.{ .bool = false });
+    renamePath(from, to) catch |err| {
+        try warn(ctx, "rename({s},{s}): {s}", .{ from, to, errorText(err) });
+        return NativeResult.scalar(.{ .bool = false });
+    };
     _ = bundle.remove(from);
     return NativeResult.scalar(.{ .bool = true });
+}
+
+fn renamePath(from: []const u8, to: []const u8) !void {
+    if (from.len == 0 or to.len == 0) return error.FileNotFound;
+    std.Io.Dir.cwd().rename(from, std.Io.Dir.cwd(), to, platform.io) catch |err| {
+        // across filesystems php copies the file and removes the original
+        if (err != error.CrossDevice) return err;
+        try std.Io.Dir.cwd().copyFile(from, std.Io.Dir.cwd(), to, platform.io, .{});
+        try std.Io.Dir.cwd().deleteFile(platform.io, from);
+    };
 }
 
 // directory listing
