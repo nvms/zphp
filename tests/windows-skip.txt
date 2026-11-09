@@ -27,3 +27,4 @@ stream_socket_pair.php: the runner's php fails stream_socket_pair(STREAM_PF_UNIX
 backtick_shell.php: the test drives a posix shell (printf, quoting, >&2), which cmd.exe doesn't have
 chmod_path_modes.php: windows keeps only a read-only bit, so the modes read back differ from the unix ones the test prints
 mkdir_rmdir_unlink_rename_warnings.php: php on windows words these failures with the system's own messages, not strerror's
+link_failure_warnings.php: symlink and link are posix calls; windows php needs privileges for them and words failures differently

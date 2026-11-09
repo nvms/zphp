@@ -1051,12 +1051,14 @@ fn native_pathinfo(ctx: *NativeContext, args: []const Value) RuntimeError!Native
 }
 
 fn native_realpath(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const given = try strArg(ctx, args, "realpath", 0, "path", true);
+    // an empty path resolves the working directory, as "." does
+    const spelled = if (given.len == 0) "." else given;
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = bundle.osPath(&os_buf, args[0].string.bytes());
+    const path = bundle.osPath(&os_buf, spelled);
     if (bundle.canonicalPath(&buf, path)) |packed_path| return NativeResult.copyString(ctx.allocator, packed_path);
-    const resolved = platform.realpath(args[0].string.bytes(), &buf) catch return NativeResult.scalar(Value{ .bool = false });
+    const resolved = platform.realpath(spelled, &buf) catch return NativeResult.scalar(Value{ .bool = false });
     return NativeResult.copyString(ctx.allocator, resolved);
 }
 
@@ -3283,38 +3285,47 @@ fn native_is_link(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     return NativeResult.scalar(.{ .bool = (st.mode & 0o170000) == 0o120000 });
 }
 
-fn native_symlink(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
-    var t: [std.fs.max_path_bytes:0]u8 = undefined;
-    var l: [std.fs.max_path_bytes:0]u8 = undefined;
-    const target = args[0].string.bytes();
+fn native_symlink(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const target = try strArg(ctx, args, "symlink", 0, "target", true);
+    const link_arg = try strArg(ctx, args, "symlink", 1, "link", true);
+    // the link is made where the expanded path says; the target is stored as
+    // given, relative to the link
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const linkpath = bundle.osPath(&os_buf, args[1].string.bytes());
-    if (target.len >= t.len or linkpath.len >= l.len) return NativeResult.scalar(.{ .bool = false });
-    bundle.prepareWrite(linkpath, .create);
-    @memcpy(t[0..target.len], target);
-    t[target.len] = 0;
-    @memcpy(l[0..linkpath.len], linkpath);
-    l[linkpath.len] = 0;
-    return NativeResult.scalar(.{ .bool = std.c.symlink(&t, &l) == 0 });
+    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const linkpath = if (link_arg.len == 0) null else paths.expand(&link_buf, bundle.osPath(&os_buf, link_arg));
+    if (linkpath == null or target.len == 0) {
+        try warn(ctx, "symlink(): No such file or directory", .{});
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    bundle.prepareWrite(linkpath.?, .create);
+    const t = std.posix.toPosixPath(target) catch return linkFailure(ctx, "symlink", "File name too long");
+    const l = std.posix.toPosixPath(linkpath.?) catch return linkFailure(ctx, "symlink", "File name too long");
+    if (std.c.symlink(&t, &l) != 0) return linkFailure(ctx, "symlink", sys.errnoText());
+    return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_link(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
-    var t: [std.fs.max_path_bytes:0]u8 = undefined;
-    var l: [std.fs.max_path_bytes:0]u8 = undefined;
+fn native_link(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const target_arg = try strArg(ctx, args, "link", 0, "target", true);
+    const link_arg = try strArg(ctx, args, "link", 1, "link", true);
+    if (target_arg.len == 0 or link_arg.len == 0) {
+        try warn(ctx, "link(): No such file or directory", .{});
+        return NativeResult.scalar(.{ .bool = false });
+    }
     var target_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const target = bundle.osPath(&target_buf, args[0].string.bytes());
+    const target = bundle.osPath(&target_buf, target_arg);
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const linkpath = bundle.osPath(&os_buf, args[1].string.bytes());
-    if (target.len >= t.len or linkpath.len >= l.len) return NativeResult.scalar(.{ .bool = false });
+    const linkpath = bundle.osPath(&os_buf, link_arg);
     bundle.prepareWrite(target, .edit);
     bundle.prepareWrite(linkpath, .create);
-    @memcpy(t[0..target.len], target);
-    t[target.len] = 0;
-    @memcpy(l[0..linkpath.len], linkpath);
-    l[linkpath.len] = 0;
-    return NativeResult.scalar(.{ .bool = std.c.link(&t, &l) == 0 });
+    const t = std.posix.toPosixPath(target) catch return linkFailure(ctx, "link", "File name too long");
+    const l = std.posix.toPosixPath(linkpath) catch return linkFailure(ctx, "link", "File name too long");
+    if (std.c.link(&t, &l) != 0) return linkFailure(ctx, "link", sys.errnoText());
+    return NativeResult.scalar(.{ .bool = true });
+}
+
+fn linkFailure(ctx: *NativeContext, comptime func: []const u8, reason: []const u8) RuntimeError!NativeResult {
+    try warn(ctx, func ++ "(): {s}", .{reason});
+    return NativeResult.scalar(.{ .bool = false });
 }
 
 fn wrapperStatArray(ctx: *NativeContext, st: WrapperStat) !*PhpArray {
@@ -3331,11 +3342,13 @@ fn native_lstat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
 }
 
 fn native_readlink(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const path = try strArg(ctx, args, "readlink", 0, "path", true);
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const len = std.Io.Dir.cwd().readLink(platform.io, args[0].string.bytes(), &buf) catch return NativeResult.scalar(.{ .bool = false });
-    const target = buf[0..len];
-    return try NativeResult.copyString(ctx.allocator, target);
+    const len = (if (path.len == 0) error.FileNotFound else std.Io.Dir.cwd().readLink(platform.io, path, &buf)) catch |err| {
+        try warn(ctx, "readlink(): {s}", .{errorText(err)});
+        return NativeResult.scalar(.{ .bool = false });
+    };
+    return try NativeResult.copyString(ctx.allocator, buf[0..len]);
 }
 
 fn native_tmpfile(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -4073,10 +4086,21 @@ fn native_disk_total_space(ctx: *NativeContext, args: []const Value) RuntimeErro
     return NativeResult.scalar(.{ .float = @floatFromInt(total_bytes) });
 }
 
-fn native_linkinfo(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .int = -1 });
-    const stat = platform.statPath(args[0].string.bytes()) catch return NativeResult.scalar(.{ .int = -1 });
-    return NativeResult.scalar(.{ .int = @intCast(stat.inode) });
+// the device of the link itself, -1 with a warning when it cannot be lstat'ed
+fn native_linkinfo(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const path = try strArg(ctx, args, "linkinfo", 0, "path", true);
+    if (platform.is_windows) {
+        const st = (if (path.len == 0) error.FileNotFound else platform.statPath(path)) catch |err| {
+            try warn(ctx, "linkinfo(): {s}", .{errorText(err)});
+            return NativeResult.scalar(.{ .int = -1 });
+        };
+        return NativeResult.scalar(.{ .int = @intCast(st.inode) });
+    }
+    const st = sys.lstat(path) catch {
+        try warn(ctx, "linkinfo(): {s}", .{sys.errnoText()});
+        return NativeResult.scalar(.{ .int = -1 });
+    };
+    return NativeResult.scalar(.{ .int = @bitCast(st.dev) });
 }
 
 fn native_finfo_open(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
