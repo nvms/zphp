@@ -29,9 +29,9 @@ fn retainReturned(value: Value) Value {
 // in a property; `_default_value` only says whether the default is null, which
 // the implicitly nullable type check reads
 fn setLazyDefault(ctx: *NativeContext, obj: *PhpObject, func: *const ObjFunction, index: usize) !void {
-    try obj.set(ctx.allocator, "_default_value", if (func.defaults[index] == .null) .null else .{ .bool = false });
-    try obj.set(ctx.allocator, "_default_func", .{ .int = @intCast(@intFromPtr(func)) });
-    try obj.set(ctx.allocator, "_default_index", .{ .int = @intCast(index) });
+    try obj.set(ctx.allocator, "__default_value", if (func.defaults[index] == .null) .null else .{ .bool = false });
+    try obj.set(ctx.allocator, "__default_func", .{ .int = @intCast(@intFromPtr(func)) });
+    try obj.set(ctx.allocator, "__default_index", .{ .int = @intCast(index) });
 }
 
 pub fn register(vm: *VM, a: Allocator) !void {
@@ -438,8 +438,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionParameter::getDefaultValueConstantName", rpGetDefaultValueConstantName);
 
     var rnt_def = ClassDef{ .name = "ReflectionNamedType", .parent = "ReflectionType" };
-    try rnt_def.properties.append(a, .{ .name = "type_name", .default = .{ .string = Value.String.borrowed("") } });
-    try rnt_def.properties.append(a, .{ .name = "nullable", .default = .{ .bool = false } });
+    try rnt_def.properties.append(a, .{ .name = "__type_name", .default = .{ .string = Value.String.borrowed("") } });
+    try rnt_def.properties.append(a, .{ .name = "__nullable", .default = .{ .bool = false } });
     try rnt_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
     try rnt_def.methods.put(a, "isBuiltin", .{ .name = "isBuiltin", .arity = 0 });
     try rnt_def.methods.put(a, "allowsNull", .{ .name = "allowsNull", .arity = 0 });
@@ -452,8 +452,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionNamedType::__toString", rntToString);
 
     var rut_def = ClassDef{ .name = "ReflectionUnionType", .parent = "ReflectionType" };
-    try rut_def.properties.append(a, .{ .name = "type_str", .default = .{ .string = Value.String.borrowed("") } });
-    try rut_def.properties.append(a, .{ .name = "nullable", .default = .{ .bool = false } });
+    try rut_def.properties.append(a, .{ .name = "__type_str", .default = .{ .string = Value.String.borrowed("") } });
+    try rut_def.properties.append(a, .{ .name = "__nullable", .default = .{ .bool = false } });
     try rut_def.methods.put(a, "getTypes", .{ .name = "getTypes", .arity = 0 });
     try rut_def.methods.put(a, "allowsNull", .{ .name = "allowsNull", .arity = 0 });
     try rut_def.methods.put(a, "__toString", .{ .name = "__toString", .arity = 0 });
@@ -463,7 +463,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionUnionType::__toString", rutToString);
 
     var rit_def = ClassDef{ .name = "ReflectionIntersectionType", .parent = "ReflectionType" };
-    try rit_def.properties.append(a, .{ .name = "type_str", .default = .{ .string = Value.String.borrowed("") } });
+    try rit_def.properties.append(a, .{ .name = "__type_str", .default = .{ .string = Value.String.borrowed("") } });
     try rit_def.methods.put(a, "getTypes", .{ .name = "getTypes", .arity = 0 });
     try rit_def.methods.put(a, "allowsNull", .{ .name = "allowsNull", .arity = 0 });
     try rit_def.methods.put(a, "__toString", .{ .name = "__toString", .arity = 0 });
@@ -911,8 +911,8 @@ fn createNamedTypeObj(ctx: *NativeContext, type_name: []const u8, nullable: bool
         clean_name = type_name[1..];
         is_nullable = true;
     }
-    try obj.set(ctx.allocator, "type_name", .{ .string = Value.String.borrowed(clean_name) });
-    try obj.set(ctx.allocator, "nullable", .{ .bool = is_nullable });
+    try obj.set(ctx.allocator, "__type_name", .{ .string = Value.String.borrowed(clean_name) });
+    try obj.set(ctx.allocator, "__nullable", .{ .bool = is_nullable });
     return obj;
 }
 
@@ -967,15 +967,15 @@ fn createTypeObj(ctx: *NativeContext, type_name: []const u8, nullable: bool, sel
         }
         const obj = try ctx.createObject("ReflectionUnionType");
         // printed as php's zend_type_to_string orders a union
-        try obj.set(ctx.allocator, "type_str", .{ .string = Value.String.borrowed(try canonicalUnion(ctx, clean, self_class)) });
+        try obj.set(ctx.allocator, "__type_str", .{ .string = Value.String.borrowed(try canonicalUnion(ctx, clean, self_class)) });
         if (has_null) is_nullable = true;
-        try obj.set(ctx.allocator, "nullable", .{ .bool = is_nullable });
-        try obj.set(ctx.allocator, "_self_class", .{ .string = Value.String.borrowed(self_class orelse "") });
+        try obj.set(ctx.allocator, "__nullable", .{ .bool = is_nullable });
+        try obj.set(ctx.allocator, "__self_class", .{ .string = Value.String.borrowed(self_class orelse "") });
         return obj;
     }
     if (std.mem.indexOfScalar(u8, clean, '&') != null) {
         const obj = try ctx.createObject("ReflectionIntersectionType");
-        try obj.set(ctx.allocator, "type_str", .{ .string = Value.String.borrowed(clean) });
+        try obj.set(ctx.allocator, "__type_str", .{ .string = Value.String.borrowed(clean) });
         return obj;
     }
     return createNamedTypeObj(ctx, clean, is_nullable);
@@ -985,22 +985,22 @@ fn buildMethodObj(ctx: *NativeContext, class_name: []const u8, method_name: []co
     const obj = try ctx.createObject("ReflectionMethod");
     try obj.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(method_name) });
     try obj.set(ctx.allocator, "class", .{ .string = Value.String.borrowed(class_name) });
-    try obj.set(ctx.allocator, "_declaring_class", .{ .string = Value.String.borrowed(declaring_class) });
-    try obj.set(ctx.allocator, "_is_static", .{ .bool = info.is_static });
-    try obj.set(ctx.allocator, "_visibility", .{ .int = @intFromEnum(info.visibility) });
+    try obj.set(ctx.allocator, "__declaring_class", .{ .string = Value.String.borrowed(declaring_class) });
+    try obj.set(ctx.allocator, "__is_static", .{ .bool = info.is_static });
+    try obj.set(ctx.allocator, "__visibility", .{ .int = @intFromEnum(info.visibility) });
 
     // look up ObjFunction for parameter info
     var buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring_class, method_name }) catch return obj;
     if (ctx.vm.functions.get(key)) |func| {
-        try obj.set(ctx.allocator, "_arity", .{ .int = func.arity });
-        try obj.set(ctx.allocator, "_required_params", .{ .int = func.required_params });
+        try obj.set(ctx.allocator, "__arity", .{ .int = func.arity });
+        try obj.set(ctx.allocator, "__required_params", .{ .int = func.required_params });
     } else if (native_params.get(key)) |sig| {
-        try obj.set(ctx.allocator, "_arity", .{ .int = @intCast(sig.params.len) });
-        try obj.set(ctx.allocator, "_required_params", .{ .int = @intCast(nativeRequiredCount(sig)) });
+        try obj.set(ctx.allocator, "__arity", .{ .int = @intCast(sig.params.len) });
+        try obj.set(ctx.allocator, "__required_params", .{ .int = @intCast(nativeRequiredCount(sig)) });
     } else {
-        try obj.set(ctx.allocator, "_arity", .{ .int = info.arity });
-        try obj.set(ctx.allocator, "_required_params", .{ .int = info.arity });
+        try obj.set(ctx.allocator, "__arity", .{ .int = info.arity });
+        try obj.set(ctx.allocator, "__required_params", .{ .int = info.arity });
     }
     return obj;
 }
@@ -1083,36 +1083,36 @@ fn buildPropertyObjStatic(
 
     try obj.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(prop.name) });
     try obj.set(ctx.allocator, "class", .{ .string = Value.String.borrowed(class_name) });
-    try obj.set(ctx.allocator, "_visibility", .{ .int = @intFromEnum(prop.visibility) });
+    try obj.set(ctx.allocator, "__visibility", .{ .int = @intFromEnum(prop.visibility) });
 
     // PHP's ReflectionProperty::hasDefaultValue() always returns false for
     // constructor-promoted properties, even if the promoted parameter has
     // a default in the constructor signature.
     const effective_has_default = prop.has_default and !prop.is_promoted;
 
-    try obj.set(ctx.allocator, "_has_default", .{ .bool = effective_has_default });
+    try obj.set(ctx.allocator, "__has_default", .{ .bool = effective_has_default });
     try obj.set(
         ctx.allocator,
-        "_default_value",
+        "__default_value",
         if (effective_has_default) prop.default else .null,
     );
 
-    try obj.set(ctx.allocator, "_declaring_class", .{ .string = Value.String.borrowed(declaring_class) });
+    try obj.set(ctx.allocator, "__declaring_class", .{ .string = Value.String.borrowed(declaring_class) });
 
     try obj.set(
         ctx.allocator,
-        "_set_visibility",
+        "__set_visibility",
         .{ .int = @intFromEnum(prop.set_visibility) },
     );
     try obj.set(
         ctx.allocator,
-        "_has_set_visibility",
+        "__has_set_visibility",
         .{ .bool = prop.has_set_visibility },
     );
 
-    try obj.set(ctx.allocator, "_is_readonly", .{ .bool = prop.is_readonly and !prop.readonly_undeclared });
-    try obj.set(ctx.allocator, "_is_final", .{ .bool = prop.is_final });
-    try obj.set(ctx.allocator, "_is_static", .{ .bool = is_static });
+    try obj.set(ctx.allocator, "__is_readonly", .{ .bool = prop.is_readonly and !prop.readonly_undeclared });
+    try obj.set(ctx.allocator, "__is_final", .{ .bool = prop.is_final });
+    try obj.set(ctx.allocator, "__is_static", .{ .bool = is_static });
 
     return obj;
 }
@@ -1166,8 +1166,8 @@ fn rcConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     }
 
     try this.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(try ctx.vm.stableClassName(class_name)) });
-    try this.set(ctx.allocator, "_is_interface", .{ .bool = ctx.vm.interfaces.contains(class_name) });
-    try this.set(ctx.allocator, "_is_trait", .{ .bool = ctx.vm.traits.contains(class_name) });
+    try this.set(ctx.allocator, "__is_interface", .{ .bool = ctx.vm.interfaces.contains(class_name) });
+    try this.set(ctx.allocator, "__is_trait", .{ .bool = ctx.vm.traits.contains(class_name) });
     return NativeResult.scalar(.null);
 }
 
@@ -1191,9 +1191,9 @@ fn rcGetConstructor(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRe
 
 fn rcIsInstantiable(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const is_iface = this.get("_is_interface");
+    const is_iface = this.get("__is_interface");
     if (is_iface == .bool and is_iface.bool) return NativeResult.scalar(.{ .bool = false });
-    const is_trait = this.get("_is_trait");
+    const is_trait = this.get("__is_trait");
     if (is_trait == .bool and is_trait.bool) return NativeResult.scalar(.{ .bool = false });
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
     const cls = ctx.vm.classes.get(class_name) orelse return NativeResult.scalar(.{ .bool = true });
@@ -1218,7 +1218,7 @@ fn rcGetParentClass(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRe
 
     const parent_obj = try ctx.createObject("ReflectionClass");
     try parent_obj.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(parent_name) });
-    try parent_obj.set(ctx.allocator, "_is_interface", .{ .bool = ctx.vm.interfaces.contains(parent_name) });
+    try parent_obj.set(ctx.allocator, "__is_interface", .{ .bool = ctx.vm.interfaces.contains(parent_name) });
     return NativeResult.borrowed(.{ .object = parent_obj });
 }
 
@@ -1473,7 +1473,7 @@ fn rcIsAbstract(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
     // an interface is abstract when it has methods, its own or inherited
-    const is_iface = this.get("_is_interface");
+    const is_iface = this.get("__is_interface");
     if (is_iface == .bool and is_iface.bool) return NativeResult.scalar(.{ .bool = interfaceHasMethods(ctx.vm, class_name, 0) });
     const cls = ctx.vm.classes.get(class_name) orelse return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = cls.is_abstract });
@@ -1517,9 +1517,9 @@ fn rcIsReadOnly(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
 
 fn rcIsCloneable(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const is_iface = this.get("_is_interface");
+    const is_iface = this.get("__is_interface");
     if (is_iface == .bool and is_iface.bool) return NativeResult.scalar(.{ .bool = false });
-    const is_trait = this.get("_is_trait");
+    const is_trait = this.get("__is_trait");
     if (is_trait == .bool and is_trait.bool) return NativeResult.scalar(.{ .bool = false });
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
     const cls = ctx.vm.classes.get(class_name) orelse return NativeResult.scalar(.{ .bool = true });
@@ -1533,7 +1533,7 @@ fn rcIsCloneable(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
 
 fn rcIsInterface(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const is_iface = this.get("_is_interface");
+    const is_iface = this.get("__is_interface");
     return NativeResult.scalar(.{ .bool = is_iface == .bool and is_iface.bool });
 }
 
@@ -1749,7 +1749,7 @@ fn rmGetDocComment(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
 
 fn rfGetDocComment(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const name_v = this.get("name");
+    const name_v = functionKey(this);
     if (name_v != .string) return NativeResult.scalar(.{ .bool = false });
     const func = ctx.vm.functions.get(name_v.string.bytes()) orelse return NativeResult.scalar(.{ .bool = false });
     if (func.doc_comment.len == 0) return NativeResult.scalar(.{ .bool = false });
@@ -1803,7 +1803,7 @@ fn rcGetProperties(ctx: *NativeContext, args: []const Value) RuntimeError!Native
             if (!seen.contains(sp_name)) {
                 try seen.put(ctx.allocator, sp_name, {});
                 const obj = try buildPropertyObj(ctx, class_name, staticPropertyDef(&cls, sp_name, entry.value_ptr.*), name);
-                try obj.set(ctx.allocator, "_is_static", .{ .bool = true });
+                try obj.set(ctx.allocator, "__is_static", .{ .bool = true });
                 try arr.append(ctx.allocator, .{ .object = obj });
             }
         }
@@ -1966,7 +1966,7 @@ fn rcInNamespace(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
 
 fn rcIsTrait(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const v = this.get("_is_trait");
+    const v = this.get("__is_trait");
     return NativeResult.scalar(.{ .bool = v == .bool and v.bool });
 }
 
@@ -2533,21 +2533,21 @@ fn initMethodReflection(ctx: *NativeContext, this: *PhpObject, args: []const Val
     // the names may be slices of an argument string that dies with the call
     try this.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(try ctx.vm.internName(method_name)) });
     try this.set(ctx.allocator, "class", .{ .string = Value.String.borrowed(try ctx.vm.internName(class_name)) });
-    try this.set(ctx.allocator, "_declaring_class", .{ .string = Value.String.borrowed(try ctx.vm.internName(declaring)) });
-    try this.set(ctx.allocator, "_is_static", .{ .bool = info.is_static });
-    try this.set(ctx.allocator, "_visibility", .{ .int = @intFromEnum(info.visibility) });
+    try this.set(ctx.allocator, "__declaring_class", .{ .string = Value.String.borrowed(try ctx.vm.internName(declaring)) });
+    try this.set(ctx.allocator, "__is_static", .{ .bool = info.is_static });
+    try this.set(ctx.allocator, "__visibility", .{ .int = @intFromEnum(info.visibility) });
 
     var buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return NativeResult.scalar(.null);
     if (ctx.vm.functions.get(key)) |func| {
-        try this.set(ctx.allocator, "_arity", .{ .int = func.arity });
-        try this.set(ctx.allocator, "_required_params", .{ .int = func.required_params });
+        try this.set(ctx.allocator, "__arity", .{ .int = func.arity });
+        try this.set(ctx.allocator, "__required_params", .{ .int = func.required_params });
     } else if (native_params.get(key)) |sig| {
-        try this.set(ctx.allocator, "_arity", .{ .int = @intCast(sig.params.len) });
-        try this.set(ctx.allocator, "_required_params", .{ .int = @intCast(nativeRequiredCount(sig)) });
+        try this.set(ctx.allocator, "__arity", .{ .int = @intCast(sig.params.len) });
+        try this.set(ctx.allocator, "__required_params", .{ .int = @intCast(nativeRequiredCount(sig)) });
     } else {
-        try this.set(ctx.allocator, "_arity", .{ .int = info.arity });
-        try this.set(ctx.allocator, "_required_params", .{ .int = info.arity });
+        try this.set(ctx.allocator, "__arity", .{ .int = info.arity });
+        try this.set(ctx.allocator, "__required_params", .{ .int = info.arity });
     }
 
     return NativeResult.scalar(.null);
@@ -2561,7 +2561,7 @@ fn rmGetName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
 fn rmLookupFunc(ctx: *NativeContext) ?@TypeOf(ctx.vm.functions.get("").?) {
     const this = getThis(ctx) orelse return null;
     const method_name = methodLookupName(this) orelse return null;
-    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return null;
+    const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return null;
     var buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return null;
     return ctx.vm.functions.get(key);
@@ -2587,13 +2587,13 @@ fn rmGetEndLine(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
 
 fn rmIsInternal(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const dc = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    const dc = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = isInternalClassName(ctx.vm, dc) });
 }
 
 fn rmIsUserDefined(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = true });
-    const dc = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.scalar(.{ .bool = true });
+    const dc = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.{ .bool = true });
     return NativeResult.scalar(.{ .bool = !isInternalClassName(ctx.vm, dc) });
 }
 
@@ -2604,7 +2604,7 @@ fn reflectionEmptyString(_: *NativeContext, _: []const Value) RuntimeError!Nativ
 fn rmGetParameters(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const method_name = methodLookupName(this) orelse return NativeResult.scalar(.null);
-    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.scalar(.null);
+    const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.null);
 
     var buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return NativeResult.scalar(.null);
@@ -2614,9 +2614,9 @@ fn rmGetParameters(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
     };
 
     const result = try buildParamArray(ctx, func, key);
-    if (this.get("_hook_method") == .string and result == .array) {
+    if (this.get("__hook_method") == .string and result == .array) {
         for (result.array.entries.items) |entry| {
-            if (entry.value == .object) try entry.value.object.set(ctx.allocator, "_hook_declaring_function", .{ .object = this });
+            if (entry.value == .object) try entry.value.object.set(ctx.allocator, "__hook_declaring_function", .{ .object = this });
         }
     }
     return NativeResult.borrowed(result);
@@ -2624,47 +2624,47 @@ fn rmGetParameters(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
 
 fn rmIsPublic(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const vis = this.get("_visibility");
+    const vis = this.get("__visibility");
     return NativeResult.scalar(.{ .bool = vis == .int and vis.int == 0 });
 }
 
 fn rmIsProtected(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const vis = this.get("_visibility");
+    const vis = this.get("__visibility");
     return NativeResult.scalar(.{ .bool = vis == .int and vis.int == 1 });
 }
 
 fn rmIsPrivate(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const vis = this.get("_visibility");
+    const vis = this.get("__visibility");
     return NativeResult.scalar(.{ .bool = vis == .int and vis.int == 2 });
 }
 
 fn rmIsStatic(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const is_static = this.get("_is_static");
+    const is_static = this.get("__is_static");
     return NativeResult.scalar(.{ .bool = is_static == .bool and is_static.bool });
 }
 
 fn rmGetDeclaringClass(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.scalar(.null);
+    const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.null);
 
     const obj = try ctx.createObject("ReflectionClass");
     try obj.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(declaring) });
-    try obj.set(ctx.allocator, "_is_interface", .{ .bool = ctx.vm.interfaces.contains(declaring) });
+    try obj.set(ctx.allocator, "__is_interface", .{ .bool = ctx.vm.interfaces.contains(declaring) });
     return NativeResult.borrowed(.{ .object = obj });
 }
 
 fn rmGetReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const hook_type = this.get("_hook_return_type");
+    const hook_type = this.get("__hook_return_type");
     if (hook_type == .string) {
         if (hook_type.string.bytes().len == 0) return NativeResult.scalar(.null);
-        return NativeResult.borrowed(.{ .object = try createTypeObj(ctx, hook_type.string.bytes(), false, this.get("_declaring_class").string.bytes()) });
+        return NativeResult.borrowed(.{ .object = try createTypeObj(ctx, hook_type.string.bytes(), false, this.get("__declaring_class").string.bytes()) });
     }
     const method_name = methodLookupName(this) orelse return NativeResult.scalar(.null);
-    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.scalar(.null);
+    const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.null);
 
     var buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return NativeResult.scalar(.null);
@@ -2677,12 +2677,12 @@ fn rmGetReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
 
 fn rmHasReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const hook_type = this.get("_hook_return_type");
+    const hook_type = this.get("__hook_return_type");
     if (hook_type == .string) {
         return NativeResult.scalar(.{ .bool = hook_type.string.bytes().len > 0 });
     }
     const method_name = methodLookupName(this) orelse return NativeResult.scalar(.{ .bool = false });
-    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.{ .bool = false });
 
     var buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return NativeResult.scalar(.{ .bool = false });
@@ -2694,7 +2694,7 @@ fn rmHasReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
 // override may still differ from; user methods never have one
 fn methodTentativeReturnType(ctx: *NativeContext, this: *PhpObject) []const u8 {
     const method_name = methodLookupName(this) orelse return "";
-    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return "";
+    const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return "";
     var buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return "";
     if (ctx.vm.functions.contains(key)) return "";
@@ -2711,7 +2711,7 @@ fn rmGetTentativeReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const tentative = methodTentativeReturnType(ctx, this);
     if (tentative.len == 0) return NativeResult.scalar(.null);
-    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else null;
+    const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else null;
     return NativeResult.borrowed(.{ .object = try createTypeObj(ctx, tentative, false, declaring) });
 }
 
@@ -2729,13 +2729,13 @@ fn rmIsDestructor(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
 
 fn rmGetNumberOfParameters(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
-    const arity = this.get("_arity");
+    const arity = this.get("__arity");
     return if (arity == .int) NativeResult.share(arity) else NativeResult.scalar(.{ .int = 0 });
 }
 
 fn rmGetNumberOfRequiredParameters(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
-    const req = this.get("_required_params");
+    const req = this.get("__required_params");
     return if (req == .int) NativeResult.share(req) else NativeResult.scalar(.{ .int = 0 });
 }
 
@@ -2746,18 +2746,18 @@ fn rpGetName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
 
 fn rpGetType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const type_val = this.get("_type_name");
+    const type_val = this.get("__type_name");
     if (type_val != .string or type_val.string.bytes().len == 0) return NativeResult.scalar(.null);
 
-    const nullable = this.get("_nullable");
+    const nullable = this.get("__nullable");
     var is_nullable = nullable == .bool and nullable.bool;
     // PHP's implicit-nullable: `foo($x = null)` reports the type as nullable
     // even though source didn't write '?'. detect by checking default == null
-    const has_default = this.get("_has_default");
+    const has_default = this.get("__has_default");
     if (!is_nullable and has_default == .bool and has_default.bool) {
-        if (this.get("_default_value") == .null) is_nullable = true;
+        if (this.get("__default_value") == .null) is_nullable = true;
     }
-    const declaring = this.get("_declaring_class");
+    const declaring = this.get("__declaring_class");
     const self_class: ?[]const u8 = if (declaring == .string and declaring.string.bytes().len > 0) declaring.string.bytes() else null;
     const obj = try createTypeObj(ctx, type_val.string.bytes(), is_nullable, self_class);
     return NativeResult.borrowed(.{ .object = obj });
@@ -2765,63 +2765,63 @@ fn rpGetType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
 
 fn rpIsDefaultValueAvailable(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const has_default = this.get("_has_default");
+    const has_default = this.get("__has_default");
     return NativeResult.scalar(.{ .bool = has_default == .bool and has_default.bool });
 }
 
 fn rpGetDefaultValue(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const has_default = this.get("_has_default");
+    const has_default = this.get("__has_default");
     if (has_default != .bool or !has_default.bool) return throwReflection(ctx, "Internal error: no default value available");
     // a user function's default is evaluated when asked for, as php does:
     // constants resolve then, and an unresolvable one throws then
-    const lazy_func = this.get("_default_func");
+    const lazy_func = this.get("__default_func");
     if (lazy_func == .int) {
         const func: *const ObjFunction = @ptrFromInt(@as(usize, @intCast(lazy_func.int)));
-        return NativeResult.share(try ctx.vm.resolveParamDefault(func, @intCast(this.get("_default_index").int)));
+        return NativeResult.share(try ctx.vm.resolveParamDefault(func, @intCast(this.get("__default_index").int)));
     }
-    return NativeResult.share(this.get("_default_value"));
+    return NativeResult.share(this.get("__default_value"));
 }
 
 fn rpIsOptional(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const optional = this.get("_optional");
+    const optional = this.get("__optional");
     if (optional == .bool) return NativeResult.scalar(optional);
-    const has_default = this.get("_has_default");
+    const has_default = this.get("__has_default");
     if (has_default == .bool and has_default.bool) return NativeResult.scalar(.{ .bool = true });
-    const is_var = this.get("_is_variadic");
+    const is_var = this.get("__is_variadic");
     return NativeResult.scalar(.{ .bool = is_var == .bool and is_var.bool });
 }
 
 fn rpGetPosition(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
-    return NativeResult.share(this.get("_position"));
+    return NativeResult.share(this.get("__position"));
 }
 
 fn rpAllowsNull(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = true });
-    const type_val = this.get("_type_name");
+    const type_val = this.get("__type_name");
     if (type_val != .string or type_val.string.bytes().len == 0) return NativeResult.scalar(.{ .bool = true });
     if (std.mem.eql(u8, type_val.string.bytes(), "mixed") or std.mem.eql(u8, type_val.string.bytes(), "null")) return NativeResult.scalar(.{ .bool = true });
-    const nullable = this.get("_nullable");
+    const nullable = this.get("__nullable");
     return NativeResult.scalar(.{ .bool = nullable == .bool and nullable.bool });
 }
 
 fn rpIsPassedByReference(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const by_ref = this.get("_by_reference");
+    const by_ref = this.get("__by_reference");
     return NativeResult.scalar(.{ .bool = by_ref == .bool and by_ref.bool });
 }
 
 fn rpCanBePassedByValue(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = true });
-    const by_ref = this.get("_by_reference");
+    const by_ref = this.get("__by_reference");
     return NativeResult.scalar(.{ .bool = !(by_ref == .bool and by_ref.bool) });
 }
 
 fn rpHasType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const type_val = this.get("_type_name");
+    const type_val = this.get("__type_name");
     return NativeResult.scalar(.{ .bool = type_val == .string and type_val.string.bytes().len > 0 });
 }
 
@@ -2841,17 +2841,17 @@ fn decodeConstSentinel(ctx: *NativeContext, v: Value) !?[]const u8 {
 
 fn rpIsDefaultValueConstant(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const has_default = this.get("_has_default");
+    const has_default = this.get("__has_default");
     if (has_default != .bool or !has_default.bool) return NativeResult.scalar(.{ .bool = false });
-    const name = this.get("_default_const_name");
+    const name = this.get("__default_const_name");
     return NativeResult.scalar(.{ .bool = name == .string and name.string.bytes().len > 0 });
 }
 
 fn rpGetDefaultValueConstantName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const has_default = this.get("_has_default");
+    const has_default = this.get("__has_default");
     if (has_default != .bool or !has_default.bool) return throwReflection(ctx, "Internal error: no default value available");
-    const name = this.get("_default_const_name");
+    const name = this.get("__default_const_name");
     if (name == .string and name.string.bytes().len > 0) return NativeResult.share(name);
     return NativeResult.scalar(.null);
 }
@@ -2862,9 +2862,9 @@ fn rpGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     const param_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const filter_arg: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else null;
     const flags_arg: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
-    if (this.get("_declaring_class") != .string) {
+    if (this.get("__declaring_class") != .string) {
         // a function's or closure's parameter
-        const function = this.get("_function");
+        const function = this.get("__function");
         if (function != .string) return NativeResult.borrowed(.{ .array = try ctx.createArray() });
         const key = try bytecode.paramAttributesName(ctx.allocator, compiledFunctionName(ctx.vm, function.string.bytes()), param_name);
         defer ctx.allocator.free(key);
@@ -2872,8 +2872,8 @@ fn rpGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Native
         const scope = this.get("__attribute_scope");
         return buildAttributeArrayWithFlags(ctx, attrs, filter_arg, 32, flags_arg, if (scope == .string) scope.string.bytes() else "");
     }
-    const class_name = this.get("_declaring_class").string.bytes();
-    const method_name = if (this.get("_method_name") == .string) this.get("_method_name").string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+    const class_name = this.get("__declaring_class").string.bytes();
+    const method_name = if (this.get("__method_name") == .string) this.get("__method_name").string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
 
     var key_buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&key_buf, "{s}:{s}", .{ method_name, param_name }) catch return NativeResult.borrowed(.{ .array = try ctx.createArray() });
@@ -2895,31 +2895,31 @@ fn rpGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Native
 
 fn rpGetDeclaringClass(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const declaring = this.get("_declaring_class");
+    const declaring = this.get("__declaring_class");
     if (declaring != .string or declaring.string.bytes().len == 0) return NativeResult.scalar(.null);
 
     const obj = try ctx.createObject("ReflectionClass");
     try obj.set(ctx.allocator, "name", declaring);
-    try obj.set(ctx.allocator, "_is_interface", .{ .bool = ctx.vm.interfaces.contains(declaring.string.bytes()) });
+    try obj.set(ctx.allocator, "__is_interface", .{ .bool = ctx.vm.interfaces.contains(declaring.string.bytes()) });
     return NativeResult.borrowed(.{ .object = obj });
 }
 
 fn rpIsVariadic(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const v = this.get("_is_variadic");
+    const v = this.get("__is_variadic");
     return NativeResult.scalar(.{ .bool = v == .bool and v.bool });
 }
 
 fn rpGetDeclaringFunction(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const hook = this.get("_hook_declaring_function");
+    const hook = this.get("__hook_declaring_function");
     if (hook == .object) return NativeResult.share(hook);
-    const func_name = if (this.get("_function") == .string) this.get("_function").string.bytes() else "";
-    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else "";
+    const func_name = if (this.get("__function") == .string) this.get("__function").string.bytes() else "";
+    const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else "";
     if (declaring.len > 0) {
         const obj = try ctx.createObject("ReflectionMethod");
         try obj.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(func_name) });
-        try obj.set(ctx.allocator, "_declaring_class", .{ .string = Value.String.borrowed(declaring) });
+        try obj.set(ctx.allocator, "__declaring_class", .{ .string = Value.String.borrowed(declaring) });
         return NativeResult.borrowed(.{ .object = obj });
     }
     const obj = try ctx.createObject("ReflectionFunction");
@@ -2929,14 +2929,14 @@ fn rpGetDeclaringFunction(ctx: *NativeContext, _: []const Value) RuntimeError!Na
 
 fn rntGetName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    return NativeResult.share(this.get("type_name"));
+    return NativeResult.share(this.get("__type_name"));
 }
 
 fn rntToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const name_v = this.get("type_name");
+    const name_v = this.get("__type_name");
     if (name_v != .string) return NativeResult.share(name_v);
-    const nullable_v = this.get("nullable");
+    const nullable_v = this.get("__nullable");
     const is_nullable = nullable_v == .bool and nullable_v.bool;
     if (!is_nullable or std.mem.eql(u8, name_v.string.bytes(), "mixed") or std.mem.eql(u8, name_v.string.bytes(), "null")) return NativeResult.share(name_v);
     const result = std.fmt.allocPrint(ctx.allocator, "?{s}", .{name_v.string.bytes()}) catch return NativeResult.share(name_v);
@@ -2945,17 +2945,17 @@ fn rntToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult 
 
 fn rntIsBuiltin(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const name = this.get("type_name");
+    const name = this.get("__type_name");
     if (name != .string) return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = isBuiltinType(name.string.bytes()) });
 }
 
 fn rntAllowsNull(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const nullable = this.get("nullable");
+    const nullable = this.get("__nullable");
     if (nullable == .bool and nullable.bool) return NativeResult.scalar(.{ .bool = true });
     // mixed and null types implicitly allow null
-    const tn = this.get("type_name");
+    const tn = this.get("__type_name");
     if (tn == .string) {
         if (std.mem.eql(u8, tn.string.bytes(), "mixed") or std.mem.eql(u8, tn.string.bytes(), "null")) {
             return NativeResult.scalar(.{ .bool = true });
@@ -2966,9 +2966,9 @@ fn rntAllowsNull(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
 
 fn rutGetTypes(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-    const ts_v = this.get("type_str");
+    const ts_v = this.get("__type_str");
     if (ts_v != .string) return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-    const sc_v = this.get("_self_class");
+    const sc_v = this.get("__self_class");
     const self_class: ?[]const u8 = if (sc_v == .string and sc_v.string.bytes().len > 0) sc_v.string.bytes() else null;
     const arr = try ctx.createArray();
     var it = std.mem.splitScalar(u8, ts_v.string.bytes(), '|');
@@ -2981,7 +2981,7 @@ fn rutGetTypes(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult 
         const obj = try createNamedTypeObj(ctx, part, false);
         if (self_class) |sc| {
             if (std.mem.eql(u8, part, "self")) {
-                try obj.set(ctx.allocator, "type_name", .{ .string = Value.String.borrowed(sc) });
+                try obj.set(ctx.allocator, "__type_name", .{ .string = Value.String.borrowed(sc) });
             }
         }
         try arr.append(ctx.allocator, .{ .object = obj });
@@ -2991,19 +2991,19 @@ fn rutGetTypes(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult 
 
 fn rutAllowsNull(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const nullable = this.get("nullable");
+    const nullable = this.get("__nullable");
     return NativeResult.scalar(.{ .bool = nullable == .bool and nullable.bool });
 }
 
 fn rutToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const ts_v = this.get("type_str");
+    const ts_v = this.get("__type_str");
     return NativeResult.share(ts_v);
 }
 
 fn ritGetTypes(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-    const ts_v = this.get("type_str");
+    const ts_v = this.get("__type_str");
     if (ts_v != .string) return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const arr = try ctx.createArray();
     var it = std.mem.splitScalar(u8, ts_v.string.bytes(), '&');
@@ -3021,7 +3021,7 @@ fn ritAllowsNull(_: *NativeContext, _: []const Value) RuntimeError!NativeResult 
 
 fn ritToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const ts_v = this.get("type_str");
+    const ts_v = this.get("__type_str");
     return NativeResult.share(ts_v);
 }
 
@@ -3031,6 +3031,8 @@ fn rfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
 
     if (args[0] == .object and std.mem.eql(u8, args[0].object.class_name, "Closure")) {
         const callable = args[0].object.get("__callable");
+        // a first-class callable reflects as a closure of the function
+        try this.set(ctx.allocator, "__from_closure", .{ .bool = true });
         if (callable == .string) {
             try this.set(ctx.allocator, "name", callable);
         } else if (callable == .array and callable.array.entries.items.len == 2 and callable.array.entries.items[1].value == .string) {
@@ -3047,8 +3049,15 @@ fn rfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
         const func_name = ctx.vm.canonicalFunctionName(args[0].string.bytes()) orelse
             return throwReflection(ctx, "Function does not exist");
         // a closure instance name keeps the closure alive while reflected
-        const name_value: Value = if (args[0] == .string and std.mem.startsWith(u8, func_name, "__closure_")) args[0] else .{ .string = Value.String.borrowed(func_name) };
-        try this.set(ctx.allocator, "name", name_value);
+        if (std.mem.startsWith(u8, func_name, "__closure_")) {
+            // php names a closure `{closure:...}`; the instance itself, which
+            // this keeps alive while reflected, is internal state
+            try this.set(ctx.allocator, "__closure_name", args[0]);
+            const display = if (ctx.vm.functions.get(func_name)) |func| func.display_name else "";
+            try this.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(if (display.len > 0) display else "{closure}") });
+        } else {
+            try this.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(func_name) });
+        }
         // closures created inside a class method inherit that class as their scope
         if (std.mem.startsWith(u8, func_name, "__closure_")) {
             if (ctx.vm.closureScopeByName(func_name)) |scope| {
@@ -3078,15 +3087,23 @@ fn rfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     return NativeResult.scalar(.null);
 }
 
+// the name a ReflectionFunction looks its function up by: a closure's
+// instance, else the function's name
+pub fn functionKey(this: *PhpObject) Value {
+    const closure = this.get("__closure_name");
+    if (closure == .string) return closure;
+    return this.get("name");
+}
+
 fn rfInvoke(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const fn_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
+    const fn_name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.null);
     return NativeResult.share(try ctx.vm.callByName(fn_name, args));
 }
 
 fn rfInvokeArgs(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const fn_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
+    const fn_name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.null);
     if (args.len < 1 or args[0] != .array) return NativeResult.scalar(.null);
     const arr = args[0].array;
     var buf: [16]Value = undefined;
@@ -3105,7 +3122,7 @@ fn rfGetName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
 
 fn rfGetParameters(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const func_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
+    const func_name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.null);
 
     const func = ctx.vm.functions.get(func_name) orelse {
         if (native_params.get(func_name)) |sig| return NativeResult.borrowed(try buildNativeParamArray(ctx, sig, func_name));
@@ -3135,7 +3152,7 @@ fn functionAttributeScope(ctx: *NativeContext, this: *PhpObject, func_name: []co
 
 fn rfGetReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const func_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
+    const func_name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.null);
 
     const return_type = if (closureAwareTypeInfo(func_name)) |ti| ti.return_type else nativeReturnType(ctx, func_name);
     if (return_type.len == 0) return NativeResult.scalar(.null);
@@ -3165,7 +3182,7 @@ fn closureAwareTypeInfo(func_name: []const u8) ?@TypeOf(vm_mod.getTypeInfo("").?
 
 fn rfHasReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const func_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    const func_name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.{ .bool = false });
 
     const return_type = if (closureAwareTypeInfo(func_name)) |ti| ti.return_type else nativeReturnType(ctx, func_name);
     return NativeResult.scalar(.{ .bool = return_type.len > 0 });
@@ -3173,7 +3190,7 @@ fn rfHasReturnType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
 
 fn rfGetNumberOfParameters(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
-    const func_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .int = 0 });
+    const func_name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.{ .int = 0 });
     const func = ctx.vm.functions.get(func_name) orelse {
         const sig = native_params.get(func_name) orelse return NativeResult.scalar(.{ .int = 0 });
         return NativeResult.scalar(.{ .int = @intCast(sig.params.len) });
@@ -3183,7 +3200,7 @@ fn rfGetNumberOfParameters(ctx: *NativeContext, _: []const Value) RuntimeError!N
 
 fn rfGetNumberOfRequiredParameters(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
-    const func_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .int = 0 });
+    const func_name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.{ .int = 0 });
     const func = ctx.vm.functions.get(func_name) orelse {
         const sig = native_params.get(func_name) orelse return NativeResult.scalar(.{ .int = 0 });
         return NativeResult.scalar(.{ .int = @intCast(nativeRequiredCount(sig)) });
@@ -3204,7 +3221,7 @@ fn nativeRequiredCount(sig: native_params.Signature) usize {
 // ObjFunction. start line comes from the first instruction's stored line
 fn rfGetFileName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const name_v = this.get("name");
+    const name_v = functionKey(this);
     if (name_v != .string) return NativeResult.scalar(.{ .bool = false });
     const func = ctx.vm.functions.get(name_v.string.bytes()) orelse return NativeResult.scalar(.{ .bool = false });
     if (func.file_path.len == 0) return NativeResult.scalar(.{ .bool = false });
@@ -3213,7 +3230,7 @@ fn rfGetFileName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
 
 fn rfGetStartLine(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const name_v = this.get("name");
+    const name_v = functionKey(this);
     if (name_v != .string) return NativeResult.scalar(.{ .bool = false });
     const func = ctx.vm.functions.get(name_v.string.bytes()) orelse return NativeResult.scalar(.{ .bool = false });
     if (func.start_line == 0) return NativeResult.scalar(.{ .bool = false });
@@ -3222,7 +3239,7 @@ fn rfGetStartLine(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
 
 fn rfGetEndLine(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const name_v = this.get("name");
+    const name_v = functionKey(this);
     if (name_v != .string) return NativeResult.scalar(.{ .bool = false });
     const func = ctx.vm.functions.get(name_v.string.bytes()) orelse return NativeResult.scalar(.{ .bool = false });
     if (func.end_line == 0) return NativeResult.scalar(.{ .bool = false });
@@ -3256,7 +3273,7 @@ fn rfInNamespace(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
 
 fn rfIsAnonymous(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    const name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = std.mem.startsWith(u8, name, "__closure_") });
 }
 
@@ -3265,7 +3282,7 @@ fn rfIsInternal(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
     // land in vm.functions. closures sit under __closure_ keys which are
     // also user-defined
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    const name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.{ .bool = false });
     if (std.mem.startsWith(u8, name, "__closure_")) return NativeResult.scalar(.{ .bool = false });
     if (ctx.vm.functions.contains(name)) return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = ctx.vm.native_fns.contains(name) });
@@ -3278,7 +3295,7 @@ fn rfIsUserDefined(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
 
 fn rfIsGenerator(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const func_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    const func_name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.{ .bool = false });
     const func = ctx.vm.functions.get(func_name) orelse return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = func.is_generator });
 }
@@ -3286,14 +3303,14 @@ fn rfIsGenerator(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
 // internal functions don't return by reference
 fn rfReturnsReference(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const func_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    const func_name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.{ .bool = false });
     const func = ctx.vm.functions.get(func_name) orelse return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = func.returns_ref });
 }
 
 fn rfIsVariadic(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const func_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    const func_name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.{ .bool = false });
     const func = ctx.vm.functions.get(func_name) orelse {
         const sig = native_params.get(func_name) orelse return NativeResult.scalar(.{ .bool = false });
         for (sig.params) |p| if (p.variadic) return NativeResult.scalar(.{ .bool = true });
@@ -3304,7 +3321,7 @@ fn rfIsVariadic(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
 
 fn rfGetClosureUsedVariables(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-    const fn_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+    const fn_name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const result = try ctx.createArray();
     for (ctx.vm.captures.items) |cap| {
         if (std.mem.eql(u8, cap.closure_name, fn_name)) {
@@ -3335,7 +3352,7 @@ fn rmGetStaticVariables(ctx: *NativeContext, _: []const Value) RuntimeError!Nati
     const result = try ctx.createArray();
     const this = getThis(ctx) orelse return NativeResult.borrowed(.{ .array = result });
     const method_name = methodLookupName(this) orelse return NativeResult.borrowed(.{ .array = result });
-    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.borrowed(.{ .array = result });
+    const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.borrowed(.{ .array = result });
     var buf: [512]u8 = undefined;
     const fn_name = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return NativeResult.borrowed(.{ .array = result });
     const registered = ctx.vm.resolveMethod(declaring, method_name) catch null;
@@ -3357,7 +3374,7 @@ fn rfGetClosureCalledClass(ctx: *NativeContext, _: []const Value) RuntimeError!N
 fn rfGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     try checkAttributeFilter(ctx, args, "ReflectionFunctionAbstract");
     const this = getThis(ctx) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-    const func_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+    const func_name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const compile_name = compiledFunctionName(ctx.vm, func_name);
     const attrs = ctx.vm.function_attributes.get(compile_name) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else null;
@@ -3367,7 +3384,7 @@ fn rfGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Native
 
 fn rfGetClosureScopeClass(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
+    const name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.null);
     if (this.get("__scope_class") == .string) {
         const scope_name = this.get("__scope_class").string.bytes();
         const obj = try ctx.createObject("ReflectionClass");
@@ -3384,7 +3401,7 @@ fn rfGetClosureScopeClass(ctx: *NativeContext, _: []const Value) RuntimeError!Na
 
 fn rfGetClosureThis(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
+    const name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.null);
     return NativeResult.share(ctx.vm.closureThisByName(name));
 }
 
@@ -3412,50 +3429,50 @@ fn populateRpFields(ctx: *NativeContext, obj: *PhpObject, func: *const ObjFuncti
     const param_name = func.params[i];
     const clean_name = if (param_name.len > 0 and param_name[0] == '$') param_name[1..] else param_name;
     try obj.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(clean_name) });
-    try obj.set(ctx.allocator, "_position", .{ .int = @intCast(i) });
+    try obj.set(ctx.allocator, "__position", .{ .int = @intCast(i) });
 
     if (type_info) |ti| {
         if (i < ti.param_types.len and ti.param_types[i].len > 0) {
             const raw_type = ti.param_types[i];
             if (raw_type[0] == '?') {
-                try obj.set(ctx.allocator, "_type_name", .{ .string = Value.String.borrowed(raw_type[1..]) });
-                try obj.set(ctx.allocator, "_nullable", .{ .bool = true });
+                try obj.set(ctx.allocator, "__type_name", .{ .string = Value.String.borrowed(raw_type[1..]) });
+                try obj.set(ctx.allocator, "__nullable", .{ .bool = true });
             } else {
-                try obj.set(ctx.allocator, "_type_name", .{ .string = Value.String.borrowed(raw_type) });
-                try obj.set(ctx.allocator, "_nullable", .{ .bool = false });
+                try obj.set(ctx.allocator, "__type_name", .{ .string = Value.String.borrowed(raw_type) });
+                try obj.set(ctx.allocator, "__nullable", .{ .bool = false });
             }
         } else {
-            try obj.set(ctx.allocator, "_type_name", .{ .string = Value.String.borrowed("") });
-            try obj.set(ctx.allocator, "_nullable", .{ .bool = false });
+            try obj.set(ctx.allocator, "__type_name", .{ .string = Value.String.borrowed("") });
+            try obj.set(ctx.allocator, "__nullable", .{ .bool = false });
         }
     } else {
-        try obj.set(ctx.allocator, "_type_name", .{ .string = Value.String.borrowed("") });
-        try obj.set(ctx.allocator, "_nullable", .{ .bool = false });
+        try obj.set(ctx.allocator, "__type_name", .{ .string = Value.String.borrowed("") });
+        try obj.set(ctx.allocator, "__nullable", .{ .bool = false });
     }
 
     const is_variadic = func.is_variadic and i == func.arity - 1;
-    try obj.set(ctx.allocator, "_is_variadic", .{ .bool = is_variadic });
+    try obj.set(ctx.allocator, "__is_variadic", .{ .bool = is_variadic });
 
     const has_default = !is_variadic and i >= func.required_params;
-    try obj.set(ctx.allocator, "_has_default", .{ .bool = has_default });
+    try obj.set(ctx.allocator, "__has_default", .{ .bool = has_default });
     if (has_default and i < func.defaults.len) {
         const raw = func.defaults[i];
         try setLazyDefault(ctx, obj, func, i);
         if (try decodeConstSentinel(ctx, raw)) |const_name| {
-            try obj.set(ctx.allocator, "_default_const_name", .{ .string = Value.String.borrowed(const_name) });
+            try obj.set(ctx.allocator, "__default_const_name", .{ .string = Value.String.borrowed(const_name) });
         }
     }
 
     const by_ref = if (i < func.ref_params.len) func.ref_params[i] else false;
-    try obj.set(ctx.allocator, "_by_reference", .{ .bool = by_ref });
+    try obj.set(ctx.allocator, "__by_reference", .{ .bool = by_ref });
 
     if (std.mem.indexOf(u8, type_key, "::")) |sep| {
         const decl_class = try ctx.allocator.dupe(u8, type_key[0..sep]);
         defer ctx.allocator.free(decl_class);
-        try obj.setCopiedString(ctx.allocator, "_declaring_class", decl_class);
+        try obj.setCopiedString(ctx.allocator, "__declaring_class", decl_class);
         const meth_name = try ctx.allocator.dupe(u8, type_key[sep + 2 ..]);
         defer ctx.allocator.free(meth_name);
-        try obj.setCopiedString(ctx.allocator, "_method_name", meth_name);
+        try obj.setCopiedString(ctx.allocator, "__method_name", meth_name);
     }
 }
 
@@ -3536,26 +3553,26 @@ fn buildNativeParamArray(ctx: *NativeContext, sig: native_params.Signature, key:
 fn populateNativeRpFields(ctx: *NativeContext, obj: *PhpObject, sig: native_params.Signature, key: []const u8, i: usize) RuntimeError!void {
     const p = sig.params[i];
     try obj.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(p.name) });
-    try obj.set(ctx.allocator, "_position", .{ .int = @intCast(i) });
+    try obj.set(ctx.allocator, "__position", .{ .int = @intCast(i) });
     const nullable_prefix = p.type.len > 0 and p.type[0] == '?';
     const type_name = if (nullable_prefix) p.type[1..] else p.type;
     const in_union = std.mem.indexOf(u8, type_name, "|null") != null or std.mem.startsWith(u8, type_name, "null|");
-    try obj.set(ctx.allocator, "_type_name", .{ .string = Value.String.borrowed(type_name) });
-    try obj.set(ctx.allocator, "_nullable", .{ .bool = nullable_prefix or in_union });
-    try obj.set(ctx.allocator, "_is_variadic", .{ .bool = p.variadic });
+    try obj.set(ctx.allocator, "__type_name", .{ .string = Value.String.borrowed(type_name) });
+    try obj.set(ctx.allocator, "__nullable", .{ .bool = nullable_prefix or in_union });
+    try obj.set(ctx.allocator, "__is_variadic", .{ .bool = p.variadic });
     const has_default = !p.variadic and p.default != .required and p.default != .unknown;
-    try obj.set(ctx.allocator, "_has_default", .{ .bool = has_default });
-    try obj.set(ctx.allocator, "_optional", .{ .bool = p.variadic or p.default != .required });
-    if (has_default) try obj.set(ctx.allocator, "_default_value", try ctx.vm.nativeDefault(p.default));
-    if (p.default_constant.len > 0) try obj.set(ctx.allocator, "_default_const_name", .{ .string = Value.String.borrowed(p.default_constant) });
-    try obj.set(ctx.allocator, "_by_reference", .{ .bool = p.by_ref });
+    try obj.set(ctx.allocator, "__has_default", .{ .bool = has_default });
+    try obj.set(ctx.allocator, "__optional", .{ .bool = p.variadic or p.default != .required });
+    if (has_default) try obj.set(ctx.allocator, "__default_value", try ctx.vm.nativeDefault(p.default));
+    if (p.default_constant.len > 0) try obj.set(ctx.allocator, "__default_const_name", .{ .string = Value.String.borrowed(p.default_constant) });
+    try obj.set(ctx.allocator, "__by_reference", .{ .bool = p.by_ref });
     if (std.mem.indexOf(u8, key, "::")) |sep| {
-        try obj.set(ctx.allocator, "_declaring_class", .{ .string = Value.String.borrowed(try ctx.vm.stableClassName(key[0..sep])) });
+        try obj.set(ctx.allocator, "__declaring_class", .{ .string = Value.String.borrowed(try ctx.vm.stableClassName(key[0..sep])) });
         const method_name = try ctx.vm.internName(key[sep + 2 ..]);
-        try obj.set(ctx.allocator, "_method_name", .{ .string = Value.String.borrowed(method_name) });
-        try obj.set(ctx.allocator, "_function", .{ .string = Value.String.borrowed(method_name) });
+        try obj.set(ctx.allocator, "__method_name", .{ .string = Value.String.borrowed(method_name) });
+        try obj.set(ctx.allocator, "__function", .{ .string = Value.String.borrowed(method_name) });
     } else {
-        try obj.set(ctx.allocator, "_function", .{ .string = Value.String.borrowed(try ctx.vm.internName(key)) });
+        try obj.set(ctx.allocator, "__function", .{ .string = Value.String.borrowed(try ctx.vm.internName(key)) });
     }
 }
 
@@ -3575,58 +3592,58 @@ fn buildParamArray(ctx: *NativeContext, func: *const ObjFunction, type_key: []co
 
         const clean_name = if (param_name.len > 0 and param_name[0] == '$') param_name[1..] else param_name;
         try obj.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(clean_name) });
-        try obj.set(ctx.allocator, "_position", .{ .int = @intCast(i) });
+        try obj.set(ctx.allocator, "__position", .{ .int = @intCast(i) });
 
         if (type_info) |ti| {
             if (i < ti.param_types.len and ti.param_types[i].len > 0) {
                 const raw_type = ti.param_types[i];
                 if (raw_type[0] == '?') {
-                    try obj.set(ctx.allocator, "_type_name", .{ .string = Value.String.borrowed(raw_type[1..]) });
-                    try obj.set(ctx.allocator, "_nullable", .{ .bool = true });
+                    try obj.set(ctx.allocator, "__type_name", .{ .string = Value.String.borrowed(raw_type[1..]) });
+                    try obj.set(ctx.allocator, "__nullable", .{ .bool = true });
                 } else {
-                    try obj.set(ctx.allocator, "_type_name", .{ .string = Value.String.borrowed(raw_type) });
-                    try obj.set(ctx.allocator, "_nullable", .{ .bool = false });
+                    try obj.set(ctx.allocator, "__type_name", .{ .string = Value.String.borrowed(raw_type) });
+                    try obj.set(ctx.allocator, "__nullable", .{ .bool = false });
                 }
             } else {
-                try obj.set(ctx.allocator, "_type_name", .{ .string = Value.String.borrowed("") });
-                try obj.set(ctx.allocator, "_nullable", .{ .bool = false });
+                try obj.set(ctx.allocator, "__type_name", .{ .string = Value.String.borrowed("") });
+                try obj.set(ctx.allocator, "__nullable", .{ .bool = false });
             }
         } else {
-            try obj.set(ctx.allocator, "_type_name", .{ .string = Value.String.borrowed("") });
-            try obj.set(ctx.allocator, "_nullable", .{ .bool = false });
+            try obj.set(ctx.allocator, "__type_name", .{ .string = Value.String.borrowed("") });
+            try obj.set(ctx.allocator, "__nullable", .{ .bool = false });
         }
 
         const is_variadic = func.is_variadic and i == func.arity - 1;
-        try obj.set(ctx.allocator, "_is_variadic", .{ .bool = is_variadic });
+        try obj.set(ctx.allocator, "__is_variadic", .{ .bool = is_variadic });
 
         // default values - defaults array has one entry per param, non-default params have .null
         // variadic params never have a default (they collect remaining args)
         const has_default = !is_variadic and i >= func.required_params;
-        try obj.set(ctx.allocator, "_has_default", .{ .bool = has_default });
+        try obj.set(ctx.allocator, "__has_default", .{ .bool = has_default });
         if (has_default and i < func.defaults.len) {
             const raw = func.defaults[i];
             try setLazyDefault(ctx, obj, func, i);
             if (try decodeConstSentinel(ctx, raw)) |const_name| {
-                try obj.set(ctx.allocator, "_default_const_name", .{ .string = Value.String.borrowed(const_name) });
+                try obj.set(ctx.allocator, "__default_const_name", .{ .string = Value.String.borrowed(const_name) });
             }
         }
 
         const by_ref = if (i < func.ref_params.len) func.ref_params[i] else false;
-        try obj.set(ctx.allocator, "_by_reference", .{ .bool = by_ref });
+        try obj.set(ctx.allocator, "__by_reference", .{ .bool = by_ref });
 
         // declaring class and method name (or bare function name for free fns)
         if (std.mem.indexOf(u8, type_key, "::")) |sep| {
             const decl_class = try ctx.allocator.dupe(u8, type_key[0..sep]);
             defer ctx.allocator.free(decl_class);
-            try obj.setCopiedString(ctx.allocator, "_declaring_class", decl_class);
+            try obj.setCopiedString(ctx.allocator, "__declaring_class", decl_class);
             const meth_name = try ctx.allocator.dupe(u8, type_key[sep + 2 ..]);
             defer ctx.allocator.free(meth_name);
-            try obj.setCopiedString(ctx.allocator, "_method_name", meth_name);
-            try obj.setCopiedString(ctx.allocator, "_function", meth_name);
+            try obj.setCopiedString(ctx.allocator, "__method_name", meth_name);
+            try obj.setCopiedString(ctx.allocator, "__function", meth_name);
         } else {
             const fname = try ctx.allocator.dupe(u8, type_key);
             defer ctx.allocator.free(fname);
-            try obj.setCopiedString(ctx.allocator, "_function", fname);
+            try obj.setCopiedString(ctx.allocator, "__function", fname);
         }
 
         try arr.append(ctx.allocator, .{ .object = obj });
@@ -3849,7 +3866,7 @@ fn reflectionFalse(_: *NativeContext, _: []const Value) RuntimeError!NativeResul
 }
 
 fn methodLookupName(obj: *PhpObject) ?[]const u8 {
-    const internal = obj.get("_hook_method");
+    const internal = obj.get("__hook_method");
     if (internal == .string) return internal.string.bytes();
     const name = obj.get("name");
     return if (name == .string) name.string.bytes() else null;
@@ -3863,7 +3880,7 @@ const ReflectedHook = struct {
 fn lookupPropertyHook(ctx: *NativeContext, kind: []const u8) ?ReflectedHook {
     const this = getThis(ctx) orelse return null;
     const name = this.get("name");
-    const declaring = this.get("_declaring_class");
+    const declaring = this.get("__declaring_class");
     if (name != .string or declaring != .string) return null;
     var buf: [512]u8 = undefined;
     const method = std.fmt.bufPrint(&buf, "{s}$hook_{s}", .{ name.string.bytes(), kind }) catch return null;
@@ -3893,11 +3910,11 @@ fn buildHookObj(ctx: *NativeContext, hook: ReflectedHook, kind: []const u8) !*Ph
     const display = try std.fmt.allocPrint(ctx.allocator, "${s}::{s}", .{ this.get("name").string.bytes(), kind });
     defer ctx.allocator.free(display);
     try obj.setCopiedString(ctx.allocator, "name", display);
-    try obj.set(ctx.allocator, "_hook_method", .{ .string = Value.String.borrowed(hook.info.name) });
-    try obj.set(ctx.allocator, "_hook_property", this.get("name"));
+    try obj.set(ctx.allocator, "__hook_method", .{ .string = Value.String.borrowed(hook.info.name) });
+    try obj.set(ctx.allocator, "__hook_property", this.get("name"));
     const prop = findPropertyDef(ctx.vm, hook.declaring, this.get("name").string.bytes());
     const return_type = if (std.mem.eql(u8, kind, "set")) "void" else if (prop) |p| p.prop.type_str else "";
-    try obj.set(ctx.allocator, "_hook_return_type", .{ .string = Value.String.borrowed(return_type) });
+    try obj.set(ctx.allocator, "__hook_return_type", .{ .string = Value.String.borrowed(return_type) });
     return obj;
 }
 
@@ -3974,7 +3991,7 @@ fn rpConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     if (findPropertyDef(ctx.vm, class_name, prop_name)) |result| {
         try this.set(
             ctx.allocator,
-            "_visibility",
+            "__visibility",
             .{ .int = @intFromEnum(result.prop.visibility) },
         );
 
@@ -3983,49 +4000,49 @@ fn rpConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
 
         try this.set(
             ctx.allocator,
-            "_has_default",
+            "__has_default",
             .{ .bool = effective_has_default },
         );
 
         try this.set(
             ctx.allocator,
-            "_default_value",
+            "__default_value",
             if (effective_has_default) result.prop.default else .null,
         );
 
         try this.set(
             ctx.allocator,
-            "_declaring_class",
+            "__declaring_class",
             .{ .string = Value.String.borrowed(result.declaring_class) },
         );
 
         try this.set(
             ctx.allocator,
-            "_set_visibility",
+            "__set_visibility",
             .{ .int = @intFromEnum(result.prop.set_visibility) },
         );
 
         try this.set(
             ctx.allocator,
-            "_has_set_visibility",
+            "__has_set_visibility",
             .{ .bool = result.prop.has_set_visibility },
         );
 
         try this.set(
             ctx.allocator,
-            "_is_readonly",
+            "__is_readonly",
             .{ .bool = result.prop.is_readonly and !result.prop.readonly_undeclared },
         );
 
         try this.set(
             ctx.allocator,
-            "_is_final",
+            "__is_final",
             .{ .bool = result.prop.is_final },
         );
 
         try this.set(
             ctx.allocator,
-            "_is_static",
+            "__is_static",
             .{ .bool = result.is_static },
         );
     } else {
@@ -4047,7 +4064,7 @@ fn rpGetValue(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const prop_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
     if (args.len > 0 and args[0] == .object) {
-        const dc = this.get("_declaring_class");
+        const dc = this.get("__declaring_class");
         if (dc == .string and !ctx.vm.isInstanceOf(args[0].object.class_name, dc.string.bytes()))
             return throwReflection(ctx, "Given object is not an instance of the class this property was declared in");
         try ctx.vm.triggerLazyProperty(args[0].object, prop_name, if (dc == .string) dc.string.bytes() else null);
@@ -4061,9 +4078,9 @@ fn rpGetValue(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
 
 // the class of a static property this ReflectionProperty describes
 fn staticDeclaringClass(this: *PhpObject) ?[]const u8 {
-    const static_v = this.get("_is_static");
+    const static_v = this.get("__is_static");
     if (static_v != .bool or !static_v.bool) return null;
-    const dc = this.get("_declaring_class");
+    const dc = this.get("__declaring_class");
     return if (dc == .string) dc.string.bytes() else null;
 }
 
@@ -4077,7 +4094,7 @@ fn rpSkipLazy(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.null);
     const name = this.get("name");
-    const dc = this.get("_declaring_class");
+    const dc = this.get("__declaring_class");
     if (name != .string) return NativeResult.scalar(.null);
     const obj = args[0].object;
     if (obj.lazy) |state| {
@@ -4096,7 +4113,7 @@ fn rpIsLazy(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
     const name = this.get("name");
-    const dc = this.get("_declaring_class");
+    const dc = this.get("__declaring_class");
     return NativeResult.scalar(.{ .bool = name == .string and args[0].object.isLazySlot(name.string.bytes(), if (dc == .string) dc.string.bytes() else null) });
 }
 fn rpWrite(ctx: *NativeContext, args: []const Value, skip: bool) RuntimeError!NativeResult {
@@ -4104,7 +4121,7 @@ fn rpWrite(ctx: *NativeContext, args: []const Value, skip: bool) RuntimeError!Na
     const prop_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
     if (args.len >= 2 and args[0] == .object) {
         const target = args[0].object;
-        const dc = this.get("_declaring_class");
+        const dc = this.get("__declaring_class");
         const scope = if (dc == .string) dc.string.bytes() else target.class_name;
         if (!skip) try ctx.vm.triggerLazyProperty(target, prop_name, scope);
         const vr = ctx.vm.findPropertyVisibility(scope, prop_name);
@@ -4134,7 +4151,7 @@ fn rpropGetName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
 
 fn rpropGetType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const dc_v = this.get("_declaring_class");
+    const dc_v = this.get("__declaring_class");
     if (dc_v != .string) return NativeResult.scalar(.null);
     const class_name = dc_v.string.bytes();
     const prop_name_v = this.get("name");
@@ -4199,9 +4216,9 @@ fn makeReflectionType(ctx: *NativeContext, type_str: []const u8) RuntimeError!Va
     const obj = try ctx.createObject("ReflectionNamedType");
     const dup = try ctx.allocator.dupe(u8, name);
     defer ctx.allocator.free(dup);
-    try obj.setCopiedString(ctx.allocator, "type_name", dup);
-    try obj.set(ctx.allocator, "nullable", .{ .bool = allows_null or std.mem.eql(u8, name, "mixed") or std.mem.eql(u8, name, "null") });
-    try obj.set(ctx.allocator, "is_builtin", .{ .bool = isBuiltinTypeName(name) });
+    try obj.setCopiedString(ctx.allocator, "__type_name", dup);
+    try obj.set(ctx.allocator, "__nullable", .{ .bool = allows_null or std.mem.eql(u8, name, "mixed") or std.mem.eql(u8, name, "null") });
+    try obj.set(ctx.allocator, "__is_builtin", .{ .bool = isBuiltinTypeName(name) });
     return .{ .object = obj };
 }
 
@@ -4213,26 +4230,26 @@ fn isBuiltinTypeName(name: []const u8) bool {
 
 fn rpropIsPublic(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = true });
-    const vis = this.get("_visibility");
+    const vis = this.get("__visibility");
     return NativeResult.scalar(.{ .bool = vis == .int and vis.int == 0 });
 }
 
 fn rpropIsProtected(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const vis = this.get("_visibility");
+    const vis = this.get("__visibility");
     return NativeResult.scalar(.{ .bool = vis == .int and vis.int == 1 });
 }
 
 fn rpropIsPrivate(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const vis = this.get("_visibility");
+    const vis = this.get("__visibility");
     return NativeResult.scalar(.{ .bool = vis == .int and vis.int == 2 });
 }
 
 fn rpropIsPrivateSet(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const vis = this.get("_visibility");
-    const set_vis = this.get("_set_visibility");
+    const vis = this.get("__visibility");
+    const set_vis = this.get("__set_visibility");
     const vis_val = if (vis == .int) vis.int else 0;
     const set_vis_val = if (set_vis == .int) set_vis.int else vis_val;
     return NativeResult.scalar(.{ .bool = set_vis_val == 2 and vis_val != 2 });
@@ -4240,10 +4257,10 @@ fn rpropIsPrivateSet(ctx: *NativeContext, _: []const Value) RuntimeError!NativeR
 
 fn rpropIsProtectedSet(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const vis = this.get("_visibility");
-    const set_vis = this.get("_set_visibility");
-    const has_set_vis = this.get("_has_set_visibility");
-    const ro = this.get("_is_readonly");
+    const vis = this.get("__visibility");
+    const set_vis = this.get("__set_visibility");
+    const has_set_vis = this.get("__has_set_visibility");
+    const ro = this.get("__is_readonly");
     const is_ro = ro == .bool and ro.bool;
     const has_explicit_set = has_set_vis == .bool and has_set_vis.bool;
     const vis_val = if (vis == .int) vis.int else 0;
@@ -4257,13 +4274,13 @@ fn rpropIsProtectedSet(ctx: *NativeContext, _: []const Value) RuntimeError!Nativ
 fn rpropIsFinal(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
 
-    const final_v = this.get("_is_final");
+    const final_v = this.get("__is_final");
     const is_explicit_final = final_v == .bool and final_v.bool;
     if (is_explicit_final) return NativeResult.scalar(.{ .bool = true });
 
-    const vis = this.get("_visibility");
-    const set_vis = this.get("_set_visibility");
-    const has_set_vis = this.get("_has_set_visibility");
+    const vis = this.get("__visibility");
+    const set_vis = this.get("__set_visibility");
+    const has_set_vis = this.get("__has_set_visibility");
     const vis_val = if (vis == .int) vis.int else 0;
     const set_vis_val = if (set_vis == .int) set_vis.int else vis_val;
     const has_explicit_set = has_set_vis == .bool and has_set_vis.bool;
@@ -4287,14 +4304,14 @@ fn rpropIsAbstract(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
 
 fn rpropGetDefaultValue(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const has_default = this.get("_has_default");
+    const has_default = this.get("__has_default");
     if (has_default != .bool or !has_default.bool) return throwReflection(ctx, "Property does not have a default value");
-    return NativeResult.share(this.get("_default_value"));
+    return NativeResult.share(this.get("__default_value"));
 }
 
 fn rpropHasDefaultValue(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const has_default = this.get("_has_default");
+    const has_default = this.get("__has_default");
     return NativeResult.scalar(.{ .bool = has_default == .bool and has_default.bool });
 }
 
@@ -4302,7 +4319,7 @@ fn rpropIsInitialized(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const prop_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
     if (args.len > 0 and args[0] == .object) {
-        const dc = this.get("_declaring_class");
+        const dc = this.get("__declaring_class");
         const scope = if (dc == .string) dc.string.bytes() else args[0].object.class_name;
         try ctx.vm.triggerLazyProperty(args[0].object, prop_name, scope);
         const vr = ctx.vm.findPropertyVisibility(scope, prop_name);
@@ -4313,11 +4330,11 @@ fn rpropIsInitialized(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
 
 fn rpropGetDeclaringClass(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.scalar(.null);
+    const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.null);
 
     const obj = try ctx.createObject("ReflectionClass");
     try obj.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(declaring) });
-    try obj.set(ctx.allocator, "_is_interface", .{ .bool = ctx.vm.interfaces.contains(declaring) });
+    try obj.set(ctx.allocator, "__is_interface", .{ .bool = ctx.vm.interfaces.contains(declaring) });
     return NativeResult.borrowed(.{ .object = obj });
 }
 
@@ -4327,13 +4344,13 @@ fn rpropIsDefault(_: *NativeContext, _: []const Value) RuntimeError!NativeResult
 
 fn rpropIsReadOnly(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const v = this.get("_is_readonly");
+    const v = this.get("__is_readonly");
     return NativeResult.scalar(.{ .bool = v == .bool and v.bool });
 }
 
 fn rpropIsStatic(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const v = this.get("_is_static");
+    const v = this.get("__is_static");
     return NativeResult.scalar(.{ .bool = v == .bool and v.bool });
 }
 
@@ -4343,8 +4360,8 @@ fn rpropIsPromoted(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
     // params; detect it by matching the property name against the ctor's
     // param list)
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const class_name = if (this.get("_declaring_class") == .string)
-        this.get("_declaring_class").string.bytes()
+    const class_name = if (this.get("__declaring_class") == .string)
+        this.get("__declaring_class").string.bytes()
     else if (this.get("class") == .string)
         this.get("class").string.bytes()
     else
@@ -4368,7 +4385,7 @@ fn rpropHasType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
 
 fn rpropGetModifiers(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
-    const vis = this.get("_visibility");
+    const vis = this.get("__visibility");
     const vis_val = if (vis == .int) vis.int else 0;
 
     var mods: i64 = switch (vis_val) {
@@ -4377,19 +4394,19 @@ fn rpropGetModifiers(ctx: *NativeContext, _: []const Value) RuntimeError!NativeR
         else => 1, // IS_PUBLIC
     };
 
-    const st = this.get("_is_static");
+    const st = this.get("__is_static");
     if (st == .bool and st.bool) mods |= 16;
 
-    const ro = this.get("_is_readonly");
+    const ro = this.get("__is_readonly");
     const is_ro = ro == .bool and ro.bool;
     if (is_ro) mods |= 128;
 
-    const set_vis = this.get("_set_visibility");
-    const has_set_vis = this.get("_has_set_visibility");
+    const set_vis = this.get("__set_visibility");
+    const has_set_vis = this.get("__has_set_visibility");
     const set_vis_val = if (set_vis == .int) set_vis.int else vis_val;
     const has_explicit_set = has_set_vis == .bool and has_set_vis.bool;
 
-    const final_v = this.get("_is_final");
+    const final_v = this.get("__is_final");
     const is_explicit_final = final_v == .bool and final_v.bool;
     // Match PHP 8.4: only asymmetric private(set) contributes IS_FINAL.
     const implicit_private_set_final =
@@ -4412,7 +4429,7 @@ fn rpropGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     try checkAttributeFilter(ctx, args, "ReflectionProperty");
     const this = getThis(ctx) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const prop_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+    const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const attrs = propertyAttributes(ctx.vm, declaring, prop_name) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else null;
     const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
@@ -4430,7 +4447,7 @@ fn propertyAttributes(vm: *VM, class_name: []const u8, prop_name: []const u8) ?[
 
 fn rpropGetDocComment(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const dc_v = this.get("_declaring_class");
+    const dc_v = this.get("__declaring_class");
     if (dc_v != .string) return NativeResult.scalar(.{ .bool = false });
     const prop_name_v = this.get("name");
     if (prop_name_v != .string) return NativeResult.scalar(.{ .bool = false });
@@ -4451,7 +4468,7 @@ fn rpropGetDocComment(ctx: *NativeContext, _: []const Value) RuntimeError!Native
 
 fn rpropIsVirtual(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const dc = this.get("_declaring_class");
+    const dc = this.get("__declaring_class");
     const name = this.get("name");
     if (dc == .string and name == .string) {
         if (ctx.vm.classes.get(dc.string.bytes())) |cls| {
@@ -4467,15 +4484,15 @@ fn rmInvoke(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const guard_count = ctx.vm.prop_hook_guard.items.len;
     defer ctx.vm.prop_hook_guard.shrinkRetainingCapacity(guard_count);
-    if (this.get("_hook_property") == .string and args.len > 0 and args[0] == .object) {
-        try ctx.vm.prop_hook_guard.append(ctx.allocator, .{ .obj_ptr = @intFromPtr(args[0].object), .prop_name = this.get("_hook_property").string.bytes() });
+    if (this.get("__hook_property") == .string and args.len > 0 and args[0] == .object) {
+        try ctx.vm.prop_hook_guard.append(ctx.allocator, .{ .obj_ptr = @intFromPtr(args[0].object), .prop_name = this.get("__hook_property").string.bytes() });
     }
     const method_name = methodLookupName(this) orelse return NativeResult.scalar(.null);
     if (args.len > 0 and args[0] == .object) {
         return NativeResult.share(ctx.callMethod(args[0].object, method_name, args[1..]) catch .null);
     }
     // static call: target is null/missing, dispatch by ClassName::methodName
-    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.scalar(.null);
+    const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.null);
     var buf: [256]u8 = undefined;
     const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return NativeResult.scalar(.null);
     const rest = if (args.len >= 1) args[1..] else args[0..];
@@ -4486,8 +4503,8 @@ fn rmInvokeArgs(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const guard_count = ctx.vm.prop_hook_guard.items.len;
     defer ctx.vm.prop_hook_guard.shrinkRetainingCapacity(guard_count);
-    if (this.get("_hook_property") == .string and args.len > 0 and args[0] == .object) {
-        try ctx.vm.prop_hook_guard.append(ctx.allocator, .{ .obj_ptr = @intFromPtr(args[0].object), .prop_name = this.get("_hook_property").string.bytes() });
+    if (this.get("__hook_property") == .string and args.len > 0 and args[0] == .object) {
+        try ctx.vm.prop_hook_guard.append(ctx.allocator, .{ .obj_ptr = @intFromPtr(args[0].object), .prop_name = this.get("__hook_property").string.bytes() });
     }
     const method_name = methodLookupName(this) orelse return NativeResult.scalar(.null);
     if (args.len < 1) return NativeResult.scalar(.null);
@@ -4501,7 +4518,7 @@ fn rmInvokeArgs(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     if (target == .object) {
         return NativeResult.share(ctx.callMethod(target.object, method_name, call_args[0..count]) catch .null);
     }
-    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.scalar(.null);
+    const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.null);
     var buf: [256]u8 = undefined;
     const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return NativeResult.scalar(.null);
     return NativeResult.share(ctx.vm.callByName(full, call_args[0..count]) catch .null);
@@ -4521,7 +4538,7 @@ fn rmGetClosure(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
 fn rmIsAbstract(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const method_name = methodLookupName(this) orelse return NativeResult.scalar(.{ .bool = false });
-    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.{ .bool = false });
 
     if (ctx.vm.interfaces.contains(declaring)) return NativeResult.scalar(.{ .bool = true });
 
@@ -4540,7 +4557,7 @@ fn rmIsAbstract(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
 fn rmIsFinal(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const method_name = methodLookupName(this) orelse return NativeResult.scalar(.{ .bool = false });
-    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.{ .bool = false });
     const cls = ctx.vm.classes.get(declaring) orelse return NativeResult.scalar(.{ .bool = false });
     const m = cls.methods.get(method_name) orelse return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = m.is_final });
@@ -4549,7 +4566,7 @@ fn rmIsFinal(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
 fn rmFullName(ctx: *NativeContext) ?[]const u8 {
     const this = getThis(ctx) orelse return null;
     const method_name = methodLookupName(this) orelse return null;
-    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return null;
+    const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return null;
     var buf: [256]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "{s}::{s}", .{ declaring, method_name }) catch return null;
     const owned = Value.String.create(ctx.allocator, key) catch return null;
@@ -4577,10 +4594,10 @@ fn rmIsGenerator(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
 fn rmGetModifiers(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
     const method_name = methodLookupName(this) orelse return NativeResult.scalar(.{ .int = 0 });
-    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.scalar(.{ .int = 0 });
+    const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.{ .int = 0 });
     const cls = ctx.vm.classes.get(declaring) orelse return NativeResult.scalar(.{ .int = 0 });
     const info = cls.methods.get(method_name) orelse return NativeResult.scalar(.{ .int = 0 });
-    return NativeResult.scalar(.{ .int = if (this.get("_hook_method") == .string) (methodModifiers(info) & ~@as(i64, 7)) | 1 else methodModifiers(info) });
+    return NativeResult.scalar(.{ .int = if (this.get("__hook_method") == .string) (methodModifiers(info) & ~@as(i64, 7)) | 1 else methodModifiers(info) });
 }
 
 fn nextName(n: *usize) usize {
@@ -4619,7 +4636,7 @@ fn rmGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     try checkAttributeFilter(ctx, args, "ReflectionFunctionAbstract");
     const this = getThis(ctx) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const method_name = methodLookupName(this) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+    const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const attrs = methodAttributes(ctx.vm, declaring, method_name) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else null;
     const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
@@ -4649,9 +4666,9 @@ fn rpIsPromoted(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
     // returned true whenever any same-named property existed, which mis-
     // classified plain '?string $name = null' params as promoted whenever
     // the class happened to declare a separate '$name' property
-    const method_v = this.get("_method_name");
+    const method_v = this.get("__method_name");
     if (method_v != .string or !std.mem.eql(u8, method_v.string.bytes(), "__construct")) return NativeResult.scalar(.{ .bool = false });
-    const class_v = this.get("_declaring_class");
+    const class_v = this.get("__declaring_class");
     if (class_v != .string) return NativeResult.scalar(.{ .bool = false });
     const name_v = this.get("name");
     if (name_v != .string) return NativeResult.scalar(.{ .bool = false });
@@ -4664,14 +4681,14 @@ fn rpIsPromoted(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
 
 fn rpGetClass(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const type_val = this.get("_type_name");
+    const type_val = this.get("__type_name");
     if (type_val != .string or type_val.string.bytes().len == 0) return NativeResult.scalar(.null);
     if (isBuiltinType(type_val.string.bytes())) return NativeResult.scalar(.null);
 
     if (ctx.vm.classes.contains(type_val.string.bytes()) or ctx.vm.interfaces.contains(type_val.string.bytes())) {
         const obj = try ctx.createObject("ReflectionClass");
         try obj.set(ctx.allocator, "name", type_val);
-        try obj.set(ctx.allocator, "_is_interface", .{ .bool = ctx.vm.interfaces.contains(type_val.string.bytes()) });
+        try obj.set(ctx.allocator, "__is_interface", .{ .bool = ctx.vm.interfaces.contains(type_val.string.bytes()) });
         return NativeResult.borrowed(.{ .object = obj });
     }
     return NativeResult.scalar(.null);
@@ -4961,8 +4978,8 @@ fn reConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     }
 
     try this.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(try ctx.vm.stableClassName(class_name)) });
-    try this.set(ctx.allocator, "_is_interface", .{ .bool = false });
-    try this.set(ctx.allocator, "_is_trait", .{ .bool = false });
+    try this.set(ctx.allocator, "__is_interface", .{ .bool = false });
+    try this.set(ctx.allocator, "__is_trait", .{ .bool = false });
     return NativeResult.scalar(.null);
 }
 
@@ -5279,7 +5296,7 @@ fn setNullableStringParam(ctx: *NativeContext, this: *PhpObject, args: []const V
 
 fn rfIsDeprecated(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const func_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    const func_name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.{ .bool = false });
     if (ctx.vm.native_fns.get(func_name)) |native| return NativeResult.scalar(.{ .bool = native.deprecated != null });
     const attrs = ctx.vm.function_attributes.get(compiledFunctionName(ctx.vm, func_name)) orelse return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = hasDeprecatedAttribute(attrs) });
@@ -5288,7 +5305,7 @@ fn rfIsDeprecated(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
 fn rmIsDeprecated(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const method_name = methodLookupName(this) orelse return NativeResult.scalar(.{ .bool = false });
-    const declaring = if (this.get("_declaring_class") == .string) this.get("_declaring_class").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.{ .bool = false });
     const cls = ctx.vm.classes.get(declaring) orelse return NativeResult.scalar(.{ .bool = false });
     if (cls.is_internal) {
         var buf: [256]u8 = undefined;
