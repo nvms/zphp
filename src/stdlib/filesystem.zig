@@ -310,21 +310,50 @@ fn percentDecode(a: Allocator, s: []const u8) ![]u8 {
     return try buf.toOwnedSlice(a);
 }
 
-fn base64DecodeBytes(a: Allocator, s: []const u8) !?[]u8 {
-    var clean = std.ArrayListUnmanaged(u8).empty;
-    defer clean.deinit(a);
+// php_base64_decode_ex in strict mode: whitespace is skipped, any other
+// character outside the alphabet or misplaced padding fails
+fn base64DecodeStrict(a: Allocator, s: []const u8) !?[]u8 {
+    var out = std.ArrayListUnmanaged(u8).empty;
+    errdefer out.deinit(a);
+    var acc: u32 = 0;
+    var count: usize = 0;
+    var padding: usize = 0;
     for (s) |c| {
-        if (c == ' ' or c == '\n' or c == '\r' or c == '\t') continue;
-        try clean.append(a, c);
+        if (c == '=') {
+            padding += 1;
+            continue;
+        }
+        const v: u32 = switch (c) {
+            'A'...'Z' => c - 'A',
+            'a'...'z' => c - 'a' + 26,
+            '0'...'9' => c - '0' + 52,
+            '+' => 62,
+            '/' => 63,
+            ' ', '\t', '\r', '\n' => continue,
+            else => {
+                out.deinit(a);
+                return null;
+            },
+        };
+        if (padding > 0) {
+            out.deinit(a);
+            return null;
+        }
+        acc = (acc << 6) | v;
+        count += 1;
+        if (count % 4 == 0) {
+            try out.appendSlice(a, &.{ @truncate(acc >> 16), @truncate(acc >> 8), @truncate(acc) });
+            acc = 0;
+        }
     }
-    const decoder = std.base64.standard.Decoder;
-    const dest_len = decoder.calcSizeForSlice(clean.items) catch return null;
-    const out = try a.alloc(u8, dest_len);
-    decoder.decode(out, clean.items) catch {
-        a.free(out);
+    const rest = count % 4;
+    if (rest == 1 or (padding > 0 and (padding > 2 or (count + padding) % 4 != 0))) {
+        out.deinit(a);
         return null;
-    };
-    return out;
+    }
+    if (rest == 2) try out.append(a, @truncate(acc >> 4));
+    if (rest == 3) try out.appendSlice(a, &.{ @truncate(acc >> 10), @truncate(acc >> 2) });
+    return try out.toOwnedSlice(a);
 }
 
 fn resolvePharPathWithCtx(path: []const u8, ctx: ?*NativeContext) ?phar_path.Resolved {
@@ -365,24 +394,57 @@ fn readPharEntry(a: Allocator, archive_path: []const u8, internal_path: []const 
     return try phar.extract(a, &loaded.parsed, entry);
 }
 
-// parses "data://[mediatype][;base64],<data>" into the decoded byte payload.
-// returns null on malformed input (no comma, bad base64)
-fn parseDataUri(a: Allocator, path: []const u8) !?[]u8 {
-    // PHP accepts both "data:" (RFC 2397) and the "data://" stream-wrapper form
-    const rest: []const u8 = if (std.mem.startsWith(u8, path, "data://"))
-        path[7..]
-    else if (std.mem.startsWith(u8, path, "data:"))
-        path[5..]
-    else
-        return null;
-    const comma = std.mem.indexOfScalar(u8, rest, ',') orelse return null;
-    const meta = rest[0..comma];
+const DataUriError = error{ NoComma, IllegalMediaType, IllegalParameter, IllegalUrl, UnableToDecode, OutOfMemory };
+
+// the reason php's rfc2397 wrapper gives for refusing a data: url
+fn dataUriErrorText(err: DataUriError) []const u8 {
+    return switch (err) {
+        error.NoComma => "rfc2397: no comma in URL",
+        error.IllegalMediaType => "rfc2397: illegal media type",
+        error.IllegalParameter => "rfc2397: illegal parameter",
+        error.IllegalUrl => "rfc2397: illegal URL",
+        error.UnableToDecode => "rfc2397: unable to decode",
+        error.OutOfMemory => "Out of memory",
+    };
+}
+
+// the decoded payload of "data:[//][mediatype][;param=value]*[;base64],<data>",
+// validated as php's rfc2397 wrapper does
+fn parseDataUri(a: Allocator, path: []const u8) DataUriError![]u8 {
+    var rest = path["data:".len..];
+    if (std.mem.startsWith(u8, rest, "//")) rest = rest[2..];
+    const comma = std.mem.indexOfScalar(u8, rest, ',') orelse return error.NoComma;
+    var meta = rest[0..comma];
     const data = rest[comma + 1 ..];
-    const is_base64 = std.mem.endsWith(u8, meta, ";base64");
-    const decoded = try percentDecode(a, data);
-    if (!is_base64) return decoded;
-    defer a.free(decoded);
-    return try base64DecodeBytes(a, decoded);
+    var is_base64 = false;
+    if (meta.len > 0) {
+        const semi = std.mem.indexOfScalar(u8, meta, ';');
+        const sep = std.mem.indexOfScalar(u8, meta, '/');
+        if (semi == null and sep == null) return error.IllegalMediaType;
+        if (semi == null) {
+            meta = "";
+        } else if (sep != null and sep.? < semi.?) {
+            meta = meta[semi.?..];
+        } else if (semi.? != 0 or !std.mem.eql(u8, meta, ";base64")) {
+            return error.IllegalMediaType;
+        }
+        // parameters, and possibly ";base64" last
+        while (meta.len > 0 and meta[0] == ';') {
+            meta = meta[1..];
+            const eq = std.mem.indexOfScalar(u8, meta, '=');
+            const next = std.mem.indexOfScalar(u8, meta, ';');
+            if (eq == null or (next != null and next.? < eq.?)) {
+                if (!std.mem.eql(u8, meta, "base64")) return error.IllegalParameter;
+                is_base64 = true;
+                meta = "";
+                break;
+            }
+            meta = if (next) |n| meta[n..] else "";
+        }
+        if (meta.len > 0) return error.IllegalUrl;
+    }
+    if (is_base64) return (try base64DecodeStrict(a, data)) orelse error.UnableToDecode;
+    return percentDecode(a, data);
 }
 
 pub fn cleanupHandle(obj: *PhpObject) void {
@@ -624,25 +686,30 @@ fn fetchUrl(ctx: *NativeContext, url: []const u8) RuntimeError!NativeResult {
 }
 
 fn native_file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const filename = try strArg(ctx, args, "file_get_contents", 0, "filename", true);
+    const use_include_path = args.len > 1 and args[1].isTruthy();
+    const offset = try intArg(ctx, args, "file_get_contents", 3, "offset", 0);
+    const have_len = args.len >= 5 and args[4] != .null;
+    const length: i64 = if (have_len) try intArg(ctx, args, "file_get_contents", 4, "length", 0) else 0;
+    if (length < 0) return throwValueError(ctx, "file_get_contents(): Argument #5 ($length) must be greater than or equal to 0", .{});
     try useContext(ctx, args, 2);
-    const path = try includePathLookup(ctx, args[0].string.bytes(), args.len > 1 and args[1].isTruthy());
-    const content = (try readPath(ctx, path)) orelse return NativeResult.scalar(.{ .bool = false });
+    const path = try includePathLookup(ctx, filename, use_include_path);
+    const content = (try readPathAs(ctx, path, "file_get_contents")) orelse return NativeResult.scalar(.{ .bool = false });
     transientStreams(ctx, 1);
-    if (args.len < 4 or args[3] == .null) return NativeResult.takeString(content);
+    if (offset == 0 and !have_len) return NativeResult.takeString(content);
 
-    // optional offset (4th arg) and length (5th arg)
     defer content.release();
     const bytes = content.bytes();
-    const total_i: i64 = @intCast(bytes.len);
-    var offset = Value.toInt(args[3]);
-    if (offset < 0) offset = @max(0, total_i + offset);
-    if (offset > total_i) offset = total_i;
-    const ustart: usize = @intCast(offset);
-    const have_len = args.len >= 5 and args[4] != .null;
-    const length: i64 = if (have_len) Value.toInt(args[4]) else total_i - offset;
-    if (length < 0) return NativeResult.scalar(.{ .bool = false });
-    const finish = @min(bytes.len, ustart + @as(usize, @intCast(length)));
+    const total: i64 = @intCast(bytes.len);
+    // a positive offset seeks from the start (past the end reads nothing), a
+    // negative one from the end, and seeking before the start fails
+    const start: i64 = if (offset >= 0) @min(offset, total) else total + offset;
+    if (start < 0) {
+        try warn(ctx, "file_get_contents(): Failed to seek to position {d} in the stream", .{offset});
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    const ustart: usize = @intCast(start);
+    const finish = if (have_len) @min(bytes.len, ustart +| @as(usize, @intCast(length))) else bytes.len;
     return try NativeResult.copyString(ctx.allocator, bytes[ustart..finish]);
 }
 
@@ -650,7 +717,14 @@ fn native_file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
 // wrappers, php://, data:, phar://, compress.zlib://, http(s)://, plain files);
 // null when it cannot be opened. the caller owns the returned reference
 pub fn readPath(ctx: *NativeContext, raw_path: []const u8) RuntimeError!?Value.String {
+    return readPathAs(ctx, raw_path, null);
+}
+
+// readPath for a php function that reports, as php's stream opener does, why
+// the path could not be opened (func names it in the warning)
+pub fn readPathAs(ctx: *NativeContext, raw_path: []const u8, comptime func: ?[]const u8) RuntimeError!?Value.String {
     var path = raw_path;
+    if (func != null and path.len == 0) return throwValueError(ctx, "Path must not be empty", .{});
     if (std.mem.startsWith(u8, path, "file://")) path = path[7..];
     if (userWrapperFor(ctx.vm, path)) |class_name| {
         const opened = (try dispatchUserOpen(ctx, class_name, path, "rb")) orelse return null;
@@ -687,7 +761,11 @@ pub fn readPath(ctx: *NativeContext, raw_path: []const u8) RuntimeError!?Value.S
         return try Value.String.create(ctx.allocator, "");
     }
     if (std.mem.startsWith(u8, path, "data:")) {
-        const payload = (parseDataUri(ctx.allocator, path) catch return null) orelse return null;
+        const payload = parseDataUri(ctx.allocator, path) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            if (func) |name| try warn(ctx, name ++ "({s}): Failed to open stream: {s}", .{ path, dataUriErrorText(err) });
+            return null;
+        };
         return try Value.String.adopt(ctx.allocator, payload);
     }
     if (std.mem.startsWith(u8, path, "phar://")) {
@@ -705,7 +783,18 @@ pub fn readPath(ctx: *NativeContext, raw_path: []const u8) RuntimeError!?Value.S
     }
     const content = bundle.readFileAlloc(ctx.allocator, path, std.math.maxInt(usize)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return null,
+        else => {
+            const name = func orelse return null;
+            if (err == error.IsDir) {
+                // a directory opens, and the read is what fails
+                const chunk: i64 = 8192;
+                const size: i64 = if (std.mem.eql(u8, name, "file_get_contents")) (if (plainStat(path, false)) |st| st.size else 0) else 0;
+                try notice(ctx, name ++ "(): Read of {d} bytes failed with errno=21 Is a directory", .{if (size > 0) size + chunk else chunk});
+                return try Value.String.create(ctx.allocator, "");
+            }
+            try warn(ctx, name ++ "({s}): Failed to open stream: {s}", .{ raw_path, errorText(err) });
+            return null;
+        },
     };
     return Value.String.adopt(ctx.allocator, content) catch |err| {
         ctx.allocator.free(content);
@@ -1801,11 +1890,13 @@ fn native_filetype(ctx: *NativeContext, args: []const Value) RuntimeError!Native
 // read file into array of lines
 
 fn native_file(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const filename = try strArg(ctx, args, "file", 0, "filename", true);
+    const flags = try intArg(ctx, args, "file", 1, "flags", 0);
+    // FILE_USE_INCLUDE_PATH | FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES | FILE_NO_DEFAULT_CONTEXT
+    if (flags & ~@as(i64, 23) != 0) return throwValueError(ctx, "file(): Argument #2 ($flags) must be a valid flag value", .{});
     try useContext(ctx, args, 2);
-    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
-    const path = try includePathLookup(ctx, args[0].string.bytes(), (flags & FILE_USE_INCLUDE_PATH) != 0);
-    const content = (try readPath(ctx, path)) orelse return NativeResult.scalar(.{ .bool = false });
+    const path = try includePathLookup(ctx, filename, (flags & FILE_USE_INCLUDE_PATH) != 0);
+    const content = (try readPathAs(ctx, path, "file")) orelse return NativeResult.scalar(.{ .bool = false });
     defer content.release();
     transientStreams(ctx, 1);
     const ignore_newlines = (flags & FILE_IGNORE_NEW_LINES) != 0;
@@ -1829,10 +1920,10 @@ fn native_file(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
 }
 
 fn native_readfile(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const filename = try strArg(ctx, args, "readfile", 0, "filename", true);
     try useContext(ctx, args, 2);
-    const path = try includePathLookup(ctx, args[0].string.bytes(), args.len > 1 and args[1].isTruthy());
-    const content = (try readPath(ctx, path)) orelse return NativeResult.scalar(.{ .bool = false });
+    const path = try includePathLookup(ctx, filename, args.len > 1 and args[1].isTruthy());
+    const content = (try readPathAs(ctx, path, "readfile")) orelse return NativeResult.scalar(.{ .bool = false });
     defer content.release();
     transientStreams(ctx, 1);
     try ctx.vm.output.appendSlice(ctx.allocator, content.bytes());
@@ -1845,7 +1936,7 @@ const FILE_SKIP_EMPTY_LINES: i64 = 4;
 
 // FILE_USE_INCLUDE_PATH: a plain name is looked up the way include looks it
 // up, and one include cannot find is opened as given
-fn includePathLookup(ctx: *NativeContext, path: []const u8, use: bool) RuntimeError![]const u8 {
+pub fn includePathLookup(ctx: *NativeContext, path: []const u8, use: bool) RuntimeError![]const u8 {
     if (!use or includes.hasScheme(path)) return path;
     return (try includes.resolve(ctx.vm, path)) orelse path;
 }
@@ -1947,7 +2038,11 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         return NativeResult.borrowed(.{ .resource = obj });
     }
     if (std.mem.startsWith(u8, path, "data:")) {
-        const payload = (parseDataUri(ctx.allocator, path) catch return NativeResult.scalar(.{ .bool = false })) orelse return NativeResult.scalar(.{ .bool = false });
+        const payload = parseDataUri(ctx.allocator, path) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            try warn(ctx, "fopen({s}): Failed to open stream: {s}", .{ path, dataUriErrorText(err) });
+            return NativeResult.scalar(.{ .bool = false });
+        };
         const obj = try ctx.createResource("FileHandle");
         try setAdoptedBuffer(ctx, obj, payload);
         try obj.set(ctx.allocator, "__pos", .{ .int = 0 });

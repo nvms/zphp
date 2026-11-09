@@ -1,6 +1,6 @@
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
-const bundle = @import("../bundle.zig");
+const filesystem = @import("filesystem.zig");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
@@ -23,12 +23,23 @@ fn native_parse_ini_string(ctx: *NativeContext, args: []const Value) RuntimeErro
 
 fn native_parse_ini_file(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const path = args[0].string.bytes();
-    const content = bundle.readFileAlloc(ctx.allocator, path, 1024 * 1024 * 64) catch return NativeResult.scalar(Value{ .bool = false });
-    defer ctx.allocator.free(content);
+    const filename = args[0].string.bytes();
+    if (std.mem.indexOfScalar(u8, filename, 0) != null) {
+        try ctx.vm.setPendingException("ValueError", "parse_ini_file(): Argument #1 ($filename) must not contain any null bytes");
+        return error.RuntimeError;
+    }
+    if (filename.len == 0) {
+        try ctx.vm.setPendingException("ValueError", "parse_ini_file(): Argument #1 ($filename) must not be empty");
+        return error.RuntimeError;
+    }
+    // opened the way include opens a file: through the include path, with
+    // php's warning when it cannot be
+    const path = try filesystem.includePathLookup(ctx, filename, true);
+    const content = (try filesystem.readPathAs(ctx, path, "parse_ini_file")) orelse return NativeResult.scalar(Value{ .bool = false });
+    defer content.release();
     const process_sections = if (args.len >= 2) Value.isTruthy(args[1]) else false;
     const mode = parseMode(if (args.len >= 3) args[2] else .{ .int = 0 });
-    return parseIni(ctx, content, process_sections, mode);
+    return parseIni(ctx, content.bytes(), process_sections, mode);
 }
 
 fn parseMode(v: Value) ScannerMode {
