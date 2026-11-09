@@ -72,12 +72,17 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         const op: OpCode = @enumFromInt(code[ip + 4]);
                         const both_int = a.* == .int and b.* == .int;
                         if ((both_int or (a.* == .float and b.* == .float)) and (op == .add or op == .subtract or op == .multiply)) {
-                            const r: Value = switch (op) {
-                                .add => if (both_int) Value.intAdd(a.int, b.int) else .{ .float = a.float + b.float },
-                                .subtract => if (both_int) Value.intSub(a.int, b.int) else .{ .float = a.float - b.float },
-                                else => if (both_int) Value.intMul(a.int, b.int) else .{ .float = a.float * b.float },
-                            };
-                            b.* = r;
+                            if (both_int) {
+                                storeIntArith(b, op, a.int, b.int);
+                            } else {
+                                const x = a.float;
+                                const y = b.float;
+                                b.* = .{ .float = switch (op) {
+                                    .add => x + y,
+                                    .subtract => x - y,
+                                    else => x * y,
+                                } };
+                            }
                             ip += 6;
                             continue :dispatch .set_local;
                         }
@@ -85,8 +90,10 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     ip += 2;
                     // an object pushed onto the operand stack takes a reference
                     // (Stage 1); arrays are not stack-owned (refcounting Stage 2)
-                    VM.stackRetain(locals[slot]);
-                    stack[sp] = locals[slot];
+                    if (!copyScalar(&stack[sp], &locals[slot])) {
+                        VM.stackRetain(locals[slot]);
+                        stack[sp] = locals[slot];
+                    }
                     sp += 1;
                     const _next = code[ip];
                     ip += 1;
@@ -139,152 +146,105 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
-                .add => {
-                    const b = stack[sp - 1];
-                    const a = stack[sp - 2];
-                    // arrays (union, TypeError) and strings (numeric warnings) take
-                    // runLoop's arithmetic
-                    if (!isNumber(a) or !isNumber(b)) {
+                inline .add, .subtract, .multiply => |arith_op| {
+                    // operands are read in place: a whole copy of a value the
+                    // previous handler just wrote stalls on store forwarding
+                    const bp = &stack[sp - 1];
+                    const ap = &stack[sp - 2];
+                    // each branch stores its own result: a result value
+                    // merged across branches is spilled and copied back whole
+                    if (ap.* == .int and bp.* == .int) {
+                        storeIntArith(ap, arith_op, ap.int, bp.int);
+                    } else if (ap.* == .float and bp.* == .float) {
+                        const x = ap.float;
+                        const y = bp.float;
+                        ap.* = .{ .float = switch (arith_op) {
+                            .add => x + y,
+                            .subtract => x - y,
+                            else => x * y,
+                        } };
+                    } else {
+                        const x = ap.*;
+                        const y = bp.*;
+                        // arrays (union, TypeError) and strings (numeric warnings) take
+                        // runLoop's arithmetic
+                        if (!isNumber(x) or !isNumber(y)) {
+                            frame.ip = ip - 1;
+                            self.sp = sp;
+                            return;
+                        }
+                        ap.* = switch (arith_op) {
+                            .add => Value.add(x, y),
+                            .subtract => Value.subtract(x, y),
+                            else => Value.multiply(x, y),
+                        };
+                    }
+                    sp -= 1;
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                },
+                inline .less, .less_equal, .greater, .greater_equal => |cmp_op| {
+                    const bp = &stack[sp - 1];
+                    const ap = &stack[sp - 2];
+                    const compared: bool = if (ap.* == .int and bp.* == .int) switch (cmp_op) {
+                        .less => ap.int < bp.int,
+                        .less_equal => ap.int <= bp.int,
+                        .greater => ap.int > bp.int,
+                        else => ap.int >= bp.int,
+                    } else if (ap.* == .float and bp.* == .float) switch (cmp_op) {
+                        .less => ap.float < bp.float,
+                        .less_equal => ap.float <= bp.float,
+                        .greater => ap.float > bp.float,
+                        else => ap.float >= bp.float,
+                    } else blk: {
+                        const x = ap.*;
+                        const y = bp.*;
+                        if (x == .object or y == .object or x == .resource or y == .resource or x == .array or y == .array) {
+                            frame.ip = ip - 1;
+                            self.sp = sp;
+                            return;
+                        }
+                        const result = switch (cmp_op) {
+                            .less => Value.lessThan(x, y),
+                            .less_equal => !Value.lessThan(y, x),
+                            .greater => Value.lessThan(y, x),
+                            else => !Value.lessThan(x, y),
+                        };
+                        self.stackRelease(x);
+                        self.stackRelease(y);
+                        break :blk result;
+                    };
+                    sp -= 1;
+                    stack[sp - 1] = .{ .bool = compared };
+                    if (code[ip] == @intFromEnum(OpCode.jump_if_false)) fuseJumpIfFalse(self, ic, code, &ip, &sp, compared);
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                },
+                .equal, .not_equal => |byte_eq| {
+                    // operands of one scalar type compare by value; the rest
+                    // (numeric strings, mixed types, objects) take runLoop's rules
+                    const b_eq = &stack[sp - 1];
+                    const a_eq = &stack[sp - 2];
+                    const same: bool = switch (a_eq.*) {
+                        .int => |x| if (b_eq.* == .int) x == b_eq.int else null,
+                        .float => |x| if (b_eq.* == .float) x == b_eq.float else null,
+                        .bool => |x| if (b_eq.* == .bool) x == b_eq.bool else null,
+                        .null => if (b_eq.* == .null) true else null,
+                        else => null,
+                    } orelse {
                         frame.ip = ip - 1;
                         self.sp = sp;
                         return;
-                    }
-                    sp -= 2;
-                    self.stackRelease(a);
-                    self.stackRelease(b);
-                    stack[sp] = if (a == .int and b == .int) Value.intAdd(a.int, b.int) else if (a == .float and b == .float) .{ .float = a.float + b.float } else Value.add(a, b);
-                    sp += 1;
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
-                },
-                .subtract => {
-                    const b = stack[sp - 1];
-                    const a = stack[sp - 2];
-                    // arrays (union, TypeError) and strings (numeric warnings) take
-                    // runLoop's arithmetic
-                    if (!isNumber(a) or !isNumber(b)) {
-                        frame.ip = ip - 1;
-                        self.sp = sp;
-                        return;
-                    }
-                    sp -= 2;
-                    self.stackRelease(a);
-                    self.stackRelease(b);
-                    stack[sp] = if (a == .int and b == .int) Value.intSub(a.int, b.int) else if (a == .float and b == .float) .{ .float = a.float - b.float } else Value.subtract(a, b);
-                    sp += 1;
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
-                },
-                .multiply => {
-                    const b = stack[sp - 1];
-                    const a = stack[sp - 2];
-                    // arrays (union, TypeError) and strings (numeric warnings) take
-                    // runLoop's arithmetic
-                    if (!isNumber(a) or !isNumber(b)) {
-                        frame.ip = ip - 1;
-                        self.sp = sp;
-                        return;
-                    }
-                    sp -= 2;
-                    self.stackRelease(a);
-                    self.stackRelease(b);
-                    stack[sp] = if (a == .int and b == .int) Value.intMul(a.int, b.int) else if (a == .float and b == .float) .{ .float = a.float * b.float } else Value.multiply(a, b);
-                    sp += 1;
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
-                },
-                .less => {
-                    const b = stack[sp - 1];
-                    const a = stack[sp - 2];
-                    const result = if (a == .int and b == .int) a.int < b.int else if (a == .float and b == .float) a.float < b.float else blk: {
-                        if (a == .object or b == .object or a == .resource or b == .resource or a == .array or b == .array) {
-                            frame.ip = ip - 1;
-                            self.sp = sp;
-                            return;
-                        }
-                        break :blk Value.lessThan(a, b);
                     };
-                    sp -= 2;
-                    self.stackRelease(a);
-                    self.stackRelease(b);
-                    stack[sp] = .{ .bool = result };
-                    sp += 1;
+                    sp -= 1;
+                    const compared = if (byte_eq == .equal) same else !same;
+                    stack[sp - 1] = .{ .bool = compared };
+                    if (code[ip] == @intFromEnum(OpCode.jump_if_false)) fuseJumpIfFalse(self, ic, code, &ip, &sp, compared);
                     const _next = code[ip];
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
-                },
-                .less_equal => {
-                    const b = stack[sp - 1];
-                    const a = stack[sp - 2];
-                    const result = if (a == .int and b == .int) a.int <= b.int else blk: {
-                        if (a == .object or b == .object or a == .resource or b == .resource or a == .array or b == .array) {
-                            frame.ip = ip - 1;
-                            self.sp = sp;
-                            return;
-                        }
-                        break :blk !Value.lessThan(b, a);
-                    };
-                    sp -= 2;
-                    self.stackRelease(a);
-                    self.stackRelease(b);
-                    stack[sp] = .{ .bool = result };
-                    sp += 1;
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
-                },
-                .greater => {
-                    const b = stack[sp - 1];
-                    const a = stack[sp - 2];
-                    const result = if (a == .int and b == .int) a.int > b.int else blk: {
-                        if (a == .object or b == .object or a == .resource or b == .resource or a == .array or b == .array) {
-                            frame.ip = ip - 1;
-                            self.sp = sp;
-                            return;
-                        }
-                        break :blk Value.lessThan(b, a);
-                    };
-                    sp -= 2;
-                    self.stackRelease(a);
-                    self.stackRelease(b);
-                    stack[sp] = .{ .bool = result };
-                    sp += 1;
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
-                },
-                .greater_equal => {
-                    const b = stack[sp - 1];
-                    const a = stack[sp - 2];
-                    const result = if (a == .int and b == .int) a.int >= b.int else blk: {
-                        if (a == .object or b == .object or a == .resource or b == .resource or a == .array or b == .array) {
-                            frame.ip = ip - 1;
-                            self.sp = sp;
-                            return;
-                        }
-                        break :blk !Value.lessThan(a, b);
-                    };
-                    sp -= 2;
-                    self.stackRelease(a);
-                    self.stackRelease(b);
-                    stack[sp] = .{ .bool = result };
-                    sp += 1;
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
-                },
-                .equal => {
-                    frame.ip = ip - 1;
-                    self.sp = sp;
-                    return;
-                },
-                .not_equal => {
-                    frame.ip = ip - 1;
-                    self.sp = sp;
-                    return;
                 },
                 .identical => {
                     const b_id = stack[sp - 1];
@@ -298,8 +258,10 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     sp -= 2;
                     self.stackRelease(a_id);
                     self.stackRelease(b_id);
-                    stack[sp] = .{ .bool = Value.identical(a_id, b_id) };
+                    const compared = Value.identical(a_id, b_id);
+                    stack[sp] = .{ .bool = compared };
                     sp += 1;
+                    if (code[ip] == @intFromEnum(OpCode.jump_if_false)) fuseJumpIfFalse(self, ic, code, &ip, &sp, compared);
                     const _next = code[ip];
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
@@ -316,8 +278,10 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     sp -= 2;
                     self.stackRelease(a_ni);
                     self.stackRelease(b_ni);
-                    stack[sp] = .{ .bool = !Value.identical(a_ni, b_ni) };
+                    const compared = !Value.identical(a_ni, b_ni);
+                    stack[sp] = .{ .bool = compared };
                     sp += 1;
+                    if (code[ip] == @intFromEnum(OpCode.jump_if_false)) fuseJumpIfFalse(self, ic, code, &ip, &sp, compared);
                     const _next = code[ip];
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
@@ -1855,6 +1819,47 @@ inline fn hasCallRoom(self: *VM, sp: usize, entry_sp: usize) RuntimeError!bool {
     self.sp = sp;
     try status(result);
     return grown;
+}
+
+// a comparison followed by jump_if_false branches on the result it holds,
+// as jump_if_false would, without reading the bool back from the stack
+inline fn fuseJumpIfFalse(self: *VM, ic: *InlineCache, code: []const u8, ip: *usize, sp: *usize, result: bool) void {
+    const offset = (@as(u16, code[ip.* + 1]) << 8) | code[ip.* + 2];
+    ip.* += 3;
+    if (!result) {
+        ip.* += offset;
+    } else if (code[ip.*] == @intFromEnum(OpCode.pop) or code[ip.*] == @intFromEnum(OpCode.pop_boundary)) {
+        ip.* += 1;
+        sp.* -= 1;
+        if (self.hasPendingReleases()) {
+            self.sp = sp.*;
+            ic.slow.drain_pending_destruct(self);
+            sp.* = self.sp;
+        }
+    }
+}
+
+// php's int arithmetic, a float when it overflows, stored a field at a time:
+// a result union returned whole is built in memory and copied, and the copy
+// stalls the next read
+inline fn storeIntArith(dst: *Value, op: OpCode, x: i64, y: i64) void {
+    const r = switch (op) {
+        .add => @addWithOverflow(x, y),
+        .subtract => @subWithOverflow(x, y),
+        else => @mulWithOverflow(x, y),
+    };
+    if (r[1] == 0) {
+        @branchHint(.likely);
+        dst.* = .{ .int = r[0] };
+        return;
+    }
+    const fx: f64 = @floatFromInt(x);
+    const fy: f64 = @floatFromInt(y);
+    dst.* = .{ .float = switch (op) {
+        .add => fx + fy,
+        .subtract => fx - fy,
+        else => fx * fy,
+    } };
 }
 
 // scalars are read and written field by field: copying a whole value the
