@@ -1749,6 +1749,8 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     const local_count = sub.next_slot;
 
     const closure_lo = !gen and !is_variadic and !has_any_ref and !has_ref_capture and !needsVarSync(&sub.chunk);
+    // an arrow function has no braces of its own; it ends with its expression
+    const arrow_end = if (is_arrow) endLineForChunk(self, &sub.chunk) else 0;
 
     const func = ObjFunction{
         .name = owned_name,
@@ -1769,7 +1771,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         .slot_names = slot_names,
         .file_path = self.file_path,
         .start_line = lineForToken(self, node.main_token),
-        .end_line = endLineForBlockStartingAt(self, node.main_token),
+        .end_line = if (is_arrow) arrow_end else endLineForBlockStartingAt(self, node.main_token),
         .doc_comment = docCommentForToken(self, node.main_token),
         .display_name = display_name,
         .no_discard = call_attrs.no_discard,
