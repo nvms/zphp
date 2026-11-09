@@ -33,3 +33,4 @@ fread_fwrite_wrong_mode_notices.php: windows reports a read on a write-only hand
 stream_argument_validation.php: a non-blocking flock waits on windows, so the contended lock would hang
 disk_space_warnings.php: php on windows words a missing path with the system's message
 tempnam_names_fallback.php: php on windows names temporary files through GetTempFileName
+basename_dirname_pathinfo_edges.php: windows splits at backslashes and drive colons and answers the root with a backslash

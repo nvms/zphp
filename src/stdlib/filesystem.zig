@@ -987,86 +987,104 @@ fn usablePath(path: []const u8) bool {
     return path.len > 0 and std.mem.indexOfScalar(u8, path, 0) == null;
 }
 
-// the last path separator; windows accepts both kinds
-fn lastSep(path: []const u8) ?usize {
-    var i = path.len;
-    while (i > 0) : (i -= 1) if (platform.isSep(path[i - 1])) return i - 1;
-    return null;
+// php_basename: the last path segment, trailing separators ignored; a
+// suffix comes off when something is left. windows also splits at a drive's
+// colon
+pub fn phpBasename(path: []const u8, suffix: []const u8) []const u8 {
+    var end = path.len;
+    while (end > 0 and (platform.isSep(path[end - 1]) or (platform.is_windows and path[end - 1] == ':' and driveColon(path, end - 1)))) end -= 1;
+    if (end == 0) return "";
+    var start = end;
+    while (start > 0 and !platform.isSep(path[start - 1])) {
+        if (platform.is_windows and path[start - 1] == ':' and driveColon(path, start - 1)) break;
+        start -= 1;
+    }
+    var name = path[start..end];
+    if (suffix.len > 0 and suffix.len < name.len and std.mem.endsWith(u8, name, suffix)) name = name[0 .. name.len - suffix.len];
+    return name;
+}
+
+// a colon that ends a drive letter ("c:file")
+fn driveColon(path: []const u8, at: usize) bool {
+    return at == 1 and std.ascii.isAlphabetic(path[0]);
+}
+
+// zend_dirname: the path without its last segment and the separators around
+// it; "." when there is no separator, the separator alone for the root
+fn phpDirname(path: []const u8) []const u8 {
+    var prefix: usize = 0;
+    // a windows drive spec stays as written
+    if (platform.is_windows and path.len >= 2 and std.ascii.isAlphabetic(path[0]) and path[1] == ':') {
+        if (path.len == 2) return path;
+        prefix = 2;
+    }
+    if (path.len == prefix) return path[0..prefix];
+    var end = path.len;
+    while (end > prefix and platform.isSep(path[end - 1])) end -= 1;
+    if (end == prefix) return if (prefix == 0) platform.sep_str else path[0 .. prefix + 1];
+    while (end > prefix and !platform.isSep(path[end - 1])) end -= 1;
+    if (end == prefix) return if (prefix == 0) "." else path[0..prefix];
+    while (end > prefix and platform.isSep(path[end - 1])) end -= 1;
+    if (end == prefix) return if (prefix == 0) platform.sep_str else path[0 .. prefix + 1];
+    return path[0..end];
 }
 
 fn native_basename(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.literal("");
-    var path = args[0].string.bytes();
-    const suffix = if (args.len >= 2 and args[1] == .string) args[1].string.bytes() else "";
-    // PHP strips trailing slashes before extracting the last segment
-    while (path.len > 1 and platform.isSep(path[path.len - 1])) path = path[0 .. path.len - 1];
-    var name: []const u8 = path;
-    if (lastSep(path)) |pos| {
-        name = path[pos + 1 ..];
-    }
-    if (suffix.len > 0 and name.len > suffix.len and std.mem.endsWith(u8, name, suffix)) {
-        name = name[0 .. name.len - suffix.len];
-    }
-    return NativeResult.copyString(ctx.allocator, name);
+    const path = try strArg(ctx, args, "basename", 0, "path", false);
+    const suffix = try strArg(ctx, args, "basename", 1, "suffix", false);
+    return NativeResult.copyString(ctx.allocator, phpBasename(path, suffix));
 }
 
 fn native_dirname(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.literal("");
-    var path = args[0].string.bytes();
+    var path = try strArg(ctx, args, "dirname", 0, "path", false);
+    var levels = try intArg(ctx, args, "dirname", 1, "levels", 1);
+    if (levels < 1) return throwValueError(ctx, "dirname(): Argument #2 ($levels) must be greater than or equal to 1", .{});
     if (path.len == 0) return NativeResult.literal("");
-    var levels: i64 = if (args.len >= 2) Value.toInt(args[1]) else 1;
-    if (levels <= 0) return NativeResult.copyString(ctx.allocator, path);
+    // each level strips one more segment, until a level changes nothing
     while (levels > 0) : (levels -= 1) {
-        while (path.len > 1 and platform.isSep(path[path.len - 1])) path = path[0 .. path.len - 1];
-        if (lastSep(path)) |pos| {
-            if (pos == 0) {
-                path = platform.sep_str;
-                break;
-            }
-            path = path[0..pos];
-        } else {
-            path = ".";
-            break;
-        }
+        const up = phpDirname(path);
+        const shrank = up.len < path.len;
+        path = up;
+        if (!shrank) break;
     }
     return NativeResult.copyString(ctx.allocator, path);
 }
 
+const PATHINFO_DIRNAME: i64 = 1;
+const PATHINFO_BASENAME: i64 = 2;
+const PATHINFO_EXTENSION: i64 = 4;
+const PATHINFO_FILENAME: i64 = 8;
+const PATHINFO_ALL: i64 = 15;
+
+// pathinfo builds every part its flags ask for, in this order; one flag (or
+// several) answers with the first part built, "" when there is none
 fn native_pathinfo(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.null);
-    // PHP strips trailing slashes from the input before splitting (so
-    // pathinfo("/a/b/") yields dirname=/a, basename=b, matching basename())
-    var path = args[0].string.bytes();
-    while (path.len > 1 and platform.isSep(path[path.len - 1])) path = path[0 .. path.len - 1];
-
-    const dir: []const u8 = if (lastSep(path)) |pos|
-        (if (pos == 0) platform.sep_str else path[0..pos])
-    else
-        ".";
-    const base: []const u8 = if (lastSep(path)) |pos| path[pos + 1 ..] else path;
-    const has_dot = std.mem.lastIndexOf(u8, base, ".") != null;
-    const dot_pos: usize = if (has_dot) std.mem.lastIndexOf(u8, base, ".").? else 0;
-    const ext: []const u8 = if (has_dot) base[dot_pos + 1 ..] else "";
-    const filename: []const u8 = if (has_dot) base[0..dot_pos] else base;
-
-    if (args.len >= 2 and args[1] == .int) {
-        const flag = args[1].int;
-        return switch (flag) {
-            1 => try NativeResult.copyString(ctx.allocator, dir),
-            2 => try NativeResult.copyString(ctx.allocator, base),
-            4 => try NativeResult.copyString(ctx.allocator, ext),
-            8 => try NativeResult.copyString(ctx.allocator, filename),
-            else => NativeResult.scalar(.null),
-        };
+    const path = try strArg(ctx, args, "pathinfo", 0, "path", false);
+    const opt = try intArg(ctx, args, "pathinfo", 1, "flags", PATHINFO_ALL);
+    const base = phpBasename(path, "");
+    const dot = std.mem.lastIndexOfScalar(u8, base, '.');
+    const Part = struct { key: []const u8, value: []const u8 };
+    var parts: [4]Part = undefined;
+    var count: usize = 0;
+    if (opt & PATHINFO_DIRNAME != 0 and path.len > 0) {
+        parts[count] = .{ .key = "dirname", .value = phpDirname(path) };
+        count += 1;
     }
-
+    if (opt & PATHINFO_BASENAME != 0) {
+        parts[count] = .{ .key = "basename", .value = base };
+        count += 1;
+    }
+    if (opt & PATHINFO_EXTENSION != 0) if (dot) |d| {
+        parts[count] = .{ .key = "extension", .value = base[d + 1 ..] };
+        count += 1;
+    };
+    if (opt & PATHINFO_FILENAME != 0) {
+        parts[count] = .{ .key = "filename", .value = base[0 .. dot orelse base.len] };
+        count += 1;
+    }
+    if (opt != PATHINFO_ALL) return NativeResult.copyString(ctx.allocator, if (count > 0) parts[0].value else "");
     var arr = try ctx.createArray();
-    try arr.setCopiedString(ctx.allocator, .{ .string = Value.String.borrowed("dirname") }, dir);
-    try arr.setCopiedString(ctx.allocator, .{ .string = Value.String.borrowed("basename") }, base);
-    if (has_dot) {
-        try arr.setCopiedString(ctx.allocator, .{ .string = Value.String.borrowed("extension") }, ext);
-    }
-    try arr.setCopiedString(ctx.allocator, .{ .string = Value.String.borrowed("filename") }, filename);
+    for (parts[0..count]) |part| try arr.setCopiedString(ctx.allocator, .{ .string = Value.String.borrowed(part.key) }, part.value);
     return NativeResult.borrowed(.{ .array = arr });
 }
 
