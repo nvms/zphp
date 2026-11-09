@@ -8445,6 +8445,9 @@ pub const VM = struct {
                         // cannot know the class (inside a trait)
                         const target = self.resolveRelativeClassName(class_name_val.string.bytes());
                         self.push(.{ .bool = self.isInstanceOf(obj_val.object.class_name, target) });
+                    } else if (obj_val == .object and class_name_val == .object) {
+                        // `$a instanceof $b` with an object on the right tests its class
+                        self.push(.{ .bool = self.isInstanceOf(obj_val.object.class_name, class_name_val.object.class_name) });
                     } else if (obj_val == .generator and class_name_val == .string) {
                         const t = class_name_val.string.bytes();
                         const matches = std.mem.eql(u8, t, "Generator") or
