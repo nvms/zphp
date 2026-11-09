@@ -25,3 +25,4 @@ pdo_prepared_bindings_fetchall_modes.php: php on windows cannot unlink a sqlite 
 pdo_sqlite_query_prepare_txn.php: php on windows cannot unlink a sqlite file it still holds open
 stream_socket_pair.php: the runner's php fails stream_socket_pair(STREAM_PF_UNIX) itself on windows (setsockopt 10042); zphp's pair works
 backtick_shell.php: the test drives a posix shell (printf, quoting, >&2), which cmd.exe doesn't have
+chmod_path_modes.php: windows keeps only a read-only bit, so the modes read back differ from the unix ones the test prints

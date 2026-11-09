@@ -781,9 +781,10 @@ fn putContents(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
 }
 
 fn native_file_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const spelled = try strArg(ctx, args, "file_exists", 0, "filename", false);
+    if (!usablePath(spelled)) return NativeResult.scalar(.{ .bool = false });
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = bundle.osPath(&os_buf, args[0].string.bytes());
+    const path = bundle.osPath(&os_buf, spelled);
     if (userWrapperFor(ctx.vm, path)) |class_name| {
         const arr = try dispatchUserStat(ctx, class_name, path, 0);
         return NativeResult.scalar(.{ .bool = arr != null });
@@ -811,9 +812,9 @@ fn native_file_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
 }
 
 fn native_is_file(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const spelled = if (args[0] == .string) args[0].string.bytes() else if (args[0] == .object and ctx.vm.hasMethod(args[0].object.class_name, "__toString")) try ctx.vm.objectToString(args[0].object) else return NativeResult.scalar(.{ .bool = false });
+    const spelled = try strArg(ctx, args, "is_file", 0, "filename", false);
+    if (!usablePath(spelled)) return NativeResult.scalar(.{ .bool = false });
     const path = bundle.osPath(&os_buf, spelled);
     if (userWrapperFor(ctx.vm, path)) |class_name| {
         const arr = (try dispatchUserStat(ctx, class_name, path, 0)) orelse return NativeResult.scalar(.{ .bool = false });
@@ -843,9 +844,9 @@ fn native_is_file(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
 }
 
 fn native_is_dir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const spelled = if (args[0] == .string) args[0].string.bytes() else if (args[0] == .object and ctx.vm.hasMethod(args[0].object.class_name, "__toString")) try ctx.vm.objectToString(args[0].object) else return NativeResult.scalar(.{ .bool = false });
+    const spelled = try strArg(ctx, args, "is_dir", 0, "filename", false);
+    if (!usablePath(spelled)) return NativeResult.scalar(.{ .bool = false });
     const path = bundle.osPath(&os_buf, spelled);
     if (userWrapperFor(ctx.vm, path)) |class_name| {
         const arr = (try dispatchUserStat(ctx, class_name, path, 0)) orelse return NativeResult.scalar(.{ .bool = false });
@@ -869,6 +870,12 @@ fn native_is_dir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     var dir = std.Io.Dir.cwd().openDir(platform.io, path, .{}) catch return NativeResult.scalar(Value{ .bool = false });
     dir.close(platform.io);
     return NativeResult.scalar(.{ .bool = true });
+}
+
+// an empty path or one with a nul byte names nothing; the exists-style
+// checks answer false for it without a warning
+fn usablePath(path: []const u8) bool {
+    return path.len > 0 and std.mem.indexOfScalar(u8, path, 0) == null;
 }
 
 // the last path separator; windows accepts both kinds
@@ -1444,19 +1451,21 @@ fn globMatchFlags(pattern: []const u8, name: []const u8, flags: i64) bool {
 // file info
 
 fn native_is_readable(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    if (std.mem.startsWith(u8, args[0].string.bytes(), "phar://")) return native_is_file(ctx, args);
+    const spelled = try strArg(ctx, args, "is_readable", 0, "filename", false);
+    if (!usablePath(spelled)) return NativeResult.scalar(.{ .bool = false });
+    if (std.mem.startsWith(u8, spelled, "phar://")) return native_is_file(ctx, args);
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = bundle.osPath(&os_buf, args[0].string.bytes());
+    const path = bundle.osPath(&os_buf, spelled);
     if (bundle.find(path) != null) return NativeResult.scalar(.{ .bool = true });
     std.Io.Dir.cwd().access(platform.io, path, .{ .read = true }) catch return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_is_writable(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+fn native_is_writable(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const spelled = try strArg(ctx, args, "is_writable", 0, "filename", false);
+    if (!usablePath(spelled)) return NativeResult.scalar(.{ .bool = false });
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = bundle.osPath(&os_buf, args[0].string.bytes());
+    const path = bundle.osPath(&os_buf, spelled);
     if (bundle.find(path) != null) return NativeResult.scalar(.{ .bool = writableAncestor(path) });
     std.Io.Dir.cwd().access(platform.io, path, .{ .write = true }) catch return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = !platform.isReadOnly(path) });
@@ -1476,9 +1485,10 @@ fn writableAncestor(path: []const u8) bool {
     }
 }
 
-fn native_is_executable(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const path = args[0].string.bytes();
+fn native_is_executable(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const spelled = try strArg(ctx, args, "is_executable", 0, "filename", false);
+    if (!usablePath(spelled)) return NativeResult.scalar(.{ .bool = false });
+    const path = spelled;
     if (platform.is_windows) {
         std.Io.Dir.cwd().access(platform.io, path, .{}) catch return NativeResult.scalar(.{ .bool = false });
         const ext = std.fs.path.extension(path);
@@ -2896,31 +2906,27 @@ fn native_touch(_: *NativeContext, args: []const Value) RuntimeError!NativeResul
 }
 
 fn native_chmod(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len > 0 and args[0] == .string) bundle.prepareWrite(args[0].string.bytes(), .edit);
-    // windows keeps only a read-only bit: no write permission sets it
-    if (platform.is_windows) return windowsChmod(args);
-    return posixChmod(ctx, args);
-}
-
-fn windowsChmod(args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const mode = Value.toInt(args[1]);
+    const spelled = try strArg(ctx, args, "chmod", 0, "filename", true);
+    const mode = try intArg(ctx, args, "chmod", 1, "permissions", 0);
     var os_buf: [std.fs.max_path_bytes]u8 = undefined;
-    return NativeResult.scalar(.{ .bool = platform.setReadOnly(bundle.osPath(&os_buf, args[0].string.bytes()), (mode & 0o222) == 0) });
-}
-
-fn posixChmod(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    var os_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = bundle.osPath(&os_buf, args[0].string.bytes());
-    const mode_val = Value.toInt(args[1]);
-    if (mode_val < 0) return NativeResult.scalar(.{ .bool = false });
-    const mode: std.posix.mode_t = @intCast(mode_val);
-
-    const file = std.Io.Dir.cwd().openFile(platform.io, path, .{ .mode = .read_write }) catch
+    const path = bundle.osPath(&os_buf, spelled);
+    bundle.prepareWrite(path, .edit);
+    if (platform.is_windows) {
+        // windows keeps only a read-only bit: no write permission sets it
+        if (platform.setReadOnly(path, (mode & 0o222) == 0)) return NativeResult.scalar(.{ .bool = true });
+        try warn(ctx, "chmod(): No such file or directory", .{});
         return NativeResult.scalar(.{ .bool = false });
-    defer file.close(platform.io);
-    file.setPermissions(platform.io, platform.permissionsFromMode(mode)) catch return NativeResult.scalar(.{ .bool = false });
+    }
+    // chmod(2) on the path, as php does: opening it first would refuse a
+    // directory or a file without read and write permission
+    const path_z = std.posix.toPosixPath(path) catch {
+        try warn(ctx, "chmod(): File name too long", .{});
+        return NativeResult.scalar(.{ .bool = false });
+    };
+    if (std.c.chmod(&path_z, @truncate(@as(u64, @bitCast(mode)))) != 0) {
+        try warn(ctx, "chmod(): {s}", .{sys.errnoText()});
+        return NativeResult.scalar(.{ .bool = false });
+    }
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -3062,9 +3068,10 @@ fn native_filegroup(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     return statOne(ctx, args, .gid, "filegroup");
 }
 
-fn native_is_link(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const path = args[0].string.bytes();
+fn native_is_link(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const spelled = try strArg(ctx, args, "is_link", 0, "filename", false);
+    if (!usablePath(spelled)) return NativeResult.scalar(.{ .bool = false });
+    const path = spelled;
     const st = sys.lstat(path) catch return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = (st.mode & 0o170000) == 0o120000 });
 }
