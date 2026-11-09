@@ -35,3 +35,4 @@ disk_space_warnings.php: php on windows words a missing path with the system's m
 tempnam_names_fallback.php: php on windows names temporary files through GetTempFileName
 basename_dirname_pathinfo_edges.php: windows splits at backslashes and drive colons and answers the root with a backslash
 fnmatch_flags_glob_relative.php: windows has no fnmatch(3); the bundled matcher there does not yet handle escapes
+php_fd_wrapper.php: php://fd duplicates posix descriptors, which windows php does not offer the same way

@@ -2144,6 +2144,12 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         return NativeResult.borrowed(.{ .resource = obj });
     }
 
+    if (std.ascii.startsWithIgnoreCase(path, "php://fd/")) return openFdStream(ctx, path, mode);
+    if (std.ascii.startsWithIgnoreCase(path, "php://") and !knownPhpStream(path[6..])) {
+        try warn(ctx, "fopen(): Invalid php:// URL specified", .{});
+        try warn(ctx, "fopen({s}): Failed to open stream: operation failed", .{path});
+        return NativeResult.scalar(.{ .bool = false });
+    }
     const is_memory_stream = std.mem.startsWith(u8, path, "php://temp") or std.mem.startsWith(u8, path, "php://memory");
     const file = if (is_memory_stream)
         anonymousFile() orelse return NativeResult.scalar(.{ .bool = false })
@@ -2159,9 +2165,54 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     const obj = try ctx.createResource("FileHandle");
     try obj.set(ctx.allocator, "__fd", .{ .int = platform.fdFromFile(file) });
     try obj.set(ctx.allocator, "__open", .{ .bool = true });
-    try obj.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed(mode) });
+    // memory streams report php's own mode: append, read-only, or read-write
+    const shown_mode: []const u8 = if (!is_memory_stream) mode else if (std.mem.indexOfScalar(u8, mode, 'a') != null) "a+b" else if (std.mem.indexOfAny(u8, mode, "w+") != null) "w+b" else "rb";
+    try obj.setCopiedString(ctx.allocator, "__mode", shown_mode);
     try obj.setCopiedString(ctx.allocator, "__path", path);
     if (is_memory_stream) try obj.set(ctx.allocator, "__peek_eof", .{ .bool = true });
+    return NativeResult.borrowed(.{ .resource = obj });
+}
+
+// the php:// streams php's wrapper knows, after the scheme
+fn knownPhpStream(rest: []const u8) bool {
+    inline for (.{ "stdin", "stdout", "stderr", "output", "input" }) |name| if (std.ascii.eqlIgnoreCase(rest, name)) return true;
+    inline for (.{ "memory", "temp", "filter/" }) |prefix| if (std.ascii.startsWithIgnoreCase(rest, prefix)) return true;
+    return false;
+}
+
+extern "c" fn dup(fd: c_int) c_int;
+
+// php://fd/N: a duplicate of descriptor N, whatever the mode says. 0, 1 and 2
+// stay the process's own stdio so writes keep their order with echo
+fn openFdStream(ctx: *NativeContext, path: []const u8, mode: []const u8) RuntimeError!NativeResult {
+    const digits = path["php://fd/".len..];
+    const number = std.fmt.parseInt(i64, digits, 10) catch {
+        try warn(ctx, "fopen({s}): Failed to open stream: php://fd/ stream must be specified in the form php://fd/<orig fd>", .{path});
+        return NativeResult.scalar(.{ .bool = false });
+    };
+    if (platform.is_windows) {
+        try warn(ctx, "fopen({s}): Failed to open stream: operation failed", .{path});
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    const limit: i64 = if (std.posix.getrlimit(.NOFILE)) |lim| @intCast(@min(lim.cur, std.math.maxInt(c_int))) else |_| 1024;
+    if (number < 0 or number >= limit) {
+        try warn(ctx, "fopen({s}): Failed to open stream: The file descriptors must be non-negative numbers smaller than {d}", .{ path, limit });
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    const fd: i64 = if (number <= 2) number else blk: {
+        const copy = dup(@intCast(number));
+        if (copy < 0) {
+            const code = std.c._errno().*;
+            try warn(ctx, "fopen({s}): Failed to open stream: Error duping file descriptor {d}; possibly it doesn't exist: [{d}]: {s}", .{ path, number, code, sys.errnoText() });
+            return NativeResult.scalar(.{ .bool = false });
+        }
+        break :blk copy;
+    };
+    const obj = try ctx.createResource("FileHandle");
+    try obj.set(ctx.allocator, "__fd", .{ .int = fd });
+    try obj.set(ctx.allocator, "__open", .{ .bool = true });
+    try obj.setCopiedString(ctx.allocator, "__mode", mode);
+    try obj.setCopiedString(ctx.allocator, "__path", path);
     return NativeResult.borrowed(.{ .resource = obj });
 }
 
@@ -2742,12 +2793,14 @@ fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!N
     try result.set(ctx.allocator, .{ .string = Value.String.borrowed("timed_out") }, .{ .bool = false });
     try result.set(ctx.allocator, .{ .string = Value.String.borrowed("blocked") }, .{ .bool = !(blocking == .bool and !blocking.bool) });
     try result.set(ctx.allocator, .{ .string = Value.String.borrowed("eof") }, .{ .bool = eof == .bool and eof.bool });
-    if (!is_socket and !is_pipe) try result.set(ctx.allocator, .{ .string = Value.String.borrowed("wrapper_type") }, .{ .string = Value.String.borrowed(wrapper_type) });
-    try result.set(ctx.allocator, .{ .string = Value.String.borrowed("stream_type") }, .{ .string = Value.String.borrowed(stream_type) });
-    try result.set(ctx.allocator, .{ .string = Value.String.borrowed("mode") }, .{ .string = Value.String.borrowed(mode) });
+    // the array outlives a stream passed straight in, so it holds copies of
+    // the stream's own strings
+    if (!is_socket and !is_pipe) try result.setCopiedString(ctx.allocator, .{ .string = Value.String.borrowed("wrapper_type") }, wrapper_type);
+    try result.setCopiedString(ctx.allocator, .{ .string = Value.String.borrowed("stream_type") }, stream_type);
+    try result.setCopiedString(ctx.allocator, .{ .string = Value.String.borrowed("mode") }, mode);
     try result.set(ctx.allocator, .{ .string = Value.String.borrowed("unread_bytes") }, .{ .int = 0 });
     try result.set(ctx.allocator, .{ .string = Value.String.borrowed("seekable") }, .{ .bool = !is_socket and !is_pipe and isSeekable(obj) });
-    if (!is_pipe and (!is_socket or uri.len > 0)) try result.set(ctx.allocator, .{ .string = Value.String.borrowed("uri") }, .{ .string = Value.String.borrowed(uri) });
+    if (!is_pipe and (!is_socket or uri.len > 0)) try result.setCopiedString(ctx.allocator, .{ .string = Value.String.borrowed("uri") }, uri);
     return NativeResult.borrowed(.{ .array = result });
 }
 
