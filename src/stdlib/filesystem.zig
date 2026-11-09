@@ -549,6 +549,25 @@ fn intArg(ctx: *NativeContext, args: []const Value, comptime func: []const u8, c
     return (html.Params{ .ctx = ctx, .func = func, .args = args }).int(index, param, default);
 }
 
+// php's notice when a read or write on a plain descriptor fails: the
+// running function, the byte count it asked for, and errno with its text
+fn ioFailure(ctx: *NativeContext, comptime what: []const u8, count: usize, err: anyerror) RuntimeError!void {
+    const code: i64, const text: []const u8 = switch (err) {
+        error.NotOpenForReading, error.NotOpenForWriting => .{ 9, "Bad file descriptor" },
+        error.IsDir => .{ 21, "Is a directory" },
+        error.BrokenPipe => .{ 32, "Broken pipe" },
+        error.NoSpaceLeft => .{ 28, "No space left on device" },
+        error.DiskQuota => .{ 122, "Disk quota exceeded" },
+        error.FileTooBig => .{ 27, "File too large" },
+        else => .{ 5, "Input/output error" },
+    };
+    try notice(ctx, "{s}(): " ++ what ++ " of {d} bytes failed with errno={d} {s}", .{ ctx.call_name orelse "fread", count, code, text });
+}
+
+// php fills a stream's read buffer a chunk at a time, and that chunk is the
+// count its read failure notice names
+const read_chunk: usize = 8192;
+
 // the text php prints for a failed filesystem call, strerror(errno) as glibc
 // words it, from the error std reports for that errno
 pub fn errorText(err: anyerror) []const u8 {
@@ -2212,15 +2231,15 @@ fn isZlibWriting(obj: *PhpObject) bool {
 }
 
 fn native_fpassthru(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    _ = try streamArg(ctx, args, .{ .func = "fpassthru" });
+    const obj = try streamArg(ctx, args, .{ .func = "fpassthru" });
     var total: i64 = 0;
-    const chunk: i64 = 4096;
+    var buf: [read_chunk]u8 = undefined;
     while (true) {
-        const result = ctx.vm.callByName("fread", &.{ args[0], .{ .int = chunk } }) catch break;
-        if (result != .string or result.string.bytes().len == 0) break;
-        try ctx.vm.output.appendSlice(ctx.allocator, result.string.bytes());
-        total += @intCast(result.string.bytes().len);
-        if (result.string.bytes().len < @as(usize, @intCast(chunk))) break;
+        // a stream that cannot be read at all passes -1 through
+        const n = (try streamReadInto(ctx, obj, &buf)) orelse return NativeResult.scalar(.{ .int = if (total == 0) -1 else total });
+        if (n == 0) break;
+        try ctx.vm.output.appendSlice(ctx.allocator, buf[0..n]);
+        total += @intCast(n);
     }
     return NativeResult.scalar(.{ .int = total });
 }
@@ -2275,6 +2294,7 @@ pub fn streamReadInto(ctx: *NativeContext, obj: *PhpObject, dest: []u8) RuntimeE
     const n = io.read(dest) catch |err| {
         // non-blocking stream with nothing buffered yet reads as "" in php, not a hard failure
         if (err == error.WouldBlock) return 0;
+        if (!io.socket) try ioFailure(ctx, "Read", @max(read_chunk, dest.len), err);
         return null;
     };
     // a short read ends a regular file; a pipe or socket has only reached
@@ -2286,10 +2306,13 @@ pub fn streamReadInto(ctx: *NativeContext, obj: *PhpObject, dest: []u8) RuntimeE
 fn native_fwrite(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = try streamArg(ctx, args, .{ .func = "fwrite" });
     var data = try @import("strings.zig").stringParam(ctx, "fwrite", args, 1, "data");
-    if (args.len >= 3 and args[2] == .int) {
-        const lim: i64 = args[2].int;
-        if (lim >= 0 and @as(usize, @intCast(lim)) < data.len) data = data[0..@intCast(lim)];
+    if (args.len >= 3 and args[2] != .null) {
+        // a length of zero or less writes nothing
+        const lim = try intArg(ctx, args, "fwrite", 2, "length", 0);
+        if (lim <= 0) return NativeResult.scalar(.{ .int = 0 });
+        if (@as(u64, @intCast(lim)) < data.len) data = data[0..@intCast(lim)];
     }
+    if (data.len == 0) return NativeResult.scalar(.{ .int = 0 });
     const written = (try streamWrite(ctx, obj, data)) orelse return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .int = @intCast(written) });
 }
@@ -2332,6 +2355,7 @@ pub fn streamWrite(ctx: *NativeContext, obj: *PhpObject, data: []const u8) Runti
         const n = io.write(data[written..]) catch |err| {
             if (err == error.WouldBlock) break;
             if (written > 0) break;
+            if (!io.socket) try ioFailure(ctx, "Write", data.len, err);
             return null;
         };
         if (n == 0) break;
@@ -2383,7 +2407,10 @@ pub fn streamReadLine(ctx: *NativeContext, obj: *PhpObject, max_len: usize) Runt
     var byte: [1]u8 = undefined;
     var hit_eof = false;
     while (buf.items.len < max_len) {
-        const n = io.read(&byte) catch break;
+        const n = io.read(&byte) catch |err| {
+            if (!io.socket and buf.items.len == 0) try ioFailure(ctx, "Read", read_chunk, err);
+            break;
+        };
         if (n == 0) {
             hit_eof = true;
             break;
@@ -2474,7 +2501,10 @@ fn native_fgetc(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     const obj = try streamArg(ctx, args, .{ .func = "fgetc" });
     const io = streamIo(obj) orelse return NativeResult.scalar(.{ .bool = false });
     var byte: [1]u8 = undefined;
-    const n = io.read(&byte) catch return NativeResult.scalar(.{ .bool = false });
+    const n = io.read(&byte) catch |err| {
+        if (!io.socket) try ioFailure(ctx, "Read", read_chunk, err);
+        return NativeResult.scalar(.{ .bool = false });
+    };
     if (n == 0) {
         try obj.set(ctx.allocator, "__eof", .{ .bool = true });
         return NativeResult.scalar(.{ .bool = false });
@@ -2512,13 +2542,10 @@ fn native_fseek(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     const obj = try streamArg(ctx, args, .{ .func = "fseek" });
     if (args.len < 2 or args[1] != .int) return NativeResult.scalar(.{ .int = -1 });
     const offset = args[1].int;
-    const whence: u2 = if (args.len >= 3 and args[2] == .int) blk: {
-        break :blk switch (args[2].int) {
-            1 => 1, // SEEK_CUR
-            2 => 2, // SEEK_END
-            else => 0, // SEEK_SET
-        };
-    } else 0;
+    // SEEK_SET, SEEK_CUR, SEEK_END; lseek(2) refuses any other whence
+    const whence_arg: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
+    if (whence_arg < 0 or whence_arg > 2) return NativeResult.scalar(.{ .int = -1 });
+    const whence: u2 = @intCast(whence_arg);
     if (fileHandleWrapper(obj)) |wrapper| {
         if (!ctx.vm.hasMethod(wrapper.class_name, "stream_seek")) return NativeResult.scalar(.{ .int = -1 });
         const result = try ctx.callMethod(wrapper, "stream_seek", &[_]Value{ .{ .int = offset }, .{ .int = whence } });
