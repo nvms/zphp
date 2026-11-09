@@ -62,6 +62,26 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         self.sp = sp;
                         return;
                     }
+                    // `$x op= number`: get_local, bury 1, the operator, set_local of
+                    // the same slot, done in place without moving the operands
+                    if (code[ip + 2] == @intFromEnum(OpCode.bury) and code[ip + 3] == 1 and
+                        code[ip + 5] == @intFromEnum(OpCode.set_local) and code[ip + 6] == code[ip] and code[ip + 7] == code[ip + 1])
+                    {
+                        const a = &locals[slot];
+                        const b = &stack[sp - 1];
+                        const op: OpCode = @enumFromInt(code[ip + 4]);
+                        const both_int = a.* == .int and b.* == .int;
+                        if ((both_int or (a.* == .float and b.* == .float)) and (op == .add or op == .subtract or op == .multiply)) {
+                            const r: Value = switch (op) {
+                                .add => if (both_int) Value.intAdd(a.int, b.int) else .{ .float = a.float + b.float },
+                                .subtract => if (both_int) Value.intSub(a.int, b.int) else .{ .float = a.float - b.float },
+                                else => if (both_int) Value.intMul(a.int, b.int) else .{ .float = a.float * b.float },
+                            };
+                            b.* = r;
+                            ip += 6;
+                            continue :dispatch .set_local;
+                        }
+                    }
                     ip += 2;
                     // an object pushed onto the operand stack takes a reference
                     // (Stage 1); arrays are not stack-owned (refcounting Stage 2)
@@ -83,28 +103,30 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     }
                     const slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     ip += 2;
-                    const val = stack[sp - 1];
-                    // the slot is a durable holder (Stage 1): retain the new value,
-                    // release the object the slot previously held
-                    const sl_old = locals[slot];
-                    if (val == .string) {
-                        val.string.retain();
-                        locals[slot] = val;
-                    } else if (val == .object or val == .resource) {
-                        VM.objRetain(if (val == .object) val.object else val.resource);
-                        locals[slot] = val;
-                    } else if (val == .array) {
-                        locals[slot] = try copyValue(self, ic, val);
-                    } else {
-                        locals[slot] = val;
+                    if (!(isScalar(&locals[slot]) and copyScalar(&locals[slot], &stack[sp - 1]))) {
+                        const val = stack[sp - 1];
+                        // the slot is a durable holder (Stage 1): retain the new value,
+                        // release the object the slot previously held
+                        const sl_old = locals[slot];
+                        if (val == .string) {
+                            val.string.retain();
+                            locals[slot] = val;
+                        } else if (val == .object or val == .resource) {
+                            VM.objRetain(if (val == .object) val.object else val.resource);
+                            locals[slot] = val;
+                        } else if (val == .array) {
+                            locals[slot] = try copyValue(self, ic, val);
+                        } else {
+                            locals[slot] = val;
+                        }
+                        self.releaseValue(sl_old);
                     }
-                    self.releaseValue(sl_old);
                     self.sp = sp;
                     if (!names_local) try syncLocalWrite(self, ic, frame, slot, locals[slot]);
                     if (code[ip] == @intFromEnum(OpCode.pop) or code[ip] == @intFromEnum(OpCode.pop_boundary)) {
                         ip += 1;
                         sp -= 1;
-                        self.stackRelease(val);
+                        if (!isScalar(&stack[sp])) self.stackRelease(stack[sp]);
                         // the fused pop is still a statement boundary: free
                         // the temporaries this statement dropped, as .pop does
                         if (self.hasPendingReleases()) {
@@ -437,7 +459,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .jump_if_false => {
                     const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     ip += 2;
-                    if (!stack[sp - 1].isTruthy()) {
+                    if (!isTruthyAt(&stack[sp - 1])) {
                         ip += offset;
                     } else if (code[ip] == @intFromEnum(OpCode.pop) or code[ip] == @intFromEnum(OpCode.pop_boundary)) {
                         ip += 1;
@@ -456,7 +478,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .jump_if_true => {
                     const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     ip += 2;
-                    if (stack[sp - 1].isTruthy()) {
+                    if (isTruthyAt(&stack[sp - 1])) {
                         ip += offset;
                     } else if (code[ip] == @intFromEnum(OpCode.pop) or code[ip] == @intFromEnum(OpCode.pop_boundary)) {
                         ip += 1;
@@ -892,10 +914,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         self.sp = sp;
                         return;
                     };
-                    // a frame that would outgrow the committed depth regions
-                    // goes through runLoop, which grows them
                     // too few arguments is runLoop's to report
-                    if (!ci_func.locals_only or !self.hasCallRoomAt(sp, 1) or ci_ac < ci_func.required_params) {
+                    if (!ci_func.locals_only or !try hasCallRoom(self, sp, sp - ci_acn - 1) or ci_ac < ci_func.required_params) {
                         frame.ip = ip - 2;
                         self.sp = sp;
                         return;
@@ -1096,7 +1116,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     if (mc_entry.key == mc_ip and mc_entry.chunk_key == mc_chunk_key and mc_entry.class_ptr == @intFromPtr(mc_obj.class_name.ptr)) {
                         if (mc_entry.func) |mc_func| {
                             // a method is never a closure instance, so it has no captures
-                            if (mc_func.locals_only and self.hasCallRoomAt(sp, 1)) {
+                            if (mc_func.locals_only and try hasCallRoom(self, sp, sp - mc_ac - 1)) {
                                 if (mc_func.has_param_types and !argsHoldDeclared(self, ic, mc_func, mc_func.name, stack[sp - mc_arg_count .. sp])) {
                                     self.sp = sp;
                                     if (try checkParamTypes(self, ic, mc_func.name, mc_arg_count)) {
@@ -1189,7 +1209,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
 
                     // a declared function is never a closure instance, so it has no captures.
                     // too few arguments is runLoop's to report
-                    if (!func.locals_only or !self.hasCallRoomAt(sp, 1) or arg_count < func.required_params) {
+                    if (!func.locals_only or !try hasCallRoom(self, sp, sp - arg_count) or arg_count < func.required_params) {
                         frame.ip = ip - 4;
                         self.sp = sp;
                         return;
@@ -1823,6 +1843,47 @@ fn closureScope(self: *VM, range: anytype) ?[]const u8 {
         if (cap.value == .string and std.mem.eql(u8, cap.var_name, "$__closure_scope")) return cap.value.string.bytes();
     }
     return null;
+}
+
+// room for a frame entered at entry_sp (the caller's operands, less the
+// call's own), grown here as runLoop's calls grow it
+inline fn hasCallRoom(self: *VM, sp: usize, entry_sp: usize) RuntimeError!bool {
+    if (self.hasCallRoomAt(entry_sp, 1)) return true;
+    self.sp = entry_sp;
+    var grown = false;
+    const result = self.ic.?.slow.grow_call_room(self, &grown);
+    self.sp = sp;
+    try status(result);
+    return grown;
+}
+
+// scalars are read and written field by field: copying a whole value the
+// previous handler just wrote misses store forwarding and stalls
+inline fn isScalar(v: *const Value) bool {
+    return switch (v.*) {
+        .int, .float, .bool, .null => true,
+        else => false,
+    };
+}
+
+inline fn copyScalar(dst: *Value, src: *const Value) bool {
+    switch (src.*) {
+        .int => |n| dst.* = .{ .int = n },
+        .float => |f| dst.* = .{ .float = f },
+        .bool => |b| dst.* = .{ .bool = b },
+        .null => dst.* = .null,
+        else => return false,
+    }
+    return true;
+}
+
+inline fn isTruthyAt(v: *const Value) bool {
+    return switch (v.*) {
+        .bool => |b| b,
+        .int => |n| n != 0,
+        .null => false,
+        else => v.isTruthy(),
+    };
 }
 
 fn isNumber(v: Value) bool {

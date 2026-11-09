@@ -1422,6 +1422,7 @@ pub const VM = struct {
         expire_execution: *const fn (*VM) u8,
         param_types: *const fn (*VM, []const u8) []const []const u8,
         set_local_global: *const fn (*VM, u16, Value) u8,
+        grow_call_room: *const fn (*VM, *bool) u8,
 
         pub const Status = struct {
             pub const ok: u8 = 0;
@@ -1439,7 +1440,13 @@ pub const VM = struct {
             .expire_execution = expireExecutionEntry,
             .param_types = VM.declaredParamTypes,
             .set_local_global = setLocalGlobalEntry,
+            .grow_call_room = growCallRoomEntry,
         };
+
+        fn growCallRoomEntry(vm: *VM, grown: *bool) u8 {
+            grown.* = vm.growCallRoom(1) catch |err| return statusOf(err);
+            return Status.ok;
+        }
 
         fn drainEntry(vm: *VM) void {
             vm.flushTopWrites();
