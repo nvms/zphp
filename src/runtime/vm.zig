@@ -531,6 +531,9 @@ pub const NativeCall = struct {
     depth: usize,
     instance: bool,
     outer: ?*const NativeCall,
+    // called by the running native itself, which a trace shows as
+    // "[internal function]"
+    from_native: bool = false,
 };
 
 pub const NativeInvocation = struct {
@@ -1697,6 +1700,8 @@ pub const VM = struct {
         // frame remains separate for bytecode and return handling, while this
         // index identifies the scope whose bindings receive include changes.
         include_parent: ?usize = null,
+        // the frame a native method runs in: no code of its own, only $this
+        native: bool = false,
     };
 
     fn allocGenerator(self: *VM, initial: Generator) RuntimeError!*Generator {
@@ -8913,7 +8918,7 @@ pub const VM = struct {
                             var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                             try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                             try self.ensureCallRoom();
-                            self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+                            self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .native = true };
                             self.frames[self.frame_count].entry_sp = self.sp;
                             self.frame_count += 1;
                             self.retainFrameObjects(self.frame_count - 1);
@@ -9142,7 +9147,7 @@ pub const VM = struct {
                             var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                             try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                             try self.ensureCallRoom();
-                            self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+                            self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .native = true };
                             self.frames[self.frame_count].entry_sp = self.sp;
                             self.frame_count += 1;
                             self.retainFrameObjects(self.frame_count - 1);
@@ -9946,7 +9951,7 @@ pub const VM = struct {
                                 var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                                 try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                                 try self.ensureCallRoom();
-                                self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+                                self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .native = true };
                                 self.setFrameArgCount(arg_count);
                                 self.frames[self.frame_count].entry_sp = self.sp;
                                 self.frame_count += 1;
@@ -10055,7 +10060,7 @@ pub const VM = struct {
                         var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                         try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                         try self.ensureCallRoom();
-                        self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+                        self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .native = true };
                         self.setFrameArgCount(arg_count);
                         self.frames[self.frame_count].entry_sp = self.sp;
                         self.frame_count += 1;
@@ -10331,7 +10336,7 @@ pub const VM = struct {
                         var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                         try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                         try self.ensureCallRoom();
-                        self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+                        self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .native = true };
                         self.setFrameArgCount(mcs_ac);
                         self.frames[self.frame_count].entry_sp = self.sp;
                         self.frame_count += 1;
@@ -10483,7 +10488,7 @@ pub const VM = struct {
                         var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                         try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                         try self.ensureCallRoom();
-                        self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+                        self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .native = true };
                         self.setFrameArgCount(arg_count);
                         self.frames[self.frame_count].entry_sp = self.sp;
                         self.frame_count += 1;
@@ -10655,7 +10660,7 @@ pub const VM = struct {
                         var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                         try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                         try self.ensureCallRoom();
-                        self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+                        self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .native = true };
                         self.setFrameArgCount(mcds_ac);
                         self.frames[self.frame_count].entry_sp = self.sp;
                         self.frame_count += 1;
@@ -11699,7 +11704,7 @@ pub const VM = struct {
                     var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                     try tmp_vars.put(self.allocator, "$this", tv);
                     try self.ensureCallRoom();
-                    self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .called_class = effective_called };
+                    self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .native = true, .called_class = effective_called };
                     self.setFrameArgCount(arg_count);
                     const sc_saved_fc = self.frame_count;
                     self.frames[self.frame_count].entry_sp = self.sp;
@@ -12194,7 +12199,8 @@ pub const VM = struct {
             while (next_native < native_count and natives[next_native].depth == i + 1) : (next_native += 1) {
                 if (natives[next_native].label.len == 0) continue;
                 const outermost = next_native + 1 == native_count or natives[next_native + 1].depth != i + 1;
-                try arr.append(self.allocator, .{ .array = try self.nativeTraceEntry(natives[next_native], if (outermost) self.framePosition(i) else null) });
+                const site = if (outermost and !natives[next_native].from_native) self.framePosition(i) else null;
+                try arr.append(self.allocator, .{ .array = try self.nativeTraceEntry(natives[next_native], site) });
             }
             if (self.frames[i].func) |f| if (f.name.len > 0) {
                 const called_by_native = next_native < native_count and natives[next_native].depth == i;
@@ -20373,7 +20379,8 @@ pub const VM = struct {
         if (!isUserCallForwarder(name) and (!admitted or !isFrameOutNative(label))) {
             // eval is a language construct to php: its frame lists no arguments
             const shown_args = if (std.mem.eql(u8, label, "eval")) &[_]Value{} else input_args;
-            record = .{ .label = label, .args = shown_args, .depth = self.frame_count, .instance = call.instance, .outer = outer };
+            const from_native = if (outer) |o| o.depth == self.frame_count or (o.depth + 1 == self.frame_count and self.frames[self.frame_count - 1].native) else false;
+            record = .{ .label = label, .args = shown_args, .depth = self.frame_count, .instance = call.instance, .outer = outer, .from_native = from_native };
             self.native_call = &record;
         }
         if (native.deprecated) |suffix| try self.warnDeprecatedNative(name orelse label, suffix);
@@ -21788,7 +21795,7 @@ pub const VM = struct {
             var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
             try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
             try self.ensureCallRoom();
-            self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars };
+            self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .native = true };
             self.frame_count += 1;
             self.retainFrameObjects(self.frame_count - 1);
             if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
