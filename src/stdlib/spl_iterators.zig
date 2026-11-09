@@ -591,6 +591,9 @@ fn rdiGetCurrentEntry(obj: *PhpObject) ?*PhpArray {
 fn rdiHasChildren(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const entry = rdiGetCurrentEntry(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    // php never recurses into . and ..
+    const name = entry.get(.{ .string = Value.String.borrowed("name") });
+    if (name == .string and (std.mem.eql(u8, name.string.bytes(), ".") or std.mem.eql(u8, name.string.bytes(), ".."))) return NativeResult.scalar(.{ .bool = false });
     const is_dir = entry.get(.{ .string = Value.String.borrowed("is_dir") });
     return NativeResult.scalar(.{ .bool = is_dir == .bool and is_dir.bool });
 }
