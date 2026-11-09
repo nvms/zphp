@@ -523,10 +523,12 @@ pub fn register(vm: *VM, a: Allocator) !void {
     var def = ClassDef{ .name = "GMP", .native_cleanup = cleanupGmp, .native_clone = cloneGmp, .native_properties = gmpProperties, .native_binop = gmpBinop, .native_cast = gmpCast };
     // GMP is mostly a value-holding class; user-facing methods are
     // PHP's procedural ones. providing __toString lets `(string)$gmp` work
+    try def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
     try def.methods.put(a, "__toString", .{ .name = "__toString", .arity = 0 });
     try def.methods.put(a, "__serialize", .{ .name = "__serialize", .arity = 0 });
     try def.methods.put(a, "__unserialize", .{ .name = "__unserialize", .arity = 1 });
     try vm.classes.put(a, "GMP", def);
+    try vm.native_fns.put(a, "GMP::__construct", gmpConstruct);
     try vm.native_fns.put(a, "GMP::__toString", gmpToString);
     try vm.native_fns.put(a, "GMP::__serialize", gmpSerialize);
     try vm.native_fns.put(a, "GMP::__unserialize", gmpUnserialize);
@@ -551,6 +553,30 @@ fn gmpToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult 
     const owned = try Value.String.create(ctx.allocator, slice);
     zphp_gmp_free(cstr);
     return NativeResult.takeString(owned);
+}
+
+// new GMP(int|string $num = 0, int $base = 0), the object gmp_init returns
+fn gmpConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const obj = thisObject(ctx) orelse return NativeResult.scalar(.null);
+    const p = zphp_mpz_create() orelse return error.OutOfMemory;
+    var ok = true;
+    if (args.len > 0) switch (args[0]) {
+        .int => |i| _ = zphp_mpz_set_si(p, i),
+        .string => |str| {
+            const base: c_int = if (args.len > 1 and args[1] == .int) @intCast(args[1].int) else 0;
+            const z = try dupZ(ctx, str.bytes());
+            defer ctx.allocator.free(z);
+            ok = zphp_mpz_set_str(p, z.ptr, base) == 0;
+        },
+        else => ok = false,
+    };
+    if (!ok) {
+        zphp_mpz_destroy(p);
+        return throwOperand(ctx, "ValueError", "GMP::__construct(): Argument #1 ($num) is not an integer string", .{});
+    }
+    if (getMpz(obj)) |old| zphp_mpz_destroy(old);
+    setMpz(obj, p);
+    return NativeResult.scalar(.null);
 }
 
 fn thisObject(ctx: *NativeContext) ?*PhpObject {
