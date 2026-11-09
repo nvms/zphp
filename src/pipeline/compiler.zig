@@ -1229,6 +1229,25 @@ pub const Compiler = struct {
                         else => {},
                     }
                 }
+                if (tok.tag == .tilde) {
+                    const inner = self.evalConstExpr(n.data.lhs);
+                    switch (inner) {
+                        .int => |v| break :blk Value{ .int = ~v },
+                        // ~CONST, E_ALL & ~E_NOTICE
+                        .string => break :blk self.makeDeferredExpr(.bnot, inner, Value.null),
+                        else => {},
+                    }
+                }
+                if (tok.tag == .bang) {
+                    const inner = self.evalConstExpr(n.data.lhs);
+                    switch (inner) {
+                        .null, .bool, .int, .float => break :blk Value{ .bool = !inner.isTruthy() },
+                        .string => |s| if (s.bytes().len == 0 or s.bytes()[0] != 0) {
+                            break :blk Value{ .bool = !inner.isTruthy() };
+                        } else break :blk self.makeDeferredExpr(.not, inner, Value.null),
+                        else => {},
+                    }
+                }
                 if (tok.tag == .plus) {
                     const inner = self.evalConstExpr(n.data.lhs);
                     switch (inner) {
@@ -1398,6 +1417,28 @@ pub const Compiler = struct {
                 // treat as a constant name (sentinel for runtime resolution)
                 const resolved = self.resolveClassName(name);
                 const sentinel = std.fmt.allocPrint(self.allocator, "\x00CC\x00\x00{s}", .{resolved}) catch break :blk Value.null;
+                self.string_allocs.append(self.allocator, sentinel) catch break :blk Value.null;
+                break :blk .{ .string = Value.String.borrowed(sentinel) };
+            },
+            // a qualified constant name (\PHP_INT_MAX, Foo\BAR, namespace\BAR),
+            // resolved as the constant opcode resolves it
+            .qualified_name => blk: {
+                const fqn = self.buildQualifiedString(self.ast.extraSlice(n.data.lhs)) catch break :blk Value.null;
+                const absolute = n.data.rhs == 1 or (fqn.len > 0 and fqn[0] == '\\');
+                const stripped = if (fqn.len > 0 and fqn[0] == '\\') fqn[1..] else fqn;
+                if (absolute and std.mem.indexOfScalar(u8, stripped, '\\') == null) {
+                    if (std.ascii.eqlIgnoreCase(stripped, "true")) break :blk Value{ .bool = true };
+                    if (std.ascii.eqlIgnoreCase(stripped, "false")) break :blk Value{ .bool = false };
+                    if (std.ascii.eqlIgnoreCase(stripped, "null")) break :blk Value.null;
+                }
+                const name = if (absolute)
+                    stripped
+                else if (n.data.rhs == 2 and self.namespace.len > 0)
+                    std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, stripped }) catch break :blk Value.null
+                else
+                    self.resolveClassName(stripped);
+                if (!absolute and n.data.rhs == 2 and self.namespace.len > 0) self.string_allocs.append(self.allocator, name) catch break :blk Value.null;
+                const sentinel = std.fmt.allocPrint(self.allocator, "\x00CC\x00\x00{s}", .{name}) catch break :blk Value.null;
                 self.string_allocs.append(self.allocator, sentinel) catch break :blk Value.null;
                 break :blk .{ .string = Value.String.borrowed(sentinel) };
             },

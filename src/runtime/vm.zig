@@ -20598,6 +20598,8 @@ pub const VM = struct {
                 else => Value{ .int = -%Value.toInt(lhs) },
             };
         }
+        if (de.op == .bnot) return Value{ .int = ~Value.toInt(lhs) };
+        if (de.op == .not) return Value{ .bool = !lhs.isTruthy() };
         const rhs = try self.resolveDefault(de.rhs);
         return switch (de.op) {
             .bor => Value{ .int = Value.toInt(lhs) | Value.toInt(rhs) },
@@ -20627,7 +20629,7 @@ pub const VM = struct {
                 @memcpy(joined[ls.len..], rs);
                 break :blk Value{ .string = try self.transientAdopted(joined) };
             },
-            .neg => unreachable,
+            .neg, .bnot, .not => unreachable,
         };
     }
 

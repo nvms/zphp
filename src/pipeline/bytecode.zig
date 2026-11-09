@@ -712,7 +712,27 @@ pub const DeferredExpr = struct {
     op: Op,
     lhs: Value,
     rhs: Value,
-    pub const Op = enum(u8) { bor, band, bxor, add, sub, mul, div, mod, shl, shr, pow, concat, neg };
+    pub const Op = enum(u8) {
+        bor,
+        band,
+        bxor,
+        add,
+        sub,
+        mul,
+        div,
+        mod,
+        shl,
+        shr,
+        pow,
+        concat,
+        neg,
+        bnot,
+        not,
+
+        pub fn isUnary(op: Op) bool {
+            return op == .neg or op == .bnot or op == .not;
+        }
+    };
 };
 
 pub const DEFERRED_EXPR_PREFIX = "\x00DX\x00";
