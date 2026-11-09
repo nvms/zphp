@@ -35,6 +35,7 @@ const compiler_mod = @import("../pipeline/compiler.zig");
 const enums = @import("../stdlib/enums.zig");
 const callables = @import("callables.zig");
 const object_properties = @import("object_properties.zig");
+const spl_iterator_classes = @import("../stdlib/spl_iterator_classes.zig");
 const inheritance = @import("inheritance.zig");
 
 const Allocator = std.mem.Allocator;
@@ -6550,10 +6551,18 @@ pub const VM = struct {
                             };
                             continue;
                         }
+                        if (iterable == .object) if (spl_iterator_classes.foreachRefusal(self, iterable.object)) |refusal| {
+                            if (try self.throwBuiltinException("Error", refusal)) continue;
+                            return error.RuntimeError;
+                        };
                         // Iterator protocol
                         if (iterable == .object and self.hasMethod(iterable.object.class_name, "rewind")) {
                             try self.pushIteratorMarker();
-                            _ = self.callMethod(iterable.object, "rewind", &.{}) catch {
+                            // a RecursiveIteratorIterator php steps with its
+                            // own iterator; the marker remembers that
+                            const direct = spl_iterator_classes.foreachDirect(self, iterable.object);
+                            if (direct) self.stack[self.sp - 1].object.native.extra = 1;
+                            _ = (if (direct) spl_iterator_classes.foreachStep(self, iterable.object, .rewind) else self.callMethod(iterable.object, "rewind", &.{})) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
@@ -6627,7 +6636,8 @@ pub const VM = struct {
                         }
                     } else if (idx_val == .object and iterable == .object) {
                         // Iterator protocol
-                        const valid = self.callMethod(iterable.object, "valid", &.{}) catch {
+                        const direct = idx_val.object.native.extra == 1;
+                        const valid = (if (direct) spl_iterator_classes.foreachStep(self, iterable.object, .valid) else self.callMethod(iterable.object, "valid", &.{})) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
@@ -6636,12 +6646,12 @@ pub const VM = struct {
                         } else {
                             // php fetches current() first, then key() only
                             // when the loop names a key
-                            const current = self.callMethod(iterable.object, "current", &.{}) catch {
+                            const current = (if (direct) spl_iterator_classes.foreachStep(self, iterable.object, .current) else self.callMethod(iterable.object, "current", &.{})) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
                             self.push(current);
-                            const key = if (op == .iter_check_nokey) Value.null else self.callMethod(iterable.object, "key", &.{}) catch {
+                            const key = if (op == .iter_check_nokey) Value.null else (if (direct) spl_iterator_classes.foreachStep(self, iterable.object, .key) else self.callMethod(iterable.object, "key", &.{})) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
@@ -6679,7 +6689,8 @@ pub const VM = struct {
                             self.stack[self.sp - 2] = .null;
                         }
                     } else if (self.stack[self.sp - 1] == .object and iterable == .object) {
-                        _ = self.callMethod(iterable.object, "next", &.{}) catch {
+                        const direct = self.stack[self.sp - 1].object.native.extra == 1;
+                        _ = (if (direct) spl_iterator_classes.foreachStep(self, iterable.object, .next) else self.callMethod(iterable.object, "next", &.{})) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
@@ -7810,7 +7821,7 @@ pub const VM = struct {
                         };
                         src = src.storage();
                         const native_clone = self.nativeCloneHook(src.class_name);
-                        const uncloneable = if (self.classes.getPtr(src.class_name)) |cls| cls.uncloneable else false;
+                        const uncloneable = self.classUncloneable(src.class_name);
                         if ((src.native.kind != .none and native_clone == null) or uncloneable) {
                             if (try self.throwUncloneable(src.class_name)) continue;
                             return error.RuntimeError;
@@ -10029,6 +10040,24 @@ pub const VM = struct {
                                     return err;
                                 };
                                 self.removeCallGuard(obj_id, method_name);
+                                self.push(result);
+                                continue;
+                            }
+                        }
+                        // the spl iterators pass a method they lack to the
+                        // iterator they wrap (php's get_method handlers)
+                        if (spl_iterator_classes.forwardFor(self, obj, method_name)) |target| {
+                            if (self.hasMethod(target.class_name, method_name)) {
+                                const held = self.holdCallOperands(ac + 1);
+                                defer self.releaseHeld(held);
+                                var fwd_buf: [16]Value = undefined;
+                                const fwd_args = try self.copyStackArgs(&fwd_buf, self.stack[self.sp - ac ..][0..ac]);
+                                defer self.freeStackArgs(fwd_args, &fwd_buf);
+                                self.dropN(ac + 1);
+                                const result = self.callMethod(target, method_name, fwd_args) catch |err| {
+                                    if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                    return err;
+                                };
                                 self.push(result);
                                 continue;
                             }
@@ -13802,6 +13831,19 @@ pub const VM = struct {
             name = def.parent;
         }
         return null;
+    }
+
+    // php keeps clone_obj NULL for a class's subclasses too
+    fn classUncloneable(self: *VM, class_name: []const u8) bool {
+        var current: ?[]const u8 = class_name;
+        var depth: usize = 0;
+        while (current) |name| : (depth += 1) {
+            if (depth > 64) return false;
+            const cls = self.classes.getPtr(name) orelse return false;
+            if (cls.uncloneable) return true;
+            current = cls.parent;
+        }
+        return false;
     }
 
     pub fn throwUncloneable(self: *VM, class_name: []const u8) !bool {
@@ -21772,15 +21814,9 @@ pub const VM = struct {
 
         try self.ensureCallRoom();
         const full_name = registered orelse self.resolveMethod(obj.class_name, method_name) catch {
-            // Internal IteratorIterator-derived classes forward missing methods
-            // to the current object exposed by their wrapped iterator.
-            const wrapped = if (obj.get("__ii_inner") != .null) obj.get("__ii_inner") else obj.get("__fi_inner");
-            if (wrapped == .object) {
-                if (self.hasMethod(wrapped.object.class_name, method_name))
-                    return self.callMethod(wrapped.object, method_name, args);
-                const current = try self.callMethod(wrapped.object, "current", &.{});
-                if (current == .object and self.hasMethod(current.object.class_name, method_name))
-                    return self.callMethod(current.object, method_name, args);
+            // the spl iterators pass a method they lack to the iterator they wrap
+            if (spl_iterator_classes.forwardFor(self, obj, method_name)) |target| {
+                if (self.hasMethod(target.class_name, method_name)) return self.callMethod(target, method_name, args);
             }
             return error.RuntimeError;
         };

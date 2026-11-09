@@ -457,6 +457,74 @@ test "normalizeOpenBoundQuantifier" {
     }
 }
 
+// what php's pcre_get_compiled_regex_cache warns about a regex it can't
+// use, without the function prefix; null for a usable one. the caller owns
+// the message
+pub fn patternProblem(ctx: *NativeContext, regex: []const u8) RuntimeError!?[]u8 {
+    const a = ctx.allocator;
+    var p: usize = 0;
+    while (p < regex.len and std.ascii.isWhitespace(regex[p])) p += 1;
+    if (p >= regex.len) return try a.dupe(u8, "Empty regular expression");
+    const start = regex[p];
+    p += 1;
+    if (std.ascii.isAlphanumeric(start) or start == '\\' or start == 0) return try a.dupe(u8, "Delimiter must not be alphanumeric, backslash, or NUL byte");
+    const end: u8 = switch (start) {
+        '(' => ')',
+        '[' => ']',
+        '{' => '}',
+        '<' => '>',
+        else => start,
+    };
+    var pp = p;
+    var depth: usize = 1;
+    while (pp < regex.len) : (pp += 1) {
+        const c = regex[pp];
+        if (c == '\\' and pp + 1 < regex.len) {
+            pp += 1;
+        } else if (c == end) {
+            if (start == end) break;
+            depth -= 1;
+            if (depth == 0) break;
+        } else if (c == start and start != end) {
+            depth += 1;
+        }
+    }
+    if (pp >= regex.len) {
+        if (start == end) return try std.fmt.allocPrint(a, "No ending delimiter '{c}' found", .{end});
+        return try std.fmt.allocPrint(a, "No ending matching delimiter '{c}' found", .{end});
+    }
+    const pattern = regex[p..pp];
+    var flags: u32 = 0;
+    for (regex[pp + 1 ..]) |m| {
+        switch (m) {
+            'i' => flags |= pcre2.CASELESS,
+            'm' => flags |= pcre2.MULTILINE,
+            'n' => flags |= pcre2.NO_AUTO_CAPTURE,
+            's' => flags |= pcre2.DOTALL,
+            'x' => flags |= pcre2.EXTENDED,
+            'A' => flags |= pcre2.ANCHORED,
+            'D' => flags |= pcre2.DOLLAR_ENDONLY,
+            'U' => flags |= pcre2.UNGREEDY,
+            'u' => flags |= pcre2.UTF | pcre2.UCP,
+            'J' => flags |= pcre2.DUPNAMES,
+            'S', 'X', 'r', ' ', '\n', '\r' => {},
+            0 => return try a.dupe(u8, "NUL byte is not a valid modifier"),
+            else => return try std.fmt.allocPrint(a, "Unknown modifier '{c}'", .{m}),
+        }
+    }
+    var err_code: c_int = 0;
+    var err_offset: usize = 0;
+    const probe = pcre2.pcre2_compile_8(pattern.ptr, pattern.len, flags, &err_code, &err_offset, null);
+    if (probe) |code| {
+        pcre2.pcre2_code_free_8(code);
+        return null;
+    }
+    var msg_buf: [256]u8 = undefined;
+    const len = pcre2.pcre2_get_error_message_8(err_code, &msg_buf, msg_buf.len);
+    const text = if (len > 0) msg_buf[0..@intCast(len)] else "";
+    return try std.fmt.allocPrint(a, "Compilation failed: {s} at offset {d}", .{ text, err_offset });
+}
+
 // emit a PHP-format 'preg_<fn>(): Compilation failed: <message> at offset N'
 // warning for a pattern that fails to compile. callers should already have
 // set preg_last_error to 1 before invoking this

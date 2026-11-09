@@ -13,6 +13,7 @@ const VM = @import("../runtime/vm.zig").VM;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const ClassDef = @import("../runtime/vm.zig").ClassDef;
 const includes = @import("../runtime/includes.zig");
+const spl_iterator_classes = @import("spl_iterator_classes.zig");
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 pub const entries = .{
@@ -161,9 +162,9 @@ pub const entries = .{
     .{ "class_implements", native_class_implements },
     .{ "class_parents", native_class_parents },
     .{ "class_uses", native_class_uses },
-    .{ "iterator_to_array", native_iterator_to_array },
-    .{ "iterator_count", native_iterator_count },
-    .{ "iterator_apply", native_iterator_apply },
+    .{ "iterator_to_array", spl_iterator_classes.iteratorToArray },
+    .{ "iterator_count", spl_iterator_classes.iteratorCount },
+    .{ "iterator_apply", spl_iterator_classes.iteratorApplyFn },
     .{ "filter_var", native_filter_var },
     .{ "filter_id", native_filter_id },
     .{ "filter_list", native_filter_list },
@@ -2534,198 +2535,6 @@ fn native_class_uses(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
         try result.set(ctx.allocator, .{ .string = Value.String.borrowed(trait) }, .{ .string = Value.String.borrowed(trait) });
     }
     return NativeResult.borrowed(.{ .array = result });
-}
-
-fn native_iterator_to_array(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-
-    if (args[0] == .array) return NativeResult.borrowed(args[0]);
-    const preserve_keys = if (args.len > 1 and args[1] == .bool) args[1].bool else true;
-
-    if (args[0] == .generator) {
-        const gen = args[0].generator;
-        const arr = try ctx.createArray();
-
-        if (gen.state == .created) try ctx.vm.resumeGenerator(gen, .null);
-
-        while (gen.state != .completed) {
-            if (preserve_keys) {
-                try ctx.vm.arraySetOwned(arr, switch (gen.current_key) {
-                    .int => |i| .{ .int = i },
-                    .string => |s| .{ .string = s },
-                    else => .{ .int = arr.length() },
-                }, gen.current_value);
-            } else {
-                try arr.append(ctx.allocator, gen.current_value);
-            }
-            try ctx.vm.resumeGenerator(gen, .null);
-        }
-        return NativeResult.borrowed(.{ .array = arr });
-    }
-
-    if (args[0] == .object) {
-        const obj = args[0].object;
-        const arr = try ctx.createArray();
-        const is_iterator = ctx.vm.isInstanceOf(obj.class_name, "Iterator");
-        const is_aggregate = !is_iterator and ctx.vm.isInstanceOf(obj.class_name, "IteratorAggregate");
-        if (is_aggregate and ctx.vm.hasMethod(obj.class_name, "getIterator")) {
-            const inner_v = try ctx.vm.callMethod(obj, "getIterator", &.{});
-            var inner_args: [2]Value = undefined;
-            inner_args[0] = inner_v;
-            var n: usize = 1;
-            if (args.len > 1) {
-                inner_args[1] = args[1];
-                n = 2;
-            }
-            return native_iterator_to_array(ctx, inner_args[0..n]);
-        }
-        const has_traversal = ctx.vm.hasMethod(obj.class_name, "rewind") and ctx.vm.hasMethod(obj.class_name, "valid") and ctx.vm.hasMethod(obj.class_name, "current");
-        if (!is_iterator and !has_traversal) return NativeResult.borrowed(.{ .array = arr });
-        if (!ctx.vm.hasMethod(obj.class_name, "rewind")) return NativeResult.borrowed(.{ .array = arr });
-        _ = try ctx.vm.callMethod(obj, "rewind", &.{});
-        var valid_v = try ctx.vm.callMethod(obj, "valid", &.{});
-        while (valid_v.isTruthy()) {
-            const cur = try ctx.vm.callMethod(obj, "current", &.{});
-            if (cur == .string) cur.string.retain();
-            defer if (cur == .string) cur.string.release();
-            if (preserve_keys) {
-                const key = try ctx.vm.callMethod(obj, "key", &.{});
-                try ctx.vm.arraySetOwned(arr, switch (key) {
-                    .int => |i| .{ .int = i },
-                    .string => |s| .{ .string = s },
-                    else => .{ .int = arr.length() },
-                }, cur);
-            } else {
-                try arr.append(ctx.allocator, cur);
-            }
-            _ = try ctx.vm.callMethod(obj, "next", &.{});
-            valid_v = try ctx.vm.callMethod(obj, "valid", &.{});
-        }
-        return NativeResult.borrowed(.{ .array = arr });
-    }
-
-    return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-}
-
-fn native_iterator_count(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .int = 0 });
-
-    if (args[0] == .array) return NativeResult.scalar(.{ .int = args[0].array.length() });
-
-    if (args[0] == .generator) {
-        const gen = args[0].generator;
-        var n: i64 = 0;
-
-        if (gen.state == .created) try ctx.vm.resumeGenerator(gen, .null);
-
-        while (gen.state != .completed) {
-            n += 1;
-            try ctx.vm.resumeGenerator(gen, .null);
-        }
-        return NativeResult.scalar(.{ .int = n });
-    }
-
-    if (args[0] == .object) {
-        var obj = args[0].object;
-        if (ctx.vm.hasMethod(obj.class_name, "getIterator")) {
-            const inner = try ctx.vm.callMethod(obj, "getIterator", &.{});
-            if (inner == .object) obj = inner.object;
-            if (inner == .generator) {
-                const gen = inner.generator;
-                var n: i64 = 0;
-                if (gen.state == .created) try ctx.vm.resumeGenerator(gen, .null);
-                while (gen.state != .completed) {
-                    n += 1;
-                    try ctx.vm.resumeGenerator(gen, .null);
-                }
-                return NativeResult.scalar(.{ .int = n });
-            }
-        }
-        if (!ctx.vm.hasMethod(obj.class_name, "rewind")) return NativeResult.scalar(.{ .int = 0 });
-        _ = try ctx.vm.callMethod(obj, "rewind", &.{});
-        var n: i64 = 0;
-        while (true) {
-            const valid = try ctx.vm.callMethod(obj, "valid", &.{});
-            if (!valid.isTruthy()) break;
-            n += 1;
-            _ = try ctx.vm.callMethod(obj, "next", &.{});
-        }
-        return NativeResult.scalar(.{ .int = n });
-    }
-
-    return NativeResult.scalar(.{ .int = 0 });
-}
-
-fn native_iterator_apply(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2) return NativeResult.scalar(.{ .int = 0 });
-
-    var tmp_buf: ?[]Value = null;
-    defer if (tmp_buf) |b| ctx.allocator.free(b);
-    var call_args: []const Value = &.{};
-    if (args.len >= 3 and args[2] == .array) {
-        const arr = args[2].array;
-        const tmp = try ctx.allocator.alloc(Value, arr.entries.items.len);
-        for (arr.entries.items, 0..) |entry, i| tmp[i] = entry.value;
-        tmp_buf = tmp;
-        call_args = tmp;
-    }
-
-    if (args[0] == .generator) {
-        const gen = args[0].generator;
-        if (gen.state == .created) try ctx.vm.resumeGenerator(gen, .null);
-        var n: i64 = 0;
-        while (gen.state != .completed) {
-            const r = try ctx.invokeCallable(args[1], call_args);
-            n += 1;
-            if (!r.isTruthy()) break;
-            try ctx.vm.resumeGenerator(gen, .null);
-        }
-        return NativeResult.scalar(.{ .int = n });
-    }
-
-    if (args[0] == .array) {
-        var n: i64 = 0;
-        for (args[0].array.entries.items) |_| {
-            const r = try ctx.invokeCallable(args[1], call_args);
-            n += 1;
-            if (!r.isTruthy()) break;
-        }
-        return NativeResult.scalar(.{ .int = n });
-    }
-
-    if (args[0] == .object) {
-        const obj = args[0].object;
-        // try IteratorAggregate first
-        if (ctx.vm.hasMethod(obj.class_name, "getIterator")) {
-            const inner = try ctx.vm.callMethod(obj, "getIterator", &.{});
-            if (inner == .object) {
-                const inner_args = [_]Value{args[1]} ++ .{};
-                _ = inner_args;
-                const new_args: [3]Value = .{ inner, args[1], if (args.len >= 3) args[2] else Value.null };
-                return native_iterator_apply(ctx, new_args[0..if (args.len >= 3) 3 else 2]);
-            }
-            if (inner == .generator) {
-                const new_args: [3]Value = .{ inner, args[1], if (args.len >= 3) args[2] else Value.null };
-                return native_iterator_apply(ctx, new_args[0..if (args.len >= 3) 3 else 2]);
-            }
-        }
-        // Iterator protocol
-        if (ctx.vm.hasMethod(obj.class_name, "rewind")) {
-            _ = try ctx.vm.callMethod(obj, "rewind", &.{});
-            var n: i64 = 0;
-            while (true) {
-                const valid = try ctx.vm.callMethod(obj, "valid", &.{});
-                if (!valid.isTruthy()) break;
-                const r = try ctx.invokeCallable(args[1], call_args);
-                n += 1;
-                if (!r.isTruthy()) break;
-                _ = try ctx.vm.callMethod(obj, "next", &.{});
-            }
-            return NativeResult.scalar(.{ .int = n });
-        }
-    }
-
-    return NativeResult.scalar(.{ .int = 0 });
 }
 
 fn native_filter_id(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
