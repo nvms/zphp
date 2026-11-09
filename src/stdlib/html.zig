@@ -467,8 +467,24 @@ fn escapeHtmlEntities(ctx: *NativeContext, func: []const u8, old: []const u8, al
     const replacement: []const u8 = if (charset == .utf_8) "\xEF\xBF\xBD" else "&#xFFFD;";
 
     try out.ensureTotalCapacity(allocator, if (old.len < 64) 128 else old.len * 2);
+    // htmlspecialchars on utf-8 (templates' hot path) copies runs of plain
+    // ascii in one go; only the five special characters and multibyte
+    // sequences need the full path
+    const ascii_runs = !all and charset == .utf_8 and (flags & substitute_disallowed) == 0;
     var cursor: usize = 0;
     while (cursor < old.len) {
+        if (ascii_runs) {
+            var end = cursor;
+            while (end < old.len) : (end += 1) {
+                const c = old[end];
+                if (c >= 0x80 or c == '&' or c == '<' or c == '>' or c == '"' or c == '\'') break;
+            }
+            if (end > cursor) {
+                try out.appendSlice(allocator, old[cursor..end]);
+                cursor = end;
+                continue;
+            }
+        }
         const before = cursor;
         const decoded = nextChar(charset, old, &cursor);
         var this_char = decoded orelse {
