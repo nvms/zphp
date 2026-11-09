@@ -369,7 +369,10 @@ fn roundShortest(v: f64, ndigit: usize, d: *Dtoa) bool {
         // a whole ulp in units of the 17th significant digit, plus one
         const ulp = std.math.nextAfter(f64, v, std.math.inf(f64)) - v;
         const unit = std.math.pow(f64, 10, @as(f64, @floatFromInt(decpt - 17)));
-        const margin: u64 = @as(u64, @intFromFloat(@ceil(ulp / unit))) + 1;
+        // the largest double's next neighbour is infinity
+        const units = ulp / unit;
+        if (!std.math.isFinite(units) or units > 1e6) return false;
+        const margin: u64 = @as(u64, @intFromFloat(@ceil(units))) + 1;
         if (t + margin >= half and t <= half + margin) return false;
         len = ndigit;
         if (t > half) {
