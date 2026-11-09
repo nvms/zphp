@@ -865,6 +865,10 @@ pub const VM = struct {
     // resolve a frame's class scope in O(K) (K = small) instead of O(N)
     // iterating self.functions (grows large in framework-heavy workloads).
     chunk_to_func_names: std.AutoHashMapUnmanaged(usize, std.ArrayListUnmanaged([]const u8)) = .{},
+    // class or trait name -> its "Name::method" keys in self.functions, kept
+    // beside chunk_to_func_names, so a trait's methods are found without
+    // scanning every function
+    method_names_by_class: std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)) = .{},
     // chunk-ptr → owning CompileResult, for every main chunk and function
     // chunk. declare_fn resolves its conditionally-declared function through
     // the executing frame's chunk here. entries are overwritten on
@@ -3029,6 +3033,8 @@ pub const VM = struct {
         var ctfn_iter = self.chunk_to_func_names.iterator();
         while (ctfn_iter.next()) |e| e.value_ptr.*.deinit(self.allocator);
         self.chunk_to_func_names.deinit(self.allocator);
+        self.clearMethodNameIndex();
+        self.method_names_by_class.deinit(self.allocator);
         self.chunk_to_result.deinit(self.allocator);
         self.clearPharAliases();
         self.phar_aliases.deinit(self.allocator);
@@ -3346,6 +3352,7 @@ pub const VM = struct {
             var ctfn_it = self.chunk_to_func_names.iterator();
             while (ctfn_it.next()) |e| e.value_ptr.*.deinit(self.allocator);
             self.chunk_to_func_names.clearRetainingCapacity();
+            self.clearMethodNameIndex();
             self.php_constants.clearRetainingCapacity();
             self.user_constants.clearRetainingCapacity();
             self.deprecated_traits.clearRetainingCapacity();
@@ -3771,6 +3778,17 @@ pub const VM = struct {
         if (!gop.found_existing) gop.value_ptr.* = .empty;
         for (gop.value_ptr.*.items) |existing| if (std.mem.eql(u8, existing, name)) return;
         try gop.value_ptr.*.append(self.allocator, name);
+        if (std.mem.startsWith(u8, name, "__closure")) return;
+        const sep = std.mem.indexOf(u8, name, "::") orelse return;
+        const by_class = try self.method_names_by_class.getOrPut(self.allocator, name[0..sep]);
+        if (!by_class.found_existing) by_class.value_ptr.* = .empty;
+        try by_class.value_ptr.append(self.allocator, name);
+    }
+
+    fn clearMethodNameIndex(self: *VM) void {
+        var it = self.method_names_by_class.valueIterator();
+        while (it.next()) |names| names.deinit(self.allocator);
+        self.method_names_by_class.clearRetainingCapacity();
     }
 
     // minimal PHP eval(): parses+compiles a code string and runs it as a
@@ -15958,14 +15976,16 @@ pub const VM = struct {
     fn traitMethods(self: *VM, trait_name: []const u8) ![]const TraitMethodEntry {
         if (self.trait_method_cache.get(trait_name)) |cached| return cached;
         var list: std.ArrayListUnmanaged(TraitMethodEntry) = .empty;
-        var fn_iter = self.functions.iterator();
-        while (fn_iter.next()) |entry| {
-            const fn_name = entry.key_ptr.*;
-            if (fn_name.len > trait_name.len + 2 and
-                std.mem.eql(u8, fn_name[0..trait_name.len], trait_name) and
-                std.mem.eql(u8, fn_name[trait_name.len .. trait_name.len + 2], "::"))
-            {
-                try list.append(self.allocator, .{ .name = fn_name[trait_name.len + 2 ..], .func = entry.value_ptr.* });
+        if (self.method_names_by_class.get(trait_name)) |names| {
+            for (names.items) |fn_name| {
+                const entry = self.functions.getEntry(fn_name) orelse continue;
+                if (fn_name.len <= trait_name.len + 2) continue;
+                const method = entry.key_ptr.*[trait_name.len + 2 ..];
+                const seen = for (list.items) |e| {
+                    if (std.mem.eql(u8, e.name, method)) break true;
+                } else false;
+                if (seen) continue;
+                try list.append(self.allocator, .{ .name = method, .func = entry.value_ptr.* });
             }
         }
         std.sort.pdq(TraitMethodEntry, list.items, {}, struct {
