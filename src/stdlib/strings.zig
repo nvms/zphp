@@ -87,7 +87,7 @@ pub const entries = .{
     .{ "mb_str_pad", native_mb_str_pad },
     .{ "mb_encoding_aliases", native_mb_encoding_aliases },
     .{ "mb_list_encodings", native_mb_list_encodings },
-    .{ "str_getcsv", native_str_getcsv },
+    .{ "str_getcsv", @import("csv.zig").str_getcsv },
     .{ "base64_encode", native_base64_encode },
     .{ "base64_decode", native_base64_decode },
     .{ "convert_uuencode", native_convert_uuencode },
@@ -2788,59 +2788,6 @@ fn utf8CharLen(byte: u8) usize {
     if (byte < 0xE0) return 2;
     if (byte < 0xF0) return 3;
     return 4;
-}
-
-fn native_str_getcsv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.null);
-    const s = if (args[0] == .string) args[0].string.bytes() else return NativeResult.scalar(.null);
-    const sep: u8 = if (args.len >= 2 and args[1] == .string and args[1].string.bytes().len > 0) args[1].string.bytes()[0] else ',';
-    const enc: u8 = if (args.len >= 3 and args[2] == .string and args[2].string.bytes().len > 0) args[2].string.bytes()[0] else '"';
-
-    var arr = try ctx.createArray();
-
-    if (s.len == 0) {
-        try arr.append(ctx.allocator, .{ .string = Value.String.borrowed("") });
-        return NativeResult.borrowed(.{ .array = arr });
-    }
-
-    var field = std.ArrayListUnmanaged(u8).empty;
-    defer field.deinit(ctx.allocator);
-    var in_quotes = false;
-    var at_field_start = true;
-    var i: usize = 0;
-    while (i < s.len) : (i += 1) {
-        const c = s[i];
-        if (in_quotes) {
-            if (c == enc) {
-                if (i + 1 < s.len and s[i + 1] == enc) {
-                    try field.append(ctx.allocator, enc);
-                    i += 1;
-                } else {
-                    in_quotes = false;
-                }
-            } else {
-                try field.append(ctx.allocator, c);
-            }
-        } else {
-            if (c == enc and at_field_start) {
-                in_quotes = true;
-                at_field_start = false;
-            } else if (c == sep) {
-                const f = try Value.String.adopt(ctx.allocator, try field.toOwnedSlice(ctx.allocator));
-                defer f.release();
-                try arr.append(ctx.allocator, .{ .string = f });
-                at_field_start = true;
-            } else {
-                try field.append(ctx.allocator, c);
-                at_field_start = false;
-            }
-        }
-    }
-    const f = try Value.String.adopt(ctx.allocator, try field.toOwnedSlice(ctx.allocator));
-    defer f.release();
-    try arr.append(ctx.allocator, .{ .string = f });
-
-    return NativeResult.borrowed(.{ .array = arr });
 }
 
 const base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

@@ -8,6 +8,9 @@ const NativeResult = vm_mod.NativeResult;
 const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
 
+const csv = @import("csv.zig");
+const filesystem = @import("filesystem.zig");
+
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
@@ -52,8 +55,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "SplFileObject::key", sfoKey);
     try vm.native_fns.put(a, "SplFileObject::next", sfoNext);
     try vm.native_fns.put(a, "SplFileObject::fgets", sfoFgets);
-    try vm.native_fns.put(a, "SplFileObject::fgetcsv", sfoFgetcsv);
-    try vm.native_fns.put(a, "SplFileObject::fputcsv", sfoFputcsv);
+    try vm.native_fns.put(a, "SplFileObject::fgetcsv", csv.splFgetcsv);
+    try vm.native_fns.put(a, "SplFileObject::fputcsv", csv.splFputcsv);
     try vm.native_fns.put(a, "SplFileObject::fread", sfoFread);
     try vm.native_fns.put(a, "SplFileObject::fwrite", sfoFwrite);
     try vm.native_fns.put(a, "SplFileObject::fseek", sfoFseek);
@@ -65,8 +68,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "SplFileObject::fflush", sfoFflush);
     try vm.native_fns.put(a, "SplFileObject::ftruncate", sfoFtruncate);
     try vm.native_fns.put(a, "SplFileObject::flock", sfoFlock);
-    try vm.native_fns.put(a, "SplFileObject::getCsvControl", sfoGetCsvControl);
-    try vm.native_fns.put(a, "SplFileObject::setCsvControl", sfoSetCsvControl);
+    try vm.native_fns.put(a, "SplFileObject::getCsvControl", csv.splGetCsvControl);
+    try vm.native_fns.put(a, "SplFileObject::setCsvControl", csv.splSetCsvControl);
     try vm.native_fns.put(a, "SplFileObject::getCurrentLine", sfoFgets);
     try vm.native_fns.put(a, "SplFileObject::getMaxLineLen", sfoGetMaxLineLen);
     try vm.native_fns.put(a, "SplFileObject::setMaxLineLen", sfoSetMaxLineLen);
@@ -144,53 +147,45 @@ fn stfoConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     return sfoConstruct(ctx, &.{ .{ .string = path_str }, .{ .string = Value.String.borrowed("w+") } });
 }
 
+// spl_filesystem_file_read_line: the next line (or csv record) as current;
+// false when the stream was already at its end. a line read at the end is ""
 fn readOneLine(ctx: *NativeContext, obj: *PhpObject) RuntimeError!void {
     const fh = getHandle(obj) orelse {
         try obj.set(ctx.allocator, "__sfo_current", .{ .bool = false });
         return;
     };
     const flags = objGetInt(obj, "__sfo_flags");
-    while (true) {
-        var line: Value = undefined;
-        var trimmed: ?Value.String = null;
-        defer if (trimmed) |value| value.release();
-        if ((flags & FLAG_READ_CSV) != 0) {
-            const csv_v = obj.get("__sfo_csv");
-            const sep_v: Value = if (csv_v == .array) csv_v.array.get(.{ .int = 0 }) else .{ .string = Value.String.borrowed(",") };
-            const enc_v: Value = if (csv_v == .array) csv_v.array.get(.{ .int = 1 }) else .{ .string = Value.String.borrowed("\"") };
-            const esc_v: Value = if (csv_v == .array) csv_v.array.get(.{ .int = 2 }) else .{ .string = Value.String.borrowed("\\") };
-            line = try ctx.vm.callByName("fgetcsv", &.{ fh, .{ .int = 0 }, sep_v, enc_v, esc_v });
-        } else {
-            line = try ctx.vm.callByName("fgets", &.{fh});
+    const max = objGetInt(obj, "__sfo_max");
+    const max_len: usize = if (max > 0) @intCast(max) else 0;
+    if ((flags & FLAG_READ_CSV) != 0) {
+        const control = csv.Control.load(obj);
+        if ((try csv.splReadCsv(ctx, obj, fh.resource, control.delimiter, control.enclosure, control.escape)) == null) {
+            try obj.set(ctx.allocator, "__sfo_current", .{ .bool = false });
         }
-        if (line == .bool and !line.bool) {
+        return;
+    }
+    var counts = csv.hasCurrent(obj);
+    while (true) {
+        const eof = try ctx.vm.callByName("feof", &.{fh});
+        if (eof == .bool and eof.bool) {
             try obj.set(ctx.allocator, "__sfo_current", .{ .bool = false });
             return;
         }
-        if ((flags & FLAG_READ_CSV) == 0 and (flags & FLAG_DROP_NEW_LINE) != 0 and line == .string) {
-            var s = line.string.bytes();
-            while (s.len > 0 and (s[s.len - 1] == '\n' or s[s.len - 1] == '\r')) s = s[0 .. s.len - 1];
-            trimmed = try Value.String.create(ctx.allocator, s);
-            line = .{ .string = trimmed.? };
+        const raw = (try filesystem.streamReadLine(ctx, fh.resource, if (max_len > 0) max_len else std.math.maxInt(usize))) orelse try ctx.allocator.alloc(u8, 0);
+        defer ctx.allocator.free(raw);
+        // php counts the read as moving on only when a line was current;
+        // lines SKIP_EMPTY passes over drop it first
+        if (counts) try obj.set(ctx.allocator, "__sfo_line", .{ .int = objGetInt(obj, "__sfo_line") + 1 });
+        counts = false;
+        var line: []const u8 = raw;
+        if ((flags & FLAG_DROP_NEW_LINE) != 0 and line.len > 0 and line[line.len - 1] == '\n') {
+            line = line[0 .. line.len - 1];
+            if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
         }
-        if ((flags & FLAG_SKIP_EMPTY) != 0) {
-            const is_empty = blk: {
-                if (line == .string) break :blk line.string.bytes().len == 0;
-                if (line == .array) {
-                    if (line.array.length() == 0) break :blk true;
-                    if (line.array.length() == 1) {
-                        const only = line.array.get(.{ .int = 0 });
-                        if (only == .null or (only == .string and only.string.bytes().len == 0)) break :blk true;
-                    }
-                }
-                break :blk false;
-            };
-            if (is_empty) {
-                try obj.set(ctx.allocator, "__sfo_line", .{ .int = objGetInt(obj, "__sfo_line") + 1 });
-                continue;
-            }
-        }
-        try obj.set(ctx.allocator, "__sfo_current", line);
+        if ((flags & FLAG_SKIP_EMPTY) != 0 and line.len == 0) continue;
+        const str = try Value.String.create(ctx.allocator, line);
+        defer str.release();
+        try obj.set(ctx.allocator, "__sfo_current", .{ .string = str });
         return;
     }
 }
@@ -212,6 +207,12 @@ fn ensureCurrent(ctx: *NativeContext, obj: *@import("../runtime/value.zig").PhpO
 
 fn sfoValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    // without READ_AHEAD php asks the stream, not the line
+    if ((objGetInt(obj, "__sfo_flags") & FLAG_READ_AHEAD) == 0) {
+        const fh = getHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
+        const eof = try ctx.vm.callByName("feof", &.{fh});
+        return NativeResult.scalar(.{ .bool = !(eof == .bool and eof.bool) });
+    }
     try ensureCurrent(ctx, obj);
     const cur = obj.get("__sfo_current");
     if (cur == .bool and !cur.bool) return NativeResult.scalar(.{ .bool = false });
@@ -232,8 +233,10 @@ fn sfoKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
 
 fn sfoNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    // the next line is read now under READ_AHEAD, else lazily by current()
+    try obj.set(ctx.allocator, "__sfo_current", .null);
+    if ((objGetInt(obj, "__sfo_flags") & FLAG_READ_AHEAD) != 0) try readOneLine(ctx, obj);
     try obj.set(ctx.allocator, "__sfo_line", .{ .int = objGetInt(obj, "__sfo_line") + 1 });
-    try readOneLine(ctx, obj);
     return NativeResult.scalar(.null);
 }
 
@@ -242,29 +245,6 @@ fn sfoFgets(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const fh = getHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
     try obj.set(ctx.allocator, "__sfo_line", .{ .int = objGetInt(obj, "__sfo_line") + 1 });
     return NativeResult.share(try ctx.vm.callByName("fgets", &.{fh}));
-}
-
-fn sfoFgetcsv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const fh = getHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
-    const csv_v = obj.get("__sfo_csv");
-    const sep: Value = if (args.len >= 1 and args[0] == .string) args[0] else if (csv_v == .array) csv_v.array.get(.{ .int = 0 }) else .{ .string = Value.String.borrowed(",") };
-    const enc: Value = if (args.len >= 2 and args[1] == .string) args[1] else if (csv_v == .array) csv_v.array.get(.{ .int = 1 }) else .{ .string = Value.String.borrowed("\"") };
-    const esc: Value = if (args.len >= 3 and args[2] == .string) args[2] else if (csv_v == .array) csv_v.array.get(.{ .int = 2 }) else .{ .string = Value.String.borrowed("\\") };
-    try obj.set(ctx.allocator, "__sfo_line", .{ .int = objGetInt(obj, "__sfo_line") + 1 });
-    return NativeResult.share(try ctx.vm.callByName("fgetcsv", &.{ fh, .{ .int = 0 }, sep, enc, esc }));
-}
-
-fn sfoFputcsv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const fh = getHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
-    if (args.len < 1 or args[0] != .array) return NativeResult.scalar(.{ .bool = false });
-    const csv_v = obj.get("__sfo_csv");
-    const sep: Value = if (args.len >= 2 and args[1] == .string) args[1] else if (csv_v == .array) csv_v.array.get(.{ .int = 0 }) else .{ .string = Value.String.borrowed(",") };
-    const enc: Value = if (args.len >= 3 and args[2] == .string) args[2] else if (csv_v == .array) csv_v.array.get(.{ .int = 1 }) else .{ .string = Value.String.borrowed("\"") };
-    const esc: Value = if (args.len >= 4 and args[3] == .string) args[3] else if (csv_v == .array) csv_v.array.get(.{ .int = 2 }) else .{ .string = Value.String.borrowed("\\") };
-    const eol: Value = if (args.len >= 5 and args[4] == .string) args[4] else .{ .string = Value.String.borrowed("\n") };
-    return NativeResult.share(try ctx.vm.callByName("fputcsv", &.{ fh, args[0], sep, enc, esc, eol }));
 }
 
 fn sfoFread(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -345,24 +325,6 @@ fn sfoFlock(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     return NativeResult.scalar(.{ .bool = true });
 }
 
-fn sfoGetCsvControl(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    return NativeResult.share(obj.get("__sfo_csv"));
-}
-
-fn sfoSetCsvControl(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const arr = try ctx.createArray();
-    const sep: Value = if (args.len >= 1 and args[0] == .string) args[0] else .{ .string = Value.String.borrowed(",") };
-    const enc: Value = if (args.len >= 2 and args[1] == .string) args[1] else .{ .string = Value.String.borrowed("\"") };
-    const esc: Value = if (args.len >= 3 and args[2] == .string) args[2] else .{ .string = Value.String.borrowed("\\") };
-    try arr.append(ctx.allocator, sep);
-    try arr.append(ctx.allocator, enc);
-    try arr.append(ctx.allocator, esc);
-    try obj.set(ctx.allocator, "__sfo_csv", .{ .array = arr });
-    return NativeResult.scalar(.null);
-}
-
 fn sfoGetMaxLineLen(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
     return NativeResult.scalar(.{ .int = objGetInt(obj, "__sfo_max") });
@@ -391,18 +353,23 @@ fn sfoSeek(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len < 1) return NativeResult.scalar(.null);
     const target = Value.toInt(args[0]);
+    if (target < 0) {
+        try ctx.vm.setPendingException("ValueError", "SplFileObject::seek(): Argument #1 ($line) must be greater than or equal to 0");
+        return error.RuntimeError;
+    }
     _ = try sfoRewind(ctx, &.{});
-    // rewind leaves the file handle at byte 0 and __sfo_line at 0 / current
-    // unread. for target > 0 advance by reading target lines so the file
-    // handle ends at the start of line `target`. for target == 0 no read is
-    // needed - the next fgets will return line 0
-    if (target > 0) {
-        try ensureCurrent(ctx, obj);
-        while (objGetInt(obj, "__sfo_line") < target) {
-            const cur = obj.get("__sfo_current");
-            if (cur == .bool and !cur.bool) break;
-            _ = try sfoNext(ctx, &.{});
-        }
+    const read_ahead = (objGetInt(obj, "__sfo_flags") & FLAG_READ_AHEAD) != 0;
+    if (read_ahead) try readOneLine(ctx, obj);
+    // php's spl_filesystem_file_seek: read target lines, stopping at the end
+    var i: i64 = 0;
+    while (i < target) : (i += 1) {
+        try readOneLine(ctx, obj);
+        const cur = obj.get("__sfo_current");
+        if (cur == .bool and !cur.bool) return NativeResult.scalar(.null);
+    }
+    if (target > 0 and !read_ahead) {
+        try obj.set(ctx.allocator, "__sfo_line", .{ .int = objGetInt(obj, "__sfo_line") + 1 });
+        try obj.set(ctx.allocator, "__sfo_current", .null);
     }
     return NativeResult.scalar(.null);
 }

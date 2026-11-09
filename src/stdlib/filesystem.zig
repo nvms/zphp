@@ -17,6 +17,7 @@ const phar_path = @import("phar_path.zig");
 const includes = @import("../runtime/includes.zig");
 const bundle = @import("../bundle.zig");
 const zlib = @import("c_zlib");
+const csv = @import("csv.zig");
 
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
@@ -116,8 +117,8 @@ const common_entries = .{
     .{ "rewind", native_rewind },
     .{ "fflush", native_fflush },
     .{ "ftruncate", native_ftruncate },
-    .{ "fgetcsv", native_fgetcsv },
-    .{ "fputcsv", native_fputcsv },
+    .{ "fgetcsv", csv.fgetcsv },
+    .{ "fputcsv", csv.fputcsv },
     .{ "stream_get_meta_data", stream_get_meta_data },
     .{ "stream_get_wrappers", stream_get_wrappers },
     .{ "stream_wrapper_register", stream_wrapper_register },
@@ -425,7 +426,7 @@ pub const StreamArg = struct {
 pub fn streamArg(ctx: *NativeContext, args: []const Value, comptime spec: StreamArg) RuntimeError!*PhpObject {
     const v: Value = if (spec.index < args.len) args[spec.index] else .null;
     const prefix = spec.func ++ "(): Argument #" ++ std.fmt.comptimePrint("{d}", .{spec.index + 1}) ++ " ($" ++ spec.param ++ ") must be ";
-    if (v != .resource) return throwStreamArg(ctx, prefix ++ "of type resource, {s} given", .{v.typeName()});
+    if (v != .resource) return throwStreamArg(ctx, prefix ++ "of type resource, {s} given", .{v.valueName()});
     const r = v.resource;
     const is_stream = std.mem.eql(u8, r.class_name, "FileHandle") or std.mem.eql(u8, r.class_name, "DirectoryHandle");
     if (!is_stream or value_mod.resourceClosed(r)) return throwStreamArg(ctx, prefix ++ "an open stream resource", .{});
@@ -2008,8 +2009,10 @@ pub fn streamWrite(ctx: *NativeContext, obj: *PhpObject, data: []const u8) Runti
     }
     const io = streamIo(obj) orelse return null;
     const file = io.file;
-    // 'a' / 'a+' modes: writes always append, regardless of where the read cursor is
     const mode_v = obj.get("__mode");
+    // php://memory and php://temp opened without w, a or + are read-only
+    if (obj.get("__peek_eof") == .bool and mode_v == .string and std.mem.indexOfAny(u8, mode_v.string.bytes(), "wa+") == null) return null;
+    // 'a' / 'a+' modes: writes always append, regardless of where the read cursor is
     if (mode_v == .string and mode_v.string.bytes().len > 0 and mode_v.string.bytes()[0] == 'a') {
         platform.seekFromEnd(file, 0) catch {};
     }
@@ -2047,6 +2050,17 @@ fn native_fgets(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
 // at eof. a plain file opened without read access fails the read the way
 // php's does, with a notice naming the calling function
 pub fn readLine(ctx: *NativeContext, obj: *PhpObject, max_len: usize, comptime func: []const u8) RuntimeError!?Value.String {
+    if (getBufferBacking(obj) == null and streamIo(obj) != null and writeOnlyPlainFile(obj)) {
+        try ctx.vm.raiseError(8, func ++ "(): Read of 8192 bytes failed with errno=9 Bad file descriptor");
+        return null;
+    }
+    const line = (try streamReadLine(ctx, obj, max_len)) orelse return null;
+    return try Value.String.adopt(ctx.allocator, line);
+}
+
+// the next line of a stream through its newline, at most max_len bytes,
+// owned by the caller; null at the end of the stream
+pub fn streamReadLine(ctx: *NativeContext, obj: *PhpObject, max_len: usize) RuntimeError!?[]u8 {
     if (getBufferBacking(obj)) |buffer| {
         const pos = getBufferPos(obj);
         if (pos >= buffer.len) return null;
@@ -2058,15 +2072,12 @@ pub fn readLine(ctx: *NativeContext, obj: *PhpObject, max_len: usize, comptime f
         }
         const slice = try ctx.allocator.dupe(u8, buffer[pos..end]);
         setBufferPos(obj, end);
-        return try Value.String.adopt(ctx.allocator, slice);
+        return slice;
     }
     const io = streamIo(obj) orelse return null;
-    if (writeOnlyPlainFile(obj)) {
-        try ctx.vm.raiseError(8, func ++ "(): Read of 8192 bytes failed with errno=9 Bad file descriptor");
-        return null;
-    }
 
     var buf = std.ArrayListUnmanaged(u8).empty;
+    errdefer buf.deinit(ctx.allocator);
     var byte: [1]u8 = undefined;
     var hit_eof = false;
     while (buf.items.len < max_len) {
@@ -2079,9 +2090,11 @@ pub fn readLine(ctx: *NativeContext, obj: *PhpObject, max_len: usize, comptime f
         if (byte[0] == '\n') break;
     }
     if (hit_eof) try obj.set(ctx.allocator, "__eof", .{ .bool = true });
-    if (buf.items.len == 0) return null;
-    const result = try buf.toOwnedSlice(ctx.allocator);
-    return try Value.String.adopt(ctx.allocator, result);
+    if (buf.items.len == 0) {
+        buf.deinit(ctx.allocator);
+        return null;
+    }
+    return try buf.toOwnedSlice(ctx.allocator);
 }
 
 // a file opened by path in a mode without read access (w, a, x, c and their
@@ -2766,142 +2779,6 @@ fn native_fstat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     try result.set(ctx.allocator, .{ .int = 2 }, .{ .int = mode });
     try result.set(ctx.allocator, .{ .int = 7 }, .{ .int = size });
     return NativeResult.borrowed(.{ .array = result });
-}
-
-fn native_fgetcsv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = try streamArg(ctx, args, .{ .func = "fgetcsv" });
-    const io = streamIo(obj) orelse return NativeResult.scalar(.{ .bool = false });
-    const delimiter: u8 = if (args.len >= 3 and args[2] == .string and args[2].string.bytes().len > 0) args[2].string.bytes()[0] else ',';
-    const enclosure: u8 = if (args.len >= 4 and args[3] == .string and args[3].string.bytes().len > 0) args[3].string.bytes()[0] else '"';
-
-    // read a CSV record, honoring quoted-field embedded newlines
-    var line = std.ArrayListUnmanaged(u8).empty;
-    var byte: [1]u8 = undefined;
-    var in_quotes = false;
-    var got_any = false;
-    while (true) {
-        const n = io.read(&byte) catch break;
-        if (n == 0) {
-            try obj.set(ctx.allocator, "__eof", .{ .bool = true });
-            break;
-        }
-        got_any = true;
-        const c = byte[0];
-        try line.append(ctx.allocator, c);
-        if (c == enclosure) {
-            if (in_quotes) {
-                // peek next byte for `""` escape
-                var peek: [1]u8 = undefined;
-                const np = io.read(&peek) catch 0;
-                if (np == 1) {
-                    try line.append(ctx.allocator, peek[0]);
-                    if (peek[0] != enclosure) {
-                        in_quotes = false;
-                        if (peek[0] == '\n') break;
-                    }
-                } else {
-                    in_quotes = false;
-                    break;
-                }
-            } else {
-                in_quotes = true;
-            }
-        } else if (c == '\n' and !in_quotes) {
-            break;
-        }
-    }
-    if (!got_any) return NativeResult.scalar(.{ .bool = false });
-
-    const line_owned = try line.toOwnedSlice(ctx.allocator);
-    defer ctx.allocator.free(line_owned);
-
-    var raw = line_owned;
-    if (raw.len > 0 and raw[raw.len - 1] == '\n') raw = raw[0 .. raw.len - 1];
-    if (raw.len > 0 and raw[raw.len - 1] == '\r') raw = raw[0 .. raw.len - 1];
-
-    return parseCsvRecord(ctx, raw, delimiter, enclosure);
-}
-
-fn parseCsvRecord(ctx: *NativeContext, raw: []const u8, delimiter: u8, enclosure: u8) !NativeResult {
-    var result = try ctx.createArray();
-    errdefer ctx.vm.discardOrphan(.{ .array = result });
-    var field = std.ArrayListUnmanaged(u8).empty;
-    defer field.deinit(ctx.allocator);
-    var in_quotes = false;
-    var at_field_start = true;
-    var i: usize = 0;
-    while (i < raw.len) : (i += 1) {
-        const c = raw[i];
-        if (in_quotes) {
-            if (c == enclosure) {
-                if (i + 1 < raw.len and raw[i + 1] == enclosure) {
-                    try field.append(ctx.allocator, enclosure);
-                    i += 1;
-                } else {
-                    in_quotes = false;
-                }
-            } else {
-                try field.append(ctx.allocator, c);
-            }
-        } else {
-            if (c == enclosure and at_field_start) {
-                in_quotes = true;
-                at_field_start = false;
-            } else if (c == delimiter) {
-                try result.appendCopiedString(ctx.allocator, field.items);
-                field.clearRetainingCapacity();
-                at_field_start = true;
-            } else {
-                try field.append(ctx.allocator, c);
-                at_field_start = false;
-            }
-        }
-    }
-    try result.appendCopiedString(ctx.allocator, field.items);
-    return NativeResult.borrowed(.{ .array = result });
-}
-
-fn native_fputcsv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = try streamArg(ctx, args, .{ .func = "fputcsv" });
-    if (args.len < 2 or args[1] != .array) return NativeResult.scalar(.{ .bool = false });
-    const io = streamIo(obj) orelse return NativeResult.scalar(.{ .bool = false });
-    const arr = args[1].array;
-    const delimiter: u8 = if (args.len >= 3 and args[2] == .string and args[2].string.bytes().len > 0) args[2].string.bytes()[0] else ',';
-    const enclosure: u8 = if (args.len >= 4 and args[3] == .string and args[3].string.bytes().len > 0) args[3].string.bytes()[0] else '"';
-    const escape: ?u8 = if (args.len >= 5 and args[4] == .string and args[4].string.bytes().len > 0) args[4].string.bytes()[0] else null;
-
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    for (arr.entries.items, 0..) |entry, i| {
-        if (i > 0) try buf.append(ctx.allocator, delimiter);
-        var tmp_buf = std.ArrayListUnmanaged(u8).empty;
-        defer tmp_buf.deinit(ctx.allocator);
-        try entry.value.format(&tmp_buf, ctx.allocator);
-        const val = tmp_buf.items;
-
-        var needs_quote = false;
-        for (val) |c| {
-            if (c == delimiter or c == enclosure or c == '\n' or c == '\r' or c == ' ' or c == '\t' or (escape != null and c == escape.?)) {
-                needs_quote = true;
-                break;
-            }
-        }
-
-        if (needs_quote) {
-            try buf.append(ctx.allocator, enclosure);
-            for (val) |c| {
-                if (c == enclosure) try buf.append(ctx.allocator, enclosure);
-                try buf.append(ctx.allocator, c);
-            }
-            try buf.append(ctx.allocator, enclosure);
-        } else {
-            try buf.appendSlice(ctx.allocator, val);
-        }
-    }
-    try buf.append(ctx.allocator, '\n');
-
-    defer buf.deinit(ctx.allocator);
-    const written = io.write(buf.items) catch return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.scalar(.{ .int = @intCast(written) });
 }
 
 fn native_touch(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {

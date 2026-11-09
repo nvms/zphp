@@ -670,6 +670,32 @@ var current_locale: [128]u8 = @as([128]u8, @splat(0));
 var current_locale_len: usize = 1;
 var current_locale_initialized: bool = false;
 
+// whether LC_CTYPE names a UTF-8 locale: php's multibyte-aware byte
+// scanning (the csv parser's mblen) reads characters as UTF-8 then. php 8.5
+// starts with LC_CTYPE set to C.UTF-8
+pub var ctype_utf8: bool = true;
+
+// a locale accepted for category: LC_ALL and LC_CTYPE set the character type
+// ("" takes it from the environment, as libc does)
+fn acceptLocale(category: Value, requested: []const u8) void {
+    const cat = Value.toInt(category);
+    if (cat != 0 and cat != 2) return;
+    var name = requested;
+    if (name.len == 0) {
+        name = "C";
+        for ([_][]const u8{ "LC_ALL", "LC_CTYPE", "LANG" }) |key| {
+            if (platform.getenv(key)) |v| if (v.len > 0) {
+                name = v;
+                break;
+            };
+        }
+    }
+    var lower: [128]u8 = undefined;
+    const n = @min(name.len, lower.len);
+    const l = std.ascii.lowerString(lower[0..n], name[0..n]);
+    ctype_utf8 = std.mem.indexOf(u8, l, "utf-8") != null or std.mem.indexOf(u8, l, "utf8") != null;
+}
+
 fn ensureLocaleInit() void {
     if (current_locale_initialized) return;
     current_locale[0] = 'C';
@@ -693,6 +719,7 @@ fn native_setlocale(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
                 }
                 // accept the string verbatim. empty string maps to "C"
                 const new = if (s.bytes().len == 0) "C" else s.bytes();
+                acceptLocale(args[0], s.bytes());
                 if (new.len <= current_locale.len) {
                     @memcpy(current_locale[0..new.len], new);
                     current_locale_len = new.len;
@@ -704,6 +731,7 @@ fn native_setlocale(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
                     if (e.value != .string) continue;
                     const s = e.value.string.bytes();
                     if (s.len == 0) continue;
+                    acceptLocale(args[0], s);
                     if (s.len <= current_locale.len) {
                         @memcpy(current_locale[0..s.len], s);
                         current_locale_len = s.len;
