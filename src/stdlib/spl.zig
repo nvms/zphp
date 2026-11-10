@@ -1278,8 +1278,8 @@ fn tableAt(vm: *VM, o: *PhpObject, pos: usize) ?TableProp {
         if (object_properties.isInternalState(vm, o, name)) return null;
         const declared = vm.propertyDeclaration(layout.declaring_classes[pos], name);
         const value = o.slots.?[pos];
-        const uninitialized = value == .null and declared.type_str.len > 0 and vm.typedPropForbidsNull(declared.type_str);
-        return .{ .name = name, .value = value, .slot = true, .visibility = declared.visibility, .declaring = declared.defining_class, .hole = uninitialized or o.isUnset(name) };
+        const uninitialized = value == .undef or (value == .null and declared.type_str.len > 0 and vm.typedPropForbidsNull(declared.type_str));
+        return .{ .name = name, .value = if (value == .undef) .null else value, .slot = true, .visibility = declared.visibility, .declaring = declared.defining_class, .hole = uninitialized or o.isUnset(name) };
     }
     const index = pos - slot_count;
     if (index >= o.properties.count()) return null;

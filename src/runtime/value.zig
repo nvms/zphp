@@ -1230,8 +1230,15 @@ pub const PhpObject = struct {
         return self.getForScope(name, null);
     }
 
+    // an uninitialized typed property (its slot holds undef) reads as null
+    // here; rawForScope tells the two apart
     pub fn getForScope(self: *const PhpObject, name: []const u8, scope: ?[]const u8) Value {
-        if (self.backingValue() == .object) return self.backingValue().object.getForScope(name, scope);
+        const v = self.rawForScope(name, scope);
+        return if (v == .undef) .null else v;
+    }
+
+    pub fn rawForScope(self: *const PhpObject, name: []const u8, scope: ?[]const u8) Value {
+        if (self.backingValue() == .object) return self.backingValue().object.rawForScope(name, scope);
         if (self.slots) |s| {
             if (self.getSlotIndexForScope(name, scope)) |idx| return s[idx];
         }
@@ -1837,7 +1844,12 @@ pub const Value = union(enum) {
                 for (la.names, 0..) |name, i| {
                     if (i >= sa.len or i >= sb.len) break;
                     const va = sa[i];
-                    const vb = b.get(name);
+                    const vb = b.rawForScope(name, null);
+                    // an uninitialized property only equals another one
+                    if (va == .undef or vb == .undef) {
+                        if (va == .undef and vb == .undef) continue;
+                        return 1;
+                    }
                     const c = compare(va, vb);
                     if (c != 0) return c;
                 }

@@ -2397,6 +2397,8 @@ fn rcGetDefaultProperties(ctx: *NativeContext, _: []const Value) RuntimeError!Na
             if (!is_own and prop.visibility == .private) continue;
             if (seen.contains(prop.name)) continue;
             try seen.put(ctx.allocator, prop.name, {});
+            // a typed property without a default has none to list
+            if (!cls.is_internal and prop.type_str.len > 0 and (!prop.has_default or prop.is_promoted)) continue;
             try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(prop.name) }, prop.default);
         }
         current = cls.parent;
@@ -4342,7 +4344,11 @@ fn rpropIsInitialized(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
         const scope = if (dc == .string) dc.string.bytes() else args[0].object.class_name;
         try ctx.vm.triggerLazyProperty(args[0].object, prop_name, scope);
         const vr = ctx.vm.findPropertyVisibility(scope, prop_name);
-        return NativeResult.scalar(.{ .bool = !args[0].object.isUnset(prop_name) and (args[0].object.getForScope(prop_name, scope) != .null or vr.type_str.len == 0 or (findPropertyDef(ctx.vm, scope, prop_name) orelse return NativeResult.scalar(.{ .bool = false })).prop.has_default) });
+        const raw = args[0].object.storage().rawForScope(prop_name, scope);
+        if (raw == .undef or args[0].object.isUnset(prop_name)) return NativeResult.scalar(.{ .bool = false });
+        // a user class's uninitialized property holds undef, so null is a value
+        const user_class = if (ctx.vm.classes.get(vr.defining_class)) |c| !c.is_internal else false;
+        return NativeResult.scalar(.{ .bool = raw != .null or user_class or vr.type_str.len == 0 or (findPropertyDef(ctx.vm, scope, prop_name) orelse return NativeResult.scalar(.{ .bool = false })).prop.has_default });
     }
     return NativeResult.scalar(.{ .bool = true });
 }

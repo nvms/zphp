@@ -503,7 +503,7 @@ fn array_splice(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
                     const name = layout.names[i];
                     if (object.isLazySlot(name, layout.declaring_classes[i]) or object.isUnset(name)) continue;
                     const property = ctx.vm.findPropertyVisibility(layout.declaring_classes[i], name);
-                    if (value == .null and ctx.vm.typedPropForbidsNull(property.type_str)) continue;
+                    if (value == .undef or (value == .null and ctx.vm.typedPropForbidsNull(property.type_str))) continue;
                     VM.retainValue(value);
                     values.appendAssumeCapacity(value);
                 }

@@ -7159,6 +7159,7 @@ pub const VM = struct {
                             if (!self.classDeclaresProperty(obj_ptr.class_name, prop_name) and try self.checkDynamicProperty(obj_ptr, prop_name)) continue;
                             try obj_ptr.set(self.allocator, prop_name, .null);
                         }
+                        try self.initializeForReference(obj_ptr, prop_name);
                         const cell = blk: {
                             if (self.ref_index) |ri| {
                                 if (ri.prop_rev.get(.{ .object = obj_ptr, .class_name = "", .prop_name = prop_name })) |cells| {
@@ -7242,6 +7243,7 @@ pub const VM = struct {
                                 continue;
                             }
                         }
+                        try self.initializeForReference(obj_ptr, prop_owned);
                         const cell = blk: {
                             if (self.ref_index) |ri| {
                                 if (ri.prop_rev.get(.{ .object = obj_ptr, .class_name = "", .prop_name = prop_owned })) |cells| {
@@ -9559,7 +9561,7 @@ pub const VM = struct {
                                         // a null slot may be an uninitialized
                                         // typed property - fall to the slow path
                                         // for the type check
-                                        if (ic_val != .null) {
+                                        if (ic_val != .null and ic_val != .undef) {
                                             self.push(ic_val);
                                             continue;
                                         }
@@ -9577,7 +9579,8 @@ pub const VM = struct {
                         // would pick the wrong one in deep hierarchies
                         const gp_vr = self.findPropertyVisibility(obj.class_name, prop_name);
                         const gp_scope: ?[]const u8 = gp_vr.defining_class;
-                        const val = obj.getForScope(prop_name, gp_scope);
+                        const raw_gp = obj.rawForScope(prop_name, gp_scope);
+                        const val = if (raw_gp == .undef) Value.null else raw_gp;
                         const slot_present_gp = if (obj.slots != null) obj.getSlotIndexForScope(prop_name, gp_scope) != null else false;
                         const is_present = !obj.isUnset(prop_name) and
                             (val != .null or obj.properties.contains(prop_name) or slot_present_gp);
@@ -9611,7 +9614,7 @@ pub const VM = struct {
                             // never written - PHP's uninitialized state, fatal
                             // to read (such a type rejects null on write, so
                             // null can only mean uninitialized)
-                            if (val == .null and self.typedPropForbidsNull(vr.type_str)) {
+                            if (raw_gp == .undef or (val == .null and self.typedPropForbidsNull(vr.type_str))) {
                                 const msg = try std.fmt.allocPrint(self.allocator, "Typed property {s}::${s} must not be accessed before initialization", .{ vr.defining_class, prop_name });
                                 defer self.allocator.free(msg);
                                 if (try self.throwBuiltinException("Error", msg)) continue;
@@ -9626,7 +9629,8 @@ pub const VM = struct {
                             }
                             self.push(val);
                         } else if (self.magicApplies(obj, prop_name, .get)) {
-                            const result = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicGet(obj, prop_name) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
+                            var result = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicGet(obj, prop_name) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
+                            if (gp_vr.declared and gp_vr.type_str.len > 0 and slot_present_gp) result = try self.checkMagicGetResult(obj, gp_vr, prop_name, result);
                             self.push(result);
                         } else if (badPropertyName(prop_name)) {
                             if (try self.throwBuiltinException("Error", bad_property_name_message)) continue;
@@ -17899,6 +17903,35 @@ pub const VM = struct {
         return error.RuntimeError;
     }
 
+    // a reference to an uninitialized typed property makes it null when its
+    // type takes null, and is an Error otherwise
+    // (zend_handle_fetch_obj_flags / zend_throw_access_uninit_prop_by_ref_error)
+    fn initializeForReference(self: *VM, obj: *PhpObject, prop_name: []const u8) RuntimeError!void {
+        if (obj.rawForScope(prop_name, null) != .undef) return;
+        const decl = self.propertyDeclaration(obj.class_name, prop_name);
+        if (php_types.shape(decl.type_str).mask & php_types.NULL != 0) return obj.set(self.allocator, prop_name, .null);
+        const msg = try std.fmt.allocPrint(self.allocator, "Cannot access uninitialized non-nullable property {s}::${s} by reference", .{ decl.defining_class, prop_name });
+        defer self.allocator.free(msg);
+        try self.setPendingException("Error", msg);
+        return error.RuntimeError;
+    }
+
+    // what __get returns for a typed property that was unset must fit the
+    // property's type, coerced as __get's file allows
+    // (zend_verify_prop_assignable_by_ref_ex in the magic get context)
+    fn checkMagicGetResult(self: *VM, obj: *PhpObject, vr: VisResult, prop_name: []const u8, result: Value) RuntimeError!Value {
+        const strict = blk: {
+            const key = self.resolveMethod(obj.class_name, "__get") catch break :blk false;
+            break :blk if (self.functions.get(key)) |f| f.strict_types else false;
+        };
+        if (try self.propertyTypeAccepts(result, vr.type_str, vr.defining_class, strict)) |accepted| return accepted;
+        const msg = try std.fmt.allocPrint(self.allocator, "Value of type {s} returned from {s}::__get() must be compatible with unset property {s}::${s} of type {s}", .{ Value.typeName(result), vr.defining_class, vr.defining_class, prop_name, try self.propertyTypeText(vr.type_str, vr.defining_class) });
+        defer self.allocator.free(msg);
+        self.releaseValue(result);
+        try self.setPendingException("TypeError", msg);
+        return error.RuntimeError;
+    }
+
     // a property holding a reference that typed properties are bound to
     // takes only what each of them accepts (zend_assign_to_typed_ref)
     fn checkTypedPropWrite(self: *VM, obj: *PhpObject, prop_name: []const u8, val: Value) RuntimeError!Value {
@@ -20270,7 +20303,7 @@ pub const VM = struct {
                 for (all_names.items, 0..) |n, i| {
                     if (all_priv.items[i]) continue;
                     if (std.mem.eql(u8, n, prop.name)) {
-                        all_defaults.items[i] = prop.default;
+                        all_defaults.items[i] = slotDefault(def, prop);
                         // a public/protected child overrides any visibility:
                         // record the child as the new declaring class
                         all_decl.items[i] = def.name;
@@ -20281,7 +20314,7 @@ pub const VM = struct {
             }
             if (!found) {
                 try all_names.append(self.allocator, prop.name);
-                try all_defaults.append(self.allocator, prop.default);
+                try all_defaults.append(self.allocator, slotDefault(def, prop));
                 try all_decl.append(self.allocator, def.name);
                 try all_priv.append(self.allocator, is_priv);
             }
@@ -20300,6 +20333,14 @@ pub const VM = struct {
         @memcpy(priv, all_priv.items);
         layout.* = .{ .names = names, .defaults = defaults, .declaring_classes = decl, .is_private = priv, .throwable = self.definesThrowable(def), .defaults_ready = self.ancestorDefaultsReady(def) };
         return layout;
+    }
+
+    // what a new object's slot holds: a typed property a user class declares
+    // without a default starts uninitialized (php's IS_UNDEF with
+    // IS_PROP_UNINIT), anything else its default
+    fn slotDefault(def: *const ClassDef, prop: ClassDef.PropertyDef) Value {
+        if (!def.is_internal and prop.type_str.len > 0 and (!prop.has_default or prop.is_promoted)) return .undef;
+        return prop.default;
     }
 
     pub fn initObjectProperties(self: *VM, obj: *PhpObject, class_name: []const u8) RuntimeError!void {
