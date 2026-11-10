@@ -556,6 +556,9 @@ fn intArg(ctx: *NativeContext, args: []const Value, comptime func: []const u8, c
 fn ioFailure(ctx: *NativeContext, comptime what: []const u8, count: usize, err: anyerror) RuntimeError!void {
     const code: i64, const text: []const u8 = switch (err) {
         error.NotOpenForReading, error.NotOpenForWriting => .{ 9, "Bad file descriptor" },
+        // windows refuses a read or write the handle wasn't opened for with
+        // access denied, which its c runtime reports as EBADF
+        error.AccessDenied => if (platform.is_windows) .{ 9, "Bad file descriptor" } else .{ 13, "Permission denied" },
         error.IsDir => .{ 21, "Is a directory" },
         error.BrokenPipe => .{ 32, "Broken pipe" },
         error.NoSpaceLeft => .{ 28, "No space left on device" },
@@ -1354,8 +1357,20 @@ fn native_copy(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
         try warn(ctx, "copy(): The second argument to copy() function cannot be a directory", .{});
         return NativeResult.scalar(.{ .bool = false });
     };
-    if (source_stat != null and dest_stat != null and source_stat.?.ino != 0 and source_stat.?.ino == dest_stat.?.ino and source_stat.?.dev == dest_stat.?.dev) {
-        return NativeResult.scalar(.{ .bool = false });
+    if (source_stat != null and dest_stat != null) {
+        if (source_stat.?.ino != 0 and dest_stat.?.ino != 0) {
+            if (source_stat.?.ino == dest_stat.?.ino and source_stat.?.dev == dest_stat.?.dev) return NativeResult.scalar(.{ .bool = false });
+        } else {
+            // no inode numbers (windows): the same file is the same expanded
+            // path, compared without case there
+            var sp_buf: [std.fs.max_path_bytes]u8 = undefined;
+            var dp_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const sp = paths.expand(&sp_buf, source) orelse return NativeResult.scalar(.{ .bool = false });
+            if (paths.expand(&dp_buf, dest)) |dp| {
+                const same = if (platform.is_windows) std.ascii.eqlIgnoreCase(sp, dp) else std.mem.eql(u8, sp, dp);
+                if (same) return NativeResult.scalar(.{ .bool = false });
+            }
+        }
     }
 
     // the source opens first, then the destination is created or truncated

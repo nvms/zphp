@@ -22,8 +22,6 @@ pub const entries = .{
     .{ "is_link", native_is_link },
     .{ "symlink", unsupported },
     .{ "link", unsupported },
-    .{ "stat", native_stat },
-    .{ "lstat", native_stat },
     .{ "flock", native_flock },
     .{ "popen", filesystem.native_popen },
     .{ "pclose", filesystem.native_pclose },
@@ -46,33 +44,6 @@ fn native_is_link(_: *NativeContext, args: []const Value) RuntimeError!NativeRes
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const st = std.Io.Dir.cwd().statFile(platform.io, args[0].string.bytes(), .{}) catch return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = st.kind == .sym_link });
-}
-
-// php's stat() shape from what windows reports: no owner, no inode, no
-// block accounting
-fn native_stat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const st = @import("../platform.zig").statPath(args[0].string.bytes()) catch return NativeResult.scalar(.{ .bool = false });
-    const mode: i64 = @intCast(@import("../platform.zig").modeOf(st));
-    const size: i64 = @intCast(st.size);
-    const atime: i64 = @intCast(@divTrunc((st.atime orelse st.mtime).nanoseconds, std.time.ns_per_s));
-    const mtime: i64 = @intCast(@divTrunc(st.mtime.nanoseconds, std.time.ns_per_s));
-    const ctime: i64 = @intCast(@divTrunc(st.ctime.nanoseconds, std.time.ns_per_s));
-    const pairs = [_]struct { name: []const u8, val: i64 }{
-        .{ .name = "dev", .val = 0 },       .{ .name = "ino", .val = 0 },
-        .{ .name = "mode", .val = mode },   .{ .name = "nlink", .val = 1 },
-        .{ .name = "uid", .val = 0 },       .{ .name = "gid", .val = 0 },
-        .{ .name = "rdev", .val = 0 },      .{ .name = "size", .val = size },
-        .{ .name = "atime", .val = atime }, .{ .name = "mtime", .val = mtime },
-        .{ .name = "ctime", .val = ctime }, .{ .name = "blksize", .val = -1 },
-        .{ .name = "blocks", .val = -1 },
-    };
-    var arr = try ctx.createArray();
-    for (pairs, 0..) |p, i| {
-        try arr.set(ctx.allocator, .{ .int = @intCast(i) }, .{ .int = p.val });
-        try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(p.name) }, .{ .int = p.val });
-    }
-    return NativeResult.borrowed(.{ .array = arr });
 }
 
 fn native_flock(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
