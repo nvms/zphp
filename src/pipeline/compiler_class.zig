@@ -965,6 +965,42 @@ fn defaultFits(kind: DefaultKind, t: php_types.Type) struct { bool, []const u8 }
 
 // php's zend_compile_class_const_decl checks: a private constant can't be
 // final, and a typed constant's literal value must fit its type
+// zend_compile_prop_decl: the types a property can't have, and a literal
+// default its type can't hold
+fn checkPropDecls(self: *Compiler, class_name: []const u8, members: []const u32) Error!void {
+    for (members) |m_idx| {
+        const m = self.ast.nodes[m_idx];
+        if (m.tag != .class_property and m.tag != .static_class_property and m.tag != .class_property_hooks) continue;
+        const type_extra = m.data.rhs >> 16;
+        if (type_extra == 0) continue;
+        const raw = self.ast.tokenSlice(m.main_token);
+        const name = if (raw.len > 0 and raw[0] == '$') raw[1..] else raw;
+        const text = try buildTypeString(self, self.ast.extra_data[type_extra - 1], self.ast.extra_data[type_extra]);
+        const t = php_types.parse(self.allocator, text, null, null) catch return error.OutOfMemory;
+        defer t.deinit(self.allocator);
+        if (t.mask & (php_types.VOID | php_types.NEVER | php_types.CALLABLE) != 0) {
+            const shown = php_types.format(self.allocator, t) catch return error.OutOfMemory;
+            defer self.allocator.free(shown);
+            return self.failFmt(m.main_token, "Property {s}::${s} cannot have type {s}", .{ class_name, name, shown });
+        }
+        const default_idx = if (m.tag == .class_property_hooks) self.ast.extra_data[m.data.lhs] else m.data.lhs;
+        if (default_idx == 0) continue;
+        const kind = foldedDefault(self, default_idx) orelse continue;
+        const accepted, const kind_name = defaultFits(kind, t);
+        if (accepted) continue;
+        const shown = php_types.format(self.allocator, t) catch return error.OutOfMemory;
+        defer self.allocator.free(shown);
+        if (kind == .null and !t.pure_intersection) {
+            var nullable = t;
+            nullable.mask |= php_types.NULL;
+            const nullable_shown = php_types.format(self.allocator, nullable) catch return error.OutOfMemory;
+            defer self.allocator.free(nullable_shown);
+            return self.failFmt(m.main_token, "Default value for property of type {s} may not be null. Use the nullable type {s} to allow null default value", .{ shown, nullable_shown });
+        }
+        return self.failFmt(m.main_token, "Cannot use {s} as default value for property {s}::${s} of type {s}", .{ kind_name, class_name, name, shown });
+    }
+}
+
 fn checkConstDecls(self: *Compiler, class_name: []const u8, members: []const u32) Error!void {
     const outer_class = self.current_class;
     self.current_class = class_name;
@@ -2289,6 +2325,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
     const members = shape.members;
     try checkDuplicateMembers(self, class_name, members);
     try checkConstDecls(self, class_name, members);
+    try checkPropDecls(self, class_name, members);
 
     const prev_class = self.current_class;
     self.current_class = class_name;
