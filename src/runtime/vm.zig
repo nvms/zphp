@@ -1704,6 +1704,9 @@ pub const VM = struct {
         frame_count: usize, // frame count when handler was pushed
         sp: usize, // stack pointer when handler was pushed
         chunk: *const Chunk, // chunk the handler belongs to
+        // the @ nesting when the try began: an exception leaving an @
+        // expression ends its silence, as php's live-range cleanup does
+        silenced_depth: u32,
     };
 
     const CallFrame = struct {
@@ -8187,6 +8190,7 @@ pub const VM = struct {
                         .frame_count = self.frame_count,
                         .sp = self.sp,
                         .chunk = self.currentChunk(),
+                        .silenced_depth = self.error_silenced_depth,
                     };
                     self.handler_count += 1;
                 },
@@ -14107,6 +14111,7 @@ pub const VM = struct {
         }
         self.discardArgTransport(handler.sp);
         self.sp = handler.sp;
+        self.error_silenced_depth = handler.silenced_depth;
         if (ownership == .owned) self.pushTransfer(exc) else self.push(exc);
         self.currentFrame().ip = handler.catch_ip;
     }
@@ -16888,6 +16893,7 @@ pub const VM = struct {
                 .frame_count = self.frame_count,
                 .sp = gen.base_sp + h.sp_offset,
                 .chunk = h.chunk,
+                .silenced_depth = self.error_silenced_depth,
             };
             self.handler_count += 1;
         }
@@ -22756,6 +22762,7 @@ pub const VM = struct {
                 .frame_count = base_frame + h.frame_count_offset,
                 .sp = base_sp + h.sp_offset,
                 .chunk = h.chunk,
+                .silenced_depth = self.error_silenced_depth,
             };
             self.handler_count += 1;
         }

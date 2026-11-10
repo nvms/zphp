@@ -7,3 +7,8 @@ $x = @file_get_contents('/nonexistent/x');
 $y = @$undefined;
 echo error_reporting(), "\n";
 var_dump(defined("ZEND_THREAD_SAFE"), ZEND_THREAD_SAFE, defined("ZEND_DEBUG_BUILD"));
+try { @throw new Exception; } catch (Exception $e) {}
+var_dump(error_reporting());
+function thrower() { throw new Exception; }
+try { @thrower(); } catch (Exception $e) {}
+var_dump(error_reporting());
