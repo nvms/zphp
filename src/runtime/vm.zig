@@ -20494,7 +20494,6 @@ pub const VM = struct {
             try self.setPendingException("ArgumentCountError", native.arity.describe(&buf, label, input_args.len));
             return error.RuntimeError;
         }
-        if (native.arrays != 0) if (name) |n| try self.checkArrayArgs(n, label, native.arrays, input_args);
         var args_buf: [16]Value = undefined;
         var separated_args: ?[]Value = null;
         defer if (separated_args) |copy| self.freeStackArgs(copy, &args_buf);
@@ -20538,7 +20537,7 @@ pub const VM = struct {
         }
         // the callable parameters are checked once the arguments are pinned:
         // resolving one may autoload, which runs php
-        if (native.callbacks != 0) if (name) |n| try self.checkCallbackArgs(n, label, native.callbacks, native_args);
+        if (native.callbacks != 0 or native.arrays != 0) if (name) |n| try self.checkCallbackArgs(n, label, native.callbacks, native.arrays, native_args);
         const result = try native.call(ctx, native_args);
         return result.value;
     }
@@ -22212,31 +22211,31 @@ pub const VM = struct {
         try self.raiseErrorAt(E_WARNING, msg, .{ .file = self.frameFile(self.frame_count - 1), .line = line });
     }
 
-    // a native's `array` parameters, which php's argument parsing refuses
-    // anything else for; a variadic one names no parameter
-    fn checkArrayArgs(self: *VM, name: []const u8, label: []const u8, positions: u32, args: []const Value) RuntimeError!void {
-        for (args, 0..) |arg, i| {
-            const bit: u32 = if (i >= 31) (positions & natives_mod.variadic_array_bit) else (positions & (@as(u32, 1) << @intCast(i)));
-            if (bit == 0 or arg == .array) continue;
-            const signature = native_params.get(name) orelse return;
-            const param = signature.params[@min(i, signature.params.len - 1)];
-            const msg = if (param.variadic)
-                try std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} must be of type array, {s} given", .{ label, i + 1, valueTypeName(arg) })
-            else
-                try std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} (${s}) must be of type array, {s} given", .{ label, i + 1, param.name, valueTypeName(arg) });
-            defer self.allocator.free(msg);
-            try self.setPendingException("TypeError", msg);
-            return error.RuntimeError;
-        }
-    }
-
-    // a native's `callable` parameters, checked as php's argument parsing
-    // does before the function runs
-    fn checkCallbackArgs(self: *VM, name: []const u8, label: []const u8, positions: u32, args: []const Value) RuntimeError!void {
+    // a native's `callable` and `array` parameters, checked in order as php's
+    // argument parsing does before the function runs. a scalar parameter
+    // before them that the argument cannot fit stops the checks: the native
+    // reports that one itself
+    fn checkCallbackArgs(self: *VM, name: []const u8, label: []const u8, callbacks: u32, arrays: u32, args: []const Value) RuntimeError!void {
         const signature = native_params.get(name) orelse return;
+        if (signature.params.len == 0) return;
         for (args, 0..) |arg, i| {
-            if (i >= 32 or positions & (@as(u32, 1) << @intCast(i)) == 0) continue;
             const param = signature.params[@min(i, signature.params.len - 1)];
+            const is_callback = i < 32 and callbacks & (@as(u32, 1) << @intCast(i)) != 0;
+            const is_array = if (i >= 31) (arrays & natives_mod.variadic_array_bit) != 0 else (arrays & (@as(u32, 1) << @intCast(i))) != 0;
+            if (is_array) {
+                if (arg == .array) continue;
+                const msg = if (param.variadic)
+                    try std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} must be of type array, {s} given", .{ label, i + 1, valueTypeName(arg) })
+                else
+                    try std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} (${s}) must be of type array, {s} given", .{ label, i + 1, param.name, valueTypeName(arg) });
+                defer self.allocator.free(msg);
+                try self.setPendingException("TypeError", msg);
+                return error.RuntimeError;
+            }
+            if (!is_callback) {
+                if (scalarParamRefuses(self, param.type, arg)) return;
+                continue;
+            }
             const nullable = param.type.len > 0 and param.type[0] == '?';
             if (nullable and arg == .null) continue;
             switch (try callables.resolveCallback(self, arg, .{})) {
@@ -22251,6 +22250,18 @@ pub const VM = struct {
                 },
             }
         }
+    }
+
+    // an argument a scalar parameter can never take, whatever the mode
+    fn scalarParamRefuses(self: *VM, param_type: []const u8, arg: Value) bool {
+        const t = if (param_type.len > 0 and param_type[0] == '?') param_type[1..] else param_type;
+        const scalar = std.mem.eql(u8, t, "string") or std.mem.eql(u8, t, "int") or std.mem.eql(u8, t, "float") or std.mem.eql(u8, t, "bool");
+        if (!scalar) return false;
+        return switch (arg) {
+            .array, .resource => true,
+            .object => |o| !std.mem.eql(u8, t, "string") or !self.hasMethod(o.class_name, "__toString"),
+            else => false,
+        };
     }
 
     pub fn callByName(self: *VM, raw_name: []const u8, args: []const Value) RuntimeError!Value {
