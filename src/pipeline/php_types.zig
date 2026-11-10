@@ -33,6 +33,9 @@ pub const Type = struct {
     pure_intersection: bool = false,
     // `iterable`, which php compiles to Traversable|array
     iterable: bool = false,
+    // the written order of the class members: 'n' for the next of names,
+    // 'i' for the next of intersections (php prints them in this order)
+    order: []const u8 = &.{},
 
     pub fn isSet(self: Type) bool {
         return self.mask != 0 or self.names.len > 0 or self.intersections.len > 0;
@@ -42,6 +45,7 @@ pub const Type = struct {
         allocator.free(self.names);
         for (self.intersections) |group| allocator.free(group);
         allocator.free(self.intersections);
+        allocator.free(self.order);
     }
 };
 
@@ -83,6 +87,8 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, scope: ?[]const u8,
         for (groups.items) |g| allocator.free(g);
         groups.deinit(allocator);
     }
+    var order: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer order.deinit(allocator);
     // a type with & and no | or parentheses is a pure intersection
     if (std.mem.indexOfScalar(u8, body, '&') != null and std.mem.indexOfScalar(u8, body, '|') == null and std.mem.indexOfScalar(u8, body, '(') == null) {
         var group: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -103,12 +109,14 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, scope: ?[]const u8,
             var parts = std.mem.splitScalar(u8, inner, '&');
             while (parts.next()) |part| try group.append(allocator, resolveName(std.mem.trim(u8, part, " "), scope, parent));
             try groups.append(allocator, try group.toOwnedSlice(allocator));
+            try order.append(allocator, 'i');
             continue;
         }
         if (std.ascii.eqlIgnoreCase(member, "iterable")) {
             t.iterable = true;
             t.mask |= ARRAY;
             try names.append(allocator, "Traversable");
+            try order.append(allocator, 'n');
             continue;
         }
         if (builtinBits(member)) |bits| {
@@ -116,9 +124,11 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, scope: ?[]const u8,
             continue;
         }
         try names.append(allocator, resolveName(member, scope, parent));
+        try order.append(allocator, 'n');
     }
     t.names = try names.toOwnedSlice(allocator);
     t.intersections = try groups.toOwnedSlice(allocator);
+    t.order = try order.toOwnedSlice(allocator);
     return t;
 }
 
@@ -170,7 +180,19 @@ pub fn format(allocator: std.mem.Allocator, t: Type) ![]u8 {
         }
         return out.toOwnedSlice(allocator);
     }
-    for (t.intersections) |group| {
+    const ordered = t.order.len == t.names.len + t.intersections.len;
+    var next_name: usize = 0;
+    var next_group: usize = 0;
+    var member: usize = 0;
+    while (member < t.names.len + t.intersections.len) : (member += 1) {
+        const group_next = if (ordered) t.order[member] == 'i' else next_group < t.intersections.len;
+        if (!group_next) {
+            try add(&out, allocator, &count, t.names[next_name]);
+            next_name += 1;
+            continue;
+        }
+        const group = t.intersections[next_group];
+        next_group += 1;
         var text: std.ArrayListUnmanaged(u8) = .empty;
         defer text.deinit(allocator);
         try text.append(allocator, '(');
@@ -182,7 +204,6 @@ pub fn format(allocator: std.mem.Allocator, t: Type) ![]u8 {
         try add(&out, allocator, &count, text.items);
         has_intersection = true;
     }
-    for (t.names) |name| try add(&out, allocator, &count, name);
     const mask = t.mask;
     if (mask == ANY) {
         try add(&out, allocator, &count, "mixed");
