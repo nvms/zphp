@@ -706,13 +706,17 @@ fn native_hash_hmac_file(ctx: *NativeContext, args: []const Value) RuntimeError!
 }
 
 fn native_md5_file(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    return hashPath(ctx, "md5_file", HashAlgo.fromString("md5").?, args[0].string.bytes(), null, args.len >= 2 and args[1].isTruthy());
+    const p = @import("string_ports.zig").Args.init(ctx, "md5_file", args);
+    const path = try p.str(0, "filename");
+    const binary = try p.boolean(1, "binary", false);
+    return hashPath(ctx, "md5_file", HashAlgo.fromString("md5").?, path, null, binary);
 }
 
 fn native_sha1_file(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    return hashPath(ctx, "sha1_file", HashAlgo.fromString("sha1").?, args[0].string.bytes(), null, args.len >= 2 and args[1].isTruthy());
+    const p = @import("string_ports.zig").Args.init(ctx, "sha1_file", args);
+    const path = try p.str(0, "filename");
+    const binary = try p.boolean(1, "binary", false);
+    return hashPath(ctx, "sha1_file", HashAlgo.fromString("sha1").?, path, null, binary);
 }
 
 fn native_hash_equals(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {

@@ -495,11 +495,8 @@ fn strlen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
             const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch break :blk NativeResult.scalar(.{ .int = 0 });
             break :blk NativeResult.scalar(.{ .int = @intCast(s.len) });
         },
-        .float => |f| blk: {
-            var buf: [64]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "{d}", .{f}) catch break :blk NativeResult.scalar(.{ .int = 0 });
-            break :blk NativeResult.scalar(.{ .int = @intCast(s.len) });
-        },
+        // a float as php turns it into a string, with the precision ini
+        .float => NativeResult.scalar(.{ .int = @intCast((try ctx.vm.transientFormatted(args[0])).bytes().len) }),
         .bool => |b| NativeResult.scalar(.{ .int = if (b) 1 else 0 }),
         .null => NativeResult.scalar(.{ .int = 0 }),
         .object => |obj| blk: {
