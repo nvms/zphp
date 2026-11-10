@@ -1256,7 +1256,7 @@ fn methodToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
     if (this.get("__closure") != .null) {
         // a closure's __invoke
         var view: FnView = .{ .name = "__invoke", .scope = "Closure", .trampoline = true, .info = .{ .name = "__invoke", .arity = 0 } };
-        if (stringProp(this, "__closure")) |closure| {
+        if (this.get("__closure").closureName()) |closure| {
             view.user = ctx.vm.functions.get(closure);
             view.types = reflection.closureAwareTypeInfo(closure);
         }
