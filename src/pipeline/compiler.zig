@@ -233,7 +233,7 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
     try c.emitOp(.halt);
 
     const slot_names = try c.buildSlotNames();
-    const strict = detectStrictTypes(ast.source);
+    const strict = strictTypesDeclared(ast, c.root_stmts);
     for (c.functions.items) |*f| f.strict_types = strict;
     // php compiles a file top to bottom; zphp compiles early-bound classes
     // first, so its warnings are put back in source order
@@ -251,24 +251,19 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
     return result;
 }
 
-fn detectStrictTypes(src: []const u8) bool {
-    // declare(strict_types=1) appears at file scope, before any namespace.
-    // tolerate whitespace around tokens. we just need a yes/no answer; we
-    // don't bother re-parsing the directive
-    var i: usize = 0;
-    while (i < src.len) {
-        const idx = std.mem.indexOfScalarPos(u8, src, i, 'd') orelse return false;
-        if (idx + 7 <= src.len and std.mem.eql(u8, src[idx .. idx + 7], "declare")) {
-            var j = idx + 7;
-            while (j < src.len and (src[j] == ' ' or src[j] == '\t')) j += 1;
-            if (j < src.len and src[j] == '(') {
-                const end = std.mem.indexOfScalarPos(u8, src, j, ')') orelse return false;
-                const inner = src[j + 1 .. end];
-                if (std.mem.indexOf(u8, inner, "strict_types") != null and std.mem.indexOf(u8, inner, "1") != null) return true;
-                return false;
-            }
+// declare(strict_types=1) among the declares that open the file
+fn strictTypesDeclared(ast: *const Ast, root_stmts: []const u32) bool {
+    for (root_stmts) |idx| {
+        const node = ast.nodes[idx];
+        if (node.tag == .inline_html) continue;
+        if (node.tag != .declare_stmt) return false;
+        var t = node.main_token + 1;
+        while (t + 2 < node.data.lhs) : (t += 1) {
+            if (ast.tokens[t].tag != .identifier or !std.ascii.eqlIgnoreCase(ast.tokenSlice(t), "strict_types")) continue;
+            if (ast.tokens[t + 1].tag != .equal or ast.tokens[t + 2].tag != .integer) continue;
+            const value = std.fmt.parseInt(i64, ast.tokenSlice(t + 2), 0) catch 1;
+            return value != 0;
         }
-        i = idx + 1;
     }
     return false;
 }
