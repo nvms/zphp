@@ -607,6 +607,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rprop_def.methods.put(a, "isInitialized", .{ .name = "isInitialized", .arity = 1 });
     try rprop_def.methods.put(a, "getDeclaringClass", .{ .name = "getDeclaringClass", .arity = 0 });
     try rprop_def.methods.put(a, "isDefault", .{ .name = "isDefault", .arity = 0 });
+    try rprop_def.methods.put(a, "isDynamic", .{ .name = "isDynamic", .arity = 0 });
+    try rprop_def.methods.put(a, "getMangledName", .{ .name = "getMangledName", .arity = 0 });
     try rprop_def.methods.put(a, "isReadOnly", .{ .name = "isReadOnly", .arity = 0 });
     // PHP 8.4 added the lowercase 'isReadonly' alias
     try rprop_def.methods.put(a, "isReadonly", .{ .name = "isReadonly", .arity = 0 });
@@ -647,9 +649,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionProperty::__construct", rpConstruct);
     try vm.native_fns.put(a, "ReflectionProperty::setAccessible", reflectionNoop);
     try vm.native_fns.put(a, "ReflectionProperty::getValue", rpGetValue);
-    try vm.native_fns.put(a, "ReflectionProperty::getRawValue", rpGetValue);
+    try vm.native_fns.put(a, "ReflectionProperty::getRawValue", rpGetRawValue);
     try vm.native_fns.put(a, "ReflectionProperty::setValue", rpSetValue);
-    try vm.native_fns.put(a, "ReflectionProperty::setRawValue", rpSetValue);
+    try vm.native_fns.put(a, "ReflectionProperty::setRawValue", rpSetRawValue);
     try vm.native_fns.put(a, "ReflectionProperty::setRawValueWithoutLazyInitialization", rpSetWithoutLazy);
     try vm.native_fns.put(a, "ReflectionProperty::getName", rpropGetName);
     try vm.native_fns.put(a, "ReflectionProperty::getType", rpropGetType);
@@ -672,6 +674,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionProperty::isInitialized", rpropIsInitialized);
     try vm.native_fns.put(a, "ReflectionProperty::getDeclaringClass", rpropGetDeclaringClass);
     try vm.native_fns.put(a, "ReflectionProperty::isDefault", rpropIsDefault);
+    try vm.native_fns.put(a, "ReflectionProperty::isDynamic", rpropIsDynamic);
+    try vm.native_fns.put(a, "ReflectionProperty::getMangledName", rpropGetMangledName);
     try vm.native_fns.put(a, "ReflectionProperty::isReadOnly", rpropIsReadOnly);
     try vm.native_fns.put(a, "ReflectionProperty::isReadonly", rpropIsReadOnly);
     try vm.native_fns.put(a, "ReflectionProperty::isStatic", rpropIsStatic);
@@ -893,6 +897,120 @@ pub fn getThis(ctx: *NativeContext) ?*PhpObject {
     return v.object;
 }
 
+// php's zend_parse_parameters for the reflection natives: weak-mode
+// coercion, the null deprecation, and the TypeError wording
+const zpp = struct {
+    fn typeError(ctx: *NativeContext, label: []const u8, i: usize, pname: []const u8, expected: []const u8, v: Value) RuntimeError {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given", .{ label, i + 1, pname, expected, v.valueName() });
+        defer ctx.allocator.free(msg);
+        _ = try ctx.vm.throwBuiltinException("TypeError", msg);
+        return error.RuntimeError;
+    }
+
+    fn nullDeprecated(ctx: *NativeContext, label: []const u8, i: usize, pname: []const u8, expected: []const u8) RuntimeError!void {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Passing null to parameter #{d} (${s}) of type {s} is deprecated", .{ label, i + 1, pname, expected });
+        defer ctx.allocator.free(msg);
+        try ctx.vm.raiseError(VM.E_DEPRECATED, msg);
+    }
+
+    // a scalar as the string a string parameter receives, null when the
+    // value can't be one
+    fn scalarString(ctx: *NativeContext, label: []const u8, args: []const Value, i: usize, pname: []const u8, expected: []const u8) RuntimeError!?[]const u8 {
+        const v = args[i];
+        switch (v) {
+            .string => |str_v| return str_v.bytes(),
+            .int, .float, .bool => {
+                var buf: std.ArrayListUnmanaged(u8) = .empty;
+                defer buf.deinit(ctx.allocator);
+                try v.format(&buf, ctx.allocator);
+                return try ctx.vm.internName(buf.items);
+            },
+            .null => {
+                try nullDeprecated(ctx, label, i, pname, expected);
+                return "";
+            },
+            .object => |o| if (ctx.vm.hasMethod(o.class_name, "__toString")) {
+                const r = try ctx.vm.callMethod(o, "__toString", &.{});
+                defer ctx.vm.releaseValue(r);
+                if (r == .string) return try ctx.vm.internName(r.string.bytes());
+                return error.RuntimeError;
+            },
+            else => {},
+        }
+        return null;
+    }
+
+    fn str(ctx: *NativeContext, label: []const u8, args: []const Value, i: usize, pname: []const u8) RuntimeError![]const u8 {
+        return (try scalarString(ctx, label, args, i, pname, "string")) orelse typeError(ctx, label, i, pname, "string", args[i]);
+    }
+
+    // Z_PARAM_OBJ_OR_STR: an object, or a string
+    fn objOrStr(ctx: *NativeContext, label: []const u8, args: []const Value, i: usize, pname: []const u8) RuntimeError!Value {
+        if (args[i] == .object) return args[i];
+        const text = (try scalarString(ctx, label, args, i, pname, "object|string")) orelse return typeError(ctx, label, i, pname, "object|string", args[i]);
+        return .{ .string = Value.String.borrowed(text) };
+    }
+
+    // "?object" / "o!"
+    fn optObject(ctx: *NativeContext, label: []const u8, args: []const Value, i: usize, pname: []const u8) RuntimeError!?*PhpObject {
+        if (i >= args.len) return null;
+        return switch (args[i]) {
+            .object => |o| o,
+            .null => null,
+            else => typeError(ctx, label, i, pname, "?object", args[i]),
+        };
+    }
+
+    fn array(ctx: *NativeContext, label: []const u8, args: []const Value, i: usize, pname: []const u8) RuntimeError!*PhpArray {
+        if (args[i] == .array) return args[i].array;
+        return typeError(ctx, label, i, pname, "array", args[i]);
+    }
+
+    fn long(ctx: *NativeContext, label: []const u8, args: []const Value, i: usize, pname: []const u8, nullable: bool) RuntimeError!?i64 {
+        const v = args[i];
+        switch (v) {
+            .int => |n| return n,
+            .bool => |b| return @intFromBool(b),
+            .float => |f| if (std.math.isFinite(f) and @floor(f) == f and f >= -9.2233720368547758e18 and f < 9.2233720368547758e18) return @intFromFloat(f),
+            .string => |sv| if (Value.isNumericString(sv.bytes())) {
+                const as_float = Value.toFloat(v);
+                if (@floor(as_float) == as_float) return Value.toInt(v);
+            },
+            .null => {
+                if (nullable) return null;
+                try nullDeprecated(ctx, label, i, pname, "int");
+                return 0;
+            },
+            else => {},
+        }
+        return typeError(ctx, label, i, pname, if (nullable) "?int" else "int", v);
+    }
+};
+
+// zend_lookup_class: a class, interface, trait or enum by name, autoloading
+// it; the declared spelling, or null
+fn lookupClass(ctx: *NativeContext, raw: []const u8) RuntimeError!?[]const u8 {
+    const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
+    if (name.len == 0 or std.mem.indexOfScalar(u8, name, 0) != null) return null;
+    if (!ctx.vm.classes.contains(name) and !ctx.vm.interfaces.contains(name) and !ctx.vm.traits.contains(name)) {
+        try ctx.vm.tryAutoload(name);
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+    }
+    if (!ctx.vm.classes.contains(name) and !ctx.vm.interfaces.contains(name) and !ctx.vm.traits.contains(name)) return null;
+    return try ctx.vm.stableClassName(ctx.vm.declaredClassName(name));
+}
+
+// the class an object|string argument names, or php's ReflectionException
+fn classArgument(ctx: *NativeContext, v: Value) RuntimeError![]const u8 {
+    if (v == .object) return v.object.class_name;
+    const text = v.string.bytes();
+    return (try lookupClass(ctx, text)) orelse {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Class \"{s}\" does not exist", .{text});
+        defer ctx.allocator.free(msg);
+        return throwReflection(ctx, msg);
+    };
+}
+
 fn throwReflection(ctx: *NativeContext, msg: []const u8) RuntimeError {
     _ = ctx.vm.throwBuiltinException("ReflectionException", msg) catch {};
     return error.RuntimeError;
@@ -997,11 +1115,14 @@ fn createTypeObj(ctx: *NativeContext, type_name: []const u8, nullable: bool, sel
 
 fn buildMethodObj(ctx: *NativeContext, class_name: []const u8, method_name: []const u8, info: ClassDef.MethodInfo, declaring_class: []const u8) !*PhpObject {
     const obj = try ctx.createObject("ReflectionMethod");
+    // $class is the class declaring the method, as php's method->common.scope;
+    // the class it was asked about stays in __class (php's intern->ce)
     try obj.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(method_name) });
-    try obj.set(ctx.allocator, "class", .{ .string = Value.String.borrowed(class_name) });
+    try obj.set(ctx.allocator, "class", .{ .string = Value.String.borrowed(declaring_class) });
+    try obj.set(ctx.allocator, "__class", .{ .string = Value.String.borrowed(class_name) });
     try obj.set(ctx.allocator, "__declaring_class", .{ .string = Value.String.borrowed(declaring_class) });
     try obj.set(ctx.allocator, "__is_static", .{ .bool = info.is_static });
-    try obj.set(ctx.allocator, "__visibility", .{ .int = @intFromEnum(info.visibility) });
+    try obj.set(ctx.allocator, "__visibility", .{ .int = @backingInt(info.visibility) });
 
     // look up ObjFunction for parameter info
     var buf: [256]u8 = undefined;
@@ -1095,41 +1216,52 @@ fn buildPropertyObjStatic(
     is_static: bool,
 ) !*PhpObject {
     const obj = try ctx.createObject("ReflectionProperty");
+    try setPropertyReflection(ctx, obj, class_name, prop.name, .{ .prop = prop, .declaring_class = declaring_class, .is_static = is_static });
+    return obj;
+}
 
-    try obj.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(prop.name) });
-    try obj.set(ctx.allocator, "class", .{ .string = Value.String.borrowed(class_name) });
-    try obj.set(ctx.allocator, "__visibility", .{ .int = @intFromEnum(prop.visibility) });
-
-    // PHP's ReflectionProperty::hasDefaultValue() always returns false for
-    // constructor-promoted properties, even if the promoted parameter has
-    // a default in the constructor signature.
+// php's reflection_property_factory: $class is the declaring class of a
+// declared property and the reflected class (kept in __class, php's
+// intern->ce) of a dynamic one, which has no __declaring_class
+fn setPropertyReflection(ctx: *NativeContext, obj: *PhpObject, class_name: []const u8, prop_name: []const u8, found: ?PropertyDefResult) !void {
+    const name = try ctx.vm.internName(prop_name);
+    const ce = try ctx.vm.internName(class_name);
+    try obj.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(name) });
+    try obj.set(ctx.allocator, "class", .{ .string = Value.String.borrowed(if (found) |f| f.declaring_class else ce) });
+    try obj.set(ctx.allocator, "__class", .{ .string = Value.String.borrowed(ce) });
+    const result = found orelse {
+        try obj.set(ctx.allocator, "__dynamic", .{ .bool = true });
+        try obj.set(ctx.allocator, "__visibility", .{ .int = @backingInt(ClassDef.Visibility.public) });
+        return;
+    };
+    const prop = result.prop;
+    try obj.set(ctx.allocator, "__visibility", .{ .int = @backingInt(prop.visibility) });
+    // a promoted property never has a default value of its own
     const effective_has_default = prop.has_default and !prop.is_promoted;
-
     try obj.set(ctx.allocator, "__has_default", .{ .bool = effective_has_default });
-    try obj.set(
-        ctx.allocator,
-        "__default_value",
-        if (effective_has_default) prop.default else .null,
-    );
-
-    try obj.set(ctx.allocator, "__declaring_class", .{ .string = Value.String.borrowed(declaring_class) });
-
-    try obj.set(
-        ctx.allocator,
-        "__set_visibility",
-        .{ .int = @intFromEnum(prop.set_visibility) },
-    );
-    try obj.set(
-        ctx.allocator,
-        "__has_set_visibility",
-        .{ .bool = prop.has_set_visibility },
-    );
-
+    try obj.set(ctx.allocator, "__default_value", if (effective_has_default) prop.default else .null);
+    try obj.set(ctx.allocator, "__declaring_class", .{ .string = Value.String.borrowed(result.declaring_class) });
+    try obj.set(ctx.allocator, "__set_visibility", .{ .int = @backingInt(prop.set_visibility) });
+    try obj.set(ctx.allocator, "__has_set_visibility", .{ .bool = prop.has_set_visibility });
     try obj.set(ctx.allocator, "__is_readonly", .{ .bool = prop.is_readonly and !prop.readonly_undeclared });
     try obj.set(ctx.allocator, "__is_final", .{ .bool = prop.is_final });
-    try obj.set(ctx.allocator, "__is_static", .{ .bool = is_static });
+    try obj.set(ctx.allocator, "__is_static", .{ .bool = result.is_static });
+}
 
-    return obj;
+// php's lookup in ce->properties_info: a property the class declares or
+// inherits, except an ancestor's private one
+pub fn visiblePropertyDef(vm: *VM, class_name: []const u8, prop_name: []const u8) ?PropertyDefResult {
+    const found = findPropertyDef(vm, class_name, prop_name) orelse return null;
+    if (found.prop.visibility == .private and !std.ascii.eqlIgnoreCase(found.declaring_class, class_name)) return null;
+    return found;
+}
+
+// whether the object holds a dynamic property of the name (one no visible
+// declaration covers, as php's get_properties table lists it)
+fn hasDynamicProperty(vm: *VM, obj: *PhpObject, prop_name: []const u8) bool {
+    if (!obj.properties.contains(prop_name) or obj.isUnset(prop_name)) return false;
+    if (object_properties.isInternalState(vm, obj, prop_name)) return false;
+    return visiblePropertyDef(vm, obj.class_name, prop_name) == null;
 }
 
 fn hasAbstractMethodInChain(vm: *VM, class_name: []const u8, method_name: []const u8) bool {
@@ -1464,11 +1596,23 @@ fn rcGetMethod(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
         return throwReflection(ctx, msg);
     }
 
-    const declaring = findDeclaringClass(ctx.vm, class_name, method_name);
+    const declared = declaredMethodName(ctx.vm, class_name, method_name);
+    const declaring = findDeclaringClass(ctx.vm, class_name, declared);
     const cls = ctx.vm.classes.get(declaring) orelse return NativeResult.scalar(.null);
-    const info = cls.methods.get(method_name) orelse ClassDef.MethodInfo{ .name = method_name, .arity = 0 };
-    const obj = try buildMethodObj(ctx, class_name, method_name, info, declaring);
+    const info = cls.methods.get(declared) orelse ClassDef.MethodInfo{ .name = declared, .arity = 0 };
+    const obj = try buildMethodObj(ctx, class_name, declared, info, declaring);
     return NativeResult.borrowed(.{ .object = obj });
+}
+
+// the spelling a method was declared with, found from a name in any case
+fn declaredMethodName(vm: *VM, class_name: []const u8, method_name: []const u8) []const u8 {
+    var walk: ?[]const u8 = class_name;
+    while (walk) |cn| {
+        const cls = vm.classes.getPtr(cn) orelse break;
+        if (cls.methods.getKey(method_name)) |declared| return declared;
+        walk = cls.parent;
+    }
+    return method_name;
 }
 
 fn rcHasMethod(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -1831,6 +1975,17 @@ fn rcGetProperties(ctx: *NativeContext, args: []const Value) RuntimeError!Native
         current = cls.parent;
         is_own = false;
     }
+    const reflected = this.get("__object");
+    if (reflected == .object and (filter == 0 or filter & 1 != 0)) {
+        var it = reflected.object.properties.iterator();
+        while (it.next()) |entry| {
+            const prop_name = entry.key_ptr.*;
+            if (seen.contains(prop_name) or !hasDynamicProperty(ctx.vm, reflected.object, prop_name)) continue;
+            const obj = try ctx.createObject("ReflectionProperty");
+            try setPropertyReflection(ctx, obj, class_name, prop_name, null);
+            try arr.append(ctx.allocator, .{ .object = obj });
+        }
+    }
     return NativeResult.borrowed(.{ .array = arr });
 }
 
@@ -1870,26 +2025,58 @@ fn matchPropFilter(filter: i64, vis: ClassDef.Visibility, is_static: bool) bool 
 }
 
 fn rcGetProperty(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1 or args[0] != .string) return throwReflection(ctx, "ReflectionClass::getProperty() expects a property name");
-    const prop_name = args[0].string.bytes();
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const name = try zpp.str(ctx, "ReflectionClass::getProperty", args, 0, "name");
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
     try ctx.vm.resolveClassDefaults(class_name);
 
-    if (findPropertyDef(ctx.vm, class_name, prop_name)) |result| {
+    if (visiblePropertyDef(ctx.vm, class_name, name)) |result| {
         const obj = try buildPropertyObjStatic(ctx, class_name, result.prop, result.declaring_class, result.is_static);
         return NativeResult.borrowed(.{ .object = obj });
     }
-    const msg = std.fmt.allocPrint(ctx.allocator, "Property {s}::${s} does not exist", .{ class_name, prop_name }) catch return error.OutOfMemory;
+    const reflected = this.get("__object");
+    if (reflected == .object and hasDynamicProperty(ctx.vm, reflected.object, name)) {
+        const obj = try ctx.createObject("ReflectionProperty");
+        try setPropertyReflection(ctx, obj, class_name, name, null);
+        return NativeResult.borrowed(.{ .object = obj });
+    }
+    var shown_class = class_name;
+    var shown_name = name;
+    if (std.mem.indexOf(u8, name, "::")) |sep| {
+        const qualifier = name[0..sep];
+        shown_name = name[sep + 2 ..];
+        const base = (try lookupClass(ctx, qualifier)) orelse {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Class \"{s}\" does not exist", .{qualifier});
+            defer ctx.allocator.free(msg);
+            return throwReflection(ctx, msg);
+        };
+        if (!ctx.vm.isInstanceOf(class_name, base)) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Fully qualified property name {s}::${s} does not specify a base class of {s}", .{ base, shown_name, class_name });
+            defer ctx.allocator.free(msg);
+            return throwReflection(ctx, msg);
+        }
+        shown_class = base;
+        if (visiblePropertyDef(ctx.vm, base, shown_name)) |result| {
+            const obj = try buildPropertyObjStatic(ctx, base, result.prop, result.declaring_class, result.is_static);
+            return NativeResult.borrowed(.{ .object = obj });
+        }
+    }
+    const msg = try std.fmt.allocPrint(ctx.allocator, "Property {s}::${s} does not exist", .{ shown_class, shown_name });
     defer ctx.allocator.free(msg);
     return throwReflection(ctx, msg);
 }
 
 fn rcHasProperty(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const name = try zpp.str(ctx, "ReflectionClass::hasProperty", args, 0, "name");
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.scalar(.{ .bool = findPropertyDef(ctx.vm, class_name, args[0].string.bytes()) != null });
+    if (visiblePropertyDef(ctx.vm, class_name, name) != null) return NativeResult.scalar(.{ .bool = true });
+    const reflected = this.get("__object");
+    if (reflected == .object) {
+        // has_property with ZEND_PROPERTY_EXISTS, which never calls __isset
+        if (hasDynamicProperty(ctx.vm, reflected.object, name)) return NativeResult.scalar(.{ .bool = true });
+    }
+    return NativeResult.scalar(.{ .bool = false });
 }
 
 fn rcNewLazyProxy(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -2561,10 +2748,11 @@ fn initMethodReflection(ctx: *NativeContext, this: *PhpObject, args: []const Val
 
     // the names may be slices of an argument string that dies with the call
     try this.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(try ctx.vm.internName(method_name)) });
-    try this.set(ctx.allocator, "class", .{ .string = Value.String.borrowed(try ctx.vm.internName(class_name)) });
+    try this.set(ctx.allocator, "class", .{ .string = Value.String.borrowed(try ctx.vm.internName(declaring)) });
+    try this.set(ctx.allocator, "__class", .{ .string = Value.String.borrowed(try ctx.vm.internName(class_name)) });
     try this.set(ctx.allocator, "__declaring_class", .{ .string = Value.String.borrowed(try ctx.vm.internName(declaring)) });
     try this.set(ctx.allocator, "__is_static", .{ .bool = info.is_static });
-    try this.set(ctx.allocator, "__visibility", .{ .int = @intFromEnum(info.visibility) });
+    try this.set(ctx.allocator, "__visibility", .{ .int = @backingInt(info.visibility) });
 
     var buf: [256]u8 = undefined;
     const key = class_names.memberKey(&buf, declaring, method_name);
@@ -4084,129 +4272,111 @@ fn rrefGetId(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
 }
 
 fn rpConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2) {
-        return throwReflection(
-            ctx,
-            "ReflectionProperty::__construct() expects class and property name",
-        );
-    }
-
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-
-    const raw_class = if (args[0] == .string)
-        args[0].string.bytes()
-    else if (args[0] == .object)
-        args[0].object.class_name
-    else
-        return throwReflection(
-            ctx,
-            "ReflectionProperty::__construct() expects a class name",
-        );
-
-    const class_name = if (raw_class.len > 0 and raw_class[0] == '\\')
-        raw_class[1..]
-    else
-        raw_class;
-    try ctx.vm.tryAutoload(class_name);
+    const label = "ReflectionProperty::__construct";
+    const class_arg = try zpp.objOrStr(ctx, label, args, 0, "class");
+    const prop_name = try zpp.str(ctx, label, args, 1, "property");
+    const class_name = try classArgument(ctx, class_arg);
     try ctx.vm.resolveClassDefaults(class_name);
-
-    const prop_name = if (args[1] == .string)
-        args[1].string.bytes()
-    else
-        return throwReflection(
-            ctx,
-            "ReflectionProperty::__construct() expects a property name",
-        );
-
-    try this.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(prop_name) });
-    try this.set(ctx.allocator, "class", .{ .string = Value.String.borrowed(class_name) });
-
-    if (findPropertyDef(ctx.vm, class_name, prop_name)) |result| {
-        try this.set(
-            ctx.allocator,
-            "__visibility",
-            .{ .int = @intFromEnum(result.prop.visibility) },
-        );
-
-        const effective_has_default =
-            result.prop.has_default and !result.prop.is_promoted;
-
-        try this.set(
-            ctx.allocator,
-            "__has_default",
-            .{ .bool = effective_has_default },
-        );
-
-        try this.set(
-            ctx.allocator,
-            "__default_value",
-            if (effective_has_default) result.prop.default else .null,
-        );
-
-        try this.set(
-            ctx.allocator,
-            "__declaring_class",
-            .{ .string = Value.String.borrowed(result.declaring_class) },
-        );
-
-        try this.set(
-            ctx.allocator,
-            "__set_visibility",
-            .{ .int = @intFromEnum(result.prop.set_visibility) },
-        );
-
-        try this.set(
-            ctx.allocator,
-            "__has_set_visibility",
-            .{ .bool = result.prop.has_set_visibility },
-        );
-
-        try this.set(
-            ctx.allocator,
-            "__is_readonly",
-            .{ .bool = result.prop.is_readonly and !result.prop.readonly_undeclared },
-        );
-
-        try this.set(
-            ctx.allocator,
-            "__is_final",
-            .{ .bool = result.prop.is_final },
-        );
-
-        try this.set(
-            ctx.allocator,
-            "__is_static",
-            .{ .bool = result.is_static },
-        );
-    } else {
-        const msg = try std.fmt.allocPrint(
-            ctx.allocator,
-            "Property {s}::${s} does not exist",
-            .{ class_name, prop_name },
-        );
-
+    const found = visiblePropertyDef(ctx.vm, class_name, prop_name);
+    if (found == null and !(args[0] == .object and findPropertyDef(ctx.vm, class_name, prop_name) == null and hasDynamicProperty(ctx.vm, args[0].object, prop_name))) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Property {s}::${s} does not exist", .{ class_name, prop_name });
         defer ctx.allocator.free(msg);
-
         return throwReflection(ctx, msg);
     }
-
+    try setPropertyReflection(ctx, this, class_name, prop_name, found);
     return NativeResult.scalar(.null);
 }
 
 fn rpGetValue(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const label = "ReflectionProperty::getValue";
+    const object = try zpp.optObject(ctx, label, args, 0, "object");
     const prop_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
-    if (args.len > 0 and args[0] == .object) {
-        const dc = this.get("__declaring_class");
-        if (dc == .string and !ctx.vm.isInstanceOf(args[0].object.class_name, dc.string.bytes()))
-            return throwReflection(ctx, "Given object is not an instance of the class this property was declared in");
-        try ctx.vm.triggerLazyProperty(args[0].object, prop_name, if (dc == .string) dc.string.bytes() else null);
-        return NativeResult.share(args[0].object.getForScope(prop_name, if (dc == .string) dc.string.bytes() else null));
+    if (staticDeclaringClass(this)) |declaring| {
+        const v = (try ctx.vm.staticPropertyValue(reflectedClass(this) orelse declaring, prop_name)) orelse .null;
+        if (v == .undef) return uninitializedStatic(ctx, declaring, prop_name);
+        return NativeResult.share(v);
     }
-    if (staticDeclaringClass(this)) |class_name| {
-        return NativeResult.share((try ctx.vm.staticPropertyValue(class_name, prop_name)) orelse .null);
+    const obj = object orelse return mustBeProvided(ctx, label);
+    try checkPropertyInstance(ctx, this, obj);
+    return readPropertyAs(ctx, obj, prop_name, reflectedClass(this) orelse obj.class_name);
+}
+
+fn mustBeProvided(ctx: *NativeContext, label: []const u8) RuntimeError {
+    const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Argument #1 ($object) must be provided for instance properties", .{label});
+    defer ctx.allocator.free(msg);
+    _ = try ctx.vm.throwBuiltinException("TypeError", msg);
+    return error.RuntimeError;
+}
+
+fn uninitializedStatic(ctx: *NativeContext, declaring: []const u8, prop_name: []const u8) RuntimeError {
+    const msg = try std.fmt.allocPrint(ctx.allocator, "Typed static property {s}::${s} must not be accessed before initialization", .{ declaring, prop_name });
+    defer ctx.allocator.free(msg);
+    _ = try ctx.vm.throwBuiltinException("Error", msg);
+    return error.RuntimeError;
+}
+
+// the class the reflector was made for (php's intern->ce)
+fn reflectedClass(this: *PhpObject) ?[]const u8 {
+    const v = this.get("__class");
+    return if (v == .string) v.string.bytes() else null;
+}
+
+// the object must be an instance of the declaring class (the reflected class
+// for a dynamic property)
+fn checkPropertyInstance(ctx: *NativeContext, this: *PhpObject, obj: *PhpObject) RuntimeError!void {
+    const dc = this.get("__declaring_class");
+    const expected = if (dc == .string) dc.string.bytes() else reflectedClass(this) orelse return;
+    if (!ctx.vm.isInstanceOf(obj.class_name, expected))
+        return throwReflection(ctx, "Given object is not an instance of the class this property was declared in");
+}
+
+// php's read_property with EG(fake_scope) set to the reflected class: lazy
+// initialization, get hooks, __get for an unset property, and the errors and
+// warnings of a plain read
+fn readPropertyAs(ctx: *NativeContext, obj_in: *PhpObject, prop_name: []const u8, scope: []const u8) RuntimeError!NativeResult {
+    const vm = ctx.vm;
+    const decl = vm.propertyDeclaration(obj_in.class_name, prop_name);
+    const slot_scope = privateScopeFor(vm, obj_in.class_name, prop_name, scope) orelse decl.defining_class;
+    try vm.triggerLazyProperty(obj_in, prop_name, slot_scope);
+    const obj = obj_in.storage();
+    if (vm.hasPropHook(obj.class_name, prop_name, .get) and !vm.inPropHook(obj, prop_name)) {
+        if (try vm.callPropHook(obj, prop_name, .get, .null)) |hv| return NativeResult.share(hv);
     }
+    const val = obj.getForScope(prop_name, slot_scope);
+    const slot_present = obj.slots != null and obj.getSlotIndexForScope(prop_name, slot_scope) != null;
+    const present = !obj.isUnset(prop_name) and val != .undef and (val != .null or obj.properties.contains(prop_name) or slot_present);
+    if (present) {
+        if (val == .null and vm.typedPropForbidsNull(decl.type_str)) return uninitializedProperty(ctx, decl.defining_class, prop_name);
+        return NativeResult.share(val);
+    }
+    if (vm.magicApplies(obj, prop_name, .get)) {
+        return NativeResult.share(try vm.callMagicProperty(obj, .get, prop_name, .null));
+    }
+    if (decl.declared and decl.type_str.len > 0) return uninitializedProperty(ctx, decl.defining_class, prop_name);
+    const msg = try std.fmt.allocPrint(ctx.allocator, "Undefined property: {s}::${s}", .{ obj.class_name, prop_name });
+    defer ctx.allocator.free(msg);
+    try vm.emitWarning(msg);
     return NativeResult.scalar(.null);
+}
+
+fn uninitializedProperty(ctx: *NativeContext, declaring: []const u8, prop_name: []const u8) RuntimeError {
+    const msg = try std.fmt.allocPrint(ctx.allocator, "Typed property {s}::${s} must not be accessed before initialization", .{ declaring, prop_name });
+    defer ctx.allocator.free(msg);
+    _ = try ctx.vm.throwBuiltinException("Error", msg);
+    return error.RuntimeError;
+}
+
+// the scope's own private property of the name, which shadows any other
+// declaration when read from that scope
+fn privateScopeFor(vm: *VM, class_name: []const u8, prop_name: []const u8, scope: []const u8) ?[]const u8 {
+    if (!vm.isInstanceOf(class_name, scope)) return null;
+    const cls = vm.classes.get(scope) orelse return null;
+    for (cls.properties.items) |prop| {
+        if (prop.visibility == .private and std.mem.eql(u8, prop.name, prop_name)) return vm.declaredClassName(scope);
+    }
+    return null;
 }
 
 // the class of a static property this ReflectionProperty describes
@@ -4218,14 +4388,48 @@ fn staticDeclaringClass(this: *PhpObject) ?[]const u8 {
 }
 
 fn rpSetValue(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return rpWrite(ctx, args, false);
+    return rpWrite(ctx, args, .value);
+}
+fn rpSetRawValue(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return rpWrite(ctx, args, .raw);
 }
 fn rpSetWithoutLazy(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return rpWrite(ctx, args, true);
+    return rpWrite(ctx, args, .raw_without_lazy);
 }
+
+// getRawValue: a get hook is bypassed and the backing value read directly
+fn rpGetRawValue(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const label = "ReflectionProperty::getRawValue";
+    if (args[0] != .object) return zpp.typeError(ctx, label, 0, "object", "object", args[0]);
+    const obj = args[0].object;
+    const prop_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
+    const ce = reflectedClass(this) orelse obj.class_name;
+    if (!ctx.vm.isInstanceOf(obj.class_name, ce)) return throwReflection(ctx, "Given object is not an instance of the class this property was declared in");
+    if (staticDeclaringClass(this) != null) return throwReflection(ctx, "May not use getRawValue on static properties");
+    if (!ctx.vm.hasPropHook(obj.class_name, prop_name, .get)) return readPropertyAs(ctx, obj, prop_name, ce);
+    const decl = ctx.vm.propertyDeclaration(obj.class_name, prop_name);
+    if (propertyIsVirtual(ctx.vm, decl.defining_class, prop_name)) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Must not read from virtual property {s}::${s}", .{ decl.defining_class, prop_name });
+        defer ctx.allocator.free(msg);
+        _ = try ctx.vm.throwBuiltinException("Error", msg);
+        return error.RuntimeError;
+    }
+    try ctx.vm.triggerLazyProperty(obj, prop_name, decl.defining_class);
+    const val = obj.storage().getForScope(prop_name, decl.defining_class);
+    if (val == .undef or (val == .null and ctx.vm.typedPropForbidsNull(decl.type_str))) return uninitializedProperty(ctx, decl.defining_class, prop_name);
+    return NativeResult.share(val);
+}
+
+fn propertyIsVirtual(vm: *VM, class_name: []const u8, prop_name: []const u8) bool {
+    const found = findPropertyDef(vm, class_name, prop_name) orelse return false;
+    return found.prop.is_virtual;
+}
+
 fn rpSkipLazy(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.null);
+    try checkLazyCompatible(ctx, this, "skipLazyInitialization");
     const name = this.get("name");
     const dc = this.get("__declaring_class");
     if (name != .string) return NativeResult.scalar(.null);
@@ -4249,32 +4453,115 @@ fn rpIsLazy(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     const dc = this.get("__declaring_class");
     return NativeResult.scalar(.{ .bool = name == .string and args[0].object.isLazySlot(name.string.bytes(), if (dc == .string) dc.string.bytes() else null) });
 }
-fn rpWrite(ctx: *NativeContext, args: []const Value, skip: bool) RuntimeError!NativeResult {
+// reflection_property_check_lazy_compatible
+fn checkLazyCompatible(ctx: *NativeContext, this: *PhpObject, method: []const u8) RuntimeError!void {
+    const name = if (this.get("name") == .string) this.get("name").string.bytes() else "";
+    if (this.get("__dynamic") == .bool) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Can not use {s} on dynamic property {s}::${s}", .{ method, reflectedClass(this) orelse "", name });
+        defer ctx.allocator.free(msg);
+        return throwReflection(ctx, msg);
+    }
+    const dc = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else "";
+    const kind: ?[]const u8 = if (staticDeclaringClass(this) != null) "static" else if (propertyIsVirtual(ctx.vm, dc, name)) "virtual" else null;
+    if (kind) |k| {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Can not use {s} on {s} property {s}::${s}", .{ method, k, dc, name });
+        defer ctx.allocator.free(msg);
+        return throwReflection(ctx, msg);
+    }
+}
+
+const WriteMode = enum { value, raw, raw_without_lazy };
+
+fn rpWrite(ctx: *NativeContext, args: []const Value, mode: WriteMode) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const prop_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
-    if (args.len >= 2 and args[0] == .object) {
-        const target = args[0].object;
-        const dc = this.get("__declaring_class");
-        const scope = if (dc == .string) dc.string.bytes() else target.class_name;
-        if (!skip) try ctx.vm.triggerLazyProperty(target, prop_name, scope);
-        const vr = ctx.vm.findPropertyVisibility(scope, prop_name);
-        if (vr.is_readonly and target.getForScope(prop_name, scope) != .null) {
-            const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot modify readonly property {s}::${s}", .{ vr.defining_class, prop_name });
+    const skip = mode == .raw_without_lazy;
+    const label = switch (mode) {
+        .value => "ReflectionProperty::setValue",
+        .raw => "ReflectionProperty::setRawValue",
+        .raw_without_lazy => "ReflectionProperty::setRawValueWithoutLazyInitialization",
+    };
+    if (mode == .raw_without_lazy) try checkLazyCompatible(ctx, this, "setRawValueWithoutLazyInitialization");
+    if (mode == .raw and staticDeclaringClass(this) != null) return throwReflection(ctx, "May not use setRawValue on static properties");
+    if (mode == .value) if (staticDeclaringClass(this)) |declaring| {
+        // php's setValue($value) and setValue($ignored, $value) forms
+        const value = if (args.len == 1) args[0] else if (args.len >= 2) args[1] else {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "{s}() expects exactly 2 arguments, 0 given", .{label});
             defer ctx.allocator.free(msg);
-            _ = ctx.vm.throwBuiltinException("Error", msg) catch {};
+            _ = try ctx.vm.throwBuiltinException("ArgumentCountError", msg);
+            return error.RuntimeError;
+        };
+        if (args.len == 1) {
+            try ctx.vm.raiseError(VM.E_DEPRECATED, "Calling ReflectionProperty::setValue() with a single argument is deprecated");
+        } else if (args[0] != .null and args[0] != .object) {
+            try ctx.vm.raiseError(VM.E_DEPRECATED, "Calling ReflectionProperty::setValue() with a 1st argument which is not null or an object is deprecated");
+        }
+        var v = value;
+        const type_str = staticPropertyType(ctx.vm, declaring, prop_name);
+        if (try ctx.vm.checkPropertyType(&v, type_str, declaring, prop_name)) return error.RuntimeError;
+        try ctx.vm.setStaticPropValue(reflectedClass(this) orelse declaring, prop_name, v);
+        return NativeResult.scalar(.null);
+    };
+    if (args.len < 2) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "{s}() expects exactly 2 arguments, {d} given", .{ label, args.len });
+        defer ctx.allocator.free(msg);
+        _ = try ctx.vm.throwBuiltinException("ArgumentCountError", msg);
+        return error.RuntimeError;
+    }
+    if (args[0] != .object) return zpp.typeError(ctx, label, 0, "object", "object", args[0]);
+    const target = args[0].object;
+    const scope = reflectedClass(this) orelse target.class_name;
+    const decl = ctx.vm.propertyDeclaration(target.class_name, prop_name);
+    const slot_scope = privateScopeFor(ctx.vm, target.class_name, prop_name, scope) orelse decl.defining_class;
+    if (mode != .value and ctx.vm.hasPropHook(target.class_name, prop_name, .set) and propertyIsVirtual(ctx.vm, decl.defining_class, prop_name)) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Must not write to virtual property {s}::${s}", .{ decl.defining_class, prop_name });
+        defer ctx.allocator.free(msg);
+        _ = try ctx.vm.throwBuiltinException("Error", msg);
+        return error.RuntimeError;
+    }
+    if (!skip) {
+        try ctx.vm.triggerLazyProperty(target, prop_name, slot_scope);
+        const obj = target.storage();
+        if (mode == .value and ctx.vm.hasPropHook(obj.class_name, prop_name, .set) and !ctx.vm.inPropHook(obj, prop_name)) {
+            if (try ctx.vm.callPropHook(obj, prop_name, .set, args[1])) |r| ctx.vm.releaseValue(r);
+            return NativeResult.scalar(.null);
+        }
+        if (!decl.declared and ctx.vm.magicApplies(obj, prop_name, .set) and !obj.properties.contains(prop_name)) {
+            const r = try ctx.vm.callMagicProperty(obj, .set, prop_name, args[1]);
+            ctx.vm.releaseValue(r);
+            return NativeResult.scalar(.null);
+        }
+    }
+    const vr = ctx.vm.propertyDeclaration(slot_scope, prop_name);
+    if (vr.is_readonly) {
+        const current = target.getForScope(prop_name, slot_scope);
+        // a null slot counts as unset: a class declared by eval leaves an
+        // uninitialized readonly property null rather than undef
+        const initialized = current != .undef and current != .null and !target.isUnset(prop_name);
+        if (initialized or !std.ascii.eqlIgnoreCase(scope, vr.defining_class)) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot modify readonly property {s}::${s}", .{ target.class_name, prop_name });
+            defer ctx.allocator.free(msg);
+            _ = try ctx.vm.throwBuiltinException("Error", msg);
             return error.RuntimeError;
         }
-        var value = args[1];
-        if (try ctx.vm.checkPropertyType(&value, vr.type_str, scope, prop_name)) return error.RuntimeError;
-        try target.setForScope(ctx.allocator, prop_name, value, scope);
-        if (skip) _ = try rpSkipLazy(ctx, args);
-        return NativeResult.scalar(.null);
     }
-    if (staticDeclaringClass(this)) |class_name| {
-        const value = if (args.len >= 2) args[1] else if (args.len == 1) args[0] else Value.null;
-        try ctx.vm.setStaticPropValue(class_name, prop_name, value);
-    }
+    var value = args[1];
+    if (try ctx.vm.checkPropertyType(&value, vr.type_str, vr.defining_class, prop_name)) return error.RuntimeError;
+    try target.setForScope(ctx.allocator, prop_name, value, slot_scope);
+    if (skip) _ = try rpSkipLazy(ctx, args);
     return NativeResult.scalar(.null);
+}
+
+// the declared type of a static property, searched up from its class
+fn staticPropertyType(vm: *VM, class_name: []const u8, prop_name: []const u8) []const u8 {
+    var current: ?[]const u8 = class_name;
+    while (current) |cn| {
+        const cls = vm.classes.get(cn) orelse break;
+        if (cls.static_prop_types.get(prop_name)) |t| return t;
+        if (cls.static_props.contains(prop_name)) return "";
+        current = cls.parent;
+    }
+    return "";
 }
 
 fn rpropGetName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -4450,24 +4737,34 @@ fn rpropHasDefaultValue(ctx: *NativeContext, _: []const Value) RuntimeError!Nati
 
 fn rpropIsInitialized(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const label = "ReflectionProperty::isInitialized";
+    const object = try zpp.optObject(ctx, label, args, 0, "object");
     const prop_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
-    if (args.len > 0 and args[0] == .object) {
-        const dc = this.get("__declaring_class");
-        const scope = if (dc == .string) dc.string.bytes() else args[0].object.class_name;
-        try ctx.vm.triggerLazyProperty(args[0].object, prop_name, scope);
-        const vr = ctx.vm.findPropertyVisibility(scope, prop_name);
-        const raw = args[0].object.storage().rawForScope(prop_name, scope);
-        if (raw == .undef or args[0].object.isUnset(prop_name)) return NativeResult.scalar(.{ .bool = false });
-        // a user class's uninitialized property holds undef, so null is a value
-        const user_class = if (ctx.vm.classes.get(vr.defining_class)) |c| !c.is_internal else false;
-        return NativeResult.scalar(.{ .bool = raw != .null or user_class or vr.type_str.len == 0 or (findPropertyDef(ctx.vm, scope, prop_name) orelse return NativeResult.scalar(.{ .bool = false })).prop.has_default });
+    if (staticDeclaringClass(this)) |declaring| {
+        const v = (try ctx.vm.staticPropertyValue(reflectedClass(this) orelse declaring, prop_name)) orelse .undef;
+        return NativeResult.scalar(.{ .bool = v != .undef });
     }
-    return NativeResult.scalar(.{ .bool = true });
+    const obj_in = object orelse return mustBeProvided(ctx, label);
+    try checkPropertyInstance(ctx, this, obj_in);
+    const scope = reflectedClass(this) orelse obj_in.class_name;
+    const decl = ctx.vm.propertyDeclaration(obj_in.class_name, prop_name);
+    const slot_scope = privateScopeFor(ctx.vm, obj_in.class_name, prop_name, scope) orelse decl.defining_class;
+    try ctx.vm.triggerLazyProperty(obj_in, prop_name, slot_scope);
+    const obj = obj_in.storage();
+    // has_property(ZEND_PROPERTY_EXISTS), which never calls __isset: a
+    // virtual property exists
+    if (decl.declared and propertyIsVirtual(ctx.vm, decl.defining_class, prop_name)) return NativeResult.scalar(.{ .bool = true });
+    const val = obj.getForScope(prop_name, slot_scope);
+    const slot_present = obj.slots != null and obj.getSlotIndexForScope(prop_name, slot_scope) != null;
+    if (obj.isUnset(prop_name) or val == .undef or !(val != .null or obj.properties.contains(prop_name) or slot_present)) {
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    return NativeResult.scalar(.{ .bool = !(val == .null and ctx.vm.typedPropForbidsNull(decl.type_str)) });
 }
 
 fn rpropGetDeclaringClass(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.null);
+    const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else reflectedClass(this) orelse return NativeResult.scalar(.null);
 
     const obj = try ctx.createObject("ReflectionClass");
     try obj.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(declaring) });
@@ -4475,8 +4772,30 @@ fn rpropGetDeclaringClass(ctx: *NativeContext, _: []const Value) RuntimeError!Na
     return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn rpropIsDefault(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return NativeResult.scalar(.{ .bool = true });
+fn rpropIsDefault(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = true });
+    return NativeResult.scalar(.{ .bool = this.get("__dynamic") != .bool });
+}
+
+fn rpropIsDynamic(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = this.get("__dynamic") == .bool });
+}
+
+// the property's key in the object's property table: (array)'s mangled name
+fn rpropGetMangledName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const name = this.get("name");
+    if (name != .string) return NativeResult.scalar(.null);
+    const dc = this.get("__declaring_class");
+    const vis = this.get("__visibility");
+    if (dc != .string or vis != .int or vis.int == @backingInt(ClassDef.Visibility.public)) return NativeResult.share(name);
+    const text = if (vis.int == @backingInt(ClassDef.Visibility.protected))
+        try std.fmt.allocPrint(ctx.allocator, "\x00*\x00{s}", .{name.string.bytes()})
+    else
+        try std.fmt.allocPrint(ctx.allocator, "\x00{s}\x00{s}", .{ dc.string.bytes(), name.string.bytes() });
+    defer ctx.allocator.free(text);
+    return try NativeResult.copyString(ctx.allocator, text);
 }
 
 fn rpropIsReadOnly(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {

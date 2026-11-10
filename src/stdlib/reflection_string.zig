@@ -1243,7 +1243,7 @@ fn methodToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
     const this = reflection.getThis(ctx) orelse return NativeResult.literal("");
     const name = reflection.methodLookupName(this) orelse return NativeResult.literal("");
     const declaring = stringProp(this, "__declaring_class") orelse return NativeResult.literal("");
-    const class_name = stringProp(this, "class") orelse declaring;
+    const class_name = stringProp(this, "__class") orelse declaring;
     var view = try methodView(ctx, class_name, declaring, name);
     const vis = this.get("__visibility");
     if (vis == .int) view.info.visibility = @fromBackingInt(@intCast(@as(u8, @intCast(vis.int))));
