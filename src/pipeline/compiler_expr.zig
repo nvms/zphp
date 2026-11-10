@@ -341,7 +341,8 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
             return;
         }
         if (op_tag == .question_question_equal) {
-            try self.emitOp(.get_static_prop);
+            // read as isset() reads: an uninitialized typed property is null
+            try self.emitOp(.get_static_prop_quiet);
             try self.emitU16(class_idx);
             try self.emitU16(prop_idx);
             const skip_jump = try self.emitJump(.jump_if_not_null);
