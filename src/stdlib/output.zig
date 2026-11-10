@@ -196,8 +196,7 @@ fn varDumpMarked(ctx: *NativeContext, val: Value, depth: usize, marker: []const 
             try appendIndent(out, a, indent + 2);
             try out.appendSlice(a, "string(");
             var tmp: [32]u8 = undefined;
-            // a closure's generator names the closure as php prints it
-            const fname = if (g.func.display_name.len > 0) g.func.display_name else g.func.name;
+            const fname = try ctx.vm.generatorFunctionName(g);
             const len_s = std.fmt.bufPrint(&tmp, "{d}", .{fname.len}) catch return;
             try out.appendSlice(a, len_s);
             try out.appendSlice(a, ") \"");

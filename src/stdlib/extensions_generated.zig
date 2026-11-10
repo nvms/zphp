@@ -1188,6 +1188,7 @@ pub const classes = Map.initComptime(.{
     .{ "CURLFile", "curl" },
     .{ "CachingIterator", "SPL" },
     .{ "CallbackFilterIterator", "SPL" },
+    .{ "ClosedGeneratorException", "Core" },
     .{ "Closure", "Core" },
     .{ "Collator", "intl" },
     .{ "CompileError", "Core" },

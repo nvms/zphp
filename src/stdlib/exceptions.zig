@@ -111,6 +111,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
         .{ "DivisionByZeroError", "ArithmeticError" },
         .{ "AssertionError", "Error" },
         .{ "FiberError", "Error" },
+        .{ "ClosedGeneratorException", "Exception" },
         .{ "ValueError", "Error" },
         .{ "UnhandledMatchError", "Error" },
         .{ "CompileError", "Error" },

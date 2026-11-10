@@ -7,7 +7,7 @@ pub const names = [_][]const u8{
     "Error",                               "TypeError",                     "ValueError",                   "ArgumentCountError",                   "ArithmeticError",                    "DivisionByZeroError",
     "RuntimeException",                    "LogicException",                "InvalidArgumentException",     "BadMethodCallException",               "BadFunctionCallException",           "OutOfRangeException",
     "OverflowException",                   "UnderflowException",            "LengthException",              "DomainException",                      "RangeException",                     "UnexpectedValueException",
-    "JsonException",                       "UnhandledMatchError",           "FiberError",                   "ParseError",                           "CompileError",                       "DateTime",
+    "JsonException",                       "UnhandledMatchError",           "FiberError",                   "ClosedGeneratorException", "ParseError",                           "CompileError",                       "DateTime",
     "DateTimeImmutable",                   "DateTimeInterface",             "DateTimeZone",                 "DateInterval",                         "DatePeriod",                         "DateException",
     "DateInvalidTimeZoneException",        "DateInvalidOperationException", "DateMalformedStringException", "DateMalformedIntervalStringException", "DateMalformedPeriodStringException", "DateError",
     "DateObjectError",                     "DateRangeError",                "ArrayObject",                  "ArrayIterator",                        "AppendIterator",                     "EmptyIterator",

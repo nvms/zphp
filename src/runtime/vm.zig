@@ -6411,12 +6411,10 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
                         try self.pushIteratorMarker();
-                        if (iterable.generator.state == .created) {
-                            self.resumeGenerator(iterable.generator, .null) catch {
-                                if (self.dispatchPendingException(base_frame)) continue;
-                                return error.RuntimeError;
-                            };
-                        }
+                        self.rewindGenerator(iterable.generator) catch {
+                            if (self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
                     } else if (iterable == .object) {
                         // IteratorAggregate: replace iterable with getIterator() result.
                         // PHP allows getIterator to return another IteratorAggregate;
@@ -9662,108 +9660,19 @@ pub const VM = struct {
 
                     if (obj_val == .generator) {
                         const gen = obj_val.generator;
+                        var args_buf: [16]Value = undefined;
+                        const args = try self.copyStackArgs(&args_buf, self.stack[self.sp - ac ..][0..ac]);
+                        defer self.freeStackArgs(args, &args_buf);
                         // the generator and its arguments stay counted while
                         // the method runs the generator's code
                         const held = self.holdCallOperands(ac + 1);
                         defer self.releaseHeld(held);
-                        self.dropN(ac);
-                        self.dropN(1); // pop generator
-                        if (std.mem.eql(u8, method_name, "current")) {
-                            // auto-start if not yet started
-                            if (gen.state == .created) {
-                                self.resumeGenerator(gen, .null) catch {
-                                    if (self.dispatchPendingException(base_frame)) continue;
-                                    return error.RuntimeError;
-                                };
-                            }
-                            self.push(gen.current_value);
-                        } else if (std.mem.eql(u8, method_name, "key")) {
-                            if (gen.state == .created) {
-                                self.resumeGenerator(gen, .null) catch {
-                                    if (self.dispatchPendingException(base_frame)) continue;
-                                    return error.RuntimeError;
-                                };
-                            }
-                            self.push(gen.current_key);
-                        } else if (std.mem.eql(u8, method_name, "valid")) {
-                            if (gen.state == .created) {
-                                self.resumeGenerator(gen, .null) catch {
-                                    if (self.dispatchPendingException(base_frame)) continue;
-                                    return error.RuntimeError;
-                                };
-                            }
-                            self.push(.{ .bool = gen.state != .completed });
-                        } else if (std.mem.eql(u8, method_name, "next")) {
-                            // next() always advances: if not started, start then advance
-                            if (gen.state == .created) {
-                                self.resumeGenerator(gen, .null) catch {
-                                    if (self.dispatchPendingException(base_frame)) continue;
-                                    return error.RuntimeError;
-                                };
-                            }
-                            self.resumeGenerator(gen, .null) catch {
-                                if (self.dispatchPendingException(base_frame)) continue;
-                                return error.RuntimeError;
-                            };
-                            self.push(.null);
-                        } else if (std.mem.eql(u8, method_name, "send")) {
-                            const sent = if (ac > 0) self.stack[self.sp + 1] else Value{ .null = {} };
-                            if (gen.state == .created) {
-                                self.resumeGenerator(gen, .null) catch {
-                                    if (self.dispatchPendingException(base_frame)) continue;
-                                    return error.RuntimeError;
-                                };
-                            }
-                            self.resumeGenerator(gen, sent) catch {
-                                if (self.dispatchPendingException(base_frame)) continue;
-                                return error.RuntimeError;
-                            };
-                            self.push(if (gen.state == .completed) .null else gen.current_value);
-                        } else if (std.mem.eql(u8, method_name, "rewind")) {
-                            if (gen.resumes > 1) {
-                                try self.setPendingException("Exception", "Cannot rewind a generator that was already run");
-                                if (self.dispatchPendingException(base_frame)) continue;
-                                return error.RuntimeError;
-                            }
-                            if (gen.state == .created) {
-                                self.resumeGenerator(gen, .null) catch {
-                                    if (self.dispatchPendingException(base_frame)) continue;
-                                    return error.RuntimeError;
-                                };
-                            }
-                            self.push(.null);
-                        } else if (std.mem.eql(u8, method_name, "getReturn")) {
-                            if (gen.state != .completed) {
-                                try self.setPendingException("Exception", "Cannot get return value of a generator that hasn't returned");
-                                if (self.dispatchPendingException(base_frame)) continue;
-                                return error.RuntimeError;
-                            }
-                            self.push(gen.return_value);
-                        } else if (std.mem.eql(u8, method_name, "throw")) {
-                            const ex = if (ac > 0) self.stack[self.sp + 1] else Value{ .null = {} };
-                            if (gen.state == .completed) {
-                                self.raise(ex);
-                                if (self.dispatchPendingException(base_frame)) continue;
-                                return error.RuntimeError;
-                            }
-                            if (gen.state == .created) {
-                                self.resumeGenerator(gen, .null) catch {
-                                    if (self.dispatchPendingException(base_frame)) continue;
-                                    return error.RuntimeError;
-                                };
-                            }
-                            gen.pending_throw = ex;
-                            self.resumeGenerator(gen, .null) catch {
-                                if (self.dispatchPendingException(base_frame)) continue;
-                                return error.RuntimeError;
-                            };
-                            self.push(if (gen.state == .completed) .null else gen.current_value);
-                        } else {
-                            const msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method Generator::{s}()", .{method_name});
-                            defer self.allocator.free(msg);
-                            if (try self.throwBuiltinException("Error", msg)) continue;
+                        self.dropN(ac + 1);
+                        const result = self.generatorMethod(gen, method_name, args) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
-                        }
+                        };
+                        self.push(result);
                         continue;
                     }
 
@@ -11455,6 +11364,7 @@ pub const VM = struct {
                     self.releaseValue(gen.return_value);
                     if (val == .array) arrayRetain(val.array);
                     gen.return_value = val;
+                    gen.has_return = true;
                     self.setGeneratorCurrent(gen, .null, .null, true);
                     gen.state = .completed;
                     gen.vars = self.currentFrame().vars;
@@ -12715,6 +12625,7 @@ pub const VM = struct {
         try obj.set(self.allocator, "code", .{ .int = 0 });
         const marker_ptr = @intFromPtr(obj);
 
+        stackRetain(.{ .object = obj });
         gen.pending_throw = .{ .object = obj };
         self.resumeGenerator(gen, .null) catch |err| {
             // RuntimeError is expected when the marker (or another exception)
@@ -12756,6 +12667,7 @@ pub const VM = struct {
         self.releaseValue(gen.current_value);
         gen.current_key = key;
         gen.current_value = value;
+        gen.has_value = true;
     }
 
     pub fn releaseGeneratorVars(self: *VM, gen: *@import("value.zig").Generator) void {
@@ -14129,7 +14041,12 @@ pub const VM = struct {
     // stack per level
     pub fn resumeGenerator(self: *VM, gen: *Generator, sent_value: Value) RuntimeError!void {
         if (gen.state == .completed) return;
+        if (generatorRoot(gen).state == .running) {
+            try self.setPendingException("Error", "Cannot resume an already running generator");
+            return error.RuntimeError;
+        }
         gen.resumes +|= 1;
+        gen.at_first_yield = false;
         // the path lives on the stack until a chain outgrows it
         var inline_path: [16]*Generator = undefined;
         var path: std.ArrayListUnmanaged(*Generator) = .initBuffer(&inline_path);
@@ -14210,14 +14127,167 @@ pub const VM = struct {
             }
             if (path.items.len == 1) return;
             // the delegate finished: its return value is what yield from
-            // gives its parent, which runs on
+            // gives its parent, which runs on. one that was aborted has none,
+            // and its parent gets php's ClosedGeneratorException instead
             _ = path.pop();
             leaf.delegator = null;
             const parent = path.items[path.items.len - 1];
             const ret_val = leaf.return_value;
+            const returned = leaf.has_return;
             parent.delegate = null;
+            if (returned) retainValue(ret_val);
+            defer if (returned) self.releaseValue(ret_val);
             self.genRelease(leaf);
-            sent = ret_val;
+            if (!returned) parent.pending_closed_delegate = true;
+            sent = if (returned) ret_val else .null;
+        }
+    }
+
+    // php's zend_generator_get_current: the generator a delegation chain
+    // runs, the innermost one still running. one whose delegate finished is
+    // its own root until it is resumed and takes the delegate's result
+    pub fn generatorRoot(gen: *Generator) *Generator {
+        var g = gen;
+        while (g.delegate) |delegate| {
+            if (delegate != .gen or delegate.gen.state == .completed) break;
+            g = delegate.gen;
+        }
+        return g;
+    }
+
+    // php's zend_generator_ensure_initialized: a generator a method or
+    // foreach touches first runs to its first yield
+    pub fn ensureGeneratorInitialized(self: *VM, gen: *Generator) RuntimeError!void {
+        if (gen.has_value or gen.state == .completed or gen.delegate != null) return;
+        try self.resumeGenerator(gen, .null);
+        gen.at_first_yield = true;
+    }
+
+    const GeneratorMethod = enum { current, key, next, rewind, send, throw, getReturn, valid, __debugInfo };
+
+    // a native method of Generator or Fiber while it runs: traces show it,
+    // and the code it runs reads as called by an internal function
+    fn enterEngineMethod(self: *VM, record: *NativeCall, label: []const u8, args: []const Value, instance: bool) void {
+        const outer = self.native_call;
+        const from_native = if (outer) |o| o.depth == self.frame_count or (o.depth + 1 == self.frame_count and self.frames[self.frame_count - 1].native) else false;
+        record.* = .{ .label = label, .args = args, .depth = self.frame_count, .instance = instance, .outer = outer, .from_native = from_native };
+        self.native_call = record;
+    }
+
+    fn argumentCountError(self: *VM, label: []const u8, min: u16, max: u16, given: usize) RuntimeError {
+        var buf: [256]u8 = undefined;
+        const arity: @import("natives.zig").Arity = .{ .min = min, .max = max };
+        try self.setPendingException("ArgumentCountError", arity.describe(&buf, label, given));
+        return error.RuntimeError;
+    }
+
+    // the methods of php's Generator class (zend_generators.c). the value
+    // returned is borrowed from the generator
+    pub fn generatorMethod(self: *VM, gen: *Generator, name: []const u8, args: []const Value) RuntimeError!Value {
+        const method = inline for (comptime std.enums.values(GeneratorMethod)) |m| {
+            if (std.ascii.eqlIgnoreCase(name, @tagName(m))) break m;
+        } else {
+            const msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method Generator::{s}()", .{name});
+            defer self.allocator.free(msg);
+            try self.setPendingException("Error", msg);
+            return error.RuntimeError;
+        };
+        const label = switch (method) {
+            inline else => |m| "Generator::" ++ @tagName(m),
+        };
+        var record: NativeCall = undefined;
+        self.enterEngineMethod(&record, label, args, true);
+        defer self.native_call = record.outer;
+        const arity: u16 = if (method == .send or method == .throw) 1 else 0;
+        if (args.len != arity) return self.argumentCountError(label, arity, arity, args.len);
+        switch (method) {
+            .current, .key => {
+                try self.ensureGeneratorInitialized(gen);
+                const root = generatorRoot(gen);
+                if (gen.state == .completed) return .null;
+                return if (method == .current) root.current_value else root.current_key;
+            },
+            .valid => {
+                try self.ensureGeneratorInitialized(gen);
+                return .{ .bool = gen.state != .completed };
+            },
+            .next => {
+                try self.ensureGeneratorInitialized(gen);
+                try self.resumeGenerator(gen, .null);
+                return .null;
+            },
+            .rewind => {
+                try self.rewindGenerator(gen);
+                return .null;
+            },
+            .send => {
+                try self.ensureGeneratorInitialized(gen);
+                if (gen.state == .completed) return .null;
+                try self.resumeGenerator(gen, args[0]);
+                if (gen.state == .completed) return .null;
+                return generatorRoot(gen).current_value;
+            },
+            .throw => {
+                const ex = args[0];
+                if (ex != .object or !self.isInstanceOf(ex.object.class_name, "Throwable")) {
+                    const msg = try std.fmt.allocPrint(self.allocator, "Generator::throw(): Argument #1 ($exception) must be of type Throwable, {s} given", .{valueTypeName(ex)});
+                    defer self.allocator.free(msg);
+                    try self.setPendingException("TypeError", msg);
+                    return error.RuntimeError;
+                }
+                try self.ensureGeneratorInitialized(gen);
+                if (gen.state == .completed) {
+                    // a closed generator throws it where throw() was called
+                    self.raise(ex);
+                    return error.RuntimeError;
+                }
+                const root = generatorRoot(gen);
+                if (root.state == .running) {
+                    try self.setPendingException("Error", "Cannot resume an already running generator");
+                    return error.RuntimeError;
+                }
+                // the exception reaches the generator at its yield; one
+                // delegating to an array or iterator stops doing so
+                if (root.delegate) |delegate| if (delegate == .array) {
+                    root.delegate = null;
+                    self.arrayRelease(delegate.array.arr);
+                };
+                stackRetain(ex);
+                if (root.pending_throw) |old| self.stackRelease(old);
+                root.pending_throw = ex;
+                try self.resumeGenerator(gen, .null);
+                if (gen.state == .completed) return .null;
+                return generatorRoot(gen).current_value;
+            },
+            .getReturn => {
+                try self.ensureGeneratorInitialized(gen);
+                if (self.pending_exception != null) return error.RuntimeError;
+                if (!gen.has_return) {
+                    try self.setPendingException("Exception", "Cannot get return value of a generator that hasn't returned");
+                    return error.RuntimeError;
+                }
+                return gen.return_value;
+            },
+            .__debugInfo => {
+                const arr = try self.allocArray();
+                try arr.set(self.allocator, .{ .string = Value.String.borrowed("function") }, .{ .string = Value.String.borrowed(try self.generatorFunctionName(gen)) });
+                return .{ .array = arr };
+            },
+        }
+    }
+
+    // the function a generator runs as php names it in its debug info:
+    // Class::method, a closure's {closure:...}, or the function
+    pub fn generatorFunctionName(self: *VM, gen: *const Generator) ![]const u8 {
+        return self.funcDisplayName(gen.func);
+    }
+
+    // php's zend_generator_rewind
+    pub fn rewindGenerator(self: *VM, gen: *Generator) RuntimeError!void {
+        try self.ensureGeneratorInitialized(gen);
+        if (!gen.at_first_yield) {
+            try self.setPendingException("Exception", "Cannot rewind a generator that was already run");
+            return error.RuntimeError;
         }
     }
 
@@ -14271,9 +14341,16 @@ pub const VM = struct {
             self.push(sent_value);
         }
 
+        if (gen.pending_closed_delegate) {
+            gen.pending_closed_delegate = false;
+            // made here, so its trace starts in the generator's frame
+            try self.setPendingException("ClosedGeneratorException", "Generator yielded from aborted, no return value available");
+            gen.pending_throw = self.pending_exception;
+            self.pending_exception = null;
+        }
         if (gen.pending_throw) |ex| {
             gen.pending_throw = null;
-            self.raise(ex);
+            self.setPendingOwned(ex);
             // try to dispatch within the generator's frame; if no handler, the exception
             // will propagate when runUntilFrame catches the eventual error
             if (self.dispatchPendingException(return_frame)) {
@@ -19029,7 +19106,7 @@ pub const VM = struct {
             "BadMethodCallException", "BadFunctionCallException", "OutOfRangeException",
             "OverflowException",      "UnderflowException",       "LengthException",
             "DomainException",        "RangeException",           "UnexpectedValueException",
-            "JsonException",          "PDOException",
+            "JsonException",          "PDOException",             "ClosedGeneratorException",
         };
         for (exception_children) |name| {
             if (std.ascii.eqlIgnoreCase(class_name, name)) return "Exception";
@@ -24199,6 +24276,38 @@ pub const VM = struct {
         }
     }
 
+    // a generator nothing references: php's dtor_obj runs its pending
+    // finally blocks, then free_obj releases what its frame held (its $this
+    // and locals go before its own handle)
+    fn destroyReleasedGenerator(self: *VM, gen: *Generator, deferred_stack_arrays: *std.ArrayListUnmanaged(*PhpArray)) void {
+        // rescued if re-retained between queue and drain
+        if (gen.refcount != 0 or gen.pooled) return;
+        // closeGenerator early-returns on .completed; releaseGeneratorVars
+        // is idempotent. closing a suspended gen may queue more work
+        self.closeGenerator(gen, self.frame_count) catch {};
+        if (gen.refcount != 0) return;
+        var dropped: std.ArrayListUnmanaged(ReleasedItem) = .empty;
+        defer dropped.deinit(self.allocator);
+        const outer_log = self.release_log;
+        if (self.release_depth < max_release_depth) self.release_log = &dropped;
+        self.releaseGeneratorVars(gen);
+        self.releaseValue(gen.return_value);
+        gen.return_value = .null;
+        self.releaseGeneratorClosure(gen);
+        self.release_log = outer_log;
+        self.destroyDropped(dropped.items, deferred_stack_arrays);
+        self.drainPendingStringReleases();
+        if (gen.handle != 0) {
+            self.free_handles.append(self.allocator, gen.handle) catch {};
+            gen.handle = 0;
+        }
+        if (!self.serve_mode) {
+            gen.deinit(self.allocator);
+            gen.pooled = true;
+            self.free_generators.append(self.allocator, gen) catch {};
+        }
+    }
+
     fn destroyReleasedArray(self: *VM, arr: *PhpArray, deferred_stack_arrays: *std.ArrayListUnmanaged(*PhpArray)) void {
         if (arr.refcount != 0 or arr.elements_released) return;
         // a global `global $x` cell is a root the refcount cannot
@@ -24315,24 +24424,7 @@ pub const VM = struct {
                 const gen = self.pending_gen_release.items[self.gen_release_cursor];
                 self.gen_release_cursor += 1;
                 // rescued if re-retained between queue and drain
-                if (gen.refcount != 0 or gen.pooled) continue;
-                // closeGenerator early-returns on .completed; releaseGeneratorVars
-                // is idempotent. closing a suspended gen may queue more work
-                self.closeGenerator(gen, self.frame_count) catch {};
-                self.releaseGeneratorVars(gen);
-                self.releaseValue(gen.return_value);
-                gen.return_value = .null;
-                self.releaseGeneratorClosure(gen);
-                self.drainPendingStringReleases();
-                if (gen.handle != 0) {
-                    self.free_handles.append(self.allocator, gen.handle) catch {};
-                    gen.handle = 0;
-                }
-                if (!self.serve_mode) {
-                    gen.deinit(self.allocator);
-                    gen.pooled = true;
-                    self.free_generators.append(self.allocator, gen) catch {};
-                }
+                self.destroyReleasedGenerator(gen, &deferred_stack_arrays);
             }
             while (self.fiber_release_cursor < self.pending_fiber_release.items.len) {
                 const fiber = self.pending_fiber_release.items[self.fiber_release_cursor];

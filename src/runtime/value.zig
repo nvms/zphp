@@ -825,10 +825,21 @@ pub const Generator = struct {
     // generator waiting in it (backtraces show the chain, as php's do)
     delegator: ?*Generator = null,
     pending_throw: ?Value = null,
+    // the delegate it waits on in yield from was aborted without returning:
+    // its next resume throws php's ClosedGeneratorException at the yield from
+    pending_closed_delegate: bool = false,
     pooled: bool = false,
-    // how often it has been resumed: php's AT_FIRST_YIELD holds while it is
-    // one, the only point a started generator may be rewound
+    // how often it has been resumed
     resumes: u32 = 0,
+    // php's AT_FIRST_YIELD: set when a method or foreach starts the
+    // generator, cleared by the next resume. the only point a started
+    // generator may be rewound
+    at_first_yield: bool = false,
+    // php's value is no longer UNDEF: the generator has yielded
+    has_value: bool = false,
+    // php's retval is set: the generator returned, rather than being
+    // aborted by an exception or destroyed
+    has_return: bool = false,
 
     pub const SavedHandler = struct {
         catch_ip: usize,

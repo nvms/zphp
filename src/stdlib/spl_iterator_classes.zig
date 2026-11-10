@@ -103,6 +103,20 @@ fn resumeGenVoid(vm: *VM, gen: *Generator) RuntimeError!Value {
     return .null;
 }
 
+fn initGen(ctx: *NativeContext, gen: *Generator) RuntimeError!void {
+    _ = try guarded(ctx, initGenVoid, .{ ctx.vm, gen });
+}
+
+fn initGenVoid(vm: *VM, gen: *Generator) RuntimeError!Value {
+    try vm.ensureGeneratorInitialized(gen);
+    return .null;
+}
+
+fn rewindGenVoid(vm: *VM, gen: *Generator) RuntimeError!Value {
+    try vm.rewindGenerator(gen);
+    return .null;
+}
+
 fn isInstance(vm: *VM, v: Value, class: []const u8) bool {
     return switch (v) {
         .object => |o| vm.isInstanceOf(o.class_name, class),
@@ -382,7 +396,7 @@ const ObjIter = struct {
                 return r != .undef and r.isTruthy();
             },
             .generator => |g| {
-                if (g.state == .created) try resumeGen(ctx, g);
+                try initGen(ctx, g);
                 return g.state != .completed;
             },
             else => return false,
@@ -405,9 +419,9 @@ const ObjIter = struct {
                 return slot(self.arr, self.base + 1);
             },
             .generator => |g| {
-                if (g.state == .created) try resumeGen(ctx, g);
+                try initGen(ctx, g);
                 if (g.state == .completed or pending(ctx)) return .undef;
-                return g.current_value;
+                return VM.generatorRoot(g).current_value;
             },
             else => return .undef,
         }
@@ -417,10 +431,10 @@ const ObjIter = struct {
         switch (self.target()) {
             .object => |o| return callOn(ctx, o, "key", &.{}),
             .generator => |g| {
-                if (g.state == .created) try resumeGen(ctx, g);
+                try initGen(ctx, g);
                 if (pending(ctx)) return .undef;
                 if (g.state == .completed) return .null;
-                return g.current_key;
+                return VM.generatorRoot(g).current_key;
             },
             else => return .null,
         }
@@ -433,8 +447,8 @@ const ObjIter = struct {
                 _ = try callOn(ctx, o, "next", &.{});
             },
             .generator => |g| {
-                if (g.state == .created) try resumeGen(ctx, g);
-                if (g.state != .completed) try resumeGen(ctx, g);
+                try initGen(ctx, g);
+                try resumeGen(ctx, g);
             },
             else => {},
         }
@@ -448,11 +462,7 @@ const ObjIter = struct {
             },
             .generator => |g| {
                 if (pending(ctx)) return;
-                if (g.resumes > 1) {
-                    try raise(ctx, "Exception", "Cannot rewind a generator that was already run", .{});
-                    return;
-                }
-                if (g.state == .created) try resumeGen(ctx, g);
+                _ = try guarded(ctx, rewindGenVoid, .{ ctx.vm, g });
             },
             else => {},
         }
