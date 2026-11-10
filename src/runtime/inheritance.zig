@@ -432,6 +432,8 @@ pub fn checkClass(vm: *VM, class_name: []const u8, def: *const ClassDef) Runtime
     var pending: Pending = .{ .vm = vm, .name = class_name, .def = def };
     const p = &pending;
 
+    checkProperties(p, arena) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else err;
+
     // methods it declares against the ones its parents declare
     if (def.parent) |parent_name| {
         for (def.method_order.items) |name| {
@@ -466,6 +468,90 @@ pub fn checkInterface(vm: *VM, name: []const u8, def: *const ClassDef) RuntimeEr
     defer arena_state.deinit();
     var pending: Pending = .{ .vm = vm, .name = name, .def = def, .is_interface = true };
     checkConstants(&pending, arena_state.allocator()) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else err;
+}
+
+// php's do_inherit_property type rules: a property keeps the type of the
+// one it redeclares (a virtual property without a set hook may narrow it, one
+// without a get hook may widen it), and an untyped one stays untyped
+fn checkProperties(p: *Pending, arena: std.mem.Allocator) (RuntimeError || error{OutOfMemory})!void {
+    const def = p.def;
+    const parent_name = def.parent orelse return;
+    for (def.properties.items) |child| {
+        const found = inheritedProperty(p, parent_name, child.name) orelse continue;
+        try checkPropertyType(p, arena, child.name, child.type_str, found.class, found.prop.type_str, propertyVariance(found.def, found.prop));
+    }
+    for (def.static_props.keys()) |name| {
+        var current: ?[]const u8 = parent_name;
+        while (current) |class| {
+            const cdef = p.vm.classes.getPtr(class) orelse break;
+            if (cdef.static_props.contains(name)) {
+                if ((cdef.static_prop_visibility.get(name) orelse .public) == .private) break;
+                try checkPropertyType(p, arena, name, def.static_prop_types.get(name) orelse "", cdef.name, cdef.static_prop_types.get(name) orelse "", .invariant);
+                break;
+            }
+            current = cdef.parent;
+        }
+    }
+}
+
+const PropVariance = enum { invariant, covariant, contravariant };
+
+const FoundProperty = struct { class: []const u8, def: *const ClassDef, prop: ClassDef.PropertyDef };
+
+// the nearest ancestor's declaration of a property, unless it is private
+fn inheritedProperty(p: *const Pending, start: []const u8, name: []const u8) ?FoundProperty {
+    var current: ?[]const u8 = start;
+    while (current) |class| {
+        const entry = p.vm.classes.getEntry(class) orelse return null;
+        for (entry.value_ptr.properties.items) |prop| {
+            if (!std.mem.eql(u8, prop.name, name)) continue;
+            if (prop.visibility == .private) return null;
+            return .{ .class = entry.key_ptr.*, .def = entry.value_ptr, .prop = prop };
+        }
+        current = entry.value_ptr.parent;
+    }
+    return null;
+}
+
+// prop_get_variance
+fn propertyVariance(def: *const ClassDef, prop: ClassDef.PropertyDef) PropVariance {
+    if (!prop.is_virtual) return .invariant;
+    var buf: [256]u8 = undefined;
+    const getter = std.fmt.bufPrint(&buf, "{s}$hook_get", .{prop.name}) catch return .invariant;
+    const has_get = def.methods.contains(getter);
+    var buf2: [256]u8 = undefined;
+    const setter = std.fmt.bufPrint(&buf2, "{s}$hook_set", .{prop.name}) catch return .invariant;
+    const has_set = def.methods.contains(setter);
+    if (!has_get and !has_set) return .invariant;
+    if (!has_set) return .covariant;
+    if (!has_get) return .contravariant;
+    return .invariant;
+}
+
+fn checkPropertyType(p: *Pending, arena: std.mem.Allocator, name: []const u8, child_text: []const u8, parent_class: []const u8, parent_text: []const u8, variance: PropVariance) (RuntimeError || error{OutOfMemory})!void {
+    if (parent_text.len == 0) {
+        if (child_text.len == 0) return;
+        return constantFatal(p, "Type of {s}::${s} must be omitted to match the parent definition in class {s}", .{ p.name, name, parent_class });
+    }
+    const parent_type = try canonicalType(p, arena, parent_text, parent_class);
+    const compatible = child_text.len > 0 and blk: {
+        const child_type = try canonicalType(p, arena, child_text, p.name);
+        const forward: php_types.Status = if (variance == .contravariant) .success else php_types.covariant(classes(p), p.name, child_type, parent_type);
+        const backward: php_types.Status = if (variance == .covariant) .success else php_types.covariant(classes(p), parent_class, parent_type, child_type);
+        // an unresolved check is php's obligation, which fails at the end of
+        // linking when a class it names still can't be loaded
+        break :blk forward == .success and backward == .success;
+    };
+    if (p.failure) |err| return err;
+    if (!compatible) {
+        const shown = try php_types.format(arena, try parseType(p, arena, parent_text, parent_class));
+        const kind: []const u8 = switch (variance) {
+            .invariant => "",
+            .covariant => "subtype of ",
+            .contravariant => "supertype of ",
+        };
+        return constantFatal(p, "Type of {s}::${s} must be {s}{s} (as in class {s})", .{ p.name, name, kind, shown, parent_class });
+    }
 }
 
 const ConstantOwners = std.StringHashMapUnmanaged([]const u8);

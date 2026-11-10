@@ -1944,6 +1944,12 @@ fn methodTypesKnown(self: *Compiler, node: Ast.Node, known: *const std.StringHas
     const own = self.declaredName(self.ast.tokenSlice(node.main_token));
     for (self.ast.extraSlice(node.data.lhs)) |m_idx| {
         const m = self.ast.nodes[m_idx];
+        // a property's type is checked against the one it redeclares too
+        if (m.tag == .class_property or m.tag == .static_class_property or m.tag == .class_property_hooks) {
+            const type_extra = m.data.rhs >> 16;
+            if (type_extra != 0 and !typeNamesKnown(self, own, self.ast.extra_data[type_extra - 1], self.ast.extra_data[type_extra], known)) return false;
+            continue;
+        }
         if (m.tag != .class_method and m.tag != .static_class_method and m.tag != .interface_method) continue;
         const params = self.ast.extraSlice(m.data.lhs);
         for (params) |p| {
