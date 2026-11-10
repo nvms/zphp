@@ -244,7 +244,8 @@ pub const NativeContext = struct {
 pub const NativeResult = @import("native_result.zig").NativeResult;
 const extension = @import("../extension.zig");
 pub const NativeFn = *const fn (*NativeContext, []const Value) RuntimeError!NativeResult;
-pub const NativeTable = @import("natives.zig").Table(NativeFn);
+const natives_mod = @import("natives.zig");
+pub const NativeTable = natives_mod.Table(NativeFn);
 pub const Native = NativeTable.Native;
 pub const NativeBinop = enum { add, sub, mul, div, mod, pow, compare, negate, bit_and, bit_or, bit_xor, bit_not, shl, shr };
 
@@ -20493,6 +20494,7 @@ pub const VM = struct {
             try self.setPendingException("ArgumentCountError", native.arity.describe(&buf, label, input_args.len));
             return error.RuntimeError;
         }
+        if (native.arrays != 0) if (name) |n| try self.checkArrayArgs(n, label, native.arrays, input_args);
         var args_buf: [16]Value = undefined;
         var separated_args: ?[]Value = null;
         defer if (separated_args) |copy| self.freeStackArgs(copy, &args_buf);
@@ -22208,6 +22210,24 @@ pub const VM = struct {
         defer self.allocator.free(msg);
         const line: i64 = if (self.sourceLocation(frame.chunk, if (frame.ip > 0) frame.ip - 1 else 0)) |loc| @intCast(loc.line) else 0;
         try self.raiseErrorAt(E_WARNING, msg, .{ .file = self.frameFile(self.frame_count - 1), .line = line });
+    }
+
+    // a native's `array` parameters, which php's argument parsing refuses
+    // anything else for; a variadic one names no parameter
+    fn checkArrayArgs(self: *VM, name: []const u8, label: []const u8, positions: u32, args: []const Value) RuntimeError!void {
+        for (args, 0..) |arg, i| {
+            const bit: u32 = if (i >= 31) (positions & natives_mod.variadic_array_bit) else (positions & (@as(u32, 1) << @intCast(i)));
+            if (bit == 0 or arg == .array) continue;
+            const signature = native_params.get(name) orelse return;
+            const param = signature.params[@min(i, signature.params.len - 1)];
+            const msg = if (param.variadic)
+                try std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} must be of type array, {s} given", .{ label, i + 1, valueTypeName(arg) })
+            else
+                try std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} (${s}) must be of type array, {s} given", .{ label, i + 1, param.name, valueTypeName(arg) });
+            defer self.allocator.free(msg);
+            try self.setPendingException("TypeError", msg);
+            return error.RuntimeError;
+        }
     }
 
     // a native's `callable` parameters, checked as php's argument parsing

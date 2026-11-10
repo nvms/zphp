@@ -16,6 +16,9 @@ pub fn Table(comptime NativeFn: type) type {
             arity: Arity,
             // bit i set: parameter i is `callable` or `?callable`
             callbacks: u32,
+            // bit i set: parameter i is a plain `array`; bit 31: so is the
+            // variadic parameter that takes the rest
+            arrays: u32,
             // #[\NoDiscard]'s reason, for a native php marks with it
             no_discard: ?[]const u8,
             // what follows "is deprecated" for a native php marks #[\Deprecated]
@@ -25,7 +28,7 @@ pub fn Table(comptime NativeFn: type) type {
         map: std.StringHashMapUnmanaged(Native) = .{},
 
         pub fn put(self: *Self, allocator: Allocator, name: []const u8, call: NativeFn) !void {
-            try self.map.put(allocator, name, .{ .call = call, .arity = Arity.of(name), .callbacks = callbackParams(name), .no_discard = no_discard.get(name), .deprecated = deprecations.functions.get(name) });
+            try self.map.put(allocator, name, .{ .call = call, .arity = Arity.of(name), .callbacks = callbackParams(name), .arrays = arrayParams(name), .no_discard = no_discard.get(name), .deprecated = deprecations.functions.get(name) });
         }
 
         pub fn get(self: *const Self, name: []const u8) ?Native {
@@ -74,6 +77,24 @@ pub fn callbackParams(name: []const u8) u32 {
     for (signature.params, 0..) |param, i| {
         if (i >= 32) break;
         if (std.mem.eql(u8, param.type, "callable") or std.mem.eql(u8, param.type, "?callable")) positions |= @as(u32, 1) << @intCast(i);
+    }
+    return positions;
+}
+
+pub const variadic_array_bit: u32 = 1 << 31;
+
+// the parameters php's argument parsing requires to be arrays, for natives
+// (methods check their own)
+pub fn arrayParams(name: []const u8) u32 {
+    if (std.mem.indexOf(u8, name, "::") != null) return 0;
+    const signature = native_params.get(name) orelse return 0;
+    var positions: u32 = 0;
+    for (signature.params, 0..) |param, i| {
+        if (i >= 31) break;
+        if (!std.mem.eql(u8, param.type, "array")) continue;
+        if (param.variadic) {
+            positions |= variadic_array_bit | (~@as(u32, 0) << @intCast(i) & ~variadic_array_bit);
+        } else positions |= @as(u32, 1) << @intCast(i);
     }
     return positions;
 }
