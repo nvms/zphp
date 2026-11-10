@@ -1532,7 +1532,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
             is_variadic = true;
             try defaults.append(self.allocator, .null);
         } else if (pnode.data.lhs != 0) {
-            try defaults.append(self.allocator, self.evalConstExpr(pnode.data.lhs));
+            try defaults.append(self.allocator, try paramDefaultValue(self, pnode));
         } else {
             try defaults.append(self.allocator, .null);
         }
@@ -1695,7 +1695,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
             is_variadic = true;
             try defaults.append(self.allocator, .null);
         } else if (pnode.data.lhs != 0) {
-            try defaults.append(self.allocator, self.evalConstExpr(pnode.data.lhs));
+            try defaults.append(self.allocator, try paramDefaultValue(self, pnode));
         } else {
             try defaults.append(self.allocator, .null);
         }
@@ -3647,7 +3647,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
             is_variadic = true;
             try defaults.append(self.allocator, .null);
         } else if (pnode.data.lhs != 0) {
-            try defaults.append(self.allocator, self.evalConstExpr(pnode.data.lhs));
+            try defaults.append(self.allocator, try paramDefaultValue(self, pnode));
         } else {
             try defaults.append(self.allocator, .null);
         }
@@ -4261,7 +4261,7 @@ fn compileInterfaceMethodStub(self: *Compiler, owner_name: []const u8, member: A
             is_variadic = true;
             try defaults.append(self.allocator, .null);
         } else if (pnode.data.lhs != 0) {
-            try defaults.append(self.allocator, self.evalConstExpr(pnode.data.lhs));
+            try defaults.append(self.allocator, try paramDefaultValue(self, pnode));
         } else {
             try defaults.append(self.allocator, .null);
         }

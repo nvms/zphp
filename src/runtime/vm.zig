@@ -21003,7 +21003,38 @@ pub const VM = struct {
         const saved = ic.default_site;
         ic.default_site = func;
         defer ic.default_site = saved;
-        return self.resolveDefault(func.defaults[index]);
+        const raw = func.defaults[index];
+        const value = try self.resolveDefault(raw);
+        // a default php could not fold is checked against the parameter's
+        // type once evaluated (RECV_INIT)
+        if (raw == .string and raw.string.len > 0 and raw.string.bytes()[0] == 0) return self.checkEvaluatedDefault(func, index, value);
+        return value;
+    }
+
+    fn checkEvaluatedDefault(self: *VM, func: *const ObjFunction, index: usize, value: Value) RuntimeError!Value {
+        const ti = self.typeInfoFor(func.name) orelse return value;
+        if (index >= ti.param_types.len or ti.param_types[index].len == 0) return value;
+        const type_str = ti.param_types[index];
+        if (try self.verifyDeclaredType(value, type_str, self.functionScope(func.name), func.strict_types)) |accepted| return accepted;
+        var cs_file: []const u8 = self.file_path;
+        var cs_line: u32 = 0;
+        if (self.frame_count >= 1) {
+            const caller = &self.frames[self.frame_count - 1];
+            if (caller.script_path.len > 0) cs_file = caller.script_path else if (caller.func) |cf| if (cf.file_path.len > 0) {
+                cs_file = cf.file_path;
+            };
+            const cip: usize = if (caller.ip > 0) caller.ip - 1 else 0;
+            if (self.sourceLocation(caller.chunk, cip)) |loc| cs_line = loc.line;
+        }
+        const raw_param = if (index < func.params.len) func.params[index] else "";
+        const param_name = if (raw_param.len > 0 and raw_param[0] == '$') raw_param[1..] else raw_param;
+        const msg = try std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given, called in {s} on line {d}", .{ try self.callableDisplayName(func.name, func), index + 1, param_name, try self.resolvedTypeText(type_str, self.functionScope(func.name)), valueTypeName(value), cs_file, cs_line });
+        defer self.allocator.free(msg);
+        const at: ?SourcePosition = if (func.file_path.len > 0) SourcePosition{ .file = func.file_path, .line = func.start_line } else null;
+        const exc = try self.newBuiltinException("TypeError", msg, at);
+        try self.prependCallToTrace(exc, func, &.{});
+        self.raise(.{ .object = exc });
+        return error.RuntimeError;
     }
 
     // the defaults of the parameters a call left out, into a frame's locals
