@@ -5030,6 +5030,12 @@ fn rpropGetDocComment(ctx: *NativeContext, _: []const Value) RuntimeError!Native
     if (dc_v != .string) return NativeResult.scalar(.{ .bool = false });
     const prop_name_v = this.get("name");
     if (prop_name_v != .string) return NativeResult.scalar(.{ .bool = false });
+    if (staticDeclaringClass(this)) |declaring| {
+        const cls = ctx.vm.classes.get(declaring) orelse return NativeResult.scalar(.{ .bool = false });
+        const doc = cls.static_prop_docs.get(prop_name_v.string.bytes()) orelse "";
+        if (doc.len == 0) return NativeResult.scalar(.{ .bool = false });
+        return try NativeResult.copyString(ctx.allocator, doc);
+    }
     var current: ?[]const u8 = dc_v.string.bytes();
     while (current) |cn| {
         if (ctx.vm.classes.get(cn)) |cls| {

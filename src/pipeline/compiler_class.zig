@@ -738,11 +738,11 @@ fn readTypeName(self: *Compiler, tok: *u32, end_tok: u32) Error!TypeName {
     if (!qualified) {
         if (std.mem.eql(u8, lower, "iterable")) return .{ .written = written, .iterable = true, .mask = php_types.ARRAY };
         const builtin = std.StaticStringMap(u32).initComptime(.{
-            .{ "null", php_types.NULL },       .{ "false", php_types.FALSE }, .{ "true", php_types.TRUE },
-            .{ "bool", php_types.BOOL },       .{ "int", php_types.LONG },    .{ "float", php_types.DOUBLE },
-            .{ "string", php_types.STRING },   .{ "array", php_types.ARRAY }, .{ "object", php_types.OBJECT },
-            .{ "callable", php_types.CALLABLE }, .{ "void", php_types.VOID }, .{ "never", php_types.NEVER },
-            .{ "static", php_types.STATIC },   .{ "mixed", php_types.ANY },
+            .{ "null", php_types.NULL },         .{ "false", php_types.FALSE }, .{ "true", php_types.TRUE },
+            .{ "bool", php_types.BOOL },         .{ "int", php_types.LONG },    .{ "float", php_types.DOUBLE },
+            .{ "string", php_types.STRING },     .{ "array", php_types.ARRAY }, .{ "object", php_types.OBJECT },
+            .{ "callable", php_types.CALLABLE }, .{ "void", php_types.VOID },   .{ "never", php_types.NEVER },
+            .{ "static", php_types.STATIC },     .{ "mixed", php_types.ANY },
         });
         if (builtin.get(lower)) |mask| return .{ .written = written, .mask = mask };
     }
@@ -1229,6 +1229,7 @@ fn isDeclLeadingTokenTag(tag: Token.Tag) bool {
         .kw_final,
         .kw_abstract,
         .kw_readonly,
+        .kw_var,
         // type hints in front of a parameter / property
         .identifier,
         .kw_array,
@@ -1247,6 +1248,16 @@ fn isDeclLeadingTokenTag(tag: Token.Tag) bool {
 }
 
 fn docCommentForToken(self: *Compiler, tok_idx: u32) []const u8 {
+    return docCommentBefore(self, tok_idx, false);
+}
+
+// a closure takes the doc comment php's scanner last saw, which for
+// `$f = function` comes before the assignment
+fn docCommentForClosure(self: *Compiler, tok_idx: u32) []const u8 {
+    return docCommentBefore(self, tok_idx, true);
+}
+
+fn docCommentBefore(self: *Compiler, tok_idx: u32, closure: bool) []const u8 {
     if (tok_idx >= self.ast.tokens.len) return "";
     // walk back through modifier/keyword tokens (function, class, public,
     // static, etc) to find the leading edge of the declaration. the doc
@@ -1254,16 +1265,57 @@ fn docCommentForToken(self: *Compiler, tok_idx: u32) []const u8 {
     var lead = tok_idx;
     while (lead > 0) {
         const prev_tag = self.ast.tokens[lead - 1].tag;
-        if (!isDeclLeadingTokenTag(prev_tag)) break;
+        // the declaration's attributes are part of it
+        if (prev_tag == .r_bracket) {
+            var depth: usize = 0;
+            var j = lead - 1;
+            const opener: ?u32 = while (true) {
+                switch (self.ast.tokens[j].tag) {
+                    .r_bracket => depth += 1,
+                    .l_bracket, .hash_bracket => {
+                        depth -= 1;
+                        if (depth == 0) break if (self.ast.tokens[j].tag == .hash_bracket) j else null;
+                    },
+                    else => {},
+                }
+                if (j == 0) break null;
+                j -= 1;
+            };
+            lead = opener orelse break;
+            continue;
+        }
+        const passes = isDeclLeadingTokenTag(prev_tag) or (closure and (prev_tag == .equal or prev_tag == .variable or prev_tag == .kw_fn));
+        if (!passes) break;
         lead -= 1;
     }
-    const tok_start = self.ast.tokens[lead].start;
-    var trivia_start: usize = 0;
-    if (lead > 0) trivia_start = self.ast.tokens[lead - 1].end;
-    if (trivia_start >= tok_start) return "";
-    const trivia = self.ast.source[trivia_start..tok_start];
+    // php keeps the doc comment its scanner saw last, so one between the
+    // declaration's own tokens (`const int /** doc */ X`) counts too; one
+    // inside an attribute's arguments belongs to what is declared there
+    var found: []const u8 = "";
+    var attribute_depth: usize = 0;
+    var k = lead;
+    while (k <= tok_idx) : (k += 1) {
+        const tok_start = self.ast.tokens[k].start;
+        const trivia_start: usize = if (k > 0) self.ast.tokens[k - 1].end else 0;
+        if (attribute_depth == 0 and trivia_start < tok_start) {
+            if (lastDocComment(self.ast.source[trivia_start..tok_start])) |doc| found = doc;
+        }
+        switch (self.ast.tokens[k].tag) {
+            .hash_bracket => attribute_depth += 1,
+            .l_bracket => if (attribute_depth > 0) {
+                attribute_depth += 1;
+            },
+            .r_bracket => if (attribute_depth > 0) {
+                attribute_depth -= 1;
+            },
+            else => {},
+        }
+    }
+    return found;
+}
 
-    // walk trivia forwards collecting doc comments; keep the LAST one found
+// the last doc comment in a run of trivia
+fn lastDocComment(trivia: []const u8) ?[]const u8 {
     var last_start: ?usize = null;
     var last_end: usize = 0;
     var i: usize = 0;
@@ -1283,7 +1335,8 @@ fn docCommentForToken(self: *Compiler, tok_idx: u32) []const u8 {
         }
         if (c == '/' and i + 1 < trivia.len and trivia[i + 1] == '*') {
             const block_start = i;
-            const is_doc = i + 2 < trivia.len and trivia[i + 2] == '*' and (i + 3 >= trivia.len or trivia[i + 3] != '/');
+            // php's T_DOC_COMMENT: "/**" followed by whitespace
+            const is_doc = i + 3 < trivia.len and trivia[i + 2] == '*' and std.ascii.isWhitespace(trivia[i + 3]);
             i += 2;
             while (i + 1 < trivia.len) : (i += 1) {
                 if (trivia[i] == '*' and trivia[i + 1] == '/') {
@@ -1302,8 +1355,8 @@ fn docCommentForToken(self: *Compiler, tok_idx: u32) []const u8 {
         // unrecognized char in trivia - bail
         break;
     }
-    if (last_start) |s| return trivia[s..last_end];
-    return "";
+    if (last_start) |st| return trivia[st..last_end];
+    return null;
 }
 
 fn endLineForBlockStartingAt(self: *Compiler, start_tok: u32) u32 {
@@ -1911,7 +1964,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         .file_path = self.file_path,
         .start_line = lineForToken(self, node.main_token),
         .end_line = if (is_arrow) arrow_end else endLineForBlockStartingAt(self, node.main_token),
-        .doc_comment = docCommentForToken(self, node.main_token),
+        .doc_comment = docCommentForClosure(self, node.main_token),
         .display_name = display_name,
         .no_discard = call_attrs.no_discard,
         .deprecated = call_attrs.deprecated,
@@ -2114,7 +2167,7 @@ fn typeNamesKnown(self: *Compiler, own: []const u8, start_tok: u32, end_tok: u32
         if (written.len <= lower_buf.len) {
             const lower = std.ascii.lowerString(&lower_buf, written);
             const builtin = std.StaticStringMap(void).initComptime(.{
-                .{"null"},   .{"false"},  .{"true"},  .{"bool"},     .{"int"},  .{"float"},  .{"string"}, .{"array"},
+                .{"null"},   .{"false"},    .{"true"}, .{"bool"},  .{"int"},    .{"float"}, .{"string"},   .{"array"},
                 .{"object"}, .{"callable"}, .{"void"}, .{"never"}, .{"static"}, .{"mixed"}, .{"iterable"}, .{"self"},
                 .{"parent"},
             });
@@ -2743,7 +2796,8 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
                 const type_str = try buildTypeString(self, start_tok, end_tok);
                 try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(type_str) }));
             }
-            try self.emitU16(0xffff); // promoted params don't carry their own doc comment
+            // a promoted property takes its parameter's doc comment
+            try self.emitU16(try docCommentConst(self, pnode.main_token));
         }
     }
 
@@ -4392,7 +4446,7 @@ fn needsVarSync(chunk: *const Chunk) bool {
     const code = chunk.code.items;
     while (i < code.len) {
         const b = code[i];
-        if (b == @intFromEnum(OpCode.concat_assign) or b == @intFromEnum(OpCode.get_global) or b == @intFromEnum(OpCode.get_static) or b == @intFromEnum(OpCode.closure_bind_ref))
+        if (b == @backingInt(OpCode.concat_assign) or b == @backingInt(OpCode.get_global) or b == @backingInt(OpCode.get_static) or b == @backingInt(OpCode.closure_bind_ref))
             return true;
         i += opcodeWidth(b);
     }
@@ -4403,7 +4457,7 @@ fn hasOp(chunk: *const Chunk, op: OpCode) bool {
     var i: usize = 0;
     const code = chunk.code.items;
     while (i < code.len) {
-        if (code[i] == @intFromEnum(op)) return true;
+        if (code[i] == @backingInt(op)) return true;
         i += opcodeWidth(code[i]);
     }
     return false;
