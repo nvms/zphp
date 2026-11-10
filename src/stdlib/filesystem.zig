@@ -2928,11 +2928,33 @@ fn native_flock(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
 }
 
 // memory streams and regular files seek; pipes and terminals do not
+// php's detect_is_seekable: pipes and sockets cannot seek, nor can
+// character devices, except linux's memory devices (/dev/null, /dev/zero,
+// /dev/full and kin, major 1)
 fn isSeekable(obj: *PhpObject) bool {
     if (getBufferBacking(obj) != null) return true;
+    if (isNetStream(obj)) return false;
     const file = getFileHandle(obj) orelse return false;
-    const stat = file.stat(platform.io) catch return false;
-    return stat.kind == .file;
+    if (platform.is_windows) {
+        const stat = file.stat(platform.io) catch return false;
+        return stat.kind != .named_pipe and stat.kind != .character_device;
+    }
+    const st = sys.fstat(file.handle) catch return false;
+    return switch (st.mode & 0o170000) {
+        0o010000, 0o140000 => false,
+        0o020000 => @import("builtin").os.tag == .linux and memoryDevice(st.rdev),
+        else => true,
+    };
+}
+
+fn memoryDevice(rdev: u64) bool {
+    // glibc's major() and minor() of a dev_t
+    const major = ((rdev >> 8) & 0xfff) | ((rdev >> 32) & 0xfffff000);
+    const minor = (rdev & 0xff) | ((rdev >> 12) & 0xffffff00);
+    return major == 1 and switch (minor) {
+        1, 2, 3, 4, 5, 7 => true,
+        else => false,
+    };
 }
 
 fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
