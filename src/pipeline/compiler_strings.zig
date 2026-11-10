@@ -220,13 +220,28 @@ fn compileInterpolatedString(self: *Compiler, s: []const u8, quote: u8) (Allocat
             }
             const end = std.mem.indexOfScalarPos(u8, s, i + 2, '}') orelse s.len;
             const var_name_raw = s[i + 2 .. end];
-            var name_buf: [256]u8 = undefined;
-            name_buf[0] = '$';
-            @memcpy(name_buf[1 .. 1 + var_name_raw.len], var_name_raw);
-            const full_name = name_buf[0 .. 1 + var_name_raw.len];
-            const owned = try self.allocator.dupe(u8, full_name);
-            try self.string_allocs.append(self.allocator, owned);
-            try self.emitGetVar(owned);
+            // php 8.2 deprecates both ${name} and ${expr} interpolation
+            const src = self.ast.source;
+            const offset = if (@intFromPtr(s.ptr) >= @intFromPtr(src.ptr) and @intFromPtr(s.ptr) < @intFromPtr(src.ptr) + src.len) @intFromPtr(s.ptr) - @intFromPtr(src.ptr) + i else self.current_source_offset;
+            // a name, alone or indexed, is php's T_STRING_VARNAME
+            const plain_name = var_name_raw.len > 0 and isVarStart(var_name_raw[0]) and for (var_name_raw) |c| {
+                if (c == '[') break true;
+                if (!isVarChar(c)) break false;
+            } else true;
+            if (plain_name)
+                try self.warnAtOffset(offset, 8192, "Using ${{var}} in strings is deprecated, use {{$var}} instead", .{})
+            else
+                try self.warnAtOffset(offset, 8192, "Using ${{expr}} (variable variables) in strings is deprecated, use {{${{expr}}}} instead", .{});
+            if (!plain_name and var_name_raw.len > 0 and var_name_raw[0] == '$') {
+                // ${$expr}: the variable named by the expression's value
+                try emitInterpolationExpr(self, var_name_raw);
+                try self.emitOp(.get_var_var);
+            } else {
+                // ${name} and ${name[key]} read $name, indexed
+                const owned = try std.fmt.allocPrint(self.allocator, "${s}", .{var_name_raw});
+                try self.string_allocs.append(self.allocator, owned);
+                if (std.mem.indexOfScalar(u8, owned, '[') != null) try emitInterpolationExpr(self, owned) else try self.emitGetVar(owned);
+            }
             if (segment_count > 0) try self.emitOp(.concat);
             segment_count += 1;
             i = if (end < s.len) end + 1 else end;

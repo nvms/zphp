@@ -520,6 +520,17 @@ pub const Compiler = struct {
         self.warnings.appendAssumeCapacity(.{ .level = level, .message = message, .line = line });
     }
 
+    // the same, at a byte offset of the source
+    pub fn warnAtOffset(self: *Compiler, offset: usize, level: u16, comptime fmt: []const u8, args: anytype) Error!void {
+        try self.warnings.ensureUnusedCapacity(self.allocator, 1);
+        try self.string_allocs.ensureUnusedCapacity(self.allocator, 1);
+        const message = try std.fmt.allocPrint(self.allocator, fmt, args);
+        self.string_allocs.appendAssumeCapacity(message);
+        const end = @min(offset, self.ast.source.len);
+        const line: u32 = 1 + @as(u32, @intCast(std.mem.count(u8, self.ast.source[0..end], "\n")));
+        self.warnings.appendAssumeCapacity(.{ .level = level, .message = message, .line = line });
+    }
+
     pub fn compileNode(self: *Compiler, idx: u32) Error!void {
         // early-bound class/interface declarations are relocated to a prelude
         // (see hoistEarlyClasses); their original location emits nothing
