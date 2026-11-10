@@ -3030,7 +3030,7 @@ fn rcGetStaticPropertyValue(ctx: *NativeContext, args: []const Value) RuntimeErr
     try ctx.vm.resolveClassDefaults(class_name);
     const found = visiblePropertyDef(ctx.vm, class_name, prop_name);
     if (found != null and found.?.is_static) {
-        const v = (try ctx.vm.staticPropertyValue(class_name, prop_name)) orelse .undef;
+        const v = (try staticPropertyRaw(ctx, class_name, prop_name)) orelse .undef;
         if (v != .undef) return NativeResult.share(v);
         if (args.len >= 2) return NativeResult.share(args[1]);
         const msg = try std.fmt.allocPrint(ctx.allocator, "Typed property {s}::${s} must not be accessed before initialization", .{ class_name, prop_name });
@@ -4862,13 +4862,19 @@ fn rpGetValue(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     const object = try zpp.optObject(ctx, label, args, 0, "object");
     const prop_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
     if (staticDeclaringClass(this)) |declaring| {
-        const v = (try ctx.vm.staticPropertyValue(reflectedClass(this) orelse declaring, prop_name)) orelse .null;
+        const v = (try staticPropertyRaw(ctx, reflectedClass(this) orelse declaring, prop_name)) orelse .null;
         if (v == .undef) return uninitializedStatic(ctx, declaring, prop_name);
         return NativeResult.share(v);
     }
     const obj = object orelse return mustBeProvided(ctx, label);
     try checkPropertyInstance(ctx, this, obj);
     return readPropertyAs(ctx, obj, prop_name, reflectedClass(this) orelse obj.class_name);
+}
+
+// a static property's value with an uninitialized one left undef
+fn staticPropertyRaw(ctx: *NativeContext, class_name: []const u8, prop_name: []const u8) RuntimeError!?Value {
+    try ctx.vm.resolveClassDefaults(class_name);
+    return ctx.vm.getStaticPropRaw(class_name, prop_name);
 }
 
 fn mustBeProvided(ctx: *NativeContext, label: []const u8) RuntimeError {
@@ -4912,13 +4918,16 @@ fn readPropertyAs(ctx: *NativeContext, obj_in: *PhpObject, prop_name: []const u8
     if (vm.hasPropHook(obj.class_name, prop_name, .get) and !vm.inPropHook(obj, prop_name)) {
         if (try vm.callPropHook(obj, prop_name, .get, .null)) |hv| return NativeResult.share(hv);
     }
-    const val = obj.getForScope(prop_name, slot_scope);
+    const val = obj.rawForScope(prop_name, slot_scope);
     const slot_present = obj.slots != null and obj.getSlotIndexForScope(prop_name, slot_scope) != null;
     const present = !obj.isUnset(prop_name) and val != .undef and (val != .null or obj.properties.contains(prop_name) or slot_present);
     if (present) {
         if (val == .null and vm.typedPropForbidsNull(decl.type_str)) return uninitializedProperty(ctx, decl.defining_class, prop_name);
         return NativeResult.share(val);
     }
+    // an uninitialized typed property is an error; only one that was unset
+    // falls to __get
+    if (decl.declared and decl.type_str.len > 0 and val == .undef and !obj.isUnset(prop_name)) return uninitializedProperty(ctx, decl.defining_class, prop_name);
     if (vm.magicApplies(obj, prop_name, .get)) {
         return NativeResult.share(try vm.callMagicProperty(obj, .get, prop_name, .null));
     }
@@ -4984,7 +4993,7 @@ fn rpGetRawValue(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         return error.RuntimeError;
     }
     try ctx.vm.triggerLazyProperty(obj, prop_name, decl.defining_class);
-    const val = obj.storage().getForScope(prop_name, decl.defining_class);
+    const val = obj.storage().rawForScope(prop_name, decl.defining_class);
     if (val == .undef or (val == .null and ctx.vm.typedPropForbidsNull(decl.type_str))) return uninitializedProperty(ctx, decl.defining_class, prop_name);
     return NativeResult.share(val);
 }
@@ -5102,7 +5111,7 @@ fn rpWrite(ctx: *NativeContext, args: []const Value, mode: WriteMode) RuntimeErr
     }
     const vr = ctx.vm.propertyDeclaration(slot_scope, prop_name);
     if (vr.is_readonly) {
-        const current = target.getForScope(prop_name, slot_scope);
+        const current = target.rawForScope(prop_name, slot_scope);
         // a null slot counts as unset: a class declared by eval leaves an
         // uninitialized readonly property null rather than undef
         const initialized = current != .undef and current != .null and !target.isUnset(prop_name);
@@ -5333,7 +5342,7 @@ fn rpropIsInitialized(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     const object = try zpp.optObject(ctx, label, args, 0, "object");
     const prop_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
     if (staticDeclaringClass(this)) |declaring| {
-        const v = (try ctx.vm.staticPropertyValue(reflectedClass(this) orelse declaring, prop_name)) orelse .undef;
+        const v = (try staticPropertyRaw(ctx, reflectedClass(this) orelse declaring, prop_name)) orelse .undef;
         return NativeResult.scalar(.{ .bool = v != .undef });
     }
     const obj_in = object orelse return mustBeProvided(ctx, label);
@@ -5346,7 +5355,7 @@ fn rpropIsInitialized(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     // has_property(ZEND_PROPERTY_EXISTS), which never calls __isset: a
     // virtual property exists
     if (decl.declared and propertyIsVirtual(ctx.vm, decl.defining_class, prop_name)) return NativeResult.scalar(.{ .bool = true });
-    const val = obj.getForScope(prop_name, slot_scope);
+    const val = obj.rawForScope(prop_name, slot_scope);
     const slot_present = obj.slots != null and obj.getSlotIndexForScope(prop_name, slot_scope) != null;
     if (obj.isUnset(prop_name) or val == .undef or !(val != .null or obj.properties.contains(prop_name) or slot_present)) {
         return NativeResult.scalar(.{ .bool = false });
