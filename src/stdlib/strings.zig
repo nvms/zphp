@@ -8,6 +8,7 @@ const PhpArray = @import("../runtime/value.zig").PhpArray;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 const phpTypeName = @import("types.zig").phpTypeName;
+const html = @import("html.zig");
 
 pub const entries = .{
     .{ "substr", substr },
@@ -3638,88 +3639,231 @@ fn mbCaseFirst(ctx: *NativeContext, s: []const u8, to_upper: bool) !Value.String
 }
 
 fn native_strip_tags(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.literal("");
-    const s = args[0].string.bytes();
+    const params = html.Params{ .ctx = ctx, .func = "strip_tags", .args = args };
+    const s = try params.string(0, "string", "");
+    var tags: std.ArrayListUnmanaged(u8) = .empty;
+    defer tags.deinit(ctx.allocator);
+    var allow: ?[]const u8 = null;
+    if (args.len >= 2) switch (args[1]) {
+        .null, .undef => {},
+        // php joins an array's tags into one "<a><b>" string
+        .array => |arr| {
+            for (arr.entries.items) |entry| {
+                if (entry.value == .array) try ctx.vm.emitWarning("Array to string conversion");
+                const tag = if (entry.value == .array) "Array" else try coerceToString(ctx, entry.value);
+                try tags.append(ctx.allocator, '<');
+                try tags.appendSlice(ctx.allocator, tag);
+                try tags.append(ctx.allocator, '>');
+            }
+            if (tags.items.len > 0) allow = tags.items;
+        },
+        .string => |str| allow = str.bytes(),
+        .int, .float, .bool => allow = try coerceToString(ctx, args[1]),
+        .object => |o| if (ctx.vm.hasMethod(o.class_name, "__toString")) {
+            allow = try coerceToString(ctx, args[1]);
+        } else return params.typeError(1, "allowed_tags", "array|string|null"),
+        else => return params.typeError(1, "allowed_tags", "array|string|null"),
+    };
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(ctx.allocator);
+    try stripTags(ctx.allocator, s, allow, false, &out);
+    return NativeResult.copyString(ctx.allocator, out.items);
+}
 
-    var allowed_tags_buf: [64][64]u8 = undefined;
-    var allowed_tags_lens: [64]usize = undefined;
-    var n_allowed: usize = 0;
-    if (args.len >= 2) {
-        if (args[1] == .string) {
-            const allow = args[1].string.bytes();
-            var ai: usize = 0;
-            while (ai < allow.len and n_allowed < 64) {
-                if (allow[ai] == '<') {
-                    ai += 1;
-                    var tlen: usize = 0;
-                    while (ai < allow.len and allow[ai] != '>') : (ai += 1) {
-                        if (tlen < 64) {
-                            allowed_tags_buf[n_allowed][tlen] = toLowerAscii(allow[ai]);
-                            tlen += 1;
+// php's php_tag_find: the tag in tbuf ("<a href=...>", "</a>") normalized to
+// "<a>" and looked up in the lowercased allow set, which php searches with
+// strstr, so it ends at a nul
+fn tagAllowed(allocator: std.mem.Allocator, tag: []const u8, set: []const u8) !bool {
+    if (tag.len == 0) return false;
+    var norm: std.ArrayListUnmanaged(u8) = .empty;
+    defer norm.deinit(allocator);
+    // the tag buffer is nul-terminated in php, so reads past its end see 0
+    const at = struct {
+        fn f(t: []const u8, i: usize) u8 {
+            return if (i < t.len) toLowerAscii(t[i]) else 0;
+        }
+    }.f;
+    var t: usize = 0;
+    var state: u8 = 0;
+    var done = false;
+    while (!done) {
+        const c = at(tag, t);
+        switch (c) {
+            '<' => try norm.append(allocator, c),
+            '>' => done = true,
+            else => {
+                if (!isCSpace(c)) {
+                    if (state == 0) state = 1;
+                    const prev: u8 = if (t > 0) tag[t - 1] else 0;
+                    if (c != '/' or (prev != '<' and at(tag, t + 1) != '>')) try norm.append(allocator, c);
+                } else if (state == 1) done = true;
+            },
+        }
+        t += 1;
+    }
+    try norm.append(allocator, '>');
+    const haystack = if (std.mem.indexOfScalar(u8, set, 0)) |nul| set[0..nul] else set;
+    // php's normalized tag is a c string too
+    const needle = if (std.mem.indexOfScalar(u8, norm.items, 0)) |nul| norm.items[0..nul] else norm.items;
+    return std.mem.indexOf(u8, haystack, needle) != null;
+}
+
+fn isCSpace(c: u8) bool {
+    return c == ' ' or (c >= '\t' and c <= '\r');
+}
+
+// php's php_strip_tags_ex state machine: 0 is output, 1 inside an html tag,
+// 2 inside php code, 3 inside <! (comments and doctype), 4 inside <!-- -->
+pub fn stripTags(allocator: std.mem.Allocator, buf: []const u8, allow_in: ?[]const u8, allow_tag_spaces: bool, out: *std.ArrayListUnmanaged(u8)) !void {
+    var allow_lower: ?[]u8 = null;
+    defer if (allow_lower) |a| allocator.free(a);
+    if (allow_in) |a| {
+        allow_lower = try allocator.alloc(u8, a.len);
+        for (a, 0..) |c, i| allow_lower.?[i] = toLowerAscii(c);
+    }
+    const allow = allow_lower;
+    var tbuf: std.ArrayListUnmanaged(u8) = .empty;
+    defer tbuf.deinit(allocator);
+    const end = buf.len;
+    // reads at the end see the c string's terminator
+    const byteAt = struct {
+        fn f(b: []const u8, i: usize) u8 {
+            return if (i < b.len) b[i] else 0;
+        }
+    }.f;
+    var p: usize = 0;
+    var lc: u8 = 0;
+    var br: i64 = 0;
+    var depth: i64 = 0;
+    var in_q: u8 = 0;
+    var state: u8 = 0;
+    var is_xml = false;
+    while (p < end) {
+        const c = buf[p];
+        switch (state) {
+            0 => switch (c) {
+                0 => {},
+                '<' => {
+                    if (in_q != 0) {} else if (isCSpace(byteAt(buf, p + 1)) and !allow_tag_spaces) {
+                        try out.append(allocator, c);
+                    } else {
+                        lc = '<';
+                        state = 1;
+                        if (allow != null) try tbuf.append(allocator, '<');
+                    }
+                },
+                '>' => {
+                    if (depth != 0) {
+                        depth -= 1;
+                    } else if (in_q == 0) try out.append(allocator, c);
+                },
+                else => try out.append(allocator, c),
+            },
+            1 => reg: {
+                switch (c) {
+                    0 => break :reg,
+                    '<' => {
+                        if (in_q != 0) break :reg;
+                        if (!(isCSpace(byteAt(buf, p + 1)) and !allow_tag_spaces)) {
+                            depth += 1;
+                            break :reg;
                         }
+                    },
+                    '>' => {
+                        if (depth != 0) {
+                            depth -= 1;
+                            break :reg;
+                        }
+                        if (in_q != 0) break :reg;
+                        lc = '>';
+                        if (is_xml and p >= 1 and buf[p - 1] == '-') break :reg;
+                        in_q = 0;
+                        state = 0;
+                        is_xml = false;
+                        if (allow) |set| {
+                            try tbuf.append(allocator, '>');
+                            if (try tagAllowed(allocator, tbuf.items, set)) try out.appendSlice(allocator, tbuf.items);
+                            tbuf.clearRetainingCapacity();
+                        }
+                        break :reg;
+                    },
+                    '"', '\'' => {
+                        if (p != 0 and (in_q == 0 or c == in_q)) in_q = if (in_q != 0) 0 else c;
+                    },
+                    '!' => if (p >= 1 and buf[p - 1] == '<') {
+                        state = 3;
+                        lc = c;
+                        break :reg;
+                    },
+                    '?' => if (p >= 1 and buf[p - 1] == '<') {
+                        br = 0;
+                        state = 2;
+                        break :reg;
+                    },
+                    else => {},
+                }
+                if (allow != null) try tbuf.append(allocator, c);
+            },
+            2 => switch (c) {
+                '(' => if (lc != '"' and lc != '\'') {
+                    lc = '(';
+                    br += 1;
+                },
+                ')' => if (lc != '"' and lc != '\'') {
+                    lc = ')';
+                    br -= 1;
+                },
+                '>' => {
+                    if (depth != 0) {
+                        depth -= 1;
+                    } else if (in_q == 0 and br == 0 and p >= 1 and lc != '"' and buf[p - 1] == '?') {
+                        in_q = 0;
+                        state = 0;
+                        tbuf.clearRetainingCapacity();
                     }
-                    if (ai < allow.len) ai += 1;
-                    allowed_tags_lens[n_allowed] = tlen;
-                    n_allowed += 1;
-                } else {
-                    ai += 1;
-                }
-            }
-        } else if (args[1] == .array) {
-            for (args[1].array.entries.items) |e| {
-                if (e.value != .string or n_allowed >= 64) continue;
-                const tag = e.value.string.bytes();
-                var tlen: usize = 0;
-                for (tag) |c| {
-                    if (tlen < 64) {
-                        allowed_tags_buf[n_allowed][tlen] = toLowerAscii(c);
-                        tlen += 1;
+                },
+                '"', '\'' => if (p >= 1 and buf[p - 1] != '\\') {
+                    if (lc == c) {
+                        lc = 0;
+                    } else if (lc != '\\') lc = c;
+                    if (p != 0 and (in_q == 0 or c == in_q)) in_q = if (in_q != 0) 0 else c;
+                },
+                'l', 'L' => if (p > 4 and (buf[p - 1] == 'm' or buf[p - 1] == 'M') and (buf[p - 2] == 'x' or buf[p - 2] == 'X') and buf[p - 3] == '?' and buf[p - 4] == '<') {
+                    // <?xml is markup, not php
+                    state = 1;
+                    is_xml = true;
+                },
+                else => {},
+            },
+            3 => switch (c) {
+                '>' => {
+                    if (depth != 0) {
+                        depth -= 1;
+                    } else if (in_q == 0) {
+                        state = 0;
+                        tbuf.clearRetainingCapacity();
                     }
-                }
-                allowed_tags_lens[n_allowed] = tlen;
-                n_allowed += 1;
-            }
+                },
+                '"', '\'' => if (p != 0 and buf[p - 1] != '\\' and (in_q == 0 or c == in_q)) {
+                    in_q = if (in_q != 0) 0 else c;
+                },
+                '-' => if (p >= 2 and buf[p - 1] == '-' and buf[p - 2] == '!') {
+                    state = 4;
+                },
+                'E', 'e' => if (p > 6 and std.ascii.eqlIgnoreCase(buf[p - 6 .. p], "doctyp")) {
+                    // <!DOCTYPE is an html tag
+                    state = 1;
+                },
+                else => {},
+            },
+            else => if (c == '>' and in_q == 0 and p >= 2 and buf[p - 1] == '-' and buf[p - 2] == '-') {
+                in_q = 0;
+                state = 0;
+                tbuf.clearRetainingCapacity();
+            },
         }
+        p += 1;
     }
-
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(ctx.allocator);
-    var i: usize = 0;
-    while (i < s.len) {
-        if (s[i] == '<') {
-            const tag_start = i;
-            i += 1;
-            const is_closing = i < s.len and s[i] == '/';
-            if (is_closing) i += 1;
-            var name_buf: [64]u8 = undefined;
-            var name_len: usize = 0;
-            while (i < s.len and s[i] != '>' and s[i] != ' ' and s[i] != '/') : (i += 1) {
-                if (name_len < 64) {
-                    name_buf[name_len] = toLowerAscii(s[i]);
-                    name_len += 1;
-                }
-            }
-            while (i < s.len and s[i] != '>') : (i += 1) {}
-            if (i < s.len) i += 1;
-
-            var keep = false;
-            for (0..n_allowed) |ai| {
-                const alen = allowed_tags_lens[ai];
-                if (alen == name_len and std.mem.eql(u8, allowed_tags_buf[ai][0..alen], name_buf[0..name_len])) {
-                    keep = true;
-                    break;
-                }
-            }
-            if (keep) {
-                try buf.appendSlice(ctx.allocator, s[tag_start..i]);
-            }
-        } else {
-            try buf.append(ctx.allocator, s[i]);
-            i += 1;
-        }
-    }
-    const result = try buf.toOwnedSlice(ctx.allocator);
-    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, result));
 }
 
 fn toLowerAscii(c: u8) u8 {
