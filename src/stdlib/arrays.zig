@@ -2,6 +2,7 @@ const std = @import("std");
 const platform = @import("../platform.zig");
 const Value = @import("../runtime/value.zig").Value;
 const phpTypeName = @import("types.zig").phpTypeName;
+const html = @import("html.zig");
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const vm_mod = @import("../runtime/vm.zig");
 const NativeContext = vm_mod.NativeContext;
@@ -183,16 +184,6 @@ fn in_array(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
         } else {
             if (try ctx.vm.looseEqualWithStringable(needle, entry.value)) return NativeResult.scalar(.{ .bool = true });
         }
-    }
-    return NativeResult.scalar(.{ .bool = false });
-}
-
-fn array_key_exists(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2 or args[1] != .array) return NativeResult.scalar(.{ .bool = false });
-    const key = PhpArray.normalizeKey(Value.toArrayKey(args[0]));
-    const arr = args[1].array;
-    for (arr.entries.items) |entry| {
-        if (entry.key.eql(key)) return NativeResult.scalar(.{ .bool = true });
     }
     return NativeResult.scalar(.{ .bool = false });
 }
@@ -736,8 +727,8 @@ fn array_pad(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
     const target: i64 = Value.toInt(args[1]);
     const pad_val = args[2];
     const abs_target_i64: i64 = if (target < 0) -target else target;
-    if (abs_target_i64 > 1_073_741_823) {
-        try ctx.vm.setPendingException("ValueError", "array_pad(): Argument #2 ($length) must be less than or equal to 1073741823");
+    if (abs_target_i64 > 1_073_741_824) {
+        try ctx.vm.setPendingException("ValueError", "array_pad(): Argument #2 ($length) must not exceed the maximum allowed array size");
         return error.RuntimeError;
     }
     const abs_target: usize = @intCast(abs_target_i64);
@@ -771,8 +762,12 @@ fn array_flip(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     const src = args[0].array;
     const result = try ctx.createArray();
     for (src.entries.items) |entry| {
-        if (entry.value != .int and entry.value != .string) continue;
-        const new_key = Value.toArrayKey(entry.value);
+        const value = if (entry.ref) |cell| cell.* else entry.value;
+        if (value != .int and value != .string) {
+            try ctx.vm.emitWarning("array_flip(): Can only flip string and integer values, entry skipped");
+            continue;
+        }
+        const new_key = Value.toArrayKey(value);
         const new_val: Value = switch (entry.key) {
             .int => |i| .{ .int = i },
             .string => |s| .{ .string = s },
@@ -913,99 +908,6 @@ fn array_count_values(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     return NativeResult.borrowed(.{ .array = result });
 }
 
-fn array_sum(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .int = 0 });
-    if (args[0] != .array) return throwArrayTypeError(ctx, "array_sum", 1, args[0]);
-    const src = args[0].array;
-    var has_float = false;
-    var int_sum: i64 = 0;
-    var float_sum: f64 = 0;
-    for (src.entries.items) |entry| {
-        switch (entry.value) {
-            .int => |i| {
-                int_sum +%= i;
-                float_sum += @floatFromInt(i);
-            },
-            .float => |f| {
-                has_float = true;
-                float_sum += f;
-            },
-            else => {
-                const operand = (try arithmeticOperand(ctx, entry.value, "array_sum(): Addition")) orelse continue;
-                switch (operand) {
-                    .int => |i| {
-                        int_sum +%= i;
-                        float_sum += @floatFromInt(i);
-                    },
-                    .float => |f| {
-                        has_float = true;
-                        float_sum += f;
-                    },
-                    else => {
-                        const v = Value.toFloat(operand);
-                        if (v != 0) {
-                            float_sum += v;
-                            if (v != @trunc(v)) has_float = true;
-                            int_sum +%= Value.toInt(operand);
-                        }
-                    },
-                }
-            },
-        }
-    }
-    if (has_float) return NativeResult.scalar(.{ .float = float_sum });
-    return NativeResult.scalar(.{ .int = int_sum });
-}
-
-// an element array_sum/array_product can use: arrays and objects that do
-// not convert to a number are skipped with php's warning
-fn arithmeticOperand(ctx: *NativeContext, v: Value, comptime what: []const u8) RuntimeError!?Value {
-    switch (v) {
-        .array => {
-            try ctx.vm.emitWarning(what ++ " is not supported on type array");
-            return null;
-        },
-        .object => |o| {
-            if (@import("../runtime/value.zig").nativeCast(o, .number)) |n| return n;
-            const msg = try std.fmt.allocPrint(ctx.allocator, what ++ " is not supported on type {s}", .{o.class_name});
-            defer ctx.allocator.free(msg);
-            try ctx.vm.emitWarning(msg);
-            return null;
-        },
-        else => return v,
-    }
-}
-
-fn array_product(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .int = 0 });
-    if (args[0] != .array) return throwArrayTypeError(ctx, "array_product", 1, args[0]);
-    const src = args[0].array;
-    if (src.entries.items.len == 0) return NativeResult.scalar(.{ .int = 1 });
-    var has_float = false;
-    var int_prod: i64 = 1;
-    var float_prod: f64 = 1;
-    for (src.entries.items) |entry| {
-        switch (entry.value) {
-            .int => |i| {
-                int_prod *%= i;
-                float_prod *= @floatFromInt(i);
-            },
-            .float => |f| {
-                has_float = true;
-                float_prod *= f;
-            },
-            else => {
-                const operand = (try arithmeticOperand(ctx, entry.value, "array_product(): Multiplication")) orelse continue;
-                if (operand == .float) has_float = true;
-                int_prod *%= Value.toInt(operand);
-                float_prod *= Value.toFloat(operand);
-            },
-        }
-    }
-    if (has_float) return NativeResult.scalar(.{ .float = float_prod });
-    return NativeResult.scalar(.{ .int = int_prod });
-}
-
 fn array_walk(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2) return NativeResult.scalar(.{ .bool = false });
     if (args[0] != .array and !(args[0] == .object and ctx.vm.isInstanceOf(args[0].object.class_name, "Traversable"))) {
@@ -1095,8 +997,11 @@ fn native_shuffle(_: *NativeContext, args: []const Value) RuntimeError!NativeRes
 fn array_rand(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .array) return NativeResult.scalar(.null);
     const arr = args[0].array;
-    if (arr.entries.items.len == 0) return NativeResult.scalar(.null);
-    const num: i64 = if (args.len >= 2) Value.toInt(args[1]) else 1;
+    const num: i64 = if (args.len >= 2) try (html.Params{ .ctx = ctx, .func = "array_rand", .args = args }).int(1, "num", 1) else 1;
+    if (arr.entries.items.len == 0) {
+        try ctx.vm.setPendingException("ValueError", "array_rand(): Argument #1 ($array) must not be empty");
+        return error.RuntimeError;
+    }
     if (num < 1 or num > @as(i64, @intCast(arr.entries.items.len))) {
         try ctx.vm.setPendingException("ValueError", "array_rand(): Argument #2 ($num) must be between 1 and the number of elements in argument #1 ($array)");
         return error.RuntimeError;
@@ -1133,123 +1038,6 @@ fn array_rand(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
         try out.append(ctx.allocator, v);
     }
     return NativeResult.borrowed(.{ .array = out });
-}
-
-fn native_compact(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const arr = try ctx.createArray();
-    const frame = ctx.vm.currentFrame();
-    for (args) |arg| try compactValue(ctx, arg, arr, frame);
-    return NativeResult.borrowed(.{ .array = arr });
-}
-
-fn compactValue(ctx: *NativeContext, arg: Value, arr: *PhpArray, frame: anytype) RuntimeError!void {
-    if (arg == .string) {
-        const name = arg.string.bytes();
-        const var_name = try std.fmt.allocPrint(ctx.allocator, "${s}", .{name});
-        defer ctx.allocator.free(var_name);
-        if (ctx.vm.frameVariable(frame, var_name)) |val| {
-            try ctx.vm.arraySetOwned(arr, .{ .string = arg.string }, val);
-        } else {
-            const w = try std.fmt.allocPrint(ctx.allocator, "compact(): Undefined variable ${s}", .{name});
-            defer ctx.allocator.free(w);
-            try ctx.vm.emitWarning(w);
-        }
-    } else if (arg == .array) {
-        // an array of names that contains itself is php's "Recursion detected"
-        const names = arg.array;
-        const Recursion = @import("../runtime/value.zig").Recursion;
-        if (names.recursion & Recursion.gc != 0) {
-            try ctx.vm.setPendingException("Error", "Recursion detected");
-            return error.RuntimeError;
-        }
-        names.recursion |= Recursion.gc;
-        defer names.recursion &= ~Recursion.gc;
-        for (names.entries.items) |entry| try compactValue(ctx, entry.value, arr, frame);
-    }
-}
-
-fn native_extract(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .array) return NativeResult.scalar(.{ .int = 0 });
-    const arr = args[0].array;
-    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
-    // strip EXTR_REFS bit (256) so the type bits stay intact
-    const type_flag = flags & 0xff;
-    const prefix = if (args.len >= 3 and args[2] == .string) args[2].string.bytes() else "";
-    const frame = ctx.vm.currentFrame();
-    const slot_names = if (frame.func) |func| func.slot_names else ctx.vm.global_slot_names;
-
-    const existsInScope = struct {
-        fn f(fr: anytype, names: []const []const u8, name: []const u8) bool {
-            for (names, 0..) |sn, i| {
-                if (std.mem.eql(u8, sn, name)) {
-                    if (i < fr.locals.len and fr.locals[i] != .undef) return true;
-                    break;
-                }
-            }
-            return fr.vars.contains(name);
-        }
-    }.f;
-
-    const isValidIdent = struct {
-        fn f(name: []const u8) bool {
-            if (name.len <= 1) return false;
-            const c0 = name[1];
-            if (!(c0 == '_' or (c0 >= 'a' and c0 <= 'z') or (c0 >= 'A' and c0 <= 'Z'))) return false;
-            var i: usize = 2;
-            while (i < name.len) : (i += 1) {
-                const c = name[i];
-                if (!(c == '_' or (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9'))) return false;
-            }
-            return true;
-        }
-    }.f;
-
-    var count_val: i64 = 0;
-    for (arr.entries.items) |entry| {
-        if (entry.key != .string) continue;
-        const key = entry.key.string.bytes();
-        const base = try ctx.vm.internVarName(key);
-        const prefixed = try internVarName(ctx, "${s}_{s}", .{ prefix, key });
-
-        var var_name: []const u8 = base;
-        const base_valid = isValidIdent(base);
-
-        switch (type_flag) {
-            1 => { // EXTR_SKIP
-                if (!base_valid or existsInScope(frame, slot_names, base)) continue;
-            },
-            2 => { // EXTR_PREFIX_SAME
-                if (existsInScope(frame, slot_names, base)) var_name = prefixed;
-                if (!isValidIdent(var_name)) continue;
-            },
-            3 => { // EXTR_PREFIX_ALL
-                var_name = prefixed;
-                if (!isValidIdent(var_name)) continue;
-            },
-            4 => { // EXTR_PREFIX_INVALID
-                if (!base_valid) var_name = prefixed;
-                if (!isValidIdent(var_name)) continue;
-            },
-            5 => { // EXTR_IF_EXISTS
-                if (!base_valid or !existsInScope(frame, slot_names, base)) continue;
-            },
-            6 => { // EXTR_PREFIX_IF_EXISTS
-                if (existsInScope(frame, slot_names, base)) {
-                    var_name = prefixed;
-                    if (!isValidIdent(var_name)) continue;
-                } else {
-                    if (!base_valid) continue;
-                }
-            },
-            else => { // EXTR_OVERWRITE
-                if (!base_valid) continue;
-            },
-        }
-
-        try ctx.vm.setVariableByName(frame, var_name, try ctx.vm.copyValue(entry.value));
-        count_val += 1;
-    }
-    return NativeResult.scalar(.{ .int = count_val });
 }
 
 // a variable name a frame's vars map will borrow: interned, so repeated calls
@@ -1589,7 +1377,7 @@ fn array_merge_recursive(ctx: *NativeContext, args: []const Value) RuntimeError!
 fn array_change_key_case(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .array) return NativeResult.scalar(.null);
     const src = args[0].array;
-    const case_upper = args.len >= 2 and args[1] == .int and args[1].int == 1;
+    const case_upper = (try (html.Params{ .ctx = ctx, .func = "array_change_key_case", .args = args }).int(1, "case", 0)) != 0;
     const result = try ctx.createArray();
 
     for (src.entries.items) |entry| {
@@ -1625,4 +1413,349 @@ test "unshift allocation failure preserves entries and ownership" {
     ctx.allocator = testing.allocator;
     _ = try array_unshift(&ctx, &.{ .{ .array = arr }, .{ .string = owned } });
     try testing.expectEqualStrings("owned", arr.get(.{ .int = 0 }).string.bytes());
+}
+// php_array_binop: each element through add_function or mul_function, with
+// php's warnings for the types they refuse
+fn arrayBinop(ctx: *NativeContext, comptime func: []const u8, comptime op_name: []const u8, args: []const Value, comptime multiply: bool) RuntimeError!NativeResult {
+    if (args[0] != .array) return throwArrayTypeError(ctx, func, 1, args[0]);
+    const src = args[0].array;
+    var acc: Value = .{ .int = if (multiply) 1 else 0 };
+    if (src.entries.items.len == 0) return NativeResult.scalar(acc);
+    var i: usize = 0;
+    while (i < src.entries.items.len) : (i += 1) {
+        const entry = src.entries.items[i];
+        const v = if (entry.ref) |cell| cell.* else entry.value;
+        const operand: Value = switch (v) {
+            .int, .float => v,
+            .null => .{ .int = 0 },
+            .bool => |b| .{ .int = @intFromBool(b) },
+            .string => |s| blk: {
+                if (std.mem.startsWith(u8, s.bytes(), "__closure_")) break :blk try unsupportedOperand(ctx, func, op_name, "Closure") orelse continue;
+                if (numericPrefix(s.bytes())) |n| {
+                    if (!n.whole) try ctx.vm.emitWarning("A non-numeric value encountered");
+                    break :blk n.value;
+                }
+                // php used to count a non-numeric string as 0
+                _ = try unsupportedOperand(ctx, func, op_name, "string");
+                break :blk Value{ .int = 0 };
+            },
+            .object => |o| if (@import("../runtime/value.zig").nativeCast(o, .number)) |n| n else {
+                _ = try unsupportedOperand(ctx, func, op_name, @import("../runtime/class_names.zig").display(o.class_name));
+                continue;
+            },
+            .resource => |r| blk: {
+                // and a resource as its number
+                _ = try unsupportedOperand(ctx, func, op_name, "resource");
+                break :blk Value{ .int = r.id };
+            },
+            else => {
+                _ = try unsupportedOperand(ctx, func, op_name, phpTypeName(v));
+                continue;
+            },
+        };
+        acc = arith(acc, operand, multiply);
+    }
+    return NativeResult.scalar(acc);
+}
+
+fn unsupportedOperand(ctx: *NativeContext, comptime func: []const u8, comptime op_name: []const u8, type_name: []const u8) RuntimeError!?Value {
+    const msg = try std.fmt.allocPrint(ctx.allocator, func ++ "(): " ++ op_name ++ " is not supported on type {s}", .{type_name});
+    defer ctx.allocator.free(msg);
+    try ctx.vm.emitWarning(msg);
+    return null;
+}
+
+// integer arithmetic that overflows into a float, as php's does
+fn arith(a: Value, b: Value, multiply: bool) Value {
+    if (a == .int and b == .int) {
+        const r = if (multiply) @mulWithOverflow(a.int, b.int) else @addWithOverflow(a.int, b.int);
+        if (r[1] == 0) return .{ .int = r[0] };
+        const fa: f64 = @floatFromInt(a.int);
+        const fb: f64 = @floatFromInt(b.int);
+        return .{ .float = if (multiply) fa * fb else fa + fb };
+    }
+    const fa = Value.toFloat(a);
+    const fb = Value.toFloat(b);
+    return .{ .float = if (multiply) fa * fb else fa + fb };
+}
+
+const NumericPrefix = struct { value: Value, whole: bool };
+
+// the number a string starts with (php's leading-numeric strings), and
+// whether that is the whole string apart from whitespace
+fn numericPrefix(s: []const u8) ?NumericPrefix {
+    const ws = " \t\n\r\x0b\x0c";
+    var i: usize = 0;
+    while (i < s.len and std.mem.indexOfScalar(u8, ws, s[i]) != null) i += 1;
+    const start = i;
+    if (i < s.len and (s[i] == '+' or s[i] == '-')) i += 1;
+    var digits: usize = 0;
+    while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1) digits += 1;
+    var is_float = false;
+    if (i < s.len and s[i] == '.') {
+        const dot = i;
+        i += 1;
+        var frac: usize = 0;
+        while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1) frac += 1;
+        if (digits + frac == 0) i = dot else is_float = true;
+        digits += frac;
+    }
+    if (digits == 0) return null;
+    if (i < s.len and (s[i] == 'e' or s[i] == 'E')) {
+        var j = i + 1;
+        if (j < s.len and (s[j] == '+' or s[j] == '-')) j += 1;
+        if (j < s.len and std.ascii.isDigit(s[j])) {
+            while (j < s.len and std.ascii.isDigit(s[j])) j += 1;
+            i = j;
+            is_float = true;
+        }
+    }
+    const text = s[start..i];
+    var end = i;
+    while (end < s.len and std.mem.indexOfScalar(u8, ws, s[end]) != null) end += 1;
+    const whole = end == s.len;
+    if (!is_float) {
+        if (std.fmt.parseInt(i64, text, 10)) |n| return .{ .value = .{ .int = n }, .whole = whole } else |_| {}
+    }
+    const f = std.fmt.parseFloat(f64, text) catch return null;
+    return .{ .value = .{ .float = f }, .whole = whole };
+}
+
+fn array_sum(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return arrayBinop(ctx, "array_sum", "Addition", args, false);
+}
+
+fn array_product(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return arrayBinop(ctx, "array_product", "Multiplication", args, true);
+}
+fn array_key_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const arr = args[1].array;
+    const key: PhpArray.Key = switch (args[0]) {
+        .string => |s| if (std.mem.startsWith(u8, s.bytes(), "__closure_")) return invalidKeyExistsOffset(ctx, args[0]) else PhpArray.normalizeKey(.{ .string = s }),
+        .int => |i| .{ .int = i },
+        .null, .undef => blk: {
+            try ctx.vm.raiseError(8192, "Using null as the key parameter for array_key_exists() is deprecated, use an empty string instead");
+            if (ctx.vm.pending_exception != null) return error.RuntimeError;
+            break :blk .{ .string = Value.String.borrowed("") };
+        },
+        .float => |f| blk: {
+            // zend_dval_to_lval_safe
+            if (!Value.floatFitsInt(f) or f != @trunc(f)) {
+                var tmp: [64]u8 = undefined;
+                const msg = try std.fmt.allocPrint(ctx.allocator, "Implicit conversion from float {s} to int loses precision", .{@import("output.zig").formatFloat(&tmp, f)});
+                defer ctx.allocator.free(msg);
+                try ctx.vm.raiseError(8192, msg);
+                if (ctx.vm.pending_exception != null) return error.RuntimeError;
+            }
+            break :blk .{ .int = if (Value.floatFitsInt(f)) @intFromFloat(@trunc(f)) else 0 };
+        },
+        .bool => |b| .{ .int = @intFromBool(b) },
+        .resource => |r| blk: {
+            try ctx.vm.warnResourceOffset(args[0]);
+            break :blk .{ .int = r.id };
+        },
+        else => return invalidKeyExistsOffset(ctx, args[0]),
+    };
+    return NativeResult.scalar(.{ .bool = arr.contains(key) });
+}
+
+fn invalidKeyExistsOffset(ctx: *NativeContext, key: Value) RuntimeError!NativeResult {
+    const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot access offset of type {s} on array", .{phpTypeName(key)});
+    defer ctx.allocator.free(msg);
+    try ctx.vm.setPendingException("TypeError", msg);
+    return error.RuntimeError;
+}
+// php_valid_var_name: [a-zA-Z_\x7f-\xff][a-zA-Z0-9_\x7f-\xff]*
+fn validVarName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name, 0..) |c, i| {
+        const ok = c == '_' or std.ascii.isAlphabetic(c) or c >= 0x7f or (i > 0 and std.ascii.isDigit(c));
+        if (!ok) return false;
+    }
+    return true;
+}
+
+const extr_overwrite = 0;
+const extr_skip = 1;
+const extr_prefix_same = 2;
+const extr_prefix_all = 3;
+const extr_prefix_invalid = 4;
+const extr_if_exists = 6;
+const extr_prefix_if_exists = 5;
+const extr_refs = 0x100;
+
+fn native_extract(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = html.Params{ .ctx = ctx, .func = "extract", .args = args };
+    const arr = args[0].array;
+    const flags = try p.int(1, "flags", extr_overwrite);
+    const prefix_arg: ?[]const u8 = if (args.len >= 3) try p.string(2, "prefix", "") else null;
+    const extract_type = flags & 0xff;
+    if (extract_type < extr_overwrite or extract_type > extr_if_exists) return extractError(ctx, "ValueError", "extract(): Argument #2 ($flags) must be a valid extract type");
+    if (extract_type > extr_skip and extract_type <= extr_prefix_if_exists and args.len < 3) return extractError(ctx, "ValueError", "extract(): Argument #3 ($prefix) is required when using this extract type");
+    const prefix = prefix_arg orelse "";
+    if (prefix.len > 0 and !validVarName(prefix)) return extractError(ctx, "ValueError", "extract(): Argument #3 ($prefix) must be a valid identifier");
+
+    const frame = ctx.vm.currentFrame();
+    const slot_names = if (frame.slot_names.len > 0) frame.slot_names else if (frame.func) |func| func.slot_names else ctx.vm.global_slot_names;
+    // the variable as php's symbol table has it: defined when it holds a
+    // value; a compiled variable that is unset is there but undefined
+    const defined = struct {
+        fn f(c: *NativeContext, fr: anytype, names: []const []const u8, name: []const u8) bool {
+            _ = names;
+            var buf: [256]u8 = undefined;
+            const var_name = std.fmt.bufPrint(&buf, "${s}", .{name}) catch return false;
+            const v = c.vm.frameVariable(fr, var_name) orelse return false;
+            return v != .undef;
+        }
+    }.f;
+
+    const undefSlot = struct {
+        fn f(c: *NativeContext, fr: anytype, names: []const []const u8, name: []const u8) bool {
+            var buf: [256]u8 = undefined;
+            const var_name = std.fmt.bufPrint(&buf, "${s}", .{name}) catch return false;
+            for (names) |sn| {
+                if (std.mem.eql(u8, sn, var_name)) return (c.vm.frameVariable(fr, var_name) orelse @as(Value, .undef)) == .undef;
+            }
+            return false;
+        }
+    }.f;
+
+    var count: i64 = 0;
+    var i: usize = 0;
+    while (i < arr.entries.items.len) : (i += 1) {
+        const entry = arr.entries.items[i];
+        const value = if (entry.ref) |cell| cell.* else entry.value;
+        var key_buf: [24]u8 = undefined;
+        const key: []const u8 = switch (entry.key) {
+            .string => |s| s.bytes(),
+            .int => |n| blk: {
+                if (extract_type != extr_prefix_all and extract_type != extr_prefix_invalid) continue;
+                break :blk std.fmt.bufPrint(&key_buf, "{d}", .{n}) catch unreachable;
+            },
+        };
+        const prefixed = try std.fmt.allocPrint(ctx.allocator, "{s}_{s}", .{ prefix, key });
+        defer ctx.allocator.free(prefixed);
+        var target: ?[]const u8 = null;
+        switch (extract_type) {
+            extr_overwrite => {
+                if (!validVarName(key)) continue;
+                if (std.mem.eql(u8, key, "this")) return extractError(ctx, "Error", "Cannot re-assign $this");
+                // $GLOBALS is no variable to php: the key lands in the symbol table
+                // where nothing reads it
+                if (std.mem.eql(u8, key, "GLOBALS")) {
+                    count += 1;
+                    continue;
+                }
+                target = key;
+            },
+            extr_skip => {
+                if (!validVarName(key) or std.mem.eql(u8, key, "this")) continue;
+                if (defined(ctx, frame, slot_names, key)) continue;
+                target = key;
+            },
+            extr_if_exists => {
+                if (!defined(ctx, frame, slot_names, key)) continue;
+                if (!validVarName(key) or std.mem.eql(u8, key, "GLOBALS")) continue;
+                if (std.mem.eql(u8, key, "this")) return extractError(ctx, "Error", "Cannot re-assign $this");
+                target = key;
+            },
+            extr_prefix_same => {
+                if (key.len == 0) continue;
+                if (defined(ctx, frame, slot_names, key) or std.mem.eql(u8, key, "this")) {
+                    if (!validVarName(prefixed)) continue;
+                    target = prefixed;
+                } else {
+                    if (!validVarName(key)) continue;
+                    target = key;
+                }
+            },
+            extr_prefix_if_exists => {
+                // a compiled variable that is unset takes the value itself
+                if (undefSlot(ctx, frame, slot_names, key)) {
+                    target = key;
+                } else if (!defined(ctx, frame, slot_names, key)) continue;
+                if (target != null) {
+                    const var_name = try internVarName(ctx, "${s}", .{key});
+                    try ctx.vm.setVariableByName(frame, var_name, try ctx.vm.copyValue(value));
+                    count += 1;
+                    continue;
+                }
+                if (!validVarName(prefixed)) continue;
+                target = prefixed;
+            },
+            extr_prefix_all => {
+                if (entry.key == .string and key.len == 0) continue;
+                if (!validVarName(prefixed)) continue;
+                target = prefixed;
+            },
+            else => { // EXTR_PREFIX_INVALID
+                if (entry.key == .string and validVarName(key) and !std.mem.eql(u8, key, "this")) {
+                    target = key;
+                } else {
+                    if (!validVarName(prefixed)) continue;
+                    target = prefixed;
+                }
+            },
+        }
+        const name = target.?;
+        if (std.mem.eql(u8, name, "this")) return extractError(ctx, "Error", "Cannot re-assign $this");
+        const var_name = try internVarName(ctx, "${s}", .{name});
+        try ctx.vm.setVariableByName(frame, var_name, try ctx.vm.copyValue(value));
+        count += 1;
+    }
+    return NativeResult.scalar(.{ .int = count });
+}
+
+fn extractError(ctx: *NativeContext, class: []const u8, msg: []const u8) RuntimeError!NativeResult {
+    try ctx.vm.setPendingException(class, msg);
+    return error.RuntimeError;
+}
+fn native_compact(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const arr = try ctx.createArray();
+    const frame = ctx.vm.currentFrame();
+    for (args, 1..) |arg, pos| try compactValue(ctx, arg, arr, frame, pos);
+    return NativeResult.borrowed(.{ .array = arr });
+}
+
+// php_compact_var
+fn compactValue(ctx: *NativeContext, arg_in: Value, arr: *PhpArray, frame: anytype, pos: usize) RuntimeError!void {
+    const arg = arg_in;
+    if (arg == .string and !std.mem.startsWith(u8, arg.string.bytes(), "__closure_")) {
+        const name = arg.string.bytes();
+        const var_name = try std.fmt.allocPrint(ctx.allocator, "${s}", .{name});
+        defer ctx.allocator.free(var_name);
+        const found = ctx.vm.frameVariable(frame, var_name);
+        if (std.mem.eql(u8, name, "this")) {
+            // $this is no variable: only an object in scope is taken
+            if (found) |val| if (val == .object) try ctx.vm.arraySetOwned(arr, .{ .string = arg.string }, val);
+            return;
+        }
+        if (found) |val| if (val != .undef) {
+            try ctx.vm.arraySetOwned(arr, .{ .string = arg.string }, val);
+            return;
+        };
+        const w = try std.fmt.allocPrint(ctx.allocator, "compact(): Undefined variable ${s}", .{name});
+        defer ctx.allocator.free(w);
+        try ctx.vm.emitWarning(w);
+    } else if (arg == .array) {
+        // an array of names that contains itself is php's "Recursion detected"
+        const names = arg.array;
+        const Recursion = @import("../runtime/value.zig").Recursion;
+        if (names.recursion & Recursion.gc != 0) {
+            try ctx.vm.setPendingException("Error", "Recursion detected");
+            return error.RuntimeError;
+        }
+        names.recursion |= Recursion.gc;
+        defer names.recursion &= ~Recursion.gc;
+        for (names.entries.items) |entry| try compactValue(ctx, if (entry.ref) |cell| cell.* else entry.value, arr, frame, pos);
+    } else {
+        const shown: []const u8 = switch (arg) {
+            .bool => |b| if (b) "true" else "false",
+            .object => |o| @import("../runtime/class_names.zig").display(o.class_name),
+            else => phpTypeName(arg),
+        };
+        const w = try std.fmt.allocPrint(ctx.allocator, "compact(): Argument #{d} must be string or array of strings, {s} given", .{ pos, shown });
+        defer ctx.allocator.free(w);
+        try ctx.vm.emitWarning(w);
+    }
 }
