@@ -11693,7 +11693,10 @@ pub const VM = struct {
                     }
                     var val = try self.copyValue(self.peek());
                     if (op == .set_static_prop_default) if (cls.static_prop_types.get(prop_name)) |t| {
-                        val = try self.widenIntDefault(val, t, class_name);
+                        val = self.widenIntDefault(val, t, class_name, prop_name) catch |err| {
+                            self.releaseValue(val);
+                            return err;
+                        };
                     };
                     // Stage 2 overwrite-release for static prop set
                     const ssp_old = cls.static_props.get(prop_name) orelse Value.null;
@@ -11724,7 +11727,10 @@ pub const VM = struct {
                     if (self.classes.getPtr(class_name)) |cls| {
                         for (cls.properties.items) |*p| {
                             if (std.mem.eql(u8, p.name, prop_name)) {
-                                val = try self.widenIntDefault(val, p.type_str, class_name);
+                                val = self.widenIntDefault(val, p.type_str, class_name, prop_name) catch |err| {
+                                    self.releaseValue(val);
+                                    return err;
+                                };
                                 p.default = val;
                                 p.has_default = true;
                                 break;
@@ -13393,12 +13399,16 @@ pub const VM = struct {
 
     // an int default of a property typed float (and not int) is a float, as
     // php converts it when it declares the property
-    fn widenIntDefault(self: *VM, val: Value, type_str: []const u8, class_name: []const u8) RuntimeError!Value {
-        if (val != .int or type_str.len == 0) return val;
-        const t = php_types.parse(self.allocator, type_str, class_name, null) catch return error.OutOfMemory;
-        defer t.deinit(self.allocator);
-        if (t.mask & php_types.DOUBLE != 0 and t.mask & php_types.LONG == 0) return .{ .float = @floatFromInt(val.int) };
-        return val;
+    // a property default as the class stores it: an int default of a float
+    // property becomes a float, and a default evaluated at run time must
+    // fit the type strictly (zend_update_class_constants)
+    fn widenIntDefault(self: *VM, val: Value, type_str: []const u8, class_name: []const u8, prop_name: []const u8) RuntimeError!Value {
+        if (type_str.len == 0) return val;
+        if (try self.propertyTypeAccepts(val, type_str, class_name, true)) |accepted| return accepted;
+        const msg = try std.fmt.allocPrint(self.allocator, "Cannot assign {s} to property {s}::${s} of type {s}", .{ valueTypeName(val), class_name, prop_name, try self.resolvedTypeText(type_str, class_name) });
+        defer self.allocator.free(msg);
+        try self.setPendingException("TypeError", msg);
+        return error.RuntimeError;
     }
 
     fn warnDeprecatedTraitUse(self: *VM, trait: []const u8, user: []const u8) RuntimeError!void {
