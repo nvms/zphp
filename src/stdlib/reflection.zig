@@ -533,6 +533,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rf_def.methods.put(a, "returnsReference", .{ .name = "returnsReference", .arity = 0 });
     try rf_def.methods.put(a, "getStaticVariables", .{ .name = "getStaticVariables", .arity = 0 });
     try rf_def.methods.put(a, "getClosureScopeClass", .{ .name = "getClosureScopeClass", .arity = 0 });
+    try rf_def.methods.put(a, "getClosure", .{ .name = "getClosure", .arity = 0 });
     try rf_def.methods.put(a, "getClosureThis", .{ .name = "getClosureThis", .arity = 0 });
     try rf_def.methods.put(a, "isStatic", .{ .name = "isStatic", .arity = 0 });
     try rf_def.methods.put(a, "hasReturnType", .{ .name = "hasReturnType", .arity = 0 });
@@ -566,6 +567,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionFunction::isVariadic", rfIsVariadic);
     try vm.native_fns.put(a, "ReflectionFunction::returnsReference", rfReturnsReference);
     try vm.native_fns.put(a, "ReflectionFunction::getClosureScopeClass", rfGetClosureScopeClass);
+    try vm.native_fns.put(a, "ReflectionFunction::getClosure", rfGetClosure);
     try vm.native_fns.put(a, "ReflectionFunction::getClosureThis", rfGetClosureThis);
     try vm.native_fns.put(a, "ReflectionFunction::isStatic", rfIsStatic);
     try vm.native_fns.put(a, "ReflectionFunction::hasReturnType", rfHasReturnType);
@@ -4665,12 +4667,26 @@ fn rmInvokeArgs(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
 fn rmGetClosure(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const method_name = methodLookupName(this) orelse return NativeResult.scalar(.null);
-    if (args.len < 1 or args[0] != .object) return NativeResult.scalar(.null);
-
+    // a static method's closure needs no object
+    if (args.len < 1 or args[0] != .object) {
+        const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.null);
+        const full = try ctx.vm.transientAdopted(try std.fmt.allocPrint(ctx.allocator, "{s}::{s}", .{ declaring, method_name }));
+        return wrapCallableClosure(ctx, .{ .string = full });
+    }
     const arr = try ctx.createArray();
     try arr.append(ctx.allocator, args[0]);
     try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(method_name) });
-    return NativeResult.borrowed(.{ .array = arr });
+    return wrapCallableClosure(ctx, .{ .array = arr });
+}
+
+// a closure reflects as itself; a function as a closure calling it
+fn rfGetClosure(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const closure = this.get("__closure");
+    if (closure == .object) return NativeResult.share(closure);
+    const name = this.get("name");
+    if (name != .string) return NativeResult.scalar(.null);
+    return wrapCallableClosure(ctx, name);
 }
 
 fn rmIsAbstract(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {

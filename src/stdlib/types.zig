@@ -809,7 +809,13 @@ fn native_is_callable(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
         return NativeResult.scalar(.{ .bool = ctx.vm.isValueCallable(val) });
     }
     if (val == .object) {
-        if (std.mem.eql(u8, val.object.class_name, "Closure")) return NativeResult.scalar(.{ .bool = true });
+        if (std.mem.eql(u8, val.object.class_name, "Closure")) {
+            // zend_get_callable_name: a closure's own name, or what a
+            // closure made from a callable calls
+            var name_buf: [512]u8 = undefined;
+            fillName(ctx, args, closureCallableName(ctx, val.object, &name_buf));
+            return NativeResult.scalar(.{ .bool = true });
+        }
         var buf: [256]u8 = undefined;
         const full = class_names.memberKey(&buf, val.object.class_name, "__invoke");
         fillName(ctx, args, full);
@@ -838,6 +844,31 @@ fn native_is_callable(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
         return NativeResult.scalar(.{ .bool = ctx.vm.isValueCallable(val) });
     }
     return NativeResult.scalar(.{ .bool = false });
+}
+
+fn closureCallableName(ctx: *NativeContext, closure: *value_mod.PhpObject, buf: []u8) []const u8 {
+    if (closure.closureName()) |instance| {
+        const func = ctx.vm.functions.get(instance) orelse return "{closure}";
+        return if (func.display_name.len > 0) func.display_name else "{closure}";
+    }
+    const callable = closure.get("__callable");
+    return switch (callable) {
+        .string => |s| s.bytes(),
+        .object => |o| std.fmt.bufPrint(buf, "{s}::__invoke", .{o.class_name}) catch "{closure}",
+        .array => |arr| blk: {
+            if (arr.entries.items.len != 2) break :blk "{closure}";
+            const target = arr.entries.items[0].value;
+            const method = arr.entries.items[1].value;
+            if (method != .string) break :blk "{closure}";
+            const class = switch (target) {
+                .object => |o| o.class_name,
+                .string => |cs| cs.bytes(),
+                else => break :blk "{closure}",
+            };
+            break :blk std.fmt.bufPrint(buf, "{s}::{s}", .{ class, method.string.bytes() }) catch "{closure}";
+        },
+        else => "{closure}",
+    };
 }
 
 fn native_settype(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

@@ -4920,144 +4920,7 @@ pub const VM = struct {
                         }
                     }
                     if (has_named) {
-                        if (self.functions.get(name)) |func| {
-                            var resolved_buf: [256]Value = undefined;
-                            var sources_buf: [256]RefSource = undefined;
-                            var assigned_buf: [256]bool = undefined;
-                            const slots = try self.argSlots(&resolved_buf, &sources_buf, &assigned_buf, func.params.len + arr.entries.items.len);
-                            defer self.freeArgSlots(slots, &resolved_buf);
-                            const resolved = slots.values;
-                            const resolved_sources = slots.sources;
-                            const assigned = slots.assigned;
-                            var pos: usize = 0;
-                            var ok = true;
-                            // a variadic function's last param is the catch-all -
-                            // named args never bind to it directly, they fall in
-                            // as keyed entries (see named_extras below)
-                            const match_limit: usize = if (func.is_variadic and func.arity > 0) func.arity - 1 else func.params.len;
-                            var named_extras: ?*PhpArray = null;
-                            for (arr.entries.items) |entry| {
-                                if (entry.key == .string) {
-                                    var found = false;
-                                    for (func.params[0..match_limit], 0..) |p, pi| {
-                                        if (std.mem.eql(u8, p[1..], entry.key.string.bytes()) or std.mem.eql(u8, p, entry.key.string.bytes())) {
-                                            if (assigned[pi]) {
-                                                const msg = try std.fmt.allocPrint(self.allocator, "Named parameter ${s} overwrites previous argument", .{entry.key.string.bytes()});
-                                                defer self.allocator.free(msg);
-                                                if (try self.throwBuiltinException("Error", msg)) {
-                                                    ok = false;
-                                                    break;
-                                                }
-                                                return error.RuntimeError;
-                                            }
-                                            resolved[pi] = entry.value;
-                                            resolved_sources[pi] = self.argArraySource(arr, entry.key);
-                                            assigned[pi] = true;
-                                            if (pi >= pos) pos = pi + 1;
-                                            found = true;
-                                            break;
-                                        }
-                                    }
-                                    if (!ok) break;
-                                    if (!found) {
-                                        if (func.is_variadic) {
-                                            // a named arg that matches no fixed
-                                            // param falls into the variadic,
-                                            // keyed by name (PHP 8.1). it is
-                                            // still type-checked against the
-                                            // variadic element type
-                                            var ev = entry.value;
-                                            const vtype: []const u8 = blk: {
-                                                const ti = self.typeInfoFor(name) orelse break :blk "";
-                                                const vi = func.arity - 1;
-                                                if (vi < ti.param_types.len) break :blk ti.param_types[vi];
-                                                break :blk "";
-                                            };
-                                            if (vtype.len > 0 and !self.checkTypeMatch(ev, vtype)) {
-                                                const fstrict = if (self.frame_count >= 1) (if (self.currentFrame().func) |cf| cf.strict_types else self.script_strict_types) else self.script_strict_types;
-                                                var coerced = false;
-                                                if (!fstrict) {
-                                                    if (try self.tryWeakCoerce(ev, vtype)) |c| {
-                                                        ev = c;
-                                                        coerced = true;
-                                                    }
-                                                }
-                                                if (!coerced) {
-                                                    const msg = try std.fmt.allocPrint(self.allocator, "{s}(): Argument ${s} must be of type {s}, {s} given", .{ name, entry.key.string.bytes(), vtype, valueTypeName(ev) });
-                                                    defer self.allocator.free(msg);
-                                                    if (try self.throwBuiltinException("TypeError", msg)) {
-                                                        ok = false;
-                                                        break;
-                                                    }
-                                                    return error.RuntimeError;
-                                                }
-                                            }
-                                            if (named_extras == null) {
-                                                const ne = try self.allocArray();
-                                                named_extras = ne;
-                                            }
-                                            try named_extras.?.set(self.allocator, entry.key, ev);
-                                            continue;
-                                        }
-                                        const msg = try std.fmt.allocPrint(self.allocator, "Unknown named parameter ${s}", .{entry.key.string.bytes()});
-                                        defer self.allocator.free(msg);
-                                        if (try self.throwBuiltinException("Error", msg)) {
-                                            ok = false;
-                                            break;
-                                        }
-                                        return error.RuntimeError;
-                                    }
-                                } else {
-                                    if (assigned[pos]) {
-                                        // positional after a named that already filled this slot
-                                        ok = true;
-                                    }
-                                    resolved[pos] = entry.value;
-                                    resolved_sources[pos] = self.argArraySource(arr, entry.key);
-                                    assigned[pos] = true;
-                                    pos += 1;
-                                }
-                            }
-                            if (!ok) continue;
-                            const count = @max(pos, func.required_params);
-                            for (0..count) |i| {
-                                if (resolved[i] == .null and i < func.defaults.len) {
-                                    resolved[i] = try self.resolveParamDefault(func, i);
-                                }
-                            }
-                            for (0..count) |i| {
-                                self.push(resolved[i]);
-                                self.setArgSource(self.sp - 1, resolved_sources[i]);
-                            }
-                            self.callNamedFunctionV(name, @intCast(count), named_extras) catch {
-                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
-                                return error.RuntimeError;
-                            };
-                        } else if (native_params.get(name)) |signature| {
-                            const params = signature.params;
-                            var resolved: [256]Value = undefined;
-                            var resolved_sources: [256]RefSource = undefined;
-                            const placed = try self.placeNativeNamedArgs(arr, params, &resolved, &resolved_sources);
-                            if (placed.problem) |problem| {
-                                if (try self.throwNamedArgProblem(name, params, problem)) continue;
-                                return error.RuntimeError;
-                            }
-                            const pos = placed.count;
-                            for (0..pos) |i| {
-                                self.push(resolved[i]);
-                                self.setArgSource(self.sp - 1, resolved_sources[i]);
-                            }
-                            self.callNamedFunction(name, @intCast(pos)) catch {
-                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
-                                return error.RuntimeError;
-                            };
-                        } else {
-                            try self.pushArgEntries(arr, arr.entries.items);
-                            self.callNamedFunction(name, @intCast(arr.entries.items.len)) catch {
-                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
-                                return error.RuntimeError;
-                            };
-                        }
+                        try self.callWithNamedArgs(name, arr, base_frame);
                     } else {
                         const native_needs_refs = self.native_fns.contains(name) and (std.mem.eql(u8, name, "preg_match") or std.mem.eql(u8, name, "preg_match_all") or std.mem.eql(u8, name, "pcntl_sigprocmask"));
                         if (native_needs_refs) {
@@ -5114,6 +4977,8 @@ pub const VM = struct {
                     // until the call is under way
                     const spread_name: ?[]const u8 = if (name_val.closureName()) |closure|
                         closure
+                    else if (fakeClosureFunction(name_val)) |function|
+                        function
                     else if (name_val == .string and std.mem.indexOf(u8, name_val.string.bytes(), "::") == null)
                         name_val.string.bytes()
                     else
@@ -5152,48 +5017,7 @@ pub const VM = struct {
                             }
                         }
                         if (has_named_args) {
-                            if (self.functions.get(callee_name)) |func| {
-                                var resolved_buf: [256]Value = undefined;
-                                var sources_buf: [256]RefSource = undefined;
-                                var assigned_buf: [256]bool = undefined;
-                                const slots = try self.argSlots(&resolved_buf, &sources_buf, &assigned_buf, func.params.len + arr.entries.items.len);
-                                defer self.freeArgSlots(slots, &resolved_buf);
-                                const resolved = slots.values;
-                                const resolved_sources = slots.sources;
-                                var pos: usize = 0;
-                                for (arr.entries.items) |entry| {
-                                    if (entry.key == .string) {
-                                        for (func.params, 0..) |p, pi| {
-                                            const pn = if (p.len > 0 and p[0] == '$') p[1..] else p;
-                                            if (std.mem.eql(u8, pn, entry.key.string.bytes())) {
-                                                resolved[pi] = entry.value;
-                                                resolved_sources[pi] = self.argArraySource(arr, entry.key);
-                                                if (pi >= pos) pos = pi + 1;
-                                                break;
-                                            }
-                                        }
-                                    } else {
-                                        resolved[pos] = entry.value;
-                                        resolved_sources[pos] = self.argArraySource(arr, entry.key);
-                                        pos += 1;
-                                    }
-                                }
-                                for (0..pos) |i| {
-                                    self.push(resolved[i]);
-                                    self.setArgSource(self.sp - 1, resolved_sources[i]);
-                                }
-                                self.callNamedFunction(callee_name, @intCast(pos)) catch {
-                                    if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
-                                    return error.RuntimeError;
-                                };
-                            } else {
-                                try self.pushArgEntries(arr, arr.entries.items);
-                                const ac2: u32 = @intCast(arr.entries.items.len);
-                                self.callNamedFunction(callee_name, ac2) catch {
-                                    if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
-                                    return error.RuntimeError;
-                                };
-                            }
+                            try self.callWithNamedArgs(callee_name, arr, base_frame);
                         } else {
                             try self.pushArgEntries(arr, arr.entries.items);
                             const ac: u32 = @intCast(arr.entries.items.len);
@@ -22454,6 +22278,159 @@ pub const VM = struct {
             self.frames[fc_before].called_class = class_name;
     }
 
+    // the function a Closure made from a function's name calls
+    fn fakeClosureFunction(v: Value) ?[]const u8 {
+        if (v != .object or v.object.native.kind != .none or !std.mem.eql(u8, v.object.class_name, "Closure")) return null;
+        const callable = v.object.get("__callable");
+        if (callable != .string or std.mem.indexOf(u8, callable.string.bytes(), "::") != null) return null;
+        return callable.string.bytes();
+    }
+
+    // a call by name with named arguments (an argument array with string
+    // keys): each lands on its parameter, defaults fill the gaps, and names
+    // no parameter has fall into a variadic. an exception raised on the way
+    // is dispatched before this returns
+    fn callWithNamedArgs(self: *VM, name: []const u8, arr: *PhpArray, base_frame: usize) RuntimeError!void {
+        if (self.functions.get(name)) |func| {
+            var resolved_buf: [256]Value = undefined;
+            var sources_buf: [256]RefSource = undefined;
+            var assigned_buf: [256]bool = undefined;
+            const slots = try self.argSlots(&resolved_buf, &sources_buf, &assigned_buf, func.params.len + arr.entries.items.len);
+            defer self.freeArgSlots(slots, &resolved_buf);
+            const resolved = slots.values;
+            const resolved_sources = slots.sources;
+            const assigned = slots.assigned;
+            var pos: usize = 0;
+            var ok = true;
+            // a variadic function's last param is the catch-all -
+            // named args never bind to it directly, they fall in
+            // as keyed entries (see named_extras below)
+            const match_limit: usize = if (func.is_variadic and func.arity > 0) func.arity - 1 else func.params.len;
+            var named_extras: ?*PhpArray = null;
+            for (arr.entries.items) |entry| {
+                if (entry.key == .string) {
+                    var found = false;
+                    for (func.params[0..match_limit], 0..) |p, pi| {
+                        if (std.mem.eql(u8, p[1..], entry.key.string.bytes()) or std.mem.eql(u8, p, entry.key.string.bytes())) {
+                            if (assigned[pi]) {
+                                const msg = try std.fmt.allocPrint(self.allocator, "Named parameter ${s} overwrites previous argument", .{entry.key.string.bytes()});
+                                defer self.allocator.free(msg);
+                                if (try self.throwBuiltinException("Error", msg)) {
+                                    ok = false;
+                                    break;
+                                }
+                                return error.RuntimeError;
+                            }
+                            resolved[pi] = entry.value;
+                            resolved_sources[pi] = self.argArraySource(arr, entry.key);
+                            assigned[pi] = true;
+                            if (pi >= pos) pos = pi + 1;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!ok) break;
+                    if (!found) {
+                        if (func.is_variadic) {
+                            // a named arg that matches no fixed
+                            // param falls into the variadic,
+                            // keyed by name (PHP 8.1). it is
+                            // still type-checked against the
+                            // variadic element type
+                            var ev = entry.value;
+                            const vtype: []const u8 = blk: {
+                                const ti = self.typeInfoFor(name) orelse break :blk "";
+                                const vi = func.arity - 1;
+                                if (vi < ti.param_types.len) break :blk ti.param_types[vi];
+                                break :blk "";
+                            };
+                            if (vtype.len > 0 and !self.checkTypeMatch(ev, vtype)) {
+                                const fstrict = if (self.frame_count >= 1) (if (self.currentFrame().func) |cf| cf.strict_types else self.script_strict_types) else self.script_strict_types;
+                                var coerced = false;
+                                if (!fstrict) {
+                                    if (try self.tryWeakCoerce(ev, vtype)) |c| {
+                                        ev = c;
+                                        coerced = true;
+                                    }
+                                }
+                                if (!coerced) {
+                                    const msg = try std.fmt.allocPrint(self.allocator, "{s}(): Argument ${s} must be of type {s}, {s} given", .{ name, entry.key.string.bytes(), vtype, valueTypeName(ev) });
+                                    defer self.allocator.free(msg);
+                                    if (try self.throwBuiltinException("TypeError", msg)) {
+                                        ok = false;
+                                        break;
+                                    }
+                                    return error.RuntimeError;
+                                }
+                            }
+                            if (named_extras == null) {
+                                const ne = try self.allocArray();
+                                named_extras = ne;
+                            }
+                            try named_extras.?.set(self.allocator, entry.key, ev);
+                            continue;
+                        }
+                        const msg = try std.fmt.allocPrint(self.allocator, "Unknown named parameter ${s}", .{entry.key.string.bytes()});
+                        defer self.allocator.free(msg);
+                        if (try self.throwBuiltinException("Error", msg)) {
+                            ok = false;
+                            break;
+                        }
+                        return error.RuntimeError;
+                    }
+                } else {
+                    if (assigned[pos]) {
+                        // positional after a named that already filled this slot
+                        ok = true;
+                    }
+                    resolved[pos] = entry.value;
+                    resolved_sources[pos] = self.argArraySource(arr, entry.key);
+                    assigned[pos] = true;
+                    pos += 1;
+                }
+            }
+            if (!ok) return;
+            const count = @max(pos, func.required_params);
+            for (0..count) |i| {
+                if (resolved[i] == .null and i < func.defaults.len) {
+                    resolved[i] = try self.resolveParamDefault(func, i);
+                }
+            }
+            for (0..count) |i| {
+                self.push(resolved[i]);
+                self.setArgSource(self.sp - 1, resolved_sources[i]);
+            }
+            self.callNamedFunctionV(name, @intCast(count), named_extras) catch {
+                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) return;
+                return error.RuntimeError;
+            };
+        } else if (native_params.get(name)) |signature| {
+            const params = signature.params;
+            var resolved: [256]Value = undefined;
+            var resolved_sources: [256]RefSource = undefined;
+            const placed = try self.placeNativeNamedArgs(arr, params, &resolved, &resolved_sources);
+            if (placed.problem) |problem| {
+                if (try self.throwNamedArgProblem(name, params, problem)) return;
+                return error.RuntimeError;
+            }
+            const pos = placed.count;
+            for (0..pos) |i| {
+                self.push(resolved[i]);
+                self.setArgSource(self.sp - 1, resolved_sources[i]);
+            }
+            self.callNamedFunction(name, @intCast(pos)) catch {
+                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) return;
+                return error.RuntimeError;
+            };
+        } else {
+            try self.pushArgEntries(arr, arr.entries.items);
+            self.callNamedFunction(name, @intCast(arr.entries.items.len)) catch {
+                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) return;
+                return error.RuntimeError;
+            };
+        }
+    }
+
     fn callNamedFunction(self: *VM, raw_name: []const u8, arg_count: u32) RuntimeError!void {
         return self.callNamedFunctionV(raw_name, arg_count, null);
     }
@@ -23024,7 +23001,8 @@ pub const VM = struct {
             if (self.sourceLocation(caller.chunk, cip)) |loc| caller_line = loc.line;
         }
         const modifier: []const u8 = if (func.required_params == func.arity) "exactly" else "at least";
-        return std.fmt.allocPrint(self.allocator, "Too few arguments to function {s}(), {d} passed in {s} on line {d} and {s} {d} expected", .{ name, ac, caller_file, caller_line, modifier, func.required_params });
+        const shown = try self.callableDisplayName(name, func);
+        return std.fmt.allocPrint(self.allocator, "Too few arguments to function {s}(), {d} passed in {s} on line {d} and {s} {d} expected", .{ shown, ac, caller_file, caller_line, modifier, func.required_params });
     }
 
     // too few arguments for a call made from native code (call_user_func and
