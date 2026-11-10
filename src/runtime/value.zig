@@ -1586,6 +1586,7 @@ pub const Value = union(enum) {
     pub fn equal(a_in: Value, b_in: Value) bool {
         const a = resourceAsId(a_in);
         const b = resourceAsId(b_in);
+        if (a == .int and b == .int) return a.int == b.int;
         if (a == .object and b == .object) {
             if (a.object == b.object) return true;
             if (nativeCompare(a, b)) |order| return order == 0;
@@ -1681,6 +1682,14 @@ pub const Value = union(enum) {
     pub fn compare(a_in: Value, b_in: Value) i64 {
         const a = resourceAsId(a_in);
         const b = resourceAsId(b_in);
+        // zend_compare's numeric pairs: ints exactly, a float against
+        // anything numeric through doubles
+        if (a == .int and b == .int) return if (a.int < b.int) -1 else if (a.int > b.int) 1 else 0;
+        if ((a == .float and (b == .float or b == .int)) or (a == .int and b == .float)) {
+            const af: f64 = if (a == .int) @floatFromInt(a.int) else a.float;
+            const bf: f64 = if (b == .int) @floatFromInt(b.int) else b.float;
+            return if (af < bf) -1 else if (af > bf) 1 else 0;
+        }
         if (a == .object and b == .object) {
             if (a.object == b.object) return 0;
             if (nativeCompare(a, b)) |order| return order;
