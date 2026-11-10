@@ -2499,10 +2499,21 @@ const Parser = struct {
         return tag == .identifier or tag == .kw_array or tag == .kw_callable or
             tag == .kw_self or tag == .kw_static or tag == .kw_null or
             tag == .kw_true or tag == .kw_false or tag == .backslash or
-            tag == .kw_parent;
+            tag == .kw_parent or (tag == .kw_namespace and self.peekAt(1) == .backslash);
     }
 
     fn skipTypeName(self: *Parser) void {
+        // a namespace-relative name, `namespace\Foo`
+        if (self.peek() == .kw_namespace and self.peekAt(1) == .backslash) {
+            _ = self.advance();
+            _ = self.advance();
+            if (self.peek() == .identifier or isSemiReserved(self.peek())) _ = self.advance();
+            while (self.peek() == .backslash) {
+                _ = self.advance();
+                if (self.peek() == .identifier or isSemiReserved(self.peek())) _ = self.advance();
+            }
+            return;
+        }
         if (self.peek() == .backslash) _ = self.advance();
         if (self.isTypeName()) _ = self.advance();
         while (self.peek() == .backslash) {

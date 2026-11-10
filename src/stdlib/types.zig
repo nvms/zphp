@@ -2097,6 +2097,17 @@ fn native_class_alias(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     const original = if (written.len > 0 and written[0] == '\\') written[1..] else written;
     const alias = args[1].string.bytes();
     const autoload = if (args.len >= 3) args[2].isTruthy() else true;
+    {
+        // zend_register_class_alias_ex: a reserved alias is a compile error
+        const bare = if (alias.len > 0 and alias[0] == '\\') alias[1..] else alias;
+        if (@import("../pipeline/compiler_class.zig").isReservedClassName(bare)) {
+            const lower = try std.ascii.allocLowerString(ctx.allocator, bare);
+            defer ctx.allocator.free(lower);
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot use \"{s}\" as a class alias as it is reserved", .{lower});
+            defer ctx.allocator.free(msg);
+            return ctx.vm.raiseFatal(msg);
+        }
+    }
     if (autoload and !ctx.vm.classes.contains(original)) {
         try ctx.vm.tryAutoload(original);
     }

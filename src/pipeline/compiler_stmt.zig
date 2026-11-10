@@ -787,6 +787,9 @@ pub fn compileUse(self: *Compiler, node: Ast.Node) Error!void {
         self.ast.tokenSlice(node.data.rhs)
     else
         self.ast.tokenSlice(parts[parts.len - 1]);
+    if (@import("compiler_class.zig").isReservedClassName(alias)) {
+        return self.failFmt(node.main_token, "Cannot use {s} as {s} because '{s}' is a special class name", .{ fqn, alias, alias });
+    }
 
     try self.use_aliases.put(self.allocator, alias, fqn);
 }

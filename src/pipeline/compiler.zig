@@ -356,6 +356,8 @@ pub const Compiler = struct {
     in_trait: bool = false,
     // set while the parameters and return type of a closure compile
     closure_signature: bool = false,
+    // compiling a named function's signature: self and parent need a class
+    named_signature: bool = false,
     // a class constant's initializer: self and parent stay as written in
     // class constant fetches, resolved as it runs (its errors name them so)
     relative_const_classes: bool = false,

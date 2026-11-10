@@ -726,8 +726,14 @@ fn readTypeName(self: *Compiler, tok: *u32, end_tok: u32) Error!TypeName {
     const written = self.ast.source[first .. last.start + last.lexeme(self.ast.source).len];
     var lower_buf: [16]u8 = undefined;
     const lower = if (written.len <= lower_buf.len) std.ascii.lowerString(&lower_buf, written) else "";
+    if (qualified) try checkQualifiedTypeName(self, start, written);
     if (!qualified and std.mem.eql(u8, lower, "static") and self.current_class.len == 0 and !self.closure_signature and !std.mem.startsWith(u8, self.current_function, "{closure:")) {
         return self.fail(start, "Cannot use \"static\" when no class scope is active");
+    }
+    // zend_ensure_valid_class_fetch_type, where the scope is known
+    if (!qualified and (std.mem.eql(u8, lower, "self") or std.mem.eql(u8, lower, "parent")) and typeScopeKnown(self)) {
+        if (self.current_class.len == 0) return self.failFmt(start, "Cannot use \"{s}\" when no class scope is active", .{lower});
+        if (std.mem.eql(u8, lower, "parent") and self.current_parent.len == 0) return self.fail(start, "Cannot use \"parent\" when current class scope has no parent");
     }
     if (!qualified) {
         if (std.mem.eql(u8, lower, "iterable")) return .{ .written = written, .iterable = true, .mask = php_types.ARRAY };
@@ -746,6 +752,43 @@ fn readTypeName(self: *Compiler, tok: *u32, end_tok: u32) Error!TypeName {
     if (!qualified and (std.mem.eql(u8, lower, "self") or std.mem.eql(u8, lower, "parent"))) return .{ .written = written, .class = written };
     const class = if (written[0] == '\\') written[1..] else self.resolveClassName(written);
     return .{ .written = written, .class = class };
+}
+
+// zend_is_scope_known while compiling a type: not in a closure or a
+// trait, and in a class or a function
+fn typeScopeKnown(self: *Compiler) bool {
+    if (self.closure_signature or std.mem.startsWith(u8, self.current_function, "{closure:")) return false;
+    if (self.current_class.len == 0) return self.current_function.len > 0 or self.named_signature;
+    return !self.in_trait;
+}
+
+// a qualified type name (`\Foo`, `namespace\Foo`, `Foo\Bar`): a built-in
+// type can't be written qualified, `\self` names no class, and a name
+// ending in a reserved word is refused (zend_compile_single_typename)
+fn checkQualifiedTypeName(self: *Compiler, at: u32, written: []const u8) Error!void {
+    const bare = if (written[0] == '\\') written[1..] else if (std.ascii.startsWithIgnoreCase(written, "namespace\\")) written["namespace\\".len..] else written;
+    if (std.mem.indexOfScalar(u8, bare, '\\') == null) {
+        var buf: [16]u8 = undefined;
+        if (bare.len <= buf.len) {
+            const lower = std.ascii.lowerString(&buf, bare);
+            const builtin = std.StaticStringMap(void).initComptime(.{
+                .{"null"},   .{"false"},    .{"true"},  .{"bool"},  .{"int"},    .{"float"},  .{"string"},
+                .{"array"},  .{"object"},   .{"callable"}, .{"void"}, .{"never"}, .{"static"}, .{"mixed"}, .{"iterable"},
+            });
+            if (builtin.has(lower)) return self.failFmt(at, "Type declaration '{s}' must be unqualified", .{lower});
+            if (written[0] == '\\' and (std.mem.eql(u8, lower, "self") or std.mem.eql(u8, lower, "parent"))) return self.failFmt(at, "'\\{s}' is an invalid class name", .{bare});
+        }
+    }
+    const resolved = if (written[0] == '\\') written[1..] else self.resolveClassName(written);
+    if (isReservedClassName(resolved)) return self.failFmt(at, "Cannot use \"{s}\" as a type name as it is reserved", .{resolved});
+}
+
+// zend_is_reserved_class_name: the last segment of the name
+pub fn isReservedClassName(name: []const u8) bool {
+    const last = if (std.mem.lastIndexOfScalar(u8, name, '\\')) |i| name[i + 1 ..] else name;
+    const reserved = [_][]const u8{ "bool", "false", "float", "int", "null", "parent", "self", "static", "string", "true", "void", "never", "iterable", "object", "mixed" };
+    for (reserved) |r| if (std.ascii.eqlIgnoreCase(last, r)) return true;
+    return false;
 }
 
 // the members of an intersection, checked as php's compiler checks them
@@ -1509,6 +1552,9 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     const raw_name = self.ast.tokenSlice(name_tok);
     const name = if (std.mem.startsWith(u8, raw_name, "__closure_")) raw_name else self.declaredName(raw_name);
     const param_nodes = self.ast.extraSlice(node.data.lhs);
+    const outer_named_signature = self.named_signature;
+    self.named_signature = !std.mem.startsWith(u8, raw_name, "__closure_");
+    defer self.named_signature = outer_named_signature;
     if (!std.mem.startsWith(u8, raw_name, "__closure_")) {
         try checkImportCollision(self, name_tok, .function, name);
         try checkParams(self, name, name_tok, param_nodes, try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len)), (node.data.rhs & (1 << 30)) != 0);
@@ -2331,6 +2377,8 @@ const ClassShape = struct {
 };
 
 pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
+    const unqualified = self.ast.tokenSlice(node.main_token);
+    if (isReservedClassName(unqualified)) return self.failFmt(node.main_token, "Cannot use \"{s}\" as a class name as it is reserved", .{unqualified});
     const class_name = self.declaredName(self.ast.tokenSlice(node.main_token));
     try checkImportCollision(self, node.main_token, .class, class_name);
     // rhs: {class_modifiers, parent_node, implements_count, impl_nodes...}
