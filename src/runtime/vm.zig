@@ -21947,7 +21947,7 @@ pub const VM = struct {
         if (g_type_info.count() == 0) return false;
         const frame = &self.frames[self.frame_count - 1];
         const func_name = if (frame.func) |f| f.name else return false;
-        const ti = g_type_info.get(func_name) orelse return false;
+        const ti = self.typeInfoFor(func_name) orelse return false;
         if (ti.return_type.len == 0) return false;
         // the function's own strict_types decides (ZEND_RET_USES_STRICT_TYPES)
         const fn_strict = if (frame.func) |f| f.strict_types else self.script_strict_types;
@@ -21969,7 +21969,7 @@ pub const VM = struct {
     noinline fn throwImplicitReturn(self: *VM) RuntimeError!bool {
         const frame = &self.frames[self.frame_count - 1];
         const func = frame.func orelse return false;
-        const ti = g_type_info.get(func.name) orelse return false;
+        const ti = self.typeInfoFor(func.name) orelse return false;
         if (ti.return_type.len == 0) return false;
         const shown = if (func.display_name.len > 0) func.display_name else try self.callableDisplayName(func.name, func);
         const msg = if (std.ascii.eqlIgnoreCase(ti.return_type, "never"))

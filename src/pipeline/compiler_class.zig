@@ -1925,6 +1925,8 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     if (param_types.len > 0 or return_type.len > 0) {
         try self.type_hints.append(self.allocator, .{ .name = owned_name, .param_types = param_types, .return_type = return_type });
         self.functions.items[self.functions.items.len - 1].has_param_types = param_types.len > 0;
+        // the fast loop returns without the check only for a value of the type
+        if (return_type.len > 0) self.functions.items[self.functions.items.len - 1].return_type_kind = returnTypeKind(return_type);
     }
 
     // closure-level attributes
