@@ -125,6 +125,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         } else if (val == .array) {
                             locals[slot] = try copyValue(self, ic, val);
                         } else {
+                            // generators and fibers are counted like objects
+                            VM.retainValue(val);
                             locals[slot] = val;
                         }
                         self.releaseValue(sl_old);
