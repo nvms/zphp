@@ -241,8 +241,10 @@ pub fn describe(ctx: *NativeContext, throwable: *PhpObject) RuntimeError![]u8 {
         const line = e.get("line");
         const where = .{ if (file == .string) file.string.bytes() else "", if (line == .int) line.int else 0 };
         const next: []const u8 = if (text.len > 0) "\n\nNext " else "";
+        // a call's argument error says where the function is defined too
+        const defined: []const u8 = if ((std.mem.eql(u8, e.class_name, "TypeError") or std.mem.eql(u8, e.class_name, "ArgumentCountError")) and std.mem.indexOf(u8, message_text, ", called in ") != null) " and defined" else "";
         const described = if (message_text.len > 0)
-            try std.fmt.allocPrint(ctx.allocator, "{s}: {s} in {s}:{d}\nStack trace:\n{s}{s}{s}", .{ class_names.display(e.class_name), message_text, where[0], where[1], trace, next, text })
+            try std.fmt.allocPrint(ctx.allocator, "{s}: {s}{s} in {s}:{d}\nStack trace:\n{s}{s}{s}", .{ class_names.display(e.class_name), message_text, defined, where[0], where[1], trace, next, text })
         else
             try std.fmt.allocPrint(ctx.allocator, "{s} in {s}:{d}\nStack trace:\n{s}{s}{s}", .{ class_names.display(e.class_name), where[0], where[1], trace, next, text });
         ctx.allocator.free(text);
