@@ -242,17 +242,19 @@ fn array_slice(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     if (args.len < 2 or args[0] != .array) return NativeResult.scalar(.null);
     const src = args[0].array;
     const slen: i64 = @intCast(src.entries.items.len);
-    var offset = Value.toInt(args[1]);
+    const p = @import("string_ports.zig").Args.init(ctx, "array_slice", args);
+    var offset = try p.long(1, "offset");
+    const length_arg = try p.longOrNull(2, "length");
+    const preserve_keys = try p.boolean(3, "preserve_keys", false);
     if (offset < 0) offset = @max(0, slen + offset);
     if (offset >= slen) {
         return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     }
     const uoffset: usize = @intCast(offset);
-    var raw_length: i64 = if (args.len >= 3 and args[2] != .null) Value.toInt(args[2]) else slen - offset;
+    var raw_length: i64 = length_arg orelse slen - offset;
     if (raw_length < 0) raw_length = @max(0, slen - offset + raw_length);
     const length: usize = @intCast(@max(0, @min(slen - offset, raw_length)));
     const end = @min(src.entries.items.len, uoffset + length);
-    const preserve_keys = args.len >= 4 and args[3].isTruthy();
 
     var arr = try ctx.createArray();
     for (src.entries.items[uoffset..end]) |entry| {
@@ -464,13 +466,16 @@ fn array_splice(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     if (args.len < 2 or args[0] != .array) return NativeResult.scalar(.null);
     const arr = args[0].array;
     const alen: i64 = @intCast(arr.entries.items.len);
-    var offset = Value.toInt(args[1]);
+    const p = @import("string_ports.zig").Args.init(ctx, "array_splice", args);
+    var offset = try p.long(1, "offset");
+    const length_arg = try p.longOrNull(2, "length");
     if (offset < 0) offset = @max(0, alen + offset);
     if (offset > alen) offset = alen;
     const uoffset: usize = @intCast(offset);
 
-    var length: usize = if (args.len >= 3) blk: {
-        var l = Value.toInt(args[2]);
+    // a null length runs to the end, as an omitted one does
+    var length: usize = if (length_arg) |given| blk: {
+        var l = given;
         if (l < 0) l = @max(0, alen - offset + l);
         break :blk @intCast(@max(0, l));
     } else @intCast(alen - offset);
@@ -809,7 +814,8 @@ fn findEntryIndex(arr: *PhpArray, key: PhpArray.Key) ?usize {
 }
 
 fn array_unshift(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2 or args[0] != .array) return NativeResult.scalar(.{ .int = 0 });
+    if (args.len == 0 or args[0] != .array) return NativeResult.scalar(.{ .int = 0 });
+    if (args.len == 1) return NativeResult.scalar(.{ .int = args[0].array.length() });
     const arr = args[0].array;
 
     try arr.entries.ensureUnusedCapacity(ctx.allocator, args.len - 1);
