@@ -12150,7 +12150,7 @@ pub const VM = struct {
                 if (natives[next_native].label.len == 0) continue;
                 const outermost = next_native + 1 == native_count or natives[next_native + 1].depth != i + 1;
                 const site = if (outermost and !natives[next_native].from_native) self.framePosition(i) else null;
-                try arr.append(self.allocator, .{ .array = try self.nativeTraceEntry(natives[next_native], site) });
+                try arr.append(self.allocator, .{ .array = try self.nativeTraceEntry(natives[next_native], site, true) });
             }
             if (self.frames[i].func) |f| if (f.name.len > 0) {
                 const called_by_native = next_native < native_count and natives[next_native].depth == i;
@@ -12211,7 +12211,7 @@ pub const VM = struct {
         return ic.fga_buf[offset .. offset + count];
     }
 
-    fn nativeTraceEntry(self: *VM, call: *const NativeCall, call_site: ?SourcePosition) !*PhpArray {
+    pub fn nativeTraceEntry(self: *VM, call: *const NativeCall, call_site: ?SourcePosition, with_args: bool) !*PhpArray {
         const entry = try self.allocArray();
         if (call_site) |site| {
             try entry.set(self.allocator, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(site.file) });
@@ -12224,6 +12224,7 @@ pub const VM = struct {
         } else {
             try entry.set(self.allocator, .{ .string = Value.String.borrowed("function") }, .{ .string = Value.String.borrowed(call.label) });
         }
+        if (!with_args) return entry;
         const args = try self.traceArgs(entry);
         for (call.args) |a| try args.append(self.allocator, a);
         return entry;
@@ -12372,7 +12373,7 @@ pub const VM = struct {
     }
 
     // the file and line a frame is executing
-    fn framePosition(self: *VM, frame_idx: usize) ?SourcePosition {
+    pub fn framePosition(self: *VM, frame_idx: usize) ?SourcePosition {
         const frame = &self.frames[frame_idx];
         const ip = if (frame.ip > 0) frame.ip - 1 else 0;
         const loc = self.sourceLocation(frame.chunk, ip) orelse return null;

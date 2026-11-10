@@ -778,17 +778,39 @@ fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bool, 
     var count: usize = 0;
     var i: usize = vm.frame_count - 1;
 
+    // the running natives below debug_backtrace itself, innermost first:
+    // php lists each where its frame would be, and what one calls as
+    // called from an internal function
+    var natives: [64]*const @import("../runtime/vm.zig").NativeCall = undefined;
+    var native_count: usize = 0;
+    var call = vm.native_call;
+    if (call) |c| if (c.depth == vm.frame_count) {
+        call = c.outer;
+    };
+    while (call) |c| : (call = c.outer) {
+        if (c.depth > vm.frame_count) continue;
+        if (native_count == natives.len) break;
+        natives[native_count] = c;
+        native_count += 1;
+    }
+    var next_native: usize = 0;
+
     while (i >= 1 and count < max) : ({
         i -= 1;
         count += 1;
     }) {
+        try appendNativeEntries(vm, result, natives[0..native_count], &next_native, i, ignore_args, limit);
+        if (limit > 0 and result.entries.items.len >= limit) break;
+        const called_by_native = next_native < native_count and natives[next_native].depth == i;
         var entry = try ctx.createArray();
         const frame = &vm.frames[i];
         // a generator running as a yield from delegate is listed as called
         // from the generator waiting in it, and those waiting generators
         // follow it, as php lists them
         const delegator = if (frame.generator) |g| g.delegator else null;
-        if (delegator) |d| {
+        if (called_by_native and delegator == null) {
+            // [internal function]: no file or line
+        } else if (delegator) |d| {
             if (vm.generatorPosition(d)) |site| {
                 try entry.set(alloc, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(site.file) });
                 try entry.set(alloc, .{ .string = Value.String.borrowed("line") }, .{ .int = site.line });
@@ -885,7 +907,22 @@ fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bool, 
         }
     }
 
+    // natives the main script's code called
+    if (i == 0) try appendNativeEntries(vm, result, natives[0..native_count], &next_native, 0, ignore_args, limit);
     return result;
+}
+
+// the natives frame i called, innermost first: the outermost of them was
+// called from frame i's code, each other one by the native outside it
+fn appendNativeEntries(vm: *VM, result: *PhpArray, natives: []const *const @import("../runtime/vm.zig").NativeCall, next: *usize, i: usize, ignore_args: bool, limit: usize) RuntimeError!void {
+    while (next.* < natives.len and natives[next.*].depth == i + 1) : (next.* += 1) {
+        if (natives[next.*].label.len == 0) continue;
+        if (limit > 0 and result.entries.items.len >= limit) return;
+        const outermost = next.* + 1 == natives.len or natives[next.* + 1].depth != i + 1;
+        const site = if (outermost and !natives[next.*].from_native) vm.framePosition(i) else null;
+        const native_entry = try vm.nativeTraceEntry(natives[next.*], site, !ignore_args);
+        try result.append(vm.allocator, .{ .array = native_entry });
+    }
 }
 
 fn native_debug_backtrace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -931,6 +968,8 @@ fn native_debug_print_backtrace(ctx: *NativeContext, args: []const Value) Runtim
                 try out.appendSlice(alloc, ")");
             }
             try out.appendSlice(alloc, ": ");
+        } else {
+            try out.appendSlice(alloc, "[internal function]: ");
         }
         // php appends these as C strings, which end at an anonymous class's NUL
         if (class == .string and call_type == .string) {
