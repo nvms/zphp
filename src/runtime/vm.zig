@@ -226,7 +226,33 @@ pub const NativeContext = struct {
     }
 
     fn invokeCallableAsCaller(self: *NativeContext, callable: Value, args: []const Value) RuntimeError!Value {
-        return callables.invoke(self.vm, try self.vm.callbackCallee(callable), args);
+        const callee = try self.vm.callbackCallee(callable);
+        try self.warnValuesForReferences(callee, args.len);
+        return callables.invoke(self.vm, callee, args);
+    }
+
+    // zend_call_function: an internal function hands values, so a callback
+    // parameter declared by reference warns and gets a temporary instead
+    fn warnValuesForReferences(self: *NativeContext, callee: callables.Callee, count: usize) RuntimeError!void {
+        const name: []const u8 = switch (callee) {
+            .function => |n| n,
+            .closure => |obj| blk: {
+                const inner = obj.get("__callable");
+                break :blk if (inner == .string) inner.string.bytes() else return;
+            },
+            else => return,
+        };
+        const func = self.vm.functions.get(name) orelse return;
+        if (func.ref_params.len == 0) return;
+        for (0..@min(count, func.ref_params.len)) |i| {
+            if (!func.ref_params[i] or i >= func.params.len) continue;
+            const shown = try self.vm.callableDisplayName(name, func);
+            const param = func.params[i];
+            const param_name = if (param.len > 0 and param[0] == '$') param[1..] else param;
+            const msg = try std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} (${s}) must be passed by reference, value given", .{ shown, i + 1, param_name });
+            defer self.allocator.free(msg);
+            try self.vm.emitWarning(msg);
+        }
     }
 
     pub fn invokeCallableRef(self: *NativeContext, callable: Value, args: []Value) RuntimeError!Value {
