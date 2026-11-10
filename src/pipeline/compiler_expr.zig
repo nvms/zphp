@@ -1533,7 +1533,21 @@ fn compileSettype(self: *Compiler, args: []const u32) Error!void {
 pub fn compileCallableRef(self: *Compiler, node: Ast.Node) Error!void {
     const callee = self.ast.nodes[node.data.lhs];
     if (callee.tag == .identifier) {
-        const name = self.ast.tokenSlice(callee.main_token);
+        // named as a call names it: in the namespace, falling back to the
+        // global function when the closure is made
+        const name = self.resolveFunctionName(self.ast.tokenSlice(callee.main_token));
+        const idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });
+        try self.emitOp(.constant);
+        try self.emitU16(idx);
+    } else if (callee.tag == .qualified_name) {
+        const parts = self.ast.extraSlice(callee.data.lhs);
+        const fqn = try self.buildQualifiedString(parts);
+        const stripped = if (fqn.len > 0 and fqn[0] == '\\') fqn[1..] else fqn;
+        const name = if (callee.data.rhs == 2 and self.namespace.len > 0) blk: {
+            const q = std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, stripped }) catch return error.CompileError;
+            self.string_allocs.append(self.allocator, q) catch return error.CompileError;
+            break :blk q;
+        } else stripped;
         const idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });
         try self.emitOp(.constant);
         try self.emitU16(idx);
@@ -1548,9 +1562,16 @@ pub fn compileCallableRef(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitU16(method_idx);
         try self.emitOp(.array_push);
     } else if (callee.tag == .static_call) {
-        // ClassName::method(...) => ['ClassName', 'method']
+        // ClassName::method(...) => ['ClassName', 'method']. in code that
+        // runs, self, parent and static stay as written: the closure resolves
+        // them where it is made, forwarding the called class. a constant
+        // expression (its initializer is named with a leading nul) names
+        // its own class
         const class_node = self.ast.nodes[callee.data.lhs];
-        const class_name = try resolveNodeClassName(self, class_node);
+        const written = self.ast.tokenSlice(class_node.main_token);
+        const in_initializer = self.current_function.len > 0 and self.current_function[0] == 0;
+        const relative = class_node.tag != .qualified_name and !(in_initializer and !self.in_trait) and (std.ascii.eqlIgnoreCase(written, "self") or std.ascii.eqlIgnoreCase(written, "parent") or std.ascii.eqlIgnoreCase(written, "static"));
+        const class_name = if (relative) written else try resolveNodeClassName(self, class_node);
         const method_name = self.ast.tokenSlice(callee.main_token);
         try self.emitOp(.array_new);
         const class_idx = try self.addConstant(.{ .string = Value.String.borrowed(class_name) });

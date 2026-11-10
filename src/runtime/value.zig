@@ -501,7 +501,7 @@ pub const BindingTarget = union(enum) {
     static: struct { class_name: []const u8, prop_name: []const u8 },
     // a closure's by-reference capture: the capture entry mirrors (and owns
     // a reference to) the cell's value for the closure instance's lifetime
-    capture: struct { closure: *PhpString.Owner, var_name: []const u8 },
+    capture: struct { closure: *PhpObject, var_name: []const u8 },
 };
 
 // reverse index key for the prop/static sync direction (a DIRECT write to
@@ -804,8 +804,8 @@ pub const Generator = struct {
     refcount: u32 = 0,
     // the Generator object's handle
     handle: u32 = 0,
-    // the closure instance the generator came from, kept alive with it
-    closure: ?*PhpString.Owner = null,
+    // the Closure object the generator came from, kept alive with it
+    closure: ?*PhpObject = null,
     state: State = .created,
     func: *const ObjFunction,
     ip: usize = 0,
@@ -965,6 +965,9 @@ pub const NativeHandle = struct {
         list_formatter,
         // a WeakReference: ptr is its target until the target is freed
         weak_reference,
+        // a Closure: ptr and aux are the instance name the vm keys the
+        // closure's function, captures and statics by
+        closure,
         _,
     };
 
@@ -1058,6 +1061,14 @@ pub const PhpObject = struct {
         skip_serialize: bool = false,
         running: bool = false,
     };
+
+    // the instance name of a Closure made from a closure expression (or bound
+    // from one); null for every other object
+    pub inline fn closureName(self: *const PhpObject) ?[]const u8 {
+        if (self.native.kind != .closure) return null;
+        const ptr: [*]const u8 = @ptrFromInt(self.native.ptr);
+        return ptr[0..self.native.aux];
+    }
 
     pub fn backingValue(self: *const PhpObject) Value {
         if (self.lazy) |state| if (state.backing) |obj| return .{ .object = obj };
@@ -1292,10 +1303,6 @@ pub const PhpString = struct {
         allocator: std.mem.Allocator,
         refcount: u32 = 1,
         release_queued: bool = false,
-        // a closure instance name: the bytes live in the VM's recycled name
-        // arena and the VM releases the instance's captures when the last
-        // reference drops, so the owner struct is the closure's identity
-        closure: bool = false,
         // bytes[0..len] were found to be valid utf-8 when len == bytes.len;
         // an in-place append clears it
         utf8_valid: bool = false,
@@ -1341,7 +1348,7 @@ pub const PhpString = struct {
         const owner = self.owner orelse return;
         std.debug.assert(owner.refcount > 0);
         owner.refcount -= 1;
-        if (owner.refcount == 0 and !owner.release_queued and !owner.closure) destroyOwner(owner);
+        if (owner.refcount == 0 and !owner.release_queued) destroyOwner(owner);
     }
 
     pub fn releaseDeferred(self: PhpString) ?*Owner {
@@ -1353,7 +1360,7 @@ pub const PhpString = struct {
 
     pub fn destroyOwner(owner: *Owner) void {
         const allocator = owner.allocator;
-        if (!owner.closure) allocator.free(owner.bytes);
+        allocator.free(owner.bytes);
         allocator.destroy(owner);
     }
 };
@@ -1416,6 +1423,11 @@ pub const Value = union(enum) {
 
     pub fn isEmptyArrayDefault(self: Value) bool {
         return self == .array and self.array == &empty_array_sentinel;
+    }
+
+    // the instance name of a closure expression's Closure object
+    pub inline fn closureName(self: Value) ?[]const u8 {
+        return if (self == .object) self.object.closureName() else null;
     }
 
     // the type a php TypeError names: "bool" for either boolean, the class
@@ -1604,6 +1616,7 @@ pub const Value = union(enum) {
         if (a == .int and b == .int) return a.int == b.int;
         if (a == .object and b == .object) {
             if (a.object == b.object) return true;
+            if (isClosureObject(a.object) or isClosureObject(b.object)) return closuresCompare(a.object, b.object) == 0;
             if (nativeCompare(a, b)) |order| return order == 0;
             if (!std.mem.eql(u8, a.object.class_name, b.object.class_name)) return false;
             return objectsCompareGuarded(a.object, b.object) == 0;
@@ -1707,6 +1720,7 @@ pub const Value = union(enum) {
         }
         if (a == .object and b == .object) {
             if (a.object == b.object) return 0;
+            if (isClosureObject(a.object) or isClosureObject(b.object)) return closuresCompare(a.object, b.object);
             if (nativeCompare(a, b)) |order| return order;
             if (!std.mem.eql(u8, a.object.class_name, b.object.class_name)) return 1;
             return objectsCompareGuarded(a.object, b.object);
@@ -1818,6 +1832,42 @@ pub const Value = union(enum) {
             }
         }
         return false;
+    }
+
+    fn isClosureObject(obj: *const PhpObject) bool {
+        return std.mem.eql(u8, obj.class_name, "Closure");
+    }
+
+    // zend_closure_compare: two closure expressions are never equal (only an
+    // object to itself), two closures made from callables are when they call
+    // the same function on the same object in the same scope; anything else
+    // is uncomparable (1, so neither < nor > holds)
+    fn closuresCompare(a: *PhpObject, b: *PhpObject) i64 {
+        if (!isClosureObject(a) or !isClosureObject(b)) return 1;
+        if (a.closureName() != null or b.closureName() != null) return 1;
+        if (!sameCallable(a.get("__callable"), b.get("__callable"))) return 1;
+        const ca = a.get("__called_class");
+        const cb = b.get("__called_class");
+        if (@intFromEnum(ca) != @intFromEnum(cb)) return 1;
+        if (ca == .string and !std.ascii.eqlIgnoreCase(ca.string.bytes(), cb.string.bytes())) return 1;
+        return 0;
+    }
+
+    fn sameCallable(a: Value, b: Value) bool {
+        switch (a) {
+            .string => |s| return b == .string and std.ascii.eqlIgnoreCase(s.bytes(), b.string.bytes()),
+            .array => |arr| {
+                if (b != .array or arr.entries.items.len != 2 or b.array.entries.items.len != 2) return false;
+                const ta = arr.entries.items[0].value;
+                const tb = b.array.entries.items[0].value;
+                const ma = arr.entries.items[1].value;
+                const mb = b.array.entries.items[1].value;
+                if (ma != .string or mb != .string or !std.ascii.eqlIgnoreCase(ma.string.bytes(), mb.string.bytes())) return false;
+                if (ta == .object) return tb == .object and ta.object == tb.object;
+                return ta == .string and tb == .string and std.ascii.eqlIgnoreCase(ta.string.bytes(), tb.string.bytes());
+            },
+            else => return false,
+        }
     }
 
     // php's zend_std_compare_objects: out of native stack is an Error, and

@@ -397,7 +397,15 @@ fn findMethod(vm: *VM, class: []const u8, method: []const u8) RuntimeError!?Meth
 pub fn invoke(vm: *VM, callee: Callee, args: []const Value) RuntimeError!Value {
     switch (callee) {
         .function => |name| return vm.callByName(name, args),
-        .closure => |obj| return vm.callValueCallable(obj.get("__callable"), args),
+        .closure => |obj| {
+            if (obj.closureName()) |name| return vm.callByName(name, args);
+            var target = try vm.callbackCallee(obj.get("__callable"));
+            // made through self:: or parent::, a static method keeps the
+            // class static:: named where it was made
+            const called = obj.get("__called_class");
+            if (called == .string and target == .static_method) target.static_method.called_class = called.string.bytes();
+            return invoke(vm, target, args);
+        },
         .invoke => |obj| return vm.callMethod(obj, "__invoke", args),
         .method => |m| return vm.callMethodAs(m.object, m.name, m.registered, args),
         .static_method => |m| return vm.callByNameAs(m.registered, args, m.called_class),
@@ -421,7 +429,11 @@ pub fn invokeRef(vm: *VM, callee: Callee, args: []Value) RuntimeError!Value {
         .invoke => |obj| return vm.callMethodRef(obj, "__invoke", args),
         .method => |m| return vm.callMethodRefAs(m.object, m.name, m.registered, args),
         .static_method => |m| return vm.callByNameRefAs(m.registered, args, m.called_class),
-        .closure, .magic => return invoke(vm, callee, args),
+        .closure => |obj| {
+            if (obj.closureName()) |name| return vm.callByNameRef(name, args);
+            return invoke(vm, callee, args);
+        },
+        .magic => return invoke(vm, callee, args),
     }
 }
 

@@ -737,15 +737,24 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClassConstant::hasType", rccHasType);
     try vm.native_fns.put(a, "ReflectionClassConstant::getModifiers", rccGetModifiers);
 
-    // Closure class (static methods only - instance methods handled in VM dispatch)
     var closure_def = ClassDef{ .name = "Closure", .is_final = true, .native_properties = closureProperties };
-    try closure_def.methods.put(a, "bind", .{ .name = "bind", .arity = 2, .is_static = true });
-    try closure_def.methods.put(a, "fromCallable", .{ .name = "fromCallable", .arity = 1, .is_static = true });
-    try closure_def.methods.put(a, "getCurrent", .{ .name = "getCurrent", .arity = 0, .is_static = true });
+    inline for (.{
+        .{ "bind", 2, true },
+        .{ "bindTo", 1, false },
+        .{ "call", 1, false },
+        .{ "fromCallable", 1, true },
+        .{ "getCurrent", 0, true },
+        .{ "__invoke", 0, false },
+    }) |method| {
+        try closure_def.methods.put(a, method[0], .{ .name = method[0], .arity = method[1], .is_static = method[2] });
+        try closure_def.method_order.append(a, method[0]);
+    }
     try vm.classes.put(a, "Closure", closure_def);
     try vm.native_fns.put(a, "Closure::getCurrent", closureGetCurrent);
-
     try vm.native_fns.put(a, "Closure::bind", closureBind);
+    try vm.native_fns.put(a, "Closure::bindTo", closureBindTo);
+    try vm.native_fns.put(a, "Closure::call", closureCall);
+    try vm.native_fns.put(a, "Closure::__invoke", closureInvoke);
     try vm.native_fns.put(a, "Closure::fromCallable", closureFromCallable);
 
     var rext_def = ClassDef{ .name = "ReflectionExtension" };
@@ -3055,7 +3064,13 @@ fn rfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     if (args.len < 1) return throwReflection(ctx, "ReflectionFunction::__construct() expects a function name");
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
 
-    if (args[0] == .object and std.mem.eql(u8, args[0].object.class_name, "Closure")) {
+    if (args[0].closureName()) |instance| {
+        // php names a closure `{closure:...}`; the Closure object, which
+        // this keeps alive while reflected, is internal state
+        try this.set(ctx.allocator, "__closure", args[0]);
+        const display = if (ctx.vm.functions.get(instance)) |func| func.display_name else "";
+        try this.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(if (display.len > 0) display else "{closure}") });
+    } else if (args[0] == .object and std.mem.eql(u8, args[0].object.class_name, "Closure")) {
         const callable = args[0].object.get("__callable");
         // a first-class callable reflects as a closure of the function
         try this.set(ctx.allocator, "__from_closure", .{ .bool = true });
@@ -3074,22 +3089,7 @@ fn rfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     } else if (args[0] == .string) {
         const func_name = ctx.vm.canonicalFunctionName(args[0].string.bytes()) orelse
             return throwReflection(ctx, "Function does not exist");
-        // a closure instance name keeps the closure alive while reflected
-        if (std.mem.startsWith(u8, func_name, "__closure_")) {
-            // php names a closure `{closure:...}`; the instance itself, which
-            // this keeps alive while reflected, is internal state
-            try this.set(ctx.allocator, "__closure_name", args[0]);
-            const display = if (ctx.vm.functions.get(func_name)) |func| func.display_name else "";
-            try this.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(if (display.len > 0) display else "{closure}") });
-        } else {
-            try this.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(func_name) });
-        }
-        // closures created inside a class method inherit that class as their scope
-        if (std.mem.startsWith(u8, func_name, "__closure_")) {
-            if (ctx.vm.closureScopeByName(func_name)) |scope| {
-                try this.set(ctx.allocator, "__scope_class", .{ .string = Value.String.borrowed(scope) });
-            }
-        }
+        try this.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(func_name) });
     } else if (args[0] == .array) {
         // array callable [$obj, 'method'] - store as method reference
         const arr = args[0].array;
@@ -3116,8 +3116,7 @@ fn rfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
 // the name a ReflectionFunction looks its function up by: a closure's
 // instance, else the function's name
 pub fn functionKey(this: *PhpObject) Value {
-    const closure = this.get("__closure_name");
-    if (closure == .string) return closure;
+    if (this.get("__closure").closureName()) |instance| return .{ .string = Value.String.borrowed(instance) };
     return this.get("name");
 }
 
@@ -3386,8 +3385,16 @@ fn rmGetStaticVariables(ctx: *NativeContext, _: []const Value) RuntimeError!Nati
     return NativeResult.borrowed(.{ .array = result });
 }
 
+fn reflectionClassNamed(ctx: *NativeContext, class: ?[]const u8) RuntimeError!NativeResult {
+    const name = class orelse return NativeResult.scalar(.null);
+    const obj = try ctx.createObject("ReflectionClass");
+    try obj.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(ctx.vm.declaredClassName(name)) });
+    return NativeResult.borrowed(.{ .object = obj });
+}
+
 fn rfGetClosureCalledClass(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (this.get("__closure").closureName()) |instance| return reflectionClassNamed(ctx, ctx.vm.closureScopeByName(instance));
     if (this.get("__scope_class") == .string) {
         const scope_name = this.get("__scope_class").string.bytes();
         const obj = try ctx.createObject("ReflectionClass");
@@ -3411,6 +3418,8 @@ fn rfGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Native
 fn rfGetClosureScopeClass(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.null);
+    // the class a closure runs in, which binding can change
+    if (this.get("__closure").closureName()) |instance| return reflectionClassNamed(ctx, ctx.vm.closureDefClassByName(instance));
     if (this.get("__scope_class") == .string) {
         const scope_name = this.get("__scope_class").string.bytes();
         const obj = try ctx.createObject("ReflectionClass");
@@ -3529,6 +3538,27 @@ fn rpConstructParam(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
                 else => return throwReflection(ctx, "ReflectionParameter class must be a string or object"),
             };
             lookup_key = class_names.memberKey(&key_buf, cls_name, meth_val.string.bytes());
+        },
+        .object => |obj| {
+            if (obj.closureName()) |instance| {
+                lookup_key = instance;
+            } else if (std.mem.eql(u8, obj.class_name, "Closure")) {
+                // a closure made from a callable reflects what it calls
+                const callable = obj.get("__callable");
+                switch (callable) {
+                    .string => |s| lookup_key = s.bytes(),
+                    .array => |arr| {
+                        if (arr.entries.items.len != 2 or arr.entries.items[1].value != .string) return throwReflection(ctx, "ReflectionParameter expects a function name or [class, method]");
+                        const target = arr.entries.items[0].value;
+                        const cls_name: []const u8 = if (target == .object) target.object.class_name else if (target == .string) target.string.bytes() else "";
+                        const registered = ctx.vm.resolveMethod(cls_name, arr.entries.items[1].value.string.bytes()) catch null;
+                        lookup_key = registered orelse class_names.memberKey(&key_buf, cls_name, arr.entries.items[1].value.string.bytes());
+                    },
+                    else => return throwReflection(ctx, "ReflectionParameter expects a function name or [class, method]"),
+                }
+            } else {
+                lookup_key = class_names.memberKey(&key_buf, obj.class_name, "__invoke");
+            }
         },
         else => return throwReflection(ctx, "ReflectionParameter expects a function name or [class, method]"),
     }
@@ -3682,36 +3712,111 @@ fn buildParamArray(ctx: *NativeContext, func: *const ObjFunction, type_key: []co
     return .{ .array = arr };
 }
 
-fn closureBind(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1) return NativeResult.scalar(.null);
-    const closure = args[0];
-    if (closure != .string or !std.mem.startsWith(u8, closure.string.bytes(), "__closure_")) return NativeResult.scalar(.null);
-    const new_this = if (args.len >= 2) args[1] else Value.null;
-    const scope = resolveScope(args);
-    return NativeResult.transfer(try ctx.vm.cloneClosureWithThis(closure.string.bytes(), new_this, scope));
+fn closureArgError(ctx: *NativeContext, comptime func: []const u8, comptime param: []const u8, comptime expected: []const u8, given: Value) RuntimeError {
+    const msg = try std.fmt.allocPrint(ctx.allocator, "Closure::" ++ func ++ "(): Argument " ++ param ++ " must be of type " ++ expected ++ ", {s} given", .{given.typeName()});
+    defer ctx.allocator.free(msg);
+    try ctx.vm.setPendingException("TypeError", msg);
+    return error.RuntimeError;
 }
 
-fn resolveScope(args: []const Value) VM.ClosureScope {
-    if (args.len >= 3) {
-        const scope_arg = args[2];
-        if (scope_arg == .null) return .clear;
-        if (scope_arg == .string) {
-            if (std.mem.eql(u8, scope_arg.string.bytes(), "static")) return .preserve;
-            return .{ .set = scope_arg.string.bytes() };
-        }
-        if (scope_arg == .object) return .{ .set = scope_arg.object.class_name };
-        return .clear;
+// Closure::bind($closure, $newThis, $newScope = "static")
+fn closureBind(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .object or !std.mem.eql(u8, args[0].object.class_name, "Closure"))
+        return closureArgError(ctx, "bind", "#1 ($closure)", "Closure", if (args.len > 0) args[0] else .null);
+    return bindClosure(ctx, "bind", "#2 ($newThis)", "#3 ($newScope)", args[0].object, if (args.len >= 2) args[1] else .null, if (args.len >= 3) args[2] else null);
+}
+
+// $closure->bindTo($newThis, $newScope = "static")
+fn closureBindTo(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return bindClosure(ctx, "bindTo", "#1 ($newThis)", "#2 ($newScope)", this, if (args.len >= 1) args[0] else .null, if (args.len >= 2) args[1] else null);
+}
+
+// do_closure_bind: the scope argument names a class (an object's, "static"
+// for the closure's own), the binding is checked, and the copy is bound
+fn bindClosure(ctx: *NativeContext, comptime func: []const u8, comptime this_param: []const u8, comptime scope_param: []const u8, closure: *PhpObject, new_this: Value, scope_arg: ?Value) RuntimeError!NativeResult {
+    const vm = ctx.vm;
+    if (new_this != .null and new_this != .object) return closureArgError(ctx, func, this_param, "?object", new_this);
+    const instance = closure.closureName();
+    const current_scope: ?[]const u8 = if (instance) |name| vm.closureDefClassByName(name) else vm.fakeClosureTarget(closure).scope;
+    const scope: ?[]const u8 = if (scope_arg) |arg| switch (arg) {
+        .null => null,
+        .object => |o| o.class_name,
+        .string => |str| blk: {
+            const raw = str.bytes();
+            if (std.mem.eql(u8, raw, "static")) break :blk current_scope;
+            const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
+            if (!vm.classes.contains(name)) try vm.tryAutoload(name);
+            if (vm.classes.getKey(name)) |declared| break :blk declared;
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Class \"{s}\" not found", .{raw});
+            defer ctx.allocator.free(msg);
+            try vm.emitWarning(msg);
+            return NativeResult.scalar(.null);
+        },
+        else => return closureArgError(ctx, func, scope_param, "object|string|null", arg),
+    } else current_scope;
+    if (try vm.closureBindingRefusal(closure, new_this, scope)) |msg| {
+        defer ctx.allocator.free(msg);
+        try vm.emitWarning(msg);
+        return NativeResult.scalar(.null);
     }
-    return .preserve;
+    const name = instance orelse return bindFakeClosure(ctx, closure, new_this);
+    // an object bound without a scope gets Closure as a dummy scope
+    const effective_scope: ?[]const u8 = scope orelse if (new_this == .object) @as([]const u8, "Closure") else null;
+    const called = if (new_this == .object) new_this.object.class_name else scope;
+    return NativeResult.borrowed(vm.disownedClosure(try vm.copyClosureInstance(name, new_this, effective_scope, called)));
+}
+
+// a Closure made from a callable, bound anew: a method's now runs on new_this
+fn bindFakeClosure(ctx: *NativeContext, closure: *PhpObject, new_this: Value) RuntimeError!NativeResult {
+    var callable = closure.get("__callable");
+    if (new_this == .object and callable == .array and callable.array.entries.items.len == 2) {
+        const pair = try ctx.createArray();
+        try pair.append(ctx.allocator, new_this);
+        try pair.append(ctx.allocator, callable.array.entries.items[1].value);
+        callable = .{ .array = pair };
+    }
+    return wrapCallableClosure(ctx, callable);
+}
+
+// $closure->call($newThis, ...$args): runs bound to $newThis, in its class
+fn closureCall(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const vm = ctx.vm;
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const new_this = if (args.len >= 1) args[0] else Value.null;
+    if (new_this != .object) return closureArgError(ctx, "call", "#1 ($newThis)", "object", new_this);
+    const call_args = if (args.len > 1) args[1..] else &.{};
+    const scope = new_this.object.class_name;
+    if (try vm.closureBindingRefusal(this, new_this, scope)) |msg| {
+        defer ctx.allocator.free(msg);
+        try vm.emitWarning(msg);
+        return NativeResult.scalar(.null);
+    }
+    const instance = this.closureName() orelse {
+        const bound = (try bindFakeClosure(ctx, this, new_this)).value;
+        defer vm.discardOrphan(bound);
+        return NativeResult.share(try vm.callValueCallable(bound, call_args));
+    };
+    const bound = try vm.copyClosureInstance(instance, new_this, scope, scope);
+    // the temporary bound closure lives for this call only; the callee
+    // frame holds it while it runs
+    defer vm.releaseValue(bound);
+    const name = bound.closureName() orelse return NativeResult.scalar(.null);
+    return NativeResult.share(try vm.callByName(name, call_args));
+}
+
+// $closure->__invoke(...$args) calls the closure as it is bound
+fn closureInvoke(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(try ctx.vm.callValueCallable(.{ .object = this }, args));
 }
 
 // zend_closure_get_debug_info: a Closure shows nothing but its debug table
 fn closureProperties(ctx: *NativeContext, obj: *PhpObject, purpose: object_properties.Purpose) RuntimeError!?*PhpArray {
     const table = try ctx.vm.allocArray();
     if (purpose != .debug) return table;
-    const instance = obj.get("__closure");
-    if (instance == .string) {
-        try closureInstanceTable(ctx, table, instance.string.bytes());
+    if (obj.closureName()) |instance| {
+        try closureInstanceTable(ctx, table, instance);
     } else {
         try callableClosureTable(ctx, table, obj.get("__callable"));
     }
@@ -3834,23 +3939,18 @@ fn closureGetCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeR
     var caller = vm.frame_count;
     while (caller > 1 and vm.frames[caller - 1].func == null) caller -= 1;
     const name = if (caller > 0) vm.frames[caller - 1].call_name else null;
-    if (name == null or !std.mem.startsWith(u8, name.?, "__closure_")) {
+    const closure = if (name) |n| vm.closureObject(n) else null;
+    if (closure == null) {
         try vm.setPendingException("Error", "Current function is not a closure");
         return error.RuntimeError;
     }
-    if (vm.capture_index.getPtr(name.?)) |range| if (range.owner) |owner| {
-        owner.refcount += 1;
-        return NativeResult.takeString(.{ .ptr = owner.bytes.ptr, .len = owner.bytes.len, .owner = owner });
-    };
-    return NativeResult.copyString(ctx.allocator, name.?);
+    return NativeResult.share(.{ .object = closure.? });
 }
 
 fn closureFromCallable(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1) return NativeResult.scalar(.null);
     const callable = args[0];
     if (callable == .object and std.mem.eql(u8, callable.object.class_name, "Closure")) return NativeResult.share(callable);
-    // if already a closure, return as-is
-    if (callable == .string and std.mem.startsWith(u8, callable.string.bytes(), "__closure_")) return NativeResult.share(callable);
     if (callable == .string) {
         const raw = callable.string.bytes();
         const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;

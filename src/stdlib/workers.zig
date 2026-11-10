@@ -777,8 +777,7 @@ const TransferCheck = struct {
 
     fn check(self: *TransferCheck, v: Value) RuntimeError!void {
         switch (v) {
-            .null, .undef, .bool, .int, .float => {},
-            .string => |s| if (std.mem.startsWith(u8, s.bytes(), "__closure")) return self.refuse("a Closure"),
+            .null, .undef, .bool, .int, .float, .string => {},
             .array => |arr| {
                 if (!try self.firstVisit(arr)) return;
                 const mark = self.path.items.len;
@@ -794,6 +793,7 @@ const TransferCheck = struct {
                 }
             },
             .object => |obj| {
+                if (std.mem.eql(u8, obj.class_name, "Closure")) return self.refuse("a Closure");
                 if (obj.native.get(channel.Channel, .channel)) |ch| return self.channels.append(self.ctx.allocator, ch);
                 if (obj.native.kind == .buffer) return if (buffer.isDetached(obj)) self.refuse("a Buffer that was already transferred") else {};
                 if (obj.native.kind != .none) return self.refuse("an object backed by a native handle");
@@ -1083,7 +1083,8 @@ fn submitTask(ctx: *NativeContext, args: []const Value, block: bool) RuntimeErro
     flushOutput(ctx.vm);
     if (args.len < 1) return throwNamed(ctx, pool_exception, "submit() needs a callable", .{});
     const callable = args[0];
-    const is_closure = callable == .string and std.mem.startsWith(u8, callable.string.bytes(), "__closure_");
+    const closure_name = callable.closureName();
+    const is_closure = closure_name != null;
     const valid = is_closure or switch (callable) {
         .string => true,
         .array => |arr| arr.entries.items.len == 2 and arr.entries.items[0].value == .string and arr.entries.items[1].value == .string,
@@ -1105,7 +1106,7 @@ fn submitTask(ctx: *NativeContext, args: []const Value, block: bool) RuntimeErro
     pool.retain();
     errdefer pool.release();
     if (is_closure) {
-        task.closure = try packClosure(ctx, pool, callable.string.bytes());
+        task.closure = try packClosure(ctx, pool, closure_name.?);
     } else {
         task.callable = try serializedCopy(ctx, callable, pool.allocator);
     }

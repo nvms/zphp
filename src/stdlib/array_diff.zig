@@ -220,20 +220,9 @@ pub const TmpString = struct {
     }
 };
 
-// closures travel as strings with this prefix
-fn isClosure(v: Value) bool {
-    return v == .string and std.mem.startsWith(u8, v.string.bytes(), "__closure_");
-}
-
 pub fn tmpString(ctx: *NativeContext, v: Value, buf: []u8) RuntimeError!TmpString {
     switch (v) {
-        .string => |s| {
-            if (isClosure(v)) {
-                try ctx.vm.setPendingException("Error", "Object of class Closure could not be converted to string");
-                return error.RuntimeError;
-            }
-            return .{ .bytes = s.bytes() };
-        },
+        .string => |s| return .{ .bytes = s.bytes() },
         .int => |i| return .{ .bytes = std.fmt.bufPrint(buf, "{d}", .{i}) catch unreachable },
         .null, .undef => return .{ .bytes = "" },
         .bool => |b| return .{ .bytes = if (b) "1" else "" },
@@ -260,7 +249,7 @@ pub fn tmpString(ctx: *NativeContext, v: Value, buf: []u8) RuntimeError!TmpStrin
 
 // string_compare_function
 fn stringCompare(ctx: *NativeContext, a: Value, b: Value) RuntimeError!i32 {
-    if (a == .string and b == .string and !isClosure(a) and !isClosure(b)) return order(a.string.bytes(), b.string.bytes());
+    if (a == .string and b == .string) return order(a.string.bytes(), b.string.bytes());
     var buf_a: [128]u8 = undefined;
     var buf_b: [128]u8 = undefined;
     const sa = try tmpString(ctx, a, &buf_a);
@@ -761,7 +750,7 @@ fn array_diff(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     for (args[1..]) |arg| {
         for (arg.array.entries.items) |e| {
             const v = entryValue(e);
-            if (v == .string and !isClosure(v)) {
+            if (v == .string) {
                 exclude.putAssumeCapacity(v.string.bytes(), {});
                 continue;
             }

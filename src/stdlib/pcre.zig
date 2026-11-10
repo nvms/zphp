@@ -27,7 +27,7 @@ const UtfCheck = struct {
 
     fn initUtf(subject: []const u8, holder: ?Value) bool {
         const owner: ?*Value.String.Owner = if (holder) |h| switch (h) {
-            .string => |str| if (str.owner) |o| (if (!o.closure and str.ptr == o.bytes.ptr and str.len == o.bytes.len) o else null) else null,
+            .string => |str| if (str.owner) |o| (if (str.ptr == o.bytes.ptr and str.len == o.bytes.len) o else null) else null,
             else => null,
         } else null;
         if (owner) |o| if (o.utf8_valid) return true;

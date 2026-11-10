@@ -353,15 +353,10 @@ pub fn writeTraceArg(buf: *Writer, alloc: std.mem.Allocator, v: Value) void {
             if (std.math.isFinite(f) and std.mem.indexOfScalar(u8, text, '.') == null) write(buf, alloc, ".0");
         },
         .string => |s| {
-            // a closure passed as a callable is its synthetic name in zphp
-            if (std.mem.startsWith(u8, s.bytes(), "__closure_")) {
-                write(buf, alloc, "Object(Closure)");
-            } else {
-                const bytes = s.bytes();
-                write(buf, alloc, "'");
-                writeEscaped(buf, alloc, bytes[0..@min(bytes.len, 15)]);
-                write(buf, alloc, if (bytes.len > 15) "...'" else "'");
-            }
+            const bytes = s.bytes();
+            write(buf, alloc, "'");
+            writeEscaped(buf, alloc, bytes[0..@min(bytes.len, 15)]);
+            write(buf, alloc, if (bytes.len > 15) "...'" else "'");
         },
         .array => write(buf, alloc, "Array"),
         .object => |o| writeFmt(buf, alloc, "Object({s})", .{class_names.display(o.class_name)}),

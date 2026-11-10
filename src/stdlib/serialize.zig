@@ -163,10 +163,6 @@ fn formatPhpFloat(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, f: f64
 
 fn native_serialize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.literal("");
-    if (args[0] == .string and std.mem.startsWith(u8, args[0].string.bytes(), "__closure_")) {
-        try ctx.vm.setPendingException("Exception", "Serialization of 'Closure' is not allowed");
-        return error.RuntimeError;
-    }
     if (args[0] == .object) {
         if (std.mem.eql(u8, args[0].object.class_name, "Closure")) {
             try ctx.vm.setPendingException("Exception", "Serialization of 'Closure' is not allowed");

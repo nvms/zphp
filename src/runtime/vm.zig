@@ -246,6 +246,7 @@ pub const NativeContext = struct {
         const name: []const u8 = switch (callee) {
             .function => |n| n,
             .closure => |obj| blk: {
+                if (obj.closureName()) |instance| break :blk instance;
                 const inner = obj.get("__callable");
                 break :blk if (inner == .string) inner.string.bytes() else return;
             },
@@ -319,15 +320,13 @@ pub const CaptureRange = struct {
     start: u32,
     len: u16,
     has_refs: bool,
-    // the instance name's string owner. frames retain it by call_name while
-    // executing and every holder of the closure value counts on it; when it
-    // drops to zero the VM releases this range (releaseClosureInstance)
-    owner: ?*Value.String.Owner = null,
+    // the instance's Closure object. frames running the closure (by
+    // call_name) and generators made from it hold references on it; when it
+    // is freed the VM releases this range (releaseClosureInstance)
+    object: ?*PhpObject = null,
     has_statics: bool = false,
     // RefIndex owner of this instance's by-ref capture bindings
     ref_owner: RefIndex.OwnerId = 0,
-    // the Closure object's handle
-    handle: u32 = 0,
 };
 
 pub const AttributeDef = struct {
@@ -757,16 +756,11 @@ pub const VM = struct {
     captures: std.ArrayListUnmanaged(CaptureEntry) = .empty,
     capture_index: std.StringHashMapUnmanaged(CaptureRange) = .{},
     interned_names: std.StringHashMapUnmanaged(void) = .{},
-    cycle_closures: std.AutoArrayHashMapUnmanaged(*Value.String.Owner, i64) = .{},
     // the cycle collector's walk stack, kept for its capacity
     cycle_work: std.ArrayListUnmanaged(CycleWork) = .empty,
     collecting_cycles: bool = false,
     closure_instance_count: u32 = 0,
     captures_dead: usize = 0,
-    // ZPHP_HEAP_STATS diagnostics: every live closure owner, so survivors of
-    // teardown can be named
-    debug_closure_owners: ?std.ArrayListUnmanaged(*Value.String.Owner) = null,
-    debug_closure_names: std.AutoHashMapUnmanaged(*Value.String.Owner, []const u8) = .{},
     debug_no_pool: bool = false,
     debug_gc_verify: bool = false,
     stat_deferred_stack: usize = 0,
@@ -1896,6 +1890,10 @@ pub const VM = struct {
     // native state has no cleanup and must stay put until teardown, which
     // keeps the object out of the pool
     fn releaseNativeState(self: *VM, obj: *PhpObject) bool {
+        if (obj.native.kind == .closure) {
+            self.releaseClosureInstance(obj);
+            return true;
+        }
         if (self.nativeCleanup(obj.class_name)) |cleanup| return cleanup(obj);
         return obj.native.kind == .none;
     }
@@ -1945,7 +1943,6 @@ pub const VM = struct {
         vm.allocator = account.allocator();
         const allocator = vm.allocator;
         vm.string_pool.backing = allocator;
-        if (platform.getenv("ZPHP_HEAP_STATS") != null) vm.debug_closure_owners = .empty;
         if (platform.getenv("ZPHP_NO_POOL") != null) vm.debug_no_pool = true;
         if (platform.getenv("ZPHP_GC_VERIFY") != null) vm.debug_gc_verify = true;
         vm.debug_trace_class = platform.getenv("ZPHP_TRACE_OBJ_CLASS");
@@ -2736,40 +2733,6 @@ pub const VM = struct {
     // diagnostic for bounded-memory work: live vs pooled heap structures at
     // the end of a run. a loop that leaks shows up as a live count that grows
     // with the iteration count instead of plateauing
-    fn debugValueHas(v: Value, owner: *Value.String.Owner) bool {
-        return v == .string and v.string.owner == owner;
-    }
-
-    // runs after freeHeapItems: only structures that outlive the heap bulk
-    // free are scanned
-    fn debugPrintHolders(self: *VM, owner: *Value.String.Owner) void {
-        for (self.stack[0..self.sp]) |v| if (debugValueHas(v, owner)) std.debug.print(" stack", .{});
-        for (self.frames[0..self.frame_high_water], 0..) |*fr, i| {
-            var vit = fr.vars.valueIterator();
-            while (vit.next()) |v| if (debugValueHas(v.*, owner)) std.debug.print(" frame-var({d})", .{i});
-            for (fr.locals) |lv| if (debugValueHas(lv, owner)) std.debug.print(" frame-local({d})", .{i});
-        }
-        var classes = self.classes.valueIterator();
-        while (classes.next()) |class| {
-            for (class.static_props.values()) |v| if (debugValueHas(v, owner)) std.debug.print(" static-prop({s})", .{class.name});
-            var const_it = class.constants.valueIterator();
-            while (const_it.next()) |v| if (debugValueHas(v.*, owner)) std.debug.print(" constant({s})", .{class.name});
-            for (class.properties.items) |prop| if (debugValueHas(prop.default, owner)) std.debug.print(" prop-default({s})", .{class.name});
-        }
-        for (self.pending_string_release.items) |o| if (o == owner) std.debug.print(" pending-queue", .{});
-        for (self.shutdown_callbacks.items) |cb| {
-            if (debugValueHas(cb.callable, owner)) std.debug.print(" shutdown-cb", .{});
-            for (cb.args) |v| if (debugValueHas(v, owner)) std.debug.print(" shutdown-cb-arg", .{});
-        }
-        if (self.user_error_handler) |h| if (debugValueHas(h, owner)) std.debug.print(" error-handler", .{});
-        if (self.user_exception_handler) |h| if (debugValueHas(h, owner)) std.debug.print(" exception-handler", .{});
-        var ini = self.ini_callbacks.valueIterator();
-        while (ini.next()) |v| if (debugValueHas(v.*, owner)) std.debug.print(" ini-callback", .{});
-        if (self.last_return_ref) |c| if (debugValueHas(c.*, owner)) std.debug.print(" last-return-ref", .{});
-        if (debugValueHas(self.fiber_suspend_value, owner)) std.debug.print(" fiber-suspend-value", .{});
-        if (self.pending_exception) |e| if (debugValueHas(e, owner)) std.debug.print(" pending-exception", .{});
-    }
-
     fn printHeapStats(self: *VM) void {
         var live_objects: usize = 0;
         for (self.objects.items) |o| if (!o.pooled) {
@@ -3042,18 +3005,6 @@ pub const VM = struct {
         self.releaseFrames();
         self.releaseCallbackRegistries();
         self.freeHeapItems(true);
-        if (self.debug_closure_owners) |*list| {
-            for (list.items) |owner| {
-                std.debug.print("heap: closure owner {s} survived teardown (refcount {d}); holders:", .{ self.debug_closure_names.get(owner) orelse "?", owner.refcount });
-                self.debugPrintHolders(owner);
-                std.debug.print("\n", .{});
-            }
-            list.deinit(self.allocator);
-            self.debug_closure_owners = null;
-        }
-        var debug_names = self.debug_closure_names.valueIterator();
-        while (debug_names.next()) |name| self.allocator.free(name.*);
-        self.debug_closure_names.deinit(self.allocator);
         self.gc_zero_sites.deinit(self.allocator);
         self.builtin_classes.deinit(self.allocator);
         self.builtin_interfaces.deinit(self.allocator);
@@ -4899,8 +4850,15 @@ pub const VM = struct {
                     const arg_count = self.readByte();
                     const ac: usize = arg_count;
                     const name_val = self.stack[self.sp - ac - 1];
-                    if (name_val == .string and std.mem.indexOf(u8, name_val.string.bytes(), "::") == null) {
-                        const name = name_val.string.bytes();
+                    // a closure is called by its instance name, a plain
+                    // function name directly
+                    const direct_name: ?[]const u8 = if (name_val.closureName()) |closure|
+                        closure
+                    else if (name_val == .string and std.mem.indexOf(u8, name_val.string.bytes(), "::") == null)
+                        name_val.string.bytes()
+                    else
+                        null;
+                    if (direct_name) |name| {
                         var i: usize = 0;
                         while (i < ac) : (i += 1) {
                             self.stack[self.sp - ac - 1 + i] = self.stack[self.sp - ac + i];
@@ -4908,11 +4866,11 @@ pub const VM = struct {
                         }
                         self.clearArgStackFrom(self.sp - 1);
                         self.sp -= 1;
-                        // the closure value slot is consumed here; the callee
-                        // frame retains the instance by call_name, and the
-                        // deferred release keeps the name alive until then
+                        // the callee value's slot is gone; it is released once
+                        // the callee frame holds a closure by call_name
+                        const called = self.callNamedFunction(name, arg_count);
                         self.stackRelease(name_val);
-                        self.callNamedFunction(name, arg_count) catch {
+                        called catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
@@ -5151,8 +5109,19 @@ pub const VM = struct {
                         arrayUnpin(arr);
                         if (arr.refcount == 0) self.queueArrayRelease(arr);
                     }
-                    if (name_val == .string and std.mem.indexOf(u8, name_val.string.bytes(), "::") == null) {
-                        const native_needs_refs = self.native_fns.contains(name_val.string.bytes()) and (std.mem.eql(u8, name_val.string.bytes(), "preg_match") or std.mem.eql(u8, name_val.string.bytes(), "preg_match_all") or std.mem.eql(u8, name_val.string.bytes(), "pcntl_sigprocmask"));
+                    // a closure is called by its instance name, a plain
+                    // function name directly; the callee value stays counted
+                    // until the call is under way
+                    const spread_name: ?[]const u8 = if (name_val.closureName()) |closure|
+                        closure
+                    else if (name_val == .string and std.mem.indexOf(u8, name_val.string.bytes(), "::") == null)
+                        name_val.string.bytes()
+                    else
+                        null;
+                    if (spread_name != null and name_val == .object) objRetain(name_val.object);
+                    defer if (spread_name != null and name_val == .object) self.objRelease(name_val.object);
+                    if (spread_name) |callee_name| {
+                        const native_needs_refs = self.native_fns.contains(callee_name) and (std.mem.eql(u8, callee_name, "preg_match") or std.mem.eql(u8, callee_name, "preg_match_all") or std.mem.eql(u8, callee_name, "pcntl_sigprocmask"));
                         if (native_needs_refs) {
                             var ref_buf: [16]Value = undefined;
                             const ref_args = if (arr.entries.items.len <= ref_buf.len) ref_buf[0..arr.entries.items.len] else try self.allocator.alloc(Value, arr.entries.items.len);
@@ -5165,7 +5134,7 @@ pub const VM = struct {
                                 arrayUnpin(arr);
                                 if (arr.refcount == 0) self.queueArrayRelease(arr);
                             }
-                            const result = try self.callByNameRef(name_val.string.bytes(), ref_args);
+                            const result = try self.callByNameRef(callee_name, ref_args);
                             for (arr.entries.items, 0..) |*entry, i| {
                                 if (entry.ref) |ref| {
                                     self.setCell(ref, ref_args[i]);
@@ -5183,7 +5152,7 @@ pub const VM = struct {
                             }
                         }
                         if (has_named_args) {
-                            if (self.functions.get(name_val.string.bytes())) |func| {
+                            if (self.functions.get(callee_name)) |func| {
                                 var resolved_buf: [256]Value = undefined;
                                 var sources_buf: [256]RefSource = undefined;
                                 var assigned_buf: [256]bool = undefined;
@@ -5213,14 +5182,14 @@ pub const VM = struct {
                                     self.push(resolved[i]);
                                     self.setArgSource(self.sp - 1, resolved_sources[i]);
                                 }
-                                self.callNamedFunction(name_val.string.bytes(), @intCast(pos)) catch {
+                                self.callNamedFunction(callee_name, @intCast(pos)) catch {
                                     if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                     return error.RuntimeError;
                                 };
                             } else {
                                 try self.pushArgEntries(arr, arr.entries.items);
                                 const ac2: u32 = @intCast(arr.entries.items.len);
-                                self.callNamedFunction(name_val.string.bytes(), ac2) catch {
+                                self.callNamedFunction(callee_name, ac2) catch {
                                     if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                     return error.RuntimeError;
                                 };
@@ -5228,7 +5197,7 @@ pub const VM = struct {
                         } else {
                             try self.pushArgEntries(arr, arr.entries.items);
                             const ac: u32 = @intCast(arr.entries.items.len);
-                            self.callNamedFunction(name_val.string.bytes(), ac) catch {
+                            self.callNamedFunction(callee_name, ac) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
@@ -7717,7 +7686,7 @@ pub const VM = struct {
                     } else try append_val.format(&suffix, temporary_allocator);
                     if (is_ref == null and current == .string) {
                         if (current.string.owner) |owner| {
-                            if (!owner.closure and owner.refcount == 1 and current.string.ptr == owner.bytes.ptr) {
+                            if (owner.refcount == 1 and current.string.ptr == owner.bytes.ptr) {
                                 const length = std.math.add(usize, current.string.len, suffix.items.len) catch return error.OutOfMemory;
                                 if (length > owner.bytes.len) {
                                     const growth = std.math.add(usize, owner.bytes.len / 2, 16) catch return error.OutOfMemory;
@@ -8007,7 +7976,12 @@ pub const VM = struct {
                         if (try self.throwBuiltinException("Error", "Trying to clone an uncloneable object of class Fiber")) continue;
                         return error.RuntimeError;
                     }
-                    if (val == .object) {
+                    if (val.closureName()) |name| {
+                        // a cloned closure is a new instance with the same
+                        // captures, $this and scope
+                        const copy = try self.copyClosureInstance(name, self.closureThisByName(name), self.closureDefClassByName(name), self.closureScopeByName(name));
+                        self.pushTransfer(copy);
+                    } else if (val == .object) {
                         var src = val.object;
                         self.triggerLazyInit(src) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -8065,8 +8039,6 @@ pub const VM = struct {
                             copy.retain();
                             self.push(.{ .object = proxy });
                         } else self.push(.{ .object = copy });
-                    } else if (val == .string and std.mem.startsWith(u8, val.string.bytes(), "__closure_")) {
-                        self.push(val);
                     } else {
                         const msg = try std.fmt.allocPrint(self.allocator, "clone(): Argument #1 ($object) must be of type object, {s} given", .{val.valueName()});
                         defer self.allocator.free(msg);
@@ -8079,18 +8051,6 @@ pub const VM = struct {
                     const v = self.pop();
                     switch (v) {
                         .object => |o| self.push(.{ .string = Value.String.borrowed(o.class_name) }),
-                        // a closure is represented as a __closure_* string, but
-                        // it IS an object in PHP - `$closure::class` is "Closure"
-                        // (Symfony VarDumper's VarCloner does `$v::class` on
-                        // trace-arg closures while cloning an exception)
-                        .string => |s| {
-                            if (std.mem.startsWith(u8, s.bytes(), "__closure_")) {
-                                self.push(.{ .string = Value.String.borrowed("Closure") });
-                            } else {
-                                self.setErrorMsg("Fatal error: Cannot use \"::class\" on non-object", .{});
-                                return error.RuntimeError;
-                            }
-                        },
                         .generator => self.push(.{ .string = Value.String.borrowed("Generator") }),
                         .fiber => self.push(.{ .string = Value.String.borrowed("Fiber") }),
                         else => {
@@ -8209,10 +8169,39 @@ pub const VM = struct {
                     }
                 },
 
+                .closure_new => try self.newClosureFromTop(),
+
                 .callable_closure => {
-                    const callable = self.pop();
+                    var callable = self.pop();
+                    // a closure's first-class callable is the closure itself
+                    if (callable == .object and std.mem.eql(u8, callable.object.class_name, "Closure")) {
+                        self.push(callable);
+                        continue;
+                    }
+                    // what the callable names must exist, and be callable from
+                    // here, when the closure is made. resolving it may
+                    // autoload, which runs php: the popped callable is held
+                    const popped = callable;
+                    retainValue(popped);
+                    defer self.releaseValue(popped);
+                    var held_pair: ?*PhpArray = null;
+                    var function: ?[]const u8 = null;
+                    var forwarded: ?[]const u8 = null;
+                    switch (self.callableClosureCheck(callable, &held_pair, &function, &forwarded) catch {
+                        if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    }) {
+                        .ok => {},
+                        .failed => |failure| {
+                            if (try callables.throwDynamicFailure(self, failure)) continue;
+                            return error.RuntimeError;
+                        },
+                    }
+                    if (held_pair) |pair| callable = .{ .array = pair };
+                    if (function) |registered| callable = .{ .string = Value.String.borrowed(registered) };
                     const obj = try self.allocObject(.{ .class_name = "Closure" });
                     try obj.set(self.allocator, "__callable", callable);
+                    if (forwarded) |class| try obj.set(self.allocator, "__called_class", .{ .string = Value.String.borrowed(class) });
                     self.push(.{ .object = obj });
                 },
 
@@ -8221,8 +8210,7 @@ pub const VM = struct {
                     if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
                     const var_idx = self.readU16();
                     const var_name = self.currentChunk().constants.items[var_idx].string.bytes();
-                    try self.ensureClosureInstance();
-                    const closure_name = self.peek().string.bytes();
+                    const closure_name = self.peek().object.closureName().?;
                     const local_val = self.getLocalByName(var_name);
                     const val = if (self.currentFrame().ref_slots.get(var_name)) |cell|
                         cell.*
@@ -8262,8 +8250,7 @@ pub const VM = struct {
                     if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
                     const var_idx = self.readU16();
                     const var_name = self.currentChunk().constants.items[var_idx].string.bytes();
-                    try self.ensureClosureInstance();
-                    const closure_name = self.peek().string.bytes();
+                    const closure_name = self.peek().object.closureName().?;
                     // get or create a ref cell for this variable
                     const cell = if (self.currentFrame().ref_slots.get(var_name)) |existing|
                         existing
@@ -8651,11 +8638,6 @@ pub const VM = struct {
                         self.push(.{ .bool = matches });
                     } else if (obj_val == .fiber and class_name_val == .string) {
                         self.push(.{ .bool = std.mem.eql(u8, class_name_val.string.bytes(), "Fiber") });
-                    } else if (obj_val == .string and class_name_val == .string and
-                        std.mem.eql(u8, class_name_val.string.bytes(), "Closure") and
-                        std.mem.startsWith(u8, obj_val.string.bytes(), "__closure_"))
-                    {
-                        self.push(.{ .bool = true });
                     } else {
                         self.push(.{ .bool = false });
                     }
@@ -9093,6 +9075,13 @@ pub const VM = struct {
                             if (try self.throwBuiltinException("Error", msg)) continue;
                             return error.RuntimeError;
                         }
+                    }
+                    // closures come from closure expressions and Closure's
+                    // factories only
+                    if (std.ascii.eqlIgnoreCase(class_name, "Closure")) {
+                        self.dropN(arg_count);
+                        if (try self.throwBuiltinException("Error", "Instantiation of class Closure is not allowed")) continue;
+                        return error.RuntimeError;
                     }
 
                     const obj = try self.allocUserObjectHandle(class_name, self.takeReservedHandle(arg_count));
@@ -9817,9 +9806,8 @@ pub const VM = struct {
                         // php 8 refuses a property write on anything but an
                         // object; closures, generators, and fibers are objects
                         // that take no dynamic properties
-                        const is_closure = obj_val == .string and std.mem.startsWith(u8, obj_val.string.bytes(), "__closure_");
-                        const msg = if (is_closure or obj_val == .generator or obj_val == .fiber)
-                            try std.fmt.allocPrint(self.allocator, "Cannot create dynamic property {s}::${s}", .{ if (is_closure) "Closure" else obj_val.valueName(), prop_name })
+                        const msg = if (obj_val == .generator or obj_val == .fiber)
+                            try std.fmt.allocPrint(self.allocator, "Cannot create dynamic property {s}::${s}", .{ obj_val.valueName(), prop_name })
                         else
                             try std.fmt.allocPrint(self.allocator, "Attempt to assign property \"{s}\" on {s}", .{ prop_name, obj_val.valueName() });
                         defer self.allocator.free(msg);
@@ -9970,8 +9958,9 @@ pub const VM = struct {
                             const hb = self.handler_count;
 
                             for (0..ac) |i| self.push(args_buf[i]);
-                            if (fiber.callable == .string) {
-                                self.callNamedFunction(fiber.callable.string.bytes(), @intCast(ac)) catch {
+                            const fiber_fn: ?[]const u8 = if (fiber.callable.closureName()) |closure| closure else if (fiber.callable == .string) fiber.callable.string.bytes() else null;
+                            if (fiber_fn) |fn_name| {
+                                self.callNamedFunction(fn_name, @intCast(ac)) catch {
                                     if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                     return error.RuntimeError;
                                 };
@@ -10072,65 +10061,24 @@ pub const VM = struct {
                         continue;
                     }
 
-                    if (obj_val == .string and std.mem.startsWith(u8, obj_val.string.bytes(), "__closure_")) {
-                        const closure_name = obj_val.string.bytes();
-                        // __invoke(...args) on a closure is equivalent to
-                        // calling the closure directly. preserves the closure's
-                        // existing $this/scope binding
-                        if (std.mem.eql(u8, method_name, "__invoke")) {
-                            var call_args: [16]Value = undefined;
-                            const call_args_s = try self.copyStackArgs(&call_args, self.stack[self.sp - ac ..][0..ac]);
-                            defer self.freeStackArgs(call_args_s, &call_args);
-                            self.dropN(ac + 1);
-                            const result = try self.callByName(closure_name, call_args_s);
-                            self.push(result);
-                            continue;
+                    // $closure->__invoke(...) is a call of the closure itself,
+                    // its by-reference parameters included
+                    if (obj_val.closureName()) |closure| if (std.ascii.eqlIgnoreCase(method_name, "__invoke")) {
+                        var i: usize = 0;
+                        while (i < ac) : (i += 1) {
+                            self.stack[self.sp - ac - 1 + i] = self.stack[self.sp - ac + i];
+                            self.setArgSource(self.sp - ac - 1 + i, self.ic.?.arg_stack[self.sp - ac + i]);
                         }
-                        if (std.mem.eql(u8, method_name, "bindTo")) {
-                            const new_this = if (ac >= 1) self.stack[self.sp - ac] else Value.null;
-                            const bt_scope: ClosureScope = blk: {
-                                if (ac >= 2) {
-                                    const sa = self.stack[self.sp - ac + 1];
-                                    if (sa == .string) {
-                                        if (std.mem.eql(u8, sa.string.bytes(), "static")) break :blk .preserve;
-                                        break :blk .{ .set = sa.string.bytes() };
-                                    }
-                                    if (sa == .object) break :blk .{ .set = sa.object.class_name };
-                                    if (sa == .null) break :blk .clear;
-                                }
-                                break :blk .preserve;
-                            };
-                            self.dropN(ac + 1);
-                            const result = try self.cloneClosureWithThis(closure_name, new_this, bt_scope);
-                            self.pushTransfer(result);
-                            continue;
-                        } else if (std.mem.eql(u8, method_name, "call")) {
-                            const new_this = if (ac >= 1) self.stack[self.sp - ac] else Value.null;
-                            const call_scope: ClosureScope = if (new_this == .object) .{ .set = new_this.object.class_name } else .preserve;
-                            var call_args: [16]Value = undefined;
-                            const extra = if (ac > 1) ac - 1 else 0;
-                            const call_args_s = try self.copyStackArgs(&call_args, self.stack[self.sp - ac + 1 ..][0..extra]);
-                            defer self.freeStackArgs(call_args_s, &call_args);
-                            self.dropN(ac + 1);
-                            const bound = try self.cloneClosureWithThis(closure_name, new_this, call_scope);
-                            // the temporary bound instance lives for this call
-                            // only; the callee frame retains it while it runs
-                            defer self.releaseValue(bound);
-                            if (bound == .string) {
-                                const result = try self.callByName(bound.string.bytes(), call_args_s);
-                                self.push(result);
-                            } else {
-                                self.push(.null);
-                            }
-                            continue;
-                        } else {
-                            self.dropN(ac + 1);
-                            const msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method Closure::{s}()", .{method_name});
-                            defer self.allocator.free(msg);
-                            if (try self.throwBuiltinException("Error", msg)) continue;
+                        self.clearArgStackFrom(self.sp - 1);
+                        self.sp -= 1;
+                        const called = self.callNamedFunction(closure, arg_count);
+                        self.stackRelease(obj_val);
+                        called catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
-                        }
-                    }
+                        };
+                        continue;
+                    };
 
                     if (obj_val != .object) {
                         self.dropN(ac + 1);
@@ -14843,7 +14791,7 @@ pub const VM = struct {
         } else try append_val.format(&suffix, temporary_allocator);
         if (current == .string and self.localCell(frame, slot) == null) {
             if (current.string.owner) |owner| {
-                if (!owner.closure and owner.refcount == 1 and current.string.ptr == owner.bytes.ptr) {
+                if (owner.refcount == 1 and current.string.ptr == owner.bytes.ptr) {
                     const length = std.math.add(usize, current.string.len, suffix.items.len) catch return error.OutOfMemory;
                     if (length > owner.bytes.len) {
                         const growth = std.math.add(usize, owner.bytes.len / 2, 16) catch return error.OutOfMemory;
@@ -16464,39 +16412,37 @@ pub const VM = struct {
 
     // closure and frame helpers
 
-    fn ensureClosureInstance(self: *VM) !void {
+    // closure_new: the compiled closure named on top becomes a Closure
+    // object. its scope belongs to the instance, not to a particular use
+    // capture, so even a static closure without captures records it
+    fn newClosureFromTop(self: *VM) !void {
         const compile_name = self.peek().string.bytes();
-        if (std.mem.startsWith(u8, compile_name, "__closure_") and
-            !std.mem.containsAtLeast(u8, compile_name["__closure_".len..], 1, "_"))
-        {
-            const func = self.functions.get(compile_name) orelse return error.RuntimeError;
-            self.stack[self.sp - 1] = try self.newClosureInstance(compile_name, func);
-            // Scope belongs to the closure instance, not to a particular kind
-            // of use capture. Reference-only static closures need it too.
-            const name = self.peek().string.bytes();
-            const lexical_class = self.currentDefiningClass();
-            const this_val = self.getLocalByName("$this");
-            const scope = if (lexical_class != null)
-                self.currentFrame().called_class orelse
-                    (if (this_val == .object) this_val.object.class_name else lexical_class)
-            else
-                null;
-            if (scope) |class_name| {
-                try self.captures.append(self.allocator, .{
-                    .closure_name = name,
-                    .var_name = "$__closure_scope",
-                    .value = .{ .string = Value.String.borrowed(class_name) },
-                });
-                self.capture_index.getPtr(name).?.len += 1;
-            }
-            if (lexical_class) |class_name| {
-                try self.captures.append(self.allocator, .{
-                    .closure_name = name,
-                    .var_name = "$__closure_defclass",
-                    .value = .{ .string = Value.String.borrowed(class_name) },
-                });
-                self.capture_index.getPtr(name).?.len += 1;
-            }
+        const func = self.functions.get(compile_name) orelse return error.RuntimeError;
+        const instance = try self.newClosureInstance(compile_name, func);
+        self.stack[self.sp - 1] = instance;
+        const name = instance.object.closureName().?;
+        const lexical_class = self.currentDefiningClass();
+        const this_val = self.getLocalByName("$this");
+        const scope = if (lexical_class != null)
+            self.currentFrame().called_class orelse
+                (if (this_val == .object) this_val.object.class_name else lexical_class)
+        else
+            null;
+        if (scope) |class_name| {
+            try self.captures.append(self.allocator, .{
+                .closure_name = name,
+                .var_name = "$__closure_scope",
+                .value = .{ .string = Value.String.borrowed(class_name) },
+            });
+            self.capture_index.getPtr(name).?.len += 1;
+        }
+        if (lexical_class) |class_name| {
+            try self.captures.append(self.allocator, .{
+                .closure_name = name,
+                .var_name = "$__closure_defclass",
+                .value = .{ .string = Value.String.borrowed(class_name) },
+            });
+            self.capture_index.getPtr(name).?.len += 1;
         }
     }
 
@@ -16515,27 +16461,26 @@ pub const VM = struct {
         return name;
     }
 
-    // a closure instance is an owned string whose owner is flagged closure.
-    // the stack slot takes the single initial reference; captures appended
-    // by the following closure_bind ops extend the registered range
+    // a closure instance is a Closure object naming its instance: the vm
+    // keys the instance's function, captures and statics by that name. the
+    // object comes with the one reference the caller takes; captures
+    // appended by the following closure_bind ops extend the registered range
     fn newClosureInstance(self: *VM, compile_name: []const u8, func: *const ObjFunction) !Value {
         const name = try self.allocClosureInstanceName(compile_name);
         try self.functions.put(self.allocator, name, func);
         try self.indexFunctionByChunk(name, &func.chunk);
-        const owner = try self.allocator.create(Value.String.Owner);
-        owner.* = .{ .bytes = @constCast(name), .allocator = self.allocator, .closure = true };
-        if (self.debug_closure_owners) |*list| {
-            try list.append(self.allocator, owner);
-            try self.debug_closure_names.put(self.allocator, owner, try self.allocator.dupe(u8, name));
-        }
+        const obj = try self.allocObject(.{
+            .class_name = "Closure",
+            .native = .{ .kind = .closure, .ptr = @intFromPtr(name.ptr), .aux = name.len },
+        });
+        obj.refcount = 1;
         try self.capture_index.put(self.allocator, name, .{
             .start = @intCast(self.captures.items.len),
             .len = 0,
             .has_refs = false,
-            .owner = owner,
-            .handle = try self.allocHandle(),
+            .object = obj,
         });
-        return .{ .string = .{ .ptr = name.ptr, .len = name.len, .owner = owner } };
+        return .{ .object = obj };
     }
 
     // a closure instance for a function this vm knows, with captures given
@@ -16544,7 +16489,7 @@ pub const VM = struct {
     pub fn bindClosureInstance(self: *VM, compile_name: []const u8, names: []const []const u8, values: []const Value) !Value {
         const func = self.functions.get(compile_name) orelse return error.RuntimeError;
         const instance = try self.newClosureInstance(compile_name, func);
-        const name = instance.string.bytes();
+        const name = instance.object.closureName().?;
         for (names, values) |var_name, val| {
             const kept = try self.internName(var_name);
             retainValue(val);
@@ -16583,7 +16528,8 @@ pub const VM = struct {
         if (v == .array) return v;
         const arr = try self.allocArray();
         switch (v) {
-            .object => |o| try self.copyPropertiesToArray(o.storage(), arr),
+            // php converts a closure as it does a scalar: an array holding it
+            .object => |o| if (std.mem.eql(u8, o.class_name, "Closure")) try arr.append(self.allocator, v) else try self.copyPropertiesToArray(o.storage(), arr),
             .null => {},
             else => try arr.append(self.allocator, v),
         }
@@ -16729,10 +16675,17 @@ pub const VM = struct {
     }
 
     fn releaseGeneratorClosure(self: *VM, gen: *Generator) void {
-        const owner = gen.closure orelse return;
+        const closure = gen.closure orelse return;
         gen.closure = null;
-        owner.refcount -= 1;
-        if (owner.refcount == 0) self.queueStringRelease(owner);
+        self.objRelease(closure);
+    }
+
+    // a closure's generator keeps the Closure object alive, as php's does
+    fn keepGeneratorClosure(self: *VM, gen: *Generator, name: []const u8) void {
+        const range = self.capture_index.get(name) orelse return;
+        const closure = range.object orelse return;
+        objRetain(closure);
+        gen.closure = closure;
     }
 
     const HeldOperands = struct { values: [17]Value = undefined, len: usize = 0 };
@@ -16763,49 +16716,35 @@ pub const VM = struct {
         self.stackRelease(position);
     }
 
-    // the handle of a closure instance, the number its Closure object has in php
-    pub fn closureHandle(self: *VM, name: []const u8) ?u32 {
+    // the Closure object of a closure instance
+    pub fn closureObject(self: *VM, name: []const u8) ?*PhpObject {
         const range = self.capture_index.get(name) orelse return null;
-        return if (range.handle != 0) range.handle else null;
+        return range.object;
     }
 
+    // a frame running a closure holds its Closure object, as php's call
+    // frame does
     pub fn retainClosureByName(self: *VM, name: []const u8) void {
         const range = self.capture_index.getPtr(name) orelse return;
-        if (range.owner) |owner| owner.refcount += 1;
+        if (range.object) |obj| objRetain(obj);
     }
 
     pub fn releaseClosureByName(self: *VM, name: []const u8) void {
         const range = self.capture_index.getPtr(name) orelse return;
-        const owner = range.owner orelse return;
-        std.debug.assert(owner.refcount > 0);
-        owner.refcount -= 1;
-        if (owner.refcount == 0) self.queueStringRelease(owner);
+        const obj = range.object orelse return;
+        self.objRelease(obj);
     }
 
-    // the last reference to a closure instance dropped: release what it
-    // captured, forget its function alias and statics, recycle the name
-    fn releaseClosureInstance(self: *VM, owner: *Value.String.Owner) void {
-        if (self.debug_closure_owners) |*list| {
-            for (list.items, 0..) |o, i| if (o == owner) {
-                _ = list.swapRemove(i);
-                break;
-            };
-        }
-        // during heap teardown the captures are gone and the name arena may
-        // already be freed: only the owner struct remains to destroy
-        if (self.heap_teardown) {
-            self.allocator.destroy(owner);
-            return;
-        }
-        const name: []const u8 = owner.bytes;
+    // a Closure object is being freed: release what its instance captured
+    // (into the caller's release log, so they go before the object's own
+    // handle, as php frees a closure's bound object and statics first),
+    // forget its function alias and statics, recycle the name
+    fn releaseClosureInstance(self: *VM, obj: *PhpObject) void {
+        const name = obj.closureName() orelse return;
+        obj.native = .{};
+        if (self.heap_teardown) return;
         if (self.capture_index.fetchRemove(name)) |removed| {
             const range = removed.value;
-            // what the closure captured goes before its own handle, depth
-            // first, as php frees a closure's bound object and statics first
-            var dropped: std.ArrayListUnmanaged(ReleasedItem) = .empty;
-            defer dropped.deinit(self.allocator);
-            const outer_log = self.release_log;
-            if (self.draining_destructors and self.release_depth < max_release_depth) self.release_log = &dropped;
             for (0..range.len) |i| {
                 const capture = &self.captures.items[range.start + i];
                 self.releaseValue(capture.value);
@@ -16814,17 +16753,6 @@ pub const VM = struct {
                 capture.ref_cell = null;
                 if (old_cell) |cell| self.unbindCell(cell);
             }
-            self.release_log = outer_log;
-            if (dropped.items.len > 0) {
-                var deferred: std.ArrayListUnmanaged(*PhpArray) = .empty;
-                defer deferred.deinit(self.allocator);
-                self.destroyDropped(dropped.items, &deferred);
-                for (deferred.items) |arr| {
-                    arr.release_queued = false;
-                    self.queueArrayRelease(arr);
-                }
-            }
-            if (range.handle != 0) self.free_handles.append(self.allocator, range.handle) catch {};
             if (range.ref_owner != 0) if (self.ref_index) |ri| ri.releaseOwner(self.allocator, range.ref_owner);
             self.captures_dead += range.len;
             if (range.has_statics) self.purgeClosureStatics(name);
@@ -16841,7 +16769,6 @@ pub const VM = struct {
             }
             self.compactCapturesIfNeeded();
         }
-        self.allocator.destroy(owner);
     }
 
     fn purgeClosureStatics(self: *VM, name: []const u8) void {
@@ -16882,12 +16809,11 @@ pub const VM = struct {
 
     // request teardown: every capture goes away with the request, so release
     // what the ranges hold before the heap bulk-free destroys the containers
-    // those values point at. owners still referenced elsewhere are destroyed
-    // by the string drain once their holders release them
+    // those values point at
     fn teardownCaptures(self: *VM) void {
         if (platform.getenv("ZPHP_HEAP_STATS") != null) {
             var it = self.capture_index.iterator();
-            while (it.next()) |entry| if (entry.value_ptr.owner) |owner| {
+            while (it.next()) |entry| if (entry.value_ptr.object) |owner| {
                 const compile_name = self.getOrigClosureName(entry.key_ptr.*);
                 const loc_file = if (self.functions.get(compile_name)) |f| f.file_path else "?";
                 const loc_line = if (self.functions.get(compile_name)) |f| f.start_line else 0;
@@ -16899,6 +16825,8 @@ pub const VM = struct {
         }
         var ranges = self.capture_index.valueIterator();
         while (ranges.next()) |range| {
+            // the object outlives its instance now: it names nothing
+            if (range.object) |obj| obj.native = .{};
             for (0..range.len) |i| {
                 const capture = &self.captures.items[range.start + i];
                 self.releaseValue(capture.value);
@@ -16914,156 +16842,269 @@ pub const VM = struct {
         self.free_closure_names.clearRetainingCapacity();
     }
 
-    pub const ClosureScope = union(enum) {
-        preserve, // keep existing scope ('static' or omitted)
-        clear, // explicitly null - remove scope
-        set: []const u8, // explicit class name
-    };
+    // a new closure instance without the reference it was created with, for
+    // a native to return as its result (natives' results are borrowed)
+    pub fn disownedClosure(self: *VM, value: Value) Value {
+        _ = self;
+        if (value == .object) value.object.refcount -= 1;
+        return value;
+    }
 
-    pub fn cloneClosureWithThis(self: *VM, closure_name: []const u8, new_this: Value, scope_action: ClosureScope) !Value {
-        const func = self.functions.get(closure_name) orelse return .null;
+    const CallableCheck = union(enum) { ok, failed: callables.Failure };
 
-        // static closures cannot be bound to a non-null $this. PHP emits a
-        // warning and returns null in that case; match the null return so
-        // callers see the same observable behavior
-        if (func.is_static and new_this != .null) {
-            try self.emitWarning("Cannot bind an instance to a static closure, this will be an error in PHP 9");
-            return .null;
+    // a first-class callable's target, resolved as a dynamic call would be.
+    // `Class::method(...)` of an instance method from inside an instance of
+    // that class is bound to $this (rewritten in pair), as php does; names
+    // relative to the scope (self, parent, static) are resolved when called
+    fn callableClosureCheck(self: *VM, callable: Value, pair: *?*PhpArray, function: *?[]const u8, forwarded: *?[]const u8) RuntimeError!CallableCheck {
+        if (callable == .string and std.mem.indexOf(u8, callable.string.bytes(), "::") == null) {
+            const raw = callable.string.bytes();
+            const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
+            function.* = self.canonicalFunctionName(name) orelse self.resolveFunctionName(name) orelse
+                return .{ .failed = .{ .function_not_found = name } };
+            return .ok;
         }
+        if (callable == .array and callable.array.entries.items.len == 2) {
+            const target = callable.array.entries.items[0].value;
+            const method = callable.array.entries.items[1].value;
+            if (target == .string and method == .string) {
+                var class = target.string.bytes();
+                var named = callable;
+                // self::, parent:: and static:: name classes of the scope the
+                // closure is made in
+                const relative = std.ascii.eqlIgnoreCase(class, "self") or std.ascii.eqlIgnoreCase(class, "parent") or std.ascii.eqlIgnoreCase(class, "static");
+                if (relative) {
+                    const this = self.scopeThis();
+                    const resolved: ?[]const u8 = if (std.ascii.eqlIgnoreCase(class, "static"))
+                        (if (self.frame_count > 0) self.currentFrame().called_class else null) orelse (if (this) |t| t.class_name else null) orelse self.currentDefiningClass()
+                    else
+                        self.intentClassName(class);
+                    // self:: and parent:: forward the called class, which a
+                    // static method's static:: names
+                    if (!std.ascii.eqlIgnoreCase(class, "static")) {
+                        const called = (if (self.frame_count > 0) self.currentFrame().called_class else null) orelse (if (this) |t| t.class_name else null);
+                        if (called) |c| if (resolved) |r| if (!std.ascii.eqlIgnoreCase(c, r) and self.isInstanceOf(c, r)) {
+                            forwarded.* = c;
+                        };
+                    }
+                    class = resolved orelse return .{ .failed = .{ .no_scope = class } };
+                    const rewritten = try self.allocArray();
+                    try rewritten.append(self.allocator, .{ .string = Value.String.borrowed(class) });
+                    try rewritten.append(self.allocator, method);
+                    pair.* = rewritten;
+                    named = .{ .array = rewritten };
+                }
+                switch (try callables.resolveDynamic(self, named)) {
+                    .callee => return .ok,
+                    .failure => |failure| {
+                        if (failure == .non_static) if (self.scopeThis()) |this| if (self.isInstanceOf(this.class_name, class)) {
+                            const bound = try self.allocArray();
+                            try bound.append(self.allocator, .{ .object = this });
+                            try bound.append(self.allocator, method);
+                            pair.* = bound;
+                            return .ok;
+                        };
+                        return self.callableFailureInScope(failure);
+                    },
+                }
+            }
+        }
+        return switch (try callables.resolveDynamic(self, callable)) {
+            .callee => .ok,
+            .failure => |failure| self.callableFailureInScope(failure),
+        };
+    }
 
-        const instance = try self.newClosureInstance("__closure_bound", func);
-        const new_name = instance.string.bytes();
-        const new_range = self.capture_index.getPtr(new_name).?;
+    // a constant expression (a property or constant initializer) makes its
+    // closures in the declaring class's scope, which the running frame
+    // doesn't show
+    fn callableFailureInScope(self: *VM, failure: callables.Failure) CallableCheck {
+        if (failure == .inaccessible and self.frame_count > 0) if (self.currentFrame().func) |func| {
+            if (func.name.len > 0 and func.name[0] == 0) return .ok;
+        };
+        return .{ .failed = failure };
+    }
 
+    // a copy of a closure instance bound to new_this, scope (the class it
+    // runs in, php's func.common.scope) and called (what static:: names):
+    // the captures are shared, by-reference ones still bound to their cells,
+    // and the static variables are copied with their current values, as
+    // zend_create_closure does
+    pub fn copyClosureInstance(self: *VM, closure_name: []const u8, new_this: Value, scope: ?[]const u8, called: ?[]const u8) !Value {
+        const func = self.functions.get(closure_name) orelse return .null;
+        const instance = try self.newClosureInstance(self.getOrigClosureName(closure_name), func);
+        const new_name = instance.object.closureName().?;
+        const new_start: u32 = @intCast(self.captures.items.len);
+        var has_refs = false;
         if (self.capture_index.get(closure_name)) |cr| {
-            // copy source captures to a heap buffer to avoid dangling slice
-            // when self.captures reallocates during append
-            const src_len = cr.len;
-            const src_heap = try self.allocator.alloc(CaptureEntry, src_len);
-            defer self.allocator.free(src_heap);
-            for (0..src_len) |i| src_heap[i] = self.captures.items[cr.start + i];
-            const src = src_heap;
-
-            const new_start: u32 = @intCast(self.captures.items.len);
-            var has_this = false;
-            var has_scope = false;
-            var has_defclass = false;
-            for (src) |cap| {
-                if (std.mem.eql(u8, cap.var_name, "$__closure_scope")) {
-                    has_scope = true;
-                    switch (scope_action) {
-                        .preserve => try self.captures.append(self.allocator, .{
-                            .closure_name = new_name,
-                            .var_name = "$__closure_scope",
-                            .value = cap.value,
-                        }),
-                        .clear => {},
-                        .set => |s| try self.captures.append(self.allocator, .{
-                            .closure_name = new_name,
-                            .var_name = "$__closure_scope",
-                            .value = .{ .string = Value.String.borrowed(s) },
-                        }),
-                    }
-                    continue;
-                }
-                if (std.mem.eql(u8, cap.var_name, "$__closure_defclass")) {
-                    has_defclass = true;
-                    switch (scope_action) {
-                        .preserve => try self.captures.append(self.allocator, .{
-                            .closure_name = new_name,
-                            .var_name = "$__closure_defclass",
-                            .value = cap.value,
-                        }),
-                        .clear => {},
-                        .set => |s| try self.captures.append(self.allocator, .{
-                            .closure_name = new_name,
-                            .var_name = "$__closure_defclass",
-                            .value = .{ .string = Value.String.borrowed(s) },
-                        }),
-                    }
-                    continue;
-                }
-                var new_cap = CaptureEntry{
-                    .closure_name = new_name,
-                    .var_name = cap.var_name,
-                    .value = cap.value,
-                    .ref_cell = cap.ref_cell,
-                };
-                if (std.mem.eql(u8, cap.var_name, "$this")) {
-                    new_cap.value = new_this;
-                    new_cap.ref_cell = null;
-                    has_this = true;
-                }
+            var i: usize = 0;
+            while (i < cr.len) : (i += 1) {
+                // self.captures may move as it grows: index, never hold a slice
+                const cap = self.captures.items[cr.start + i];
+                if (std.mem.eql(u8, cap.var_name, "$this") or
+                    std.mem.eql(u8, cap.var_name, "$__closure_scope") or
+                    std.mem.eql(u8, cap.var_name, "$__closure_defclass")) continue;
+                var new_cap = CaptureEntry{ .closure_name = new_name, .var_name = cap.var_name, .value = cap.value, .ref_cell = cap.ref_cell };
                 if (new_cap.ref_cell) |cell| {
                     new_cap.value = cell.*;
                     self.bindCell(cell);
+                    has_refs = true;
                 }
-                // the copied closure holds its own reference (Stage 1)
+                // the copy holds its own reference
                 retainValue(new_cap.value);
                 try self.captures.append(self.allocator, new_cap);
-                if (new_cap.ref_cell) |cell| try self.regRefCapture(new_range, cell, new_cap.var_name);
+                if (new_cap.ref_cell) |cell| try self.regRefCapture(self.capture_index.getPtr(new_name).?, cell, new_cap.var_name);
             }
-            if (!has_this and new_this != .null) {
-                retainValue(new_this);
-                try self.captures.append(self.allocator, .{
-                    .closure_name = new_name,
-                    .var_name = "$this",
-                    .value = new_this,
-                });
-            }
-            if (!has_scope) {
-                switch (scope_action) {
-                    .set => |s| try self.captures.append(self.allocator, .{
-                        .closure_name = new_name,
-                        .var_name = "$__closure_scope",
-                        .value = .{ .string = Value.String.borrowed(s) },
-                    }),
-                    .preserve, .clear => {},
-                }
-            }
-            if (!has_defclass) {
-                switch (scope_action) {
-                    .set => |s| try self.captures.append(self.allocator, .{
-                        .closure_name = new_name,
-                        .var_name = "$__closure_defclass",
-                        .value = .{ .string = Value.String.borrowed(s) },
-                    }),
-                    .preserve, .clear => {},
-                }
-            }
-            new_range.start = new_start;
-            new_range.len = @intCast(self.captures.items.len - new_start);
-            new_range.has_refs = cr.has_refs;
-        } else {
-            const new_start: u32 = @intCast(self.captures.items.len);
-            if (new_this != .null) {
-                retainValue(new_this);
-                try self.captures.append(self.allocator, .{
-                    .closure_name = new_name,
-                    .var_name = "$this",
-                    .value = new_this,
-                });
-            }
-            switch (scope_action) {
-                .set => |s| {
-                    try self.captures.append(self.allocator, .{
-                        .closure_name = new_name,
-                        .var_name = "$__closure_scope",
-                        .value = .{ .string = Value.String.borrowed(s) },
-                    });
-                    try self.captures.append(self.allocator, .{
-                        .closure_name = new_name,
-                        .var_name = "$__closure_defclass",
-                        .value = .{ .string = Value.String.borrowed(s) },
-                    });
-                },
-                .preserve, .clear => {},
-            }
-            new_range.start = new_start;
-            new_range.len = @intCast(self.captures.items.len - new_start);
         }
-
+        if (new_this == .object) {
+            retainValue(new_this);
+            try self.captures.append(self.allocator, .{ .closure_name = new_name, .var_name = "$this", .value = new_this });
+        }
+        if (called) |class_name| try self.captures.append(self.allocator, .{
+            .closure_name = new_name,
+            .var_name = "$__closure_scope",
+            .value = .{ .string = Value.String.borrowed(class_name) },
+        });
+        if (scope) |class_name| try self.captures.append(self.allocator, .{
+            .closure_name = new_name,
+            .var_name = "$__closure_defclass",
+            .value = .{ .string = Value.String.borrowed(class_name) },
+        });
+        const range = self.capture_index.getPtr(new_name).?;
+        range.start = new_start;
+        range.len = @intCast(self.captures.items.len - new_start);
+        range.has_refs = has_refs;
+        try self.copyClosureStatics(closure_name, new_name, func);
         return instance;
+    }
+
+    fn copyClosureStatics(self: *VM, from: []const u8, to: []const u8, func: *const ObjFunction) !void {
+        for (func.static_vars) |sv| {
+            var from_buf: [256]u8 = undefined;
+            const from_key = class_names.memberKey(&from_buf, from, sv.name);
+            const value = if (self.statics_cells.get(from_key)) |cell| cell.* else if (self.statics.get(from_key)) |v| v else continue;
+            var to_buf: [256]u8 = undefined;
+            const to_key = try self.internName(class_names.memberKey(&to_buf, to, sv.name));
+            const cell = try self.newRefCell();
+            self.setCell(cell, try self.copyValue(value));
+            try self.bindRefSlot(&self.statics_cells, to_key, cell);
+            if (self.capture_index.getPtr(to)) |range| range.has_statics = true;
+        }
+    }
+
+    // a static closure, a closure using $this, a method's closure: how a
+    // binding of new_this and scope would break it, in php's words
+    // (zend_valid_closure_binding); null when the binding is valid
+    pub fn closureBindingRefusal(self: *VM, closure: *PhpObject, new_this: Value, scope: ?[]const u8) RuntimeError!?[]const u8 {
+        if (closure.closureName()) |name| {
+            const func = self.functions.get(name) orelse return null;
+            if (new_this == .object) {
+                if (func.is_static) return try self.allocator.dupe(u8, "Cannot bind an instance to a static closure, this will be an error in PHP 9");
+            } else if (self.closureThisByName(name) == .object and closureUsesThis(func)) {
+                return try self.allocator.dupe(u8, "Cannot unbind $this of closure using $this, this will be an error in PHP 9");
+            }
+            return self.internalScopeRefusal(scope, self.closureDefClassByName(name));
+        }
+        const target = self.fakeClosureTarget(closure);
+        if (new_this == .object) {
+            if (target.is_static) return try self.allocator.dupe(u8, "Cannot bind an instance to a static closure, this will be an error in PHP 9");
+            if (target.scope) |class| if (!self.isInstanceOf(new_this.object.class_name, class)) {
+                return try std.fmt.allocPrint(self.allocator, "Cannot bind method {s}::{s}() to object of class {s}, this will be an error in PHP 9", .{ class, target.method, new_this.object.class_name });
+            };
+        } else if (target.scope != null and !target.is_static) {
+            return try self.allocator.dupe(u8, "Cannot unbind $this of method, this will be an error in PHP 9");
+        }
+        if (try self.internalScopeRefusal(scope, target.scope)) |msg| return msg;
+        if (!sameClass(scope, target.scope)) {
+            return try self.allocator.dupe(u8, if (target.scope == null)
+                "Cannot rebind scope of closure created from function, this will be an error in PHP 9"
+            else
+                "Cannot rebind scope of closure created from method, this will be an error in PHP 9");
+        }
+        return null;
+    }
+
+    fn internalScopeRefusal(self: *VM, scope: ?[]const u8, current: ?[]const u8) RuntimeError!?[]const u8 {
+        const class = scope orelse return null;
+        if (sameClass(scope, current)) return null;
+        const def = self.classes.get(class) orelse return null;
+        if (!def.is_internal) return null;
+        return try std.fmt.allocPrint(self.allocator, "Cannot bind closure to scope of internal class {s}, this will be an error in PHP 9", .{self.declaredClassName(class)});
+    }
+
+    fn sameClass(a: ?[]const u8, b: ?[]const u8) bool {
+        if (a == null or b == null) return a == null and b == null;
+        return std.ascii.eqlIgnoreCase(a.?, b.?);
+    }
+
+    // php's ZEND_ACC_USES_THIS: the closure's body reads $this. every
+    // closure has a $this slot, so the body's reads of it decide
+    fn closureUsesThis(func: *const ObjFunction) bool {
+        var this_slot: ?u16 = null;
+        for (func.slot_names, 0..) |slot, i| if (std.mem.eql(u8, slot, "$this")) {
+            this_slot = @intCast(i);
+        };
+        const code = func.chunk.code.items;
+        var ip: usize = 0;
+        while (ip < code.len) {
+            const op: OpCode = @enumFromInt(code[ip]);
+            switch (op) {
+                .get_local, .get_local_quiet => if (this_slot) |slot| {
+                    if (std.mem.readInt(u16, code[ip + 1 ..][0..2], .big) == slot) return true;
+                },
+                .get_var, .get_var_quiet => {
+                    const name = func.chunk.constants.items[std.mem.readInt(u16, code[ip + 1 ..][0..2], .big)];
+                    if (name == .string and std.mem.eql(u8, name.string.bytes(), "$this")) return true;
+                },
+                else => {},
+            }
+            ip += op.width();
+        }
+        return false;
+    }
+
+    pub const FakeClosureTarget = struct {
+        // the declaring class of a method, null for a function
+        scope: ?[]const u8 = null,
+        method: []const u8 = "",
+        is_static: bool = false,
+    };
+
+    // what a Closure made from a callable (first-class callable syntax,
+    // fromCallable) calls: its function's scope and staticness
+    pub fn fakeClosureTarget(self: *VM, closure: *PhpObject) FakeClosureTarget {
+        const callable = closure.get("__callable");
+        var class: []const u8 = "";
+        var method: []const u8 = "";
+        switch (callable) {
+            .string => |s| {
+                const text = s.bytes();
+                const sep = std.mem.indexOf(u8, text, "::") orelse return .{};
+                class = text[0..sep];
+                method = text[sep + 2 ..];
+            },
+            .array => |arr| {
+                if (arr.entries.items.len != 2) return .{};
+                const target = arr.entries.items[0].value;
+                const m = arr.entries.items[1].value;
+                if (m != .string) return .{};
+                method = m.string.bytes();
+                class = switch (target) {
+                    .object => |o| o.class_name,
+                    .string => |cs| cs.bytes(),
+                    else => return .{},
+                };
+            },
+            else => return .{},
+        }
+        const vis = self.findMethodVisibility(class, method);
+        const declaring = if (vis.defining_class.len > 0) vis.defining_class else class;
+        const info: ?ClassDef.MethodInfo = if (self.classes.get(declaring)) |cls| cls.methods.get(method) else null;
+        return .{
+            .scope = self.declaredClassName(declaring),
+            .method = if (info) |i| i.name else method,
+            .is_static = if (info) |i| i.is_static else false,
+        };
     }
 
     // a function frame's local by name; one that holds nothing reads as null
@@ -18083,8 +18124,9 @@ pub const VM = struct {
     // sync a closure's by-ref capture mirror with a write through its cell.
     // the mirror owns a reference so the value outlives the frame that
     // created the reference (see closure_bind_ref)
-    fn writeCaptureMirror(self: *VM, closure: *Value.String.Owner, var_name: []const u8, val: Value) void {
-        const range = self.capture_index.getPtr(closure.bytes) orelse return;
+    fn writeCaptureMirror(self: *VM, closure: *PhpObject, var_name: []const u8, val: Value) void {
+        const name = closure.closureName() orelse return;
+        const range = self.capture_index.getPtr(name) orelse return;
         for (self.captures.items[range.start .. range.start + range.len]) |*entry| {
             if (entry.ref_cell == null or !std.mem.eql(u8, entry.var_name, var_name)) continue;
             retainValue(val);
@@ -18095,7 +18137,7 @@ pub const VM = struct {
     }
 
     fn regRefCapture(self: *VM, range: *CaptureRange, cell: *Value, var_name: []const u8) RuntimeError!void {
-        const owner = range.owner orelse return;
+        const owner = range.object orelse return;
         if (range.ref_owner == 0) range.ref_owner = (try self.refIndex()).createOwner();
         try (try self.refIndex()).addOwned(self.allocator, range.ref_owner, cell, .{ .capture = .{ .closure = owner, .var_name = var_name } });
     }
@@ -18384,6 +18426,8 @@ pub const VM = struct {
     fn methodByValue(self: *VM, receiver: Value, method: []const u8, pos: u8) ?bool {
         if (receiver != .object) return null;
         if (receiver.object.lazy != null) return null;
+        // a closure's __invoke takes the closure's own parameters
+        if (std.mem.eql(u8, receiver.object.class_name, "Closure") and std.ascii.eqlIgnoreCase(method, "__invoke")) return self.callableByValue(receiver, pos);
         return self.classMethodByValue(receiver.object.class_name, method, pos, "__call");
     }
 
@@ -18426,6 +18470,7 @@ pub const VM = struct {
                 return self.functionByValue(bytes, pos);
             },
             .object => |o| {
+                if (o.closureName()) |name| return self.functionByValue(name, pos);
                 if (std.mem.eql(u8, o.class_name, "Closure")) return self.callableByValue(o.get("__callable"), pos);
                 return self.methodByValue(callable, "__invoke", pos);
             },
@@ -19217,6 +19262,16 @@ pub const VM = struct {
 
     pub fn checkVisibility(self: *VM, target_class: []const u8, vis: ClassDef.Visibility) bool {
         if (vis == .public) return true;
+        // a running closure sees what its scope sees, never what the class
+        // it was called through or bound $this to does
+        if (self.frame_count > 0) {
+            const top = &self.frames[self.frame_count - 1];
+            if (top.func) |func| if (std.mem.startsWith(u8, func.name, "__closure_")) {
+                const scope = self.closureDefClassForFrame(top) orelse return false;
+                if (vis == .private) return std.mem.eql(u8, scope, target_class);
+                return self.isInstanceOf(scope, target_class) or self.isInstanceOf(target_class, scope);
+            };
+        }
         if (vis == .private) {
             // for private, check defining class first so parent::__construct()
             // can access its own private properties
@@ -21026,6 +21081,10 @@ pub const VM = struct {
         // the callable parameters are checked once the arguments are pinned:
         // resolving one may autoload, which runs php
         if (native.callbacks != 0 or native.arrays != 0) if (name) |n| try self.checkCallbackArgs(n, label, native.callbacks, native.arrays, native_args);
+        // an object php can't make a string of, given for a string parameter
+        if (native.strings != 0) if (name) |n| for (native_args, 0..) |arg, i| {
+            if (arg == .object and i < 31 and native.strings & (@as(u32, 1) << @intCast(i)) != 0) try self.refuseObjectForString(n, label, i, arg.object);
+        };
         const result = try native.call(ctx, native_args);
         if (self.ic) |ic| if (ic.ref_write_refused) {
             ic.ref_write_refused = false;
@@ -21616,8 +21675,7 @@ pub const VM = struct {
         if (std.mem.eql(u8, type_name, "Generator")) return val == .generator;
         if (std.mem.eql(u8, type_name, "Fiber")) return val == .fiber;
         if (std.mem.eql(u8, type_name, "Closure")) {
-            return (val == .object and std.mem.eql(u8, val.object.class_name, "Closure")) or
-                (val == .string and val.string.len > 10 and std.mem.startsWith(u8, val.string.bytes(), "__closure_"));
+            return val == .object and std.mem.eql(u8, val.object.class_name, "Closure");
         }
         if (val == .object) {
             // a leading backslash in a type name (e.g. `\DOMNode`) is a fully-qualified
@@ -21851,14 +21909,11 @@ pub const VM = struct {
     }
 
     // values zphp represents differently from php that a declared type
-    // still takes: closures are named strings, a self/parent/static whose
-    // class isn't known here takes any object, and the spl iterator types
-    // take the arrays some built-ins hand back in place of their iterators
+    // still takes: a self/parent/static whose class isn't known here takes
+    // any object, and the spl iterator types take the arrays some built-ins
+    // hand back in place of their iterators
     fn representationHolds(self: *VM, val: Value, type_str: []const u8, shape: php_types.Shape, scope: ?[]const u8) bool {
         _ = self;
-        if (val == .string and std.mem.startsWith(u8, val.string.bytes(), "__closure_")) {
-            if (shape.mask & php_types.OBJECT != 0) return true;
-        }
         if (!shape.classes and shape.mask & php_types.STATIC == 0) return false;
         var body = std.mem.trim(u8, type_str, " ");
         if (body.len > 0 and body[0] == '?') body = body[1..];
@@ -21867,7 +21922,6 @@ pub const VM = struct {
             const member = std.mem.trim(u8, raw, " ()");
             const bare = if (member.len > 0 and member[0] == '\\') member[1..] else member;
             switch (val) {
-                .string => |str| if (std.ascii.eqlIgnoreCase(bare, "Closure") and std.mem.startsWith(u8, str.bytes(), "__closure_")) return true,
                 .array => if (std.ascii.eqlIgnoreCase(bare, "Traversable") or std.ascii.eqlIgnoreCase(bare, "Iterator") or std.ascii.eqlIgnoreCase(bare, "IteratorAggregate")) return true,
                 .object, .generator => {
                     if (std.ascii.eqlIgnoreCase(bare, "static")) return true;
@@ -22023,17 +22077,6 @@ pub const VM = struct {
             val.* = accepted;
             return false;
         };
-        // zphp's first-class callables (`f(...)`, Closure::fromCallable)
-        // yield a callable string/array rather than a real Closure object.
-        // accept them for a Closure-typed property so framework code that
-        // stores `f(...)` in a `\Closure` property works - consistent with
-        // how zphp invokes those values everywhere else
-        {
-            var t = type_str;
-            if (t.len > 0 and t[0] == '?') t = t[1..];
-            if (t.len > 0 and t[0] == '\\') t = t[1..];
-            if (std.mem.eql(u8, t, "Closure") and self.isValueCallable(val.*)) return false;
-        }
         const shown = try self.propertyTypeText(type_str, class_name);
         const msg = if (step_up) |up|
             std.fmt.allocPrint(self.allocator, "Cannot {s} property {s}::${s} of type {s} past its {s} value", .{ if (up) "increment" else "decrement", class_name, prop_name, shown, if (up) "maximal" else "minimal" }) catch return error.RuntimeError
@@ -22550,11 +22593,7 @@ pub const VM = struct {
             if (self.ref_index) |ri| ri.releaseOwner(self.allocator, callee_owner);
             const gen = try self.allocGenerator(.{ .func = func, .vars = new_vars, .ref_slots = callee_refs });
             retainVarsObjects(&gen.vars);
-            // a closure's generator keeps the closure alive, as php's does
-            if (self.capture_index.get(name)) |range| if (range.owner) |owner| {
-                owner.refcount += 1;
-                gen.closure = owner;
-            };
+            self.keepGeneratorClosure(gen, name);
             self.push(.{ .generator = gen });
         } else {
             if (!self.hasCallRoom(1) and !(try self.growCallRoom(1))) {
@@ -23095,8 +23134,7 @@ pub const VM = struct {
             const is_array = if (i >= 31) (arrays & natives_mod.variadic_array_bit) != 0 else (arrays & (@as(u32, 1) << @intCast(i))) != 0;
             if (is_array) {
                 if (arg == .array) continue;
-                // closures travel as tagged strings
-                const shown = if (arg == .string and std.mem.startsWith(u8, arg.string.bytes(), "__closure_")) "Closure" else valueTypeName(arg);
+                const shown = valueTypeName(arg);
                 const msg = if (param.variadic)
                     try std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} must be of type array, {s} given", .{ label, i + 1, shown })
                 else
@@ -23123,6 +23161,18 @@ pub const VM = struct {
                 },
             }
         }
+    }
+
+    fn refuseObjectForString(self: *VM, name: []const u8, label: []const u8, i: usize, obj: *PhpObject) RuntimeError!void {
+        if (obj.native.kind != .none and obj.native.kind != .closure) return;
+        if (self.hasMethod(obj.class_name, "__toString")) return;
+        const signature = native_params.get(name) orelse return;
+        if (i >= signature.params.len) return;
+        const param = signature.params[i];
+        const msg = try std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given", .{ label, i + 1, param.name, param.type, class_names.display(obj.class_name) });
+        defer self.allocator.free(msg);
+        try self.setPendingException("TypeError", msg);
+        return error.RuntimeError;
     }
 
     // an argument a scalar parameter can never take, whatever the mode
@@ -23219,11 +23269,7 @@ pub const VM = struct {
             try self.bindArgs(&new_vars, func, if (func.is_variadic) args else args[0..@min(args.len, func.arity)]);
             const gen = try self.allocGenerator(.{ .func = func, .vars = new_vars, .ref_slots = closure_refs });
             retainVarsObjects(&gen.vars);
-            // a closure's generator keeps the closure alive, as php's does
-            if (self.capture_index.get(name)) |range| if (range.owner) |owner| {
-                owner.refcount += 1;
-                gen.closure = owner;
-            };
+            self.keepGeneratorClosure(gen, name);
             return .{ .generator = gen };
         }
         {
@@ -24369,15 +24415,13 @@ pub const VM = struct {
         var visited_arrs = std.AutoArrayHashMapUnmanaged(*PhpArray, void){};
         defer visited_arrs.deinit(self.allocator);
 
-        defer {
-            self.cycle_closures.deinit(self.allocator);
-            self.cycle_closures = .{};
-        }
         for (self.ref_cells.items) |cell| cell.visited = false;
 
+        // every closure is a possible root: a captured variable is an edge
+        // the candidate list never sees being dropped
         var closure_ranges = self.capture_index.valueIterator();
         while (closure_ranges.next()) |range| {
-            if (range.owner) |owner| self.cycleVisitChild(.{ .string = .{ .ptr = owner.bytes.ptr, .len = owner.bytes.len, .owner = owner } }, &visited_objs, &visited_arrs);
+            if (range.object) |obj| self.cycleVisit(obj, &visited_objs, &visited_arrs);
         }
 
         // pass 1: BFS from candidates, init scratch_rc on first visit
@@ -24388,20 +24432,6 @@ pub const VM = struct {
         for (self.cycle_array_candidates.items) |c| {
             if (c.elements_released) continue;
             self.cycleVisitArr(c, &visited_objs, &visited_arrs);
-        }
-
-        for (self.cycle_closures.keys()) |owner| {
-            const range = self.capture_index.get(owner.bytes) orelse continue;
-            for (self.captures.items[range.start..][0..range.len]) |capture| {
-                self.cycleDecChild(capture.value, &visited_objs, &visited_arrs);
-                if (capture.ref_cell) |cell| cellOf(cell).scratch -= 1;
-            }
-            if (range.has_statics) {
-                var statics = self.statics_cells.iterator();
-                while (statics.next()) |entry| {
-                    if (closureOwnsStatic(owner.bytes, entry.key_ptr.*)) cellOf(entry.value_ptr.*).scratch -= 1;
-                }
-            }
         }
 
         // pass 2: walk every visited node, decrement child scratch_rc for
@@ -24446,30 +24476,6 @@ pub const VM = struct {
                     if (self.cycleMarkAliveChild(cell.value, &visited_objs, &visited_arrs)) changed = true;
                 }
             }
-            for (self.cycle_closures.keys(), self.cycle_closures.values()) |owner, scratch| {
-                if (scratch == 0) continue;
-                const range = self.capture_index.get(owner.bytes) orelse continue;
-                for (self.captures.items[range.start..][0..range.len]) |capture| {
-                    if (self.cycleMarkAliveChild(capture.value, &visited_objs, &visited_arrs)) changed = true;
-                    if (capture.ref_cell) |cell| {
-                        if (cellOf(cell).scratch == 0) {
-                            cellOf(cell).scratch = 1;
-                            changed = true;
-                        }
-                    }
-                }
-                if (range.has_statics) {
-                    var statics = self.statics_cells.iterator();
-                    while (statics.next()) |entry| {
-                        if (!closureOwnsStatic(owner.bytes, entry.key_ptr.*)) continue;
-                        const cell = cellOf(entry.value_ptr.*);
-                        if (cell.scratch == 0) {
-                            cell.scratch = 1;
-                            changed = true;
-                        }
-                    }
-                }
-            }
             var it = visited_objs.iterator();
             while (it.next()) |kv| {
                 const obj = kv.key_ptr.*;
@@ -24512,30 +24518,6 @@ pub const VM = struct {
                 collected += 1;
             }
         }
-        // Pin dead closures while breaking their outgoing edges. Their names
-        // still occur in cells/containers being drained; forcing string RC to
-        // zero would make those ordinary releases underflow or use freed owners.
-        for (self.cycle_closures.keys(), self.cycle_closures.values()) |owner, scratch| {
-            if (scratch == 0) owner.refcount += 1;
-        }
-        for (self.cycle_closures.keys(), self.cycle_closures.values()) |owner, scratch| {
-            if (scratch != 0) continue;
-            const range = self.capture_index.get(owner.bytes) orelse continue;
-            for (self.captures.items[range.start..][0..range.len]) |*capture| {
-                const value = capture.value;
-                const cell = capture.ref_cell;
-                capture.value = .null;
-                capture.ref_cell = null;
-                self.releaseValue(value);
-                if (cell) |c| self.unbindCell(c);
-            }
-            if (range.ref_owner != 0) if (self.ref_index) |ri| ri.releaseOwner(self.allocator, range.ref_owner);
-            if (range.has_statics) self.purgeClosureStatics(owner.bytes);
-            if (self.capture_index.getPtr(owner.bytes)) |live_range| {
-                live_range.ref_owner = 0;
-                live_range.has_statics = false;
-            }
-        }
         for (self.cycle_candidates.items) |obj| obj.cycle_queued = false;
         for (self.cycle_array_candidates.items) |arr| arr.cycle_queued = false;
         self.cycle_candidates.clearRetainingCapacity();
@@ -24545,10 +24527,6 @@ pub const VM = struct {
         self.gc_dtors_in_fiber = self.current_fiber != null;
         self.drainPendingDestruct();
         self.gc_dtors_in_fiber = prev_in_fiber;
-        for (self.cycle_closures.keys(), self.cycle_closures.values()) |owner, scratch| {
-            if (scratch == 0) self.releaseClosureByName(owner.bytes);
-        }
-        self.drainPendingDestruct();
         // php counts what it freed: an object its destructor revived stays
         collected -|= self.gc_revived;
         self.gc_revived = 0;
@@ -24962,27 +24940,24 @@ pub const VM = struct {
                     work.append(self.allocator, .{ .value = cell.value }) catch return;
                 },
                 .value => |val| switch (val) {
-                    .string => |string| {
-                        const owner = string.owner orelse continue;
-                        if (!owner.closure or self.cycle_closures.contains(owner)) continue;
-                        const range = self.capture_index.get(owner.bytes) orelse continue;
-                        self.cycle_closures.put(self.allocator, owner, @intCast(owner.refcount)) catch return;
-                        for (self.captures.items[range.start..][0..range.len]) |capture| {
-                            work.append(self.allocator, .{ .value = capture.value }) catch return;
-                            if (capture.ref_cell) |cell| work.append(self.allocator, .{ .cell = cell }) catch return;
-                        }
-                        if (range.has_statics) {
-                            var statics = self.statics_cells.iterator();
-                            while (statics.next()) |entry| {
-                                if (!closureOwnsStatic(owner.bytes, entry.key_ptr.*)) continue;
-                                work.append(self.allocator, .{ .cell = entry.value_ptr.* }) catch return;
-                            }
-                        }
-                    },
                     .object => |obj| {
                         if (vo.contains(obj)) continue;
                         vo.put(self.allocator, obj, {}) catch return;
                         obj.scratch_rc = @intCast(obj.refcount);
+                        // a closure's captures and statics are its edges
+                        if (obj.closureName()) |name| if (self.capture_index.get(name)) |range| {
+                            for (self.captures.items[range.start..][0..range.len]) |capture| {
+                                work.append(self.allocator, .{ .value = capture.value }) catch return;
+                                if (capture.ref_cell) |cell| work.append(self.allocator, .{ .cell = cell }) catch return;
+                            }
+                            if (range.has_statics) {
+                                var statics = self.statics_cells.iterator();
+                                while (statics.next()) |entry| {
+                                    if (!closureOwnsStatic(name, entry.key_ptr.*)) continue;
+                                    work.append(self.allocator, .{ .cell = entry.value_ptr.* }) catch return;
+                                }
+                            }
+                        };
                         work.append(self.allocator, .{ .value = obj.lazyInitializer() }) catch return;
                         work.append(self.allocator, .{ .value = obj.backingValue() }) catch return;
                         if (obj.slots) |slots| for (slots) |slot| {
@@ -25009,6 +24984,18 @@ pub const VM = struct {
     }
 
     fn cycleDecrementChildren(self: *VM, obj: *PhpObject, vo: anytype, va: anytype) void {
+        if (obj.closureName()) |name| if (self.capture_index.get(name)) |range| {
+            for (self.captures.items[range.start..][0..range.len]) |capture| {
+                self.cycleDecChild(capture.value, vo, va);
+                if (capture.ref_cell) |cell| cellOf(cell).scratch -= 1;
+            }
+            if (range.has_statics) {
+                var statics = self.statics_cells.iterator();
+                while (statics.next()) |entry| {
+                    if (closureOwnsStatic(name, entry.key_ptr.*)) cellOf(entry.value_ptr.*).scratch -= 1;
+                }
+            }
+        };
         self.cycleDecChild(obj.lazyInitializer(), vo, va);
         self.cycleDecChild(obj.backingValue(), vo, va);
         if (obj.slots) |s| {
@@ -25034,11 +25021,8 @@ pub const VM = struct {
         }
     }
 
-    fn cycleDecChild(self: *VM, v: Value, vo: anytype, va: anytype) void {
+    fn cycleDecChild(_: *VM, v: Value, vo: anytype, va: anytype) void {
         switch (v) {
-            .string => |string| if (string.owner) |owner| {
-                if (self.cycle_closures.getPtr(owner)) |scratch| scratch.* -= 1;
-            },
             .object => |o| if (vo.contains(o)) {
                 o.scratch_rc -= 1;
             },
@@ -25050,7 +25034,30 @@ pub const VM = struct {
     }
 
     fn cycleMarkAlive(self: *VM, obj: *PhpObject, vo: anytype, va: anytype) bool {
-        var changed = self.cycleMarkAliveChild(obj.lazyInitializer(), vo, va);
+        var changed = false;
+        if (obj.closureName()) |name| if (self.capture_index.get(name)) |range| {
+            for (self.captures.items[range.start..][0..range.len]) |capture| {
+                if (self.cycleMarkAliveChild(capture.value, vo, va)) changed = true;
+                if (capture.ref_cell) |cell| {
+                    if (cellOf(cell).scratch == 0) {
+                        cellOf(cell).scratch = 1;
+                        changed = true;
+                    }
+                }
+            }
+            if (range.has_statics) {
+                var statics = self.statics_cells.iterator();
+                while (statics.next()) |entry| {
+                    if (!closureOwnsStatic(name, entry.key_ptr.*)) continue;
+                    const cell = cellOf(entry.value_ptr.*);
+                    if (cell.scratch == 0) {
+                        cell.scratch = 1;
+                        changed = true;
+                    }
+                }
+            }
+        };
+        changed = self.cycleMarkAliveChild(obj.lazyInitializer(), vo, va) or changed;
         changed = self.cycleMarkAliveChild(obj.backingValue(), vo, va) or changed;
         if (obj.slots) |s| {
             for (s) |v| if (self.cycleMarkAliveChild(v, vo, va)) {
@@ -25080,16 +25087,8 @@ pub const VM = struct {
         return changed;
     }
 
-    fn cycleMarkAliveChild(self: *VM, v: Value, vo: anytype, va: anytype) bool {
+    fn cycleMarkAliveChild(_: *VM, v: Value, vo: anytype, va: anytype) bool {
         switch (v) {
-            .string => |string| if (string.owner) |owner| {
-                if (self.cycle_closures.getPtr(owner)) |scratch| {
-                    if (scratch.* == 0) {
-                        scratch.* = 1;
-                        return true;
-                    }
-                }
-            },
             .object => |o| {
                 if (vo.contains(o) and o.scratch_rc == 0) {
                     o.scratch_rc = 1;
@@ -25427,7 +25426,7 @@ pub const VM = struct {
         while (self.pending_string_release.pop()) |owner| {
             owner.release_queued = false;
             if (owner.refcount != 0) continue;
-            if (owner.closure) self.releaseClosureInstance(owner) else Value.String.destroyOwner(owner);
+            Value.String.destroyOwner(owner);
         }
     }
 

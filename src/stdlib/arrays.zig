@@ -489,7 +489,7 @@ fn array_splice(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
             VM.retainValue(value.*);
         }
         break :blk values;
-    } else if (args.len >= 4 and args[3] == .object) blk: {
+    } else if (args.len >= 4 and args[3] == .object and !std.mem.eql(u8, args[3].object.class_name, "Closure")) blk: {
         const object = args[3].object.storage();
         var values: std.ArrayListUnmanaged(Value) = .empty;
         errdefer {
@@ -1290,7 +1290,6 @@ fn arrayBinop(ctx: *NativeContext, comptime func: []const u8, comptime op_name: 
             .null => .{ .int = 0 },
             .bool => |b| .{ .int = @intFromBool(b) },
             .string => |s| blk: {
-                if (std.mem.startsWith(u8, s.bytes(), "__closure_")) break :blk try unsupportedOperand(ctx, func, op_name, "Closure") orelse continue;
                 if (numericPrefix(s.bytes())) |n| {
                     if (!n.whole) try ctx.vm.emitWarning("A non-numeric value encountered");
                     break :blk n.value;
@@ -1391,7 +1390,7 @@ fn array_product(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
 fn array_key_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const arr = args[1].array;
     const key: PhpArray.Key = switch (args[0]) {
-        .string => |s| if (std.mem.startsWith(u8, s.bytes(), "__closure_")) return invalidKeyExistsOffset(ctx, args[0]) else PhpArray.normalizeKey(.{ .string = s }),
+        .string => |s| PhpArray.normalizeKey(.{ .string = s }),
         .int => |i| .{ .int = i },
         .null, .undef => blk: {
             try ctx.vm.raiseError(8192, "Using null as the key parameter for array_key_exists() is deprecated, use an empty string instead");
@@ -1580,7 +1579,7 @@ fn native_compact(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
 // php_compact_var
 fn compactValue(ctx: *NativeContext, arg_in: Value, arr: *PhpArray, frame: anytype, pos: usize) RuntimeError!void {
     const arg = arg_in;
-    if (arg == .string and !std.mem.startsWith(u8, arg.string.bytes(), "__closure_")) {
+    if (arg == .string) {
         const name = arg.string.bytes();
         const var_name = try std.fmt.allocPrint(ctx.allocator, "${s}", .{name});
         defer ctx.allocator.free(var_name);
@@ -1660,7 +1659,7 @@ fn rangeInput(ctx: *NativeContext, v_in: Value, comptime arg: usize, comptime na
             v = .{ .string = ctx.vm.transientOwned(try ctx.vm.objectString(o)) };
         },
         .int, .float => {},
-        .string => if (std.mem.startsWith(u8, v.string.bytes(), "__closure_")) return rangeTypeError(ctx, arg, name, v),
+        .string => {},
         else => return rangeTypeError(ctx, arg, name, v),
     }
     switch (v) {
@@ -1903,7 +1902,7 @@ fn columnKeyParam(ctx: *NativeContext, args: []const Value, index: usize, compti
     switch (v) {
         .null, .undef => return .none,
         .int => |i| return .{ .long = i },
-        .string => |s| if (!std.mem.startsWith(u8, s.bytes(), "__closure_")) {
+        .string => |s| {
             if (!strict) if (numericKeyLong(s.bytes())) |n| return .{ .long = n };
             return .{ .str = s.bytes() };
         },

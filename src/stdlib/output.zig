@@ -81,11 +81,6 @@ fn varDumpMarked(ctx: *NativeContext, val: Value, depth: usize, marker: []const 
             try out.appendSlice(a, ")\n");
         },
         .string => |s| {
-            if (closureView(ctx.vm, s)) |view_value| {
-                var view = view_value;
-                defer view.properties.deinit(ctx.vm.allocator);
-                return varDumpMarked(ctx, .{ .object = &view }, depth, marker);
-            }
             try appendIndent(out, a, indent);
             try out.appendSlice(a, marker);
             try out.appendSlice(a, "string(");
@@ -236,16 +231,6 @@ fn propertyReferenced(ctx: *NativeContext, obj: *value_mod.PhpObject, name: []co
 // a reference with a holder besides the one asking. the last reference a
 // function returned stays held until the next one replaces it, which php
 // would already have freed
-// a closure held as its instance name, shown as the Closure object php has:
-// a view carrying its handle and the name the Closure debug table reads
-fn closureView(vm: *@import("../runtime/vm.zig").VM, s: Value.String) ?value_mod.PhpObject {
-    if (s.owner == null or !s.owner.?.closure) return null;
-    const handle = vm.closureHandle(s.bytes()) orelse return null;
-    var view: value_mod.PhpObject = .{ .class_name = "Closure", .id = handle };
-    view.properties.put(vm.allocator, "__closure", .{ .string = s }) catch return null;
-    return view;
-}
-
 fn referenceShared(ctx: *NativeContext, cell: *Value) bool {
     var holders = value_mod.cellOf(cell).binders;
     if (ctx.vm.last_return_ref == cell) holders -= 1;
@@ -281,11 +266,6 @@ fn printRValueImpl(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: 
         },
         .float => try val.format(out, a),
         .string => |s| {
-            if (vm) |v| if (closureView(v, s)) |view_value| {
-                var view = view_value;
-                defer view.properties.deinit(v.allocator);
-                return printRValueImpl(a, out, .{ .object = &view }, depth, vm);
-            };
             try out.appendSlice(a, s.bytes());
         },
         .array => |arr| {
@@ -466,11 +446,6 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
             }
         },
         .string => |s| {
-            if (closureView(ctx.vm, s)) |view_value| {
-                var view = view_value;
-                defer view.properties.deinit(ctx.vm.allocator);
-                return varExportValue(a, out, .{ .object = &view }, depth, ctx);
-            }
             try varExportString(a, out, s.bytes());
         },
         .array => |arr| {

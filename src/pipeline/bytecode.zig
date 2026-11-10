@@ -455,6 +455,9 @@ pub const OpCode = enum(u8) {
     // the end of a function body with a return type other than void: php's
     // "none returned" TypeError, or a never function's implicit return
     implicit_return,
+    // the closure expression whose compiled name is on top becomes a new
+    // Closure object, with the scope it was created in
+    closure_new,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {

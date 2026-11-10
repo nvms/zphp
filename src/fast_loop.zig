@@ -561,7 +561,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     }
                     const ca_suffix = ca_append.string.bytes();
                     const ca_owner = ca_current.string.owner;
-                    const ca_result: Value = if (ca_owner != null and !ca_owner.?.closure and ca_owner.?.refcount == 1 and ca_current.string.ptr == ca_owner.?.bytes.ptr) grow: {
+                    const ca_result: Value = if (ca_owner != null and ca_owner.?.refcount == 1 and ca_current.string.ptr == ca_owner.?.bytes.ptr) grow: {
                         // the variable is the string's only holder: append in place
                         const owner = ca_owner.?;
                         const length = ca_current.string.len + ca_suffix.len;
@@ -868,14 +868,14 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     ip += 1;
                     const ci_acn: usize = ci_ac;
                     const ci_name_val = stack[sp - ci_acn - 1];
-                    if (ci_name_val != .string) {
+                    // a closure by its instance name, or a plain function name
+                    const ci_name: []const u8 = if (ci_name_val.closureName()) |closure| closure else if (ci_name_val == .string) ci_name_val.string.bytes() else {
                         frame.ip = ip - 2;
                         self.sp = sp;
                         return;
-                    }
-                    const ci_name = ci_name_val.string.bytes();
+                    };
                     // a "Class::method" string is a static call, with its checks, in runLoop
-                    if (std.mem.indexOf(u8, ci_name, "::") != null) {
+                    if (ci_name_val == .string and std.mem.indexOf(u8, ci_name, "::") != null) {
                         frame.ip = ip - 2;
                         self.sp = sp;
                         return;
@@ -892,7 +892,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         return;
                     }
                     const ci_cap_range = self.getCaptureRange(ci_name);
-                    if (ci_cap_range != null and !std.mem.startsWith(u8, ci_name, "__closure_")) {
+                    if (ci_cap_range != null and ci_name_val != .object) {
                         frame.ip = ip - 2;
                         self.sp = sp;
                         return;
@@ -941,9 +941,6 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     self.saveFrameArgs(ci_ac);
                     self.dropN(ci_acn);
                     sp = self.sp;
-                    // the closure value slot was consumed above; the callee
-                    // frame retains the instance by call_name
-                    self.stackRelease(ci_name_val);
                     if (ci_cap_range) |cr| {
                         const caps = self.captures.items[cr.start .. cr.start + cr.len];
                         for (caps) |cap| {
@@ -971,6 +968,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     ic.arg_counts[self.frame_count] = ci_ac;
                     self.frame_count += 1;
                     ic.slow.retain_frame_objects(self, self.frame_count - 1);
+                    // the callee value's slot was consumed above; the frame
+                    // holds a closure by call_name now
+                    self.stackRelease(ci_name_val);
                     if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                     continue :reenter;
                 },

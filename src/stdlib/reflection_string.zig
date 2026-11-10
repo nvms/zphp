@@ -423,10 +423,11 @@ fn functionView(ctx: *NativeContext, this: *PhpObject) FnView {
         view.types = reflection.closureAwareTypeInfo(key);
         view.deprecated = view.user.?.deprecated != null;
     }
-    view.is_closure = std.mem.startsWith(u8, key, "__closure_") or boolProp(this, "__from_closure");
-    if (std.mem.startsWith(u8, key, "__closure_")) {
-        view.closure_instance = key;
-        view.scope = stringProp(this, "__scope_class") orelse vm.closureScopeByName(key);
+    const instance = this.get("__closure").closureName();
+    view.is_closure = instance != null or boolProp(this, "__from_closure");
+    if (instance) |name| {
+        view.closure_instance = name;
+        view.scope = stringProp(this, "__scope_class") orelse vm.closureScopeByName(name);
         if (view.user) |f| view.info.is_static = f.is_static;
     }
     return view;

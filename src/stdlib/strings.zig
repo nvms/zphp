@@ -2374,7 +2374,6 @@ fn rejectArrayParam(ctx: *NativeContext, v: Value, comptime func_name: []const u
     const bad_type: ?[]const u8 = switch (v) {
         .array => "array",
         .object => |o| if (ctx.vm.hasMethod(o.class_name, "__toString")) null else o.class_name,
-        .string => |s| if (std.mem.startsWith(u8, s.bytes(), "__closure_")) "Closure" else null,
         else => null,
     };
     if (bad_type) |bt| {

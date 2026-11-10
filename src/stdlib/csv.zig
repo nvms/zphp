@@ -367,7 +367,7 @@ const Params = struct {
     fn typedString(self: Params, index: usize, expected: []const u8) RuntimeError!?[]const u8 {
         if (!self.given(index)) return null;
         const v = self.args[index];
-        if (v == .string and !std.mem.startsWith(u8, v.string.bytes(), "__closure_")) return v.string.bytes();
+        if (v == .string) return v.string.bytes();
         const strict = self.ctx.vm.topFrameStrict();
         switch (v) {
             .null, .undef => {

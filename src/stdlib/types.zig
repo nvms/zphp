@@ -264,10 +264,8 @@ fn native_get_defined_constants(ctx: *NativeContext, args: []const Value) Runtim
 }
 
 // PHP's type-name used in TypeError messages: 'string', 'int', 'float',
-// 'array', 'true', 'false', 'null', or the class name for objects.
-// closures live as strings tagged with the '__closure_' prefix in zphp
+// 'array', 'true', 'false', 'null', or the class name for objects
 pub fn phpTypeName(v: Value) []const u8 {
-    if (v == .string and std.mem.startsWith(u8, v.string.bytes(), "__closure_")) return "Closure";
     return v.valueName();
 }
 
@@ -334,13 +332,7 @@ fn floatval(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
 
 fn strval(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.literal("");
-    if (args[0] == .string) {
-        if (std.mem.startsWith(u8, args[0].string.bytes(), "__closure_")) {
-            try ctx.vm.setPendingException("Error", "Object of class Closure could not be converted to string");
-            return error.RuntimeError;
-        }
-        return NativeResult.share(args[0]);
-    }
+    if (args[0] == .string) return NativeResult.share(args[0]);
     // PHP's strval on an object dispatches through __toString. Without this,
     // we'd print "Object" instead of the user-defined string form
     if (args[0] == .object) {
@@ -370,7 +362,7 @@ fn gettype(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
         .bool => NativeResult.literal("boolean"),
         .int => NativeResult.literal("integer"),
         .float => NativeResult.literal("double"),
-        .string => |s| if (std.mem.startsWith(u8, s.bytes(), "__closure_")) NativeResult.literal("object") else NativeResult.literal("string"),
+        .string => NativeResult.literal("string"),
         .array => NativeResult.literal("array"),
         .object, .generator, .fiber => NativeResult.literal("object"),
         .resource => |r| if (value_mod.resourceClosed(r)) NativeResult.literal("resource (closed)") else NativeResult.literal("resource"),
@@ -384,7 +376,7 @@ fn get_debug_type(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         .bool => NativeResult.literal("bool"),
         .int => NativeResult.literal("int"),
         .float => NativeResult.literal("float"),
-        .string => |s| if (std.mem.startsWith(u8, s.bytes(), "__closure_")) NativeResult.literal("Closure") else NativeResult.literal("string"),
+        .string => NativeResult.literal("string"),
         .array => NativeResult.literal("array"),
         .object => |o| try NativeResult.copyString(ctx.allocator, class_names.display(o.class_name)),
         .generator => NativeResult.literal("Generator"),
@@ -414,8 +406,7 @@ fn is_float(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
 
 fn is_string(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
-    if (args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.scalar(.{ .bool = !std.mem.startsWith(u8, args[0].string.bytes(), "__closure_") });
+    return NativeResult.scalar(.{ .bool = args[0] == .string });
 }
 
 fn is_bool(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -477,17 +468,7 @@ fn native_empty(_: *NativeContext, args: []const Value) RuntimeError!NativeResul
 fn strlen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(.{ .int = 0 });
     return switch (args[0]) {
-        .string => |s| blk: {
-            // closures live as '__closure_<id>' strings in zphp; treat them
-            // as object-class Closure for the TypeError, matching PHP
-            if (std.mem.startsWith(u8, s.bytes(), "__closure_")) {
-                const msg = try std.fmt.allocPrint(ctx.allocator, "strlen(): Argument #1 ($string) must be of type string, Closure given", .{});
-                defer ctx.allocator.free(msg);
-                try ctx.vm.setPendingException("TypeError", msg);
-                break :blk error.RuntimeError;
-            }
-            break :blk NativeResult.scalar(.{ .int = @intCast(s.bytes().len) });
-        },
+        .string => |s| NativeResult.scalar(.{ .int = @intCast(s.bytes().len) }),
         .int => |i| blk: {
             var buf: [32]u8 = undefined;
             const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch break :blk NativeResult.scalar(.{ .int = 0 });
@@ -526,7 +507,6 @@ fn is_object(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args[0] == .object) return NativeResult.scalar(.{ .bool = true });
     if (args[0] == .generator) return NativeResult.scalar(.{ .bool = true });
     if (args[0] == .fiber) return NativeResult.scalar(.{ .bool = true });
-    if (args[0] == .string and std.mem.startsWith(u8, args[0].string.bytes(), "__closure_")) return NativeResult.scalar(.{ .bool = true });
     return NativeResult.scalar(.{ .bool = false });
 }
 
@@ -534,10 +514,7 @@ fn is_scalar(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{
         .bool = switch (args[0]) {
-            .int, .float, .bool => true,
-            // closures are stored as a Value.string with a "__closure_" prefix;
-            // PHP treats Closure as an object, not a scalar
-            .string => |s| !std.mem.startsWith(u8, s.bytes(), "__closure_"),
+            .int, .float, .bool, .string => true,
             else => false,
         },
     });
@@ -647,7 +624,6 @@ fn get_class(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
     if (args[0] == .object) return NativeResult.copyString(ctx.allocator, args[0].object.class_name);
     if (args[0] == .generator) return NativeResult.literal("Generator");
     if (args[0] == .fiber) return NativeResult.literal("Fiber");
-    if (args[0] == .string and std.mem.startsWith(u8, args[0].string.bytes(), "__closure_")) return NativeResult.literal("Closure");
     return throwObjectArg(ctx, "get_class", args[0]);
 }
 
@@ -706,14 +682,6 @@ fn class_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
 
 fn method_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2 or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
-    // closures (stored as unique name strings) report themselves as the
-    // 'Closure' class. they always have __invoke + the public Closure API
-    if (args[0] == .string and std.mem.startsWith(u8, args[0].string.bytes(), "__closure_")) {
-        const m = args[1].string.bytes();
-        const closure_methods = [_][]const u8{ "__invoke", "bindTo", "bind", "call", "fromCallable", "getClosureScopeClass", "getClosureThis", "getClosureCalledClass", "getClosureUsedVariables" };
-        for (closure_methods) |cm| if (std.ascii.eqlIgnoreCase(cm, m)) return NativeResult.scalar(.{ .bool = true });
-        return NativeResult.scalar(.{ .bool = false });
-    }
     var current: ?[]const u8 = if (args[0] == .object)
         args[0].object.class_name
     else if (args[0] == .generator)
@@ -884,6 +852,11 @@ fn native_settype(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     if (std.mem.eql(u8, type_name, "string")) {
         if (val == .string) return NativeResult.share(val);
         if (val == .array) try ctx.vm.emitWarning("Array to string conversion");
+        // __toString, or php's "could not be converted to string" Error
+        if (val == .object) {
+            const text = try ctx.vm.objectString(val.object);
+            return if (text.owner != null) NativeResult.takeString(text) else NativeResult.shareString(text);
+        }
         var buf = std.ArrayListUnmanaged(u8).empty;
         defer buf.deinit(ctx.allocator);
         try val.format(&buf, ctx.allocator);
@@ -927,12 +900,6 @@ fn native_function_exists(ctx: *NativeContext, args: []const Value) RuntimeError
 }
 
 fn native_get_object_vars(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    // closures are stored as name strings and report as 'object'/'Closure'
-    // but have no user-visible properties - return empty array per PHP
-    if (args.len > 0 and args[0] == .string and std.mem.startsWith(u8, args[0].string.bytes(), "__closure_")) {
-        const empty = try ctx.createArray();
-        return NativeResult.borrowed(.{ .array = empty });
-    }
     if (args.len == 0 or args[0] != .object) return NativeResult.scalar(Value{ .bool = false });
     try ctx.vm.triggerLazyInit(args[0].object);
     const obj = args[0].object.storage();
@@ -979,13 +946,6 @@ fn isInClassHierarchy(vm: *@import("../runtime/vm.zig").VM, candidate: []const u
 
 fn native_get_class_methods(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(Value{ .bool = false });
-    // closures (stored as name strings) report the standard Closure API
-    if (args[0] == .string and std.mem.startsWith(u8, args[0].string.bytes(), "__closure_")) {
-        var arr = try ctx.createArray();
-        const methods = [_][]const u8{ "bind", "bindTo", "call", "fromCallable", "__invoke" };
-        for (methods) |m| try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(m) });
-        return NativeResult.borrowed(.{ .array = arr });
-    }
     const class_name = if (args[0] == .object)
         args[0].object.class_name
     else if (args[0] == .generator)
@@ -1111,10 +1071,6 @@ fn native_get_parent_class(ctx: *NativeContext, args: []const Value) RuntimeErro
         if (cls.parent) |p| return NativeResult.copyString(ctx.allocator, p);
         return NativeResult.scalar(Value{ .bool = false });
     }
-    // closures (string-form) report as Closure with no parent
-    if (args[0] == .string and std.mem.startsWith(u8, args[0].string.bytes(), "__closure_")) {
-        return NativeResult.scalar(Value{ .bool = false });
-    }
     const raw = if (args[0] == .object)
         args[0].object.class_name
     else if (args[0] == .string)
@@ -1139,10 +1095,6 @@ fn native_is_a(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
         return NativeResult.scalar(.{ .bool = std.mem.eql(u8, target, "Generator") or std.mem.eql(u8, target, "Iterator") or std.mem.eql(u8, target, "Traversable") });
     }
     if (args[0] == .fiber) return NativeResult.scalar(.{ .bool = std.mem.eql(u8, target, "Fiber") });
-    // closures stored as unique name strings present as object/Closure
-    if (args[0] == .string and std.mem.startsWith(u8, args[0].string.bytes(), "__closure_")) {
-        return NativeResult.scalar(.{ .bool = std.mem.eql(u8, target, "Closure") });
-    }
     if (args[0] == .string) {
         // string arg requires explicit allow_string=true (3rd arg)
         const allow_string = args.len >= 3 and args[2].isTruthy();
@@ -1182,17 +1134,7 @@ fn native_spl_object_id(ctx: *NativeContext, args: []const Value) RuntimeError!N
     }
     if (args[0] == .generator) return NativeResult.scalar(.{ .int = args[0].generator.handle });
     if (args[0] == .fiber) return NativeResult.scalar(.{ .int = args[0].fiber.handle });
-    if (closureHandle(ctx, args[0])) |handle| return NativeResult.scalar(.{ .int = @intCast(handle) });
     return throwObjectArg(ctx, "spl_object_id", args[0]);
-}
-
-// a closure held as its instance name: the handle of the Closure object it
-// stands for. a closure with no instance range of its own (a plain function
-// name) takes its address, which no handle collides with in practice
-fn closureHandle(ctx: *NativeContext, v: Value) ?u64 {
-    if (v != .string or !std.mem.startsWith(u8, v.string.bytes(), "__closure_")) return null;
-    if (ctx.vm.closureHandle(v.string.bytes())) |handle| return handle;
-    return @intCast(@intFromPtr(v.string.bytes().ptr));
 }
 
 fn throwObjectArg(ctx: *NativeContext, comptime func: []const u8, v: Value) RuntimeError {
@@ -2018,14 +1960,9 @@ fn native_match_unhandled_msg(ctx: *NativeContext, args: []const Value) RuntimeE
         .bool => |b| try buf.appendSlice(ctx.allocator, if (b) "true" else "false"),
         .null, .undef => try buf.appendSlice(ctx.allocator, "null"),
         .string => |s| {
-            // closures stored as Value.string with a __closure_ prefix are objects
-            if (std.mem.startsWith(u8, s.bytes(), "__closure_")) {
-                try buf.appendSlice(ctx.allocator, "of type Closure");
-            } else {
-                try buf.append(ctx.allocator, '\'');
-                try buf.appendSlice(ctx.allocator, s.bytes());
-                try buf.append(ctx.allocator, '\'');
-            }
+            try buf.append(ctx.allocator, '\'');
+            try buf.appendSlice(ctx.allocator, s.bytes());
+            try buf.append(ctx.allocator, '\'');
         },
         .array => try buf.appendSlice(ctx.allocator, "of type array"),
         .object => |o| {
@@ -3015,7 +2952,6 @@ fn native_spl_object_hash(ctx: *NativeContext, args: []const Value) RuntimeError
         },
         .generator => |g| id = g.handle,
         .fiber => |f| id = f.handle,
-        .string => id = closureHandle(ctx, args[0]) orelse return throwObjectArg(ctx, "spl_object_hash", args[0]),
         else => return throwObjectArg(ctx, "spl_object_hash", args[0]),
     }
     // PHP format: 16 hex chars of id, then 16 zeros

@@ -85,10 +85,6 @@ pub fn docref(ctx: *NativeContext, func: []const u8, msg: []const u8) RuntimeErr
     return warnFmt(ctx, "{s}(): {s}", .{ func, msg });
 }
 
-fn isClosure(v: Value) bool {
-    return v == .string and std.mem.startsWith(u8, v.string.bytes(), "__closure_");
-}
-
 // php's argument parsing for one call: weak-mode coercions, the null
 // deprecation, and TypeErrors worded as zend_parse_parameters words them
 pub const Args = struct {
@@ -131,7 +127,7 @@ pub const Args = struct {
     pub fn strAs(self: Args, index: usize, name: []const u8, expected: []const u8) RuntimeError![]const u8 {
         const v = self.args[index];
         switch (v) {
-            .string => if (!isClosure(v)) return v.string.bytes(),
+            .string => return v.string.bytes(),
             .null, .undef => if (!self.strict()) {
                 try self.nullDeprecated(index, name, expected);
                 return "";
@@ -172,7 +168,7 @@ pub const Args = struct {
             .float => |f| if (!self.strict()) return self.floatToLong(index, name, expected, f, false),
             .string => |s| if (!self.strict()) {
                 const bytes = s.bytes();
-                if (Value.isNumericString(bytes) and !isClosure(v)) {
+                if (Value.isNumericString(bytes)) {
                     const trimmed = std.mem.trim(u8, bytes, " \t\n\r\x0b\x0c");
                     if (std.fmt.parseInt(i64, trimmed, 10)) |i| return i else |_| {}
                     return self.floatToLong(index, name, expected, Value.toFloat(v), true);
@@ -226,7 +222,7 @@ pub const Args = struct {
                 return false;
             },
             .int, .float => if (!self.strict()) return v.isTruthy(),
-            .string => if (!self.strict() and !isClosure(v)) return v.isTruthy(),
+            .string => if (!self.strict()) return v.isTruthy(),
             else => {},
         }
         return self.typeError(index, name, "bool");
@@ -247,7 +243,7 @@ pub const Args = struct {
 fn elementString(ctx: *NativeContext, v_in: Value) RuntimeError![]const u8 {
     const v = v_in;
     switch (v) {
-        .string => if (!isClosure(v)) return v.string.bytes(),
+        .string => return v.string.bytes(),
         .array => {
             try ctx.vm.emitWarning("Array to string conversion");
             return "Array";
