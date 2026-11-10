@@ -157,6 +157,7 @@ pub fn extractHeredocBody(self: *Compiler, token_idx: u32) (Allocator.Error || e
 
 fn compileInterpolatedString(self: *Compiler, s: []const u8, quote: u8) (Allocator.Error || error{CompileError})!void {
     var segment_count: u32 = 0;
+    var literal_count: u32 = 0;
     var i: usize = 0;
 
     while (i < s.len) {
@@ -197,6 +198,7 @@ fn compileInterpolatedString(self: *Compiler, s: []const u8, quote: u8) (Allocat
         if (s[i] == '{' and i + 1 < s.len and s[i + 1] == '$') {
             if (i > lit_start) {
                 try emitLiteralSegment(self, quote, s[lit_start..i]);
+                literal_count += 1;
                 if (segment_count > 0) try self.emitOp(.concat);
                 segment_count += 1;
             }
@@ -215,6 +217,7 @@ fn compileInterpolatedString(self: *Compiler, s: []const u8, quote: u8) (Allocat
         if (s[i] == '$' and i + 1 < s.len and s[i + 1] == '{') {
             if (i > lit_start) {
                 try emitLiteralSegment(self, quote, s[lit_start..i]);
+                literal_count += 1;
                 if (segment_count > 0) try self.emitOp(.concat);
                 segment_count += 1;
             }
@@ -252,6 +255,7 @@ fn compileInterpolatedString(self: *Compiler, s: []const u8, quote: u8) (Allocat
         if (s[i] == '$' and i + 1 < s.len and isVarStart(s[i + 1])) {
             if (i > lit_start) {
                 try emitLiteralSegment(self, quote, s[lit_start..i]);
+                literal_count += 1;
                 if (segment_count > 0) try self.emitOp(.concat);
                 segment_count += 1;
             }
@@ -293,6 +297,7 @@ fn compileInterpolatedString(self: *Compiler, s: []const u8, quote: u8) (Allocat
 
     if (lit_start < s.len) {
         try emitLiteralSegment(self, quote, s[lit_start..]);
+        literal_count += 1;
         if (segment_count > 0) try self.emitOp(.concat);
         segment_count += 1;
     }
@@ -300,6 +305,9 @@ fn compileInterpolatedString(self: *Compiler, s: []const u8, quote: u8) (Allocat
     if (segment_count == 0) {
         const idx = try self.addConstant(.{ .string = Value.String.borrowed("") });
         try self.emitConstant(idx);
+    } else if (segment_count == 1 and literal_count == 0) {
+        // "$var" alone is still a string: php casts it
+        try self.emitOp(.cast_string);
     }
 }
 
