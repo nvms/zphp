@@ -345,6 +345,8 @@ const FnView = struct {
     module: ?[]const u8 = null,
     // the closure instance whose bound variables are listed
     closure_instance: ?[]const u8 = null,
+    // a closure's __invoke: an internal method with the closure's signature
+    trampoline: bool = false,
 };
 
 fn nativeSignature(key: []const u8) ?native_params.Signature {
@@ -435,7 +437,7 @@ fn functionView(ctx: *NativeContext, this: *PhpObject) FnView {
 
 // the class whose method a class's method overrides or implements first:
 // what php's zend_function.prototype names
-fn prototypeOf(vm: *VM, class_name: []const u8, method: []const u8, depth: usize) ?[]const u8 {
+pub fn prototypeOf(vm: *VM, class_name: []const u8, method: []const u8, depth: usize) ?[]const u8 {
     if (depth > 64) return null;
     var proto: ?[]const u8 = null;
     const is_ctor = std.ascii.eqlIgnoreCase(method, "__construct");
@@ -555,6 +557,9 @@ const ParamView = struct {
     user_default: ?Value = null,
     native: ?native_params.Param = null,
     self_class: ?[]const u8 = null,
+    // a closure's __invoke has internal arginfo with userland names, so its
+    // defaults print as <default>
+    trampoline: bool = false,
 };
 
 fn paramView(view: FnView, i: usize) ParamView {
@@ -568,6 +573,7 @@ fn paramView(view: FnView, i: usize) ParamView {
             .self_class = view.scope,
         };
         p.required = i < f.required_params;
+        p.trampoline = view.trampoline;
         if (view.types) |t| if (i < t.param_types.len) {
             p.type_raw = t.param_types[i];
         };
@@ -603,7 +609,9 @@ fn appendParameter(w: *Writer, p: ParamView) !void {
     if (p.variadic) try w.str("...");
     try w.fmt("${s}", .{p.name});
     if (!p.required and !p.variadic) {
-        if (p.native) |np| {
+        if (p.trampoline) {
+            try w.str(" = <default>");
+        } else if (p.native) |np| {
             try w.str(" = ");
             try appendNativeDefault(w, np);
         } else if (p.user_default) |d| {
@@ -645,15 +653,16 @@ fn appendBoundVariables(w: *Writer, view: FnView, indent: []const u8) !void {
 // against
 fn appendFunction(w: *Writer, view: FnView, scope: ?[]const u8, indent: []const u8) RuntimeError!void {
     const vm = w.ctx.vm;
-    if (view.user) |f| if (f.doc_comment.len > 0) {
-        try w.fmt("{s}{s}\n", .{ indent, f.doc_comment });
+    const is_user = view.user != null and !view.trampoline;
+    if (is_user) if (view.user.?.doc_comment.len > 0) {
+        try w.fmt("{s}{s}\n", .{ indent, view.user.?.doc_comment });
     };
     try w.str(indent);
     try w.str(if (view.is_closure) "Closure [ " else if (view.scope != null) "Method [ " else "Function [ ");
-    try w.str(if (view.user != null) "<user" else "<internal");
+    try w.str(if (is_user) "<user" else "<internal");
     if (view.deprecated) try w.str(", deprecated");
-    if (view.user == null) if (view.module) |m| try w.fmt(":{s}", .{m});
-    if (scope != null and view.scope != null and !view.is_closure) {
+    if (!is_user and !view.trampoline) if (view.module) |m| try w.fmt(":{s}", .{m});
+    if (scope != null and view.scope != null and !view.is_closure and !view.trampoline) {
         const declaring = view.scope.?;
         if (!std.mem.eql(u8, declaring, scope.?)) {
             try w.fmt(", inherits {s}", .{declaring});
@@ -661,7 +670,7 @@ fn appendFunction(w: *Writer, view: FnView, scope: ?[]const u8, indent: []const 
             try w.fmt(", overwrites {s}", .{parent});
         }
     }
-    if (view.scope != null and !view.is_closure) {
+    if (view.scope != null and !view.is_closure and !view.trampoline) {
         if (prototypeOf(vm, view.scope.?, view.name, 0)) |proto| try w.fmt(", prototype {s}", .{proto});
         if (std.ascii.eqlIgnoreCase(view.name, "__construct")) try w.str(", ctor");
     }
@@ -682,7 +691,7 @@ fn appendFunction(w: *Writer, view: FnView, scope: ?[]const u8, indent: []const 
         try w.str(view.user.?.display_name);
     } else try w.str(view.name);
     try w.str(" ] {\n");
-    if (view.user) |f| try w.fmt("{s}  @@ {s} {d} - {d}\n", .{ indent, f.file_path, f.start_line, if (f.end_line == 0) f.start_line else f.end_line });
+    if (is_user) if (view.user) |f| try w.fmt("{s}  @@ {s} {d} - {d}\n", .{ indent, f.file_path, f.start_line, if (f.end_line == 0) f.start_line else f.end_line });
 
     const param_indent = try std.fmt.allocPrint(w.ctx.allocator, "{s}  ", .{indent});
     defer w.ctx.allocator.free(param_indent);
@@ -691,7 +700,7 @@ fn appendFunction(w: *Writer, view: FnView, scope: ?[]const u8, indent: []const 
     const ret = returnType(view);
     const count = paramCount(view);
     // a user function has argument info only with parameters or a return type
-    if (view.user == null or count > 0 or ret.text.len > 0) {
+    if ((!is_user and !view.trampoline) or count > 0 or ret.text.len > 0) {
         if (view.user != null or view.sig != null) {
             try w.fmt("\n{s}- Parameters [{d}] {{\n", .{ param_indent, count });
             for (0..count) |i| {
@@ -1244,6 +1253,18 @@ fn methodToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
     const name = reflection.methodLookupName(this) orelse return NativeResult.literal("");
     const declaring = stringProp(this, "__declaring_class") orelse return NativeResult.literal("");
     const class_name = stringProp(this, "__class") orelse declaring;
+    if (this.get("__closure") != .null) {
+        // a closure's __invoke
+        var view: FnView = .{ .name = "__invoke", .scope = "Closure", .trampoline = true, .info = .{ .name = "__invoke", .arity = 0 } };
+        if (stringProp(this, "__closure")) |closure| {
+            view.user = ctx.vm.functions.get(closure);
+            view.types = reflection.closureAwareTypeInfo(closure);
+        }
+        var w = Writer{ .ctx = ctx };
+        defer w.deinit();
+        try appendFunction(&w, view, null, "");
+        return w.result();
+    }
     var view = try methodView(ctx, class_name, declaring, name);
     const vis = this.get("__visibility");
     if (vis == .int) view.info.visibility = @fromBackingInt(@intCast(@as(u8, @intCast(vis.int))));
