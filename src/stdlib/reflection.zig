@@ -851,16 +851,27 @@ pub fn register(vm: *VM, a: Allocator) !void {
 }
 
 fn rextConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return throwReflection(ctx, "ReflectionExtension::__construct() expects an extension name");
-    const loaded = try ctx.vm.callByName("extension_loaded", args[0..1]);
-    if (!loaded.isTruthy()) {
-        const msg = try std.fmt.allocPrint(ctx.allocator, "Extension \"{s}\" does not exist", .{args[0].string.bytes()});
+    const name = try zpp.str(ctx, "ReflectionExtension::__construct", args, 0, "name");
+    const canonical = extensionName(name) orelse {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Extension \"{s}\" does not exist", .{name});
         defer ctx.allocator.free(msg);
         return throwReflection(ctx, msg);
-    }
+    };
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    try this.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(try ctx.vm.internName(args[0].string.bytes())) });
+    try this.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(canonical) });
     return NativeResult.scalar(.null);
+}
+
+// the module name of a loaded extension, named in any case
+pub fn extensionName(name: []const u8) ?[]const u8 {
+    for (@import("types.zig").SUPPORTED_EXTENSIONS) |ext| if (std.ascii.eqlIgnoreCase(ext, name)) return ext;
+    for (@import("../extension.zig").loaded()) |ext| if (std.ascii.eqlIgnoreCase(ext.name, name)) return ext.name;
+    return null;
+}
+
+fn enumIsBacked(vm: *VM, class_name: []const u8) bool {
+    const cls = vm.classes.get(class_name) orelse return false;
+    return cls.backed_type != .none;
 }
 
 fn rextGetName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -946,9 +957,15 @@ const zpp = struct {
 
     // Z_PARAM_OBJ_OR_STR: an object, or a string
     fn objOrStr(ctx: *NativeContext, label: []const u8, args: []const Value, i: usize, pname: []const u8) RuntimeError!Value {
-        if (args[i] == .object) return args[i];
+        if (args[i] == .object or isClosureValue(args[i])) return args[i];
         const text = (try scalarString(ctx, label, args, i, pname, "object|string")) orelse return typeError(ctx, label, i, pname, "object|string", args[i]);
         return .{ .string = Value.String.borrowed(text) };
+    }
+
+    // Z_PARAM_STR_OR_NULL
+    fn strOrNull(ctx: *NativeContext, label: []const u8, args: []const Value, i: usize, pname: []const u8) RuntimeError!?[]const u8 {
+        if (i >= args.len or args[i] == .null) return null;
+        return (try scalarString(ctx, label, args, i, pname, "?string")) orelse typeError(ctx, label, i, pname, "?string", args[i]);
     }
 
     // "?object" / "o!"
@@ -991,8 +1008,9 @@ const zpp = struct {
 // it; the declared spelling, or null
 fn lookupClass(ctx: *NativeContext, raw: []const u8) RuntimeError!?[]const u8 {
     const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
-    if (name.len == 0 or std.mem.indexOfScalar(u8, name, 0) != null) return null;
-    if (!ctx.vm.classes.contains(name) and !ctx.vm.interfaces.contains(name) and !ctx.vm.traits.contains(name)) {
+    if (name.len == 0) return null;
+    // a name with a nul byte (an anonymous class) is never autoloaded
+    if (std.mem.indexOfScalar(u8, name, 0) == null and !ctx.vm.classes.contains(name) and !ctx.vm.interfaces.contains(name) and !ctx.vm.traits.contains(name)) {
         try ctx.vm.tryAutoload(name);
         if (ctx.vm.pending_exception != null) return error.RuntimeError;
     }
@@ -1000,8 +1018,18 @@ fn lookupClass(ctx: *NativeContext, raw: []const u8) RuntimeError!?[]const u8 {
     return try ctx.vm.stableClassName(ctx.vm.declaredClassName(name));
 }
 
+// a closure as natives receive it: an instance name, or a Closure object
+pub fn isClosureValue(v: Value) bool {
+    return switch (v) {
+        .string => |name| std.mem.startsWith(u8, name.bytes(), "__closure_"),
+        .object => |o| std.mem.eql(u8, o.class_name, "Closure"),
+        else => false,
+    };
+}
+
 // the class an object|string argument names, or php's ReflectionException
 fn classArgument(ctx: *NativeContext, v: Value) RuntimeError![]const u8 {
+    if (isClosureValue(v)) return "Closure";
     if (v == .object) return v.object.class_name;
     const text = v.string.bytes();
     return (try lookupClass(ctx, text)) orelse {
@@ -1289,36 +1317,26 @@ fn hasInterfaceMethod(vm: *VM, iface_name: []const u8, method_name: []const u8) 
 }
 
 fn rcConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1) return throwReflection(ctx, "ReflectionClass::__construct() expects a class name");
-    const raw_class_name = if (args[0] == .string)
-        args[0].string.bytes()
-    else if (args[0] == .object)
-        args[0].object.class_name
-    else
-        return throwReflection(ctx, "ReflectionClass::__construct() expects a class name or object");
-    // PHP accepts leading-backslash on FQN class strings; normalize so the
-    // class registry lookup succeeds either way
-    const class_name = if (raw_class_name.len > 0 and raw_class_name[0] == '\\') raw_class_name[1..] else raw_class_name;
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    _ = try classObjectCtor(ctx, this, args, "ReflectionClass::__construct");
+    return NativeResult.scalar(.null);
+}
 
-    _ = resolveClassName(ctx.vm, class_name) catch {
-        const msg = std.fmt.allocPrint(ctx.allocator, "Class \"{s}\" does not exist", .{class_name}) catch return throwReflection(ctx, "Class does not exist");
-        defer ctx.allocator.free(msg);
-        return throwReflection(ctx, msg);
-    };
-    if (ctx.vm.classes.get(class_name) == null and ctx.vm.interfaces.get(class_name) == null and !ctx.vm.traits.contains(class_name)) {
-        const msg = std.fmt.allocPrint(ctx.allocator, "Class \"{s}\" does not exist", .{class_name}) catch return throwReflection(ctx, "Class does not exist");
-        defer ctx.allocator.free(msg);
-        return throwReflection(ctx, msg);
-    }
-
+// reflection_class_object_ctor: a ReflectionObject takes only an object
+fn classObjectCtor(ctx: *NativeContext, this: *PhpObject, args: []const Value, class_label: []const u8) RuntimeError![]const u8 {
+    const is_object = ctx.vm.isInstanceOf(this.class_name, "ReflectionObject");
+    const arg = if (is_object) blk: {
+        if (args[0] != .object and !isClosureValue(args[0])) return zpp.typeError(ctx, "ReflectionObject::__construct", 0, "object", "object", args[0]);
+        break :blk args[0];
+    } else try zpp.objOrStr(ctx, class_label, args, 0, "objectOrClass");
+    const class_name = try classArgument(ctx, arg);
     try this.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(try ctx.vm.stableClassName(class_name)) });
     try this.set(ctx.allocator, "__is_interface", .{ .bool = ctx.vm.interfaces.contains(class_name) });
     try this.set(ctx.allocator, "__is_trait", .{ .bool = ctx.vm.traits.contains(class_name) });
     // a ReflectionObject keeps the object it reflects, whose dynamic
     // properties its string form lists
-    if (args[0] == .object and ctx.vm.isInstanceOf(this.class_name, "ReflectionObject")) try this.set(ctx.allocator, "__object", args[0]);
-    return NativeResult.scalar(.null);
+    if (is_object and arg == .object) try this.set(ctx.allocator, "__object", arg);
+    return class_name;
 }
 
 fn rcGetName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -1373,28 +1391,35 @@ fn rcGetParentClass(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRe
 }
 
 fn rcImplementsInterface(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const iface_name = args[0].string.bytes();
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const iface = try reflectionClassArgument(ctx, args, "ReflectionClass::implementsInterface", "interface", "Interface");
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    if (!ctx.vm.interfaces.contains(iface)) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "{s} is not an interface", .{iface});
+        defer ctx.allocator.free(msg);
+        return throwReflection(ctx, msg);
+    }
+    return NativeResult.scalar(.{ .bool = ctx.vm.isInstanceOf(class_name, iface) });
+}
 
-    var queue = std.ArrayListUnmanaged([]const u8).empty;
-    defer queue.deinit(ctx.allocator);
-    var current: ?[]const u8 = class_name;
-    while (current) |name| {
-        const cls = ctx.vm.classes.get(name) orelse break;
-        for (cls.interfaces.items) |iface| try queue.append(ctx.allocator, iface);
-        current = cls.parent;
-    }
-    var i: usize = 0;
-    while (i < queue.items.len) : (i += 1) {
-        const iface = queue.items[i];
-        if (std.ascii.eqlIgnoreCase(iface, iface_name)) return NativeResult.scalar(.{ .bool = true });
-        if (ctx.vm.classes.get(iface)) |idef| {
-            for (idef.interfaces.items) |sub| try queue.append(ctx.allocator, sub);
+// Z_PARAM_OBJ_OF_CLASS_OR_STR(ReflectionClass): the class a ReflectionClass
+// reflects, or one named by a string
+fn reflectionClassArgument(ctx: *NativeContext, args: []const Value, label: []const u8, pname: []const u8, kind: []const u8) RuntimeError![]const u8 {
+    if (args[0] == .object and ctx.vm.isInstanceOf(args[0].object.class_name, "ReflectionClass")) {
+        const name = args[0].object.get("name");
+        if (name != .string) {
+            _ = try ctx.vm.throwBuiltinException("Error", "Internal error: Failed to retrieve the argument's reflection object");
+            return error.RuntimeError;
         }
+        return name.string.bytes();
     }
-    return NativeResult.scalar(.{ .bool = false });
+    const text = (if (args[0] == .object) null else try zpp.scalarString(ctx, label, args, 0, pname, "ReflectionClass|string")) orelse
+        return zpp.typeError(ctx, label, 0, pname, "ReflectionClass|string", args[0]);
+    return (try lookupClass(ctx, text)) orelse {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "{s} \"{s}\" does not exist", .{ kind, text });
+        defer ctx.allocator.free(msg);
+        return throwReflection(ctx, msg);
+    };
 }
 
 fn rcIsInstance(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -1426,83 +1451,162 @@ fn rcIsInstance(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
 }
 
 fn rcIsSubclassOf(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const parent_name = args[0].string.bytes();
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const parent_name = try reflectionClassArgument(ctx, args, "ReflectionClass::isSubclassOf", "class", "Class");
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
-
-    var current: ?[]const u8 = class_name;
-    while (current) |name| {
-        const cls = ctx.vm.classes.get(name) orelse break;
-        current = cls.parent;
-        if (current) |p| {
-            if (std.ascii.eqlIgnoreCase(p, parent_name)) return NativeResult.scalar(.{ .bool = true });
-        }
-    }
-    return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = !std.ascii.eqlIgnoreCase(class_name, parent_name) and ctx.vm.isInstanceOf(class_name, parent_name) });
 }
 
 fn rcNewInstance(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
-    if (ctx.vm.traits.contains(class_name)) {
-        const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot instantiate trait {s}", .{class_name});
-        defer ctx.allocator.free(msg);
-        try ctx.vm.setPendingException("Error", msg);
-        return error.RuntimeError;
-    }
-    if (ctx.vm.interfaces.contains(class_name)) {
-        const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot instantiate interface {s}", .{class_name});
-        defer ctx.allocator.free(msg);
-        try ctx.vm.setPendingException("Error", msg);
-        return error.RuntimeError;
-    }
-    if (ctx.vm.classes.get(class_name)) |cd| {
-        if (cd.is_abstract) {
-            const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot instantiate abstract class {s}", .{class_name});
-            defer ctx.allocator.free(msg);
-            try ctx.vm.setPendingException("Error", msg);
-            return error.RuntimeError;
-        }
-    }
-    const obj = try ctx.vm.allocObject(.{ .class_name = try ctx.vm.stableClassName(class_name) });
-    // full slot layout + per-instance default copies (walks the parent chain,
-    // deep-clones array defaults) - the raw cls.properties loop skipped both,
-    // so inherited typed props read as uninitialized
-    try ctx.vm.initObjectProperties(obj, class_name);
-    if (ctx.vm.hasMethod(class_name, "__construct")) {
-        _ = try ctx.callMethod(obj, "__construct", args);
-    }
-    return NativeResult.borrowed(.{ .object = obj });
+    return newInstanceWith(ctx, args, null, args.len);
 }
 
 fn rcNewInstanceArgs(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
-    if (ctx.vm.classes.get(class_name)) |cd| {
-        if (cd.is_abstract) {
-            const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot instantiate abstract class {s}", .{class_name});
+    const arr: ?*PhpArray = if (args.len >= 1) try zpp.array(ctx, "ReflectionClass::newInstanceArgs", args, 0, "args") else null;
+    return newInstanceWith(ctx, &.{}, arr, if (arr) |a| a.entries.items.len else 0);
+}
+
+// the arguments a native passes on to a php call, bound as php's
+// zend_call_function binds them: positional entries first, then named ones
+// (string keys) placed on the callee's parameters, skipped parameters taking
+// their defaults. the errors are php's: a positional entry after a named one,
+// an unknown name, a name overwriting an argument, a required parameter left
+// without one
+const BoundArgs = struct {
+    list: std.ArrayListUnmanaged(Value) = .empty,
+
+    fn deinit(self: *BoundArgs, allocator: Allocator) void {
+        self.list.deinit(allocator);
+    }
+};
+
+fn raiseError(ctx: *NativeContext, class: []const u8, comptime fmt: []const u8, args: anytype) RuntimeError {
+    const msg = try std.fmt.allocPrint(ctx.allocator, fmt, args);
+    defer ctx.allocator.free(msg);
+    _ = try ctx.vm.throwBuiltinException(class, msg);
+    return error.RuntimeError;
+}
+
+// func_key names the callee as vm.functions or the native signatures key it
+// ("Class::method" or a function name); display is how messages name it
+fn bindArguments(ctx: *NativeContext, func_key: []const u8, display: []const u8, positional: []const Value, named: ?*PhpArray) RuntimeError!BoundArgs {
+    var bound: BoundArgs = .{};
+    errdefer bound.deinit(ctx.allocator);
+    try bound.list.appendSlice(ctx.allocator, positional);
+    const arr = named orelse return bound;
+    var saw_named = false;
+    for (arr.entries.items) |entry| {
+        const v = if (entry.ref) |r| r.* else entry.value;
+        if (entry.key == .int) {
+            if (saw_named) return raiseError(ctx, "Error", "Cannot use positional argument after named argument", .{});
+            try bound.list.append(ctx.allocator, v);
+        } else saw_named = true;
+    }
+    if (!saw_named) return bound;
+    if (ctx.vm.functions.get(func_key)) |func| {
+        const fixed: usize = if (func.is_variadic and func.arity > 0) func.arity - 1 else func.params.len;
+        const given = bound.list.items.len;
+        for (arr.entries.items) |entry| {
+            if (entry.key != .string) continue;
+            const name = entry.key.string.bytes();
+            const index = for (func.params[0..@min(fixed, func.params.len)], 0..) |p, i| {
+                if (std.mem.eql(u8, std.mem.trimStart(u8, p, "$"), name)) break i;
+            } else return raiseError(ctx, "Error", "Unknown named parameter ${s}", .{name});
+            if (index < given or (index < bound.list.items.len and bound.list.items[index] != .undef))
+                return raiseError(ctx, "Error", "Named parameter ${s} overwrites previous argument", .{name});
+            while (bound.list.items.len <= index) try bound.list.append(ctx.allocator, .undef);
+            bound.list.items[index] = if (entry.ref) |r| r.* else entry.value;
+        }
+        for (bound.list.items, 0..) |*slot, i| {
+            if (slot.* != .undef) continue;
+            if (i >= func.required_params and i < func.defaults.len) {
+                slot.* = try ctx.vm.resolveParamDefault(func, i);
+                continue;
+            }
+            return raiseError(ctx, "ArgumentCountError", "{s}(): Argument #{d} (${s}) not passed", .{ display, i + 1, std.mem.trimStart(u8, func.params[i], "$") });
+        }
+        return bound;
+    }
+    if (native_params.get(func_key)) |sig| {
+        var resolved: [256]Value = undefined;
+        var sources: [256]vm_mod.RefSource = undefined;
+        const placed = try ctx.vm.placeNativeNamedArgs(arr, sig.params, &resolved, &sources);
+        if (placed.problem) |problem| {
+            const class, const msg = try ctx.vm.namedArgProblemMessage(display, sig.params, problem);
             defer ctx.allocator.free(msg);
-            try ctx.vm.setPendingException("Error", msg);
+            _ = try ctx.vm.throwBuiltinException(class, msg);
             return error.RuntimeError;
         }
+        bound.list.clearRetainingCapacity();
+        try bound.list.appendSlice(ctx.allocator, resolved[0..placed.count]);
+        return bound;
     }
+    for (arr.entries.items) |entry| if (entry.key == .string)
+        return raiseError(ctx, "Error", "Unknown named parameter ${s}", .{entry.key.string.bytes()});
+    return bound;
+}
 
-    const arr = if (args.len >= 1 and args[0] == .array) args[0].array else return NativeResult.scalar(.null);
+// the class's constructor as get_constructor finds it: its declaring class,
+// declared name and visibility
+const Constructor = struct { declaring: []const u8, name: []const u8, visibility: ClassDef.Visibility };
 
-    var ctor_buf: [16]Value = undefined;
-    const ctor_args = try ctx.argsFromArray(arr, &ctor_buf);
-    defer ctx.freeArgs(ctor_args, &ctor_buf);
-    const count = ctor_args.len;
+fn findConstructor(vm: *VM, class_name: []const u8) ?Constructor {
+    if (!vm.hasMethod(class_name, "__construct")) return null;
+    const name = declaredMethodName(vm, class_name, "__construct");
+    const declaring = findDeclaringClass(vm, class_name, name);
+    const vis = vm.findMethodVisibility(class_name, name);
+    return .{ .declaring = declaring, .name = name, .visibility = vis.visibility };
+}
 
+// object_init_ex's refusals
+fn checkInstantiable(ctx: *NativeContext, class_name: []const u8) RuntimeError!void {
+    if (ctx.vm.traits.contains(class_name)) return raiseError(ctx, "Error", "Cannot instantiate trait {s}", .{class_name});
+    if (ctx.vm.interfaces.contains(class_name)) return raiseError(ctx, "Error", "Cannot instantiate interface {s}", .{class_name});
+    if (ctx.vm.classes.get(class_name)) |cd| {
+        if (cd.is_enum) return raiseError(ctx, "Error", "Cannot instantiate enum {s}", .{class_name});
+        if (cd.is_abstract) return raiseError(ctx, "Error", "Cannot instantiate abstract class {s}", .{class_name});
+    }
+    if (std.mem.eql(u8, class_name, "Generator") or std.mem.eql(u8, class_name, "Closure")) {
+        const what = if (std.mem.eql(u8, class_name, "Closure")) "Instantiation of class Closure is not allowed" else "The \"Generator\" class is reserved for internal use and cannot be manually instantiated";
+        return raiseError(ctx, "Error", "{s}", .{what});
+    }
+}
+
+// ReflectionClass::newInstance / newInstanceArgs
+fn newInstanceWith(ctx: *NativeContext, positional: []const Value, named: ?*PhpArray, argc: usize) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
+    try checkInstantiable(ctx, class_name);
+    const ctor = findConstructor(ctx.vm, class_name);
+    if (ctor) |c| if (c.visibility != .public) return throwReflectionFmt(ctx, "Access to non-public constructor of class {s}", .{class_name});
     const obj = try ctx.vm.allocObject(.{ .class_name = try ctx.vm.stableClassName(class_name) });
-
+    // full slot layout + per-instance default copies (walks the parent chain,
+    // deep-clones array defaults)
     try ctx.vm.initObjectProperties(obj, class_name);
-
-    if (ctx.vm.hasMethod(class_name, "__construct")) {
-        _ = try ctx.callMethod(obj, "__construct", ctor_args[0..count]);
-    }
+    const c = ctor orelse {
+        if (argc > 0) {
+            ctx.vm.releaseValue(.{ .object = obj });
+            return throwReflectionFmt(ctx, "Class {s} does not have a constructor, so you cannot pass any constructor arguments", .{class_name});
+        }
+        return NativeResult.borrowed(.{ .object = obj });
+    };
+    var key_buf: [256]u8 = undefined;
+    const key = class_names.memberKey(&key_buf, c.declaring, c.name);
+    var bound = try bindArguments(ctx, key, key, positional, named);
+    defer bound.deinit(ctx.allocator);
+    // a call from internal code: php's too-few-arguments error names no
+    // calling line
+    const outer = ctx.vm.native_caller;
+    ctx.vm.native_caller = .{ .name = "ReflectionClass::newInstance", .frames = ctx.vm.frame_count };
+    defer ctx.vm.native_caller = outer;
+    _ = try ctx.callMethod(obj, "__construct", bound.list.items);
     return NativeResult.borrowed(.{ .object = obj });
+}
+
+fn throwReflectionFmt(ctx: *NativeContext, comptime fmt: []const u8, args: anytype) RuntimeError {
+    const msg = try std.fmt.allocPrint(ctx.allocator, fmt, args);
+    defer ctx.allocator.free(msg);
+    return throwReflection(ctx, msg);
 }
 
 fn rcGetMethods(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -1585,8 +1689,7 @@ fn methodModifiers(info: ClassDef.MethodInfo) i64 {
 }
 
 fn rcGetMethod(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1 or args[0] != .string) return throwReflection(ctx, "ReflectionClass::getMethod() expects a method name");
-    const method_name = args[0].string.bytes();
+    const method_name = try zpp.str(ctx, "ReflectionClass::getMethod", args, 0, "name");
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
 
@@ -1616,15 +1719,15 @@ fn declaredMethodName(vm: *VM, class_name: []const u8, method_name: []const u8) 
 }
 
 fn rcHasMethod(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const method_name = try zpp.str(ctx, "ReflectionClass::hasMethod", args, 0, "name");
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
     // PHP method names are case-insensitive
-    if (ctx.vm.hasMethod(class_name, args[0].string.bytes())) return NativeResult.scalar(.{ .bool = true });
+    if (ctx.vm.hasMethod(class_name, method_name)) return NativeResult.scalar(.{ .bool = true });
     var current: ?[]const u8 = class_name;
     while (current) |cn| {
         if (ctx.vm.classes.get(cn)) |cls| {
-            if (cls.methods.contains(args[0].string.bytes())) return NativeResult.scalar(.{ .bool = true });
+            if (cls.methods.contains(method_name)) return NativeResult.scalar(.{ .bool = true });
             current = cls.parent;
         } else break;
     }
@@ -2133,6 +2236,11 @@ fn rcMarkLazyObjectAsInitialized(ctx: *NativeContext, args: []const Value) Runti
 fn rcNewInstanceWithoutConstructor(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
+    // internal final classes whose objects only their own code creates
+    for ([_][]const u8{ "Closure", "Generator", "Fiber", "WeakReference", "WeakMap", "InternalIterator", "Random\\Randomizer", "CurlHandle", "CurlMultiHandle", "CurlShareHandle" }) |refused| {
+        if (std.ascii.eqlIgnoreCase(class_name, refused)) return throwReflectionFmt(ctx, "Class {s} is an internal class marked as final that cannot be instantiated without invoking its constructor", .{class_name});
+    }
+    try checkInstantiable(ctx, class_name);
 
     const obj = try ctx.vm.allocObject(.{ .class_name = try ctx.vm.stableClassName(class_name) });
 
@@ -2287,35 +2395,21 @@ fn rcGetReflectionConstant(ctx: *NativeContext, args: []const Value) RuntimeErro
 
 fn rcHasConstant(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const target = try zpp.str(ctx, "ReflectionClass::hasConstant", args, 0, "name");
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const target = args[0].string.bytes();
-
-    var current: ?[]const u8 = class_name;
-    while (current) |name| {
-        const cls = ctx.vm.classes.get(name) orelse break;
-        if (cls.constants.contains(target)) return NativeResult.scalar(.{ .bool = true });
-        current = cls.parent;
-    }
-    return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = findConstantOwner(ctx, class_name, target, 0) != null });
 }
 
 fn rcGetConstant(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const target = try zpp.str(ctx, "ReflectionClass::getConstant", args, 0, "name");
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
     // php evaluates the class's constant expressions first
     try ctx.vm.updateClassConstants(class_name);
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const target = args[0].string.bytes();
-
-    var current: ?[]const u8 = class_name;
-    while (current) |name| {
-        const cls = ctx.vm.classes.get(name) orelse break;
-        if (cls.constants.contains(target)) {
-            if (cls.constants.get(target)) |val| return NativeResult.share(ctx.vm.enumCase(val));
-        }
-        current = cls.parent;
+    if (findConstantOwner(ctx, class_name, target, 0) != null) {
+        if (ctx.vm.getClassConstant(class_name, target)) |val| return NativeResult.share(ctx.vm.enumCase(val));
     }
+    try ctx.vm.raiseError(VM.E_DEPRECATED, "ReflectionClass::getConstant() for a non-existent constant is deprecated, use ReflectionClass::hasConstant() to check if the constant exists");
     return NativeResult.scalar(.{ .bool = false });
 }
 
@@ -2425,23 +2519,22 @@ fn rccConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
 }
 
 fn bindClassConstant(ctx: *NativeContext, args: []const Value) RuntimeError![]const u8 {
-    if (args.len < 2) return throwReflection(ctx, "ReflectionClassConstant::__construct expects class and constant name");
     const this = getThis(ctx) orelse return throwReflection(ctx, "ReflectionClassConstant::__construct called without an object");
-    const raw_class: []const u8 = switch (args[0]) {
-        .string => args[0].string.bytes(),
-        .object => args[0].object.class_name,
-        else => return throwReflection(ctx, "ReflectionClassConstant::__construct class must be a string or object"),
-    };
-    const class_name = if (raw_class.len > 0 and raw_class[0] == '\\') raw_class[1..] else raw_class;
-    if (args[1] != .string) return throwReflection(ctx, "ReflectionClassConstant::__construct constant name must be a string");
-    const const_name = args[1].string.bytes();
-    try ctx.vm.tryAutoload(class_name);
+    const label = if (ctx.vm.isInstanceOf(this.class_name, "ReflectionEnumBackedCase"))
+        "ReflectionEnumBackedCase::__construct"
+    else if (ctx.vm.isInstanceOf(this.class_name, "ReflectionEnumUnitCase"))
+        "ReflectionEnumUnitCase::__construct"
+    else
+        "ReflectionClassConstant::__construct";
+    const class_arg = try zpp.objOrStr(ctx, label, args, 0, "class");
+    const const_name = try zpp.str(ctx, label, args, 1, "constant");
+    const class_name = try classArgument(ctx, class_arg);
     const owner = findConstantOwner(ctx, class_name, const_name, 0) orelse {
         const msg = try std.fmt.allocPrint(ctx.allocator, "Constant {s}::{s} does not exist", .{ class_name, const_name });
         defer ctx.allocator.free(msg);
         return throwReflection(ctx, msg);
     };
-    try this.set(ctx.allocator, "name", args[1]);
+    try this.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(try ctx.vm.internName(const_name)) });
     try this.set(ctx.allocator, "class", .{ .string = Value.String.borrowed(owner) });
     return owner;
 }
@@ -2612,129 +2705,132 @@ fn rcGetStaticProperties(ctx: *NativeContext, _: []const Value) RuntimeError!Nat
     try ctx.vm.resolveClassDefaults(class_name);
     const arr = try ctx.createArray();
     var current: ?[]const u8 = class_name;
+    var is_own = true;
     while (current) |name| {
         const cls = ctx.vm.classes.get(name) orelse break;
         var it = cls.static_props.iterator();
         while (it.next()) |entry| {
+            // a redeclared static hides the ancestor's, and an ancestor's
+            // private one isn't the class's
+            const key: PhpArray.Key = .{ .string = Value.String.borrowed(entry.key_ptr.*) };
+            if (arr.contains(key)) continue;
             if (entry.value_ptr.* == .undef) continue;
-            try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(entry.key_ptr.*) }, entry.value_ptr.*);
+            if (!is_own and (cls.static_prop_visibility.get(entry.key_ptr.*) orelse .public) == .private) continue;
+            try arr.set(ctx.allocator, key, entry.value_ptr.*);
         }
         current = cls.parent;
+        is_own = false;
     }
     return NativeResult.borrowed(.{ .array = arr });
 }
 
 fn rcGetStaticPropertyValue(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1 or args[0] != .string) return throwReflection(ctx, "ReflectionClass::getStaticPropertyValue() expects a property name");
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const prop_name = try zpp.str(ctx, "ReflectionClass::getStaticPropertyValue", args, 0, "name");
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
-    const prop_name = args[0].string.bytes();
     try ctx.vm.resolveClassDefaults(class_name);
-    var current: ?[]const u8 = class_name;
-    while (current) |name| {
-        const cls = ctx.vm.classes.get(name) orelse break;
-        if (cls.static_props.get(prop_name)) |v| {
-            if (v == .undef) {
-                const msg = try std.fmt.allocPrint(ctx.allocator, "Typed property {s}::${s} must not be accessed before initialization", .{ name, prop_name });
-                defer ctx.allocator.free(msg);
-                try ctx.vm.setPendingException("Error", msg);
-                return error.RuntimeError;
-            }
-            return NativeResult.share(v);
-        }
-        current = cls.parent;
+    const found = visiblePropertyDef(ctx.vm, class_name, prop_name);
+    if (found != null and found.?.is_static) {
+        const v = (try ctx.vm.staticPropertyValue(class_name, prop_name)) orelse .undef;
+        if (v != .undef) return NativeResult.share(v);
+        if (args.len >= 2) return NativeResult.share(args[1]);
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Typed property {s}::${s} must not be accessed before initialization", .{ class_name, prop_name });
+        defer ctx.allocator.free(msg);
+        _ = try ctx.vm.throwBuiltinException("Error", msg);
+        return error.RuntimeError;
     }
     if (args.len >= 2) return NativeResult.share(args[1]);
-    return throwReflection(ctx, "Static property does not exist");
+    const msg = try std.fmt.allocPrint(ctx.allocator, "Property {s}::${s} does not exist", .{ class_name, prop_name });
+    defer ctx.allocator.free(msg);
+    return throwReflection(ctx, msg);
 }
 
 fn rcSetStaticPropertyValue(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2 or args[0] != .string) return throwReflection(ctx, "ReflectionClass::setStaticPropertyValue() expects a property name and value");
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const prop_name = try zpp.str(ctx, "ReflectionClass::setStaticPropertyValue", args, 0, "name");
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
-    const prop_name = args[0].string.bytes();
-    var current: ?[]const u8 = class_name;
-    while (current) |name| {
-        const cls_ptr = ctx.vm.classes.getPtr(name) orelse break;
-        if (!cls_ptr.constants.contains(prop_name) and cls_ptr.static_props.contains(prop_name)) {
-            try ctx.vm.setStaticPropValue(class_name, prop_name, args[1]);
-            return NativeResult.scalar(.null);
-        }
-        current = cls_ptr.parent;
+    try ctx.vm.resolveClassDefaults(class_name);
+    const found = visiblePropertyDef(ctx.vm, class_name, prop_name);
+    if (found == null or !found.?.is_static) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Class {s} does not have a property named {s}", .{ class_name, prop_name });
+        defer ctx.allocator.free(msg);
+        return throwReflection(ctx, msg);
     }
-    return throwReflection(ctx, "Static property does not exist");
+    var value = args[1];
+    if (try ctx.vm.checkPropertyType(&value, found.?.prop.type_str, found.?.declaring_class, prop_name)) return error.RuntimeError;
+    try ctx.vm.setStaticPropValue(class_name, prop_name, value);
+    return NativeResult.scalar(.null);
 }
 
 // ReflectionMethod::createFromMethodName('Class::method'), an instance of the
 // class it was called on
 fn rmCreateFromMethodName(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const valid = args.len > 0 and args[0] == .string and std.mem.indexOf(u8, args[0].string.bytes(), "::") != null;
-    if (!valid) return throwReflection(ctx, "ReflectionMethod::createFromMethodName(): Argument #1 ($method) must be a valid method name");
+    const method = try zpp.str(ctx, "ReflectionMethod::createFromMethodName", args, 0, "method");
     const class_name = ctx.vm.currentFrame().called_class orelse "ReflectionMethod";
+    if (ctx.vm.classes.get(class_name)) |cls| if (cls.is_abstract) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot instantiate abstract class {s}", .{class_name});
+        defer ctx.allocator.free(msg);
+        _ = try ctx.vm.throwBuiltinException("Error", msg);
+        return error.RuntimeError;
+    };
     const obj = try ctx.createObject(class_name);
-    _ = try initMethodReflection(ctx, obj, args[0..1]);
+    errdefer ctx.vm.releaseValue(.{ .object = obj });
+    _ = try initMethodReflection(ctx, obj, &.{.{ .string = Value.String.borrowed(method) }}, false);
     return NativeResult.borrowed(.{ .object = obj });
 }
 
 fn rmConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    return initMethodReflection(ctx, this, args);
+    return initMethodReflection(ctx, this, args, true);
 }
 
-fn initMethodReflection(ctx: *NativeContext, this: *PhpObject, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1) return throwReflection(ctx, "ReflectionMethod::__construct() expects parameters");
+// php's instantiate_reflection_method
+fn initMethodReflection(ctx: *NativeContext, this: *PhpObject, args: []const Value, is_constructor: bool) RuntimeError!NativeResult {
+    const label = if (is_constructor) "ReflectionMethod::__construct" else "ReflectionMethod::createFromMethodName";
+    const first_param = if (is_constructor) "objectOrMethod" else "method";
+    if (is_constructor and args.len == 1) {
+        try ctx.vm.raiseError(VM.E_DEPRECATED, "Calling ReflectionMethod::__construct() with 1 argument is deprecated, use ReflectionMethod::createFromMethodName() instead");
+    }
+    const arg1 = try zpp.objOrStr(ctx, label, args, 0, first_param);
+    const arg2 = if (is_constructor) try zpp.strOrNull(ctx, label, args, 1, "method") else null;
 
     var class_name: []const u8 = undefined;
     var method_name: []const u8 = undefined;
-
-    if (args.len >= 2 and args[1] == .string) {
-        method_name = args[1].string.bytes();
-        if (args[0] == .string) {
-            class_name = args[0].string.bytes();
-        } else if (args[0] == .object) {
-            class_name = args[0].object.class_name;
-        } else {
-            return throwReflection(ctx, "ReflectionMethod::__construct() expects a class name or object");
-        }
-    } else if (args[0] == .string) {
-        const s = args[0].string.bytes();
-        if (std.mem.indexOf(u8, s, "::")) |sep| {
-            class_name = s[0..sep];
-            method_name = s[sep + 2 ..];
-        } else {
-            return throwReflection(ctx, "ReflectionMethod::__construct() expects Class::method format");
-        }
+    var class_text: ?[]const u8 = null;
+    const arg1_object = arg1 == .object or isClosureValue(arg1);
+    if (arg1_object) {
+        method_name = arg2 orelse {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Argument #2 ($method) cannot be null when argument #1 ($objectOrMethod) is an object", .{label});
+            defer ctx.allocator.free(msg);
+            _ = try ctx.vm.throwBuiltinException("ValueError", msg);
+            return error.RuntimeError;
+        };
+        class_name = try classArgument(ctx, arg1);
+    } else if (arg2) |m| {
+        class_text = arg1.string.bytes();
+        method_name = m;
     } else {
-        return throwReflection(ctx, "ReflectionMethod::__construct() expects a class name or object");
-    }
-    if (class_name.len > 0 and class_name[0] == '\\') class_name = class_name[1..];
-
-    if (!ctx.vm.hasMethod(class_name, method_name)) {
-        // class might not be loaded yet - try autoloading
-        if (ctx.vm.classes.get(class_name) == null and ctx.vm.interfaces.get(class_name) == null) {
-            try ctx.vm.tryAutoload(class_name);
-        }
-        if (!ctx.vm.hasMethod(class_name, method_name) and
-            !hasInterfaceMethod(ctx.vm, class_name, method_name) and
-            !hasAbstractMethodInChain(ctx.vm, class_name, method_name))
-        {
-            const msg = std.fmt.allocPrint(ctx.allocator, "Method {s}::{s}() does not exist", .{ class_name, method_name }) catch return error.OutOfMemory;
+        const text = arg1.string.bytes();
+        const sep = std.mem.indexOf(u8, text, "::") orelse {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Argument #1 (${s}) must be a valid method name", .{ label, first_param });
             defer ctx.allocator.free(msg);
             return throwReflection(ctx, msg);
-        }
+        };
+        class_text = text[0..sep];
+        method_name = text[sep + 2 ..];
+    }
+    if (class_text) |text| class_name = try classArgument(ctx, .{ .string = Value.String.borrowed(text) });
+
+    if (!ctx.vm.hasMethod(class_name, method_name) and
+        !hasInterfaceMethod(ctx.vm, class_name, method_name) and
+        !hasAbstractMethodInChain(ctx.vm, class_name, method_name))
+    {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Method {s}::{s}() does not exist", .{ class_name, method_name });
+        defer ctx.allocator.free(msg);
+        return throwReflection(ctx, msg);
     }
     // report the declared spellings of a class and method named in any case
-    class_name = ctx.vm.declaredClassName(class_name);
-    var walk: ?[]const u8 = class_name;
-    while (walk) |cn| {
-        const cls = ctx.vm.classes.getPtr(cn) orelse break;
-        if (cls.methods.getKey(method_name)) |declared| {
-            method_name = declared;
-            break;
-        }
-        walk = cls.parent;
-    }
-
+    method_name = declaredMethodName(ctx.vm, class_name, method_name);
     const declaring = findDeclaringClass(ctx.vm, class_name, method_name);
     const info = blk: {
         if (ctx.vm.classes.get(declaring)) |cls| {
@@ -3251,8 +3347,18 @@ fn ritToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult 
 }
 
 fn rfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1) return throwReflection(ctx, "ReflectionFunction::__construct() expects a function name");
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const label = "ReflectionFunction::__construct";
+    // Z_PARAM_OBJ_OF_CLASS_OR_STR(Closure)
+    if (!isClosureValue(args[0])) {
+        const name = (try zpp.scalarString(ctx, label, args, 0, "function", "Closure|string")) orelse return zpp.typeError(ctx, label, 0, "function", "Closure|string", args[0]);
+        if (ctx.vm.canonicalFunctionName(name) == null or std.mem.startsWith(u8, name, "__closure_")) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Function {s}() does not exist", .{name});
+            defer ctx.allocator.free(msg);
+            return throwReflection(ctx, msg);
+        }
+        if (args[0] != .string) return rfConstruct(ctx, &.{.{ .string = Value.String.borrowed(name) }});
+    }
 
     if (args[0].closureName()) |instance| {
         // php names a closure `{closure:...}`; the Closure object, which
@@ -3319,12 +3425,10 @@ fn rfInvoke(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
 fn rfInvokeArgs(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const fn_name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.null);
-    if (args.len < 1 or args[0] != .array) return NativeResult.scalar(.null);
-    const arr = args[0].array;
-    var buf: [16]Value = undefined;
-    const call_args = try ctx.argsFromArray(arr, &buf);
-    defer ctx.freeArgs(call_args, &buf);
-    return NativeResult.share(try ctx.vm.callByName(fn_name, call_args));
+    const arr = try zpp.array(ctx, "ReflectionFunction::invokeArgs", args, 0, "args");
+    var bound = try bindArguments(ctx, fn_name, fn_name, &.{}, arr);
+    defer bound.deinit(ctx.allocator);
+    return NativeResult.share(try ctx.vm.callByName(fn_name, bound.list.items));
 }
 
 fn rfGetName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -3707,84 +3811,100 @@ fn populateRpFields(ctx: *NativeContext, obj: *PhpObject, func: *const ObjFuncti
 }
 
 fn rpConstructParam(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2) return throwReflection(ctx, "ReflectionParameter::__construct expects function and parameter");
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-
-    // accept "func_name" | ["Class", "method"] | [$obj, "method"] | Closure-ish
-    var key_buf: [256]u8 = undefined;
-    var lookup_key: []const u8 = "";
-    switch (args[0]) {
-        .string => |s| {
-            lookup_key = s.bytes();
-        },
-        .array => |arr| {
-            if (arr.entries.items.len < 2) return throwReflection(ctx, "ReflectionParameter callable must have [class, method]");
-            const cls_val = arr.entries.items[0].value;
-            const meth_val = arr.entries.items[1].value;
-            if (meth_val != .string) return throwReflection(ctx, "ReflectionParameter method name must be string");
-            const cls_name: []const u8 = switch (cls_val) {
-                .string => cls_val.string.bytes(),
-                .object => cls_val.object.class_name,
-                else => return throwReflection(ctx, "ReflectionParameter class must be a string or object"),
-            };
-            lookup_key = class_names.memberKey(&key_buf, cls_name, meth_val.string.bytes());
-        },
-        .object => |obj| {
-            if (obj.closureName()) |instance| {
-                lookup_key = instance;
-            } else if (std.mem.eql(u8, obj.class_name, "Closure")) {
-                // a closure made from a callable reflects what it calls
-                const callable = obj.get("__callable");
-                switch (callable) {
-                    .string => |s| lookup_key = s.bytes(),
-                    .array => |arr| {
-                        if (arr.entries.items.len != 2 or arr.entries.items[1].value != .string) return throwReflection(ctx, "ReflectionParameter expects a function name or [class, method]");
-                        const target = arr.entries.items[0].value;
-                        const cls_name: []const u8 = if (target == .object) target.object.class_name else if (target == .string) target.string.bytes() else "";
-                        const registered = ctx.vm.resolveMethod(cls_name, arr.entries.items[1].value.string.bytes()) catch null;
-                        lookup_key = registered orelse class_names.memberKey(&key_buf, cls_name, arr.entries.items[1].value.string.bytes());
-                    },
-                    else => return throwReflection(ctx, "ReflectionParameter expects a function name or [class, method]"),
-                }
-            } else {
-                lookup_key = class_names.memberKey(&key_buf, obj.class_name, "__invoke");
-            }
-        },
-        else => return throwReflection(ctx, "ReflectionParameter expects a function name or [class, method]"),
-    }
-
-    const func = ctx.vm.functions.get(lookup_key) orelse {
-        const sig = native_params.get(lookup_key) orelse return throwReflection(ctx, "ReflectionParameter could not find function");
-        const index: ?usize = switch (args[1]) {
-            .int => |n| if (n >= 0 and @as(usize, @intCast(n)) < sig.params.len) @intCast(n) else null,
-            .string => |want| for (sig.params, 0..) |p, i| {
-                if (std.mem.eql(u8, p.name, want.bytes())) break i;
-            } else null,
-            else => null,
-        };
-        try populateNativeRpFields(ctx, this, sig, lookup_key, index orelse return throwReflection(ctx, "ReflectionParameter could not find parameter"));
-        return NativeResult.scalar(.null);
+    const label = "ReflectionParameter::__construct";
+    // Z_PARAM_STR_OR_LONG
+    const param = args[1];
+    const by_name: ?[]const u8 = switch (param) {
+        .int => null,
+        .float => |f| if (std.math.isFinite(f) and @floor(f) == f) null else (try zpp.scalarString(ctx, label, args, 1, "param", "string|int")),
+        .bool => null,
+        else => (try zpp.scalarString(ctx, label, args, 1, "param", "string|int")) orelse return zpp.typeError(ctx, label, 1, "param", "string|int", param),
+    };
+    const position: i64 = switch (param) {
+        .int => |n| n,
+        .float => |f| if (by_name == null) @intFromFloat(f) else 0,
+        .bool => |b| @intFromBool(b),
+        else => 0,
     };
 
-    var idx: ?usize = null;
-    switch (args[1]) {
-        .int => |n| if (n >= 0 and @as(usize, @intCast(n)) < func.params.len) {
-            idx = @intCast(n);
+    // first, find the function: a name, [class or object, method], or a
+    // callable object
+    var key_buf: [256]u8 = undefined;
+    var lookup_key: []const u8 = "";
+    const reference = args[0];
+    if (isClosureValue(reference)) {
+        if (reference != .string) return throwReflection(ctx, "ReflectionParameter could not find function");
+        lookup_key = reference.string.bytes();
+    } else switch (reference) {
+        .string => |sv| {
+            lookup_key = ctx.vm.canonicalFunctionName(sv.bytes()) orelse {
+                const msg = try std.fmt.allocPrint(ctx.allocator, "Function {s}() does not exist", .{sv.bytes()});
+                defer ctx.allocator.free(msg);
+                return throwReflection(ctx, msg);
+            };
         },
-        .string => |want| {
-            for (func.params, 0..) |p, i| {
-                const clean = if (p.len > 0 and p[0] == '$') p[1..] else p;
-                if (std.mem.eql(u8, clean, want.bytes())) {
-                    idx = i;
-                    break;
-                }
+        .array => |arr| {
+            if (!arr.contains(.{ .int = 0 }) or !arr.contains(.{ .int = 1 })) return throwReflection(ctx, "Expected array($object, $method) or array($classname, $method)");
+            const classref: ?Value = arr.get(.{ .int = 0 });
+            const method: ?Value = arr.get(.{ .int = 1 });
+            const class_name = if (classref.? == .object) classref.?.object.class_name else blk: {
+                const text = (try zpp.scalarString(ctx, label, &.{classref.?}, 0, "function", "string")) orelse return zpp.typeError(ctx, label, 0, "function", "string", classref.?);
+                break :blk (try lookupClass(ctx, text)) orelse {
+                    const msg = try std.fmt.allocPrint(ctx.allocator, "Class \"{s}\" does not exist", .{text});
+                    defer ctx.allocator.free(msg);
+                    return throwReflection(ctx, msg);
+                };
+            };
+            const method_name = (try zpp.scalarString(ctx, label, &.{method.?}, 0, "function", "string")) orelse return zpp.typeError(ctx, label, 0, "function", "string", method.?);
+            if (!ctx.vm.hasMethod(class_name, method_name)) {
+                const msg = try std.fmt.allocPrint(ctx.allocator, "Method {s}::{s}() does not exist", .{ class_name, method_name });
+                defer ctx.allocator.free(msg);
+                return throwReflection(ctx, msg);
             }
+            const declared = declaredMethodName(ctx.vm, class_name, method_name);
+            lookup_key = try ctx.vm.internName(class_names.memberKey(&key_buf, findDeclaringClass(ctx.vm, class_name, declared), declared));
         },
-        else => {},
+        .object => |o| {
+            if (!ctx.vm.hasMethod(o.class_name, "__invoke")) {
+                const msg = try std.fmt.allocPrint(ctx.allocator, "Method {s}::__invoke() does not exist", .{o.class_name});
+                defer ctx.allocator.free(msg);
+                return throwReflection(ctx, msg);
+            }
+            const declared = declaredMethodName(ctx.vm, o.class_name, "__invoke");
+            lookup_key = try ctx.vm.internName(class_names.memberKey(&key_buf, findDeclaringClass(ctx.vm, o.class_name, declared), declared));
+        },
+        else => {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Argument #1 ($function) must be a string, an array(class, method), or a callable object, {s} given", .{ label, reference.valueName() });
+            defer ctx.allocator.free(msg);
+            return throwReflection(ctx, msg);
+        },
     }
-    if (idx == null) return throwReflection(ctx, "ReflectionParameter could not find parameter");
 
-    try populateRpFields(ctx, this, func, lookup_key, idx.?);
+    // then the parameter, by name or position
+    const user = ctx.vm.functions.get(lookup_key);
+    const sig = if (user == null) native_params.get(lookup_key) else null;
+    if (user == null and sig == null) return throwReflection(ctx, "The parameter specified by its offset could not be found");
+    const count: usize = if (user) |f| f.params.len else sig.?.params.len;
+    var index: usize = 0;
+    if (by_name) |want| {
+        index = for (0..count) |i| {
+            const pname = if (user) |f| std.mem.trimStart(u8, f.params[i], "$") else sig.?.params[i].name;
+            if (std.mem.eql(u8, pname, want)) break i;
+        } else return throwReflection(ctx, "The parameter specified by its name could not be found");
+    } else {
+        if (position < 0) {
+            _ = try ctx.vm.throwBuiltinException("ValueError", "ReflectionParameter::__construct(): Argument #2 ($param) must be greater than or equal to 0");
+            return error.RuntimeError;
+        }
+        if (position >= count) return throwReflection(ctx, "The parameter specified by its offset could not be found");
+        index = @intCast(position);
+    }
+    if (user) |f| {
+        try populateRpFields(ctx, this, f, lookup_key, index);
+    } else {
+        try populateNativeRpFields(ctx, this, sig.?, lookup_key, index);
+    }
     return NativeResult.scalar(.null);
 }
 
@@ -4940,47 +5060,64 @@ fn rpropIsVirtual(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
 }
 
 fn rmInvoke(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const guard_count = ctx.vm.prop_hook_guard.items.len;
-    defer ctx.vm.prop_hook_guard.shrinkRetainingCapacity(guard_count);
-    if (this.get("__hook_property") == .string and args.len > 0 and args[0] == .object) {
-        try ctx.vm.prop_hook_guard.append(ctx.allocator, .{ .obj_ptr = @intFromPtr(args[0].object), .prop_name = this.get("__hook_property").string.bytes() });
-    }
-    const method_name = methodLookupName(this) orelse return NativeResult.scalar(.null);
-    if (args.len > 0 and args[0] == .object) {
-        return NativeResult.share(ctx.callMethod(args[0].object, method_name, args[1..]) catch .null);
-    }
-    // static call: target is null/missing, dispatch by ClassName::methodName
-    const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.null);
-    var buf: [256]u8 = undefined;
-    const full = class_names.memberKey(&buf, declaring, method_name);
-    const rest = if (args.len >= 1) args[1..] else args[0..];
-    return NativeResult.share(ctx.vm.callByName(full, rest) catch .null);
+    return methodInvoke(ctx, args, true);
 }
 
 fn rmInvokeArgs(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return methodInvoke(ctx, args, false);
+}
+
+// php's reflection_method_invoke: the reflected method itself is called (no
+// override, no visibility check), static methods ignore the object
+fn methodInvoke(ctx: *NativeContext, args: []const Value, variadic: bool) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const label = if (variadic) "ReflectionMethod::invoke" else "ReflectionMethod::invokeArgs";
+    const method_name = methodLookupName(this) orelse return NativeResult.scalar(.null);
+    const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.null);
+    if (methodIsAbstract(ctx.vm, this, method_name, declaring)) return throwReflectionFmt(ctx, "Trying to invoke abstract method {s}::{s}()", .{ declaring, method_name });
+    var object: ?*PhpObject = null;
+    var closure_target: ?Value = null;
+    if (args.len > 0 and isClosureValue(args[0]) and args[0] == .string) closure_target = args[0] else object = try zpp.optObject(ctx, label, args, 0, "object");
+    const named: ?*PhpArray = if (variadic) null else try zpp.array(ctx, label, args, 1, "args");
+    const is_static = this.get("__is_static") == .bool and this.get("__is_static").bool;
+    if (!is_static) {
+        if (closure_target) |closure| {
+            const rest = if (variadic) args[1..] else &[_]Value{};
+            var bound = try bindArguments(ctx, closure.string.bytes(), "{closure}", rest, named);
+            defer bound.deinit(ctx.allocator);
+            return NativeResult.share(try ctx.invokeCallable(closure, bound.list.items));
+        }
+        const obj = object orelse return throwReflectionFmt(ctx, "Trying to invoke non static method {s}::{s}() without an object", .{ declaring, method_name });
+        if (!ctx.vm.isInstanceOf(obj.class_name, declaring)) return throwReflection(ctx, "Given object is not an instance of the class this method was declared in");
+    }
     const guard_count = ctx.vm.prop_hook_guard.items.len;
     defer ctx.vm.prop_hook_guard.shrinkRetainingCapacity(guard_count);
-    if (this.get("__hook_property") == .string and args.len > 0 and args[0] == .object) {
-        try ctx.vm.prop_hook_guard.append(ctx.allocator, .{ .obj_ptr = @intFromPtr(args[0].object), .prop_name = this.get("__hook_property").string.bytes() });
-    }
-    const method_name = methodLookupName(this) orelse return NativeResult.scalar(.null);
-    if (args.len < 1) return NativeResult.scalar(.null);
-    const target = args[0];
-
-    var arg_buf: [16]Value = undefined;
-    const call_args: []Value = if (args.len >= 2 and args[1] == .array) try ctx.argsFromArray(args[1].array, &arg_buf) else arg_buf[0..0];
-    defer ctx.freeArgs(call_args, &arg_buf);
-    const count = call_args.len;
-
-    if (target == .object) {
-        return NativeResult.share(ctx.callMethod(target.object, method_name, call_args[0..count]) catch .null);
-    }
-    const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.null);
+    if (this.get("__hook_property") == .string) if (object) |obj| {
+        try ctx.vm.prop_hook_guard.append(ctx.allocator, .{ .obj_ptr = @intFromPtr(obj), .prop_name = this.get("__hook_property").string.bytes() });
+    };
     var buf: [256]u8 = undefined;
     const full = class_names.memberKey(&buf, declaring, method_name);
-    return NativeResult.share(ctx.vm.callByName(full, call_args[0..count]) catch .null);
+    const owned_key = try ctx.vm.internName(full);
+    const positional = if (variadic and args.len > 1) args[1..] else &[_]Value{};
+    var bound = try bindArguments(ctx, owned_key, owned_key, positional, named);
+    defer bound.deinit(ctx.allocator);
+    const outer = ctx.vm.native_caller;
+    ctx.vm.native_caller = .{ .name = label, .frames = ctx.vm.frame_count };
+    defer ctx.vm.native_caller = outer;
+    if (!is_static) return NativeResult.share(try ctx.vm.callMethodAs(object.?, method_name, owned_key, bound.list.items));
+    const called = reflectedClass(this) orelse declaring;
+    return NativeResult.share(try ctx.vm.callByNameAs(owned_key, bound.list.items, called));
+}
+
+fn methodIsAbstract(vm: *VM, this: *PhpObject, method_name: []const u8, declaring: []const u8) bool {
+    _ = this;
+    if (vm.interfaces.contains(declaring)) return true;
+    if (vm.classes.get(declaring)) |cls| {
+        if (cls.methods.get(method_name)) |m| if (m.is_abstract) return true;
+    }
+    var buf: [256]u8 = undefined;
+    const key = class_names.memberKey(&buf, declaring, method_name);
+    return vm.functions.get(key) == null and vm.native_fns.get(key) == null;
 }
 
 fn rmGetClosure(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -5316,103 +5453,22 @@ fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
     const args_val: Value = if (stored_args == .array) .{ .array = try resolvedArguments(ctx, this, stored_args.array) } else stored_args;
     // without a constructor php drops positional arguments and refuses
     // named ones
-    if (!ctx.vm.hasMethod(attr_name, "__construct")) {
+    const ctor = findConstructor(ctx.vm, attr_name) orelse {
         if (args_val == .array) for (args_val.array.entries.items) |entry| if (entry.key == .string) {
-            const msg = try std.fmt.allocPrint(ctx.allocator, "Unknown named parameter ${s}", .{entry.key.string.bytes()});
-            defer ctx.allocator.free(msg);
-            try ctx.vm.setPendingException("Error", msg);
-            return error.RuntimeError;
+            return raiseError(ctx, "Error", "Unknown named parameter ${s}", .{entry.key.string.bytes()});
         };
         return NativeResult.borrowed(.{ .object = obj });
-    }
-    // always call __construct even with zero attribute args - constructors
-    // commonly have all-optional params plus initialization side effects
-    // (e.g. Symfony's Constraint::__construct does `unset($this->groups)`
-    // to set up lazy default-group handling)
-    if (args_val != .array or args_val.array.entries.items.len == 0) {
-        _ = try ctx.callMethod(obj, "__construct", &.{});
-        return NativeResult.borrowed(.{ .object = obj });
-    }
-    if (args_val == .array) {
-        const arr = args_val.array;
-        var has_named = false;
-        for (arr.entries.items) |entry| {
-            if (entry.key == .string) {
-                has_named = true;
-                break;
-            }
-        }
-
-        if (has_named) {
-            var buf: [256]u8 = undefined;
-            const ctor_key = std.fmt.bufPrint(&buf, "{s}::__construct", .{attr_name}) catch "";
-            if (ctx.vm.functions.get(ctor_key)) |func| {
-                var resolved: [16]Value = @splat(.null);
-                var pos: usize = 0;
-                var positional: usize = 0;
-                for (arr.entries.items) |entry| {
-                    if (entry.key == .string) {
-                        const key = entry.key.string.bytes();
-                        const found = for (func.params, 0..) |p, pi| {
-                            const pn = if (p.len > 0 and p[0] == '$') p[1..] else p;
-                            if (std.mem.eql(u8, pn, key)) break pi;
-                        } else null;
-                        const pi = found orelse if (func.is_variadic) null else {
-                            const msg = try std.fmt.allocPrint(ctx.allocator, "Unknown named parameter ${s}", .{key});
-                            defer ctx.allocator.free(msg);
-                            try ctx.vm.setPendingException("Error", msg);
-                            return error.RuntimeError;
-                        };
-                        if (pi) |i| {
-                            if (i < positional) {
-                                const msg = try std.fmt.allocPrint(ctx.allocator, "Named parameter ${s} overwrites previous argument", .{key});
-                                defer ctx.allocator.free(msg);
-                                try ctx.vm.setPendingException("Error", msg);
-                                return error.RuntimeError;
-                            }
-                            resolved[i] = entry.value;
-                            if (i >= pos) pos = i + 1;
-                        }
-                    } else {
-                        positional += 1;
-                        resolved[pos] = entry.value;
-                        pos += 1;
-                    }
-                }
-                const count = @max(pos, func.required_params);
-                for (0..count) |i| {
-                    if (resolved[i] == .null and i < func.defaults.len) {
-                        resolved[i] = try ctx.vm.resolveParamDefault(func, i);
-                    }
-                }
-                if (count > 0) _ = try ctx.callMethod(obj, "__construct", resolved[0..count]);
-            } else if (@import("native_params.zig").get(ctor_key)) |signature| {
-                const params = signature.params;
-                // a native attribute constructor (#[Deprecated]) places its
-                // arguments the way a named call does
-                var resolved: [256]Value = undefined;
-                var sources: [256]vm_mod.RefSource = undefined;
-                const placed = try ctx.vm.placeNativeNamedArgs(arr, params, &resolved, &sources);
-                if (placed.problem) |problem| {
-                    const class, const msg = try ctx.vm.namedArgProblemMessage(ctor_key, params, problem);
-                    defer ctx.allocator.free(msg);
-                    try ctx.vm.setPendingException(class, msg);
-                    return error.RuntimeError;
-                }
-                _ = try ctx.callMethod(obj, "__construct", resolved[0..placed.count]);
-            } else {
-                var arg_buf: [16]Value = undefined;
-                const call_args = try ctx.argsFromArray(arr, &arg_buf);
-                defer ctx.freeArgs(call_args, &arg_buf);
-                _ = try ctx.callMethod(obj, "__construct", call_args);
-            }
-        } else {
-            var arg_buf: [16]Value = undefined;
-            const call_args = try ctx.argsFromArray(arr, &arg_buf);
-            defer ctx.freeArgs(call_args, &arg_buf);
-            if (call_args.len > 0) _ = try ctx.callMethod(obj, "__construct", call_args);
-        }
-    }
+    };
+    // the arguments bind as any call from internal code does (named ones
+    // placed on the constructor's parameters, skipped ones defaulted)
+    var key_buf: [256]u8 = undefined;
+    const key = try ctx.vm.internName(class_names.memberKey(&key_buf, ctor.declaring, ctor.name));
+    var bound = try bindArguments(ctx, key, key, &.{}, if (args_val == .array) args_val.array else null);
+    defer bound.deinit(ctx.allocator);
+    const outer = ctx.vm.native_caller;
+    ctx.vm.native_caller = .{ .name = "ReflectionAttribute::newInstance", .frames = ctx.vm.frame_count };
+    defer ctx.vm.native_caller = outer;
+    _ = try ctx.callMethod(obj, "__construct", bound.list.items);
     return NativeResult.borrowed(.{ .object = obj });
 }
 
@@ -5429,30 +5485,14 @@ fn raIsRepeated(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
 }
 
 fn reConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1) return throwReflection(ctx, "ReflectionEnum::__construct() expects an enum name");
-    const raw = if (args[0] == .string)
-        args[0].string.bytes()
-    else if (args[0] == .object)
-        args[0].object.class_name
-    else
-        return throwReflection(ctx, "ReflectionEnum::__construct() expects an enum name or object");
-    const class_name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-
-    const cls = ctx.vm.classes.get(class_name) orelse {
-        const msg = std.fmt.allocPrint(ctx.allocator, "Class \"{s}\" does not exist", .{class_name}) catch return throwReflection(ctx, "Class does not exist");
-        defer ctx.allocator.free(msg);
-        return throwReflection(ctx, msg);
-    };
-    if (!cls.is_enum) {
-        const msg = std.fmt.allocPrint(ctx.allocator, "Class \"{s}\" is not an enum", .{class_name}) catch return throwReflection(ctx, "Not an enum");
+    const class_name = try classObjectCtor(ctx, this, args, "ReflectionEnum::__construct");
+    const is_enum = if (ctx.vm.classes.get(class_name)) |cls| cls.is_enum else false;
+    if (!is_enum) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Class \"{s}\" is not an enum", .{class_name});
         defer ctx.allocator.free(msg);
         return throwReflection(ctx, msg);
     }
-
-    try this.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(try ctx.vm.stableClassName(class_name)) });
-    try this.set(ctx.allocator, "__is_interface", .{ .bool = false });
-    try this.set(ctx.allocator, "__is_trait", .{ .bool = false });
     return NativeResult.scalar(.null);
 }
 
@@ -5523,10 +5563,17 @@ fn buildEnumCase(ctx: *NativeContext, class_name: []const u8, case_name: []const
 
 fn reucConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const owner = try bindClassConstant(ctx, args);
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const name = this.get("name").string.bytes();
     const cls = ctx.vm.classes.get(owner);
-    const is_case = if (cls) |c| containsName(c.case_order.items, args[1].string.bytes()) else false;
+    const is_case = if (cls) |c| containsName(c.case_order.items, name) else false;
     if (!is_case) {
-        const msg = try std.fmt.allocPrint(ctx.allocator, "Constant {s}::{s} is not a case", .{ owner, args[1].string.bytes() });
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Constant {s}::{s} is not a case", .{ owner, name });
+        defer ctx.allocator.free(msg);
+        return throwReflection(ctx, msg);
+    }
+    if (ctx.vm.isInstanceOf(this.class_name, "ReflectionEnumBackedCase") and !enumIsBacked(ctx.vm, owner)) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Enum case {s}::{s} is not a backed case", .{ owner, name });
         defer ctx.allocator.free(msg);
         return throwReflection(ctx, msg);
     }

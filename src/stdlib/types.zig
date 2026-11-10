@@ -1487,8 +1487,8 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
 }
 
 
-const SUPPORTED_EXTENSIONS = [_][]const u8{
-    "Core",      "standard",   "spl",       "json",      "pcre",
+pub const SUPPORTED_EXTENSIONS = [_][]const u8{
+    "Core",      "standard",   "SPL",       "json",      "pcre",
     "PDO",       "pdo_sqlite", "pdo_mysql", "pdo_pgsql", "session",
     "mbstring",  "ctype",      "filter",    "hash",      "iconv",
     "tokenizer", "Reflection", "date",      "openssl",   "curl",

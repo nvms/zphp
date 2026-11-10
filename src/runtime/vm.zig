@@ -21253,7 +21253,10 @@ pub const VM = struct {
         self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = try self.allocLocals(func, &vars), .func = func, .call_name = self.pending_call_name, .called_class = self.pending_called_class };
         self.frames[self.frame_count].entry_sp = self.sp;
         self.consumePendingArgCount();
+        // the arguments are the new frame's alone: a call its body makes
+        // must not take them for its own
         if (self.pending_invoke_args) |pia| self.saveFrameArgsSlice(pia) else self.markArgsUnsaved();
+        self.pending_invoke_args = null;
         self.pending_call_name = null;
         self.pending_called_class = null;
         self.frame_count += 1;
@@ -21281,6 +21284,7 @@ pub const VM = struct {
         self.frames[self.frame_count].entry_sp = self.sp;
         self.consumePendingArgCount();
         if (self.pending_invoke_args) |pia| self.saveFrameArgsSlice(pia);
+        self.pending_invoke_args = null;
         self.pending_call_name = null;
         self.pending_called_class = null;
         self.frame_count += 1;
@@ -22815,6 +22819,11 @@ pub const VM = struct {
             // running an inherited Command::__construct that reads its own
             // #[AsCommand] via new ReflectionClass(static::class))
             self.pending_called_class = obj.class_name;
+            // func_get_args() sees every argument, past the declared ones too
+            if (self.ic) |ic| ic.pending_arg_count = @intCast(@min(checked.len, unknown_arg_count - 1));
+            const saved_invoke_args = self.pending_invoke_args;
+            self.pending_invoke_args = checked;
+            defer self.pending_invoke_args = saved_invoke_args;
             return self.executeFunction(func, new_vars);
         } else return error.RuntimeError;
     }
