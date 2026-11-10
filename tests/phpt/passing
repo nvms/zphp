@@ -4010,11 +4010,9 @@ ext/json/tests/009.phpt
 ext/json/tests/bug40503.phpt
 ext/json/tests/bug41034.phpt
 ext/json/tests/bug41067.phpt
-ext/json/tests/bug41403.phpt
 ext/json/tests/bug41504.phpt
 ext/json/tests/bug41567.phpt
 ext/json/tests/bug42090.phpt
-ext/json/tests/bug42785.phpt
 ext/json/tests/bug45791.phpt
 ext/json/tests/bug46215.phpt
 ext/json/tests/bug46944.phpt
@@ -6846,7 +6844,6 @@ ext/standard/tests/strings/bug38770.phpt
 ext/standard/tests/strings/bug39032.phpt
 ext/standard/tests/strings/bug39350.phpt
 ext/standard/tests/strings/bug39621.phpt
-ext/standard/tests/strings/bug39873.phpt
 ext/standard/tests/strings/bug40432.phpt
 ext/standard/tests/strings/bug40637.phpt
 ext/standard/tests/strings/bug40704.phpt
@@ -7002,7 +6999,6 @@ ext/standard/tests/strings/htmlentities-utf-3.phpt
 ext/standard/tests/strings/htmlentities-utf.phpt
 ext/standard/tests/strings/htmlentities.phpt
 ext/standard/tests/strings/htmlentities01.phpt
-ext/standard/tests/strings/htmlentities02.phpt
 ext/standard/tests/strings/htmlentities10.phpt
 ext/standard/tests/strings/htmlentities11.phpt
 ext/standard/tests/strings/htmlentities12.phpt
@@ -7701,7 +7697,6 @@ tests/lang/027.phpt
 tests/lang/028.phpt
 tests/lang/030.phpt
 tests/lang/032.phpt
-tests/lang/034.phpt
 tests/lang/035.phpt
 tests/lang/036.phpt
 tests/lang/037.phpt
