@@ -122,6 +122,34 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, scope: ?[]const u8,
     return t;
 }
 
+// the built-in part of a type (ZEND_TYPE_FULL_MASK) and whether it also
+// names classes, read without allocating
+pub const Shape = struct { mask: u32 = 0, classes: bool = false };
+
+pub fn shape(text: []const u8) Shape {
+    var s: Shape = .{};
+    var body = std.mem.trim(u8, text, " ");
+    if (body.len == 0) return s;
+    if (body[0] == '?') {
+        s.mask |= NULL;
+        body = body[1..];
+    }
+    var it = std.mem.splitScalar(u8, body, '|');
+    while (it.next()) |raw| {
+        const member = std.mem.trim(u8, raw, " ");
+        if (member.len == 0) continue;
+        if (member[0] == '(' or std.mem.indexOfScalar(u8, member, '&') != null) {
+            s.classes = true;
+        } else if (std.ascii.eqlIgnoreCase(member, "iterable")) {
+            s.mask |= ARRAY;
+            s.classes = true;
+        } else if (builtinBits(member)) |bits| {
+            s.mask |= bits;
+        } else s.classes = true;
+    }
+    return s;
+}
+
 // zend_type_to_string_resolved
 pub fn format(allocator: std.mem.Allocator, t: Type) ![]u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;

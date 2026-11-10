@@ -442,6 +442,16 @@ pub const OpCode = enum(u8) {
     // iter_check for a foreach without a key variable: an Iterator's key()
     // is not called, as php skips it
     iter_check_nokey,
+    // `$o->p = &<place>`: [object, reference source] -> [value]; u16
+    // property name. binds the property to the source's reference cell
+    prop_bind_ref_source,
+    // the same with the name on the stack: [object, name, reference source]
+    prop_bind_ref_source_dyn,
+    // `C::$p = &<place>`: [reference source] -> [value]; u16 class, u16
+    // property
+    static_prop_bind_ref_source,
+    // `$a[k] = &<place>`: [array, key, reference source] -> [value]
+    array_bind_ref_source,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -493,6 +503,7 @@ pub const OpCode = enum(u8) {
             .make_var_prop_ref_dyn,
             .prop_bind_ref,
             .prop_bind_ref_dyn,
+            .prop_bind_ref_source,
             .return_ref,
             .bind_ref_from_return,
             .array_set_local,
@@ -526,6 +537,7 @@ pub const OpCode = enum(u8) {
             .ensure_array_static_prop,
             => 5,
             .make_var_static_prop_ref => 7,
+            .static_prop_bind_ref_source => 5,
             .arg_guard_static_prop => 8,
             .check_rw_container => 2,
             .defer_class_const => 5,
@@ -618,7 +630,8 @@ pub const OpCode = enum(u8) {
             .array_push_ref,
             .array_spread,
             => -1,
-            .array_set_elem, .array_set_elem_ref => -2,
+            .array_set_elem, .array_set_elem_ref, .prop_bind_ref_source_dyn, .array_bind_ref_source => -2,
+            .prop_bind_ref_source => -1,
             // unary ops: pop 1, push 1
             .negate,
             .bit_not,

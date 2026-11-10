@@ -1166,6 +1166,7 @@ pub const Compiler = struct {
 
     fn compileDestructureRefSlot(self: *Compiler, ref_node: Ast.Node, key: RefSlotKey) Error!void {
         const inner = self.ast.nodes[ref_node.data.lhs];
+        if (inner.tag == .property_access or inner.tag == .static_prop_access) return self.compileDestructureRefPlace(inner, key);
         if (inner.tag != .variable) return;
         const name = self.ast.tokenSlice(inner.main_token);
         const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });
@@ -1180,6 +1181,46 @@ pub const Compiler = struct {
         }
         try self.emitOp(.bind_array_ref);
         try self.emitU16(name_idx);
+    }
+
+    // `[&$o->p] = $a` / `[&C::$p] = $a`: the element's reference goes to a
+    // hidden variable, which becomes the reference source the property binds
+    fn compileDestructureRefPlace(self: *Compiler, inner: Ast.Node, key: RefSlotKey) Error!void {
+        const tmp_idx = try self.addConstant(.{ .string = Value.String.borrowed("\x00reference-source") });
+        try self.emitOp(.dup);
+        switch (key) {
+            .index => |i| {
+                const ki = try self.addConstant(.{ .int = i });
+                try self.emitOp(.constant);
+                try self.emitU16(ki);
+            },
+            .key_node => |kn| try self.compileNode(kn),
+        }
+        try self.emitOp(.bind_array_ref);
+        try self.emitU16(tmp_idx);
+        if (inner.tag == .property_access) {
+            try self.compileNode(inner.data.lhs);
+            const dynamic = self.isDynamicProp(inner);
+            if (dynamic) try self.compileNode(inner.data.rhs);
+            try self.emitOp(.reference_source);
+            try self.emitU16(tmp_idx);
+            if (dynamic) {
+                try self.emitOp(.prop_bind_ref_source_dyn);
+            } else {
+                try self.emitOp(.prop_bind_ref_source);
+                try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(self.propName(inner)) }));
+            }
+        } else {
+            const class_name = try compiler_expr.resolveNodeClassName(self, self.ast.nodes[inner.data.lhs]);
+            var prop_name = self.ast.tokenSlice(inner.main_token);
+            if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+            try self.emitOp(.reference_source);
+            try self.emitU16(tmp_idx);
+            try self.emitOp(.static_prop_bind_ref_source);
+            try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(class_name) }));
+            try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(prop_name) }));
+        }
+        try self.emitOp(.pop);
     }
 
     // ==================================================================

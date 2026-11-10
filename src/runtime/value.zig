@@ -10,6 +10,10 @@ pub const RefCell = struct {
     scratch: i32 = 0,
     dead: bool = false,
     visited: bool = false,
+    // bound to a typed property at some point (php's
+    // ZEND_REF_HAS_TYPE_SOURCES): writes check the sources, which the vm
+    // finds in the reference index and clears the mark when none are left
+    typed: bool = false,
 };
 pub fn cellOf(value: *Value) *RefCell {
     return @fieldParentPtr("value", value);

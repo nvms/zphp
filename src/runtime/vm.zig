@@ -8,6 +8,7 @@ const php_version = @import("../php_version.zig");
 const class_names = @import("class_names.zig");
 const includes = @import("includes.zig");
 const php_types = @import("../pipeline/php_types.zig");
+const formatted_print = @import("../stdlib/formatted_print.zig");
 pub const stack_limit = @import("stack_limit.zig");
 const Value = @import("value.zig").Value;
 const value_mod = @import("value.zig");
@@ -157,14 +158,22 @@ pub const NativeContext = struct {
 
         switch (arg_sources[arg_index]) {
             .cell => |c| {
-                vm.setCell(c.value, value);
-                vm.propagateCellWrite(c.value, value) catch {};
+                // a reference typed properties hold refuses what they can't
+                // take; the TypeError stays pending for the call to raise
+                const stored = if (cellOf(c.value).typed) vm.verifyRefAssignable(c.value, value) catch return vm.refuseRefWrite() else value;
+                vm.setCell(c.value, stored);
+                vm.propagateCellWrite(c.value, stored) catch {};
             },
-            .simple => |var_name| {
+            .simple => |var_name_in| {
+                const var_name = var_name_in;
                 if (VM.isSuperglobal(var_name)) {
                     vm.putRequestVar(var_name, value) catch {};
                     return;
                 }
+                if (caller.ref_slots.get(var_name)) |cell| if (cellOf(cell).typed) {
+                    const stored = vm.verifyRefAssignable(cell, value) catch return vm.refuseRefWrite();
+                    if (@intFromEnum(stored) != @intFromEnum(value) or !Value.identical(stored, value)) return self.setCallerVar(arg_index, arg_count, stored);
+                };
                 // the caller's variable is a durable holder: a named local and
                 // its vars entry share one reference, so retain once and drop
                 // the single reference the slot held before
@@ -1299,11 +1308,15 @@ pub const VM = struct {
         try (try self.refIndex()).addOwned(self.allocator, owner, cell, .{ .array = .{ .array = arr, .key = entry.key } });
     }
     fn regRefObject(self: *VM, owner: RefIndex.OwnerId, cell: *Value, obj: *PhpObject, prop_name: []const u8) RuntimeError!void {
-        try (try self.refIndex()).addOwned(self.allocator, owner, cell, .{ .object = .{ .object = obj, .prop_name = prop_name } });
+        const target: BindingTarget = .{ .object = .{ .object = obj, .prop_name = prop_name } };
+        try (try self.refIndex()).addOwned(self.allocator, owner, cell, target);
         obj.ref_mirrored = true;
+        self.markTypedSource(cell, target);
     }
     fn regRefStatic(self: *VM, owner: RefIndex.OwnerId, cell: *Value, class_name: []const u8, prop_name: []const u8) RuntimeError!void {
-        try (try self.refIndex()).addOwned(self.allocator, owner, cell, .{ .static = .{ .class_name = class_name, .prop_name = prop_name } });
+        const target: BindingTarget = .{ .static = .{ .class_name = class_name, .prop_name = prop_name } };
+        try (try self.refIndex()).addOwned(self.allocator, owner, cell, target);
+        self.markTypedSource(cell, target);
     }
 
     // is `obj->prop_name` the target of a live reference (`$r = &$obj->prop`)?
@@ -1537,6 +1550,8 @@ pub const VM = struct {
         }
     };
 
+    pub const StepOverflow = struct { up: ?bool = null, frame: usize = 0, ip: usize = 0 };
+
     pub const InlineCache = struct {
         // argument guard sites: keyed by (chunk_ptr ^ guard ip); `guard` is the
         // identity of the receiver/callable read from the stack and
@@ -1551,6 +1566,14 @@ pub const VM = struct {
         // call hands out, and whether request_init has run
         ext_slots: []extension.VmSlot = &.{},
         ext_request_active: bool = false,
+        // an int ++/-- that overflowed to float, and where: the write that
+        // follows it reports php's "past its maximal value" for a typed
+        // property or reference (zend_incdec_typed_prop / _ref)
+        step_overflow: StepOverflow = .{},
+        // a native's write through a by-reference argument was refused by a
+        // typed reference: the TypeError is pending and the call raises it
+        // once the native returns (ZEND_TRY_ASSIGN_REF_*)
+        ref_write_refused: bool = false,
         // classes whose deferred property defaults have not run yet; while it
         // is zero a static access skips the resolution check
         pending_defaults: u32 = 0,
@@ -4289,6 +4312,7 @@ pub const VM = struct {
                 .set_var => {
                     const idx = self.readU16();
                     const name = self.currentChunk().constants.items[idx].string.bytes();
+                    try self.checkTypedNameWrite(self.currentFrame(), name);
                     const val = try self.copyValue(self.peek());
                     if (isSuperglobal(name)) {
                         const cell = try self.superglobalCell(name);
@@ -4374,6 +4398,10 @@ pub const VM = struct {
                 .set_var_var => {
                     const name_val = self.pop();
                     const raw_name = if (name_val == .string) name_val.string.bytes() else "";
+                    if (raw_name.len > 0) {
+                        var check_buf: [256]u8 = undefined;
+                        try self.checkTypedNameWrite(self.currentFrame(), varVarName(raw_name, &check_buf));
+                    }
                     const val = try self.copyValue(self.peek());
                     if (raw_name.len > 0) {
                         var buf: [256]u8 = undefined;
@@ -6517,6 +6545,12 @@ pub const VM = struct {
                         const ak = Value.toArrayKey(aei_key);
                         const old = aei_arr.array.get(ak);
                         const new_val = try self.stepValue(old, op == .array_elem_inc) orelse continue;
+                        // a referenced element steps the reference
+                        if (try self.writeArrayElemRef(aei_arr.array, PhpArray.normalizeKey(ak), new_val)) {
+                            if (new_val == .string) self.releaseValue(new_val);
+                            self.push(old);
+                            continue;
+                        }
                         // the element slot takes the new value and drops the old
                         // one; an adopted increment result is consumed here
                         try self.arraySetOwned(aei_arr.array, ak, new_val);
@@ -6956,7 +6990,7 @@ pub const VM = struct {
                         break :blk self.currentChunk().constants.items[prop_idx].string.bytes();
                     } else blk: {
                         const name = self.pop();
-                        break :blk (try self.coerceToStringValue(name)).string.bytes();
+                        break :blk try self.valueToString(name);
                     };
                     const source_idx = self.readU16();
                     const source_name = self.currentChunk().constants.items[source_idx].string.bytes();
@@ -6970,10 +7004,80 @@ pub const VM = struct {
                         }
                         const frame = self.currentFrame();
                         const cell = try self.getOrCreateVarCell(frame, source_name);
-                        try obj_val.object.set(self.allocator, prop_name, cell.*);
-                        try self.regRefObject(try self.persistentRefOwner(), cell, obj_val.object, prop_name);
-                        self.obj_ref_active = true;
+                        try self.bindPropToCell(obj_val.object, prop_name, cell);
                     }
+                },
+
+                .static_prop_bind_ref_source => {
+                    var source = self.retainArgSource(self.ic.?.arg_stack[self.sp - 1]);
+                    defer self.releaseArgSource(&source);
+                    _ = self.pop();
+                    const class_name = self.resolveStaticClassName(self.currentChunk().constants.items[self.readU16()].string.bytes());
+                    const prop_name = self.currentChunk().constants.items[self.readU16()].string.bytes();
+                    if (source != .cell) return error.RuntimeError;
+                    try self.checkArgCell(source.cell.denial);
+                    const cell = source.cell.value;
+                    try self.resolveStaticDefaults(class_name);
+                    _ = try self.staticPropTarget(class_name, prop_name, .write);
+                    try self.bindStaticPropToCell(class_name, prop_name, cell);
+                    self.push(cell.*);
+                },
+
+                .array_bind_ref_source => {
+                    var source = self.retainArgSource(self.ic.?.arg_stack[self.sp - 1]);
+                    defer self.releaseArgSource(&source);
+                    _ = self.pop();
+                    const key = self.pop();
+                    const arr_val = self.pop();
+                    if (source != .cell) return error.RuntimeError;
+                    try self.checkArgCell(source.cell.denial);
+                    const cell = source.cell.value;
+                    if (arr_val == .array) {
+                        if (key == .array or key == .object) {
+                            if (try self.throwOffsetKeyType(key, .access)) continue;
+                            return error.RuntimeError;
+                        }
+                        if (key == .resource) self.warnResourceOffset(key) catch if (try self.resumeRaised()) continue;
+                        const array = arr_val.array;
+                        const ak = PhpArray.normalizeKey(Value.toArrayKey(key));
+                        self.detachArrayEntryRef(array, ak);
+                        const old = array.get(ak);
+                        try self.arraySetOwned(array, ak, cell.*);
+                        self.releaseValue(old);
+                        self.setEntryRef(array.getPtr(ak).?, cell);
+                        const persistent = try self.persistentRefOwner();
+                        const frame = self.currentFrame();
+                        if (frame.ref_owner != 0) try (try self.refIndex()).transferCell(self.allocator, frame.ref_owner, persistent, cell);
+                        try self.regRefArray(persistent, cell, array, ak);
+                        self.array_ref_active = true;
+                    }
+                    self.push(cell.*);
+                },
+
+                .prop_bind_ref_source, .prop_bind_ref_source_dyn => |bind_op| {
+                    var source = self.retainArgSource(self.ic.?.arg_stack[self.sp - 1]);
+                    defer self.releaseArgSource(&source);
+                    _ = self.pop();
+                    var name_hold: Value = .null;
+                    defer self.stackRelease(name_hold);
+                    const prop_name = if (bind_op == .prop_bind_ref_source_dyn)
+                        try self.popHeldName(&name_hold)
+                    else
+                        self.currentChunk().constants.items[self.readU16()].string.bytes();
+                    const obj_val = self.pop();
+                    if (source != .cell) return error.RuntimeError;
+                    try self.checkArgCell(source.cell.denial);
+                    const cell = source.cell.value;
+                    if (obj_val == .object) {
+                        if (!self.inPropHook(obj_val.object, prop_name) and
+                            (self.hasPropHook(obj_val.object.class_name, prop_name, .get) or self.hasPropHook(obj_val.object.class_name, prop_name, .set)))
+                        {
+                            if (try self.throwBuiltinException("Error", "Cannot assign by reference to overloaded object")) continue;
+                            return error.RuntimeError;
+                        }
+                        try self.bindPropToCell(obj_val.object, prop_name, cell);
+                    }
+                    self.push(cell.*);
                 },
 
                 .make_var_prop_ref => {
@@ -7328,6 +7432,8 @@ pub const VM = struct {
                             // fall through to __get (matching PHP's lazy-init
                             // pattern). slot value remains its default; only
                             // the unset_slots set decides "present"
+                            // the property leaves any reference it shared
+                            if (obj.ref_mirrored) self.detachPropRefs(obj, prop_name, null);
                             try obj.markUnset(self.allocator, prop_name);
                             // release the object the property held (Stage 1)
                             if (obj.slots) |s| {
@@ -7374,6 +7480,8 @@ pub const VM = struct {
                         } else if (try self.propertyAccessDenied(obj, prop_name)) {
                             continue;
                         } else {
+                            // the property leaves any reference it shared
+                            if (obj.ref_mirrored) self.detachPropRefs(obj, prop_name, null);
                             try obj.markUnset(self.allocator, prop_name);
                             // release the object the property held (Stage 1)
                             if (obj.slots) |s| {
@@ -7663,6 +7771,7 @@ pub const VM = struct {
                     // is a no-op for arrays (Option B), local owns the array
                     const slot = self.readU16();
                     const frame = self.currentFrame();
+                    if (frame.ref_slots.count() != 0) _ = try self.checkTypedSlotWrite(frame, slot, self.peek());
                     const peeked = self.peek();
                     var val = peeked;
                     if (val == .array) {
@@ -9645,6 +9754,7 @@ pub const VM = struct {
                                     if (sp_entry.prop_type.len > 0) {
                                         if (try self.checkPropertyType(&val, sp_entry.prop_type, sp_entry.decl_class, prop_name)) continue;
                                     }
+                                    if (obj.ref_mirrored) val = try self.checkTypedPropWrite(obj, prop_name, val);
                                     // a write resurrects a previously-unset
                                     // property; without this, init()'s prior
                                     // unset() leaves the slot looking absent
@@ -11569,6 +11679,9 @@ pub const VM = struct {
                         if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                         return error.RuntimeError;
                     };
+                    if (op != .set_static_prop_default) {
+                        if (try self.checkStaticPropWrite(cls, class_name, prop_name)) continue;
+                    }
                     var val = try self.copyValue(self.peek());
                     if (op == .set_static_prop_default) if (cls.static_prop_types.get(prop_name)) |t| {
                         val = try self.widenIntDefault(val, t, class_name);
@@ -11648,10 +11761,15 @@ pub const VM = struct {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
-                        const stored = try self.copyValue(rhs_val);
+                        self.pushTransfer(rhs_val);
+                        if (try self.checkStaticPropWrite(cls, class_name, prop_name)) continue;
+                        const checked = self.popTransfer();
+                        const stored = try self.copyValue(checked);
                         const old = try cls.static_props.fetchPut(self.allocator, prop_name, stored);
                         if (old) |kv| self.releaseValue(kv.value);
                         self.syncStaticPropRefs(class_name, prop_name, stored);
+                        self.pushTransfer(checked);
+                        continue;
                     }
                     self.pushTransfer(rhs_val);
                 },
@@ -14590,7 +14708,9 @@ pub const VM = struct {
 
     // what set_local does with the value on top of the stack: the slot, its
     // vars mirror, a bound reference cell, the globals, an including scope
-    fn assignLocal(self: *VM, frame: *CallFrame, slot: u16, peeked: Value) RuntimeError!void {
+    fn assignLocal(self: *VM, frame: *CallFrame, slot: u16, peeked_in: Value) RuntimeError!void {
+        var peeked = peeked_in;
+        if (frame.ref_slots.count() != 0) peeked = try self.checkTypedSlotWrite(frame, slot, peeked);
         // copyValue clones arrays and retains objects (Stage 1) - the local
         // slot is a durable holder and needs its own ref
         const val = try self.copyValue(peeked);
@@ -14620,6 +14740,30 @@ pub const VM = struct {
             try self.setLocalGlobal(slot, val, frame);
         }
         try self.syncIncludeLocal(frame, slot, val);
+    }
+
+    // a write to a variable bound to a reference that typed properties hold
+    // is checked against them, and coerced, before any view of the variable
+    // changes. the coerced value replaces the operand on top of the stack,
+    // which is the assignment's result
+    fn checkTypedSlotWrite(self: *VM, frame: *CallFrame, slot: u16, val: Value) RuntimeError!Value {
+        const cell = self.slotRefCell(frame, slot) orelse return val;
+        if (!cellOf(cell).typed) return val;
+        const checked = try self.verifyRefAssignable(cell, val);
+        if (!Value.identical(checked, val) or @intFromEnum(checked) != @intFromEnum(val)) {
+            if (self.sp > 0 and Value.identical(self.stack[self.sp - 1], val)) self.replaceOwned(&self.stack[self.sp - 1], checked);
+        }
+        return checked;
+    }
+
+    // checkTypedSlotWrite for a variable written by name
+    fn checkTypedNameWrite(self: *VM, frame: *CallFrame, name: []const u8) RuntimeError!void {
+        if (frame.ref_slots.count() == 0) return;
+        const cell = frame.ref_slots.get(name) orelse return;
+        if (!cellOf(cell).typed) return;
+        const top = &self.stack[self.sp - 1];
+        const checked = try self.verifyRefAssignable(cell, top.*);
+        if (@intFromEnum(checked) != @intFromEnum(top.*) or !Value.identical(checked, top.*)) self.replaceOwned(top, checked);
     }
 
     // `$local .= value`: grows the string in place when the variable is its
@@ -14748,9 +14892,38 @@ pub const VM = struct {
                 if (overloaded) |r| return r;
                 return self.throwStepError(verb, obj.class_name);
             },
+            .int => |i| if (i == @as(i64, if (up) std.math.maxInt(i64) else std.math.minInt(i64))) {
+                if (self.ic) |ic| ic.step_overflow = .{ .up = up, .frame = self.frame_count, .ip = self.currentFrame().ip };
+            },
             else => {},
         }
         return if (up) try Value.phpInc(v, self.allocator) else Value.phpDec(v);
+    }
+
+    // the overflowing ++/-- whose result the running write stores: the write
+    // is the instruction right after inc_value/dec_value (past a swap), or
+    // the fused inc_local itself
+    fn takeStepOverflow(self: *VM) ?bool {
+        const ic = self.ic orelse return null;
+        const rec = ic.step_overflow;
+        ic.step_overflow = .{};
+        const up = rec.up orelse return null;
+        if (rec.frame != self.frame_count) return null;
+        const frame = self.currentFrame();
+        if (frame.ip == rec.ip) return up;
+        const code = frame.chunk.code.items;
+        var at = rec.ip;
+        if (at < code.len and code[at] == @intFromEnum(OpCode.swap)) at += 1;
+        if (at >= code.len) return null;
+        const next: OpCode = @enumFromInt(code[at]);
+        return if (at + next.width() == frame.ip) up else null;
+    }
+
+    fn throwIncdecRef(self: *VM, src: TypeSource, up: bool) RuntimeError {
+        const msg = std.fmt.allocPrint(self.allocator, "Cannot {s} a reference held by property {s}::${s} of type {s} past its {s} value", .{ if (up) "increment" else "decrement", src.class, src.prop, src.type_str, if (up) "maximal" else "minimal" }) catch return error.RuntimeError;
+        defer self.allocator.free(msg);
+        try self.setPendingException("TypeError", msg);
+        return error.RuntimeError;
     }
 
     fn throwStepError(self: *VM, verb: []const u8, type_name: []const u8) RuntimeError!?Value {
@@ -17555,11 +17728,152 @@ pub const VM = struct {
         }
     }
 
+    // a static property write: the declared type, then any typed
+    // properties sharing a reference with it. the value on top of the stack
+    // is checked and replaced by its coerced form. true when the TypeError
+    // was caught
+    fn checkStaticPropWrite(self: *VM, cls: *ClassDef, class_name: []const u8, prop_name: []const u8) RuntimeError!bool {
+        const top = &self.stack[self.sp - 1];
+        var val = top.*;
+        if (cls.static_prop_types.get(prop_name)) |t| if (t.len > 0) {
+            const decl = self.staticPropDeclaringClass(class_name, prop_name) orelse class_name;
+            if (try self.checkPropertyType(&val, t, decl, prop_name)) return true;
+        };
+        if (self.obj_ref_active) val = try self.checkTypedStaticPropWrite(class_name, prop_name, val);
+        if (@intFromEnum(val) != @intFromEnum(top.*) or !Value.identical(val, top.*)) self.replaceOwned(top, val);
+        return false;
+    }
+
+    // `$o->p = &...` (zend_assign_to_property_reference): a typed property
+    // checks the referenced value first, then the property leaves any
+    // reference it held and joins the cell. the cell's bindings the running
+    // frame made to reach its source outlive the frame now that a property
+    // holds the reference
+    fn bindPropToCell(self: *VM, obj: *PhpObject, prop_name: []const u8, cell: *Value) RuntimeError!void {
+        const vr = self.findPropertyVisibility(obj.class_name, prop_name);
+        if (vr.declared and vr.type_str.len > 0) try self.verifyPropAssignableByRef(vr, prop_name, cell);
+        self.detachPropRefs(obj, prop_name, cell);
+        const scope: ?[]const u8 = if (vr.declared) vr.defining_class else null;
+        const old = obj.getForScope(prop_name, scope);
+        obj.clearUnset(self.allocator, prop_name);
+        try obj.setForScope(self.allocator, prop_name, cell.*, scope);
+        self.releaseValue(old);
+        const ri = try self.refIndex();
+        const persistent = try self.persistentRefOwner();
+        const frame = self.currentFrame();
+        if (frame.ref_owner != 0) try ri.transferCell(self.allocator, frame.ref_owner, persistent, cell);
+        try self.regRefObject(persistent, cell, obj, prop_name);
+        self.obj_ref_active = true;
+    }
+
+    // `C::$p = &...`: the static property leaves the reference it held and
+    // joins the cell, checked against its type as a property is
+    fn bindStaticPropToCell(self: *VM, class_name: []const u8, prop_name: []const u8, cell: *Value) RuntimeError!void {
+        const decl = self.staticPropDeclaringClass(class_name, prop_name) orelse class_name;
+        if (self.classes.getPtr(decl)) |cls| if (cls.static_prop_types.get(prop_name)) |t| if (t.len > 0) {
+            try self.verifyPropAssignableByRef(.{ .visibility = .public, .defining_class = decl, .type_str = t }, prop_name, cell);
+        };
+        const ri = try self.refIndex();
+        while (ri.prop_rev.get(.{ .object = null, .class_name = class_name, .prop_name = prop_name })) |cells| {
+            var victim: ?*Value = null;
+            for (cells.items) |c| if (c != cell) {
+                victim = c;
+                break;
+            };
+            ri.removeTargetAllOwners(self.allocator, victim orelse break, .{ .static = .{ .class_name = class_name, .prop_name = prop_name } });
+        }
+        if (self.getStaticPropPtr(class_name, prop_name)) |slot| {
+            retainValue(cell.*);
+            self.releaseValue(slot.*);
+            slot.* = cell.*;
+        }
+        const persistent = try self.persistentRefOwner();
+        const frame = self.currentFrame();
+        if (frame.ref_owner != 0) try ri.transferCell(self.allocator, frame.ref_owner, persistent, cell);
+        try self.regRefStatic(persistent, cell, class_name, prop_name);
+        self.obj_ref_active = true;
+    }
+
+    // the property stops sharing whatever reference it held before
+    fn detachPropRefs(self: *VM, obj: *PhpObject, prop_name: []const u8, keep: ?*Value) void {
+        const ri = self.ref_index orelse return;
+        while (true) {
+            const cells = ri.prop_rev.get(.{ .object = obj, .class_name = "", .prop_name = prop_name }) orelse return;
+            var victim: ?*Value = null;
+            for (cells.items) |c| if (c != keep) {
+                victim = c;
+                break;
+            };
+            const c = victim orelse return;
+            ri.removeTargetAllOwners(self.allocator, c, .{ .object = .{ .object = obj, .prop_name = prop_name } });
+        }
+    }
+
+    // zend_verify_prop_assignable_by_ref: a reference other typed properties
+    // hold must already fit, since coercing it would change their value; a
+    // plain one is coerced in place
+    fn verifyPropAssignableByRef(self: *VM, vr_in: VisResult, prop_name: []const u8, cell: *Value) RuntimeError!void {
+        var vr = vr_in;
+        vr.type_str = try self.resolvedTypeText(vr.type_str, vr.defining_class);
+        const strict = self.currentStrictTypes();
+        const val = cell.*;
+        var buf: [8]TypeSource = undefined;
+        const sources = self.refTypeSources(cell, &buf);
+        if (sources.len > 0) {
+            const result = self.typeAssignable(val, vr.type_str, vr.defining_class, strict);
+            if (result > 0) return;
+            if (result < 0) {
+                if (try self.weakScalarHint(php_types.shape(vr.type_str).mask, val) != null) {
+                    const first = sources[0];
+                    const msg = try std.fmt.allocPrint(self.allocator, "Reference with value of type {s} held by property {s}::${s} of type {s} is not compatible with property {s}::${s} of type {s}", .{ Value.typeName(val), first.class, first.prop, first.type_str, vr.defining_class, prop_name, vr.type_str });
+                    defer self.allocator.free(msg);
+                    try self.setPendingException("TypeError", msg);
+                    return error.RuntimeError;
+                }
+            }
+        } else if (try self.propertyTypeAccepts(val, vr.type_str, vr.defining_class, strict)) |coerced| {
+            if (@intFromEnum(coerced) != @intFromEnum(val) or !Value.identical(coerced, val)) {
+                self.setCell(cell, coerced);
+                try self.propagateCellWrite(cell, coerced);
+            }
+            return;
+        }
+        const msg = try std.fmt.allocPrint(self.allocator, "Cannot assign {s} to property {s}::${s} of type {s}", .{ valueTypeName(val), vr.defining_class, prop_name, vr.type_str });
+        defer self.allocator.free(msg);
+        try self.setPendingException("TypeError", msg);
+        return error.RuntimeError;
+    }
+
+    // a property holding a reference that typed properties are bound to
+    // takes only what each of them accepts (zend_assign_to_typed_ref)
+    fn checkTypedPropWrite(self: *VM, obj: *PhpObject, prop_name: []const u8, val: Value) RuntimeError!Value {
+        const ri = self.ref_index orelse return val;
+        const cells = ri.prop_rev.get(.{ .object = obj, .class_name = "", .prop_name = prop_name }) orelse return val;
+        var v = val;
+        for (cells.items) |cell| {
+            if (cellOf(cell).typed) v = try self.verifyRefAssignable(cell, v);
+        }
+        return v;
+    }
+
+    fn checkTypedStaticPropWrite(self: *VM, class_name: []const u8, prop_name: []const u8, val: Value) RuntimeError!Value {
+        const ri = self.ref_index orelse return val;
+        const cells = ri.prop_rev.get(.{ .object = null, .class_name = class_name, .prop_name = prop_name }) orelse return val;
+        var v = val;
+        for (cells.items) |cell| {
+            if (cellOf(cell).typed) v = try self.verifyRefAssignable(cell, v);
+        }
+        return v;
+    }
+
     fn syncStaticPropRefs(self: *VM, class_name: []const u8, prop_name: []const u8, val: Value) void {
         if (!self.obj_ref_active) return;
         const ri = self.ref_index orelse return;
         const cells = ri.prop_rev.get(.{ .object = null, .class_name = class_name, .prop_name = prop_name }) orelse return;
-        for (cells.items) |cell| self.setCell(cell, val);
+        for (cells.items) |cell| {
+            self.setCell(cell, val);
+            self.propagateCellWrite(cell, val) catch {};
+        }
     }
 
     // get the ref cell for $var, making $var a reference if it isn't one yet
@@ -17608,8 +17922,9 @@ pub const VM = struct {
             self.unbindCell(cell);
             return false;
         }
-        self.setCell(cell, val);
-        try self.propagateCellWrite(cell, val);
+        const stored = if (cellOf(cell).typed) try self.verifyRefAssignable(cell, val) else val;
+        self.setCell(cell, stored);
+        try self.propagateCellWrite(cell, stored);
         return true;
     }
 
@@ -19029,6 +19344,7 @@ pub const VM = struct {
         if (vr.type_str.len > 0) {
             if (try self.checkPropertyType(val, vr.type_str, vr.defining_class, prop_name)) return .dispatched;
         }
+        if (obj.ref_mirrored) val.* = try self.checkTypedPropWrite(obj, prop_name, val.*);
         // overwrite-release: drop the object the property previously held
         // before the new value lands (Stage 1)
         try obj.setForScope(self.allocator, prop_name, val.*, sp_scope);
@@ -20588,7 +20904,18 @@ pub const VM = struct {
         // resolving one may autoload, which runs php
         if (native.callbacks != 0 or native.arrays != 0) if (name) |n| try self.checkCallbackArgs(n, label, native.callbacks, native.arrays, native_args);
         const result = try native.call(ctx, native_args);
+        if (self.ic) |ic| if (ic.ref_write_refused) {
+            ic.ref_write_refused = false;
+            if (self.pending_exception != null) {
+                self.releaseValue(result.value);
+                return error.RuntimeError;
+            }
+        };
         return result.value;
+    }
+
+    pub fn refuseRefWrite(self: *VM) void {
+        if (self.ic) |ic| ic.ref_write_refused = true;
     }
 
     pub fn bindClosures(self: *VM, vars: *std.StringHashMapUnmanaged(Value), ref_slots: ?*std.StringHashMapUnmanaged(*Value), name: []const u8) !void {
@@ -21488,56 +21815,336 @@ pub const VM = struct {
             .bool => if (std.mem.eql(u8, type_str, "bool")) return false,
             else => {},
         }
+        // an int stepped past its range (zend_incdec_typed_prop) is refused
+        // before any coercion
+        const step_up: ?bool = if (val.* == .float and php_types.shape(type_str).mask & php_types.DOUBLE == 0) self.takeStepOverflow() else null;
         // the assigning file's strict_types determines the mode
-        const strict = blk: {
-            if (self.frame_count >= 1) {
-                if (self.frames[self.frame_count - 1].func) |f| break :blk f.strict_types;
-            }
-            break :blk self.script_strict_types;
+        // (i_zend_verify_property_type)
+        if (step_up == null) if (try self.propertyTypeAccepts(val.*, type_str, class_name, self.currentStrictTypes())) |accepted| {
+            val.* = accepted;
+            return false;
         };
-        if (!self.checkTypeMatch(val.*, type_str)) {
-            if (!strict) {
-                if (try self.tryWeakCoerce(val.*, type_str)) |coerced| {
-                    val.* = coerced;
-                    return false;
-                }
-            }
-            // zphp's first-class callables (`f(...)`, Closure::fromCallable)
-            // yield a callable string/array rather than a real Closure object.
-            // accept them for a Closure-typed property so framework code that
-            // stores `f(...)` in a `\Closure` property works - consistent with
-            // how zphp invokes those values everywhere else
-            {
-                var t = type_str;
-                if (t.len > 0 and t[0] == '?') t = t[1..];
-                if (t.len > 0 and t[0] == '\\') t = t[1..];
-                if (std.mem.eql(u8, t, "Closure") and self.isValueCallable(val.*)) return false;
-            }
-            const msg = std.fmt.allocPrint(self.allocator, "Cannot assign {s} to property {s}::${s} of type {s}", .{ valueTypeName(val.*), class_name, prop_name, type_str }) catch return error.RuntimeError;
-            defer self.allocator.free(msg);
-            if (try self.throwBuiltinException("TypeError", msg)) return true;
-            self.setErrorMsg("{s}", .{msg});
-            return error.RuntimeError;
-        }
-        // value satisfies the type; non-strict still coerces it to the exact
-        // declared scalar (a numeric string into an int property, etc.)
-        if (val.* == .object and self.typeStrAllowsString(type_str) and self.hasMethod(val.object.class_name, "__toString")) {
-            const text = self.transientOwned(try self.objectString(val.object));
-            val.* = .{ .string = text };
-        } else if (val.* == .int and blk: {
+        // zphp's first-class callables (`f(...)`, Closure::fromCallable)
+        // yield a callable string/array rather than a real Closure object.
+        // accept them for a Closure-typed property so framework code that
+        // stores `f(...)` in a `\Closure` property works - consistent with
+        // how zphp invokes those values everywhere else
+        {
             var t = type_str;
             if (t.len > 0 and t[0] == '?') t = t[1..];
-            break :blk std.mem.eql(u8, t, "float");
-        }) {
-            // int -> float widening is the one coercion strict_types allows
-            const fv: f64 = @floatFromInt(val.int);
-            val.* = .{ .float = fv };
-        } else if (!strict) {
-            if (try self.coerceToDeclaredScalar(val.*, type_str)) |coerced| {
-                val.* = coerced;
+            if (t.len > 0 and t[0] == '\\') t = t[1..];
+            if (std.mem.eql(u8, t, "Closure") and self.isValueCallable(val.*)) return false;
+        }
+        const shown = try self.resolvedTypeText(type_str, class_name);
+        const msg = if (step_up) |up|
+            std.fmt.allocPrint(self.allocator, "Cannot {s} property {s}::${s} of type {s} past its {s} value", .{ if (up) "increment" else "decrement", class_name, prop_name, shown, if (up) "maximal" else "minimal" }) catch return error.RuntimeError
+        else
+            std.fmt.allocPrint(self.allocator, "Cannot assign {s} to property {s}::${s} of type {s}", .{ valueTypeName(val.*), class_name, prop_name, shown }) catch return error.RuntimeError;
+        defer self.allocator.free(msg);
+        if (try self.throwBuiltinException("TypeError", msg)) return true;
+        self.setErrorMsg("{s}", .{msg});
+        return error.RuntimeError;
+    }
+
+    // a declared type as php prints it in errors (zend_type_to_string_resolved):
+    // self and parent name the classes they stand for
+    pub fn resolvedTypeText(self: *VM, type_str: []const u8, decl_class: []const u8) RuntimeError![]const u8 {
+        const relative = for (0..type_str.len) |i| {
+            const rest = type_str[i..];
+            if (std.ascii.startsWithIgnoreCase(rest, "self") or std.ascii.startsWithIgnoreCase(rest, "parent")) break true;
+        } else false;
+        if (!relative) return type_str;
+        const parent = if (self.classes.get(decl_class)) |c| c.parent else null;
+        const t = php_types.parse(self.allocator, type_str, decl_class, parent) catch return error.OutOfMemory;
+        defer t.deinit(self.allocator);
+        const text = php_types.format(self.allocator, t) catch return error.OutOfMemory;
+        defer self.allocator.free(text);
+        return self.internName(text);
+    }
+
+    // php's is_numeric_str_function: a whole numeric string (surrounding
+    // whitespace allowed) read as an int, or as a float when it has a
+    // fraction or exponent or overflows
+    const NumericStr = union(enum) { none, int: i64, float: f64 };
+
+    fn numericStr(s: []const u8) NumericStr {
+        if (!Value.isNumericString(s)) return .none;
+        const t = std.mem.trim(u8, s, " \t\n\r\x0b\x0c");
+        integral: {
+            for (t, 0..) |c, i| {
+                if ((c == '-' or c == '+') and i == 0) continue;
+                if (c < '0' or c > '9') break :integral;
             }
+            const n = std.fmt.parseInt(i64, t, 10) catch break :integral;
+            return .{ .int = n };
+        }
+        return .{ .float = Value.toFloat(.{ .string = Value.String.borrowed(t) }) };
+    }
+
+    // zend_incompatible_double_to_long_error / _string_to_long_error
+    fn warnLossyIntConversion(self: *VM, f: f64, from_string: ?[]const u8) RuntimeError!void {
+        const msg = if (from_string) |s|
+            try std.fmt.allocPrint(self.allocator, "Implicit conversion from float-string \"{s}\" to int loses precision", .{s})
+        else blk: {
+            var buf: [64]u8 = undefined;
+            break :blk try std.fmt.allocPrint(self.allocator, "Implicit conversion from float {s} to int loses precision", .{formatted_print.gcvt(f, -1, '.', 'E', &buf)});
+        };
+        defer self.allocator.free(msg);
+        try self.raiseError(E_DEPRECATED, msg);
+    }
+
+    // zend_parse_arg_long_weak for a user-declared type (no null)
+    fn weakLong(self: *VM, val: Value) RuntimeError!?i64 {
+        switch (val) {
+            .float => |f| {
+                if (std.math.isNan(f) or !Value.floatFitsInt(f)) return null;
+                if (f != @trunc(f)) try self.warnLossyIntConversion(f, null);
+                return @intFromFloat(@trunc(f));
+            },
+            .string => |s| switch (numericStr(s.bytes())) {
+                .none => return null,
+                .int => |i| return i,
+                .float => |f| {
+                    if (std.math.isNan(f) or !Value.floatFitsInt(f)) return null;
+                    if (f != @trunc(f)) try self.warnLossyIntConversion(f, s.bytes());
+                    return @intFromFloat(@trunc(f));
+                },
+            },
+            .bool => |b| return @intFromBool(b),
+            else => return null,
+        }
+    }
+
+    // zend_verify_weak_scalar_type_hint: int, then float, then string, then bool
+    fn weakScalarHint(self: *VM, mask: u32, val: Value) RuntimeError!?Value {
+        if (mask & php_types.LONG != 0) {
+            if (mask & php_types.DOUBLE != 0 and val == .string) {
+                switch (numericStr(val.string.bytes())) {
+                    .int => |i| return .{ .int = i },
+                    .float => |f| return .{ .float = f },
+                    .none => {},
+                }
+            } else if (try self.weakLong(val)) |i| return .{ .int = i };
+        }
+        if (mask & php_types.DOUBLE != 0) switch (val) {
+            .int => |i| return .{ .float = @floatFromInt(i) },
+            .string => |s| switch (numericStr(s.bytes())) {
+                .int => |i| return .{ .float = @floatFromInt(i) },
+                .float => |f| return .{ .float = f },
+                .none => {},
+            },
+            .bool => |b| return .{ .float = if (b) 1.0 else 0.0 },
+            else => {},
+        };
+        if (mask & php_types.STRING != 0) switch (val) {
+            .int, .float, .bool => return try self.coerceToStringValue(val),
+            .object => |obj| if (self.hasMethod(obj.class_name, "__toString")) {
+                return .{ .string = self.transientOwned(try self.objectString(obj)) };
+            },
+            else => {},
+        };
+        if (mask & php_types.BOOL == php_types.BOOL) switch (val) {
+            .int, .float, .string => return .{ .bool = val.isTruthy() },
+            else => {},
+        };
+        return null;
+    }
+
+    // ZEND_TYPE_CONTAINS_CODE plus the class part of a declared type: the
+    // value fits without any coercion. self and parent name the declaring
+    // class and its parent
+    fn typeHoldsExactly(self: *VM, val: Value, type_str: []const u8, shape: php_types.Shape, decl_class: []const u8) bool {
+        const bit: u32 = switch (val) {
+            .null, .undef => php_types.NULL,
+            .bool => |b| if (b) php_types.TRUE else php_types.FALSE,
+            .int => php_types.LONG,
+            .float => php_types.DOUBLE,
+            .string => php_types.STRING,
+            .array => php_types.ARRAY,
+            .resource => php_types.RESOURCE,
+            .object, .generator, .fiber => php_types.OBJECT,
+        };
+        if (shape.mask & bit != 0) return true;
+        if (!shape.classes) return false;
+        const class_name: []const u8 = switch (val) {
+            .object => |obj| obj.class_name,
+            .generator => "Generator",
+            .fiber => "Fiber",
+            else => return false,
+        };
+        var body = std.mem.trim(u8, type_str, " ");
+        if (body.len > 0 and body[0] == '?') body = body[1..];
+        var it = std.mem.splitScalar(u8, body, '|');
+        while (it.next()) |raw| {
+            var member = std.mem.trim(u8, raw, " ");
+            if (member.len > 1 and member[0] == '(') member = member[1 .. member.len - 1];
+            var all = true;
+            var parts = std.mem.splitScalar(u8, member, '&');
+            while (parts.next()) |part_raw| {
+                const part = std.mem.trim(u8, part_raw, " ");
+                const bare = if (part.len > 0 and part[0] == '\\') part[1..] else part;
+                const target = if (std.ascii.eqlIgnoreCase(bare, "self"))
+                    decl_class
+                else if (std.ascii.eqlIgnoreCase(bare, "parent"))
+                    (if (self.classes.get(decl_class)) |c| c.parent orelse bare else bare)
+                else if (std.ascii.eqlIgnoreCase(bare, "iterable"))
+                    "Traversable"
+                else
+                    bare;
+                if (!php_types.shape(target).classes) {
+                    all = false;
+                    break;
+                }
+                const instance = switch (val) {
+                    // zphp's generators are not objects of a class
+                    .generator => std.ascii.eqlIgnoreCase(target, "Generator") or std.ascii.eqlIgnoreCase(target, "Traversable") or std.ascii.eqlIgnoreCase(target, "Iterator"),
+                    .fiber => std.ascii.eqlIgnoreCase(target, "Fiber"),
+                    else => self.isInstanceOf(class_name, target),
+                };
+                if (!instance) {
+                    all = false;
+                    break;
+                }
+            }
+            if (all) return true;
         }
         return false;
+    }
+
+    // i_zend_check_property_type: the value as the property would store it,
+    // or null when the type refuses it
+    fn propertyTypeAccepts(self: *VM, val: Value, type_str: []const u8, decl_class: []const u8, strict: bool) RuntimeError!?Value {
+        const shape = php_types.shape(type_str);
+        if (self.typeHoldsExactly(val, type_str, shape, decl_class)) return val;
+        if (strict) {
+            if (shape.mask & php_types.DOUBLE == 0 or val != .int) return null;
+        } else if (val == .null) return null;
+        return try self.weakScalarHint(shape.mask, val);
+    }
+
+    // i_zend_verify_type_assignable_zval: 1 fits, 0 refused, -1 may fit
+    // after coercion
+    fn typeAssignable(self: *VM, val: Value, type_str: []const u8, decl_class: []const u8, strict: bool) i2 {
+        const shape = php_types.shape(type_str);
+        if (self.typeHoldsExactly(val, type_str, shape, decl_class)) return 1;
+        if (strict) return if (shape.mask & php_types.DOUBLE != 0 and val == .int) -1 else 0;
+        if (val == .null) return 0;
+        if (shape.mask & (php_types.LONG | php_types.DOUBLE | php_types.STRING) == 0 and shape.mask & php_types.BOOL != php_types.BOOL) return 0;
+        return -1;
+    }
+
+    pub fn currentStrictTypes(self: *VM) bool {
+        if (self.frame_count >= 1) {
+            if (self.frames[self.frame_count - 1].func) |f| return f.strict_types;
+        }
+        return self.script_strict_types;
+    }
+
+    // a typed property a reference is bound to (php's ZEND_REF_HAS_TYPE_SOURCES)
+    pub const TypeSource = struct { class: []const u8, prop: []const u8, type_str: []const u8 };
+
+    fn staticPropDeclaringClass(self: *VM, class_name: []const u8, prop_name: []const u8) ?[]const u8 {
+        var current: ?[]const u8 = class_name;
+        while (current) |cn| {
+            const entry = self.classes.getEntry(cn) orelse return null;
+            if (entry.value_ptr.static_props.contains(prop_name)) return entry.key_ptr.*;
+            current = entry.value_ptr.parent;
+        }
+        return null;
+    }
+
+    fn propertySource(self: *VM, target: BindingTarget) ?TypeSource {
+        switch (target) {
+            .object => |t| {
+                const decl = self.propertyDeclaration(t.object.class_name, t.prop_name);
+                if (!decl.declared or decl.type_str.len == 0) return null;
+                return .{ .class = decl.defining_class, .prop = t.prop_name, .type_str = self.resolvedTypeText(decl.type_str, decl.defining_class) catch decl.type_str };
+            },
+            .static => |t| {
+                const cn = self.staticPropDeclaringClass(t.class_name, t.prop_name) orelse return null;
+                const cls = self.classes.getPtr(cn) orelse return null;
+                const ts = cls.static_prop_types.get(t.prop_name) orelse return null;
+                if (ts.len == 0) return null;
+                return .{ .class = cn, .prop = t.prop_name, .type_str = self.resolvedTypeText(ts, cn) catch ts };
+            },
+            else => return null,
+        }
+    }
+
+    // the typed properties a reference cell is bound to, in binding order.
+    // a cell marked typed whose sources are all gone loses the mark
+    pub fn refTypeSources(self: *VM, cell: *Value, buf: []TypeSource) []TypeSource {
+        const rc = cellOf(cell);
+        if (!rc.typed) return buf[0..0];
+        var n: usize = 0;
+        if (self.ref_index) |ri| if (ri.fwd.getPtr(cell)) |list| {
+            for (list.items) |target| {
+                if (n == buf.len) break;
+                const src = self.propertySource(target) orelse continue;
+                var dup = false;
+                for (buf[0..n]) |seen| {
+                    if (std.mem.eql(u8, seen.class, src.class) and std.mem.eql(u8, seen.prop, src.prop)) dup = true;
+                }
+                if (dup) continue;
+                buf[n] = src;
+                n += 1;
+            }
+        };
+        if (n == 0) rc.typed = false;
+        return buf[0..n];
+    }
+
+    fn markTypedSource(self: *VM, cell: *Value, target: BindingTarget) void {
+        if (self.propertySource(target) != null) cellOf(cell).typed = true;
+    }
+
+    fn throwRefTypeError(self: *VM, src: TypeSource, val: Value) RuntimeError {
+        const msg = std.fmt.allocPrint(self.allocator, "Cannot assign {s} to reference held by property {s}::${s} of type {s}", .{ valueTypeName(val), src.class, src.prop, src.type_str }) catch return error.RuntimeError;
+        defer self.allocator.free(msg);
+        try self.setPendingException("TypeError", msg);
+        return error.RuntimeError;
+    }
+
+    fn throwConflictingCoercion(self: *VM, a: TypeSource, b: TypeSource, val: Value) RuntimeError {
+        const msg = std.fmt.allocPrint(self.allocator, "Cannot assign {s} to reference held by property {s}::${s} of type {s} and property {s}::${s} of type {s}, as this would result in an inconsistent type conversion", .{ valueTypeName(val), a.class, a.prop, a.type_str, b.class, b.prop, b.type_str }) catch return error.RuntimeError;
+        defer self.allocator.free(msg);
+        try self.setPendingException("TypeError", msg);
+        return error.RuntimeError;
+    }
+
+    // zend_verify_ref_assignable_zval: the value must fit every typed
+    // property the reference is bound to and coerce to the same value for
+    // each. returns the value to store; raises the TypeError as pending
+    pub noinline fn verifyRefAssignable(self: *VM, cell: *Value, val: Value) RuntimeError!Value {
+        var buf: [8]TypeSource = undefined;
+        const sources = self.refTypeSources(cell, &buf);
+        if (sources.len == 0) return val;
+        // an int stepped past its range (zend_incdec_typed_ref)
+        if (val == .float) if (self.takeStepOverflow()) |up| {
+            for (sources) |src| {
+                if (php_types.shape(src.type_str).mask & php_types.DOUBLE == 0) return self.throwIncdecRef(src, up);
+            }
+            return val;
+        };
+        const strict = self.currentStrictTypes();
+        var first: ?TypeSource = null;
+        var coerced: ?Value = null;
+        for (sources) |src| {
+            const result = self.typeAssignable(val, src.type_str, src.class, strict);
+            if (result == 0) return self.throwRefTypeError(src, val);
+            if (result < 0) {
+                const c = (try self.weakScalarHint(php_types.shape(src.type_str).mask, val)) orelse return self.throwRefTypeError(src, val);
+                if (first == null) {
+                    first = src;
+                    coerced = c;
+                } else if (coerced) |prev| {
+                    if (!Value.identical(prev, c)) return self.throwConflictingCoercion(first.?, src, val);
+                } else return self.throwConflictingCoercion(first.?, src, val);
+            } else if (first == null) {
+                first = src;
+            } else if (coerced != null) return self.throwConflictingCoercion(first.?, src, val);
+        }
+        return coerced orelse val;
     }
 
     fn isAncestor(self: *VM, ancestor: []const u8, descendant: []const u8) bool {

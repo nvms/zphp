@@ -137,6 +137,19 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                     return;
                 }
             }
+            if (rhs_is_ref and target.data.rhs != 0) {
+                const ref_inner = self.ast.nodes[node.data.rhs].data.lhs;
+                switch (self.ast.nodes[ref_inner].tag) {
+                    .property_access, .array_access, .static_prop_access, .call, .method_call, .static_call => {
+                        try compileVivifyChain(self, target.data.lhs);
+                        try self.compileNode(target.data.rhs);
+                        try compileReferenceSource(self, ref_inner);
+                        try self.emitOp(.array_bind_ref_source);
+                        return;
+                    },
+                    else => {},
+                }
+            }
             const target_lhs = self.ast.nodes[target.data.lhs];
             if (target_lhs.tag == .variable) {
                 const var_name = self.ast.tokenSlice(target_lhs.main_token);
@@ -211,6 +224,22 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                 try self.emitU16(source_idx);
                 try self.compileNode(self.ast.nodes[node.data.rhs].data.lhs);
                 return;
+            }
+            switch (ref_inner.tag) {
+                .property_access, .array_access, .static_prop_access, .call, .method_call, .static_call => {
+                    try self.compileNode(target.data.lhs);
+                    const dynamic = self.isDynamicProp(target);
+                    if (dynamic) try self.compileNode(target.data.rhs);
+                    try compileReferenceSource(self, self.ast.nodes[node.data.rhs].data.lhs);
+                    if (dynamic) {
+                        try self.emitOp(.prop_bind_ref_source_dyn);
+                    } else {
+                        try self.emitOp(.prop_bind_ref_source);
+                        try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(self.propName(target)) }));
+                    }
+                    return;
+                },
+                else => {},
             }
         }
         if (self.isDynamicProp(target)) {
@@ -304,6 +333,13 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
         if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
         const class_idx = try self.addConstant(.{ .string = Value.String.borrowed(class_name) });
         const prop_idx = try self.addConstant(.{ .string = Value.String.borrowed(prop_name) });
+        if (op_tag == .equal and self.ast.nodes[node.data.rhs].tag == .ref_target and isReferenceSource(self, self.ast.nodes[node.data.rhs].data.lhs)) {
+            try compileReferenceSource(self, self.ast.nodes[node.data.rhs].data.lhs);
+            try self.emitOp(.static_prop_bind_ref_source);
+            try self.emitU16(class_idx);
+            try self.emitU16(prop_idx);
+            return;
+        }
         if (op_tag == .question_question_equal) {
             try self.emitOp(.get_static_prop);
             try self.emitU16(class_idx);
@@ -1656,6 +1692,18 @@ pub fn compileReferenceBinding(self: *Compiler, source: u32, dst: u16) Error!boo
         else => return false,
     }
     return true;
+}
+
+// what compileReferenceBinding can make a reference of
+fn isReferenceSource(self: *Compiler, source: u32) bool {
+    return switch (self.ast.nodes[source].tag) {
+        .variable, .identifier, .array_access, .array_push_target, .property_access, .call, .method_call, .static_call => true,
+        .static_prop_access => blk: {
+            _ = resolveNodeClassName(self, self.ast.nodes[self.ast.nodes[source].data.lhs]) catch break :blk false;
+            break :blk true;
+        },
+        else => false,
+    };
 }
 
 // Move the temporary binding into the owning operand-stack provenance. No
