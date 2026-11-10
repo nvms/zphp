@@ -2791,8 +2791,13 @@ fn native_fseek(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         return NativeResult.scalar(.{ .int = 0 });
     }
     const file = getFileHandle(obj) orelse return NativeResult.scalar(.{ .int = -1 });
+    // pipes, sockets, and character devices cannot seek
+    if (!isSeekable(obj)) {
+        try warn(ctx, "fseek(): Stream does not support seeking", .{});
+        return NativeResult.scalar(.{ .int = -1 });
+    }
     switch (whence) {
-        0 => platform.seekTo(file, @intCast(offset)) catch return NativeResult.scalar(.{ .int = -1 }),
+        0 => platform.seekTo(file, std.math.cast(u64, offset) orelse return NativeResult.scalar(.{ .int = -1 })) catch return NativeResult.scalar(.{ .int = -1 }),
         1 => platform.seekBy(file, offset) catch return NativeResult.scalar(.{ .int = -1 }),
         2 => platform.seekFromEnd(file, offset) catch return NativeResult.scalar(.{ .int = -1 }),
         else => return NativeResult.scalar(.{ .int = -1 }),
@@ -2829,6 +2834,10 @@ fn native_rewind(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         return NativeResult.scalar(.{ .bool = true });
     }
     const file = getFileHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
+    if (!isSeekable(obj)) {
+        try warn(ctx, "rewind(): Stream does not support seeking", .{});
+        return NativeResult.scalar(.{ .bool = false });
+    }
     platform.seekTo(file, 0) catch return NativeResult.scalar(.{ .bool = false });
     try obj.set(ctx.allocator, "__eof", .{ .bool = false });
     return NativeResult.scalar(.{ .bool = true });
