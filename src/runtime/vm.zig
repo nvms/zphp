@@ -11075,6 +11075,7 @@ pub const VM = struct {
                                         if (std.mem.eql(u8, pn, entry.key.string.bytes())) {
                                             resolved[pi] = entry.value;
                                             resolved_sources[pi] = self.argArraySource(arr, entry.key);
+                                            slots.assigned[pi] = true;
                                             if (pi >= pos) pos = pi + 1;
                                             break;
                                         }
@@ -11082,8 +11083,13 @@ pub const VM = struct {
                                 } else {
                                     resolved[pos] = entry.value;
                                     resolved_sources[pos] = self.argArraySource(arr, entry.key);
+                                    slots.assigned[pos] = true;
                                     pos += 1;
                                 }
+                            }
+                            // a parameter the named arguments skipped takes its default
+                            for (0..pos) |i| {
+                                if (!slots.assigned[i] and i < func2.defaults.len) resolved[i] = try self.resolveParamDefault(func2, i);
                             }
                             for (0..pos) |i| {
                                 self.push(resolved[i]);
