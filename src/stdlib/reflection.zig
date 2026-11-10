@@ -430,6 +430,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rp_def.methods.put(a, "isVariadic", .{ .name = "isVariadic", .arity = 0 });
     try rp_def.methods.put(a, "isPromoted", .{ .name = "isPromoted", .arity = 0 });
     try rp_def.methods.put(a, "getClass", .{ .name = "getClass", .arity = 0 });
+    try rp_def.methods.put(a, "isArray", .{ .name = "isArray", .arity = 0 });
+    try rp_def.methods.put(a, "isCallable", .{ .name = "isCallable", .arity = 0 });
     try rp_def.methods.put(a, "isDefaultValueConstant", .{ .name = "isDefaultValueConstant", .arity = 0 });
     try rp_def.methods.put(a, "getDefaultValueConstantName", .{ .name = "getDefaultValueConstantName", .arity = 0 });
     try vm.classes.put(a, "ReflectionParameter", rp_def);
@@ -451,6 +453,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionParameter::isVariadic", rpIsVariadic);
     try vm.native_fns.put(a, "ReflectionParameter::isPromoted", rpIsPromoted);
     try vm.native_fns.put(a, "ReflectionParameter::getClass", rpGetClass);
+    try vm.native_fns.put(a, "ReflectionParameter::isArray", rpIsArray);
+    try vm.native_fns.put(a, "ReflectionParameter::isCallable", rpIsCallable);
     try vm.native_fns.put(a, "ReflectionParameter::isDefaultValueConstant", rpIsDefaultValueConstant);
     try vm.native_fns.put(a, "ReflectionParameter::getDefaultValueConstantName", rpGetDefaultValueConstantName);
 
@@ -1267,7 +1271,7 @@ fn isBuiltinType(name: []const u8) bool {
         "false", "true",
     };
     for (builtins) |b| {
-        if (std.mem.eql(u8, name, b)) return true;
+        if (std.ascii.eqlIgnoreCase(name, b)) return true;
     }
     return false;
 }
@@ -1836,6 +1840,8 @@ fn rcGetMethods(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     const arr = try ctx.createArray();
     var seen = std.StringHashMapUnmanaged(void){};
     defer seen.deinit(ctx.allocator);
+    // Closure's __invoke is listed last, reflecting the closure
+    if (std.mem.eql(u8, class_name, "Closure")) try seen.put(ctx.allocator, "__invoke", {});
 
     // interface methods (declaration order, abstract by definition)
     if (ctx.vm.interfaces.get(class_name)) |iface| {
@@ -1886,13 +1892,12 @@ fn rcGetMethods(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         current = cls.parent;
         depth += 1;
     }
-    // the Closure class lists its __invoke last
+    // the Closure class's __invoke reflects the closure's signature
     const reflected = this.get("__object");
-    if (std.mem.eql(u8, class_name, "Closure") and !seen.contains("__invoke") and (filter == null or filter.? & 1 != 0)) {
+    if (std.mem.eql(u8, class_name, "Closure") and (filter == null or filter.? & 1 != 0)) {
         const obj = try ctx.createObject("ReflectionMethod");
         try setClosureInvokeMethod(ctx, obj, if (reflected.closureName() != null) reflected else .null);
         try arr.append(ctx.allocator, .{ .object = obj });
-        try seen.put(ctx.allocator, "__invoke", {});
     }
     // an abstract class inherits the interface methods it doesn't implement
     var queue = std.ArrayListUnmanaged([]const u8).empty;
@@ -1910,6 +1915,8 @@ fn rcGetMethods(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         for (iface.parents.items) |p| try queue.append(ctx.allocator, p);
         for (iface.methods.items) |method_name| {
             if (std.mem.indexOf(u8, method_name, "$hook_") != null or seen.contains(method_name)) continue;
+            // a method the class has, in any case, isn't inherited abstract
+            if (ctx.vm.hasMethod(class_name, method_name)) continue;
             try seen.put(ctx.allocator, method_name, {});
             const info = ClassDef.MethodInfo{ .name = method_name, .arity = 0, .visibility = .public, .is_abstract = true };
             if (filter) |f| if (!methodMatchesFilter(info, f)) continue;
@@ -2046,6 +2053,13 @@ fn rcIsCloneable(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
     const cls = ctx.vm.classes.get(class_name) orelse return NativeResult.scalar(.{ .bool = true });
     if (cls.is_abstract) return NativeResult.scalar(.{ .bool = false });
     if (cls.is_enum) return NativeResult.scalar(.{ .bool = false });
+    // an internal class without a clone handler, and its subclasses
+    var walk: ?[]const u8 = class_name;
+    while (walk) |n| {
+        const c = ctx.vm.classes.get(n) orelse break;
+        if (c.uncloneable) return NativeResult.scalar(.{ .bool = false });
+        walk = c.parent;
+    }
     if (cls.methods.get("__clone")) |m| {
         if (m.visibility != .public) return NativeResult.scalar(.{ .bool = false });
     }
@@ -2706,6 +2720,8 @@ fn buildReflectionClassConstant(ctx: *NativeContext, class_name: []const u8, con
 
 fn rccGetName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    // $name is a typed property; unset, reading it is php's error
+    if (this.isUnset("name") or this.get("name") != .string) return raiseError(ctx, "Error", "Typed property ReflectionClassConstant::$name must not be accessed before initialization", .{});
     return NativeResult.share(this.get("name"));
 }
 
@@ -2958,7 +2974,10 @@ fn rcGetDefaultProperties(ctx: *NativeContext, _: []const Value) RuntimeError!Na
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
     try ctx.vm.resolveClassDefaults(class_name);
-    const arr = try ctx.createArray();
+    // php's add_class_vars: the static properties (their current values)
+    // first, then the instance properties' defaults
+    const statics = (try rcGetStaticProperties(ctx, &.{})).value;
+    const arr = if (statics == .array) statics.array else try ctx.createArray();
     var seen = std.StringHashMapUnmanaged(void){};
     defer seen.deinit(ctx.allocator);
     var is_own = true;
@@ -5087,7 +5106,9 @@ fn rpWrite(ctx: *NativeContext, args: []const Value, mode: WriteMode) RuntimeErr
         // a null slot counts as unset: a class declared by eval leaves an
         // uninitialized readonly property null rather than undef
         const initialized = current != .undef and current != .null and !target.isUnset(prop_name);
-        if (initialized or !std.ascii.eqlIgnoreCase(scope, vr.defining_class)) {
+        // readonly is implicitly protected(set): any class of the hierarchy
+        // may initialize it, none may modify it
+        if (initialized) {
             const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot modify readonly property {s}::${s}", .{ target.class_name, prop_name });
             defer ctx.allocator.free(msg);
             _ = try ctx.vm.throwBuiltinException("Error", msg);
@@ -5608,7 +5629,11 @@ fn rmGetClosure(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     if (!ctx.vm.isInstanceOf(obj.class_name, declaring)) return throwReflection(ctx, "Given object is not an instance of the class this method was declared in");
     const arr = try ctx.createArray();
     try arr.append(ctx.allocator, .{ .object = obj });
-    try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(full) });
+    // the method itself, named plainly when the object's class resolves
+    // the name to it
+    const resolved = findDeclaringClass(ctx.vm, obj.class_name, method_name);
+    const callable_name = if (std.ascii.eqlIgnoreCase(resolved, declaring)) try ctx.vm.internName(method_name) else full;
+    try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(callable_name) });
     return wrapCallableClosure(ctx, .{ .array = arr });
 }
 
@@ -5767,6 +5792,36 @@ fn rpIsPromoted(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
         if (std.mem.eql(u8, prop.name, name_v.string.bytes())) return NativeResult.scalar(.{ .bool = prop.is_promoted });
     }
     return NativeResult.scalar(.{ .bool = false });
+}
+
+// isArray and isCallable: the parameter's type is that one type, perhaps
+// nullable
+fn rpTypeIs(ctx: *NativeContext, want: []const u8) bool {
+    const this = getThis(ctx) orelse return false;
+    const type_val = this.get("__type_name");
+    if (type_val != .string) return false;
+    var t = std.mem.trimStart(u8, type_val.string.bytes(), "?");
+    if (std.mem.indexOfScalar(u8, t, '|')) |_| {
+        var it = std.mem.splitScalar(u8, t, '|');
+        var other: ?[]const u8 = null;
+        var count: usize = 0;
+        while (it.next()) |part| {
+            if (std.ascii.eqlIgnoreCase(part, "null")) continue;
+            other = part;
+            count += 1;
+        }
+        if (count != 1) return false;
+        t = other.?;
+    }
+    return std.ascii.eqlIgnoreCase(t, want);
+}
+
+fn rpIsArray(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = rpTypeIs(ctx, "array") });
+}
+
+fn rpIsCallable(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .bool = rpTypeIs(ctx, "callable") });
 }
 
 fn rpGetClass(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
