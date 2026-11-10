@@ -833,16 +833,21 @@ fn array_unshift(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     return NativeResult.scalar(.{ .int = arr.length() });
 }
 
-fn native_shuffle(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+// php_array_data_shuffle over the default engine, mt_rand's
+fn native_shuffle(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .array) return NativeResult.scalar(.{ .bool = false });
     const arr = args[0].array;
+    if (!ctx.vm.rng_seeded) {
+        var entropy: [4]u8 = undefined;
+        platform.random.bytes(&entropy);
+        ctx.vm.mt19937.seed(std.mem.readInt(u32, &entropy, .little));
+        ctx.vm.rng_seeded = true;
+    }
     var i: usize = arr.entries.items.len;
     while (i > 1) {
         i -= 1;
-        const j = platform.random.intRangeAtMost(usize, 0, i);
-        const tmp = arr.entries.items[i];
-        arr.entries.items[i] = arr.entries.items[j];
-        arr.entries.items[j] = tmp;
+        const j: usize = @intCast(ctx.vm.mt19937.nextRange(0, @intCast(i)));
+        if (j != i) std.mem.swap(PhpArray.Entry, &arr.entries.items[i], &arr.entries.items[j]);
     }
     reindexArray(arr);
     return NativeResult.scalar(.{ .bool = true });

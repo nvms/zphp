@@ -95,13 +95,11 @@ pub const entries = .{
     .{ "mb_parse_str", native_mb_parse_str },
     .{ "strip_tags", native_strip_tags },
     .{ "http_build_query", native_http_build_query },
-    .{ "quoted_printable_encode", native_qp_encode },
     .{ "quoted_printable_decode", native_qp_decode },
     .{ "parse_url", native_parse_url },
     .{ "parse_str", native_parse_str },
     .{ "levenshtein", native_levenshtein },
     .{ "similar_text", native_similar_text },
-    .{ "metaphone", native_metaphone },
     .{ "strcspn", native_strcspn },
     .{ "strspn", native_strspn },
 } ++ @import("html.zig").entries;
@@ -259,14 +257,17 @@ fn str_shuffle(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     if (s.len <= 1) return if (args[0] == .string) NativeResult.share(args[0]) else NativeResult.copyString(ctx.allocator, s);
     const buf = try ctx.allocator.alloc(u8, s.len);
     @memcpy(buf, s);
-    // Fisher-Yates with the default PRNG
-    var prng = std.Random.DefaultPrng.init(@bitCast(platform.timestamp()));
-    var i: usize = buf.len - 1;
-    while (i > 0) : (i -= 1) {
-        const j = prng.random().intRangeAtMost(usize, 0, i);
-        const tmp = buf[i];
-        buf[i] = buf[j];
-        buf[j] = tmp;
+    // php_binary_string_shuffle over the default engine, mt_rand's
+    if (!ctx.vm.rng_seeded) {
+        var entropy: [4]u8 = undefined;
+        platform.random.bytes(&entropy);
+        ctx.vm.mt19937.seed(std.mem.readInt(u32, &entropy, .little));
+        ctx.vm.rng_seeded = true;
+    }
+    var n_left: usize = buf.len - 1;
+    while (n_left > 0) : (n_left -= 1) {
+        const j: usize = @intCast(ctx.vm.mt19937.nextRange(0, @intCast(n_left)));
+        if (j != n_left) std.mem.swap(u8, &buf[n_left], &buf[j]);
     }
     return NativeResult.takeString(try Value.String.adopt(ctx.allocator, buf));
 }
@@ -3189,41 +3190,6 @@ fn appendUrlEncodedMode(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, 
     }
 }
 
-fn native_qp_encode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.literal("");
-    const s = args[0].string.bytes();
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(ctx.allocator);
-    const hex = "0123456789ABCDEF";
-    var line_len: usize = 0;
-    var i: usize = 0;
-    while (i < s.len) {
-        if (i + 1 < s.len and s[i] == '\r' and s[i + 1] == '\n') {
-            try buf.appendSlice(ctx.allocator, "\r\n");
-            line_len = 0;
-            i += 2;
-            continue;
-        }
-        const c = s[i];
-        const need: usize = if ((c >= 33 and c <= 126 and c != '=') or c == ' ' or c == '\t') 1 else 3;
-        if (line_len + need > 75) {
-            try buf.appendSlice(ctx.allocator, "=\r\n");
-            line_len = 0;
-        }
-        if (need == 1) {
-            try buf.append(ctx.allocator, c);
-        } else {
-            try buf.append(ctx.allocator, '=');
-            try buf.append(ctx.allocator, hex[c >> 4]);
-            try buf.append(ctx.allocator, hex[c & 0xf]);
-        }
-        line_len += need;
-        i += 1;
-    }
-    const result = try buf.toOwnedSlice(ctx.allocator);
-    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, result));
-}
-
 fn native_qp_decode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.literal("");
     const s = args[0].string.bytes();
@@ -3649,226 +3615,6 @@ fn native_similar_text(ctx: *NativeContext, args: []const Value) RuntimeError!Na
     }
 
     return NativeResult.scalar(.{ .int = matching });
-}
-
-fn native_metaphone(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.literal("");
-    const input = args[0].string.bytes();
-    const max_phonemes: usize = if (args.len >= 2) @intCast(@max(Value.toInt(args[1]), 0)) else 32;
-    if (input.len == 0) return NativeResult.literal("");
-
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(ctx.allocator);
-    var upper = try ctx.allocator.alloc(u8, input.len);
-    defer ctx.allocator.free(upper);
-    for (input, 0..) |c, i| upper[i] = std.ascii.toUpper(c);
-
-    var i: usize = 0;
-
-    // skip initial silent consonant pairs
-    if (upper.len >= 2) {
-        const pair = upper[0..2];
-        if (std.mem.eql(u8, pair, "AE") or std.mem.eql(u8, pair, "GN") or
-            std.mem.eql(u8, pair, "KN") or std.mem.eql(u8, pair, "PN") or
-            std.mem.eql(u8, pair, "WR"))
-        {
-            i = 1;
-        }
-    }
-
-    while (i < upper.len and buf.items.len < max_phonemes) {
-        const c = upper[i];
-        const prev: u8 = if (i > 0) upper[i - 1] else 0;
-        const next: u8 = if (i + 1 < upper.len) upper[i + 1] else 0;
-
-        if (!std.ascii.isAlphabetic(c)) {
-            i += 1;
-            continue;
-        }
-
-        // vowels only at start
-        if (c == 'A' or c == 'E' or c == 'I' or c == 'O' or c == 'U') {
-            if (i == 0) try buf.append(ctx.allocator, c);
-            i += 1;
-            continue;
-        }
-
-        // skip doubled letters (except C)
-        if (c == prev and c != 'C') {
-            i += 1;
-            continue;
-        }
-
-        switch (c) {
-            'B' => {
-                if (prev != 'M') try buf.append(ctx.allocator, 'B');
-                i += 1;
-            },
-            'C' => {
-                if (next == 'H') {
-                    try buf.append(ctx.allocator, 'X');
-                    i += 2;
-                } else if (next == 'I' or next == 'E' or next == 'Y') {
-                    if (next == 'I' and i + 2 < upper.len and upper[i + 2] == 'A') {
-                        try buf.append(ctx.allocator, 'X');
-                        i += 3;
-                    } else {
-                        try buf.append(ctx.allocator, 'S');
-                        i += 2;
-                    }
-                } else {
-                    try buf.append(ctx.allocator, 'K');
-                    i += 1;
-                }
-            },
-            'D' => {
-                if (next == 'G' and i + 2 < upper.len) {
-                    const after = upper[i + 2];
-                    if (after == 'I' or after == 'E' or after == 'Y') {
-                        try buf.append(ctx.allocator, 'J');
-                        i += 3;
-                    } else {
-                        try buf.append(ctx.allocator, 'T');
-                        i += 1;
-                    }
-                } else {
-                    try buf.append(ctx.allocator, 'T');
-                    i += 1;
-                }
-            },
-            'F' => {
-                try buf.append(ctx.allocator, 'F');
-                i += 1;
-            },
-            'G' => {
-                if (next == 'H') {
-                    const after_h: u8 = if (i + 2 < upper.len) upper[i + 2] else 0;
-                    const after_is_vowel = after_h == 'A' or after_h == 'E' or after_h == 'I' or after_h == 'O' or after_h == 'U';
-                    const prev_is_vowel = prev == 'A' or prev == 'E' or prev == 'I' or prev == 'O' or prev == 'U';
-                    if (prev_is_vowel and !after_is_vowel) {
-                        try buf.append(ctx.allocator, 'F');
-                        i += 2;
-                        continue;
-                    } else if (i == 0) {
-                        // GH at start -> hard G
-                        try buf.append(ctx.allocator, 'K');
-                        i += 2;
-                        continue;
-                    } else if (!after_is_vowel) {
-                        i += 2;
-                        continue;
-                    }
-                }
-                if (i > 0 and next == 'N' and i + 2 >= upper.len) {
-                    i += 1;
-                    continue;
-                }
-                if (prev == 'G') {
-                    i += 1;
-                    continue;
-                }
-                if (next == 'I' or next == 'E' or next == 'Y') {
-                    try buf.append(ctx.allocator, 'J');
-                } else {
-                    try buf.append(ctx.allocator, 'K');
-                }
-                i += 1;
-            },
-            'H' => {
-                if ((prev == 'A' or prev == 'E' or prev == 'I' or prev == 'O' or prev == 'U') or
-                    (next == 'A' or next == 'E' or next == 'I' or next == 'O' or next == 'U'))
-                {
-                    if (next == 'A' or next == 'E' or next == 'I' or next == 'O' or next == 'U') {
-                        if (!(prev == 'S' or prev == 'C' or prev == 'P' or prev == 'T' or prev == 'G')) {
-                            try buf.append(ctx.allocator, 'H');
-                        }
-                    }
-                }
-                i += 1;
-            },
-            'J' => {
-                try buf.append(ctx.allocator, 'J');
-                i += 1;
-            },
-            'K' => {
-                if (prev != 'C') try buf.append(ctx.allocator, 'K');
-                i += 1;
-            },
-            'L' => {
-                try buf.append(ctx.allocator, 'L');
-                i += 1;
-            },
-            'M' => {
-                try buf.append(ctx.allocator, 'M');
-                i += 1;
-            },
-            'N' => {
-                try buf.append(ctx.allocator, 'N');
-                i += 1;
-            },
-            'P' => {
-                if (next == 'H') {
-                    try buf.append(ctx.allocator, 'F');
-                    i += 2;
-                } else {
-                    try buf.append(ctx.allocator, 'P');
-                    i += 1;
-                }
-            },
-            'Q' => {
-                try buf.append(ctx.allocator, 'K');
-                i += 1;
-            },
-            'R' => {
-                try buf.append(ctx.allocator, 'R');
-                i += 1;
-            },
-            'S' => {
-                if (next == 'H' or (next == 'I' and i + 2 < upper.len and (upper[i + 2] == 'O' or upper[i + 2] == 'A'))) {
-                    try buf.append(ctx.allocator, 'X');
-                    i += 2;
-                } else {
-                    try buf.append(ctx.allocator, 'S');
-                    i += 1;
-                }
-            },
-            'T' => {
-                if (next == 'H') {
-                    try buf.append(ctx.allocator, '0');
-                    i += 2;
-                } else if (next == 'I' and i + 2 < upper.len and (upper[i + 2] == 'O' or upper[i + 2] == 'A')) {
-                    try buf.append(ctx.allocator, 'X');
-                    i += 3;
-                } else {
-                    try buf.append(ctx.allocator, 'T');
-                    i += 1;
-                }
-            },
-            'V' => {
-                try buf.append(ctx.allocator, 'F');
-                i += 1;
-            },
-            'W', 'Y' => {
-                if (next == 'A' or next == 'E' or next == 'I' or next == 'O' or next == 'U') {
-                    try buf.append(ctx.allocator, c);
-                }
-                i += 1;
-            },
-            'X' => {
-                try buf.append(ctx.allocator, 'K');
-                try buf.append(ctx.allocator, 'S');
-                i += 1;
-            },
-            'Z' => {
-                try buf.append(ctx.allocator, 'S');
-                i += 1;
-            },
-            else => i += 1,
-        }
-    }
-
-    const result = try buf.toOwnedSlice(ctx.allocator);
-    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, result));
 }
 
 fn spanResolveRange(slen: i64, args: []const Value) struct { start: usize, end: usize } {

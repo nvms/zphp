@@ -60,6 +60,8 @@ pub const entries = .{
     .{ "str_word_count", native_str_word_count },
     .{ "convert_uuencode", native_convert_uuencode },
     .{ "convert_uudecode", native_convert_uudecode },
+    .{ "quoted_printable_encode", native_quoted_printable_encode },
+    .{ "metaphone", native_metaphone },
 };
 
 const e_warning = 2;
@@ -1575,4 +1577,204 @@ fn native_convert_uudecode(ctx: *NativeContext, args: []const Value) RuntimeErro
         return NativeResult.scalar(.{ .bool = false });
     }
     return NativeResult.copyString(ctx.allocator, out.items);
+}
+
+// php_quot_print_encode: lines of at most 75 characters, never splitting a
+// utf-8 sequence; reads past the end see the terminating nul
+fn native_quoted_printable_encode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = Args.init(ctx, "quoted_printable_encode", args);
+    const str = try p.str(0, "string");
+    if (str.len == 0) return NativeResult.literal("");
+    const maxl = 75;
+    const hex = "0123456789ABCDEF";
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(ctx.allocator);
+    var lp: usize = 0;
+    var i: usize = 0;
+    while (i < str.len) {
+        const c = str[i];
+        i += 1;
+        const next: u8 = if (i < str.len) str[i] else 0;
+        if (c == '\r' and next == '\n' and i < str.len) {
+            try out.appendSlice(ctx.allocator, "\r\n");
+            i += 1;
+            lp = 0;
+        } else if (c < 0x20 or c == 0x7f or c & 0x80 != 0 or c == '=' or (c == ' ' and next == '\r')) {
+            lp += 3;
+            if ((lp > maxl and c <= 0x7f) or
+                (c > 0x7f and c <= 0xdf and lp + 3 > maxl) or
+                (c > 0xdf and c <= 0xef and lp + 6 > maxl) or
+                (c > 0xef and c <= 0xf4 and lp + 9 > maxl))
+            {
+                try out.appendSlice(ctx.allocator, "=\r\n");
+                lp = 3;
+            }
+            try out.append(ctx.allocator, '=');
+            try out.append(ctx.allocator, hex[c >> 4]);
+            try out.append(ctx.allocator, hex[c & 0xf]);
+        } else {
+            lp += 1;
+            if (lp > maxl) {
+                try out.appendSlice(ctx.allocator, "=\r\n");
+                lp = 1;
+            }
+            try out.append(ctx.allocator, c);
+        }
+    }
+    return NativeResult.copyString(ctx.allocator, out.items);
+}
+
+// php's metaphone (ext/standard/metaphone.c, Michael G Schwern's code),
+// with the word read as a c string
+fn native_metaphone(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = Args.init(ctx, "metaphone", args);
+    const raw = try p.str(0, "string");
+    const max_phonemes = try p.optLong(1, "max_phonemes", 0);
+    if (max_phonemes < 0) return p.valueError(1, "max_phonemes", "must be greater than or equal to 0");
+    const word = if (std.mem.indexOfScalar(u8, raw, 0)) |nul| raw[0..nul] else raw;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(ctx.allocator);
+    try metaphone(ctx.allocator, word, @intCast(max_phonemes), &out);
+    return NativeResult.copyString(ctx.allocator, out.items);
+}
+
+const metaphone_codes = [26]u8{ 1, 16, 4, 16, 9, 2, 4, 16, 9, 2, 0, 2, 2, 2, 1, 4, 0, 2, 4, 4, 1, 0, 0, 0, 8, 0 };
+
+fn mpEncode(c: u8) u8 {
+    return if (c >= 'A' and c <= 'Z') metaphone_codes[c - 'A'] else 0;
+}
+
+fn metaphone(allocator: std.mem.Allocator, word: []const u8, max_phonemes: usize, out: *std.ArrayListUnmanaged(u8)) !void {
+    const W = struct {
+        w: []const u8,
+        fn raw(self: @This(), i: usize) u8 {
+            return if (i < self.w.len) self.w[i] else 0;
+        }
+        fn up(self: @This(), i: usize) u8 {
+            return std.ascii.toUpper(self.raw(i));
+        }
+        fn back(self: @This(), i: usize, n: usize) u8 {
+            return if (i >= n) std.ascii.toUpper(self.w[i - n]) else 0;
+        }
+        fn afterNext(self: @This(), i: usize) u8 {
+            return if (self.raw(i + 1) != 0) self.up(i + 2) else 0;
+        }
+        fn ahead(self: @This(), i: usize, n: usize) u8 {
+            var idx: usize = 0;
+            while (self.raw(i + idx) != 0 and idx < n) idx += 1;
+            return std.ascii.toUpper(self.raw(i + idx));
+        }
+    };
+    const w = W{ .w = word };
+    const isvowel = struct {
+        fn f(c: u8) bool {
+            return mpEncode(c) & 1 != 0;
+        }
+    }.f;
+    var i: usize = 0;
+    while (!std.ascii.isAlphabetic(w.raw(i))) : (i += 1) {
+        if (w.raw(i) == 0) return;
+    }
+    const first = w.up(i);
+    switch (first) {
+        'A' => if (w.up(i + 1) == 'E') {
+            try out.append(allocator, 'E');
+            i += 2;
+        } else {
+            try out.append(allocator, 'A');
+            i += 1;
+        },
+        'G', 'K', 'P' => if (w.up(i + 1) == 'N') {
+            try out.append(allocator, 'N');
+            i += 2;
+        },
+        'W' => {
+            const next = w.up(i + 1);
+            if (next == 'R') {
+                try out.append(allocator, 'R');
+                i += 2;
+            } else if (next == 'H' or isvowel(next)) {
+                try out.append(allocator, 'W');
+                i += 2;
+            }
+        },
+        'X' => {
+            try out.append(allocator, 'S');
+            i += 1;
+        },
+        'E', 'I', 'O', 'U' => {
+            try out.append(allocator, first);
+            i += 1;
+        },
+        else => {},
+    }
+    while (w.raw(i) != 0 and (max_phonemes == 0 or out.items.len < max_phonemes)) : (i += 1) {
+        var skip: usize = 0;
+        if (!std.ascii.isAlphabetic(w.raw(i))) continue;
+        const c = w.up(i);
+        const prev = w.back(i, 1);
+        if (c == prev and c != 'C') continue;
+        switch (c) {
+            'B' => if (prev != 'M') try out.append(allocator, 'B'),
+            'C' => {
+                const next = w.up(i + 1);
+                if (mpEncode(next) & 8 != 0) {
+                    if (next == 'I' and w.afterNext(i) == 'A') {
+                        try out.append(allocator, 'X');
+                    } else if (prev != 'S') try out.append(allocator, 'S');
+                } else if (next == 'H') {
+                    try out.append(allocator, 'X');
+                    skip += 1;
+                } else try out.append(allocator, 'K');
+            },
+            'D' => if (w.up(i + 1) == 'G' and mpEncode(w.afterNext(i)) & 8 != 0) {
+                try out.append(allocator, 'J');
+                skip += 1;
+            } else try out.append(allocator, 'T'),
+            'G' => {
+                const next = w.up(i + 1);
+                if (next == 'H') {
+                    if (!(mpEncode(w.back(i, 3)) & 16 != 0 or w.back(i, 4) == 'H')) {
+                        try out.append(allocator, 'F');
+                        skip += 1;
+                    }
+                } else if (next == 'N') {
+                    const after = w.afterNext(i);
+                    if (!(!std.ascii.isAlphabetic(after) or (after == 'E' and w.ahead(i, 3) == 'D'))) try out.append(allocator, 'K');
+                } else if (mpEncode(next) & 8 != 0 and prev != 'G') {
+                    try out.append(allocator, 'J');
+                } else try out.append(allocator, 'K');
+            },
+            'H' => if (isvowel(w.up(i + 1)) and mpEncode(prev) & 4 == 0) try out.append(allocator, 'H'),
+            'K' => if (prev != 'C') try out.append(allocator, 'K'),
+            'P' => try out.append(allocator, if (w.up(i + 1) == 'H') 'F' else 'P'),
+            'Q' => try out.append(allocator, 'K'),
+            'S' => {
+                const next = w.up(i + 1);
+                if (next == 'I' and (w.afterNext(i) == 'O' or w.afterNext(i) == 'A')) {
+                    try out.append(allocator, 'X');
+                } else if (next == 'H') {
+                    try out.append(allocator, 'X');
+                    skip += 1;
+                } else try out.append(allocator, 'S');
+            },
+            'T' => {
+                const next = w.up(i + 1);
+                if (next == 'I' and (w.afterNext(i) == 'O' or w.afterNext(i) == 'A')) {
+                    try out.append(allocator, 'X');
+                } else if (next == 'H') {
+                    try out.append(allocator, '0');
+                    skip += 1;
+                } else if (!(next == 'C' and w.afterNext(i) == 'H')) try out.append(allocator, 'T');
+            },
+            'V' => try out.append(allocator, 'F'),
+            'W' => if (isvowel(w.up(i + 1))) try out.append(allocator, 'W'),
+            'X' => try out.appendSlice(allocator, "KS"),
+            'Y' => if (isvowel(w.up(i + 1))) try out.append(allocator, 'Y'),
+            'Z' => try out.append(allocator, 'S'),
+            'F', 'J', 'L', 'M', 'N', 'R' => try out.append(allocator, c),
+            else => {},
+        }
+        i += skip;
+    }
 }
