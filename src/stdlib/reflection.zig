@@ -839,6 +839,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rg_def.methods.put(a, "getThis", .{ .name = "getThis", .arity = 0 });
     try rg_def.methods.put(a, "getExecutingGenerator", .{ .name = "getExecutingGenerator", .arity = 0 });
     try rg_def.methods.put(a, "getTrace", .{ .name = "getTrace", .arity = 0 });
+    try rg_def.methods.put(a, "isClosed", .{ .name = "isClosed", .arity = 0 });
     try vm.classes.put(a, "ReflectionGenerator", rg_def);
     try vm.native_fns.put(a, "ReflectionGenerator::__construct", rgConstruct);
     try vm.native_fns.put(a, "ReflectionGenerator::getExecutingLine", rgGetExecutingLine);
@@ -847,6 +848,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionGenerator::getThis", rgGetThis);
     try vm.native_fns.put(a, "ReflectionGenerator::getExecutingGenerator", rgGetExecutingGenerator);
     try vm.native_fns.put(a, "ReflectionGenerator::getTrace", rgGetTrace);
+    try vm.native_fns.put(a, "ReflectionGenerator::isClosed", rgIsClosed);
 
     var rfib_def = ClassDef{ .name = "ReflectionFiber" };
     try rfib_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
@@ -6010,112 +6012,217 @@ fn rebcGetBackingValue(ctx: *NativeContext, _: []const Value) RuntimeError!Nativ
     return NativeResult.share(case_obj_v.object.get("value"));
 }
 
+const Generator = @import("../runtime/value.zig").Generator;
+
 fn rgConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1 or args[0] != .generator) return throwReflection(ctx, "ReflectionGenerator::__construct expects a Generator");
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    try obj.set(ctx.allocator, "__gen", .{ .int = @intCast(@intFromPtr(args[0].generator)) });
+    if (args[0] != .generator) return zpp.typeError(ctx, "ReflectionGenerator::__construct", 0, "generator", "Generator", args[0]);
+    // the reflector keeps the generator alive, as php's does
+    try obj.set(ctx.allocator, "__gen", args[0]);
     return NativeResult.scalar(.null);
 }
 
-fn getGenPtr(obj: *PhpObject) ?*@import("../runtime/value.zig").Generator {
+fn getGenPtr(obj: *PhpObject) ?*Generator {
     const v = obj.get("__gen");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return if (v == .generator) v.generator else null;
+}
+
+// REFLECTION_CHECK_VALID_GENERATOR: a finished generator has no frame left
+fn openGenerator(ctx: *NativeContext) RuntimeError!*Generator {
+    const obj = getThis(ctx) orelse return throwReflection(ctx, "Cannot fetch information from a closed Generator");
+    const gen = getGenPtr(obj) orelse return throwReflection(ctx, "Cannot fetch information from a closed Generator");
+    if (gen.state == .completed) return throwReflection(ctx, "Cannot fetch information from a closed Generator");
+    return gen;
+}
+
+fn generatorLine(ctx: *NativeContext, gen: *const Generator) i64 {
+    // one not yet started is at its declaration
+    if (gen.state == .created) return @intCast(gen.func.start_line);
+    const ip = if (gen.ip > 0) gen.ip - 1 else 0;
+    if (ctx.vm.sourceLocation(&gen.func.chunk, ip)) |loc| return @intCast(loc.line);
+    return @intCast(gen.func.start_line);
 }
 
 fn rgGetExecutingLine(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const gen = getGenPtr(obj) orelse return NativeResult.scalar(.null);
-    const chunk = &gen.func.chunk;
-    const ip = if (gen.ip > 0) gen.ip - 1 else 0;
-    if (ctx.vm.sourceLocation(chunk, ip)) |loc| {
-        return NativeResult.scalar(.{ .int = @intCast(loc.line) });
-    }
-    return NativeResult.scalar(.{ .int = 0 });
+    const gen = try openGenerator(ctx);
+    return NativeResult.scalar(.{ .int = generatorLine(ctx, gen) });
 }
 
 fn rgGetExecutingFile(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const gen = getGenPtr(obj) orelse return NativeResult.scalar(.null);
-    _ = gen;
-    // zphp stores a single source per VM; surface that as the executing file
-    return try NativeResult.copyString(ctx.allocator, ctx.vm.file_path);
+    const gen = try openGenerator(ctx);
+    return try NativeResult.copyString(ctx.allocator, if (gen.func.file_path.len > 0) gen.func.file_path else ctx.vm.file_path);
 }
 
+fn rgIsClosed(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = true });
+    const gen = getGenPtr(obj) orelse return NativeResult.scalar(.{ .bool = true });
+    return NativeResult.scalar(.{ .bool = gen.state == .completed });
+}
+
+// a generator's function as php's reflection factories give it: the
+// closure, the method, or the function
 fn rgGetFunction(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const gen = getGenPtr(obj) orelse return NativeResult.scalar(.null);
+    const name = gen.func.name;
+    if (gen.closure) |owner| {
+        const closure: Value = .{ .object = owner };
+        const rf = try ctx.createObject("ReflectionFunction");
+        _ = try ctx.callMethod(rf, "__construct", &.{closure});
+        return NativeResult.borrowed(.{ .object = rf });
+    }
+    if (std.mem.indexOf(u8, name, "::") != null) {
+        const rm = try ctx.createObject("ReflectionMethod");
+        _ = try initMethodReflection(ctx, rm, &.{.{ .string = Value.String.borrowed(try ctx.vm.internName(name)) }}, false);
+        return NativeResult.borrowed(.{ .object = rm });
+    }
     const rf = try ctx.createObject("ReflectionFunction");
-    try rf.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(try ctx.vm.internName(gen.func.name)) });
+    _ = try ctx.callMethod(rf, "__construct", &.{.{ .string = Value.String.borrowed(try ctx.vm.internName(name)) }});
     return NativeResult.borrowed(.{ .object = rf });
 }
 
 fn rgGetThis(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const gen = getGenPtr(obj) orelse return NativeResult.scalar(.null);
-    if (gen.vars.get("$this")) |this_v| return NativeResult.share(this_v);
+    const gen = try openGenerator(ctx);
+    if (gen.vars.get("$this")) |this_v| if (this_v == .object) return NativeResult.share(this_v);
     return NativeResult.scalar(.null);
+}
+
+fn innermostGenerator(gen: *Generator) *Generator {
+    var current = gen;
+    while (current.delegate) |del| switch (del) {
+        .gen => |inner| current = inner,
+        else => break,
+    };
+    return current;
 }
 
 fn rgGetExecutingGenerator(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    var gen = getGenPtr(obj) orelse return NativeResult.scalar(.null);
-    // walk yield-from delegates to the innermost actually-executing generator
-    while (gen.delegate) |del| switch (del) {
-        .gen => |inner| gen = inner,
-        else => break,
-    };
-    return NativeResult.borrowed(.{ .generator = gen });
+    const gen = try openGenerator(ctx);
+    return NativeResult.borrowed(.{ .generator = innermostGenerator(gen) });
 }
 
-fn rgGetTrace(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const gen = getGenPtr(obj) orelse return NativeResult.scalar(.null);
-    const arr = try ctx.createArray();
-    const frame = try ctx.createArray();
-    if (ctx.vm.sourceLocation(&gen.func.chunk, if (gen.ip > 0) gen.ip - 1 else 0)) |loc| {
-        try frame.set(ctx.allocator, .{ .string = Value.String.borrowed("line") }, .{ .int = @intCast(loc.line) });
+// the backtrace of the generator's yield from chain, innermost first: each
+// frame names its function and, but for the outermost, the line its
+// delegator waits at
+fn rgGetTrace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const options: i64 = if (args.len > 0) (try zpp.long(ctx, "ReflectionGenerator::getTrace", args, 0, "options", false)) orelse 1 else 1;
+    const gen = try openGenerator(ctx);
+    var chain: std.ArrayListUnmanaged(*Generator) = .empty;
+    defer chain.deinit(ctx.allocator);
+    var current: ?*Generator = gen;
+    while (current) |g| {
+        try chain.append(ctx.allocator, g);
+        current = if (g.delegate) |del| switch (del) {
+            .gen => |inner| inner,
+            else => null,
+        } else null;
     }
-    try frame.setCopiedString(ctx.allocator, .{ .string = Value.String.borrowed("file") }, ctx.vm.file_path);
-    try frame.setCopiedString(ctx.allocator, .{ .string = Value.String.borrowed("function") }, gen.func.name);
-    try arr.append(ctx.allocator, .{ .array = frame });
+    std.mem.reverse(*Generator, chain.items);
+    const arr = try ctx.createArray();
+    for (chain.items, 0..) |g, i| {
+        const frame = try ctx.createArray();
+        if (i + 1 < chain.items.len) {
+            const caller = chain.items[i + 1];
+            try frame.setCopiedString(ctx.allocator, .{ .string = Value.String.borrowed("file") }, if (caller.func.file_path.len > 0) caller.func.file_path else ctx.vm.file_path);
+            try frame.set(ctx.allocator, .{ .string = Value.String.borrowed("line") }, .{ .int = generatorLine(ctx, caller) });
+        }
+        const full = g.func.name;
+        const display = if (g.func.display_name.len > 0) g.func.display_name else full;
+        if (std.mem.indexOf(u8, full, "::")) |sep| {
+            try frame.setCopiedString(ctx.allocator, .{ .string = Value.String.borrowed("function") }, full[sep + 2 ..]);
+            try frame.setCopiedString(ctx.allocator, .{ .string = Value.String.borrowed("class") }, full[0..sep]);
+            const this_v = g.vars.get("$this");
+            if (this_v != null and this_v.? == .object) {
+                if (options & 1 != 0) try frame.set(ctx.allocator, .{ .string = Value.String.borrowed("object") }, this_v.?);
+                try frame.set(ctx.allocator, .{ .string = Value.String.borrowed("type") }, .{ .string = Value.String.borrowed("->") });
+            } else {
+                try frame.set(ctx.allocator, .{ .string = Value.String.borrowed("type") }, .{ .string = Value.String.borrowed("::") });
+            }
+        } else {
+            try frame.setCopiedString(ctx.allocator, .{ .string = Value.String.borrowed("function") }, display);
+        }
+        if (options & 2 == 0) {
+            const call_args = try ctx.createArray();
+            for (g.func.params) |param| {
+                const v = g.vars.get(param) orelse continue;
+                try call_args.append(ctx.allocator, v);
+            }
+            try frame.set(ctx.allocator, .{ .string = Value.String.borrowed("args") }, .{ .array = call_args });
+        }
+        try arr.append(ctx.allocator, .{ .array = frame });
+    }
     return NativeResult.borrowed(.{ .array = arr });
 }
 
+const Fiber = @import("../runtime/value.zig").Fiber;
+
 fn rfibConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1 or args[0] != .fiber) return throwReflection(ctx, "ReflectionFiber::__construct expects a Fiber");
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    try obj.set(ctx.allocator, "__fib", .{ .int = @intCast(@intFromPtr(args[0].fiber)) });
+    if (args[0] != .fiber) return zpp.typeError(ctx, "ReflectionFiber::__construct", 0, "fiber", "Fiber", args[0]);
+    // the reflector keeps the fiber alive, as php's does
+    try obj.set(ctx.allocator, "__fib", args[0]);
     return NativeResult.scalar(.null);
 }
 
-fn getFibPtr(obj: *PhpObject) ?*@import("../runtime/value.zig").Fiber {
+fn getFibPtr(obj: *PhpObject) ?*Fiber {
     const v = obj.get("__fib");
-    if (v != .int or v.int == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(v.int)));
+    return if (v == .fiber) v.fiber else null;
+}
+
+// REFLECTION_CHECK_VALID_FIBER
+fn startedFiber(ctx: *NativeContext) RuntimeError!*Fiber {
+    const obj = getThis(ctx) orelse return fiberGone(ctx);
+    const fib = getFibPtr(obj) orelse return fiberGone(ctx);
+    if (fib.state == .created or fib.state == .terminated) return fiberGone(ctx);
+    return fib;
+}
+
+fn fiberGone(ctx: *NativeContext) RuntimeError {
+    _ = try ctx.vm.throwBuiltinException("Error", "Cannot fetch information from a fiber that has not been started or is terminated");
+    return error.RuntimeError;
+}
+
+// the user frame the fiber runs: the current one while it runs, the one
+// that suspended it otherwise
+const FiberPosition = struct { file: []const u8, line: i64 };
+
+fn fiberPosition(ctx: *NativeContext, fib: *Fiber) ?FiberPosition {
+    if (ctx.vm.current_fiber == fib) {
+        const frame = ctx.vm.currentFrame();
+        const ip = if (frame.ip > 0) frame.ip - 1 else 0;
+        const loc = ctx.vm.sourceLocation(frame.chunk, ip) orelse return null;
+        return .{ .file = ctx.vm.frameFile(ctx.vm.frame_count - 1), .line = @intCast(loc.line) };
+    }
+    if (fib.saved_frames.items.len == 0) return null;
+    return savedFramePosition(ctx, &fib.saved_frames.items[fib.saved_frames.items.len - 1]);
+}
+
+fn savedFramePosition(ctx: *NativeContext, frame: *const Fiber.SavedFrame) ?FiberPosition {
+    const ip = if (frame.ip > 0) frame.ip - 1 else 0;
+    const loc = ctx.vm.sourceLocation(frame.chunk, ip) orelse return null;
+    const file = if (frame.func) |f| (if (f.file_path.len > 0) f.file_path else ctx.vm.file_path) else ctx.vm.file_path;
+    return .{ .file = file, .line = @intCast(loc.line) };
 }
 
 fn rfibGetExecutingLine(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const fib = getFibPtr(obj) orelse return NativeResult.scalar(.null);
-    if (fib.saved_frames.items.len == 0) return NativeResult.scalar(.{ .int = 0 });
-    const top = &fib.saved_frames.items[fib.saved_frames.items.len - 1];
-    const ip = if (top.ip > 0) top.ip - 1 else 0;
-    if (ctx.vm.sourceLocation(top.chunk, ip)) |loc| {
-        return NativeResult.scalar(.{ .int = @intCast(loc.line) });
-    }
-    return NativeResult.scalar(.{ .int = 0 });
+    const fib = try startedFiber(ctx);
+    const pos = fiberPosition(ctx, fib) orelse return NativeResult.scalar(.null);
+    return NativeResult.scalar(.{ .int = pos.line });
 }
 
 fn rfibGetExecutingFile(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    _ = getFibPtr(obj) orelse return NativeResult.scalar(.null);
-    return try NativeResult.copyString(ctx.allocator, ctx.vm.file_path);
+    const fib = try startedFiber(ctx);
+    const pos = fiberPosition(ctx, fib) orelse return NativeResult.scalar(.null);
+    return try NativeResult.copyString(ctx.allocator, pos.file);
 }
 
 fn rfibGetCallable(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const fib = getFibPtr(obj) orelse return NativeResult.scalar(.null);
+    if (fib.state == .terminated) {
+        _ = try ctx.vm.throwBuiltinException("Error", "Cannot fetch the callable from a fiber that has terminated");
+        return error.RuntimeError;
+    }
     return NativeResult.share(fib.callable);
 }
 
@@ -6125,21 +6232,55 @@ fn rfibGetFiber(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
     return NativeResult.borrowed(.{ .fiber = fib });
 }
 
-fn rfibGetTrace(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const fib = getFibPtr(obj) orelse return NativeResult.scalar(.null);
+fn traceSet(ctx: *NativeContext, entry: *PhpArray, key: []const u8, v: Value) RuntimeError!void {
+    try entry.set(ctx.allocator, .{ .string = Value.String.borrowed(key) }, v);
+}
+
+// a suspended fiber's backtrace: the Fiber::suspend() call, then the
+// fiber's frames, innermost first
+fn rfibGetTrace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const options: i64 = if (args.len > 0) (try zpp.long(ctx, "ReflectionFiber::getTrace", args, 0, "options", false)) orelse 1 else 1;
+    const fib = try startedFiber(ctx);
+    if (ctx.vm.current_fiber == fib) {
+        // within the fiber the trace is debug_backtrace's
+        const all = try ctx.vm.callByName("debug_backtrace", &.{.{ .int = if (options & 1 != 0) 0 else 1 }});
+        return NativeResult.share(all);
+    }
     const arr = try ctx.createArray();
-    var i: usize = fib.saved_frames.items.len;
-    while (i > 0) {
-        i -= 1;
-        const sf = &fib.saved_frames.items[i];
-        const frame = try ctx.createArray();
-        const ip = if (sf.ip > 0) sf.ip - 1 else 0;
-        if (ctx.vm.sourceLocation(sf.chunk, ip)) |loc| {
-            try frame.set(ctx.allocator, .{ .string = Value.String.borrowed("line") }, .{ .int = @intCast(loc.line) });
+    const frames = fib.saved_frames.items;
+    if (frames.len > 0) {
+        const entry = try ctx.createArray();
+        if (savedFramePosition(ctx, &frames[frames.len - 1])) |pos| {
+            try traceSet(ctx, entry, "file", .{ .string = Value.String.borrowed(pos.file) });
+            try traceSet(ctx, entry, "line", .{ .int = pos.line });
         }
-        try frame.setCopiedString(ctx.allocator, .{ .string = Value.String.borrowed("file") }, ctx.vm.file_path);
-        try arr.append(ctx.allocator, .{ .array = frame });
+        try traceSet(ctx, entry, "function", .{ .string = Value.String.borrowed("suspend") });
+        try traceSet(ctx, entry, "class", .{ .string = Value.String.borrowed("Fiber") });
+        try traceSet(ctx, entry, "type", .{ .string = Value.String.borrowed("::") });
+        if (options & 2 == 0) try traceSet(ctx, entry, "args", .{ .array = try ctx.createArray() });
+        try arr.append(ctx.allocator, .{ .array = entry });
+    }
+    var k = frames.len;
+    while (k > 0) {
+        k -= 1;
+        const frame = &frames[k];
+        const func = frame.func orelse continue;
+        const entry = try ctx.createArray();
+        if (k > 0) if (savedFramePosition(ctx, &frames[k - 1])) |pos| {
+            try traceSet(ctx, entry, "file", .{ .string = Value.String.borrowed(pos.file) });
+            try traceSet(ctx, entry, "line", .{ .int = pos.line });
+        };
+        if (std.mem.indexOf(u8, func.name, "::")) |sep| {
+            try traceSet(ctx, entry, "function", .{ .string = Value.String.borrowed(try ctx.vm.phpMethodName(func.name[sep + 2 ..])) });
+            try traceSet(ctx, entry, "class", .{ .string = Value.String.borrowed(func.name[0..sep]) });
+            const this_v = frame.vars.get("$this");
+            if (this_v != null and this_v.? == .object and options & 1 != 0) try traceSet(ctx, entry, "object", this_v.?);
+            try traceSet(ctx, entry, "type", .{ .string = Value.String.borrowed(if (func.is_static) "::" else "->") });
+        } else {
+            try traceSet(ctx, entry, "function", .{ .string = Value.String.borrowed(try ctx.vm.funcDisplayName(func)) });
+        }
+        if (options & 2 == 0) try traceSet(ctx, entry, "args", .{ .array = try ctx.createArray() });
+        try arr.append(ctx.allocator, .{ .array = entry });
     }
     return NativeResult.borrowed(.{ .array = arr });
 }
