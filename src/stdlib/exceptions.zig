@@ -153,6 +153,19 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.classes.put(a, "ErrorException", ee_def);
     try vm.native_fns.put(a, "ErrorException::__construct", errorExceptionConstruct);
     try vm.native_fns.put(a, "ErrorException::getSeverity", errorExceptionGetSeverity);
+
+    // the engine makes FiberErrors without calling the constructor, which
+    // refuses everyone else
+    if (vm.classes.getPtr("FiberError")) |fiber_error| {
+        try fiber_error.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
+        fiber_error.is_final = true;
+    }
+    try vm.native_fns.put(a, "FiberError::__construct", fiberErrorConstruct);
+}
+
+fn fiberErrorConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    try ctx.vm.setPendingException("Error", "The \"FiberError\" class is reserved for internal use and cannot be manually instantiated");
+    return error.RuntimeError;
 }
 
 fn errorExceptionConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

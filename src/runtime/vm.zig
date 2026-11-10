@@ -8843,14 +8843,34 @@ pub const VM = struct {
                         }
                     }
 
-                    if (std.mem.eql(u8, class_name, "Fiber")) {
+                    if (std.ascii.eqlIgnoreCase(class_name, "Generator")) {
+                        self.dropN(arg_count);
+                        if (try self.throwBuiltinException("Error", "The \"Generator\" class is reserved for internal use and cannot be manually instantiated")) continue;
+                        return error.RuntimeError;
+                    }
+
+                    if (std.ascii.eqlIgnoreCase(class_name, "Fiber")) {
                         const ac: usize = arg_count;
-                        if (ac < 1) {
+                        if (ac != 1) {
                             self.dropN(ac);
-                            if (try self.throwBuiltinException("Error", "Fiber::__construct() expects a callable")) continue;
+                            var buf: [256]u8 = undefined;
+                            const arity: @import("natives.zig").Arity = .{ .min = 1, .max = 1 };
+                            if (try self.throwBuiltinException("ArgumentCountError", arity.describe(&buf, "Fiber::__construct", ac))) continue;
                             return error.RuntimeError;
                         }
                         const callable = self.stack[self.sp - ac];
+                        switch (try callables.resolveCallback(self, callable, .{})) {
+                            .callee => {},
+                            .failure => |failure| {
+                                var msg: std.ArrayListUnmanaged(u8) = .empty;
+                                defer msg.deinit(self.allocator);
+                                try msg.appendSlice(self.allocator, "Fiber::__construct(): Argument #1 ($callback) must be a valid callback, ");
+                                try callables.writeReason(failure, &msg, self.allocator);
+                                self.dropN(ac);
+                                if (try self.throwBuiltinException("TypeError", msg.items)) continue;
+                                return error.RuntimeError;
+                            },
+                        }
                         const reserved = self.takeReservedHandle(ac);
                         self.dropN(ac);
                         const fiber = if (!self.serve_mode) self.free_fibers.pop() orelse blk: {
@@ -9678,127 +9698,17 @@ pub const VM = struct {
 
                     if (obj_val == .fiber) {
                         const fiber = obj_val.fiber;
-                        // args are at stack[sp-ac..sp], fiber at stack[sp-ac-1]
-                        // save args before popping
                         var args_buf: [16]Value = undefined;
-                        const args_buf_s = try self.copyStackArgs(&args_buf, self.stack[self.sp - ac ..][0..ac]);
-                        defer self.freeStackArgs(args_buf_s, &args_buf);
+                        const args = try self.copyStackArgs(&args_buf, self.stack[self.sp - ac ..][0..ac]);
+                        defer self.freeStackArgs(args, &args_buf);
                         const held = self.holdCallOperands(ac + 1);
                         defer self.releaseHeld(held);
-                        self.dropN(ac);
-                        self.dropN(1);
-
-                        if (std.mem.eql(u8, method_name, "start")) {
-                            if (fiber.state != .created) {
-                                if (try self.throwBuiltinException("FiberError", "Cannot start a fiber that has already been started")) continue;
-                                return error.RuntimeError;
-                            }
-                            fiber.state = .running;
-                            const fb = self.frame_count;
-                            const sb = self.sp;
-                            const hb = self.handler_count;
-
-                            for (0..ac) |i| self.push(args_buf[i]);
-                            const fiber_fn: ?[]const u8 = if (fiber.callable.closureName()) |closure| closure else if (fiber.callable == .string) fiber.callable.string.bytes() else null;
-                            if (fiber_fn) |fn_name| {
-                                self.callNamedFunction(fn_name, @intCast(ac)) catch {
-                                    if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
-                                    return error.RuntimeError;
-                                };
-                            } else {
-                                var ctx = self.makeContext(null);
-                                _ = try ctx.invokeCallable(fiber.callable, args_buf_s);
-                                fiber.state = .terminated;
-                                self.push(.null);
-                                continue;
-                            }
-
-                            const result = self.executeFiber(fiber, fb, sb, hb) catch {
-                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
-                                return error.RuntimeError;
-                            };
-                            self.push(result);
-                            self.releaseValue(fiber.suspend_value);
-                            fiber.suspend_value = .null;
-                        } else if (std.mem.eql(u8, method_name, "resume")) {
-                            if (fiber.state != .suspended) {
-                                if (try self.throwBuiltinException("FiberError", "Cannot resume a fiber that is not suspended")) continue;
-                                return error.RuntimeError;
-                            }
-                            fiber.state = .running;
-                            const fb = self.frame_count;
-                            const sb = self.sp;
-                            const hb = self.handler_count;
-
-                            try self.restoreFiberState(fiber, fb, sb);
-
-                            const resume_val = if (ac > 0) args_buf_s[0] else Value{ .null = {} };
-                            self.push(resume_val);
-
-                            const result = self.executeFiber(fiber, fb, sb, hb) catch {
-                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
-                                return error.RuntimeError;
-                            };
-                            self.push(result);
-                            self.releaseValue(fiber.suspend_value);
-                            fiber.suspend_value = .null;
-                        } else if (std.mem.eql(u8, method_name, "getReturn")) {
-                            if (fiber.state != .terminated) {
-                                if (try self.throwBuiltinException("FiberError", "Cannot get return value of a fiber that hasn't terminated")) continue;
-                                return error.RuntimeError;
-                            }
-                            self.push(fiber.return_value);
-                        } else if (std.mem.eql(u8, method_name, "isStarted")) {
-                            self.push(.{ .bool = fiber.state != .created });
-                        } else if (std.mem.eql(u8, method_name, "isRunning")) {
-                            self.push(.{ .bool = fiber.state == .running });
-                        } else if (std.mem.eql(u8, method_name, "isSuspended")) {
-                            self.push(.{ .bool = fiber.state == .suspended });
-                        } else if (std.mem.eql(u8, method_name, "isTerminated")) {
-                            self.push(.{ .bool = fiber.state == .terminated });
-                        } else if (std.mem.eql(u8, method_name, "throw")) {
-                            if (fiber.state != .suspended) {
-                                if (try self.throwBuiltinException("FiberError", "Cannot resume a fiber that is not suspended")) continue;
-                                return error.RuntimeError;
-                            }
-                            const exc_val = if (ac > 0) args_buf_s[0] else Value.null;
-                            if (exc_val != .object) {
-                                if (try self.throwBuiltinException("TypeError", "Fiber::throw() expects an object")) continue;
-                                return error.RuntimeError;
-                            }
-                            fiber.state = .running;
-                            const fb = self.frame_count;
-                            const sb = self.sp;
-                            const hb = self.handler_count;
-
-                            try self.restoreFiberState(fiber, fb, sb);
-                            self.push(.null);
-                            const prev_fiber = self.current_fiber;
-                            const prev_floor = self.handler_floor;
-                            self.current_fiber = fiber;
-                            self.handler_floor = hb;
-                            self.raise(exc_val);
-                            const dispatched = self.dispatchPendingException(fb);
-                            self.current_fiber = prev_fiber;
-                            self.handler_floor = prev_floor;
-                            if (!dispatched) {
-                                fiber.state = .terminated;
-                                if (self.dispatchPendingException(base_frame)) continue;
-                                return error.RuntimeError;
-                            }
-                            const result = self.executeFiber(fiber, fb, sb, hb) catch {
-                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
-                                return error.RuntimeError;
-                            };
-                            self.push(result);
-                            self.releaseValue(fiber.suspend_value);
-                            fiber.suspend_value = .null;
-                        } else {
-                            const msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method Fiber::{s}()", .{method_name});
-                            defer self.allocator.free(msg);
-                            if (try self.throwBuiltinException("Error", msg)) continue;
+                        self.dropN(ac + 1);
+                        const result = self.fiberMethod(fiber, method_name, args) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
-                        }
+                        };
+                        self.push(result);
                         continue;
                     }
 
@@ -10692,14 +10602,23 @@ pub const VM = struct {
                             break :blk v;
                         } else .null;
 
-                        if (self.current_fiber == null) {
+                        const refusal: ?[]const u8 = if (self.current_fiber == null)
+                            "Cannot suspend outside of a fiber"
+                        else if (self.current_fiber.?.destroyed)
+                            "Cannot suspend in a force-closed fiber"
+                        else if (self.fiber_switch_blocked > 0)
+                            "Cannot switch fibers in current execution context"
+                        else
+                            null;
+                        if (refusal) |msg| {
+                            const shown: []const Value = if (ac > 0) (&suspend_val)[0..1] else &.{};
+                            var record: NativeCall = undefined;
+                            self.enterEngineMethod(&record, "Fiber::suspend", shown, false);
+                            const raised = self.setPendingException("FiberError", msg);
+                            self.native_call = record.outer;
                             self.releaseValue(suspend_val);
-                            if (try self.throwBuiltinException("FiberError", "Cannot call Fiber::suspend() when not in a Fiber")) continue;
-                            return error.RuntimeError;
-                        }
-                        if (self.fiber_switch_blocked > 0) {
-                            self.releaseValue(suspend_val);
-                            if (try self.throwBuiltinException("FiberError", "Cannot switch fibers in current execution state")) continue;
+                            try raised;
+                            if (self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         }
 
@@ -21661,7 +21580,7 @@ pub const VM = struct {
         if (g_type_info.count() == 0) return false;
         const ac: usize = arg_count;
         // runs before the callee frame is pushed, so the caller is the top frame
-        const internal = self.invoking_closure;
+        const internal = self.invoking_closure or self.calledFromNative();
         const exc = (try self.enforceArgTypes(name, self.stack[self.sp - ac .. self.sp], .{ .strict = !internal and self.topFrameStrict(), .internal = internal, .stack_owned = true })) orelse return false;
         self.dropN(ac);
         if (self.throwObject(exc)) return true;
@@ -23615,6 +23534,215 @@ pub const VM = struct {
         self.clearArgStackFrom(base_sp);
         self.sp = base_sp;
         return .null;
+    }
+
+    const FiberMethod = enum { start, @"resume", throw, getReturn, isStarted, isSuspended, isRunning, isTerminated, __construct };
+
+    // the instance methods of php's Fiber class (zend_fibers.c). the value
+    // returned is borrowed from the fiber
+    pub fn fiberMethod(self: *VM, fiber: *Fiber, name: []const u8, args: []const Value) RuntimeError!Value {
+        const method = inline for (comptime std.enums.values(FiberMethod)) |m| {
+            if (std.ascii.eqlIgnoreCase(name, @tagName(m))) break m;
+        } else {
+            const msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method Fiber::{s}()", .{name});
+            defer self.allocator.free(msg);
+            try self.setPendingException("Error", msg);
+            return error.RuntimeError;
+        };
+        const label = switch (method) {
+            inline else => |m| "Fiber::" ++ @tagName(m),
+        };
+        var record: NativeCall = undefined;
+        self.enterEngineMethod(&record, label, args, true);
+        defer self.native_call = record.outer;
+        const unbounded = @import("natives.zig").Arity.unbounded;
+        const min: u16, const max: u16 = switch (method) {
+            .start => .{ 0, unbounded },
+            .@"resume" => .{ 0, 1 },
+            .throw, .__construct => .{ 1, 1 },
+            else => .{ 0, 0 },
+        };
+        if (args.len < min or (max != unbounded and args.len > max)) return self.argumentCountError(label, min, max, args.len);
+        switch (method) {
+            .start => {
+                if (fiber.state != .created) return self.fiberError("Cannot start a fiber that has already been started");
+                return self.startFiber(fiber, args);
+            },
+            .@"resume", .throw => {
+                const value: Value = if (args.len > 0) args[0] else .null;
+                if (method == .throw and (value != .object or !self.isInstanceOf(value.object.class_name, "Throwable"))) {
+                    const msg = try std.fmt.allocPrint(self.allocator, "Fiber::throw(): Argument #1 ($exception) must be of type Throwable, {s} given", .{valueTypeName(value)});
+                    defer self.allocator.free(msg);
+                    try self.setPendingException("TypeError", msg);
+                    return error.RuntimeError;
+                }
+                if (fiber.state != .suspended) return self.fiberError("Cannot resume a fiber that is not suspended");
+                return self.resumeFiber(fiber, value, method == .throw);
+            },
+            .getReturn => {
+                const reason = switch (fiber.state) {
+                    .terminated => if (fiber.threw) "The fiber threw an exception" else return fiber.return_value,
+                    .created => "The fiber has not been started",
+                    else => "The fiber has not returned",
+                };
+                const msg = try std.fmt.allocPrint(self.allocator, "Cannot get fiber return value: {s}", .{reason});
+                defer self.allocator.free(msg);
+                return self.fiberError(msg);
+            },
+            .isStarted => return .{ .bool = fiber.state != .created },
+            .isSuspended => return .{ .bool = fiber.state == .suspended },
+            .isRunning => return .{ .bool = fiber.state == .running },
+            .isTerminated => return .{ .bool = fiber.state == .terminated },
+            .__construct => return self.fiberError("Cannot call constructor twice"),
+        }
+    }
+
+    fn fiberError(self: *VM, msg: []const u8) RuntimeError {
+        try self.setPendingException("FiberError", msg);
+        return error.RuntimeError;
+    }
+
+    // Fiber::start(): the callable's frame becomes the fiber's first, and
+    // runs until it suspends or ends
+    fn startFiber(self: *VM, fiber: *Fiber, args: []const Value) RuntimeError!Value {
+        self.releaseValue(fiber.suspend_value);
+        fiber.suspend_value = .null;
+        fiber.state = .running;
+        const fb = self.frame_count;
+        const sb = self.sp;
+        const hb = self.handler_count;
+        // an argument error belongs to the caller of start(), never to a
+        // handler the engine would enter in place
+        const prev_floor = self.handler_floor;
+        self.handler_floor = hb;
+        const prev_fiber = self.current_fiber;
+        self.current_fiber = fiber;
+        defer self.current_fiber = prev_fiber;
+        defer self.handler_floor = prev_floor;
+        const pushed = self.pushFiberEntryFrame(fiber, args) catch |err| {
+            fiber.state = .terminated;
+            fiber.threw = self.pending_exception != null;
+            return err;
+        };
+        if (!pushed or self.frame_count == fb) {
+            // a callable that ran to its end at once (an internal function)
+            fiber.state = .terminated;
+            if (pushed and self.sp > sb) {
+                self.releaseValue(fiber.return_value);
+                fiber.return_value = self.pop();
+                retainValue(fiber.return_value);
+            }
+            self.clearArgStackFrom(sb);
+            self.sp = sb;
+            return .null;
+        }
+        return self.runFiber(fiber, fb, sb, hb);
+    }
+
+    // Fiber::resume() and Fiber::throw(): the fiber's frames go back on the
+    // stack, and the suspended Fiber::suspend() returns the value or throws
+    fn resumeFiber(self: *VM, fiber: *Fiber, value: Value, throw: bool) RuntimeError!Value {
+        self.releaseValue(fiber.suspend_value);
+        fiber.suspend_value = .null;
+        fiber.state = .running;
+        const fb = self.frame_count;
+        const sb = self.sp;
+        const hb = self.handler_count;
+        try self.restoreFiberState(fiber, fb, sb);
+        if (!throw) {
+            self.push(value);
+            return self.runFiber(fiber, fb, sb, hb);
+        }
+        self.push(.null);
+        const prev_fiber = self.current_fiber;
+        const prev_floor = self.handler_floor;
+        self.current_fiber = fiber;
+        self.handler_floor = hb;
+        self.raise(value);
+        const dispatched = self.dispatchPendingException(fb);
+        self.current_fiber = prev_fiber;
+        self.handler_floor = prev_floor;
+        if (!dispatched) {
+            fiber.state = .terminated;
+            fiber.threw = true;
+            while (self.frame_count > fb) {
+                self.frame_count -= 1;
+                self.deinitFrameSlot(self.frame_count);
+            }
+            self.clearArgStackFrom(sb);
+            self.sp = sb;
+            self.handler_count = hb;
+            return error.RuntimeError;
+        }
+        return self.runFiber(fiber, fb, sb, hb);
+    }
+
+    fn runFiber(self: *VM, fiber: *Fiber, fb: usize, sb: usize, hb: usize) RuntimeError!Value {
+        _ = self.executeFiber(fiber, fb, sb, hb) catch |err| {
+            if (fiber.state == .terminated and self.pending_exception != null) fiber.threw = true;
+            return err;
+        };
+        return fiber.suspend_value;
+    }
+
+    // pushes the frame of the fiber's callable with its arguments, as the
+    // fiber's first frame. false when the callable is not user code and ran
+    // to its end instead
+    fn pushFiberEntryFrame(self: *VM, fiber: *Fiber, args: []const Value) RuntimeError!bool {
+        const callable = fiber.callable;
+        const fiber_fn: ?[]const u8 = if (callable.closureName()) |closure| closure else if (callable == .string) callable.string.bytes() else null;
+        if (fiber_fn) |fn_name| {
+            for (args) |arg| self.push(arg);
+            try self.callNamedFunction(fn_name, @intCast(args.len));
+            return true;
+        }
+        const resolution = try callables.resolveCallback(self, callable, .{ .deprecations = false });
+        const callee = switch (resolution) {
+            .callee => |c| c,
+            .failure => {
+                var ctx = self.makeContext(null);
+                _ = try ctx.invokeCallable(callable, args);
+                return false;
+            },
+        };
+        const target: ?struct { name: []const u8, this: ?*PhpObject, called_class: ?[]const u8 } = switch (callee) {
+            .function => |name| if (self.functions.get(name) != null) .{ .name = name, .this = null, .called_class = null } else null,
+            .invoke => |obj| .{ .name = try self.resolveMethod(obj.class_name, "__invoke"), .this = obj, .called_class = obj.class_name },
+            .method => |m| .{ .name = m.registered orelse try self.resolveMethod(m.object.class_name, m.name), .this = m.object, .called_class = m.object.class_name },
+            .static_method => |m| .{ .name = m.registered, .this = null, .called_class = m.called_class },
+            else => null,
+        };
+        const t = target orelse {
+            _ = try callables.invoke(self, callee, args);
+            return false;
+        };
+        const func = self.functions.get(t.name) orelse {
+            _ = try callables.invoke(self, callee, args);
+            return false;
+        };
+        if (t.this == null) {
+            for (args) |arg| self.push(arg);
+            try self.callNamedFunction(t.name, @intCast(args.len));
+            if (t.called_class) |cc| self.frames[self.frame_count - 1].called_class = cc;
+            return true;
+        }
+        if (args.len < func.required_params) return self.raiseTooFewArgs(t.name, args.len, func);
+        var checked_buf: [16]Value = undefined;
+        const checked = try self.checkedArgs(t.name, func, args, &checked_buf);
+        defer if (checked.ptr != &checked_buf and checked.ptr != args.ptr) self.allocator.free(checked);
+        var vars = self.acquireFrameVars();
+        try vars.put(self.allocator, "$this", .{ .object = t.this.? });
+        try self.bindClosures(&vars, null, t.name);
+        try self.bindArgs(&vars, func, if (func.is_variadic) checked else checked[0..@min(checked.len, func.arity)]);
+        try self.ensureCallRoom();
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = try self.allocLocals(func, &vars), .func = func, .called_class = t.called_class };
+        self.frames[self.frame_count].entry_sp = self.sp;
+        if (self.ic) |ic| ic.arg_counts[self.frame_count] = @intCast(@min(args.len, unknown_arg_count - 1));
+        self.saveFrameArgsSlice(args);
+        self.frame_count += 1;
+        self.retainFrameObjects(self.frame_count - 1);
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
+        return true;
     }
 
     fn saveFiberState(self: *VM, fiber: *Fiber, base_frame: usize, base_sp: usize, base_handler: usize) !void {

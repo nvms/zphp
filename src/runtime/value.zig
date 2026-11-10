@@ -888,6 +888,10 @@ pub const Fiber = struct {
     suspend_value: Value = .null,
     return_value: Value = .null,
     pooled: bool = false,
+    // php's ZEND_FIBER_FLAG_THREW: it ended with an exception
+    threw: bool = false,
+    // php's ZEND_FIBER_FLAG_DESTROYED: it is being force-closed
+    destroyed: bool = false,
 
     pub const State = enum { created, running, suspended, terminated };
 
