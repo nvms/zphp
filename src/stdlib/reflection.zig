@@ -1198,6 +1198,7 @@ pub fn staticPropertyDef(cls: *const ClassDef, name: []const u8, default: Value)
         .set_visibility = set_vis orelse vis,
         .has_set_visibility = set_vis != null,
         .type_str = cls.static_prop_types.get(name) orelse "",
+        .is_final = cls.static_prop_final.contains(name),
     };
 }
 
@@ -1667,6 +1668,29 @@ fn rcGetMethods(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         }
         current = cls.parent;
         depth += 1;
+    }
+    // an abstract class inherits the interface methods it doesn't implement
+    var queue = std.ArrayListUnmanaged([]const u8).empty;
+    defer queue.deinit(ctx.allocator);
+    var walk: ?[]const u8 = class_name;
+    while (walk) |name| {
+        const cls = ctx.vm.classes.get(name) orelse break;
+        for (cls.interfaces.items) |iface| try queue.append(ctx.allocator, iface);
+        walk = cls.parent;
+    }
+    var qi: usize = 0;
+    while (qi < queue.items.len) : (qi += 1) {
+        const iface_name = queue.items[qi];
+        const iface = ctx.vm.interfaces.get(iface_name) orelse continue;
+        for (iface.parents.items) |p| try queue.append(ctx.allocator, p);
+        for (iface.methods.items) |method_name| {
+            if (std.mem.indexOf(u8, method_name, "$hook_") != null or seen.contains(method_name)) continue;
+            try seen.put(ctx.allocator, method_name, {});
+            const info = ClassDef.MethodInfo{ .name = method_name, .arity = 0, .visibility = .public, .is_abstract = true };
+            if (filter) |f| if (!methodMatchesFilter(info, f)) continue;
+            const declared = ctx.vm.declaredClassName(iface_name);
+            try arr.append(ctx.allocator, .{ .object = try buildMethodObj(ctx, class_name, method_name, info, declared) });
+        }
     }
     return NativeResult.borrowed(.{ .array = arr });
 }
@@ -5211,9 +5235,12 @@ fn rmGetModifiers(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
     const method_name = methodLookupName(this) orelse return NativeResult.scalar(.{ .int = 0 });
     const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.{ .int = 0 });
-    const cls = ctx.vm.classes.get(declaring) orelse return NativeResult.scalar(.{ .int = 0 });
-    const info = cls.methods.get(method_name) orelse return NativeResult.scalar(.{ .int = 0 });
-    return NativeResult.scalar(.{ .int = if (this.get("__hook_method") == .string) (methodModifiers(info) & ~@as(i64, 7)) | 1 else methodModifiers(info) });
+    // an interface's methods are public and abstract
+    const in_interface = ctx.vm.interfaces.contains(declaring);
+    const interface_bits: i64 = if (in_interface) 64 else 0;
+    const cls = ctx.vm.classes.get(declaring) orelse return NativeResult.scalar(.{ .int = if (in_interface) 65 else 0 });
+    const info = cls.methods.get(method_name) orelse return NativeResult.scalar(.{ .int = if (in_interface) 65 else 0 });
+    return NativeResult.scalar(.{ .int = interface_bits | if (this.get("__hook_method") == .string) (methodModifiers(info) & ~@as(i64, 7)) | 1 else methodModifiers(info) });
 }
 
 fn nextName(n: *usize) usize {

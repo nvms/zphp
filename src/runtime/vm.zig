@@ -406,6 +406,7 @@ pub const ClassDef = struct {
     constant_order: std.ArrayListUnmanaged([]const u8) = .empty,
     constant_docs: std.StringHashMapUnmanaged([]const u8) = .{},
     static_prop_docs: std.StringHashMapUnmanaged([]const u8) = .{},
+    static_prop_final: std.StringHashMapUnmanaged(void) = .{},
     const_visibility: std.StringHashMapUnmanaged(Visibility) = .{},
     constant_types: std.StringHashMapUnmanaged([]const u8) = .{},
     static_prop_visibility: std.StringHashMapUnmanaged(Visibility) = .{},
@@ -516,6 +517,7 @@ pub const ClassDef = struct {
         self.constant_attributes.deinit(allocator);
         self.constant_docs.deinit(allocator);
         self.static_prop_docs.deinit(allocator);
+        self.static_prop_final.deinit(allocator);
         if (self.slot_layout) |layout| {
             allocator.free(layout.names);
             allocator.free(layout.defaults);
@@ -15306,6 +15308,7 @@ pub const VM = struct {
                 try def.static_props.put(self.allocator, sprop_names[pi], try self.copyDefault(default_val));
                 if (sprop_type[pi].len > 0) try def.static_prop_types.put(self.allocator, sprop_names[pi], sprop_type[pi]);
                 if (sprop_doc[pi].len > 0) try def.static_prop_docs.put(self.allocator, sprop_names[pi], sprop_doc[pi]);
+                if ((sprop_visibility[pi] & 0x80) != 0) try def.static_prop_final.put(self.allocator, sprop_names[pi], {});
                 if (vis_byte != 0) try def.static_prop_visibility.put(self.allocator, sprop_names[pi], @enumFromInt(vis_byte));
                 // bit 5 marks an explicit set visibility, held in bits 3-4
                 if ((sprop_visibility[pi] & 0x20) != 0) try def.static_prop_set_visibility.put(self.allocator, sprop_names[pi], @enumFromInt((sprop_visibility[pi] >> 3) & 0x03));
