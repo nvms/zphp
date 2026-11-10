@@ -345,7 +345,13 @@ pub fn writeTraceArg(buf: *Writer, alloc: std.mem.Allocator, v: Value) void {
         .null => write(buf, alloc, "NULL"),
         .bool => |b| write(buf, alloc, if (b) "true" else "false"),
         .int => |n| writeFmt(buf, alloc, "{d}", .{n}),
-        .float => |f| writeFmt(buf, alloc, "{d}", .{f}),
+        .float => |f| {
+            // smart_str_append_double with the precision ini and a zero fraction
+            var tmp: [64]u8 = undefined;
+            const text = @import("stdlib/formatted_print.zig").gcvt(f, 14, '.', 'E', &tmp);
+            write(buf, alloc, text);
+            if (std.math.isFinite(f) and std.mem.indexOfScalar(u8, text, '.') == null) write(buf, alloc, ".0");
+        },
         .string => |s| {
             // a closure passed as a callable is its synthetic name in zphp
             if (std.mem.startsWith(u8, s.bytes(), "__closure_")) {

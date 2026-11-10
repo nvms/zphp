@@ -12673,6 +12673,21 @@ pub const VM = struct {
         for (args) |a| try entry_args.append(self.allocator, a);
         try trace.append(self.allocator, .{ .array = entry });
         if (old == .array) for (old.array.entries.items) |e| try trace.append(self.allocator, e.value);
+        // an include the call is made from now has an entry from inside the
+        // included file, so it names that file
+        if (old == .array and old.array.entries.items.len > 0) if (self.frame_count > 0) {
+            const next = old.array.entries.items[0].value;
+            if (next == .array and next.array.get(.{ .string = Value.String.borrowed("args") }) == .null) {
+                const func_name = next.array.get(.{ .string = Value.String.borrowed("function") });
+                const included = func_name == .string and (std.mem.eql(u8, func_name.string.bytes(), "require") or std.mem.eql(u8, func_name.string.bytes(), "require_once") or std.mem.eql(u8, func_name.string.bytes(), "include") or std.mem.eql(u8, func_name.string.bytes(), "include_once"));
+                const path = self.frames[self.frame_count - 1].script_path;
+                if (included and path.len > 0) {
+                    const args_arr = try self.allocArray();
+                    try args_arr.append(self.allocator, .{ .string = Value.String.borrowed(path) });
+                    try next.array.set(self.allocator, .{ .string = Value.String.borrowed("args") }, .{ .array = args_arr });
+                }
+            }
+        };
         try exc.setForScope(self.allocator, "trace", .{ .array = trace }, scope);
     }
 
