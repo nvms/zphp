@@ -90,6 +90,7 @@ fn array_pop(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
     const arr = args[0].array;
     if (arr.entries.items.len == 0) return NativeResult.scalar(.null);
     const entry = arr.entries.pop() orelse return NativeResult.scalar(.null);
+    arr.cursor = 0;
     if (entry.key == .string) _ = arr.string_index.remove(entry.key.string.bytes());
     // php hands the popped integer key out again only when it was the last
     // one given
@@ -120,6 +121,7 @@ fn array_shift(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     }
     arr.next_int_key = next_int;
     arr.rebuildStringIndexAssumeCapacity();
+    arr.cursor = 0;
 
     return if (first.value == .string and first.value.string.owner != null) NativeResult.takeString(first.value.string) else NativeResult.share(first.value);
 }
@@ -458,107 +460,6 @@ fn array_filter(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     return NativeResult.borrowed(.{ .array = result });
 }
 
-fn native_range(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2) return NativeResult.scalar(.null);
-
-    // character range: single-char strings
-    if (args[0] == .string and args[0].string.bytes().len == 1 and args[1] == .string and args[1].string.bytes().len == 1) {
-        const lo = args[0].string.bytes()[0];
-        const hi = args[1].string.bytes()[0];
-        const step: u8 = if (args.len >= 3) @intCast(@max(1, Value.toInt(args[2]))) else 1;
-        var arr = try ctx.createArray();
-        if (lo <= hi) {
-            var c = lo;
-            while (c <= hi) {
-                const s = try ctx.allocator.alloc(u8, 1);
-                s[0] = c;
-                const owned = try Value.String.adopt(ctx.allocator, s);
-                defer owned.release();
-                try arr.append(ctx.allocator, .{ .string = owned });
-                if (c > hi - step) break;
-                c += step;
-            }
-        } else {
-            var c = lo;
-            while (c >= hi) {
-                const s = try ctx.allocator.alloc(u8, 1);
-                s[0] = c;
-                const owned = try Value.String.adopt(ctx.allocator, s);
-                defer owned.release();
-                try arr.append(ctx.allocator, .{ .string = owned });
-                if (c < hi + step) break;
-                c -= step;
-            }
-        }
-        return NativeResult.borrowed(.{ .array = arr });
-    }
-
-    // use floats if any arg is a float
-    const use_float = args[0] == .float or args[1] == .float or (args.len >= 3 and args[2] == .float);
-    if (use_float) {
-        const lo_f = Value.toFloat(args[0]);
-        const hi_f = Value.toFloat(args[1]);
-        const raw_step_f: f64 = if (args.len >= 3) Value.toFloat(args[2]) else 1.0;
-        if (raw_step_f == 0) {
-            try ctx.vm.setPendingException("ValueError", "range(): Argument #3 ($step) cannot be 0");
-            return error.RuntimeError;
-        }
-        if (raw_step_f < 0 and lo_f < hi_f) {
-            try ctx.vm.setPendingException("ValueError", "range(): Argument #3 ($step) must be greater than 0 for increasing ranges");
-            return error.RuntimeError;
-        }
-        if (raw_step_f > 0 and lo_f > hi_f and args.len >= 3 and args[2] != .null) {
-            // explicit positive step on a decreasing range is fine in PHP - no error
-        }
-        const step_f = @abs(raw_step_f);
-        const span = @abs(hi_f - lo_f);
-        if (step_f > span and lo_f != hi_f) {
-            try ctx.vm.setPendingException("ValueError", "range(): Argument #3 ($step) must be less than the range spanned by argument #1 ($start) and argument #2 ($end)");
-            return error.RuntimeError;
-        }
-        var arr = try ctx.createArray();
-        const direction: f64 = if (lo_f <= hi_f) 1.0 else -1.0;
-        const tol = step_f * 1e-9;
-        var i: i64 = 0;
-        while (true) {
-            const v = lo_f + direction * step_f * @as(f64, @floatFromInt(i));
-            if (direction > 0 and v > hi_f + tol) break;
-            if (direction < 0 and v < hi_f - tol) break;
-            try arr.append(ctx.allocator, .{ .float = v });
-            i += 1;
-            if (i > 100_000_000) break; // sanity cap
-        }
-        return NativeResult.borrowed(.{ .array = arr });
-    }
-
-    const lo = Value.toInt(args[0]);
-    const hi = Value.toInt(args[1]);
-    const raw_step: i64 = if (args.len >= 3) Value.toInt(args[2]) else 1;
-    if (raw_step == 0) {
-        try ctx.vm.setPendingException("ValueError", "range(): Argument #3 ($step) cannot be 0");
-        return error.RuntimeError;
-    }
-    if (raw_step < 0 and lo < hi) {
-        try ctx.vm.setPendingException("ValueError", "range(): Argument #3 ($step) must be greater than 0 for increasing ranges");
-        return error.RuntimeError;
-    }
-    const step: i64 = if (raw_step < 0) -raw_step else raw_step;
-    const span: i64 = if (lo <= hi) hi - lo else lo - hi;
-    if (step > span and lo != hi) {
-        try ctx.vm.setPendingException("ValueError", "range(): Argument #3 ($step) must be less than the range spanned by argument #1 ($start) and argument #2 ($end)");
-        return error.RuntimeError;
-    }
-    var arr = try ctx.createArray();
-    if (lo <= hi) {
-        var i = lo;
-        while (i <= hi) : (i += step) try arr.append(ctx.allocator, .{ .int = i });
-    } else {
-        var i = lo;
-        while (i >= hi) : (i -= step) try arr.append(ctx.allocator, .{ .int = i });
-    }
-    return NativeResult.borrowed(.{ .array = arr });
-}
-
 fn array_splice(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2 or args[0] != .array) return NativeResult.scalar(.null);
     const arr = args[0].array;
@@ -775,53 +676,6 @@ fn array_flip(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
         try ctx.vm.arraySetOwned(result, new_key, new_val);
     }
     return NativeResult.borrowed(.{ .array = result });
-}
-
-fn array_column(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2 or args[0] != .array) return NativeResult.scalar(.null);
-    const src = args[0].array;
-    const col_key = args[1];
-
-    var result = try ctx.createArray();
-    for (src.entries.items) |entry| {
-        const row_val = entry.value;
-        const is_array = row_val == .array;
-        const is_object = row_val == .object;
-        if (!is_array and !is_object) continue;
-
-        const val = if (col_key == .null) row_val else v: {
-            const v = rowGet(row_val, col_key);
-            if (v == .null) continue;
-            break :v v;
-        };
-        if (args.len >= 3 and args[2] != .null) {
-            const idx_val = rowGet(row_val, args[2]);
-            if (idx_val == .null) {
-                try result.append(ctx.allocator, val);
-            } else {
-                try ctx.vm.arraySetOwned(result, Value.toArrayKey(idx_val), val);
-            }
-        } else {
-            try result.append(ctx.allocator, val);
-        }
-    }
-    return NativeResult.borrowed(.{ .array = result });
-}
-
-fn rowGet(row: Value, key: Value) Value {
-    return switch (row) {
-        .array => |a| a.get(Value.toArrayKey(key)),
-        .object => |o| switch (key) {
-            .string => |s| o.get(s.bytes()),
-            .int => |i| blk: {
-                var buf: [32]u8 = undefined;
-                const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch break :blk .null;
-                break :blk o.get(s);
-            },
-            else => .null,
-        },
-        else => .null,
-    };
 }
 
 fn array_fill(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -1251,11 +1105,6 @@ fn native_key(_: *NativeContext, args: []const Value) RuntimeError!NativeResult 
         .int => |i| NativeResult.scalar(.{ .int = i }),
         .string => |s| NativeResult.shareString(s),
     };
-}
-
-fn native_sizeof(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .array) return NativeResult.scalar(.{ .int = 0 });
-    return NativeResult.scalar(.{ .int = args[0].array.length() });
 }
 
 fn deepReplace(ctx: *NativeContext, base: *PhpArray, overlay: *PhpArray) RuntimeError!*PhpArray {
@@ -1758,4 +1607,398 @@ fn compactValue(ctx: *NativeContext, arg_in: Value, arr: *PhpArray, frame: anyty
         defer ctx.allocator.free(w);
         try ctx.vm.emitWarning(w);
     }
+}
+const RangeInput = enum { failed, long, double, string, digit };
+
+const RangeValue = struct { kind: RangeInput, long: i64 = 0, double: f64 = 0 };
+
+// is_numeric_str_function: a numeric string as an int or a float
+fn numericString(s: []const u8) ?Value {
+    if (!Value.isNumericString(s)) return null;
+    const t = std.mem.trim(u8, s, " \t\n\r\x0b\x0c");
+    const is_float = std.mem.indexOfAny(u8, t, ".eE") != null;
+    if (!is_float) {
+        if (std.fmt.parseInt(i64, t, 10)) |n| return .{ .int = n } else |_| {}
+    }
+    return .{ .float = std.fmt.parseFloat(f64, t) catch return null };
+}
+
+fn rangeError(ctx: *NativeContext, comptime fmt: []const u8, args: anytype) RuntimeError {
+    const msg = try std.fmt.allocPrint(ctx.allocator, fmt, args);
+    defer ctx.allocator.free(msg);
+    try ctx.vm.setPendingException("ValueError", msg);
+    return error.RuntimeError;
+}
+
+// php_range_process_input, after Z_PARAM_NUMBER_OR_STR
+fn rangeInput(ctx: *NativeContext, v_in: Value, comptime arg: usize, comptime name: []const u8) RuntimeError!RangeValue {
+    var v = v_in;
+    switch (v) {
+        .null, .undef => {
+            if (ctx.vm.topFrameStrict()) return rangeTypeError(ctx, arg, name, v);
+            try ctx.vm.raiseError(8192, "range(): Passing null to parameter #" ++ std.fmt.comptimePrint("{d}", .{arg}) ++ " ($" ++ name ++ ") of type string|int|float is deprecated");
+            if (ctx.vm.pending_exception != null) return error.RuntimeError;
+            v = .{ .int = 0 };
+        },
+        .bool => |b| {
+            if (ctx.vm.topFrameStrict()) return rangeTypeError(ctx, arg, name, v);
+            v = .{ .int = @intFromBool(b) };
+        },
+        .object => |o| {
+            if (!ctx.vm.hasMethod(o.class_name, "__toString")) return rangeTypeError(ctx, arg, name, v);
+            v = .{ .string = ctx.vm.transientOwned(try ctx.vm.objectString(o)) };
+        },
+        .int, .float => {},
+        .string => if (std.mem.startsWith(u8, v.string.bytes(), "__closure_")) return rangeTypeError(ctx, arg, name, v),
+        else => return rangeTypeError(ctx, arg, name, v),
+    }
+    switch (v) {
+        .int => |i| return .{ .kind = .long, .long = i, .double = @floatFromInt(i) },
+        .float => |f| return checkFinite(ctx, f, arg, name),
+        .string => |s| {
+            const bytes = s.bytes();
+            if (bytes.len == 0) {
+                try ctx.vm.emitWarning("range(): Argument #" ++ std.fmt.comptimePrint("{d}", .{arg}) ++ " ($" ++ name ++ ") must not be empty, casted to 0");
+                return .{ .kind = .long };
+            }
+            if (numericString(bytes)) |n| {
+                if (n == .float) return checkFinite(ctx, n.float, arg, name);
+                return .{ .kind = if (bytes.len == 1) .digit else .long, .long = n.int, .double = @floatFromInt(n.int) };
+            }
+            if (bytes.len != 1) try ctx.vm.emitWarning("range(): Argument #" ++ std.fmt.comptimePrint("{d}", .{arg}) ++ " ($" ++ name ++ ") must be a single byte, subsequent bytes are ignored");
+            return .{ .kind = .string };
+        },
+        else => unreachable,
+    }
+}
+
+fn checkFinite(ctx: *NativeContext, f: f64, comptime arg: usize, comptime name: []const u8) RuntimeError!RangeValue {
+    if (std.math.isInf(f)) return rangeError(ctx, "range(): Argument #{d} (${s}) must be a finite number, INF provided", .{ arg, name });
+    if (std.math.isNan(f)) return rangeError(ctx, "range(): Argument #{d} (${s}) must be a finite number, NAN provided", .{ arg, name });
+    return .{ .kind = .double, .double = f };
+}
+
+fn rangeTypeError(ctx: *NativeContext, comptime arg: usize, comptime name: []const u8, v: Value) RuntimeError {
+    const msg = try std.fmt.allocPrint(ctx.allocator, "range(): Argument #{d} (${s}) must be of type string|int|float, {s} given", .{ arg, name, phpTypeName(v) });
+    defer ctx.allocator.free(msg);
+    try ctx.vm.setPendingException("TypeError", msg);
+    return error.RuntimeError;
+}
+
+const ht_max_size: u64 = 0x40000000;
+
+fn native_range(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    var is_step_double = false;
+    var is_step_negative = false;
+    var step_double: f64 = 1.0;
+    var step: i64 = 1;
+    if (args.len >= 3) {
+        var sv = args[2];
+        // Z_PARAM_NUMBER
+        switch (sv) {
+            .int, .float => {},
+            .string => |s| if (!ctx.vm.topFrameStrict()) {
+                sv = numericString(s.bytes()) orelse return stepTypeError(ctx, sv);
+            } else return stepTypeError(ctx, sv),
+            .null, .undef => {
+                if (ctx.vm.topFrameStrict()) return stepTypeError(ctx, sv);
+                try ctx.vm.raiseError(8192, "range(): Passing null to parameter #3 ($step) of type int|float is deprecated");
+                if (ctx.vm.pending_exception != null) return error.RuntimeError;
+                sv = .{ .int = 0 };
+            },
+            .bool => |b| {
+                if (ctx.vm.topFrameStrict()) return stepTypeError(ctx, sv);
+                sv = .{ .int = @intFromBool(b) };
+            },
+            else => return stepTypeError(ctx, sv),
+        }
+        if (sv == .float) {
+            step_double = sv.float;
+            if (std.math.isInf(step_double)) return rangeError(ctx, "range(): Argument #3 ($step) must be a finite number, INF provided", .{});
+            if (std.math.isNan(step_double)) return rangeError(ctx, "range(): Argument #3 ($step) must be a finite number, NAN provided", .{});
+            if (step_double < 0.0) {
+                is_step_negative = true;
+                step_double *= -1;
+            }
+            step = if (Value.floatFitsInt(step_double)) @intFromFloat(step_double) else 0;
+            if (@as(f64, @floatFromInt(step)) != step_double) is_step_double = true;
+        } else {
+            step = sv.int;
+            if (step < 0) {
+                if (step == std.math.minInt(i64)) return rangeError(ctx, "range(): Argument #3 ($step) must be greater than {d}", .{step});
+                is_step_negative = true;
+                step = -step;
+            }
+            step_double = @floatFromInt(step);
+        }
+        if (step_double == 0.0) return rangeError(ctx, "range(): Argument #3 ($step) cannot be 0", .{});
+    }
+
+    var start = try rangeInput(ctx, args[0], 1, "start");
+    var end = try rangeInput(ctx, args[1], 2, "end");
+    const arr = try ctx.createArray();
+    const is_str = struct {
+        fn f(k: RangeInput) bool {
+            return k == .string or k == .digit;
+        }
+    }.f;
+
+    if (is_str(start.kind) or is_str(end.kind)) chars: {
+        if (!is_str(start.kind) or !is_str(end.kind)) {
+            if (!is_str(start.kind)) {
+                if (end.kind != .digit) try ctx.vm.emitWarning("range(): Argument #1 ($start) must be a single byte string if argument #2 ($end) is a single byte string, argument #2 ($end) converted to 0");
+                end.kind = .long;
+            } else {
+                if (start.kind != .digit) try ctx.vm.emitWarning("range(): Argument #2 ($end) must be a single byte string if argument #1 ($start) is a single byte string, argument #1 ($start) converted to 0");
+                start.kind = .long;
+            }
+            break :chars;
+        }
+        if (is_step_double) {
+            if (start.kind == .string or end.kind == .string) try ctx.vm.emitWarning("range(): Argument #3 ($step) must be of type int when generating an array of characters, inputs converted to 0");
+            start.kind = .long;
+            end.kind = .long;
+            break :chars;
+        }
+        const s0 = try stringBytes(ctx, args[0]);
+        const s1 = try stringBytes(ctx, args[1]);
+        var low: i64 = s0[0];
+        const high: i64 = s1[0];
+        if (low > high) {
+            if (low - high < step) return boundaryError(ctx);
+            while (low >= high) : (low -= step) {
+                try appendChar(ctx, arr, @intCast(low));
+                if (low - step < 0) break;
+            }
+        } else if (high > low) {
+            if (is_step_negative) return negativeStepError(ctx);
+            if (high - low < step) return boundaryError(ctx);
+            while (low <= high) : (low += step) {
+                try appendChar(ctx, arr, @intCast(low));
+                if (low + step > 255) break;
+            }
+        } else {
+            try appendChar(ctx, arr, @intCast(low));
+        }
+        return NativeResult.borrowed(.{ .array = arr });
+    }
+
+    if (start.kind == .double or end.kind == .double or is_step_double) {
+        const sd = start.double;
+        const ed = end.double;
+        if (sd > ed) {
+            if (sd - ed < step_double) return boundaryError(ctx);
+            const size = try doubleRangeSize(ctx, sd, ed, step_double);
+            var i: u64 = 0;
+            var element = sd;
+            while (i < size and element >= ed) {
+                try arr.append(ctx.allocator, .{ .float = element });
+                i += 1;
+                element = sd - (@as(f64, @floatFromInt(i)) * step_double);
+            }
+        } else if (ed > sd) {
+            if (is_step_negative) return negativeStepError(ctx);
+            if (ed - sd < step_double) return boundaryError(ctx);
+            const size = try doubleRangeSize(ctx, ed, sd, step_double);
+            var i: u64 = 0;
+            var element = sd;
+            while (i < size and element <= ed) {
+                try arr.append(ctx.allocator, .{ .float = element });
+                i += 1;
+                element = sd + (@as(f64, @floatFromInt(i)) * step_double);
+            }
+        } else {
+            try arr.append(ctx.allocator, .{ .float = sd });
+        }
+        return NativeResult.borrowed(.{ .array = arr });
+    }
+
+    const ustep: u64 = @intCast(step);
+    const sl = start.long;
+    const el = end.long;
+    if (sl > el) {
+        const span: u64 = @as(u64, @bitCast(sl)) -% @as(u64, @bitCast(el));
+        if (span < ustep) return boundaryError(ctx);
+        const size = try longRangeSize(ctx, span, sl, el, step);
+        try arr.entries.ensureTotalCapacity(ctx.allocator, size);
+        var i: u64 = 0;
+        while (i < size) : (i += 1) try arr.append(ctx.allocator, .{ .int = @bitCast(@as(u64, @bitCast(sl)) -% i *% ustep) });
+    } else if (el > sl) {
+        if (is_step_negative) return negativeStepError(ctx);
+        const span: u64 = @as(u64, @bitCast(el)) -% @as(u64, @bitCast(sl));
+        if (span < ustep) return boundaryError(ctx);
+        const size = try longRangeSize(ctx, span, el, sl, step);
+        try arr.entries.ensureTotalCapacity(ctx.allocator, size);
+        var i: u64 = 0;
+        while (i < size) : (i += 1) try arr.append(ctx.allocator, .{ .int = @bitCast(@as(u64, @bitCast(sl)) +% i *% ustep) });
+    } else {
+        try arr.append(ctx.allocator, .{ .int = sl });
+    }
+    return NativeResult.borrowed(.{ .array = arr });
+}
+
+fn stringBytes(ctx: *NativeContext, v: Value) RuntimeError![]const u8 {
+    return switch (v) {
+        .string => |s| s.bytes(),
+        .object => |o| ctx.vm.objectToString(o),
+        else => "0",
+    };
+}
+
+fn appendChar(ctx: *NativeContext, arr: *PhpArray, c: u8) RuntimeError!void {
+    const s = try Value.String.create(ctx.allocator, &.{c});
+    defer s.release();
+    try arr.append(ctx.allocator, .{ .string = s });
+}
+
+fn doubleRangeSize(ctx: *NativeContext, hi: f64, lo: f64, step: f64) RuntimeError!u64 {
+    const calc = ((hi - lo) / step) + 1;
+    const max: f64 = @floatFromInt(ht_max_size);
+    if (calc >= max) return rangeError(ctx, "The supplied range exceeds the maximum array size by {d:.1} elements: start={d:.1}, end={d:.1}, step={d:.1}. Max size: {d:.0}", .{ calc - max, lo, hi, step, max });
+    return @intFromFloat(@round(calc));
+}
+
+fn longRangeSize(ctx: *NativeContext, span: u64, hi: i64, lo: i64, step: i64) RuntimeError!u64 {
+    const calc = span / @as(u64, @intCast(step));
+    if (calc >= ht_max_size - 1) return rangeError(ctx, "The supplied range exceeds the maximum array size by {d} elements: start={d}, end={d}, step={d}. Calculated size: {d}. Maximum size: {d}.", .{ calc - (ht_max_size - 1), lo, hi, step, calc, ht_max_size });
+    return calc + 1;
+}
+
+fn boundaryError(ctx: *NativeContext) RuntimeError {
+    return rangeError(ctx, "range(): Argument #3 ($step) must be less than the range spanned by argument #1 ($start) and argument #2 ($end)", .{});
+}
+
+fn negativeStepError(ctx: *NativeContext) RuntimeError {
+    return rangeError(ctx, "range(): Argument #3 ($step) must be greater than 0 for increasing ranges", .{});
+}
+
+fn stepTypeError(ctx: *NativeContext, v: Value) RuntimeError {
+    const msg = try std.fmt.allocPrint(ctx.allocator, "range(): Argument #3 ($step) must be of type int|float, {s} given", .{phpTypeName(v)});
+    defer ctx.allocator.free(msg);
+    try ctx.vm.setPendingException("TypeError", msg);
+    return error.RuntimeError;
+}
+
+fn native_sizeof(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return @import("types.zig").countAs(ctx, "sizeof", args);
+}
+const ColumnKey = union(enum) { none, long: i64, str: []const u8 };
+
+// Z_PARAM_STR_OR_LONG_OR_NULL
+fn columnKeyParam(ctx: *NativeContext, args: []const Value, index: usize, comptime name: []const u8) RuntimeError!ColumnKey {
+    if (index >= args.len) return .none;
+    const v = args[index];
+    const strict = ctx.vm.topFrameStrict();
+    switch (v) {
+        .null, .undef => return .none,
+        .int => |i| return .{ .long = i },
+        .string => |s| if (!std.mem.startsWith(u8, s.bytes(), "__closure_")) {
+            if (!strict) if (numericKeyLong(s.bytes())) |n| return .{ .long = n };
+            return .{ .str = s.bytes() };
+        },
+        .float => |f| if (!strict) {
+            if (Value.floatFitsInt(f)) return .{ .long = try (html.Params{ .ctx = ctx, .func = "array_column", .args = args }).int(index, name, 0) };
+            return .{ .str = (try ctx.vm.transientFormatted(v)).bytes() };
+        },
+        .bool => |b| if (!strict) return .{ .long = @intFromBool(b) },
+        .object => |o| if (!strict and ctx.vm.hasMethod(o.class_name, "__toString")) return .{ .str = try ctx.vm.objectToString(o) },
+        else => {},
+    }
+    const msg = try std.fmt.allocPrint(ctx.allocator, "array_column(): Argument #{d} (${s}) must be of type string|int|null, {s} given", .{ index + 1, name, phpTypeName(v) });
+    defer ctx.allocator.free(msg);
+    try ctx.vm.setPendingException("TypeError", msg);
+    return error.RuntimeError;
+}
+
+fn numericKeyLong(s: []const u8) ?i64 {
+    if (!Value.isNumericString(s)) return null;
+    const t = std.mem.trim(u8, s, " \t\n\r\x0b\x0c");
+    if (std.mem.indexOfAny(u8, t, ".eE") != null) return null;
+    return std.fmt.parseInt(i64, t, 10) catch null;
+}
+
+// whether the running scope may read a property declared with vis
+fn propertyAccessible(ctx: *NativeContext, vis: VM.VisResult) bool {
+    if (!vis.declared or vis.visibility == .public) return true;
+    const scope = ctx.vm.currentDefiningClass() orelse return false;
+    if (vis.visibility == .private) return std.mem.eql(u8, scope, vis.defining_class);
+    return ctx.vm.isInstanceOf(scope, vis.defining_class) or ctx.vm.isInstanceOf(vis.defining_class, scope);
+}
+
+// array_column_fetch_prop
+fn columnFetch(ctx: *NativeContext, data: Value, key: ColumnKey) RuntimeError!?Value {
+    switch (data) {
+        .array => |a| {
+            const k: PhpArray.Key = switch (key) {
+                .long => |n| .{ .int = n },
+                .str => |s| PhpArray.normalizeKey(.{ .string = Value.String.borrowed(s) }),
+                .none => return null,
+            };
+            if (!a.contains(k)) return null;
+            for (a.entries.items) |e| {
+                if (e.key.eql(k)) return if (e.ref) |cell| cell.* else e.value;
+            }
+            return a.get(k);
+        },
+        .object => |o| {
+            var buf: [24]u8 = undefined;
+            const name: []const u8 = switch (key) {
+                .long => |n| std.fmt.bufPrint(&buf, "{d}", .{n}) catch unreachable,
+                .str => |s| s,
+                .none => return null,
+            };
+            const vis = ctx.vm.findPropertyVisibility(o.class_name, name);
+            if (propertyAccessible(ctx, vis)) {
+                const exists = if (vis.declared and ctx.vm.classDeclaresProperty(o.class_name, name)) o.getForScope(name, vis.defining_class) != .undef else o.properties.contains(name);
+                if (exists) return o.getForScope(name, vis.defining_class);
+            }
+            if (!ctx.vm.hasMethod(o.class_name, "__isset")) return null;
+            const name_str = try Value.String.create(ctx.allocator, name);
+            defer name_str.release();
+            const isset = try ctx.vm.callMethod(o, "__isset", &.{.{ .string = name_str }});
+            if (!isset.isTruthy()) return null;
+            if (!ctx.vm.hasMethod(o.class_name, "__get")) return null;
+            return try ctx.vm.callMethod(o, "__get", &.{.{ .string = name_str }});
+        },
+        else => return null,
+    }
+}
+
+fn array_column(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const src = args[0].array;
+    const column = try columnKeyParam(ctx, args, 1, "column_key");
+    const index = try columnKeyParam(ctx, args, 2, "index_key");
+    const result = try ctx.createArray();
+    var i: usize = 0;
+    while (i < src.entries.items.len) : (i += 1) {
+        const e = src.entries.items[i];
+        const data = if (e.ref) |cell| cell.* else e.value;
+        const colval: Value = if (column == .none) data else (try columnFetch(ctx, data, column)) orelse continue;
+        if (index != .none) {
+            if (try columnFetch(ctx, data, index)) |keyval| {
+                // array_set_zval_key
+                const key: ?PhpArray.Key = switch (keyval) {
+                    .int => |n| .{ .int = n },
+                    .string => |s| PhpArray.normalizeKey(.{ .string = s }),
+                    .null => .{ .string = Value.String.borrowed("") },
+                    .bool => |b| .{ .int = @intFromBool(b) },
+                    .float => |f| .{ .int = if (Value.floatFitsInt(f)) @intFromFloat(@trunc(f)) else 0 },
+                    else => null,
+                };
+                if (key) |k| {
+                    try ctx.vm.arraySetOwned(result, k, colval);
+                    continue;
+                }
+                const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot access offset of type {s} on array", .{phpTypeName(keyval)});
+                defer ctx.allocator.free(msg);
+                try ctx.vm.setPendingException("TypeError", msg);
+                return error.RuntimeError;
+            }
+        }
+        if (!try result.appendNew(ctx.allocator, colval)) {
+            try ctx.vm.setPendingException("Error", "Cannot add element to the array as the next element is already occupied");
+            return error.RuntimeError;
+        }
+    }
+    return NativeResult.borrowed(.{ .array = result });
 }

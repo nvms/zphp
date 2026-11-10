@@ -265,48 +265,6 @@ fn native_get_defined_constants(ctx: *NativeContext, args: []const Value) Runtim
     return NativeResult.borrowed(.{ .array = flat });
 }
 
-// php's php_count_recursive: an array met again inside its own count warns
-// and counts as nothing
-fn countRecursive(ctx: *NativeContext, a: *PhpArray) RuntimeError!i64 {
-    const Recursion = @import("../runtime/value.zig").Recursion;
-    if (a.recursion & Recursion.gc != 0) {
-        try ctx.vm.emitWarning("count(): Recursion detected");
-        return 0;
-    }
-    a.recursion |= Recursion.gc;
-    defer a.recursion &= ~Recursion.gc;
-    var total: i64 = a.length();
-    for (a.entries.items) |entry| {
-        if (entry.value == .array) {
-            total += try countRecursive(ctx, entry.value.array);
-        }
-    }
-    return total;
-}
-
-fn count(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .int = 0 });
-    const recursive = args.len >= 2 and args[1] == .int and args[1].int == 1;
-    return switch (args[0]) {
-        .array => |a| NativeResult.scalar(.{ .int = if (recursive) try countRecursive(ctx, a) else a.length() }),
-        .object => |obj| {
-            if (ctx.vm.hasMethod(obj.class_name, "count")) {
-                return NativeResult.share(try ctx.vm.callMethod(obj, "count", &.{}));
-            }
-            const msg = try std.fmt.allocPrint(ctx.allocator, "count(): Argument #1 ($value) must be of type Countable|array, {s} given", .{phpTypeName(args[0])});
-            defer ctx.allocator.free(msg);
-            try ctx.vm.setPendingException("TypeError", msg);
-            return error.RuntimeError;
-        },
-        else => {
-            const msg = try std.fmt.allocPrint(ctx.allocator, "count(): Argument #1 ($value) must be of type Countable|array, {s} given", .{phpTypeName(args[0])});
-            defer ctx.allocator.free(msg);
-            try ctx.vm.setPendingException("TypeError", msg);
-            return error.RuntimeError;
-        },
-    };
-}
-
 // PHP's type-name used in TypeError messages: 'string', 'int', 'float',
 // 'array', 'true', 'false', 'null', or the class name for objects.
 // closures live as strings tagged with the '__closure_' prefix in zphp
@@ -3149,3 +3107,56 @@ fn native_spl_object_hash(ctx: *NativeContext, args: []const Value) RuntimeError
     return NativeResult.takeString(try Value.String.adopt(ctx.allocator, hash));
 }
 
+// php's php_count_recursive: an array met again inside its own count warns
+// and counts as nothing
+fn countRecursive(ctx: *NativeContext, func: []const u8, a: *PhpArray) RuntimeError!i64 {
+    const Recursion = @import("../runtime/value.zig").Recursion;
+    if (a.recursion & Recursion.gc != 0) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Recursion detected", .{func});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.emitWarning(msg);
+        return 0;
+    }
+    a.recursion |= Recursion.gc;
+    defer a.recursion &= ~Recursion.gc;
+    var total: i64 = a.length();
+    var i: usize = 0;
+    while (i < a.entries.items.len) : (i += 1) {
+        const entry = a.entries.items[i];
+        const v = if (entry.ref) |cell| cell.* else entry.value;
+        if (v == .array) total += try countRecursive(ctx, func, v.array);
+    }
+    return total;
+}
+
+// count() and sizeof()
+pub fn countAs(ctx: *NativeContext, func: []const u8, args: []const Value) RuntimeError!NativeResult {
+    const params = @import("html.zig").Params{ .ctx = ctx, .func = func, .args = args };
+    const mode = try params.int(1, "mode", 0);
+    if (mode != 0 and mode != 1) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Argument #2 ($mode) must be either COUNT_NORMAL or COUNT_RECURSIVE", .{func});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.setPendingException("ValueError", msg);
+        return error.RuntimeError;
+    }
+    switch (args[0]) {
+        .array => |a| return NativeResult.scalar(.{ .int = if (mode == 1) try countRecursive(ctx, func, a) else a.length() }),
+        .object => |obj| if (ctx.vm.isInstanceOf(obj.class_name, "Countable") and ctx.vm.hasMethod(obj.class_name, "count")) {
+            const r = try ctx.vm.callMethod(obj, "count", &.{});
+            return NativeResult.scalar(.{ .int = switch (r) {
+                .int => |n| n,
+                .float => |f| if (Value.floatFitsInt(f)) @intFromFloat(@trunc(f)) else 0,
+                else => Value.toInt(r),
+            } });
+        },
+        else => {},
+    }
+    const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Argument #1 ($value) must be of type Countable|array, {s} given", .{ func, phpTypeName(args[0]) });
+    defer ctx.allocator.free(msg);
+    try ctx.vm.setPendingException("TypeError", msg);
+    return error.RuntimeError;
+}
+
+fn count(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return countAs(ctx, "count", args);
+}
