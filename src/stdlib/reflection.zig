@@ -1031,8 +1031,9 @@ pub fn staticPropertyDef(cls: *const ClassDef, name: []const u8, default: Value)
     const set_vis = cls.static_prop_set_visibility.get(name);
     return .{
         .name = name,
-        .default = default,
-        .has_default = true,
+        // the value an uninitialized typed static property holds is no default
+        .default = if (default == .undef) .null else default,
+        .has_default = default != .undef,
         .visibility = vis,
         .set_visibility = set_vis orelse vis,
         .has_set_visibility = set_vis != null,
@@ -2417,6 +2418,7 @@ fn rcGetStaticProperties(ctx: *NativeContext, _: []const Value) RuntimeError!Nat
         const cls = ctx.vm.classes.get(name) orelse break;
         var it = cls.static_props.iterator();
         while (it.next()) |entry| {
+            if (entry.value_ptr.* == .undef) continue;
             try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(entry.key_ptr.*) }, entry.value_ptr.*);
         }
         current = cls.parent;
@@ -2433,7 +2435,15 @@ fn rcGetStaticPropertyValue(ctx: *NativeContext, args: []const Value) RuntimeErr
     var current: ?[]const u8 = class_name;
     while (current) |name| {
         const cls = ctx.vm.classes.get(name) orelse break;
-        if (cls.static_props.get(prop_name)) |v| return NativeResult.share(v);
+        if (cls.static_props.get(prop_name)) |v| {
+            if (v == .undef) {
+                const msg = try std.fmt.allocPrint(ctx.allocator, "Typed property {s}::${s} must not be accessed before initialization", .{ name, prop_name });
+                defer ctx.allocator.free(msg);
+                try ctx.vm.setPendingException("Error", msg);
+                return error.RuntimeError;
+            }
+            return NativeResult.share(v);
+        }
         current = cls.parent;
     }
     if (args.len >= 2) return NativeResult.share(args[1]);

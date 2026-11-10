@@ -12090,7 +12090,13 @@ pub const VM = struct {
         return name;
     }
 
+    // an uninitialized typed static property reads as null here
     pub fn getStaticProp(self: *VM, class_name: []const u8, prop_name: []const u8) ?Value {
+        const v = self.getStaticPropRaw(class_name, prop_name) orelse return null;
+        return if (v == .undef) .null else v;
+    }
+
+    pub fn getStaticPropRaw(self: *VM, class_name: []const u8, prop_name: []const u8) ?Value {
         var current: ?[]const u8 = class_name;
         while (current) |cn| {
             if (self.classes.contains(cn)) {
@@ -15500,11 +15506,12 @@ pub const VM = struct {
 
         var sj: usize = 0;
         for (0..static_prop_count) |pi| {
+            // a typed static property without a default starts uninitialized
             const default_val = if (sprop_has_default[pi] == 1) blk: {
                 const v = sdefaults[sj];
                 sj += 1;
                 break :blk v;
-            } else Value{ .null = {} };
+            } else if (sprop_type[pi].len > 0 and sprop_is_const[pi] != 1) Value.undef else Value{ .null = {} };
             // copyValue: an array/object default is owned by the ClassDef -
             // it must be refcounted (else an array default sits at refcount 0
             // and the first get_static_prop+push+pop releases it)
@@ -20462,6 +20469,13 @@ pub const VM = struct {
                 try self.setPendingException("Error", msg);
                 return error.RuntimeError;
             }
+            if (val == .null) if (self.getStaticPropRaw(class_name, prop_name)) |raw| if (raw == .undef) {
+                if (quiet) return self.push(.null);
+                const msg = try std.fmt.allocPrint(self.allocator, "Typed static property {s}::${s} must not be accessed before initialization", .{ self.staticPropDeclaringClass(class_name, prop_name) orelse class_name, prop_name });
+                defer self.allocator.free(msg);
+                try self.setPendingException("Error", msg);
+                return error.RuntimeError;
+            };
             return self.push(val);
         }
         if (quiet and (self.classes.contains(class_name) or self.interfaces.contains(class_name))) return self.push(.null);

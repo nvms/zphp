@@ -1091,7 +1091,14 @@ fn native_get_class_vars(ctx: *NativeContext, args: []const Value) RuntimeError!
     while (sit.next()) |e| {
         // class constants are also stored in static_props; skip them
         if (cls.constants.contains(e.key_ptr.*)) continue;
-        try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(e.key_ptr.*) }, e.value_ptr.*);
+        const static_visible = switch (cls.static_prop_visibility.get(e.key_ptr.*) orelse .public) {
+            .public => true,
+            .protected => caller != null and isInClassChain(ctx.vm, caller.?, class_name),
+            .private => caller != null and std.mem.eql(u8, caller.?, class_name),
+        };
+        if (!static_visible) continue;
+        // an uninitialized typed static property lists as null
+        try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(e.key_ptr.*) }, if (e.value_ptr.* == .undef) .null else e.value_ptr.*);
     }
     return NativeResult.borrowed(.{ .array = arr });
 }
