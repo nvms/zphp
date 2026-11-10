@@ -1618,6 +1618,7 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         ctx.vm.setExecutionLimit(seconds);
     }
     if (std.mem.eql(u8, name, "zend.enable_gc")) ctx.vm.syncGcEnabled();
+    if (std.mem.eql(u8, name, "precision") or std.mem.eql(u8, name, "serialize_precision")) ctx.vm.syncFloatPrecision();
     return result;
 }
 
@@ -1923,6 +1924,7 @@ fn native_ini_restore(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     try ctx.vm.restoreIni(name);
     if (std.mem.eql(u8, name, "memory_limit")) ctx.vm.applyConfiguredMemoryLimit(false);
     if (std.mem.eql(u8, name, "zend.enable_gc")) ctx.vm.syncGcEnabled();
+    if (std.mem.eql(u8, name, "precision") or std.mem.eql(u8, name, "serialize_precision")) ctx.vm.syncFloatPrecision();
     return NativeResult.scalar(.null);
 }
 

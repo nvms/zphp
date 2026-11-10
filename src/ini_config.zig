@@ -251,6 +251,7 @@ pub fn applyToVm(vm: *VM) RuntimeError!void {
         }
     }
     vm.syncGcEnabled();
+    vm.syncFloatPrecision();
 }
 
 test "ini values are cooked the way php cooks them" {

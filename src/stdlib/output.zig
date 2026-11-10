@@ -76,7 +76,7 @@ fn varDumpMarked(ctx: *NativeContext, val: Value, depth: usize, marker: []const 
             try out.appendSlice(a, marker);
             try out.appendSlice(a, "float(");
             var tmp: [64]u8 = undefined;
-            const s = formatFloat(&tmp, f);
+            const s = formatSerializedFloat(&tmp, f);
             try out.appendSlice(a, s);
             try out.appendSlice(a, ")\n");
         },
@@ -460,7 +460,7 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
             } else {
                 // smart_str_append_double with zero_frac: a float always
                 // reads back as one
-                const s = formatFloat(&tmp, f);
+                const s = formatSerializedFloat(&tmp, f);
                 try out.appendSlice(a, s);
                 if (std.mem.indexOfAny(u8, s, ".eE") == null) try out.appendSlice(a, ".0");
             }
@@ -593,6 +593,13 @@ fn emitDumpKey(out: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, name: []c
 
 // serialize_precision -1: zend_gcvt in mode 0, the shortest round-trip
 // digits, in exponent form past 17 integer digits or below 1e-4
+// a float as var_dump and var_export show it: %.*H with serialize_precision
+pub fn formatSerializedFloat(tmp: *[64]u8, f: f64) []const u8 {
+    const sp = @import("../runtime/value.zig").hooks().serialize_precision;
+    if (sp == -1 or std.math.isNan(f) or std.math.isInf(f)) return formatFloat(tmp, f);
+    return @import("formatted_print.zig").gcvt(f, if (sp == 0) 1 else sp, '.', 'E', tmp);
+}
+
 pub fn formatFloat(tmp: *[64]u8, f: f64) []const u8 {
     if (std.math.isNan(f)) return "NAN";
     if (std.math.isInf(f)) return if (f > 0) "INF" else "-INF";

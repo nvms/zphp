@@ -35,6 +35,10 @@ pub const ObjectHooks = struct {
 pub const Hooks = struct {
     // set by a comparison that php fails with an Error; the vm raises it
     compare_failure: CompareFailure = .none,
+    // the precision and serialize_precision ini directives, which decide
+    // how floats turn into text
+    precision: i32 = 14,
+    serialize_precision: i32 = -1,
     cell_unbind: ?CellUnbindHook = null,
     release: ?ReleaseHook = null,
     object: ?ObjectHooks = null,
@@ -2014,16 +2018,18 @@ pub const Value = union(enum) {
                 try buf.appendSlice(allocator, s);
             },
             .float => |f| {
-                if (f == @trunc(f) and @abs(f) < 1e14) {
+                const precision = hooks().precision;
+                if (precision == 14 and f == @trunc(f) and @abs(f) < 1e14) {
                     const i: i64 = @intFromFloat(f);
                     var tmp: [32]u8 = undefined;
                     const s = std.fmt.bufPrint(&tmp, "{d}", .{i}) catch return;
                     if (i == 0 and std.math.signbit(f)) try buf.append(allocator, '-');
                     try buf.appendSlice(allocator, s);
                 } else {
-                    // php's zend_double_to_str: %.*G with the precision ini, 14
+                    // php's zend_double_to_str: %.*G with the precision ini
                     var tmp: [64]u8 = undefined;
-                    try buf.appendSlice(allocator, @import("../stdlib/formatted_print.zig").gcvt(f, 14, '.', 'E', &tmp));
+                    const digits: i32 = if (precision == 0) 1 else precision;
+                    try buf.appendSlice(allocator, @import("../stdlib/formatted_print.zig").gcvt(f, digits, '.', 'E', &tmp));
                 }
             },
             .string => |s| try buf.appendSlice(allocator, s.bytes()),

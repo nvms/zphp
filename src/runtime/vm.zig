@@ -13802,6 +13802,18 @@ pub const VM = struct {
         self.gc_enabled = self.iniFlagOn("zend.enable_gc", "1");
     }
 
+    // float text follows precision and serialize_precision
+    pub fn syncFloatPrecision(self: *VM) void {
+        const h = value_mod.hooks();
+        h.precision = self.iniInt("precision", 14);
+        h.serialize_precision = self.iniInt("serialize_precision", -1);
+    }
+
+    fn iniInt(self: *const VM, name: []const u8, default: i32) i32 {
+        const val = self.ini_settings.get(name) orelse @import("../ini_config.zig").get(name) orelse return default;
+        return std.fmt.parseInt(i32, std.mem.trim(u8, val, " \t\r\n"), 10) catch default;
+    }
+
     pub fn logErrorsEnabled(self: *const VM) bool {
         return self.iniFlagOn("log_errors", "1");
     }
@@ -22224,10 +22236,12 @@ pub const VM = struct {
             const is_array = if (i >= 31) (arrays & natives_mod.variadic_array_bit) != 0 else (arrays & (@as(u32, 1) << @intCast(i))) != 0;
             if (is_array) {
                 if (arg == .array) continue;
+                // closures travel as tagged strings
+                const shown = if (arg == .string and std.mem.startsWith(u8, arg.string.bytes(), "__closure_")) "Closure" else valueTypeName(arg);
                 const msg = if (param.variadic)
-                    try std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} must be of type array, {s} given", .{ label, i + 1, valueTypeName(arg) })
+                    try std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} must be of type array, {s} given", .{ label, i + 1, shown })
                 else
-                    try std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} (${s}) must be of type array, {s} given", .{ label, i + 1, param.name, valueTypeName(arg) });
+                    try std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} (${s}) must be of type array, {s} given", .{ label, i + 1, param.name, shown });
                 defer self.allocator.free(msg);
                 try self.setPendingException("TypeError", msg);
                 return error.RuntimeError;
