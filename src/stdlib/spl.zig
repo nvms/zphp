@@ -1723,15 +1723,13 @@ fn splSort(ctx: *NativeContext, how: SplSort) RuntimeError!NativeResult {
 }
 
 fn sortEntries(ctx: *NativeContext, arr: *PhpArray, how: SplSort) RuntimeError!void {
-    switch (how) {
-        .values => |flags| arrays_mod.sortWithFlags(arr, flags, false),
-        .keys => |flags| arrays_mod.sortKeysWithFlags(arr, flags, false),
-        .user_values => |callback| try arrays_mod.mergeSort(PhpArray.Entry, arr.entries.items, ctx, callback, .value),
-        .user_keys => |callback| try arrays_mod.mergeSort(PhpArray.Entry, arr.entries.items, ctx, callback, .key),
-        // SORT_NATURAL, with SORT_FLAG_CASE
-        .natural => |fold_case| arrays_mod.sortWithFlags(arr, if (fold_case) 6 | 8 else 6, false),
-    }
-    arr.rebuildStringIndexAssumeCapacity();
+    try @import("array_sort.zig").sortStorage(ctx, arr, switch (how) {
+        .values => |flags| .{ .values = flags },
+        .keys => |flags| .{ .keys = flags },
+        .user_values => |callback| .{ .user_values = callback },
+        .user_keys => |callback| .{ .user_keys = callback },
+        .natural => |fold_case| .{ .natural = fold_case },
+    });
 }
 
 fn aoKsort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

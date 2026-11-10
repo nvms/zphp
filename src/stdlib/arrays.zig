@@ -24,14 +24,9 @@ pub const entries = .{
     .{ "array_merge", array_merge },
     .{ "array_slice", array_slice },
     .{ "array_unique", array_unique },
-    .{ "sort", native_sort },
-    .{ "rsort", native_rsort },
     .{ "range", native_range },
     .{ "array_map", array_map },
     .{ "array_filter", array_filter },
-    .{ "usort", native_usort },
-    .{ "natsort", natsort_impl },
-    .{ "natcasesort", natcasesort_impl },
     .{ "array_splice", array_splice },
     .{ "array_combine", array_combine },
     .{ "array_chunk", array_chunk },
@@ -49,17 +44,11 @@ pub const entries = .{
     .{ "array_rand", array_rand },
     .{ "compact", native_compact },
     .{ "extract", native_extract },
-    .{ "ksort", native_ksort },
-    .{ "krsort", native_krsort },
-    .{ "asort", native_asort },
-    .{ "arsort", native_arsort },
     .{ "array_reduce", array_reduce },
     .{ "array_key_first", array_key_first },
     .{ "array_key_last", array_key_last },
     .{ "array_first", array_first },
     .{ "array_last", array_last },
-    .{ "uasort", native_uasort },
-    .{ "uksort", native_uksort },
     .{ "array_replace", array_replace },
     .{ "array_find", array_find },
     .{ "array_find_key", array_find_key },
@@ -76,7 +65,6 @@ pub const entries = .{
     .{ "array_replace_recursive", array_replace_recursive },
     .{ "array_walk_recursive", array_walk_recursive },
     .{ "array_merge_recursive", array_merge_recursive },
-    .{ "array_multisort", array_multisort },
     .{ "array_change_key_case", array_change_key_case },
 };
 
@@ -351,219 +339,11 @@ fn valueAsStringForCompare(ctx: *NativeContext, v: Value) RuntimeError!Value.Str
     return Value.String.adopt(ctx.allocator, owned);
 }
 
-const SortFlags = struct {
-    flags: i64,
-    reverse: bool,
-    comptime field: enum { value, key } = .value,
-
-    fn compare(self: SortFlags, a_val: Value, b_val: Value) bool {
-        const x = if (self.reverse) b_val else a_val;
-        const y = if (self.reverse) a_val else b_val;
-        const sort_type = self.flags & 0x7; // mask out SORT_FLAG_CASE
-        const case_insensitive = (self.flags & 8) != 0; // SORT_FLAG_CASE
-        return switch (sort_type) {
-            1 => Value.toFloat(x) < Value.toFloat(y), // SORT_NUMERIC
-            2, 5 => blk: { // SORT_STRING, SORT_LOCALE_STRING
-                var xbuf: [64]u8 = undefined;
-                var ybuf: [64]u8 = undefined;
-                const xs = valueToSortStr(x, &xbuf);
-                const ys = valueToSortStr(y, &ybuf);
-                if (case_insensitive) {
-                    var lxbuf: [64]u8 = undefined;
-                    var lybuf: [64]u8 = undefined;
-                    const lxs = lowerInto(&lxbuf, xs);
-                    const lys = lowerInto(&lybuf, ys);
-                    break :blk std.mem.order(u8, lxs, lys) == .lt;
-                }
-                break :blk std.mem.order(u8, xs, ys) == .lt;
-            },
-            6 => blk: { // SORT_NATURAL
-                var xbuf: [64]u8 = undefined;
-                var ybuf: [64]u8 = undefined;
-                const xs = valueToSortStr(x, &xbuf);
-                const ys = valueToSortStr(y, &ybuf);
-                if (case_insensitive) {
-                    var lxbuf: [64]u8 = undefined;
-                    var lybuf: [64]u8 = undefined;
-                    const lxs = lowerInto(&lxbuf, xs);
-                    const lys = lowerInto(&lybuf, ys);
-                    break :blk naturalCompare(lxs, lys) < 0;
-                }
-                break :blk naturalCompare(xs, ys) < 0;
-            },
-            else => Value.lessThan(x, y), // SORT_REGULAR
-        };
-    }
-
-    fn lowerInto(buf: []u8, s: []const u8) []const u8 {
-        const n = @min(buf.len, s.len);
-        for (s[0..n], 0..) |c, i| {
-            buf[i] = if (c >= 'A' and c <= 'Z') c + 32 else c;
-        }
-        return buf[0..n];
-    }
-
-    fn valueToSortStr(v: Value, buf: *[64]u8) []const u8 {
-        return switch (v) {
-            .string => |s| s.bytes(),
-            .int => |i| std.fmt.bufPrint(buf, "{d}", .{i}) catch "",
-            .float => |f| std.fmt.bufPrint(buf, "{d}", .{f}) catch "",
-            .bool => |b| if (b) "1" else "",
-            .null => "",
-            else => "",
-        };
-    }
-
-    fn naturalCompare(a: []const u8, b: []const u8) i32 {
-        var ai: usize = 0;
-        var bi: usize = 0;
-        while (ai < a.len and bi < b.len) {
-            const a_digit = a[ai] >= '0' and a[ai] <= '9';
-            const b_digit = b[bi] >= '0' and b[bi] <= '9';
-            if (a_digit and b_digit) {
-                while (ai < a.len and a[ai] == '0') ai += 1;
-                while (bi < b.len and b[bi] == '0') bi += 1;
-                const a_start = ai;
-                const b_start = bi;
-                while (ai < a.len and a[ai] >= '0' and a[ai] <= '9') ai += 1;
-                while (bi < b.len and b[bi] >= '0' and b[bi] <= '9') bi += 1;
-                const a_len = ai - a_start;
-                const b_len = bi - b_start;
-                if (a_len != b_len) return if (a_len < b_len) @as(i32, -1) else 1;
-                for (a_start..ai, b_start..bi) |aj, bj| {
-                    if (a[aj] != b[bj]) return if (a[aj] < b[bj]) @as(i32, -1) else 1;
-                }
-            } else {
-                if (a[ai] != b[bi]) return if (a[ai] < b[bi]) @as(i32, -1) else 1;
-                ai += 1;
-                bi += 1;
-            }
-        }
-        if (ai < a.len) return 1;
-        if (bi < b.len) return -1;
-        return 0;
-    }
-};
-
-pub fn sortWithFlags(arr: *PhpArray, flags: i64, reverse: bool) void {
-    const ctx_val = SortFlags{ .flags = flags, .reverse = reverse };
-    std.mem.sort(PhpArray.Entry, arr.entries.items, ctx_val, struct {
-        fn f(c: SortFlags, a: PhpArray.Entry, b: PhpArray.Entry) bool {
-            return c.compare(a.value, b.value);
-        }
-    }.f);
-}
-
-fn sortKeyAsValue(k: PhpArray.Key) Value {
-    return switch (k) {
-        .int => |i| .{ .int = i },
-        .string => |s| .{ .string = s },
-    };
-}
-
-pub fn sortKeysWithFlags(arr: *PhpArray, flags: i64, reverse: bool) void {
-    const ctx_val = SortFlags{ .flags = flags, .reverse = reverse };
-    std.mem.sort(PhpArray.Entry, arr.entries.items, ctx_val, struct {
-        fn f(c: SortFlags, a: PhpArray.Entry, b: PhpArray.Entry) bool {
-            return c.compare(sortKeyAsValue(a.key), sortKeyAsValue(b.key));
-        }
-    }.f);
-}
-
-fn natCompareStr(a: []const u8, b: []const u8, fold_case: bool) i64 {
-    var ai: usize = 0;
-    var bi: usize = 0;
-    while (ai < a.len and bi < b.len) {
-        const ca = a[ai];
-        const cb = b[bi];
-        if (std.ascii.isDigit(ca) and std.ascii.isDigit(cb)) {
-            var as = ai;
-            while (as < a.len and a[as] == '0') as += 1;
-            var ae = as;
-            while (ae < a.len and std.ascii.isDigit(a[ae])) ae += 1;
-            var bs = bi;
-            while (bs < b.len and b[bs] == '0') bs += 1;
-            var be = bs;
-            while (be < b.len and std.ascii.isDigit(b[be])) be += 1;
-            const al = ae - as;
-            const bl = be - bs;
-            if (al != bl) return @as(i64, @intCast(al)) - @as(i64, @intCast(bl));
-            for (a[as..ae], b[bs..be]) |x, y| {
-                if (x != y) return @as(i64, x) - @as(i64, y);
-            }
-            ai = ae;
-            bi = be;
-            continue;
-        }
-        const xa: u8 = if (fold_case) std.ascii.toLower(ca) else ca;
-        const xb: u8 = if (fold_case) std.ascii.toLower(cb) else cb;
-        if (xa != xb) return @as(i64, xa) - @as(i64, xb);
-        ai += 1;
-        bi += 1;
-    }
-    if (a.len != b.len) return @as(i64, @intCast(a.len)) - @as(i64, @intCast(b.len));
-    return 0;
-}
-
-fn natsortImpl(arr: *PhpArray, fold_case: bool) void {
-    const N = arr.entries.items.len;
-    if (N < 2) return;
-    var i: usize = 1;
-    while (i < N) : (i += 1) {
-        const tmp = arr.entries.items[i];
-        var j: usize = i;
-        while (j > 0) {
-            const av = arr.entries.items[j - 1].value;
-            const sa: []const u8 = if (av == .string) av.string.bytes() else "";
-            const sb: []const u8 = if (tmp.value == .string) tmp.value.string.bytes() else "";
-            if (natCompareStr(sa, sb, fold_case) <= 0) break;
-            arr.entries.items[j] = arr.entries.items[j - 1];
-            j -= 1;
-        }
-        arr.entries.items[j] = tmp;
-    }
-    arr.string_index.clearRetainingCapacity();
-}
-
-fn natsort_impl(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
-    if (args[0] != .array) return throwArrayTypeError(ctx, "natsort", 1, args[0]);
-    natsortImpl(args[0].array, false);
-    return NativeResult.scalar(.{ .bool = true });
-}
-
-fn natcasesort_impl(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
-    if (args[0] != .array) return throwArrayTypeError(ctx, "natcasesort", 1, args[0]);
-    natsortImpl(args[0].array, true);
-    return NativeResult.scalar(.{ .bool = true });
-}
-
 fn throwArrayTypeError(ctx: *NativeContext, fn_name: []const u8, arg_pos: u8, got: Value) RuntimeError {
     const msg = std.fmt.allocPrint(ctx.allocator, "{s}(): Argument #{d} ($array) must be of type array, {s} given", .{ fn_name, arg_pos, phpTypeName(got) }) catch return error.RuntimeError;
     defer ctx.allocator.free(msg);
     ctx.vm.setPendingException("TypeError", msg) catch {};
     return error.RuntimeError;
-}
-
-fn native_sort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
-    if (args[0] != .array) return throwArrayTypeError(ctx, "sort", 1, args[0]);
-    const arr = args[0].array;
-    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
-    sortWithFlags(arr, flags, false);
-    reindexArray(arr);
-    return NativeResult.scalar(.{ .bool = true });
-}
-
-fn native_rsort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
-    if (args[0] != .array) return throwArrayTypeError(ctx, "rsort", 1, args[0]);
-    const arr = args[0].array;
-    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
-    sortWithFlags(arr, flags, true);
-    reindexArray(arr);
-    return NativeResult.scalar(.{ .bool = true });
 }
 
 fn reindexArray(arr: *PhpArray) void {
@@ -575,78 +355,6 @@ fn reindexArray(arr: *PhpArray) void {
     arr.has_int_keys = arr.entries.items.len > 0;
     arr.string_index.clearRetainingCapacity();
     arr.cursor = 0;
-}
-
-pub const SortField = enum { value, key };
-
-pub fn mergeSort(comptime T: type, items: []T, ctx: *NativeContext, callback: Value, comptime field: SortField) RuntimeError!void {
-    if (items.len <= 1) return;
-    const staged = try ctx.allocator.dupe(T, items);
-    defer ctx.allocator.free(staged);
-    try mergeSortStaged(T, staged, ctx, callback, field);
-    @memcpy(items, staged);
-}
-
-fn mergeSortStaged(comptime T: type, items: []T, ctx: *NativeContext, callback: Value, comptime field: SortField) RuntimeError!void {
-    if (items.len <= 1) return;
-    if (items.len <= 16) {
-        // insertion sort for small slices
-        for (1..items.len) |i| {
-            const tmp = items[i];
-            var j: usize = i;
-            while (j > 0) {
-                const cmp = try invokeSortCmp(T, items[j - 1], tmp, ctx, callback, field);
-                if (Value.toInt(cmp) <= 0) break;
-                items[j] = items[j - 1];
-                j -= 1;
-            }
-            items[j] = tmp;
-        }
-        return;
-    }
-    const mid = items.len / 2;
-    try mergeSortStaged(T, items[0..mid], ctx, callback, field);
-    try mergeSortStaged(T, items[mid..], ctx, callback, field);
-    const buf = try ctx.allocator.alloc(T, items.len);
-    defer ctx.allocator.free(buf);
-    var l: usize = 0;
-    var r: usize = mid;
-    var k: usize = 0;
-    while (l < mid and r < items.len) {
-        const cmp = try invokeSortCmp(T, items[l], items[r], ctx, callback, field);
-        if (Value.toInt(cmp) <= 0) {
-            buf[k] = items[l];
-            l += 1;
-        } else {
-            buf[k] = items[r];
-            r += 1;
-        }
-        k += 1;
-    }
-    while (l < mid) : (l += 1) {
-        buf[k] = items[l];
-        k += 1;
-    }
-    while (r < items.len) : (r += 1) {
-        buf[k] = items[r];
-        k += 1;
-    }
-    @memcpy(items, buf[0..items.len]);
-}
-
-fn invokeSortCmp(comptime T: type, a: T, b: T, ctx: *NativeContext, callback: Value, comptime field: SortField) RuntimeError!Value {
-    if (field == .key) {
-        const ak: Value = switch (a.key) {
-            .int => |ki| .{ .int = ki },
-            .string => |ks| .{ .string = ks },
-        };
-        const bk: Value = switch (b.key) {
-            .int => |ki| .{ .int = ki },
-            .string => |ks| .{ .string = ks },
-        };
-        return ctx.invokeCallable(callback, &.{ ak, bk });
-    }
-    return ctx.invokeCallable(callback, &.{ a.value, b.value });
 }
 
 fn array_map(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -757,16 +465,6 @@ fn array_filter(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         }
     }
     return NativeResult.borrowed(.{ .array = result });
-}
-
-fn native_usort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2) return NativeResult.scalar(.{ .bool = false });
-    if (args[0] != .array) return throwArrayTypeError(ctx, "usort", 1, args[0]);
-    const arr = args[0].array;
-    const callback = args[1];
-    try mergeSort(PhpArray.Entry, arr.entries.items, ctx, callback, .value);
-    reindexArray(arr);
-    return NativeResult.scalar(.{ .bool = true });
 }
 
 fn native_range(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -1562,57 +1260,6 @@ fn internVarName(ctx: *NativeContext, comptime fmt: []const u8, args: anytype) !
     return ctx.vm.internName(name);
 }
 
-fn keyLessThan(_: void, a: PhpArray.Entry, b: PhpArray.Entry) bool {
-    if (a.key == .int and b.key == .int) return a.key.int < b.key.int;
-    if (a.key == .string and b.key == .string) return std.mem.order(u8, a.key.string.bytes(), b.key.string.bytes()) == .lt;
-    if (a.key == .int) return true;
-    return false;
-}
-
-fn native_ksort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
-    if (args[0] != .array) return throwArrayTypeError(ctx, "ksort", 1, args[0]);
-    const arr = args[0].array;
-    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
-    sortKeysWithFlags(arr, flags, false);
-    arr.rebuildStringIndexAssumeCapacity();
-    arr.cursor = 0;
-    return NativeResult.scalar(.{ .bool = true });
-}
-
-fn native_krsort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
-    if (args[0] != .array) return throwArrayTypeError(ctx, "krsort", 1, args[0]);
-    const arr = args[0].array;
-    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
-    sortKeysWithFlags(arr, flags, true);
-    arr.rebuildStringIndexAssumeCapacity();
-    arr.cursor = 0;
-    return NativeResult.scalar(.{ .bool = true });
-}
-
-fn native_asort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
-    if (args[0] != .array) return throwArrayTypeError(ctx, "asort", 1, args[0]);
-    const arr = args[0].array;
-    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
-    sortWithFlags(arr, flags, false);
-    arr.rebuildStringIndexAssumeCapacity();
-    arr.cursor = 0;
-    return NativeResult.scalar(.{ .bool = true });
-}
-
-fn native_arsort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
-    if (args[0] != .array) return throwArrayTypeError(ctx, "arsort", 1, args[0]);
-    const arr = args[0].array;
-    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
-    sortWithFlags(arr, flags, true);
-    arr.rebuildStringIndexAssumeCapacity();
-    arr.cursor = 0;
-    return NativeResult.scalar(.{ .bool = true });
-}
-
 fn array_reduce(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2 or args[0] != .array) return NativeResult.scalar(.null);
     const arr = args[0].array;
@@ -1667,28 +1314,6 @@ fn array_last(_: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     const arr = args[0].array;
     if (arr.entries.items.len == 0) return NativeResult.scalar(.null);
     return NativeResult.share(arr.entries.items[arr.entries.items.len - 1].value);
-}
-
-fn native_uasort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2) return NativeResult.scalar(.{ .bool = false });
-    if (args[0] != .array) return throwArrayTypeError(ctx, "uasort", 1, args[0]);
-    const arr = args[0].array;
-    const callback = args[1];
-    try mergeSort(PhpArray.Entry, arr.entries.items, ctx, callback, .value);
-    arr.rebuildStringIndexAssumeCapacity();
-    arr.cursor = 0;
-    return NativeResult.scalar(.{ .bool = true });
-}
-
-fn native_uksort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2) return NativeResult.scalar(.{ .bool = false });
-    if (args[0] != .array) return throwArrayTypeError(ctx, "uksort", 1, args[0]);
-    const arr = args[0].array;
-    const callback = args[1];
-    try mergeSort(PhpArray.Entry, arr.entries.items, ctx, callback, .key);
-    arr.rebuildStringIndexAssumeCapacity();
-    arr.cursor = 0;
-    return NativeResult.scalar(.{ .bool = true });
 }
 
 fn array_replace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -1961,115 +1586,6 @@ fn array_merge_recursive(ctx: *NativeContext, args: []const Value) RuntimeError!
     return NativeResult.borrowed(.{ .array = result });
 }
 
-fn array_multisort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .array) return NativeResult.scalar(.{ .bool = false });
-
-    const SortSpec = struct { arr: *PhpArray, order: i64, kind: i64 };
-    var specs: [32]SortSpec = undefined;
-    var spec_count: usize = 0;
-
-    for (args) |arg| {
-        if (arg == .array) {
-            specs[spec_count] = .{ .arr = arg.array, .order = 4, .kind = 0 };
-            spec_count += 1;
-            if (spec_count >= 32) break;
-        } else if (arg == .int and spec_count > 0) {
-            const v = arg.int;
-            if (v == 3 or v == 4) {
-                specs[spec_count - 1].order = v;
-            } else {
-                specs[spec_count - 1].kind = v;
-            }
-        }
-    }
-
-    if (spec_count == 0) return NativeResult.scalar(.{ .bool = false });
-
-    const n = specs[0].arr.entries.items.len;
-    for (specs[0..spec_count]) |s| {
-        if (s.arr.entries.items.len != n) return NativeResult.scalar(.{ .bool = false });
-    }
-
-    var indices = try ctx.allocator.alloc(usize, n);
-    defer ctx.allocator.free(indices);
-    for (0..n) |i| indices[i] = i;
-
-    const sort_specs = specs[0..spec_count];
-    std.mem.sort(usize, indices, sort_specs, struct {
-        fn lessThan(sp: []const SortSpec, a: usize, b: usize) bool {
-            for (sp) |s| {
-                const va = s.arr.entries.items[a].value;
-                const vb = s.arr.entries.items[b].value;
-                const cmp = cmpValues(va, vb, s.kind);
-                if (cmp != 0) return if (s.order == 3) cmp > 0 else cmp < 0;
-            }
-            return false;
-        }
-
-        fn cmpValues(a: Value, b: Value, k: i64) i32 {
-            const kind = k & 0x7;
-            const ci = (k & 8) != 0;
-            if (kind == 2) {
-                var sa: []const u8 = if (a == .string) a.string.bytes() else "";
-                var sb: []const u8 = if (b == .string) b.string.bytes() else "";
-                var ba: [128]u8 = undefined;
-                var bb: [128]u8 = undefined;
-                if (ci) {
-                    const na = @min(ba.len, sa.len);
-                    for (sa[0..na], 0..) |c, i| ba[i] = if (c >= 'A' and c <= 'Z') c + 32 else c;
-                    sa = ba[0..na];
-                    const nb = @min(bb.len, sb.len);
-                    for (sb[0..nb], 0..) |c, i| bb[i] = if (c >= 'A' and c <= 'Z') c + 32 else c;
-                    sb = bb[0..nb];
-                }
-                return switch (std.mem.order(u8, sa, sb)) {
-                    .lt => -1,
-                    .gt => 1,
-                    .eq => 0,
-                };
-            }
-            if (kind == 1) {
-                const fa = Value.toFloat(a);
-                const fb = Value.toFloat(b);
-                if (fa < fb) return -1;
-                if (fa > fb) return 1;
-                return 0;
-            }
-            if (Value.lessThan(a, b)) return -1;
-            if (Value.lessThan(b, a)) return 1;
-            return 0;
-        }
-    }.lessThan);
-
-    for (sort_specs) |s| {
-        var tmp = try ctx.allocator.alloc(PhpArray.Entry, n);
-        defer ctx.allocator.free(tmp);
-        for (indices, 0..) |src, dst| tmp[dst] = s.arr.entries.items[src];
-        @memcpy(s.arr.entries.items[0..n], tmp);
-        // PHP's array_multisort renumbers integer keys (0..n-1) but preserves
-        // string keys. reindexArray would clobber both, so renumber only the
-        // int keys and leave string keys in place
-        s.arr.string_index.clearRetainingCapacity();
-        var next_int: i64 = 0;
-        for (s.arr.entries.items, 0..) |*entry, idx| {
-            switch (entry.key) {
-                .int => {
-                    entry.key = .{ .int = next_int };
-                    next_int += 1;
-                },
-                .string => |str| {
-                    try s.arr.string_index.put(ctx.allocator, str.bytes(), idx);
-                },
-            }
-        }
-        s.arr.next_int_key = next_int;
-        s.arr.has_int_keys = next_int > 0;
-        s.arr.cursor = 0;
-    }
-
-    return NativeResult.scalar(.{ .bool = true });
-}
-
 fn array_change_key_case(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .array) return NativeResult.scalar(.null);
     const src = args[0].array;
@@ -2109,19 +1625,4 @@ test "unshift allocation failure preserves entries and ownership" {
     ctx.allocator = testing.allocator;
     _ = try array_unshift(&ctx, &.{ .{ .array = arr }, .{ .string = owned } });
     try testing.expectEqualStrings("owned", arr.get(.{ .int = 0 }).string.bytes());
-}
-
-test "callback sort staging failure preserves input" {
-    const testing = std.testing;
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
-    var ctx: NativeContext = .{ .allocator = failing.allocator(), .arrays = &vm.arrays, .strings = &vm.strings, .vm = &vm };
-    var items = [_]PhpArray.Entry{
-        .{ .key = .{ .int = 0 }, .value = .{ .int = 2 } },
-        .{ .key = .{ .int = 1 }, .value = .{ .int = 1 } },
-    };
-    try testing.expectError(error.OutOfMemory, mergeSort(PhpArray.Entry, &items, &ctx, .null, .value));
-    try testing.expectEqual(@as(i64, 2), items[0].value.int);
-    try testing.expectEqual(@as(i64, 1), items[1].value.int);
 }

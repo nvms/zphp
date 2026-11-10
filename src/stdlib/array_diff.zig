@@ -209,12 +209,12 @@ fn order(a: []const u8, b: []const u8) i32 {
 
 // zval_get_tmp_string: a value's string form, owned only when converting it
 // made a new string. arrays warn, objects run __toString
-const TmpString = struct {
+pub const TmpString = struct {
     bytes: []const u8,
     owned: ?Value.String = null,
     heap: ?[]u8 = null,
 
-    fn release(self: TmpString, ctx: *NativeContext) void {
+    pub fn release(self: TmpString, ctx: *NativeContext) void {
         if (self.owned) |s| s.release();
         if (self.heap) |h| ctx.allocator.free(h);
     }
@@ -225,7 +225,7 @@ fn isClosure(v: Value) bool {
     return v == .string and std.mem.startsWith(u8, v.string.bytes(), "__closure_");
 }
 
-fn tmpString(ctx: *NativeContext, v: Value, buf: []u8) RuntimeError!TmpString {
+pub fn tmpString(ctx: *NativeContext, v: Value, buf: []u8) RuntimeError!TmpString {
     switch (v) {
         .string => |s| {
             if (isClosure(v)) {

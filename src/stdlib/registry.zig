@@ -19,6 +19,7 @@ pub fn register(map: *@import("../runtime/vm.zig").NativeTable, allocator: std.m
         @import("formatted_print.zig").entries,
         @import("arrays.zig").entries,
         @import("array_diff.zig").entries,
+        @import("array_sort.zig").entries,
         @import("json.zig").entries,
         @import("filesystem.zig").entries,
         @import("http.zig").entries,
@@ -69,6 +70,7 @@ test {
     _ = @import("formatted_print.zig");
     _ = @import("arrays.zig");
     _ = @import("array_diff.zig");
+    _ = @import("array_sort.zig");
     _ = @import("json.zig");
     _ = @import("filesystem.zig");
     _ = @import("http.zig");
