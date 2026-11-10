@@ -768,6 +768,9 @@ pub const VM = struct {
     // the cli runs the shutdown destructors itself, after the shutdown
     // functions and the report of an uncaught exception, in php's order
     destructors_after_shutdown: bool = false,
+    // the script ended on a fatal error (php's unclean shutdown): the
+    // shutdown destructors are skipped
+    unclean_shutdown: bool = false,
     // the name the last bind_ref_from_return bound a copy of the value to,
     // the call having returned no reference
     ref_bind_degraded: ?[*]const u8 = null,
@@ -3608,6 +3611,10 @@ pub const VM = struct {
     // pass destroys none; then every object left gets its destructor in
     // handle order
     pub fn runShutdownDestructors(self: *VM) void {
+        // what shutdown runs is called by the engine: no user frame calls it
+        var engine = self.engineCall();
+        self.native_call = &engine;
+        defer self.native_call = engine.outer;
         // where nothing reports what the destructors throw (serve, workers,
         // embedding), the script's own exception stays the one pending
         const prior = if (self.destructors_after_shutdown) null else self.takePending();
@@ -3628,7 +3635,35 @@ pub const VM = struct {
                 return a.id < b.id;
             }
         }.lessThan);
+        // generators and fibers are objects to php: a suspended one is
+        // destroyed in handle order with the rest (its finally blocks run)
+        var waiting: std.ArrayListUnmanaged(Value) = .empty;
+        defer waiting.deinit(self.allocator);
+        for (self.generators.items) |g| {
+            if (g.pooled or g.refcount == 0 or g.state != .suspended) continue;
+            waiting.append(self.allocator, .{ .generator = g }) catch return;
+        }
+        for (self.fibers.items) |f| {
+            if (f.pooled or f.refcount == 0 or f.state != .suspended or f == self.gc_dtor_fiber) continue;
+            waiting.append(self.allocator, .{ .fiber = f }) catch return;
+        }
+        std.mem.sort(Value, waiting.items, {}, struct {
+            fn handle(v: Value) u32 {
+                return if (v == .generator) v.generator.handle else v.fiber.handle;
+            }
+            fn lessThan(_: void, a: Value, b: Value) bool {
+                return handle(a) < handle(b);
+            }
+        }.lessThan);
+        var next_waiting: usize = 0;
         for (live.items) |obj| {
+            // generators and fibers with lower handles go first
+            while (next_waiting < waiting.items.len) : (next_waiting += 1) {
+                const w = waiting.items[next_waiting];
+                const h = if (w == .generator) w.generator.handle else w.fiber.handle;
+                if (h > obj.id) break;
+                self.destroyAtShutdown(w);
+            }
             if (self.pending_exception != null and self.destructors_after_shutdown) break;
             if (obj.destructed) continue;
             if (self.pendingExceptionIs(obj)) continue;
@@ -3641,6 +3676,7 @@ pub const VM = struct {
                 };
             }
         }
+        while (next_waiting < waiting.items.len) : (next_waiting += 1) self.destroyAtShutdown(waiting.items[next_waiting]);
         self.drain_raised = false;
         if (self.pending_exception != null and self.destructors_after_shutdown) {
             for (live.items) |obj| obj.destructor_called = true;
@@ -3648,6 +3684,40 @@ pub const VM = struct {
         }
         self.drainPendingDestruct();
         self.drain_raised = false;
+    }
+
+    // a generator's or fiber's dtor at shutdown; an exception it throws
+    // takes the one already pending as its previous
+    fn destroyAtShutdown(self: *VM, v: Value) void {
+        switch (v) {
+            .generator => |g| {
+                if (g.pooled or g.refcount == 0 or g.state != .suspended) return;
+                genRetain(g);
+                defer self.genRelease(g);
+                const in_flight = self.takePending();
+                self.closeGenerator(g, self.frame_count) catch {};
+                self.settleDrainException(in_flight);
+            },
+            .fiber => |f| {
+                if (f.pooled or f.refcount == 0 or f.state != .suspended) return;
+                fiberRetain(f);
+                defer self.fiberRelease(f);
+                self.destroyFiber(f);
+            },
+            else => {},
+        }
+        if (self.hasPendingReleases()) self.drainPendingDestruct();
+    }
+
+    // php's zval_call_destructor: a global holding the only reference to
+    // an object (a generator or fiber included) goes first
+    fn soleShutdownReference(value: Value) bool {
+        return switch (value) {
+            .object => |o| o.refcount == 1 and !o.destructed,
+            .generator => |g| g.refcount == 1,
+            .fiber => |f| f.refcount == 1,
+            else => false,
+        };
     }
 
     fn destroyGlobalsAtShutdown(self: *VM) void {
@@ -3678,7 +3748,7 @@ pub const VM = struct {
                     };
                     if (compiled or frame.ref_slots.contains(name)) continue;
                     const value = frame.vars.get(name) orelse continue;
-                    if (value != .object or value.object.refcount != 1 or value.object.destructed) continue;
+                    if (!soleShutdownReference(value)) continue;
                     const removed = frame.vars.fetchRemove(name).?;
                     ga.remove(.{ .string = Value.String.borrowed(key) });
                     self.releaseValue(removed.value);
@@ -3693,7 +3763,7 @@ pub const VM = struct {
                 const name = names[si];
                 if (name.len == 0 or frame.ref_slots.contains(name)) continue;
                 const value = if (frame.vars.get(name)) |v| v else frame.locals[si];
-                if (value != .object or value.object.refcount != 1 or value.object.destructed) continue;
+                if (!soleShutdownReference(value)) continue;
                 if (frame.vars.fetchRemove(name)) |removed| {
                     self.releaseValue(removed.value);
                 } else self.releaseValue(frame.locals[si]);
@@ -13686,6 +13756,7 @@ pub const VM = struct {
         if (!isFatalLevel(level)) return;
         self.exit_code = 255;
         self.exit_requested = true;
+        self.unclean_shutdown = true;
         return error.RuntimeError;
     }
 

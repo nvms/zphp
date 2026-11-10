@@ -701,6 +701,9 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
                 return;
             }
         }
+        // a fatal error is php's bailout: the shutdown functions run, the
+        // destructors don't. an uncaught exception ends the script cleanly
+        if (vm.pending_exception == null or vm.uncatchable_fatal) vm.unclean_shutdown = true;
         try reportRuntimeError(allocator, vm);
         _ = try runShutdown(allocator, vm);
         if (vm.output.items.len > 0) try writeStdout(vm.output.items);
@@ -727,6 +730,7 @@ fn runShutdown(allocator: std.mem.Allocator, vm: *VM) !bool {
         }
     };
     vm.discardPending();
+    if (vm.unclean_shutdown) return failed;
     vm.runShutdownDestructors();
     if (vm.pending_exception != null) {
         try reportRuntimeError(allocator, vm);
