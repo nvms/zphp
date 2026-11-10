@@ -680,6 +680,11 @@ fn digestResult(ctx: *NativeContext, digest: []const u8, raw_output: bool) Runti
 }
 
 fn hashPath(ctx: *NativeContext, comptime fn_name: []const u8, algo: HashAlgo, path: []const u8, key: ?[]const u8, raw_output: bool) RuntimeError!NativeResult {
+    // php_stream_open_wrapper refuses an empty path
+    if (path.len == 0) {
+        try ctx.vm.setPendingException("ValueError", "Path must not be empty");
+        return error.RuntimeError;
+    }
     const content = (try readHashInput(ctx, fn_name, path)) orelse return NativeResult.scalar(.{ .bool = false });
     defer content.release();
     var digest: [64]u8 = undefined;
