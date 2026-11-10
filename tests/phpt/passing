@@ -643,6 +643,7 @@ Zend/tests/closures/closure_055.phpt
 Zend/tests/closures/closure_056.phpt
 Zend/tests/closures/closure_057.phpt
 Zend/tests/closures/closure_058.phpt
+Zend/tests/closures/closure_059.phpt
 Zend/tests/closures/closure_060.phpt
 Zend/tests/closures/closure_061.phpt
 Zend/tests/closures/closure_062.phpt
@@ -665,6 +666,7 @@ Zend/tests/closures/closure_const_expr/class_const.phpt
 Zend/tests/closures/closure_const_expr/complex_array.phpt
 Zend/tests/closures/closure_const_expr/complex_new.phpt
 Zend/tests/closures/closure_const_expr/property_initializer.phpt
+Zend/tests/closures/closure_const_expr/property_initializer_scope_001.phpt
 Zend/tests/closures/closure_const_expr/static_initalizer.phpt
 Zend/tests/closures/closure_const_expr/static_property_initializer.phpt
 Zend/tests/closures/closure_const_expr/static_variable.phpt
@@ -1120,6 +1122,7 @@ Zend/tests/fibers/unfinished-fiber.phpt
 Zend/tests/fibers/unstarted-fiber.phpt
 Zend/tests/first_class_callable/constexpr/attributes.phpt
 Zend/tests/first_class_callable/constexpr/attributes_scope_001.phpt
+Zend/tests/first_class_callable/constexpr/attributes_scope_002.phpt
 Zend/tests/first_class_callable/constexpr/autoload.phpt
 Zend/tests/first_class_callable/constexpr/basic.phpt
 Zend/tests/first_class_callable/constexpr/case_insensitive.phpt
