@@ -777,6 +777,13 @@ pub const VM = struct {
     captures: std.ArrayListUnmanaged(CaptureEntry) = .empty,
     capture_index: std.StringHashMapUnmanaged(CaptureRange) = .{},
     interned_names: std.StringHashMapUnmanaged(void) = .{},
+    // generators and fibers are collector nodes too (php's get_gc handlers):
+    // what a waiting one holds is part of the graph. the candidates are the
+    // ones a release left referenced, as php's root buffer has them
+    cycle_gens: std.AutoArrayHashMapUnmanaged(*Generator, i64) = .{},
+    cycle_fibers: std.AutoArrayHashMapUnmanaged(*Fiber, i64) = .{},
+    cycle_gen_candidates: std.ArrayListUnmanaged(*Generator) = .empty,
+    cycle_fiber_candidates: std.ArrayListUnmanaged(*Fiber) = .empty,
     // the cycle collector's walk stack, kept for its capacity
     cycle_work: std.ArrayListUnmanaged(CycleWork) = .empty,
     collecting_cycles: bool = false,
@@ -3145,6 +3152,8 @@ pub const VM = struct {
         self.trait_method_sources.deinit(self.allocator);
         self.cycle_candidates.deinit(self.allocator);
         self.cycle_array_candidates.deinit(self.allocator);
+        self.cycle_gen_candidates.deinit(self.allocator);
+        self.cycle_fiber_candidates.deinit(self.allocator);
         self.cycle_work.deinit(self.allocator);
         self.array_ref_bindings.deinit(self.allocator);
         if (self.ref_index) |ri| {
@@ -3336,6 +3345,10 @@ pub const VM = struct {
         self.shutdown_callbacks.clearRetainingCapacity();
         self.cycle_candidates.clearRetainingCapacity();
         self.cycle_array_candidates.clearRetainingCapacity();
+        for (self.cycle_gen_candidates.items) |g| g.cycle_queued = false;
+        for (self.cycle_fiber_candidates.items) |f| f.cycle_queued = false;
+        self.cycle_gen_candidates.clearRetainingCapacity();
+        self.cycle_fiber_candidates.clearRetainingCapacity();
         self.captures.clearRetainingCapacity();
         self.capture_index.clearRetainingCapacity();
         self.interned_names.clearRetainingCapacity();
@@ -23878,6 +23891,24 @@ pub const VM = struct {
         }
     }
 
+    // php's zend_fiber_object_destroy: a suspended fiber that is destroyed
+    // is resumed with php's graceful exit, which no catch takes, so its
+    // finally blocks run; Fiber::suspend() in one is an error. an exception
+    // it throws reaches the code that destroyed it, with one in flight as
+    // its previous
+    pub fn destroyFiber(self: *VM, fiber: *Fiber) void {
+        if (fiber.state != .suspended) return;
+        const marker = self.unwindMarker() catch return;
+        const in_flight = self.takePending();
+        defer self.settleDrainException(in_flight);
+        fiber.destroyed = true;
+        _ = self.resumeFiber(fiber, .{ .object = marker }, true) catch {};
+        if (self.pending_exception) |ex| if (self.isUnwindMarker(ex)) {
+            self.discardPending();
+            fiber.threw = false;
+        };
+    }
+
     fn fiberError(self: *VM, msg: []const u8) RuntimeError {
         try self.setPendingException("FiberError", msg);
         return error.RuntimeError;
@@ -24886,6 +24917,12 @@ pub const VM = struct {
                 const fiber = self.pending_fiber_release.items[self.fiber_release_cursor];
                 self.fiber_release_cursor += 1;
                 if (fiber.refcount != 0 or fiber.pooled) continue;
+                if (fiber.state == .suspended) {
+                    fiber.refcount += 1;
+                    self.destroyFiber(fiber);
+                    fiber.refcount -= 1;
+                    if (fiber.refcount != 0) continue;
+                }
                 self.cleanupFiberFrames(fiber);
                 for (fiber.saved_stack.items) |value| self.stackRelease(value);
                 self.releaseValue(fiber.callable);
@@ -24939,10 +24976,22 @@ pub const VM = struct {
     // 4. remaining nodes (scratch_rc == 0) are unreachable cycles - destruct
     //    + free
     pub fn collectCycles(self: *VM) usize {
+        var rerun = false;
+        var collected = self.collectCyclesPass(&rerun);
+        // destructors ran for garbage that was left out: php collects what
+        // is still garbage in a second run, once
+        if (rerun) {
+            var again = false;
+            collected += self.collectCyclesPass(&again);
+        }
+        return collected;
+    }
+
+    fn collectCyclesPass(self: *VM, rerun_needed: *bool) usize {
         if (self.draining_destructors or self.collecting_cycles) return 0;
         self.collecting_cycles = true;
         defer self.collecting_cycles = false;
-        if (self.cycle_candidates.items.len == 0 and self.cycle_array_candidates.items.len == 0 and self.capture_index.count() == 0) return 0;
+        if (self.cycle_candidates.items.len == 0 and self.cycle_array_candidates.items.len == 0 and self.capture_index.count() == 0 and self.cycle_gen_candidates.items.len == 0 and self.cycle_fiber_candidates.items.len == 0) return 0;
         self.gc_runs += 1;
         // drain any pending normal destructs first so the candidate set
         // doesn't include objects that are about to be released anyway
@@ -24953,6 +25002,12 @@ pub const VM = struct {
         var visited_arrs = std.AutoArrayHashMapUnmanaged(*PhpArray, void){};
         defer visited_arrs.deinit(self.allocator);
 
+        defer {
+            self.cycle_gens.deinit(self.allocator);
+            self.cycle_gens = .{};
+            self.cycle_fibers.deinit(self.allocator);
+            self.cycle_fibers = .{};
+        }
         for (self.ref_cells.items) |cell| cell.visited = false;
 
         // every closure is a possible root: a captured variable is an edge
@@ -24971,6 +25026,14 @@ pub const VM = struct {
             if (c.elements_released) continue;
             self.cycleVisitArr(c, &visited_objs, &visited_arrs);
         }
+        for (self.cycle_gen_candidates.items) |g| {
+            if (g.pooled or g.refcount == 0) continue;
+            self.cycleVisitChild(.{ .generator = g }, &visited_objs, &visited_arrs);
+        }
+        for (self.cycle_fiber_candidates.items) |f| {
+            if (f.pooled or f.refcount == 0) continue;
+            self.cycleVisitChild(.{ .fiber = f }, &visited_objs, &visited_arrs);
+        }
 
         // pass 2: walk every visited node, decrement child scratch_rc for
         // each internal edge
@@ -24982,6 +25045,8 @@ pub const VM = struct {
         for (self.ref_cells.items) |cell| {
             if (cell.visited) self.cycleDecChild(cell.value, &visited_objs, &visited_arrs);
         }
+        for (self.cycle_gens.keys()) |g| _ = self.cycleGeneratorEdges(g, .decrement, &visited_objs, &visited_arrs);
+        for (self.cycle_fibers.keys()) |f| _ = self.cycleFiberEdges(f, .decrement, &visited_objs, &visited_arrs);
 
         // the $GLOBALS mirror is a NON-OWNING live view (setLocalGlobal undoes
         // its retain), so a global var's refcount is short by one - the external
@@ -25006,35 +25071,66 @@ pub const VM = struct {
         // again from alive roots, re-incrementing scratch_rc to original.
         // a negative count means an edge the refcount never saw; only an
         // exact zero is garbage, anything else is a live root
-        var changed = true;
-        while (changed) {
-            changed = false;
-            for (self.ref_cells.items) |cell| {
-                if (cell.visited and cell.scratch != 0) {
-                    if (self.cycleMarkAliveChild(cell.value, &visited_objs, &visited_arrs)) changed = true;
-                }
-            }
-            var it = visited_objs.iterator();
-            while (it.next()) |kv| {
-                const obj = kv.key_ptr.*;
-                if (obj.scratch_rc != 0) {
-                    if (self.cycleMarkAlive(obj, &visited_objs, &visited_arrs)) changed = true;
-                }
-            }
-            var ait = visited_arrs.iterator();
-            while (ait.next()) |kv| {
-                const arr = kv.key_ptr.*;
-                if (arr.scratch_rc != 0) {
-                    if (self.cycleMarkAliveArr(arr, &visited_objs, &visited_arrs)) changed = true;
-                }
-            }
+        self.cyclePropagateAlive(&visited_objs, &visited_arrs);
+
+        // php's gc runs the destructors of garbage that has one first and
+        // leaves it, and what only it reaches, out of this run: a generator
+        // not finished (its finally blocks, then its variables go, as php's
+        // zend_generator_dtor_storage closes it) and a suspended fiber. a
+        // second run then collects what is still garbage
+        var pending_gens: std.ArrayListUnmanaged(*Generator) = .empty;
+        defer pending_gens.deinit(self.allocator);
+        for (self.cycle_gens.keys(), self.cycle_gens.values()) |g, *scratch| {
+            if (scratch.* != 0 or g.refcount == 0 or g.state == .completed or g.state == .running) continue;
+            pending_gens.append(self.allocator, g) catch continue;
+            scratch.* = 1;
         }
+        var pending_fibers: std.ArrayListUnmanaged(*Fiber) = .empty;
+        defer pending_fibers.deinit(self.allocator);
+        for (self.cycle_fibers.keys(), self.cycle_fibers.values()) |f, *scratch| {
+            if (scratch.* != 0 or f.refcount == 0 or f.state != .suspended) continue;
+            pending_fibers.append(self.allocator, f) catch continue;
+            scratch.* = 1;
+        }
+        if (pending_gens.items.len > 0 or pending_fibers.items.len > 0) self.cyclePropagateAlive(&visited_objs, &visited_arrs);
 
         if (self.debug_gc_verify) self.gcVerifyCollected(&visited_objs, &visited_arrs);
 
         // pass 4: collect the unreachable ones. queue them for normal
         // destruct pipeline so __destruct runs and properties release cleanly
         var collected: usize = 0;
+        // the destructors first, while the garbage is intact; one whose
+        // generator ends up unreferenced has freed it
+        for (pending_gens.items) |g| {
+            g.refcount += 1;
+            self.closeGenerator(g, self.frame_count) catch {};
+            self.releaseGeneratorVars(g);
+            g.state = .completed;
+            g.refcount -= 1;
+            if (g.refcount == 0) {
+                self.pending_gen_release.append(self.allocator, g) catch {};
+                collected += 1;
+            } else if (!g.cycle_queued) {
+                g.cycle_queued = true;
+                self.cycle_gen_candidates.append(self.allocator, g) catch {
+                    g.cycle_queued = false;
+                };
+            }
+        }
+        for (pending_fibers.items) |f| {
+            f.refcount += 1;
+            self.destroyFiber(f);
+            f.refcount -= 1;
+            if (f.refcount == 0) {
+                self.pending_fiber_release.append(self.allocator, f) catch {};
+                collected += 1;
+            } else if (!f.cycle_queued) {
+                f.cycle_queued = true;
+                self.cycle_fiber_candidates.append(self.allocator, f) catch {
+                    f.cycle_queued = false;
+                };
+            }
+        }
         var coll_it = visited_objs.iterator();
         while (coll_it.next()) |kv| {
             const obj = kv.key_ptr.*;
@@ -25056,10 +25152,49 @@ pub const VM = struct {
                 collected += 1;
             }
         }
+        // a garbage generator that finished, or a fiber that is not
+        // suspended, has nothing left to run: what it holds goes
+        for (self.cycle_gens.keys(), self.cycle_gens.values()) |g, scratch| {
+            if (scratch != 0 or g.refcount == 0) continue;
+            g.refcount = 0;
+            self.pending_gen_release.append(self.allocator, g) catch {};
+            collected += 1;
+        }
+        for (self.cycle_fibers.keys(), self.cycle_fibers.values()) |f, scratch| {
+            if (scratch != 0 or f.refcount == 0) continue;
+            f.refcount = 0;
+            self.pending_fiber_release.append(self.allocator, f) catch {};
+            collected += 1;
+        }
         for (self.cycle_candidates.items) |obj| obj.cycle_queued = false;
         for (self.cycle_array_candidates.items) |arr| arr.cycle_queued = false;
         self.cycle_candidates.clearRetainingCapacity();
         self.cycle_array_candidates.clearRetainingCapacity();
+        // generators and fibers whose destructor ran stay candidates for the
+        // second run
+        const rerun = pending_gens.items.len > 0 or pending_fibers.items.len > 0;
+        var gi: usize = 0;
+        while (gi < self.cycle_gen_candidates.items.len) {
+            const g = self.cycle_gen_candidates.items[gi];
+            const keep = rerun and std.mem.indexOfScalar(*Generator, pending_gens.items, g) != null and g.refcount > 0;
+            if (keep) {
+                gi += 1;
+            } else {
+                g.cycle_queued = false;
+                _ = self.cycle_gen_candidates.swapRemove(gi);
+            }
+        }
+        var fi: usize = 0;
+        while (fi < self.cycle_fiber_candidates.items.len) {
+            const f = self.cycle_fiber_candidates.items[fi];
+            const keep = rerun and std.mem.indexOfScalar(*Fiber, pending_fibers.items, f) != null and f.refcount > 0;
+            if (keep) {
+                fi += 1;
+            } else {
+                f.cycle_queued = false;
+                _ = self.cycle_fiber_candidates.swapRemove(fi);
+            }
+        }
         // inside a fiber, php calls the garbage's destructors in its gc fiber
         const prev_in_fiber = self.gc_dtors_in_fiber;
         self.gc_dtors_in_fiber = self.current_fiber != null;
@@ -25073,7 +25208,43 @@ pub const VM = struct {
             self.gcVerifyDangling(collected);
             self.gcTraceClass(&visited_objs, &visited_arrs, "after");
         }
+        rerun_needed.* = rerun;
         return collected;
+    }
+
+    // pass 3 of the collector: nodes with external references are alive,
+    // and so is everything they reach
+    fn cyclePropagateAlive(self: *VM, vo: anytype, va: anytype) void {
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (self.ref_cells.items) |cell| {
+                if (cell.visited and cell.scratch != 0) {
+                    if (self.cycleMarkAliveChild(cell.value, vo, va)) changed = true;
+                }
+            }
+            for (self.cycle_gens.keys(), self.cycle_gens.values()) |g, scratch| {
+                if (scratch != 0 and self.cycleGeneratorEdges(g, .mark_alive, vo, va)) changed = true;
+            }
+            for (self.cycle_fibers.keys(), self.cycle_fibers.values()) |f, scratch| {
+                if (scratch != 0 and self.cycleFiberEdges(f, .mark_alive, vo, va)) changed = true;
+            }
+            var it = vo.iterator();
+            while (it.next()) |kv| {
+                const obj = kv.key_ptr.*;
+                if (obj.scratch_rc != 0) {
+                    if (self.cycleMarkAlive(obj, vo, va)) changed = true;
+                }
+            }
+            var ait = va.iterator();
+            while (ait.next()) |kv| {
+                const arr = kv.key_ptr.*;
+                if (arr.scratch_rc != 0) {
+                    if (self.cycleMarkAliveArr(arr, vo, va)) changed = true;
+                }
+            }
+        }
+
     }
 
     const GcTarget = union(enum) { obj: *PhpObject, arr: *PhpArray };
@@ -25514,6 +25685,16 @@ pub const VM = struct {
                             if (e.ref) |cell| work.append(self.allocator, .{ .cell = cell }) catch return;
                         }
                     },
+                    .generator => |g| {
+                        if (self.cycle_gens.contains(g) or g.pooled) continue;
+                        self.cycle_gens.put(self.allocator, g, @intCast(g.refcount)) catch return;
+                        _ = self.cycleGeneratorEdges(g, .{ .visit = work }, vo, va);
+                    },
+                    .fiber => |f| {
+                        if (self.cycle_fibers.contains(f) or f.pooled) continue;
+                        self.cycle_fibers.put(self.allocator, f, @intCast(f.refcount)) catch return;
+                        _ = self.cycleFiberEdges(f, .{ .visit = work }, vo, va);
+                    },
                     else => {},
                 },
             }
@@ -25559,8 +25740,104 @@ pub const VM = struct {
         }
     }
 
-    fn cycleDecChild(_: *VM, v: Value, vo: anytype, va: anytype) void {
+    const CycleEdgeAction = union(enum) {
+        visit: *std.ArrayListUnmanaged(CycleWork),
+        decrement,
+        mark_alive,
+    };
+
+    // one edge of the graph: visited, counted off as internal, or marked
+    // alive from a live parent. a cell edge is a binding of a reference
+    fn cycleEdge(self: *VM, v: Value, comptime counted: bool, action: CycleEdgeAction, vo: anytype, va: anytype) bool {
+        switch (action) {
+            .visit => |work| work.append(self.allocator, .{ .value = v }) catch {},
+            .decrement => if (counted) self.cycleDecChild(v, vo, va),
+            .mark_alive => return self.cycleMarkAliveChild(v, vo, va),
+        }
+        return false;
+    }
+
+    fn cycleCellEdge(self: *VM, cell: *Value, action: CycleEdgeAction) bool {
+        switch (action) {
+            .visit => |work| work.append(self.allocator, .{ .cell = cell }) catch {},
+            .decrement => cellOf(cell).scratch -= 1,
+            .mark_alive => if (cellOf(cell).scratch == 0) {
+                cellOf(cell).scratch = 1;
+                return true;
+            },
+        }
+        return false;
+    }
+
+    // a frame's variables: the vars map, and the slots it does not mirror
+    fn cycleFrameEdges(self: *VM, vars: *const std.StringHashMapUnmanaged(Value), locals: []const Value, func: ?*const ObjFunction, ref_slots: *const std.StringHashMapUnmanaged(*Value), action: CycleEdgeAction, vo: anytype, va: anytype) bool {
+        var changed = false;
+        var vit = vars.valueIterator();
+        while (vit.next()) |v| changed = self.cycleEdge(v.*, true, action, vo, va) or changed;
+        const names = if (func) |f| f.slot_names else &[_][]const u8{};
+        const vars_populated = vars.count() > 0;
+        for (locals, 0..) |v, i| {
+            if (vars_populated and i < names.len and names[i].len > 0 and vars.contains(names[i])) continue;
+            changed = self.cycleEdge(v, true, action, vo, va) or changed;
+        }
+        var rit = ref_slots.valueIterator();
+        while (rit.next()) |cell| changed = self.cycleCellEdge(cell.*, action) or changed;
+        return changed;
+    }
+
+    // php's zend_generator_get_gc: what a generator holds, unless it runs
+    // (then nothing it holds can be collected)
+    fn cycleGeneratorEdges(self: *VM, g: *Generator, action: CycleEdgeAction, vo: anytype, va: anytype) bool {
+        var changed = false;
+        changed = self.cycleEdge(g.current_value, true, action, vo, va) or changed;
+        changed = self.cycleEdge(g.current_key, true, action, vo, va) or changed;
+        changed = self.cycleEdge(g.return_value, true, action, vo, va) or changed;
+        if (g.closure) |closure| changed = self.cycleEdge(.{ .object = closure }, true, action, vo, va) or changed;
+        if (g.state == .running or g.state == .completed) return changed;
+        if (g.pending_throw) |ex| changed = self.cycleEdge(ex, true, action, vo, va) or changed;
+        if (g.delegate) |delegate| switch (delegate) {
+            .gen => |inner| changed = self.cycleEdge(.{ .generator = inner }, true, action, vo, va) or changed,
+            .array => |state| changed = self.cycleEdge(.{ .array = state.arr }, true, action, vo, va) or changed,
+            .iterator => |state| changed = self.cycleEdge(.{ .object = state.obj }, true, action, vo, va) or changed,
+        };
+        changed = self.cycleFrameEdges(&g.vars, g.locals.items, g.func, &g.ref_slots, action, vo, va) or changed;
+        // the saved operand stack counts what it holds, but no arrays
+        for (g.stack.items) |v| {
+            if (v == .array) {
+                changed = self.cycleEdge(v, false, action, vo, va) or changed;
+            } else changed = self.cycleEdge(v, true, action, vo, va) or changed;
+        }
+        return changed;
+    }
+
+    // php's zend_fiber_object_gc: its callable and result, and the frames
+    // of a suspended fiber
+    fn cycleFiberEdges(self: *VM, f: *Fiber, action: CycleEdgeAction, vo: anytype, va: anytype) bool {
+        var changed = false;
+        changed = self.cycleEdge(f.callable, true, action, vo, va) or changed;
+        changed = self.cycleEdge(f.return_value, true, action, vo, va) or changed;
+        if (f.state != .suspended) return changed;
+        changed = self.cycleEdge(f.suspend_value, true, action, vo, va) or changed;
+        for (f.saved_frames.items) |*frame| {
+            changed = self.cycleFrameEdges(&frame.vars, frame.locals, frame.func, &frame.ref_slots, action, vo, va) or changed;
+            if (frame.generator) |g| changed = self.cycleEdge(.{ .generator = g }, true, action, vo, va) or changed;
+        }
+        for (f.saved_stack.items) |v| {
+            if (v == .array) {
+                changed = self.cycleEdge(v, false, action, vo, va) or changed;
+            } else changed = self.cycleEdge(v, true, action, vo, va) or changed;
+        }
+        return changed;
+    }
+
+    fn cycleDecChild(self: *VM, v: Value, vo: anytype, va: anytype) void {
         switch (v) {
+            .generator => |g| if (self.cycle_gens.getPtr(g)) |scratch| {
+                scratch.* -= 1;
+            },
+            .fiber => |f| if (self.cycle_fibers.getPtr(f)) |scratch| {
+                scratch.* -= 1;
+            },
             .object => |o| if (vo.contains(o)) {
                 o.scratch_rc -= 1;
             },
@@ -25625,8 +25902,20 @@ pub const VM = struct {
         return changed;
     }
 
-    fn cycleMarkAliveChild(_: *VM, v: Value, vo: anytype, va: anytype) bool {
+    fn cycleMarkAliveChild(self: *VM, v: Value, vo: anytype, va: anytype) bool {
         switch (v) {
+            .generator => |g| if (self.cycle_gens.getPtr(g)) |scratch| {
+                if (scratch.* == 0) {
+                    scratch.* = 1;
+                    return true;
+                }
+            },
+            .fiber => |f| if (self.cycle_fibers.getPtr(f)) |scratch| {
+                if (scratch.* == 0) {
+                    scratch.* = 1;
+                    return true;
+                }
+            },
             .object => |o| {
                 if (vo.contains(o) and o.scratch_rc == 0) {
                     o.scratch_rc = 1;
@@ -26001,7 +26290,15 @@ pub const VM = struct {
     pub fn genRelease(self: *VM, gen: *@import("value.zig").Generator) void {
         if (gen.refcount == 0) return;
         gen.refcount -= 1;
-        if (gen.refcount != 0) return;
+        if (gen.refcount != 0) {
+            if (!gen.cycle_queued) {
+                gen.cycle_queued = true;
+                self.cycle_gen_candidates.append(self.allocator, gen) catch {
+                    gen.cycle_queued = false;
+                };
+            }
+            return;
+        }
         self.pending_gen_release.append(self.allocator, gen) catch {};
     }
 
@@ -26012,7 +26309,15 @@ pub const VM = struct {
     pub fn fiberRelease(self: *VM, fiber: *@import("value.zig").Fiber) void {
         if (fiber.refcount == 0) return;
         fiber.refcount -= 1;
-        if (fiber.refcount != 0) return;
+        if (fiber.refcount != 0) {
+            if (!fiber.cycle_queued) {
+                fiber.cycle_queued = true;
+                self.cycle_fiber_candidates.append(self.allocator, fiber) catch {
+                    fiber.cycle_queued = false;
+                };
+            }
+            return;
+        }
         self.pending_fiber_release.append(self.allocator, fiber) catch {};
     }
 

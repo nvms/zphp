@@ -836,6 +836,8 @@ pub const Generator = struct {
     // a yield from has just taken its delegate, which gives its first value
     // when the generator's resume goes on
     delegate_pending: bool = false,
+    // in the collector's candidate list
+    cycle_queued: bool = false,
     // php's ZEND_GENERATOR_FORCED_CLOSE: destroyed while suspended, it runs
     // its finally blocks and may not yield again
     forced_close: bool = false,
@@ -906,6 +908,8 @@ pub const Fiber = struct {
     threw: bool = false,
     // php's ZEND_FIBER_FLAG_DESTROYED: it is being force-closed
     destroyed: bool = false,
+    // in the collector's candidate list
+    cycle_queued: bool = false,
 
     pub const State = enum { created, running, suspended, terminated };
 
