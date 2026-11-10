@@ -10,6 +10,7 @@ const array_diff = @import("array_diff.zig");
 const array_sort = @import("array_sort.zig");
 const strings = @import("strings.zig");
 const phpTypeName = @import("types.zig").phpTypeName;
+const native_params = @import("native_params.zig");
 const NativeContext = vm_mod.NativeContext;
 const NativeResult = vm_mod.NativeResult;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
@@ -45,6 +46,20 @@ pub const entries = .{
     .{ "strripos", native_strripos },
     .{ "ucwords", native_ucwords },
     .{ "chunk_split", native_chunk_split },
+    .{ "str_pad", native_str_pad },
+    .{ "str_increment", native_str_increment },
+    .{ "str_decrement", native_str_decrement },
+    .{ "nl2br", native_nl2br },
+    .{ "wordwrap", native_wordwrap },
+    .{ "substr_replace", native_substr_replace },
+    .{ "ord", native_ord },
+    .{ "chr", native_chr },
+    .{ "count_chars", native_count_chars },
+    .{ "explode", native_explode },
+    .{ "soundex", native_soundex },
+    .{ "str_word_count", native_str_word_count },
+    .{ "convert_uuencode", native_convert_uuencode },
+    .{ "convert_uudecode", native_convert_uudecode },
 };
 
 const e_warning = 2;
@@ -99,8 +114,13 @@ pub const Args = struct {
         return throwFmt(self.ctx, "ValueError", "{s}(): Argument #{d} (${s}) " ++ text, .{ self.func, index + 1, name });
     }
 
+    // php names the type the parameter declares, not the one parsed
     fn nullDeprecated(self: Args, index: usize, name: []const u8, expected: []const u8) RuntimeError!void {
-        const msg = try std.fmt.allocPrint(self.ctx.allocator, "{s}(): Passing null to parameter #{d} (${s}) of type {s} is deprecated", .{ self.func, index + 1, name, expected });
+        var declared = expected;
+        if (native_params.get(self.func)) |sig| {
+            if (index < sig.params.len and sig.params[index].type.len > 0) declared = sig.params[index].type;
+        }
+        const msg = try std.fmt.allocPrint(self.ctx.allocator, "{s}(): Passing null to parameter #{d} (${s}) of type {s} is deprecated", .{ self.func, index + 1, name, declared });
         defer self.ctx.allocator.free(msg);
         try self.ctx.vm.raiseError(e_deprecated, msg);
     }
@@ -710,7 +730,7 @@ fn implode(ctx: *NativeContext, func: []const u8, args: []const Value) RuntimeEr
     const p = Args.init(ctx, func, args);
     // a direct call with two arguments is php's frameless implode, which
     // takes the separator as a string first
-    const first: Args.ArrayOrStr = if (args.len >= 2) .{ .string = try p.str(0, "separator") } else try p.arrayOrStr(0, "separator");
+    const first: Args.ArrayOrStr = if (args.len >= 2 and std.mem.eql(u8, func, "implode")) .{ .string = try p.str(0, "separator") } else try p.arrayOrStr(0, "separator");
     var pieces: ?*PhpArray = null;
     if (args.len >= 2) switch (args[1]) {
         .array => |a| pieces = a,
@@ -996,6 +1016,563 @@ fn native_chunk_split(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     while (i < s.len) : (i += n) {
         try out.appendSlice(ctx.allocator, s[i..@min(s.len, i + n)]);
         try out.appendSlice(ctx.allocator, end);
+    }
+    return NativeResult.copyString(ctx.allocator, out.items);
+}
+
+fn native_str_pad(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = Args.init(ctx, "str_pad", args);
+    const input = try p.str(0, "string");
+    const pad_length = try p.long(1, "length");
+    const pad = try p.optStr(2, "pad_string", " ");
+    const pad_type = try p.optLong(3, "pad_type", 1);
+    if (pad_length < 0 or pad_length <= input.len) return NativeResult.copyString(ctx.allocator, input);
+    if (pad.len == 0) return p.valueError(2, "pad_string", "must not be empty");
+    if (pad_type < 0 or pad_type > 2) return p.valueError(3, "pad_type", "must be STR_PAD_LEFT, STR_PAD_RIGHT, or STR_PAD_BOTH");
+    const num: usize = @as(usize, @intCast(pad_length)) - input.len;
+    const left: usize = switch (pad_type) {
+        0 => num,
+        2 => num / 2,
+        else => 0,
+    };
+    const out = try ctx.allocator.alloc(u8, @intCast(pad_length));
+    for (0..left) |i| out[i] = pad[i % pad.len];
+    @memcpy(out[left .. left + input.len], input);
+    for (0..num - left) |i| out[left + input.len + i] = pad[i % pad.len];
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
+}
+
+fn alnumCheck(p: Args, s: []const u8) RuntimeError!void {
+    if (s.len == 0) return p.valueError(0, "string", "must not be empty");
+    for (s) |c| {
+        if (!std.ascii.isAlphanumeric(c)) return p.valueError(0, "string", "must be composed only of alphanumeric ASCII characters");
+    }
+}
+
+fn native_str_increment(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = Args.init(ctx, "str_increment", args);
+    const s = try p.str(0, "string");
+    try alnumCheck(p, s);
+    const buf = try ctx.allocator.alloc(u8, s.len + 1);
+    defer ctx.allocator.free(buf);
+    @memcpy(buf[1..], s);
+    var pos = s.len;
+    var carry = false;
+    while (true) {
+        const c = buf[pos];
+        if (c != 'z' and c != 'Z' and c != '9') {
+            carry = false;
+            buf[pos] += 1;
+        } else {
+            carry = true;
+            buf[pos] = if (c == '9') '0' else c - 25;
+        }
+        if (!carry or pos == 1) break;
+        pos -= 1;
+    }
+    if (carry) {
+        buf[0] = if (buf[1] == '0') '1' else buf[1];
+        return NativeResult.copyString(ctx.allocator, buf);
+    }
+    return NativeResult.copyString(ctx.allocator, buf[1..]);
+}
+
+fn native_str_decrement(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = Args.init(ctx, "str_decrement", args);
+    const s = try p.str(0, "string");
+    try alnumCheck(p, s);
+    if (s[0] == '0') return throwFmt(ctx, "ValueError", "str_decrement(): Argument #1 ($string) \"{s}\" is out of decrement range", .{s});
+    const buf = try ctx.allocator.dupe(u8, s);
+    defer ctx.allocator.free(buf);
+    var pos = s.len - 1;
+    var carry = false;
+    while (true) {
+        const c = buf[pos];
+        if (c != 'a' and c != 'A' and c != '0') {
+            carry = false;
+            buf[pos] -= 1;
+        } else {
+            carry = true;
+            buf[pos] = if (c == '0') '9' else c + 25;
+        }
+        if (!carry or pos == 0) break;
+        pos -= 1;
+    }
+    if (carry or (buf[0] == '0' and buf.len > 1)) {
+        if (buf.len == 1) return throwFmt(ctx, "ValueError", "str_decrement(): Argument #1 ($string) \"{s}\" is out of decrement range", .{s});
+        return NativeResult.copyString(ctx.allocator, buf[1..]);
+    }
+    return NativeResult.copyString(ctx.allocator, buf);
+}
+
+fn native_nl2br(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = Args.init(ctx, "nl2br", args);
+    const s = try p.str(0, "string");
+    const xhtml = try p.boolean(1, "use_xhtml", true);
+    const br: []const u8 = if (xhtml) "<br />" else "<br>";
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(ctx.allocator);
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+        if (c == '\r' or c == '\n') {
+            try out.appendSlice(ctx.allocator, br);
+            const next: u8 = if (i + 1 < s.len) s[i + 1] else 0;
+            if ((c == '\r' and next == '\n') or (c == '\n' and next == '\r')) {
+                try out.append(ctx.allocator, c);
+                i += 1;
+            }
+            try out.append(ctx.allocator, s[i]);
+        } else try out.append(ctx.allocator, c);
+    }
+    return NativeResult.copyString(ctx.allocator, out.items);
+}
+
+fn native_wordwrap(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = Args.init(ctx, "wordwrap", args);
+    const text = try p.str(0, "string");
+    const linelength = try p.optLong(1, "width", 75);
+    const brk = try p.optStr(2, "break", "\n");
+    const docut = try p.boolean(3, "cut_long_words", false);
+    if (text.len == 0) return NativeResult.literal("");
+    if (brk.len == 0) return p.valueError(2, "break", "must not be empty");
+    if (linelength == 0 and docut) return p.valueError(3, "cut_long_words", "cannot be true when argument #2 ($width) is 0");
+    const len: i64 = @intCast(text.len);
+    if (brk.len == 1 and !docut) {
+        const out = try ctx.allocator.dupe(u8, text);
+        var laststart: i64 = 0;
+        var lastspace: i64 = 0;
+        var current: i64 = 0;
+        while (current < len) : (current += 1) {
+            const c = text[@intCast(current)];
+            if (c == brk[0]) {
+                laststart = current + 1;
+                lastspace = current + 1;
+            } else if (c == ' ') {
+                if (current - laststart >= linelength) {
+                    out[@intCast(current)] = brk[0];
+                    laststart = current + 1;
+                }
+                lastspace = current;
+            } else if (current - laststart >= linelength and laststart != lastspace) {
+                out[@intCast(lastspace)] = brk[0];
+                laststart = lastspace + 1;
+            }
+        }
+        return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
+    }
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(ctx.allocator);
+    var laststart: i64 = 0;
+    var lastspace: i64 = 0;
+    var current: i64 = 0;
+    while (current < len) : (current += 1) {
+        const cu: usize = @intCast(current);
+        const ls: usize = @intCast(laststart);
+        if (text[cu] == brk[0] and cu + brk.len <= text.len and std.mem.eql(u8, text[cu .. cu + brk.len], brk)) {
+            try out.appendSlice(ctx.allocator, text[ls .. cu + brk.len]);
+            current += @as(i64, @intCast(brk.len)) - 1;
+            laststart = current + 1;
+            lastspace = current + 1;
+        } else if (text[cu] == ' ') {
+            if (current - laststart >= linelength) {
+                try out.appendSlice(ctx.allocator, text[ls..cu]);
+                try out.appendSlice(ctx.allocator, brk);
+                laststart = current + 1;
+            }
+            lastspace = current;
+        } else if (current - laststart >= linelength and docut and laststart >= lastspace) {
+            try out.appendSlice(ctx.allocator, text[ls..cu]);
+            try out.appendSlice(ctx.allocator, brk);
+            laststart = current;
+            lastspace = current;
+        } else if (current - laststart >= linelength and laststart < lastspace) {
+            try out.appendSlice(ctx.allocator, text[ls..@intCast(lastspace)]);
+            try out.appendSlice(ctx.allocator, brk);
+            laststart = lastspace + 1;
+            lastspace = laststart;
+        }
+    }
+    if (laststart != current) try out.appendSlice(ctx.allocator, text[@intCast(laststart)..@intCast(current)]);
+    return NativeResult.copyString(ctx.allocator, out.items);
+}
+
+const ArrayOrLong = union(enum) { array: *PhpArray, long: i64, none };
+
+fn arrayOrLong(p: Args, index: usize, name: []const u8, nullable: bool) RuntimeError!ArrayOrLong {
+    if (index >= p.args.len) return .none;
+    const v = p.args[index];
+    if (v == .array) return .{ .array = v.array };
+    if (nullable and (v == .null or v == .undef)) return .none;
+    return .{ .long = try p.longAs(index, name, if (nullable) "array|int|null" else "array|int") };
+}
+
+// the next element of a parallel array in substr_replace
+fn nextElement(arr: *PhpArray, idx: *usize) ?Value {
+    if (idx.* >= arr.entries.items.len) return null;
+    const v = entryValue(arr.entries.items[idx.*]);
+    idx.* += 1;
+    return v;
+}
+
+fn native_substr_replace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = Args.init(ctx, "substr_replace", args);
+    const str = try p.arrayOrStr(0, "string");
+    const repl = try p.arrayOrStr(1, "replace");
+    const from = try arrayOrLong(p, 2, "offset", false);
+    const length = try arrayOrLong(p, 3, "length", true);
+    switch (str) {
+        .string => |s| {
+            if (from == .array) return throwFmt(ctx, "TypeError", "substr_replace(): Argument #3 ($offset) cannot be an array when working on a single string", .{});
+            if (length == .array) return throwFmt(ctx, "TypeError", "substr_replace(): Argument #4 ($length) cannot be an array when working on a single string", .{});
+            const slen: i64 = @intCast(s.len);
+            var l: i64 = if (length == .long) length.long else slen;
+            var f = from.long;
+            if (f < 0) {
+                f = @max(0, slen + f);
+            } else if (f > slen) f = slen;
+            if (l < 0) l = @max(0, (slen - f) + l);
+            if (l > slen) l = slen;
+            if (f + l > slen) l = slen - f;
+            const r: []const u8 = switch (repl) {
+                .string => |r| r,
+                .array => |arr| blk: {
+                    var idx: usize = 0;
+                    break :blk if (nextElement(arr, &idx)) |v| try elementString(ctx, v) else "";
+                },
+            };
+            const fu: usize = @intCast(f);
+            const lu: usize = @intCast(l);
+            var out: std.ArrayListUnmanaged(u8) = .empty;
+            defer out.deinit(ctx.allocator);
+            try out.appendSlice(ctx.allocator, s[0..fu]);
+            try out.appendSlice(ctx.allocator, r);
+            try out.appendSlice(ctx.allocator, s[fu + lu ..]);
+            return NativeResult.copyString(ctx.allocator, out.items);
+        },
+        .array => |arr| {
+            const result = try ctx.createArray();
+            var from_idx: usize = 0;
+            var len_idx: usize = 0;
+            var repl_idx: usize = 0;
+            for (arr.entries.items) |entry| {
+                const orig = try elementString(ctx, entryValue(entry));
+                const olen: i64 = @intCast(orig.len);
+                var f: i64 = switch (from) {
+                    .array => |fa| if (nextElement(fa, &from_idx)) |v| Value.toInt(v) else 0,
+                    .long => |n| n,
+                    .none => 0,
+                };
+                if (f < 0) {
+                    f = @max(0, olen + f);
+                } else if (f > olen) f = olen;
+                var l: i64 = switch (length) {
+                    .array => |la| if (nextElement(la, &len_idx)) |v| Value.toInt(v) else olen,
+                    .long => |n| n,
+                    .none => olen,
+                };
+                if (l < 0) l = @max(0, (olen - f) + l);
+                if (f + l > olen) l = olen - f;
+                const r: []const u8 = switch (repl) {
+                    .string => |r| r,
+                    .array => |ra| if (nextElement(ra, &repl_idx)) |v| try elementString(ctx, v) else "",
+                };
+                const fu: usize = @intCast(f);
+                const lu: usize = @intCast(l);
+                var out: std.ArrayListUnmanaged(u8) = .empty;
+                defer out.deinit(ctx.allocator);
+                try out.appendSlice(ctx.allocator, orig[0..fu]);
+                try out.appendSlice(ctx.allocator, r);
+                try out.appendSlice(ctx.allocator, orig[fu + lu ..]);
+                const piece = try Value.String.create(ctx.allocator, out.items);
+                defer piece.release();
+                try result.set(ctx.allocator, entry.key, .{ .string = piece });
+            }
+            return NativeResult.borrowed(.{ .array = result });
+        },
+    }
+}
+
+fn native_ord(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = Args.init(ctx, "ord", args);
+    const s = try p.str(0, "character");
+    if (s.len != 1) {
+        const msg = if (s.len == 0) "ord(): Providing an empty string is deprecated" else "ord(): Providing a string that is not one byte long is deprecated. Use ord($str[0]) instead";
+        try ctx.vm.raiseError(e_deprecated, msg);
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+    }
+    return NativeResult.scalar(.{ .int = if (s.len > 0) s[0] else 0 });
+}
+
+fn native_chr(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = Args.init(ctx, "chr", args);
+    const c = try p.long(0, "codepoint");
+    if (c < 0 or c > 255) {
+        try ctx.vm.raiseError(e_deprecated, "chr(): Providing a value not in-between 0 and 255 is deprecated, this is because a byte value must be in the [0, 255] interval. The value used will be constrained using % 256");
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+    }
+    const byte: u8 = @intCast(c & 0xff);
+    return NativeResult.copyString(ctx.allocator, &.{byte});
+}
+
+fn native_count_chars(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = Args.init(ctx, "count_chars", args);
+    const s = try p.str(0, "string");
+    const mode = try p.optLong(1, "mode", 0);
+    if (mode < 0 or mode > 4) return p.valueError(1, "mode", "must be between 0 and 4 (inclusive)");
+    var counts: [256]i64 = @splat(0);
+    for (s) |c| counts[c] += 1;
+    if (mode >= 3) {
+        var out: [256]u8 = undefined;
+        var n: usize = 0;
+        for (counts, 0..) |count, i| {
+            if ((mode == 3) == (count != 0)) {
+                out[n] = @intCast(i);
+                n += 1;
+            }
+        }
+        return NativeResult.copyString(ctx.allocator, out[0..n]);
+    }
+    const arr = try ctx.createArray();
+    for (counts, 0..) |count, i| {
+        const keep = switch (mode) {
+            1 => count != 0,
+            2 => count == 0,
+            else => true,
+        };
+        if (keep) try arr.set(ctx.allocator, .{ .int = @intCast(i) }, .{ .int = count });
+    }
+    return NativeResult.borrowed(.{ .array = arr });
+}
+
+fn native_explode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = Args.init(ctx, "explode", args);
+    const delim = try p.str(0, "separator");
+    const str = try p.str(1, "string");
+    const limit = try p.optLong(2, "limit", std.math.maxInt(i64));
+    if (delim.len == 0) return p.valueError(0, "separator", "must not be empty");
+    const arr = try ctx.createArray();
+    if (str.len == 0) {
+        if (limit >= 0) try appendPiece(ctx, arr, "");
+        return NativeResult.borrowed(.{ .array = arr });
+    }
+    if (limit > 1) {
+        var p1: usize = 0;
+        var remaining = limit;
+        var found = std.mem.indexOfPos(u8, str, 0, delim);
+        if (found == null) {
+            try appendPiece(ctx, arr, str);
+        } else {
+            while (found) |p2| {
+                try appendPiece(ctx, arr, str[p1..p2]);
+                p1 = p2 + delim.len;
+                found = std.mem.indexOfPos(u8, str, p1, delim);
+                remaining -= 1;
+                if (remaining <= 1) break;
+            }
+            try appendPiece(ctx, arr, str[p1..]);
+        }
+    } else if (limit < 0) {
+        var positions: std.ArrayListUnmanaged(usize) = .empty;
+        defer positions.deinit(ctx.allocator);
+        var found = std.mem.indexOfPos(u8, str, 0, delim);
+        if (found != null) {
+            try positions.append(ctx.allocator, 0);
+            while (found) |p2| {
+                const next = p2 + delim.len;
+                try positions.append(ctx.allocator, next);
+                found = std.mem.indexOfPos(u8, str, next, delim);
+            }
+            const n: i64 = @as(i64, @intCast(positions.items.len)) + limit;
+            var i: usize = 0;
+            while (@as(i64, @intCast(i)) < n) : (i += 1) {
+                try appendPiece(ctx, arr, str[positions.items[i] .. positions.items[i + 1] - delim.len]);
+            }
+        }
+    } else {
+        try appendPiece(ctx, arr, str);
+    }
+    return NativeResult.borrowed(.{ .array = arr });
+}
+
+fn appendPiece(ctx: *NativeContext, arr: *PhpArray, bytes: []const u8) RuntimeError!void {
+    const piece = try Value.String.create(ctx.allocator, bytes);
+    defer piece.release();
+    try arr.append(ctx.allocator, .{ .string = piece });
+}
+
+fn native_soundex(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = Args.init(ctx, "soundex", args);
+    const s = try p.str(0, "string");
+    const table = [26]u8{ 0, '1', '2', '3', 0, '1', '2', 0, 0, '2', '2', '4', '5', '5', 0, '1', '2', '6', '2', '3', 0, '1', 0, '2', 0, '2' };
+    var out: [4]u8 = undefined;
+    var small: usize = 0;
+    var last: u8 = 0xff;
+    for (s) |raw| {
+        if (small >= 4) break;
+        const code = std.ascii.toUpper(raw);
+        if (code < 'A' or code > 'Z') continue;
+        if (small == 0) {
+            out[0] = code;
+            small = 1;
+            last = table[code - 'A'];
+        } else {
+            const mapped = table[code - 'A'];
+            if (mapped != last) {
+                if (mapped != 0) {
+                    out[small] = mapped;
+                    small += 1;
+                }
+                last = mapped;
+            }
+        }
+    }
+    while (small < 4) : (small += 1) out[small] = '0';
+    return NativeResult.copyString(ctx.allocator, &out);
+}
+
+fn native_str_word_count(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = Args.init(ctx, "str_word_count", args);
+    const s = try p.str(0, "string");
+    const format = try p.optLong(1, "format", 0);
+    const char_list = try p.strOrNull(2, "characters");
+    switch (format) {
+        0 => if (s.len == 0) return NativeResult.scalar(.{ .int = 0 }),
+        1, 2 => if (s.len == 0) return NativeResult.borrowed(.{ .array = try ctx.createArray() }),
+        else => return p.valueError(1, "format", "must be a valid format value"),
+    }
+    var ch: [256]bool = @splat(false);
+    if (char_list) |list| ch = try charmask(ctx, "str_word_count", list);
+    const listed = char_list != null;
+    var pos: usize = 0;
+    var e: usize = s.len;
+    if ((s[0] == '\'' and (!listed or !ch['\''])) or (s[0] == '-' and (!listed or !ch['-']))) pos += 1;
+    if (s[e - 1] == '-' and (!listed or !ch['-'])) e -= 1;
+    const arr: ?*PhpArray = if (format != 0) try ctx.createArray() else null;
+    var count: i64 = 0;
+    while (pos < e) {
+        const start = pos;
+        while (pos < e and (std.ascii.isAlphabetic(s[pos]) or (listed and ch[s[pos]]) or s[pos] == '\'' or s[pos] == '-')) pos += 1;
+        if (pos > start) {
+            if (arr) |a| {
+                const word = try Value.String.create(ctx.allocator, s[start..pos]);
+                defer word.release();
+                if (format == 1) try a.append(ctx.allocator, .{ .string = word }) else try a.set(ctx.allocator, .{ .int = @intCast(start) }, .{ .string = word });
+            } else count += 1;
+        }
+        pos += 1;
+    }
+    if (arr) |a| return NativeResult.borrowed(.{ .array = a });
+    return NativeResult.scalar(.{ .int = count });
+}
+
+fn uuEnc(c: u8) u8 {
+    return if (c != 0) (c & 0o77) + ' ' else '`';
+}
+
+fn uuDec(c: u8) u8 {
+    return (c -% ' ') & 0o77;
+}
+
+// php_uuencode; reads past the end see the string's terminating nul
+fn uuencode(allocator: std.mem.Allocator, src: []const u8, out: *std.ArrayListUnmanaged(u8)) !void {
+    const at = struct {
+        fn f(b: []const u8, i: usize) u8 {
+            return if (i < b.len) b[i] else 0;
+        }
+    }.f;
+    var len: usize = 45;
+    var s: usize = 0;
+    const e = src.len;
+    while (s + 3 < e) {
+        var ee = s + len;
+        if (ee > e) {
+            ee = e;
+            len = ee - s;
+            if (len % 3 != 0) ee = s + (len / 3) * 3;
+        }
+        try out.append(allocator, uuEnc(@intCast(len)));
+        while (s < ee) : (s += 3) {
+            try out.append(allocator, uuEnc(at(src, s) >> 2));
+            try out.append(allocator, uuEnc(((at(src, s) << 4) & 0o60) | ((at(src, s + 1) >> 4) & 0o17)));
+            try out.append(allocator, uuEnc(((at(src, s + 1) << 2) & 0o74) | ((at(src, s + 2) >> 6) & 0o3)));
+            try out.append(allocator, uuEnc(at(src, s + 2) & 0o77));
+        }
+        if (len == 45) try out.append(allocator, '\n');
+    }
+    if (s < e) {
+        if (len == 45) {
+            try out.append(allocator, uuEnc(@intCast(e - s)));
+            len = 0;
+        }
+        try out.append(allocator, uuEnc(at(src, s) >> 2));
+        try out.append(allocator, uuEnc(((at(src, s) << 4) & 0o60) | ((at(src, s + 1) >> 4) & 0o17)));
+        try out.append(allocator, if (e - s > 1) uuEnc(((at(src, s + 1) << 2) & 0o74) | ((at(src, s + 2) >> 6) & 0o3)) else uuEnc(0));
+        try out.append(allocator, if (e - s > 2) uuEnc(at(src, s + 2) & 0o77) else uuEnc(0));
+    }
+    if (len < 45) try out.append(allocator, '\n');
+    try out.append(allocator, uuEnc(0));
+    try out.append(allocator, '\n');
+}
+
+// php_uudecode; false when the data is not uuencoded
+fn uudecode(allocator: std.mem.Allocator, src: []const u8, out: *std.ArrayListUnmanaged(u8)) !bool {
+    if (src.len == 0) return false;
+    const at = struct {
+        fn f(b: []const u8, i: usize) u8 {
+            return if (i < b.len) b[i] else 0;
+        }
+    }.f;
+    var total: usize = 0;
+    var s: usize = 0;
+    const e = src.len;
+    while (s < e) {
+        const len: usize = uuDec(src[s]);
+        s += 1;
+        if (len == 0) break;
+        if (len > src.len) return false;
+        total += len;
+        const ee = s + (if (len == 45) 60 else @as(usize, @intFromFloat(@floor(@as(f64, @floatFromInt(len)) * 1.33))));
+        if (ee > e) return false;
+        while (s < ee) : (s += 4) {
+            if (s + 4 > e) return false;
+            try out.append(allocator, uuDec(src[s]) << 2 | uuDec(src[s + 1]) >> 4);
+            try out.append(allocator, uuDec(src[s + 1]) << 4 | uuDec(src[s + 2]) >> 2);
+            try out.append(allocator, uuDec(src[s + 2]) << 6 | uuDec(src[s + 3]));
+        }
+        if (len < 45) break;
+        s += 1;
+    }
+    if (total > out.items.len) {
+        try out.append(allocator, uuDec(at(src, s)) << 2 | uuDec(at(src, s + 1)) >> 4);
+        if (total > 1) {
+            try out.append(allocator, uuDec(at(src, s + 1)) << 4 | uuDec(at(src, s + 2)) >> 2);
+            if (total > 2) try out.append(allocator, uuDec(at(src, s + 2)) << 6 | uuDec(at(src, s + 3)));
+        }
+    }
+    // the length the lines declare, which can be shorter than what was decoded
+    if (total < out.items.len) out.shrinkRetainingCapacity(total);
+    while (out.items.len < total) try out.append(allocator, 0);
+    return true;
+}
+
+fn native_convert_uuencode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = Args.init(ctx, "convert_uuencode", args);
+    const s = try p.str(0, "string");
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(ctx.allocator);
+    try uuencode(ctx.allocator, s, &out);
+    return NativeResult.copyString(ctx.allocator, out.items);
+}
+
+fn native_convert_uudecode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = Args.init(ctx, "convert_uudecode", args);
+    const s = try p.str(0, "string");
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(ctx.allocator);
+    if (!try uudecode(ctx.allocator, s, &out)) {
+        try docref(ctx, "convert_uudecode", "Argument #1 ($data) is not a valid uuencoded string");
+        return NativeResult.scalar(.{ .bool = false });
     }
     return NativeResult.copyString(ctx.allocator, out.items);
 }
