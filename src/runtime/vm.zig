@@ -1574,6 +1574,9 @@ pub const VM = struct {
         // typed reference: the TypeError is pending and the call raises it
         // once the native returns (ZEND_TRY_ASSIGN_REF_*)
         ref_write_refused: bool = false,
+        // where warnings raised while checking a call's arguments are
+        // reported: php coerces them in the callee's RECV, at its declaration
+        arg_check_site: ?SourcePosition = null,
         // classes whose deferred property defaults have not run yet; while it
         // is zero a static access skips the resolution check
         pending_defaults: u32 = 0,
@@ -13879,6 +13882,10 @@ pub const VM = struct {
         // errors raised inside the handler take the default path
         self.user_error_handler = null;
         defer self.reinstateErrorHandler(handler);
+        // code the handler runs reports its own positions
+        const saved_site = self.ic.?.arg_check_site;
+        self.ic.?.arg_check_site = null;
+        defer self.ic.?.arg_check_site = saved_site;
         var ctx = self.makeContext(null);
         const result = ctx.invokeCallable(handler, &.{ .{ .int = level }, message, .{ .string = Value.String.borrowed(at.file) }, .{ .int = at.line } }) catch |err| {
             if (self.pending_exception != null) return err;
@@ -14101,6 +14108,7 @@ pub const VM = struct {
 
     // the file and line the executing frame is at
     pub fn currentSourcePosition(self: *VM) SourcePosition {
+        if (self.ic) |ic| if (ic.arg_check_site) |site| return site;
         if (self.frame_count == 0) return .{ .file = self.file_path, .line = 0 };
         // an initializer (a constant expression: "\x00const...", attribute
         // arguments, deferred defaults) runs for the code that needed its
@@ -14926,7 +14934,7 @@ pub const VM = struct {
     }
 
     fn throwIncdecRef(self: *VM, src: TypeSource, up: bool) RuntimeError {
-        const msg = std.fmt.allocPrint(self.allocator, "Cannot {s} a reference held by property {s}::${s} of type {s} past its {s} value", .{ if (up) "increment" else "decrement", src.class, src.prop, src.type_str, if (up) "maximal" else "minimal" }) catch return error.RuntimeError;
+        const msg = std.fmt.allocPrint(self.allocator, "Cannot {s} a reference held by property {s}::${s} of type {s} past its {s} value", .{ if (up) "increment" else "decrement", src.class, src.prop, try self.resolvedTypeText(src.type_str, src.class), if (up) "maximal" else "minimal" }) catch return error.RuntimeError;
         defer self.allocator.free(msg);
         try self.setPendingException("TypeError", msg);
         return error.RuntimeError;
@@ -17831,7 +17839,7 @@ pub const VM = struct {
             if (result < 0) {
                 if (try self.weakScalarHint(php_types.shape(vr.type_str).mask, val) != null) {
                     const first = sources[0];
-                    const msg = try std.fmt.allocPrint(self.allocator, "Reference with value of type {s} held by property {s}::${s} of type {s} is not compatible with property {s}::${s} of type {s}", .{ Value.typeName(val), first.class, first.prop, first.type_str, vr.defining_class, prop_name, vr.type_str });
+                    const msg = try std.fmt.allocPrint(self.allocator, "Reference with value of type {s} held by property {s}::${s} of type {s} is not compatible with property {s}::${s} of type {s}", .{ Value.typeName(val), first.class, first.prop, try self.resolvedTypeText(first.type_str, first.class), vr.defining_class, prop_name, vr.type_str });
                     defer self.allocator.free(msg);
                     try self.setPendingException("TypeError", msg);
                     return error.RuntimeError;
@@ -21663,25 +21671,72 @@ pub const VM = struct {
             const type_str = ti.param_types[type_index];
             if (type_str.len == 0) continue;
             const val = slot.*;
-            if (!self.checkTypeMatch(val, type_str)) {
-                if (!strict) {
-                    if (try self.tryWeakCoerce(val, type_str)) |coerced| {
-                        self.replaceArg(slot, coerced, caller);
-                        continue;
-                    }
-                }
-                return try self.argTypeError(name, func, .{ .args = args, .index = i, .type_str = type_str, .variadic = variadic and type_index == ti.param_types.len - 1, .internal_caller = caller.internal });
+            // zend_verify_arg_type, which runs in the callee
+            const ic = self.ic.?;
+            const saved_site = ic.arg_check_site;
+            if (func) |f| if (f.file_path.len > 0) {
+                ic.arg_check_site = .{ .file = f.file_path, .line = f.start_line };
+            };
+            const checked = self.verifyDeclaredType(val, type_str, self.functionScope(name), strict);
+            ic.arg_check_site = saved_site;
+            if (try checked) |accepted| {
+                if (@intFromEnum(accepted) != @intFromEnum(val) or !Value.identical(accepted, val)) self.replaceArg(slot, accepted, caller);
+                continue;
             }
-            if (val == .object and self.typeStrAllowsString(type_str) and self.hasMethod(val.object.class_name, "__toString")) {
-                const text = self.transientOwned(try self.objectString(val.object));
-                self.replaceArg(slot, .{ .string = text }, caller);
-            } else if (!strict) {
-                // a value that passes still takes the declared scalar type in
-                // weak mode (int 5 into a float parameter is float(5))
-                if (try self.coerceToDeclaredScalar(val, type_str)) |coerced| self.replaceArg(slot, coerced, caller);
-            }
+            return try self.argTypeError(name, func, .{ .args = args, .index = i, .type_str = type_str, .variadic = variadic and type_index == ti.param_types.len - 1, .internal_caller = caller.internal });
         }
         return null;
+    }
+
+    // the class a method's self and parent name: the part of its registered
+    // name before "::". functions and closures have none here
+    fn functionScope(self: *VM, name: []const u8) ?[]const u8 {
+        const sep = std.mem.indexOf(u8, name, "::") orelse return null;
+        // a trait method's self is the class using it, not known here
+        if (self.traits.contains(name[0..sep])) return null;
+        return name[0..sep];
+    }
+
+    // zend_check_type: the value as a parameter or return value of the
+    // declared type takes it, or null when the type refuses it
+    fn verifyDeclaredType(self: *VM, val: Value, type_str: []const u8, scope: ?[]const u8, strict: bool) RuntimeError!?Value {
+        const shape = php_types.shape(type_str);
+        if (self.typeHoldsExactly(val, type_str, shape, scope orelse "")) return val;
+        if (self.representationHolds(val, type_str, shape, scope)) return val;
+        if (shape.mask & php_types.CALLABLE != 0 and self.isValueCallable(val)) return val;
+        if (strict) {
+            if (shape.mask & php_types.DOUBLE == 0 or val != .int) return null;
+        } else if (val == .null) return null;
+        return try self.weakScalarHint(shape.mask, val);
+    }
+
+    // values zphp represents differently from php that a declared type
+    // still takes: closures are named strings, a self/parent/static whose
+    // class isn't known here takes any object, and the spl iterator types
+    // take the arrays some built-ins hand back in place of their iterators
+    fn representationHolds(self: *VM, val: Value, type_str: []const u8, shape: php_types.Shape, scope: ?[]const u8) bool {
+        _ = self;
+        if (val == .string and std.mem.startsWith(u8, val.string.bytes(), "__closure_")) {
+            if (shape.mask & php_types.OBJECT != 0) return true;
+        }
+        if (!shape.classes and shape.mask & php_types.STATIC == 0) return false;
+        var body = std.mem.trim(u8, type_str, " ");
+        if (body.len > 0 and body[0] == '?') body = body[1..];
+        var it = std.mem.splitScalar(u8, body, '|');
+        while (it.next()) |raw| {
+            const member = std.mem.trim(u8, raw, " ()");
+            const bare = if (member.len > 0 and member[0] == '\\') member[1..] else member;
+            switch (val) {
+                .string => |str| if (std.ascii.eqlIgnoreCase(bare, "Closure") and std.mem.startsWith(u8, str.bytes(), "__closure_")) return true,
+                .array => if (std.ascii.eqlIgnoreCase(bare, "Traversable") or std.ascii.eqlIgnoreCase(bare, "Iterator") or std.ascii.eqlIgnoreCase(bare, "IteratorAggregate")) return true,
+                .object, .generator => {
+                    if (std.ascii.eqlIgnoreCase(bare, "static")) return true;
+                    if (scope == null and (std.ascii.eqlIgnoreCase(bare, "self") or std.ascii.eqlIgnoreCase(bare, "parent"))) return true;
+                },
+                else => {},
+            }
+        }
+        return false;
     }
 
     const ArgTypeFailure = struct {
@@ -21710,12 +21765,13 @@ pub const VM = struct {
             if (self.sourceLocation(caller.chunk, cip)) |loc| cs_line = loc.line;
         }
         const shown = try self.callableDisplayName(name, func);
+        const type_shown = try self.resolvedTypeText(failure.type_str, self.functionScope(name));
         const site = if (failure.internal_caller) "" else std.fmt.allocPrint(self.allocator, ", called in {s} on line {d}", .{ cs_file, cs_line }) catch return error.RuntimeError;
         defer if (!failure.internal_caller) self.allocator.free(site);
         const msg = if (param_name.len > 0)
-            std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} ({s}) must be of type {s}, {s} given{s}", .{ shown, i + 1, param_name, failure.type_str, valueTypeName(val), site }) catch return error.RuntimeError
+            std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} ({s}) must be of type {s}, {s} given{s}", .{ shown, i + 1, param_name, type_shown, valueTypeName(val), site }) catch return error.RuntimeError
         else
-            std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} must be of type {s}, {s} given{s}", .{ shown, i + 1, failure.type_str, valueTypeName(val), site }) catch return error.RuntimeError;
+            std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} must be of type {s}, {s} given{s}", .{ shown, i + 1, type_shown, valueTypeName(val), site }) catch return error.RuntimeError;
         defer self.allocator.free(msg);
         // php raises it inside the callee, at its declaration
         const at: ?SourcePosition = if (func) |f| if (f.file_path.len > 0) SourcePosition{ .file = f.file_path, .line = f.start_line } else null else null;
@@ -21753,38 +21809,19 @@ pub const VM = struct {
         const func_name = if (frame.func) |f| f.name else return false;
         const ti = g_type_info.get(func_name) orelse return false;
         if (ti.return_type.len == 0) return false;
-        if (!self.checkTypeMatch(val.*, ti.return_type)) {
-            // non-strict mode coerces the return value into the declared type
-            // (a numeric string returned from a `: int` function, etc.) before
-            // giving up with a TypeError - same as the parameter path
-            const fn_strict = if (frame.func) |f| f.strict_types else self.script_strict_types;
-            if (!fn_strict) {
-                if (try self.tryWeakCoerce(val.*, ti.return_type)) |coerced| {
-                    self.replaceOwned(val, coerced);
-                    return false;
-                }
-            }
+        // the function's own strict_types decides (ZEND_RET_USES_STRICT_TYPES)
+        const fn_strict = if (frame.func) |f| f.strict_types else self.script_strict_types;
+        const accepted = if (std.mem.eql(u8, ti.return_type, "void")) (if (val.* == .null) val.* else null) else try self.verifyDeclaredType(val.*, ti.return_type, self.functionScope(func_name), fn_strict);
+        if (accepted == null) {
             const shown = if (frame.func) |f| (if (f.display_name.len > 0) f.display_name else func_name) else func_name;
-            const msg = std.fmt.allocPrint(self.allocator, "{s}(): Return value must be of type {s}, {s} returned", .{ shown, ti.return_type, valueTypeName(val.*) }) catch return error.RuntimeError;
+            const msg = std.fmt.allocPrint(self.allocator, "{s}(): Return value must be of type {s}, {s} returned", .{ shown, try self.resolvedTypeText(ti.return_type, self.functionScope(func_name)), valueTypeName(val.*) }) catch return error.RuntimeError;
             defer self.allocator.free(msg);
             try self.popFrame();
             if (try self.throwBuiltinException("TypeError", msg)) return true;
             self.setErrorMsg("{s}", .{msg});
             return error.RuntimeError;
         }
-        // coerce Stringable -> string when return type allows string
-        if (val.* == .object and self.typeStrAllowsString(ti.return_type) and self.hasMethod(val.object.class_name, "__toString")) {
-            self.replaceOwned(val, .{ .string = self.transientOwned(try self.objectString(val.object)) });
-        } else {
-            // non-strict return coercion: `function f(): int { return "100"; }`
-            // returns int(100). gated on the function's own strict_types
-            const fn_strict = if (frame.func) |f| f.strict_types else self.script_strict_types;
-            if (!fn_strict) {
-                if (try self.coerceToDeclaredScalar(val.*, ti.return_type)) |coerced| {
-                    self.replaceOwned(val, coerced);
-                }
-            }
-        }
+        if (@intFromEnum(accepted.?) != @intFromEnum(val.*) or !Value.identical(accepted.?, val.*)) self.replaceOwned(val, accepted.?);
         return false;
     }
 
@@ -21854,13 +21891,15 @@ pub const VM = struct {
 
     // a declared type as php prints it in errors (zend_type_to_string_resolved):
     // self and parent name the classes they stand for
-    pub fn resolvedTypeText(self: *VM, type_str: []const u8, decl_class: []const u8) RuntimeError![]const u8 {
-        const relative = for (0..type_str.len) |i| {
+    // and the members print in php's order (zend_type_to_string)
+    pub fn resolvedTypeText(self: *VM, type_str: []const u8, decl_class: ?[]const u8) RuntimeError![]const u8 {
+        const plain = for (type_str, 0..) |c, i| {
+            if (c == '|' or c == '?' or c == '&' or c == '(') break false;
             const rest = type_str[i..];
-            if (std.ascii.startsWithIgnoreCase(rest, "self") or std.ascii.startsWithIgnoreCase(rest, "parent")) break true;
-        } else false;
-        if (!relative) return type_str;
-        const parent = if (self.classes.get(decl_class)) |c| c.parent else null;
+            if (std.ascii.startsWithIgnoreCase(rest, "self") or std.ascii.startsWithIgnoreCase(rest, "parent") or std.ascii.startsWithIgnoreCase(rest, "iterable")) break false;
+        } else true;
+        if (plain) return type_str;
+        const parent = if (decl_class) |dc| (if (self.classes.get(dc)) |c| c.parent else null) else null;
         const t = php_types.parse(self.allocator, type_str, decl_class, parent) catch return error.OutOfMemory;
         defer t.deinit(self.allocator);
         const text = php_types.format(self.allocator, t) catch return error.OutOfMemory;
@@ -21943,14 +21982,20 @@ pub const VM = struct {
             else => {},
         };
         if (mask & php_types.STRING != 0) switch (val) {
-            .int, .float, .bool => return try self.coerceToStringValue(val),
+            .int, .float, .bool => {
+                if (val == .float and std.math.isNan(val.float)) try self.emitWarning("unexpected NAN value was coerced to string");
+                return try self.coerceToStringValue(val);
+            },
             .object => |obj| if (self.hasMethod(obj.class_name, "__toString")) {
                 return .{ .string = self.transientOwned(try self.objectString(obj)) };
             },
             else => {},
         };
         if (mask & php_types.BOOL == php_types.BOOL) switch (val) {
-            .int, .float, .string => return .{ .bool = val.isTruthy() },
+            .int, .float, .string => {
+                if (val == .float and std.math.isNan(val.float)) try self.emitWarning("unexpected NAN value was coerced to bool");
+                return .{ .bool = val.isTruthy() };
+            },
             else => {},
         };
         return null;
@@ -21971,6 +22016,7 @@ pub const VM = struct {
             .object, .generator, .fiber => php_types.OBJECT,
         };
         if (shape.mask & bit != 0) return true;
+        if (val == .null and shape.mask & php_types.VOID != 0) return true;
         if (!shape.classes) return false;
         const class_name: []const u8 = switch (val) {
             .object => |obj| obj.class_name,
@@ -22064,14 +22110,14 @@ pub const VM = struct {
             .object => |t| {
                 const decl = self.propertyDeclaration(t.object.class_name, t.prop_name);
                 if (!decl.declared or decl.type_str.len == 0) return null;
-                return .{ .class = decl.defining_class, .prop = t.prop_name, .type_str = self.resolvedTypeText(decl.type_str, decl.defining_class) catch decl.type_str };
+                return .{ .class = decl.defining_class, .prop = t.prop_name, .type_str = decl.type_str };
             },
             .static => |t| {
                 const cn = self.staticPropDeclaringClass(t.class_name, t.prop_name) orelse return null;
                 const cls = self.classes.getPtr(cn) orelse return null;
                 const ts = cls.static_prop_types.get(t.prop_name) orelse return null;
                 if (ts.len == 0) return null;
-                return .{ .class = cn, .prop = t.prop_name, .type_str = self.resolvedTypeText(ts, cn) catch ts };
+                return .{ .class = cn, .prop = t.prop_name, .type_str = ts };
             },
             else => return null,
         }
@@ -22105,14 +22151,14 @@ pub const VM = struct {
     }
 
     fn throwRefTypeError(self: *VM, src: TypeSource, val: Value) RuntimeError {
-        const msg = std.fmt.allocPrint(self.allocator, "Cannot assign {s} to reference held by property {s}::${s} of type {s}", .{ valueTypeName(val), src.class, src.prop, src.type_str }) catch return error.RuntimeError;
+        const msg = std.fmt.allocPrint(self.allocator, "Cannot assign {s} to reference held by property {s}::${s} of type {s}", .{ valueTypeName(val), src.class, src.prop, try self.resolvedTypeText(src.type_str, src.class) }) catch return error.RuntimeError;
         defer self.allocator.free(msg);
         try self.setPendingException("TypeError", msg);
         return error.RuntimeError;
     }
 
     fn throwConflictingCoercion(self: *VM, a: TypeSource, b: TypeSource, val: Value) RuntimeError {
-        const msg = std.fmt.allocPrint(self.allocator, "Cannot assign {s} to reference held by property {s}::${s} of type {s} and property {s}::${s} of type {s}, as this would result in an inconsistent type conversion", .{ valueTypeName(val), a.class, a.prop, a.type_str, b.class, b.prop, b.type_str }) catch return error.RuntimeError;
+        const msg = std.fmt.allocPrint(self.allocator, "Cannot assign {s} to reference held by property {s}::${s} of type {s} and property {s}::${s} of type {s}, as this would result in an inconsistent type conversion", .{ valueTypeName(val), a.class, a.prop, try self.resolvedTypeText(a.type_str, a.class), b.class, b.prop, try self.resolvedTypeText(b.type_str, b.class) }) catch return error.RuntimeError;
         defer self.allocator.free(msg);
         try self.setPendingException("TypeError", msg);
         return error.RuntimeError;
