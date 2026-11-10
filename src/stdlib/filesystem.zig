@@ -745,7 +745,17 @@ pub fn readPath(ctx: *NativeContext, raw_path: []const u8) RuntimeError!?Value.S
 pub fn readPathAs(ctx: *NativeContext, raw_path: []const u8, comptime func: ?[]const u8) RuntimeError!?Value.String {
     var path = raw_path;
     if (func != null and path.len == 0) return throwValueError(ctx, "Path must not be empty", .{});
-    if (std.mem.startsWith(u8, path, "file://")) path = path[7..];
+    switch (fileUrl(path)) {
+        .not_file => {},
+        .local => |local| path = local,
+        .remote => {
+            if (func) |name| {
+                try warn(ctx, name ++ "(): Remote host file access not supported, {s}", .{path});
+                try warn(ctx, name ++ "({s}): Failed to open stream: no suitable wrapper could be found", .{path});
+            }
+            return null;
+        },
+    }
     if (userWrapperFor(ctx.vm, path)) |class_name| {
         const opened = (try dispatchUserOpen(ctx, class_name, path, "rb")) orelse return null;
         const fh = opened.resource;
@@ -2055,18 +2065,35 @@ fn native_gzfile(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
 }
 
 fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2 or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
-    const given_path = if (args[0] == .string) args[0].string.bytes() else if (args[0] == .object and ctx.vm.hasMethod(args[0].object.class_name, "__toString")) try ctx.vm.objectToString(args[0].object) else return NativeResult.scalar(.{ .bool = false });
-    const mode = args[1].string.bytes();
+    const given_path = try strArg(ctx, args, "fopen", 0, "filename", true);
+    const mode = try strArg(ctx, args, "fopen", 1, "mode", false);
+    if (given_path.len == 0) return throwValueError(ctx, "Path must not be empty", .{});
     try useContext(ctx, args, 3);
     const reading = mode.len > 0 and mode[0] == 'r' and std.mem.indexOfScalar(u8, mode, '+') == null;
-    const path = try includePathLookup(ctx, given_path, reading and args.len > 2 and args[2].isTruthy());
+    var path = try includePathLookup(ctx, given_path, reading and args.len > 2 and args[2].isTruthy());
 
     if (userWrapperFor(ctx.vm, path)) |class_name| {
         return NativeResult.borrowed((try dispatchUserOpen(ctx, class_name, path, mode)) orelse Value{ .bool = false });
     }
     if (extractScheme(path)) |s| {
-        if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return NativeResult.scalar(.{ .bool = false });
+        if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) {
+            // an unregistered wrapper's url is opened as a plain path, and
+            // file:// has nothing left to fall back on
+            try warn(ctx, "fopen(): Unable to find the wrapper \"{s}\" - did you forget to enable it when you configured PHP?", .{s});
+            if (!std.ascii.eqlIgnoreCase(s, "file")) return openPlainStream(ctx, path, mode);
+            try warn(ctx, "fopen(): file:// wrapper is disabled in the server configuration", .{});
+            try warn(ctx, "fopen({s}): Failed to open stream: no suitable wrapper could be found", .{path});
+            return NativeResult.scalar(.{ .bool = false });
+        }
+    }
+    switch (fileUrl(path)) {
+        .not_file => {},
+        .local => |local| path = local,
+        .remote => {
+            try warn(ctx, "fopen(): Remote host file access not supported, {s}", .{path});
+            try warn(ctx, "fopen({s}): Failed to open stream: no suitable wrapper could be found", .{path});
+            return NativeResult.scalar(.{ .bool = false });
+        },
     }
 
     if (std.mem.eql(u8, path, "php://stdout") or std.mem.eql(u8, path, "php://output")) {
@@ -2150,7 +2177,16 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         try warn(ctx, "fopen({s}): Failed to open stream: operation failed", .{path});
         return NativeResult.scalar(.{ .bool = false });
     }
+    return openPlainStream(ctx, path, mode);
+}
+
+fn openPlainStream(ctx: *NativeContext, path: []const u8, mode: []const u8) RuntimeError!NativeResult {
     const is_memory_stream = std.mem.startsWith(u8, path, "php://temp") or std.mem.startsWith(u8, path, "php://memory");
+    // a plain file opens in one of php's fopen modes
+    if (!is_memory_stream and (mode.len == 0 or std.mem.indexOfScalar(u8, "rwaxc", mode[0]) == null)) {
+        try warn(ctx, "fopen({s}): Failed to open stream: `{s}' is not a valid mode for fopen", .{ path, mode });
+        return NativeResult.scalar(.{ .bool = false });
+    }
     const file = if (is_memory_stream)
         anonymousFile() orelse return NativeResult.scalar(.{ .bool = false })
     else
@@ -2171,6 +2207,23 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     try obj.setCopiedString(ctx.allocator, "__path", path);
     if (is_memory_stream) try obj.set(ctx.allocator, "__peek_eof", .{ .bool = true });
     return NativeResult.borrowed(.{ .resource = obj });
+}
+
+const FileUrl = union(enum) { not_file, local: []const u8, remote };
+
+// a file:// url names a local path only without a host (or with localhost):
+// "file:///a" and "file://localhost/a" are "/a", "file://a/b" is remote
+fn fileUrl(path: []const u8) FileUrl {
+    if (!std.ascii.startsWithIgnoreCase(path, "file://")) return .not_file;
+    var rest = path["file://".len..];
+    if (std.ascii.startsWithIgnoreCase(rest, "localhost/")) {
+        rest = rest["localhost".len..];
+    } else if (rest.len > 0 and rest[0] != '/' and !(platform.is_windows and rest.len > 1 and rest[1] == ':')) {
+        return .remote;
+    }
+    // runs of slashes after the scheme collapse to one
+    while (rest.len > 1 and rest[0] == '/' and rest[1] == '/') rest = rest[1..];
+    return .{ .local = rest };
 }
 
 // the php:// streams php's wrapper knows, after the scheme
@@ -3377,6 +3430,8 @@ fn native_stream_supports_lock(ctx: *NativeContext, args: []const Value) Runtime
     // 'ftp://' is a non-fd stream
     const obj = try streamArg(ctx, args, .{ .func = "stream_supports_lock" });
     if (!std.mem.eql(u8, obj.class_name, "FileHandle")) return NativeResult.scalar(.{ .bool = false });
+    // data:, phar entries, and other in-memory payloads
+    if (getBufferBacking(obj) != null) return NativeResult.scalar(.{ .bool = false });
     const path_v = obj.get("__path");
     if (path_v != .string) return NativeResult.scalar(.{ .bool = true });
     const p = path_v.string.bytes();
