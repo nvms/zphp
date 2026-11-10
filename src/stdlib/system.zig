@@ -882,7 +882,7 @@ fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bool, 
                     try w.set(alloc, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(site.file) });
                     try w.set(alloc, .{ .string = Value.String.borrowed("line") }, .{ .int = site.line });
                 }
-            } else {
+            } else if (!called_by_native) {
                 try w.set(alloc, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(vm.frameFile(i - 1)) });
                 const caller = &vm.frames[i - 1];
                 if (vm.sourceLocation(caller.chunk, caller.ip)) |loc| {

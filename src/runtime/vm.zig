@@ -11224,7 +11224,10 @@ pub const VM = struct {
                 },
 
                 .yield_from => {
-                    var iterable = self.pop();
+                    // php's ZEND_YIELD_FROM
+                    const iterable = self.pop();
+                    if (iterable == .object) objRetain(iterable.object);
+                    defer if (iterable == .object) self.releaseValue(iterable);
                     // the popped iterable is in transit until the delegate
                     // anchors it; resuming an inner generator runs PHP (and
                     // its drains) in between, so pin it across the handoff
@@ -11238,106 +11241,87 @@ pub const VM = struct {
                         self.setErrorMsg("Fatal error: Cannot use yield outside of a generator", .{});
                         return error.RuntimeError;
                     };
-
-                    if (iterable == .object and self.hasMethod(iterable.object.class_name, "getIterator")) {
-                        iterable = self.callMethod(iterable.object, "getIterator", &.{}) catch {
-                            if (self.dispatchPendingException(base_frame)) continue;
-                            return error.RuntimeError;
-                        };
+                    if (outer_gen.forced_close) {
+                        if (try self.throwBuiltinException("Error", "Cannot use \"yield from\" in a force-closed generator")) continue;
+                        return error.RuntimeError;
                     }
 
-                    // drain Iterator-like objects into an array for delegation
-                    if (iterable == .object and self.hasMethod(iterable.object.class_name, "rewind") and self.hasMethod(iterable.object.class_name, "valid") and self.hasMethod(iterable.object.class_name, "current") and self.hasMethod(iterable.object.class_name, "next")) {
-                        const it = iterable.object;
-                        _ = self.callMethod(it, "rewind", &.{}) catch {
-                            if (self.dispatchPendingException(base_frame)) continue;
-                            return error.RuntimeError;
-                        };
-                        const arr = try self.allocArray();
-                        const has_key = self.hasMethod(it.class_name, "key");
-                        while (true) {
-                            const v = self.callMethod(it, "valid", &.{}) catch {
-                                if (self.dispatchPendingException(base_frame)) continue;
-                                return error.RuntimeError;
-                            };
-                            if (!v.isTruthy()) break;
-                            const cur = self.callMethod(it, "current", &.{}) catch {
-                                if (self.dispatchPendingException(base_frame)) continue;
-                                return error.RuntimeError;
-                            };
-                            if (has_key) {
-                                const k = self.callMethod(it, "key", &.{}) catch {
-                                    if (self.dispatchPendingException(base_frame)) continue;
-                                    return error.RuntimeError;
-                                };
-                                try arr.set(self.allocator, @import("value.zig").Value.toArrayKey(k), cur);
-                            } else {
-                                try arr.append(self.allocator, cur);
+                    const delegate: Generator.DelegateState = switch (iterable) {
+                        .array => |arr| blk: {
+                            if (arr.entries.items.len == 0) {
+                                self.push(.null);
+                                continue;
                             }
-                            _ = self.callMethod(it, "next", &.{}) catch {
+                            arrayRetain(arr);
+                            break :blk .{ .array = .{ .arr = arr, .index = 0 } };
+                        },
+                        .generator => |inner| blk: {
+                            if (inner.state == .completed) {
+                                if (!inner.has_return) {
+                                    if (try self.throwBuiltinException("Error", "Generator passed to yield from was aborted without proper return and is unable to continue")) continue;
+                                    return error.RuntimeError;
+                                }
+                                self.push(inner.return_value);
+                                continue;
+                            }
+                            if (generatorRoot(inner) == outer_gen) {
+                                if (try self.throwBuiltinException("Error", "Impossible to yield from the Generator being currently run")) continue;
+                                return error.RuntimeError;
+                            }
+                            // delegate.gen holds a real ref to the inner gen
+                            // across the yield-from window
+                            genRetain(inner);
+                            break :blk .{ .gen = inner };
+                        },
+                        .object => |obj| blk: {
+                            if (!self.isInstanceOf(obj.class_name, "Traversable")) {
+                                if (try self.throwBuiltinException("Error", "Can use \"yield from\" only with arrays and Traversables")) continue;
+                                return error.RuntimeError;
+                            }
+                            // php's get_iterator: an IteratorAggregate's
+                            // getIterator(), then rewind(). the delegate
+                            // holds a reference to what it iterates
+                            const target = self.traversableIterator(obj) catch {
                                 if (self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
-                        }
-                        iterable = .{ .array = arr };
-                    }
-
-                    if (iterable == .generator) {
-                        const inner = iterable.generator;
-                        // a generator not started yet becomes the delegate
-                        // as it is: resumeGenerator, which runs this one,
-                        // starts it next, without nesting a native call
-                        if (inner.state == .suspended or inner.state == .created) {
-                            // delegate.gen holds a real ref to the inner gen
-                            // across the yield-from window. without this
-                            // retain the pop() above is the only handle and
-                            // the inner gets queued for close at the next
-                            // drain, dying before the second yield (Stage 2)
-                            genRetain(inner);
-                            outer_gen.delegate = .{ .gen = inner };
-                            if (inner.state == .suspended) self.setGeneratorCurrent(outer_gen, inner.current_key, inner.current_value, false);
-                            // save ip past the yield_from opcode so we resume here
-                            outer_gen.ip = self.currentFrame().ip;
-                            outer_gen.vars = self.currentFrame().vars;
-                            outer_gen.ref_slots = self.currentFrame().ref_slots;
-                            self.currentFrame().ref_slots = .{};
-                            self.saveFrameLocalsToGenerator(outer_gen);
-                            try self.saveGeneratorStack(outer_gen);
-                            try self.saveGeneratorHandlers(outer_gen);
-                            outer_gen.state = .suspended;
-                            self.currentFrame().generator = null;
-                            self.frame_count -= 1;
-                            self.genRelease(outer_gen);
-                            return;
-                        }
-                        self.push(inner.return_value);
-                    } else if (iterable == .array) {
-                        const arr = iterable.array;
-                        if (arr.entries.items.len > 0) {
-                            const entry = arr.entries.items[0];
-                            arrayRetain(arr);
-                            outer_gen.delegate = .{ .array = .{ .arr = arr, .index = 1 } };
-                            self.setGeneratorCurrent(outer_gen, switch (entry.key) {
-                                .int => |i| .{ .int = i },
-                                .string => |s| .{ .string = s },
-                            }, entry.value, false);
-                            outer_gen.ip = self.currentFrame().ip;
-                            outer_gen.vars = self.currentFrame().vars;
-                            outer_gen.ref_slots = self.currentFrame().ref_slots;
-                            self.currentFrame().ref_slots = .{};
-                            self.saveFrameLocalsToGenerator(outer_gen);
-                            try self.saveGeneratorStack(outer_gen);
-                            try self.saveGeneratorHandlers(outer_gen);
-                            outer_gen.state = .suspended;
-                            self.currentFrame().generator = null;
-                            self.frame_count -= 1;
-                            self.genRelease(outer_gen);
-                            return;
-                        }
-                        self.push(.null);
-                    } else {
-                        self.push(.null);
-                    }
+                            if (target == .generator) {
+                                if (target.generator.state == .completed) {
+                                    self.releaseValue(target);
+                                    if (try self.throwBuiltinException("Exception", "Cannot traverse an already closed generator")) continue;
+                                    return error.RuntimeError;
+                                }
+                                break :blk .{ .gen = target.generator };
+                            }
+                            const it = target.object;
+                            _ = self.callMethod(it, "rewind", &.{}) catch {
+                                self.releaseValue(target);
+                                if (self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            break :blk .{ .iterator = .{ .obj = it, .index = 0 } };
+                        },
+                        else => {
+                            if (try self.throwBuiltinException("Error", "Can use \"yield from\" only with arrays and Traversables")) continue;
+                            return error.RuntimeError;
+                        },
+                    };
+                    outer_gen.delegate = delegate;
+                    // suspend at the yield from; resumeGenerator runs the
+                    // delegate from here, without nesting a native call
+                    outer_gen.ip = self.currentFrame().ip;
+                    outer_gen.vars = self.currentFrame().vars;
+                    outer_gen.ref_slots = self.currentFrame().ref_slots;
+                    self.currentFrame().ref_slots = .{};
+                    self.saveFrameLocalsToGenerator(outer_gen);
+                    try self.saveGeneratorStack(outer_gen);
+                    try self.saveGeneratorHandlers(outer_gen);
+                    outer_gen.state = .suspended;
+                    outer_gen.delegate_pending = true;
+                    self.currentFrame().generator = null;
+                    self.frame_count -= 1;
+                    self.genRelease(outer_gen);
+                    return;
                 },
 
                 .generator_return => {
@@ -12628,13 +12612,7 @@ pub const VM = struct {
     pub fn closeGenerator(self: *VM, gen: *Generator, base_frame: usize) RuntimeError!void {
         _ = base_frame;
         if (gen.state == .completed or gen.state == .running) return;
-        if (gen.delegate) |delegate| {
-            gen.delegate = null;
-            switch (delegate) {
-                .gen => |inner| self.genRelease(inner),
-                .array => |state| self.arrayRelease(state.arr),
-            }
-        }
+        self.dropGeneratorDelegate(gen);
         // no try block around where it waits: nothing to run
         if (gen.state == .created or gen.saved_handlers.items.len == 0) return;
         const marker = try self.unwindMarker();
@@ -12683,13 +12661,7 @@ pub const VM = struct {
     pub fn releaseGeneratorVars(self: *VM, gen: *@import("value.zig").Generator) void {
         self.deinitRefSlots(&gen.ref_slots);
         // release the inner gen the outer was delegating to (yield from path)
-        if (gen.delegate) |delegate| {
-            switch (delegate) {
-                .gen => |inner| self.genRelease(inner),
-                .array => |state| self.arrayRelease(state.arr),
-            }
-            gen.delegate = null;
-        }
+        self.dropGeneratorDelegate(gen);
         var vit = gen.vars.valueIterator();
         while (vit.next()) |v| self.releaseValue(v.*);
         // suspended state the generator carried: its frame locals, operand
@@ -14102,23 +14074,11 @@ pub const VM = struct {
             }
 
             var step = leaf.state != .completed;
-            if (step) if (leaf.delegate) |*delegate| {
-                const arr_state = &delegate.array;
-                if (arr_state.index < arr_state.arr.entries.items.len) {
-                    const entry = arr_state.arr.entries.items[arr_state.index];
-                    arr_state.index += 1;
-                    self.setGeneratorCurrent(leaf, switch (entry.key) {
-                        .int => |i| .{ .int = i },
-                        .string => |str| .{ .string = str },
-                    }, entry.value, false);
-                    step = false;
-                } else {
-                    const arr = arr_state.arr;
-                    leaf.delegate = null;
-                    self.arrayRelease(arr);
-                    sent = .null;
-                }
-            };
+            leaf.delegate_pending = false;
+            if (step and leaf.delegate != null) {
+                // php's zend_generator_get_next_delegated_value
+                if (try self.nextDelegatedValue(leaf)) step = false else sent = .null;
+            }
             if (step) self.resumeGeneratorWithValue(leaf, sent) catch |err| {
                 if (path.items.len == 1 or self.pending_exception == null or self.exit_requested or self.fiber_suspend_pending) return err;
                 // the delegate's exception leaves it and is thrown into its
@@ -14136,11 +14096,17 @@ pub const VM = struct {
             };
 
             if (leaf.state == .suspended) {
-                // a yield from that has just taken a generator not yet
-                // started: run that one next
-                if (leaf.delegate) |delegate| if (delegate == .gen and delegate.gen.state == .created) {
-                    sent = .null;
-                    continue;
+                // a yield from that has just taken a delegate: its first
+                // value comes next (a generator delegate that already has
+                // one keeps it, php's ZEND_GENERATOR_DO_INIT)
+                if (leaf.delegate_pending) if (leaf.delegate) |delegate| {
+                    if (delegate != .gen or delegate.gen.state == .created) {
+                        sent = .null;
+                        continue;
+                    }
+                    leaf.delegate_pending = false;
+                    const inner_root = generatorRoot(delegate.gen);
+                    self.setGeneratorCurrent(leaf, inner_root.current_key, inner_root.current_value, false);
                 };
                 var i = path.items.len - 1;
                 while (i > 0) : (i -= 1) {
@@ -14167,6 +14133,87 @@ pub const VM = struct {
         }
     }
 
+    // php's zend_generator_get_next_delegated_value: the next value of the
+    // array or iterator a generator delegates to, as its current one. false
+    // when there is none, the delegation over; an exception the iterator
+    // throws ends it too and is thrown into the generator at its yield from
+    fn nextDelegatedValue(self: *VM, gen: *Generator) RuntimeError!bool {
+        const delegate = &(gen.delegate orelse return false);
+        switch (delegate.*) {
+            .gen => return false,
+            .array => |*state| {
+                while (state.index < state.arr.entries.items.len) {
+                    const entry = state.arr.entries.items[state.index];
+                    state.index += 1;
+                    self.setGeneratorCurrent(gen, switch (entry.key) {
+                        .int => |i| .{ .int = i },
+                        .string => |str| .{ .string = str },
+                    }, if (entry.ref) |ref| ref.* else entry.value, false);
+                    return true;
+                }
+            },
+            .iterator => |*state| iterate: {
+                const it = state.obj;
+                if (state.index > 0) {
+                    _ = self.callMethod(it, "next", &.{}) catch break :iterate;
+                }
+                state.index += 1;
+                const valid = self.callMethod(it, "valid", &.{}) catch break :iterate;
+                if (!valid.isTruthy()) break :iterate;
+                const value = self.callMethod(it, "current", &.{}) catch break :iterate;
+                retainValue(value);
+                defer self.releaseValue(value);
+                const key = self.callMethod(it, "key", &.{}) catch break :iterate;
+                retainValue(key);
+                defer self.releaseValue(key);
+                self.setGeneratorCurrent(gen, key, value, false);
+                return true;
+            },
+        }
+        self.dropGeneratorDelegate(gen);
+        if (self.pending_exception) |ex| {
+            self.pending_exception = null;
+            if (gen.pending_throw) |old| self.stackRelease(old);
+            gen.pending_throw = ex;
+        }
+        return false;
+    }
+
+    // the Iterator or Generator a Traversable object is iterated through:
+    // itself, or what an IteratorAggregate's getIterator() returns (again for
+    // an aggregate that returns another). the result holds a reference
+    fn traversableIterator(self: *VM, obj: *PhpObject) RuntimeError!Value {
+        var cur: Value = .{ .object = obj };
+        retainValue(cur);
+        var steps: usize = 0;
+        while (cur == .object and !self.isInstanceOf(cur.object.class_name, "Iterator")) : (steps += 1) {
+            const aggregate = cur.object;
+            defer self.releaseValue(.{ .object = aggregate });
+            const next = try self.callMethod(aggregate, "getIterator", &.{});
+            const traversable = (next == .object and self.isInstanceOf(next.object.class_name, "Traversable") and next.object != aggregate) or next == .generator;
+            if (!traversable or steps > 64) {
+                const msg = try std.fmt.allocPrint(self.allocator, "Objects returned by {s}::getIterator() must be traversable or implement interface Iterator", .{aggregate.class_name});
+                defer self.allocator.free(msg);
+                try self.setPendingException("Exception", msg);
+                return error.RuntimeError;
+            }
+            retainValue(next);
+            cur = next;
+        }
+        return cur;
+    }
+
+    // a generator stops delegating: what it delegated to loses its reference
+    pub fn dropGeneratorDelegate(self: *VM, gen: *Generator) void {
+        const delegate = gen.delegate orelse return;
+        gen.delegate = null;
+        switch (delegate) {
+            .gen => |inner| self.genRelease(inner),
+            .array => |state| self.arrayRelease(state.arr),
+            .iterator => |state| self.releaseValue(.{ .object = state.obj }),
+        }
+    }
+
     // php's zend_generator_get_current: the generator a delegation chain
     // runs, the innermost one still running. one whose delegate finished is
     // its own root until it is resumed and takes the delegate's result
@@ -14177,6 +14224,20 @@ pub const VM = struct {
             g = delegate.gen;
         }
         return g;
+    }
+
+    // php's zend_generator_update_current, as reading a generator's current
+    // state runs it: one whose delegate was aborted without returning gets
+    // php's ClosedGeneratorException at its yield from, and runs on
+    pub fn updateGeneratorCurrent(self: *VM, gen: *Generator) RuntimeError!void {
+        if (gen.state == .completed or self.pending_exception != null) return;
+        const root = generatorRoot(gen);
+        const delegate = root.delegate orelse return;
+        if (delegate != .gen or delegate.gen.state != .completed or delegate.gen.has_return) return;
+        root.delegate = null;
+        self.genRelease(delegate.gen);
+        root.pending_closed_delegate = true;
+        try self.resumeGenerator(gen, .null);
     }
 
     // php's zend_generator_ensure_initialized: a generator a method or
@@ -14227,12 +14288,14 @@ pub const VM = struct {
         switch (method) {
             .current, .key => {
                 try self.ensureGeneratorInitialized(gen);
+                try self.updateGeneratorCurrent(gen);
                 const root = generatorRoot(gen);
                 if (gen.state == .completed) return .null;
                 return if (method == .current) root.current_value else root.current_key;
             },
             .valid => {
                 try self.ensureGeneratorInitialized(gen);
+                try self.updateGeneratorCurrent(gen);
                 return .{ .bool = gen.state != .completed };
             },
             .next => {
@@ -14247,6 +14310,7 @@ pub const VM = struct {
             .send => {
                 try self.ensureGeneratorInitialized(gen);
                 if (gen.state == .completed) return .null;
+                try self.updateGeneratorCurrent(gen);
                 try self.resumeGenerator(gen, args[0]);
                 if (gen.state == .completed) return .null;
                 return generatorRoot(gen).current_value;
@@ -14272,10 +14336,7 @@ pub const VM = struct {
                 }
                 // the exception reaches the generator at its yield; one
                 // delegating to an array or iterator stops doing so
-                if (root.delegate) |delegate| if (delegate == .array) {
-                    root.delegate = null;
-                    self.arrayRelease(delegate.array.arr);
-                };
+                if (root.delegate) |delegate| if (delegate != .gen) self.dropGeneratorDelegate(root);
                 stackRetain(ex);
                 if (root.pending_throw) |old| self.stackRelease(old);
                 root.pending_throw = ex;

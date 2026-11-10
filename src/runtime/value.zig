@@ -828,6 +828,9 @@ pub const Generator = struct {
     // the delegate it waits on in yield from was aborted without returning:
     // its next resume throws php's ClosedGeneratorException at the yield from
     pending_closed_delegate: bool = false,
+    // a yield from has just taken its delegate, which gives its first value
+    // when the generator's resume goes on
+    delegate_pending: bool = false,
     // php's ZEND_GENERATOR_FORCED_CLOSE: destroyed while suspended, it runs
     // its finally blocks and may not yield again
     forced_close: bool = false,
@@ -853,6 +856,9 @@ pub const Generator = struct {
     pub const DelegateState = union(enum) {
         gen: *Generator,
         array: struct { arr: *PhpArray, index: usize },
+        // php's zend_object_iterator over a Traversable: the Iterator, and
+        // how many values it has given
+        iterator: struct { obj: *PhpObject, index: usize },
     };
 
     pub const State = enum { created, suspended, running, completed };
