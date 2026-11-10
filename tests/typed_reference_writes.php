@@ -114,3 +114,14 @@ $plain = &$box->label;
 unset($box->label);
 $plain = [1];
 var_dump($plain);
+
+echo "-- stepping a property that holds a typed reference\n";
+class Pair { public int $a = 0; public int|bool $b = 0; }
+$pair = new Pair;
+$alias = &$pair->a;
+$pair->a = PHP_INT_MAX;
+attempt(function () use ($pair) { $pair->a++; });
+attempt(function () use ($pair) { --$pair->b; $pair->b = PHP_INT_MIN; $pair->b--; });
+$other = &$pair->b;
+attempt(function () use ($pair) { $pair->b--; });
+var_dump($pair->a, $pair->b);

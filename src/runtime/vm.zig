@@ -9754,6 +9754,8 @@ pub const VM = struct {
                                 if (obj.slots) |s| {
                                     // typed property: enforce/coerce before the
                                     // slot write (IC stores the declared type)
+                                    // ++/-- through a typed reference reports the reference
+                                    if (obj.ref_mirrored and val == .float) val = try self.checkTypedPropStep(obj, prop_name, val);
                                     if (sp_entry.prop_type.len > 0) {
                                         if (try self.checkPropertyType(&val, sp_entry.prop_type, sp_entry.decl_class, prop_name)) continue;
                                     }
@@ -17880,6 +17882,21 @@ pub const VM = struct {
         return v;
     }
 
+    // zend_pre_incdec_property_zval: a property holding a typed reference
+    // steps the reference, so an int stepped past its range is the
+    // reference's error rather than the property's
+    fn checkTypedPropStep(self: *VM, obj: *PhpObject, prop_name: []const u8, val: Value) RuntimeError!Value {
+        const ri = self.ref_index orelse return val;
+        const cells = ri.prop_rev.get(.{ .object = obj, .class_name = "", .prop_name = prop_name }) orelse return val;
+        for (cells.items) |cell| {
+            if (!cellOf(cell).typed) continue;
+            const ic = self.ic orelse return val;
+            if (ic.step_overflow.up == null) return val;
+            return self.verifyRefAssignable(cell, val);
+        }
+        return val;
+    }
+
     fn checkTypedStaticPropWrite(self: *VM, class_name: []const u8, prop_name: []const u8, val: Value) RuntimeError!Value {
         const ri = self.ref_index orelse return val;
         const cells = ri.prop_rev.get(.{ .object = null, .class_name = class_name, .prop_name = prop_name }) orelse return val;
@@ -19365,6 +19382,7 @@ pub const VM = struct {
         }
         // typed property: coerce/enforce the declared type before storing
         // (matches PHP weak/strict mode)
+        if (obj.ref_mirrored and val.* == .float) val.* = try self.checkTypedPropStep(obj, prop_name, val.*);
         if (vr.type_str.len > 0) {
             if (try self.checkPropertyType(val, vr.type_str, vr.defining_class, prop_name)) return .dispatched;
         }
