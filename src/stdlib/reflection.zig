@@ -671,7 +671,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionProperty::setRawValueWithoutLazyInitialization", rpSetWithoutLazy);
     try vm.native_fns.put(a, "ReflectionProperty::getName", rpropGetName);
     try vm.native_fns.put(a, "ReflectionProperty::getType", rpropGetType);
-    try vm.native_fns.put(a, "ReflectionProperty::getSettableType", rpropGetType);
+    try vm.native_fns.put(a, "ReflectionProperty::getSettableType", rpropGetSettableType);
     try vm.native_fns.put(a, "ReflectionProperty::isPublic", rpropIsPublic);
     try vm.native_fns.put(a, "ReflectionProperty::isProtected", rpropIsProtected);
     try vm.native_fns.put(a, "ReflectionProperty::isPrivate", rpropIsPrivate);
@@ -706,6 +706,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try ra_def.constants.put(a, "IS_INSTANCEOF", .{ .int = 2 });
     try ra_def.interfaces.append(a, "Reflector");
     try ra_def.constants.put(a, "IS_INSTANCEOF", .{ .int = 2 });
+    try ra_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0, .visibility = .private });
     try ra_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
     try ra_def.methods.put(a, "getArguments", .{ .name = "getArguments", .arity = 0 });
     try ra_def.methods.put(a, "newInstance", .{ .name = "newInstance", .arity = 0 });
@@ -713,6 +714,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try ra_def.methods.put(a, "isRepeated", .{ .name = "isRepeated", .arity = 0 });
     try vm.classes.put(a, "ReflectionAttribute", ra_def);
 
+    try vm.native_fns.put(a, "ReflectionAttribute::__construct", raConstruct);
     try vm.native_fns.put(a, "ReflectionAttribute::getName", raGetName);
     try vm.native_fns.put(a, "ReflectionAttribute::getArguments", raGetArguments);
     try vm.native_fns.put(a, "ReflectionAttribute::newInstance", raNewInstance);
@@ -820,7 +822,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.classes.put(a, "Generator", generator_def);
     try vm.classes.put(a, "Fiber", ClassDef{ .name = "Fiber" });
 
-    var rref_def = ClassDef{ .name = "ReflectionReference" };
+    var rref_def = ClassDef{ .name = "ReflectionReference", .is_final = true };
+    try rref_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0, .visibility = .private });
     try rref_def.methods.put(a, "fromArrayElement", .{ .name = "fromArrayElement", .arity = 2, .is_static = true });
     try rref_def.methods.put(a, "getId", .{ .name = "getId", .arity = 0 });
     try vm.classes.put(a, "ReflectionReference", rref_def);
@@ -866,6 +869,11 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionFiber::getTrace", rfibGetTrace);
 
     try @import("reflection_string.zig").register(vm, a);
+
+    // php leaves clone_obj NULL for every reflector
+    for ([_][]const u8{ "ReflectionClass", "ReflectionFunctionAbstract", "ReflectionParameter", "ReflectionType", "ReflectionProperty", "ReflectionClassConstant", "ReflectionExtension", "ReflectionZendExtension", "ReflectionReference", "ReflectionAttribute", "ReflectionGenerator", "ReflectionFiber", "ReflectionConstant" }) |name| {
+        if (vm.classes.getPtr(name)) |cls| cls.uncloneable = true;
+    }
 }
 
 fn rextConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -1472,10 +1480,13 @@ fn setPropertyReflection(ctx: *NativeContext, obj: *PhpObject, class_name: []con
     };
     const prop = result.prop;
     try obj.set(ctx.allocator, "__visibility", .{ .int = @backingInt(prop.visibility) });
-    // a promoted property never has a default value of its own
-    const effective_has_default = prop.has_default and !prop.is_promoted;
+    // an untyped property defaults to null; a typed one without a default
+    // and a virtual one have none. a promoted property's default is never
+    // its parameter's: null when untyped, none when typed
+    const untyped = prop.type_str.len == 0;
+    const effective_has_default = !prop.is_virtual and (if (prop.is_promoted) untyped else prop.has_default or untyped);
     try obj.set(ctx.allocator, "__has_default", .{ .bool = effective_has_default });
-    try obj.set(ctx.allocator, "__default_value", if (effective_has_default) prop.default else .null);
+    try obj.set(ctx.allocator, "__default_value", if (effective_has_default and !prop.is_promoted) prop.default else .null);
     try obj.set(ctx.allocator, "__declaring_class", .{ .string = Value.String.borrowed(result.declaring_class) });
     try obj.set(ctx.allocator, "__set_visibility", .{ .int = @backingInt(prop.set_visibility) });
     try obj.set(ctx.allocator, "__has_set_visibility", .{ .bool = prop.has_set_visibility });
@@ -2282,7 +2293,9 @@ fn rcGetProperties(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
     try ctx.vm.resolveClassDefaults(class_name);
-    const filter: i64 = if (args.len >= 1 and args[0] == .int) args[0].int else 0;
+    // ?int $filter: null lists every property, otherwise those with any of
+    // the given modifiers
+    const filter: ?i64 = if (args.len >= 1 and args[0] != .null) try zpp.long(ctx, "ReflectionClass::getProperties", args, 0, "filter", true) else null;
 
     const arr = try ctx.createArray();
     var seen = std.StringHashMapUnmanaged(void){};
@@ -2294,9 +2307,9 @@ fn rcGetProperties(ctx: *NativeContext, args: []const Value) RuntimeError!Native
         const cls = ctx.vm.classes.get(name) orelse break;
         for (cls.properties.items) |prop| {
             if (!is_own and prop.visibility == .private) continue;
-            if (!matchPropFilter(filter, prop.visibility, false)) continue;
             if (!seen.contains(prop.name)) {
                 try seen.put(ctx.allocator, prop.name, {});
+                if (!matchPropFilter(filter, propertyFlags(prop, false))) continue;
                 const obj = try buildPropertyObj(ctx, class_name, prop, name);
                 try arr.append(ctx.allocator, .{ .object = obj });
             }
@@ -2306,10 +2319,11 @@ fn rcGetProperties(ctx: *NativeContext, args: []const Value) RuntimeError!Native
             const sp_name = entry.key_ptr.*;
             const vis: ClassDef.Visibility = cls.static_prop_visibility.get(sp_name) orelse .public;
             if (!is_own and vis == .private) continue;
-            if (!matchPropFilter(filter, vis, true)) continue;
             if (!seen.contains(sp_name)) {
                 try seen.put(ctx.allocator, sp_name, {});
-                const obj = try buildPropertyObj(ctx, class_name, staticPropertyDef(&cls, sp_name, entry.value_ptr.*), name);
+                const def = staticPropertyDef(&cls, sp_name, entry.value_ptr.*);
+                if (!matchPropFilter(filter, propertyFlags(def, true))) continue;
+                const obj = try buildPropertyObj(ctx, class_name, def, name);
                 try obj.set(ctx.allocator, "__is_static", .{ .bool = true });
                 try arr.append(ctx.allocator, .{ .object = obj });
             }
@@ -2321,7 +2335,7 @@ fn rcGetProperties(ctx: *NativeContext, args: []const Value) RuntimeError!Native
         is_own = false;
     }
     const reflected = this.get("__object");
-    if (reflected == .object and (filter == 0 or filter & 1 != 0)) {
+    if (reflected == .object and (filter == null or filter.? & 1 != 0)) {
         var it = reflected.object.properties.iterator();
         while (it.next()) |entry| {
             const prop_name = entry.key_ptr.*;
@@ -2334,13 +2348,14 @@ fn rcGetProperties(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn appendInterfaceProperties(ctx: *NativeContext, reflected: []const u8, name: []const u8, filter: i64, arr: *PhpArray, seen: *std.StringHashMapUnmanaged(void)) RuntimeError!void {
+fn appendInterfaceProperties(ctx: *NativeContext, reflected: []const u8, name: []const u8, filter: ?i64, arr: *PhpArray, seen: *std.StringHashMapUnmanaged(void)) RuntimeError!void {
     const iface = ctx.vm.interfaces.get(name) orelse return;
     for (iface.parents.items) |parent| {
         const cls = ctx.vm.classes.get(parent) orelse continue;
         for (cls.properties.items) |prop| {
-            if (seen.contains(prop.name) or !matchPropFilter(filter, prop.visibility, false)) continue;
+            if (seen.contains(prop.name)) continue;
             try seen.put(ctx.allocator, prop.name, {});
+            if (!matchPropFilter(filter, propertyFlags(prop, false))) continue;
             const obj = try buildPropertyObj(ctx, reflected, prop, parent);
             try arr.append(ctx.allocator, .{ .object = obj });
         }
@@ -2348,25 +2363,23 @@ fn appendInterfaceProperties(ctx: *NativeContext, reflected: []const u8, name: [
     }
 }
 
-fn matchPropFilter(filter: i64, vis: ClassDef.Visibility, is_static: bool) bool {
-    if (filter == 0) return true;
-    const IS_STATIC: i64 = 16;
-    const IS_PUBLIC: i64 = 1;
-    const IS_PROTECTED: i64 = 2;
-    const IS_PRIVATE: i64 = 4;
-    const IS_READONLY: i64 = 128;
-    _ = IS_READONLY;
-    const want_static = (filter & IS_STATIC) != 0;
-    const want_public = (filter & IS_PUBLIC) != 0;
-    const want_protected = (filter & IS_PROTECTED) != 0;
-    const want_private = (filter & IS_PRIVATE) != 0;
-    const any_vis = want_public or want_protected or want_private;
-    const has_vis_match = (vis == .public and want_public) or
-        (vis == .protected and want_protected) or
-        (vis == .private and want_private);
-    if (any_vis and !has_vis_match) return false;
-    if (want_static and !is_static) return false;
-    return true;
+fn matchPropFilter(filter: ?i64, flags: i64) bool {
+    const f = filter orelse return true;
+    return flags & f != 0;
+}
+
+// a property's modifier bits as ReflectionProperty's IS_* constants name them
+fn propertyFlags(prop: ClassDef.PropertyDef, is_static: bool) i64 {
+    var flags: i64 = switch (prop.visibility) {
+        .public => 1,
+        .protected => 2,
+        .private => 4,
+    };
+    if (is_static) flags |= 16;
+    if (prop.is_final) flags |= 32;
+    if (prop.is_readonly and !prop.readonly_undeclared) flags |= 128;
+    if (prop.is_virtual) flags |= 512;
+    return flags;
 }
 
 fn rcGetProperty(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -2588,8 +2601,26 @@ fn appendConstant(ctx: *NativeContext, cls: ClassDef, declaring: []const u8, cna
     try out.append(ctx.allocator, .{ .declaring = declaring, .name = cname, .value = value });
 }
 
-fn rcGetConstants(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+// a class constant's modifier bits as ReflectionClassConstant names them
+fn constantFlags(vm: *VM, declaring: []const u8, name: []const u8) i64 {
+    const cls = vm.classes.get(declaring) orelse return 1;
+    var flags: i64 = switch (cls.const_visibility.get(name) orelse .public) {
+        .public => 1,
+        .protected => 2,
+        .private => 4,
+    };
+    if (cls.const_final.contains(name)) flags |= 32;
+    return flags;
+}
+
+fn constantFilter(ctx: *NativeContext, args: []const Value, label: []const u8) RuntimeError!?i64 {
+    if (args.len == 0 or args[0] == .null) return null;
+    return try zpp.long(ctx, label, args, 0, "filter", true);
+}
+
+fn rcGetConstants(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const filter = try constantFilter(ctx, args, "ReflectionClass::getConstants");
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
     // php evaluates the class's constant expressions first
     try ctx.vm.updateClassConstants(class_name);
@@ -2597,12 +2628,16 @@ fn rcGetConstants(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
     defer constants.deinit(ctx.allocator);
     try visibleConstants(ctx, class_name, &constants);
     const arr = try ctx.createArray();
-    for (constants.items) |c| try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(c.name) }, c.value);
+    for (constants.items) |c| {
+        if (!matchPropFilter(filter, constantFlags(ctx.vm, c.declaring, c.name))) continue;
+        try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(c.name) }, c.value);
+    }
     return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn rcGetReflectionConstants(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+fn rcGetReflectionConstants(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const filter = try constantFilter(ctx, args, "ReflectionClass::getReflectionConstants");
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
     // php evaluates the class's constant expressions first
     try ctx.vm.updateClassConstants(class_name);
@@ -2610,7 +2645,10 @@ fn rcGetReflectionConstants(ctx: *NativeContext, _: []const Value) RuntimeError!
     defer constants.deinit(ctx.allocator);
     try visibleConstants(ctx, class_name, &constants);
     const arr = try ctx.createArray();
-    for (constants.items) |c| try arr.append(ctx.allocator, try buildReflectionClassConstant(ctx, c.declaring, c.name, c.value));
+    for (constants.items) |c| {
+        if (!matchPropFilter(filter, constantFlags(ctx.vm, c.declaring, c.name))) continue;
+        try arr.append(ctx.allocator, try buildReflectionClassConstant(ctx, c.declaring, c.name, c.value));
+    }
     return NativeResult.borrowed(.{ .array = arr });
 }
 
@@ -4735,12 +4773,53 @@ fn rpropGetHooks(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
     return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn rrefFromArrayElement(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return NativeResult.scalar(.null);
+// ReflectionReference::fromArrayElement: the element's reference, null for a
+// plain value or a reference nothing else binds
+fn rrefFromArrayElement(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const label = "ReflectionReference::fromArrayElement";
+    const arr = try zpp.array(ctx, label, args, 0, "array");
+    const key: PhpArray.Key = switch (args[1]) {
+        .int => |n| .{ .int = n },
+        .string => |sv| PhpArray.normalizeKey(.{ .string = sv }),
+        .bool => |b| .{ .int = @intFromBool(b) },
+        .float => |f| if (std.math.isFinite(f) and @floor(f) == f) .{ .int = @intFromFloat(f) } else return zpp.typeError(ctx, label, 1, "key", "string|int", args[1]),
+        else => return zpp.typeError(ctx, label, 1, "key", "string|int", args[1]),
+    };
+    const entry = for (arr.entries.items) |*e| {
+        if (e.key.eql(key)) break e;
+    } else return throwReflection(ctx, "Array key not found");
+    const ref = entry.ref orelse return NativeResult.scalar(.null);
+    // a reference only this element binds is no reference, unless it holds
+    // the very array (a directly self-referential one)
+    const self_ref = ref.* == .array and ref.*.array == arr;
+    if (@import("../runtime/value.zig").cellOf(ref).binders <= 1 and !self_ref) return NativeResult.scalar(.null);
+    const obj = try ctx.createObject("ReflectionReference");
+    try obj.set(ctx.allocator, "__cell", .{ .int = @intCast(@intFromPtr(@import("../runtime/value.zig").cellOf(ref))) });
+    // the array keeps the reference alive while it is reflected
+    try obj.set(ctx.allocator, "__array", .{ .array = arr });
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
-fn rrefGetId(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return NativeResult.scalar(.null);
+var reference_key: [16]u8 = undefined;
+var reference_key_ready = false;
+
+// sha1 of the reference's address and a per-process random key, as php
+// hides the address
+fn rrefGetId(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const cell = this.get("__cell");
+    if (cell != .int) return throwReflection(ctx, "Corrupted ReflectionReference object");
+    if (!reference_key_ready) {
+        @import("../platform.zig").io.random(&reference_key);
+        reference_key_ready = true;
+    }
+    const address: usize = @intCast(cell.int);
+    var sha = std.crypto.hash.Sha1.init(.{});
+    sha.update(std.mem.asBytes(&address));
+    sha.update(&reference_key);
+    var digest: [20]u8 = undefined;
+    sha.final(&digest);
+    return try NativeResult.copyString(ctx.allocator, &digest);
 }
 
 fn rpConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -5041,6 +5120,25 @@ fn rpropGetName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
     return NativeResult.share(this.get("name"));
 }
 
+// the type a write must satisfy: never for a get-only virtual property, the
+// set hook's parameter type, else the property's
+fn rpropGetSettableType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const dc = this.get("__declaring_class");
+    const name = this.get("name");
+    if (dc != .string or name != .string) return NativeResult.scalar(.null);
+    const set_hook = lookupPropertyHook(ctx, "set");
+    if (set_hook == null and lookupPropertyHook(ctx, "get") != null and propertyIsVirtual(ctx.vm, dc.string.bytes(), name.string.bytes()))
+        return NativeResult.borrowed(.{ .object = try createTypeObj(ctx, "never", false, null) });
+    if (set_hook) |hook| {
+        var buf: [512]u8 = undefined;
+        const key = class_names.memberKey(&buf, hook.declaring, hook.info.name);
+        if (methodTypeInfo(ctx.vm, key)) |ti| if (ti.param_types.len > 0 and ti.param_types[0].len > 0)
+            return NativeResult.borrowed(.{ .object = try createTypeObj(ctx, ti.param_types[0], false, hook.declaring) });
+    }
+    return rpropGetType(ctx, &.{});
+}
+
 fn rpropGetType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const dc_v = this.get("__declaring_class");
@@ -5197,7 +5295,10 @@ fn rpropIsAbstract(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
 fn rpropGetDefaultValue(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const has_default = this.get("__has_default");
-    if (has_default != .bool or !has_default.bool) return throwReflection(ctx, "Property does not have a default value");
+    if (has_default != .bool or !has_default.bool) {
+        try ctx.vm.raiseError(VM.E_DEPRECATED, "ReflectionProperty::getDefaultValue() for a property without a default value is deprecated, use ReflectionProperty::hasDefaultValue() to check if the default value exists");
+        return NativeResult.scalar(.null);
+    }
     return NativeResult.share(this.get("__default_value"));
 }
 
@@ -5708,6 +5809,10 @@ fn attributeConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     return NativeResult.scalar(.null);
 }
 
+fn raConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return throwReflection(ctx, "Cannot directly instantiate ReflectionAttribute");
+}
+
 fn raGetName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     return NativeResult.share(this.get("name"));
@@ -5926,16 +6031,13 @@ fn reGetCases(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
 }
 
 fn reGetCase(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1 or args[0] != .string) return throwReflection(ctx, "ReflectionEnum::getCase() expects a name");
+    const name = try zpp.str(ctx, "ReflectionEnum::getCase", args, 0, "name");
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
     const cls = ctx.vm.classes.get(class_name) orelse return NativeResult.scalar(.null);
-    if (!cls.constants.contains(args[0].string.bytes())) {
-        const msg = std.fmt.allocPrint(ctx.allocator, "Case {s}::{s} does not exist", .{ class_name, args[0].string.bytes() }) catch return throwReflection(ctx, "Case not found");
-        defer ctx.allocator.free(msg);
-        return throwReflection(ctx, msg);
-    }
-    const obj = try buildEnumCase(ctx, class_name, args[0].string.bytes(), cls.backed_type != .none);
+    if (findConstantOwner(ctx, class_name, name, 0) == null) return throwReflectionFmt(ctx, "Case {s}::{s} does not exist", .{ class_name, name });
+    if (!containsName(cls.case_order.items, name)) return throwReflectionFmt(ctx, "{s}::{s} is not a case", .{ class_name, name });
+    const obj = try buildEnumCase(ctx, class_name, name, cls.backed_type != .none);
     return NativeResult.borrowed(.{ .object = obj });
 }
 
