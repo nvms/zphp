@@ -3401,7 +3401,7 @@ fn rpIsDefaultValueAvailable(ctx: *NativeContext, _: []const Value) RuntimeError
 fn rpGetDefaultValue(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const has_default = this.get("__has_default");
-    if (has_default != .bool or !has_default.bool) return throwReflection(ctx, "Internal error: no default value available");
+    if (has_default != .bool or !has_default.bool) return throwReflection(ctx, "Internal error: Failed to retrieve the default value");
     // a user function's default is evaluated when asked for, as php does:
     // constants resolve then, and an unresolvable one throws then
     const lazy_func = this.get("__default_func");
@@ -3464,14 +3464,17 @@ fn decodeConstSentinel(ctx: *NativeContext, v: Value) !?[]const u8 {
     const sep = std.mem.lastIndexOfScalar(u8, rest, 0) orelse return null;
     const class_name = rest[0..sep];
     const const_name = rest[sep + 1 ..];
-    if (class_name.len == 0) return const_name;
-    return (try ctx.vm.transientAdopted(try std.fmt.allocPrint(ctx.allocator, "{s}::{s}", .{ class_name, const_name }))).bytes();
+    if (class_name.len == 0) return try ctx.vm.internName(const_name);
+    // kept by the parameter object, so it must outlive this call
+    const full = try std.fmt.allocPrint(ctx.allocator, "{s}::{s}", .{ class_name, const_name });
+    defer ctx.allocator.free(full);
+    return try ctx.vm.internName(full);
 }
 
 fn rpIsDefaultValueConstant(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const has_default = this.get("__has_default");
-    if (has_default != .bool or !has_default.bool) return NativeResult.scalar(.{ .bool = false });
+    if (has_default != .bool or !has_default.bool) return throwReflection(ctx, "Internal error: Failed to retrieve the default value");
     const name = this.get("__default_const_name");
     return NativeResult.scalar(.{ .bool = name == .string and name.string.bytes().len > 0 });
 }
@@ -3479,7 +3482,7 @@ fn rpIsDefaultValueConstant(ctx: *NativeContext, _: []const Value) RuntimeError!
 fn rpGetDefaultValueConstantName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const has_default = this.get("__has_default");
-    if (has_default != .bool or !has_default.bool) return throwReflection(ctx, "Internal error: no default value available");
+    if (has_default != .bool or !has_default.bool) return throwReflection(ctx, "Internal error: Failed to retrieve the default value");
     const name = this.get("__default_const_name");
     if (name == .string and name.string.bytes().len > 0) return NativeResult.share(name);
     return NativeResult.scalar(.null);
