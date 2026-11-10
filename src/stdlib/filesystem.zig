@@ -2155,7 +2155,8 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     const mode = try strArg(ctx, args, "fopen", 1, "mode", false);
     if (given_path.len == 0) return throwValueError(ctx, "Path must not be empty", .{});
     try useContext(ctx, args, 3);
-    const reading = mode.len > 0 and mode[0] == 'r' and std.mem.indexOfScalar(u8, mode, '+') == null;
+    // the include path finds an existing file for any read mode, r+ included
+    const reading = mode.len > 0 and mode[0] == 'r';
     var path = try includePathLookup(ctx, given_path, reading and args.len > 2 and args[2].isTruthy());
 
     if (userWrapperFor(ctx.vm, path)) |class_name| {
