@@ -2216,7 +2216,14 @@ pub fn compileNewExprDynamic(self: *Compiler, node: Ast.Node) Error!void {
     }
 }
 
+// a function containing yield compiles as a generator; anywhere else php
+// refuses it when compiling
+fn checkYieldPlace(self: *Compiler, node: Ast.Node) Error!void {
+    if (!self.is_generator) return self.fail(node.main_token, "The \"yield\" expression can only be used inside a function");
+}
+
 pub fn compileYield(self: *Compiler, node: Ast.Node) Error!void {
+    try checkYieldPlace(self, node);
     if (node.data.lhs != 0) {
         try self.compileNode(node.data.lhs);
     } else {
@@ -2226,12 +2233,15 @@ pub fn compileYield(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 pub fn compileYieldPair(self: *Compiler, node: Ast.Node) Error!void {
+    try checkYieldPlace(self, node);
     try self.compileNode(node.data.lhs);
     try self.compileNode(node.data.rhs);
     try self.emitOp(.yield_pair);
 }
 
 pub fn compileYieldFrom(self: *Compiler, node: Ast.Node) Error!void {
+    try checkYieldPlace(self, node);
+    if (self.returns_ref) return self.fail(node.main_token, "Cannot use \"yield from\" inside a by-reference generator");
     try self.compileNode(node.data.lhs);
     try self.emitOp(.yield_from);
 }

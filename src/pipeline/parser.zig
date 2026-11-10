@@ -2424,7 +2424,12 @@ const Parser = struct {
         }
 
         _ = try self.expect(.fat_arrow);
+        // an arrow function whose expression yields is a generator
+        const prev_yield = self.found_yield;
+        self.found_yield = false;
         const expr = try self.parseExpression();
+        const is_gen = self.found_yield;
+        self.found_yield = prev_yield;
 
         const ret = try self.addNode(.{ .tag = .return_stmt, .main_token = fn_tok, .data = .{ .lhs = expr } });
         const block_extra = try self.addExtraList(&.{ret});
@@ -2433,7 +2438,7 @@ const Parser = struct {
         const param_extra = try self.addExtraListWithReturnType(params.items, ret_range);
         // rhs = extra -> {body (bit 30 = static), use_count}.
         // 0xFFFFFFFF signals arrow fn (implicit capture).
-        const encoded_body = body | (if (is_static) @as(u32, 1) << 30 else 0) | (if (returns_ref) @as(u32, 1) << 29 else 0);
+        const encoded_body = body | (if (is_gen) @as(u32, 1) << 31 else 0) | (if (is_static) @as(u32, 1) << 30 else 0) | (if (returns_ref) @as(u32, 1) << 29 else 0);
         const rhs_extra = try self.addExtra(&.{ encoded_body, 0xFFFFFFFF });
 
         return self.addNode(.{ .tag = .closure_expr, .main_token = fn_tok, .data = .{ .lhs = param_extra, .rhs = rhs_extra } });
