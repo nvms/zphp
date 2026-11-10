@@ -933,7 +933,6 @@ fn rextInfo(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
         try out.appendSlice(ctx.allocator, "Reflection => enabled\n");
     } else if (std.mem.eql(u8, name, "date")) {
         const zone = try ctx.vm.callByName("date_default_timezone_get", &.{});
-        defer ctx.vm.releaseValue(zone);
         try out.print(ctx.allocator, "date/time support => enabled\ntimelib version => 2022.17\n\"Olson\" Timezone Database Version => 0.system\nTimezone Database => internal\nDefault timezone => {s}\n", .{if (zone == .string) zone.string.bytes() else "UTC"});
     } else {
         try out.print(ctx.allocator, "{s} support => enabled\n", .{name});
@@ -945,7 +944,6 @@ fn rextInfo(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
         if (first) try out.appendSlice(ctx.allocator, "\nDirective => Local Value => Master Value\n");
         first = false;
         const v = try ctx.vm.callByName("ini_get", &.{.{ .string = Value.String.borrowed(entry) }});
-        defer ctx.vm.releaseValue(v);
         const text = if (v == .string) (if (v.string.bytes().len == 0) "no value" else v.string.bytes()) else "no value";
         try out.print(ctx.allocator, "{s} => {s} => {s}\n", .{ entry, text, text });
     }
@@ -1006,7 +1004,6 @@ fn rextGetConstants(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRe
     const ext = extensionOfThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = try ctx.createArray();
     const all = try ctx.vm.callByName("get_defined_constants", &.{});
-    defer ctx.vm.releaseValue(all);
     if (all != .array) return NativeResult.borrowed(.{ .array = arr });
     for (all.array.entries.items) |entry| {
         if (entry.key != .string) continue;
