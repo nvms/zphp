@@ -87,6 +87,8 @@ pub const variadic_array_bit: u32 = 1 << 31;
 // (methods check their own)
 pub fn arrayParams(name: []const u8) u32 {
     if (std.mem.indexOf(u8, name, "::") != null) return 0;
+    // these take their callbacks off the end first and check them themselves
+    if (variadic_callbacks.has(name)) return 0;
     const signature = native_params.get(name) orelse return 0;
     var positions: u32 = 0;
     for (signature.params, 0..) |param, i| {
