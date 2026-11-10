@@ -4436,6 +4436,7 @@ ext/reflection/tests/ReflectionProperty_hasDefaultValue.phpt
 ext/reflection/tests/ReflectionProperty_isDefault_basic.phpt
 ext/reflection/tests/ReflectionProperty_isDynamic_basic.phpt
 ext/reflection/tests/ReflectionProperty_isFinal.phpt
+ext/reflection/tests/ReflectionProperty_isInitialized.phpt
 ext/reflection/tests/ReflectionProperty_setAccessible.phpt
 ext/reflection/tests/ReflectionProperty_setValue_error.phpt
 ext/reflection/tests/ReflectionProperty_setValue_readonly.phpt
@@ -4541,6 +4542,7 @@ ext/reflection/tests/constructor_promotion.phpt
 ext/reflection/tests/default_value_leak.phpt
 ext/reflection/tests/final_property_indicated.phpt
 ext/reflection/tests/gh10623.phpt
+ext/reflection/tests/gh12856.phpt
 ext/reflection/tests/gh12908.phpt
 ext/reflection/tests/gh15902/ReflectionClass-callable.phpt
 ext/reflection/tests/gh15902/ReflectionClass-class.phpt
