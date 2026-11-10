@@ -247,8 +247,18 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     // rebinds the slot to an unshared array) so the writeback can't corrupt
     // co-holders. value foreach iterates a snapshot and needs no separation
     const iter_tag = self.ast.nodes[iter_n].tag;
+    // a by-reference loop reads its iterable again for each element it
+    // binds; one that is no variable or element (a call, a literal) is
+    // evaluated once into a hidden variable, dropped when the loop ends
+    var iter_temp: ?[]const u8 = null;
     if (val_by_ref and (iter_tag == .variable or iter_tag == .array_access)) {
         try compiler_expr.compileVivifyChain(self, iter_n);
+    } else if (val_by_ref and val_node_is_plain(self, val_n) and !isReadablePlace(iter_tag)) {
+        const synth = try std.fmt.allocPrint(self.allocator, "__foreach_iterable_{d}", .{self.loop_depth});
+        try self.string_allocs.append(self.allocator, synth);
+        iter_temp = synth;
+        try self.compileNode(iter_n);
+        try self.emitSetVar(synth);
     } else {
         try self.compileNode(iter_n);
     }
@@ -291,7 +301,8 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitOp(.pop); // discard the value copy - we bind instead
         try self.emitSetVar(key_name); // $key = key (peek; key still on stack)
         try self.emitOp(.pop); // -> []
-        try self.compileNode(iter_n); // push the (already-separated) iterable
+        // push the (already-separated) iterable
+        if (iter_temp) |synth| try self.emitGetVar(synth) else try self.compileNode(iter_n);
         try self.emitGetVar(key_name); // push the key
         const vidx = try self.addConstant(.{ .string = Value.String.borrowed(val_name) });
         try self.emitOp(.foreach_ref_bind); // $v = &iterable[key] (reverts prior elem if uncaptured)
@@ -321,6 +332,10 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     const end_op: bytecode.OpCode = if (close_on_exit) .iter_end_close else .iter_end;
     try self.emitOp(end_op);
     try self.patchBreaks(&prev_breaks);
+    if (iter_temp) |synth| {
+        try self.emitOp(.unset_var);
+        try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(synth) }));
+    }
     self.break_jumps = prev_breaks;
     self.continue_jumps = prev_continues;
     self.use_continue_jumps = prev_use_cj;
@@ -568,6 +583,20 @@ fn resolveCatchClassName(self: *Compiler, node_idx: u32) Error![]const u8 {
     const s = try buf.toOwnedSlice(self.allocator);
     try self.string_allocs.append(self.allocator, s);
     return s;
+}
+
+// the loop value is a variable, not a destructuring list
+fn val_node_is_plain(self: *Compiler, val_n: u32) bool {
+    const tag = self.ast.nodes[val_n].tag;
+    return tag != .array_literal and tag != .list_destructure;
+}
+
+// an iterable a by-reference loop can read again for each element
+fn isReadablePlace(tag: Ast.Node.Tag) bool {
+    return switch (tag) {
+        .variable, .variable_variable, .array_access, .property_access, .nullsafe_property_access, .static_prop_access => true,
+        else => false,
+    };
 }
 
 pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
