@@ -4145,6 +4145,10 @@ fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
                     action = .pty;
                 } else continue;
             } else if (v == .resource) {
+                // a descriptor given as a resource must be an open stream
+                if (!std.mem.eql(u8, v.resource.class_name, "FileHandle") or value_mod.resourceClosed(v.resource)) {
+                    return throwStreamArg(ctx, "proc_open(): supplied resource is not a valid stream resource", .{});
+                }
                 const fdv = v.resource.get("__fd");
                 if (fdv != .int or fdv.int < 0) continue;
                 action = .{ .redirect = @intCast(fdv.int) };
