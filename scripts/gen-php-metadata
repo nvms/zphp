@@ -27,8 +27,9 @@
 #       writes only this file, which needs no extension php may lack
 #
 #   src/stdlib/extensions_generated.zig    the extension php files each
-#       native function and class under, which the reflectors' string forms
-#       print ("<internal:standard>"). `scripts/gen-php-metadata --extensions`
+#       native function, class, constant and ini entry under, which the
+#       reflectors' string forms print ("<internal:standard>") and
+#       ReflectionExtension lists, and each extension's dependencies. `scripts/gen-php-metadata --extensions`
 #       writes only this file; what the php on PATH lacks stays unmapped
 
 import base64, json, os, subprocess, sys, tempfile
@@ -62,11 +63,20 @@ foreach (explode("\n", trim(stream_get_contents(STDIN))) as $iface) {
 EXTENSIONS_OUT = os.path.join(REPO, "src", "stdlib", "extensions_generated.zig")
 
 EXTENSION_OF = r'''<?php
-$out = ['functions' => [], 'classes' => []];
+$out = ['functions' => [], 'classes' => [], 'constants' => [], 'ini' => [], 'dependencies' => [], 'class_order' => []];
 foreach (explode("\n", trim(stream_get_contents(STDIN))) as $line) {
     [$kind, $name] = explode(' ', $line, 2);
     try {
-        if ($kind === 'f') {
+        if ($kind === 'k') {
+            if (!defined($name)) continue;
+            $ext = (new ReflectionConstant($name))->getExtensionName();
+            if ($ext !== false) $out['constants'][$name] = $ext;
+        } elseif ($kind === 'i') {
+            $ext = new ReflectionExtension($name);
+            foreach (array_keys($ext->getINIEntries()) as $entry) $out['ini'][] = [$entry, $ext->getName()];
+            foreach ($ext->getDependencies() as $dep => $how) $out['dependencies'][] = [$ext->getName(), $dep, $how];
+            foreach (array_keys((new ReflectionExtension($name))->getClasses()) as $class) $out['class_order'][] = $class;
+        } elseif ($kind === 'f') {
             if (!function_exists($name)) continue;
             $ext = (new ReflectionFunction($name))->getExtensionName();
             if ($ext !== false) $out['functions'][$name] = $ext;
@@ -85,6 +95,8 @@ echo json_encode($out);
 
 LIST = "<?php foreach (get_defined_functions()['internal'] as $f) echo $f, \"\\n\";"
 CLASSES = "<?php foreach (array_merge(get_declared_classes(), get_declared_interfaces()) as $c) echo $c, \"\\n\";"
+CONSTANTS = "<?php foreach (array_keys(get_defined_constants()) as $c) echo $c, \"\\n\";"
+EXTENSIONS = "<?php foreach (get_loaded_extensions() as $e) echo $e, \"\\n\";"
 
 # unserializing an empty instance is how php reveals the not-serializable flag
 # without constructing anything; the dom classes carry their own wording
@@ -263,7 +275,9 @@ def write_interfaces():
 def write_extensions():
     functions = run_script(ZPHP, LIST).split()
     classes = run_script(ZPHP, CLASSES).split()
-    query = "\n".join(["f " + f for f in functions] + ["c " + c for c in classes])
+    constants = run_script(ZPHP, CONSTANTS).split()
+    loaded = run_script(ZPHP, EXTENSIONS).split()
+    query = "\n".join(["f " + f for f in functions] + ["c " + c for c in classes] + ["k " + k for k in constants] + ["i " + e for e in loaded])
     found = json.loads(run_script("php", EXTENSION_OF, query))
     version = subprocess.run(["php", "-r", "echo PHP_VERSION;"], capture_output=True, text=True, check=True).stdout
     lines = [
@@ -272,15 +286,35 @@ def write_extensions():
         "",
         "const Map = std.StaticStringMapWithEql([]const u8, std.static_string_map.eqlAsciiIgnoreCase);",
     ]
-    for kind in ("functions", "classes"):
+    for kind in ("functions", "classes", "constants"):
         lines.append("")
         lines.append("pub const %s = Map.initComptime(.{" % kind)
         for name in sorted(found[kind] or {}):
             lines.append("    .{ %s, %s }," % (zig_string(name.encode()), zig_string(found[kind][name].encode())))
         lines.append("});")
+    # ini entries with their extension, and each extension's dependencies
+    # (Required, Optional, Conflicts), in the order php registers them
+    lines.append("")
+    lines.append("pub const ini = [_][2][]const u8{")
+    for entry, ext in found["ini"] or []:
+        lines.append("    .{ %s, %s }," % (zig_string(entry.encode()), zig_string(ext.encode())))
+    lines.append("};")
+    lines.append("")
+    lines.append("pub const dependencies = [_][3][]const u8{")
+    for ext, dep, how in found["dependencies"] or []:
+        lines.append("    .{ %s, %s, %s }," % (zig_string(ext.encode()), zig_string(dep.encode()), zig_string(how.encode())))
+    lines.append("};")
+    # the order php registers each extension's classes in, which
+    # ReflectionExtension::getClasses() lists them in
+    lines.append("")
+    lines.append("pub const class_order = [_][]const u8{")
+    for name in found["class_order"] or []:
+        if name in (found["classes"] or {}):
+            lines.append("    %s," % zig_string(name.encode()))
+    lines.append("};")
     with open(EXTENSIONS_OUT, "w") as f:
         f.write("\n".join(lines) + "\n")
-    print("%d functions, %d classes" % (len(found["functions"] or {}), len(found["classes"] or {})))
+    print("%d functions, %d classes, %d constants, %d ini entries" % (len(found["functions"] or {}), len(found["classes"] or {}), len(found["constants"] or {}), len(found["ini"] or {})))
 
 
 def main():

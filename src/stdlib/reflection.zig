@@ -16,6 +16,7 @@ const ClassDef = vm_mod.ClassDef;
 const AttributeDef = vm_mod.AttributeDef;
 const ObjFunction = @import("../pipeline/bytecode.zig").ObjFunction;
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
+const extensions = @import("extensions_generated.zig");
 
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
@@ -131,7 +132,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     var rconst_def = ClassDef{ .name = "ReflectionConstant" };
     try rconst_def.interfaces.append(a, "Reflector");
     try rconst_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") } });
-    inline for (.{ .{ "__construct", 1 }, .{ "getName", 0 }, .{ "getValue", 0 }, .{ "getShortName", 0 }, .{ "getNamespaceName", 0 }, .{ "isDeprecated", 0 }, .{ "getAttributes", 2 }, .{ "getFileName", 0 }, .{ "__toString", 0 } }) |m| {
+    inline for (.{ .{ "__construct", 1 }, .{ "getName", 0 }, .{ "getValue", 0 }, .{ "getShortName", 0 }, .{ "getNamespaceName", 0 }, .{ "isDeprecated", 0 }, .{ "getAttributes", 2 }, .{ "getFileName", 0 }, .{ "__toString", 0 }, .{ "getExtension", 0 }, .{ "getExtensionName", 0 } }) |m| {
         try rconst_def.methods.put(a, m[0], .{ .name = m[0], .arity = m[1] });
     }
     try vm.classes.put(a, "ReflectionConstant", rconst_def);
@@ -143,6 +144,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionConstant::isDeprecated", rconstIsDeprecated);
     try vm.native_fns.put(a, "ReflectionConstant::getAttributes", rconstGetAttributes);
     try vm.native_fns.put(a, "ReflectionConstant::getFileName", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionConstant::getExtension", rconstGetExtension);
+    try vm.native_fns.put(a, "ReflectionConstant::getExtensionName", rconstGetExtensionName);
     try vm.native_fns.put(a, "ReflectionConstant::__toString", rconstToString);
 
     // SensitiveParameterValue (PHP 8.2) - returned by debug_backtrace for
@@ -184,6 +187,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "isReadonly", .{ .name = "isReadonly", .arity = 0 });
     try rc_def.methods.put(a, "getModifiers", .{ .name = "getModifiers", .arity = 0 });
     try rc_def.methods.put(a, "isCloneable", .{ .name = "isCloneable", .arity = 0 });
+    inline for (.{ "getExtension", "getExtensionName", "isIterable", "isIterateable" }) |m| try rc_def.methods.put(a, m, .{ .name = m, .arity = 0 });
     try rc_def.methods.put(a, "newInstanceArgs", .{ .name = "newInstanceArgs", .arity = 1 });
     try rc_def.methods.put(a, "newInstance", .{ .name = "newInstance", .arity = 0 });
     try rc_def.methods.put(a, "getMethods", .{ .name = "getMethods", .arity = 1 });
@@ -292,6 +296,10 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClass::isReadonly", rcIsReadOnly);
     try vm.native_fns.put(a, "ReflectionClass::getModifiers", rcGetModifiers);
     try vm.native_fns.put(a, "ReflectionClass::isCloneable", rcIsCloneable);
+    try vm.native_fns.put(a, "ReflectionClass::getExtension", rcGetExtension);
+    try vm.native_fns.put(a, "ReflectionClass::getExtensionName", rcGetExtensionName);
+    try vm.native_fns.put(a, "ReflectionClass::isIterable", rcIsIterable);
+    try vm.native_fns.put(a, "ReflectionClass::isIterateable", rcIsIterable);
 
     // ReflectionObject extends ReflectionClass. behavior is identical to
     // ReflectionClass(get_class($obj)) when constructed with an instance,
@@ -351,6 +359,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rm_def.methods.put(a, "isUserDefined", .{ .name = "isUserDefined", .arity = 0 });
     try rm_def.methods.put(a, "isDeprecated", .{ .name = "isDeprecated", .arity = 0 });
     try rm_def.methods.put(a, "getStaticVariables", .{ .name = "getStaticVariables", .arity = 0 });
+    try rm_def.methods.put(a, "getExtension", .{ .name = "getExtension", .arity = 0 });
+    try rm_def.methods.put(a, "getExtensionName", .{ .name = "getExtensionName", .arity = 0 });
     try rm_def.methods.put(a, "createFromMethodName", .{ .name = "createFromMethodName", .arity = 1, .is_static = true });
     try vm.classes.put(a, "ReflectionMethod", rm_def);
 
@@ -393,6 +403,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionMethod::isUserDefined", rmIsUserDefined);
     try vm.native_fns.put(a, "ReflectionMethod::isDeprecated", rmIsDeprecated);
     try vm.native_fns.put(a, "ReflectionMethod::getStaticVariables", rmGetStaticVariables);
+    try vm.native_fns.put(a, "ReflectionMethod::getExtension", rfGetExtension);
+    try vm.native_fns.put(a, "ReflectionMethod::getExtensionName", rfGetExtensionName);
 
     var rp_def = ClassDef{ .name = "ReflectionParameter" };
     try rp_def.interfaces.append(a, "Reflector");
@@ -584,8 +596,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionFunction::getNamespaceName", rfGetNamespaceName);
     try vm.native_fns.put(a, "ReflectionFunction::getShortName", rfGetShortName);
     try vm.native_fns.put(a, "ReflectionFunction::inNamespace", rfInNamespace);
-    try vm.native_fns.put(a, "ReflectionFunction::getExtension", reflectionFalse);
-    try vm.native_fns.put(a, "ReflectionFunction::getExtensionName", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionFunction::getExtension", rfGetExtension);
+    try vm.native_fns.put(a, "ReflectionFunction::getExtensionName", rfGetExtensionName);
     try vm.native_fns.put(a, "ReflectionFunction::isDeprecated", rfIsDeprecated);
     try vm.native_fns.put(a, "ReflectionFunction::isDisabled", reflectionFalse);
 
@@ -784,12 +796,12 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionExtension::__construct", rextConstruct);
     try vm.native_fns.put(a, "ReflectionExtension::getName", rextGetName);
     try vm.native_fns.put(a, "ReflectionExtension::getVersion", rextGetVersion);
-    try vm.native_fns.put(a, "ReflectionExtension::getFunctions", reflectionEmptyArray);
-    try vm.native_fns.put(a, "ReflectionExtension::getConstants", reflectionEmptyArray);
-    try vm.native_fns.put(a, "ReflectionExtension::getINIEntries", reflectionEmptyArray);
-    try vm.native_fns.put(a, "ReflectionExtension::getClasses", reflectionEmptyArray);
-    try vm.native_fns.put(a, "ReflectionExtension::getClassNames", reflectionEmptyArray);
-    try vm.native_fns.put(a, "ReflectionExtension::getDependencies", reflectionEmptyArray);
+    try vm.native_fns.put(a, "ReflectionExtension::getFunctions", rextGetFunctions);
+    try vm.native_fns.put(a, "ReflectionExtension::getConstants", rextGetConstants);
+    try vm.native_fns.put(a, "ReflectionExtension::getINIEntries", rextGetIniEntries);
+    try vm.native_fns.put(a, "ReflectionExtension::getClasses", rextGetClasses);
+    try vm.native_fns.put(a, "ReflectionExtension::getClassNames", rextGetClassNames);
+    try vm.native_fns.put(a, "ReflectionExtension::getDependencies", rextGetDependencies);
     try vm.native_fns.put(a, "ReflectionExtension::info", rextInfo);
     try vm.native_fns.put(a, "ReflectionExtension::isPersistent", reflectionTrue);
     try vm.native_fns.put(a, "ReflectionExtension::isTemporary", reflectionFalse);
@@ -891,11 +903,190 @@ fn reflectionTrue(_: *NativeContext, _: []const Value) RuntimeError!NativeResult
     return NativeResult.scalar(.{ .bool = true });
 }
 
+// php_info_print_module in text mode: the module's heading, the lines its
+// MINFO prints, and its ini entries
 fn rextInfo(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const name = this.get("name");
-    if (name == .string) try ctx.vm.output.appendSlice(ctx.allocator, name.string.bytes());
+    const name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(ctx.allocator);
+    try out.print(ctx.allocator, "\n{s}\n\n", .{name});
+    if (std.mem.eql(u8, name, "Reflection")) {
+        try out.appendSlice(ctx.allocator, "Reflection => enabled\n");
+    } else if (std.mem.eql(u8, name, "date")) {
+        const zone = try ctx.vm.callByName("date_default_timezone_get", &.{});
+        defer ctx.vm.releaseValue(zone);
+        try out.print(ctx.allocator, "date/time support => enabled\ntimelib version => 2022.17\n\"Olson\" Timezone Database Version => 0.system\nTimezone Database => internal\nDefault timezone => {s}\n", .{if (zone == .string) zone.string.bytes() else "UTC"});
+    } else {
+        try out.print(ctx.allocator, "{s} support => enabled\n", .{name});
+    }
+    var first = true;
+    for (extensions.ini) |pair| {
+        const entry = pair[0];
+        if (!std.mem.eql(u8, pair[1], name)) continue;
+        if (first) try out.appendSlice(ctx.allocator, "\nDirective => Local Value => Master Value\n");
+        first = false;
+        const v = try ctx.vm.callByName("ini_get", &.{.{ .string = Value.String.borrowed(entry) }});
+        defer ctx.vm.releaseValue(v);
+        const text = if (v == .string) (if (v.string.bytes().len == 0) "no value" else v.string.bytes()) else "no value";
+        try out.print(ctx.allocator, "{s} => {s} => {s}\n", .{ entry, text, text });
+    }
+    try ctx.vm.output.appendSlice(ctx.allocator, out.items);
     return NativeResult.scalar(.null);
+}
+
+fn extensionOfThis(ctx: *NativeContext) ?[]const u8 {
+    const this = getThis(ctx) orelse return null;
+    return if (this.get("name") == .string) this.get("name").string.bytes() else null;
+}
+
+fn rextGetFunctions(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const ext = extensionOfThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = try ctx.createArray();
+    for (extensions.functions.keys(), extensions.functions.values()) |name, owner| {
+        if (!std.mem.eql(u8, owner, ext)) continue;
+        const canonical = ctx.vm.canonicalFunctionName(name) orelse continue;
+        const obj = try ctx.createObject("ReflectionFunction");
+        try obj.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(canonical) });
+        try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(canonical) }, .{ .object = obj });
+    }
+    return NativeResult.borrowed(.{ .array = arr });
+}
+
+fn rextGetClasses(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return extensionClasses(ctx, true);
+}
+
+fn rextGetClassNames(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return extensionClasses(ctx, false);
+}
+
+fn extensionClasses(ctx: *NativeContext, objects: bool) RuntimeError!NativeResult {
+    const ext = extensionOfThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = try ctx.createArray();
+    for (extensions.class_order) |name| {
+        const owner = extensions.classes.get(name) orelse continue;
+        if (!std.mem.eql(u8, owner, ext)) continue;
+        if (!ctx.vm.classes.contains(name) and !ctx.vm.interfaces.contains(name) and !ctx.vm.traits.contains(name)) continue;
+        const declared = try ctx.vm.stableClassName(ctx.vm.declaredClassName(name));
+        const key: Value = .{ .string = Value.String.borrowed(declared) };
+        if (objects) {
+            const is_enum = if (ctx.vm.classes.get(declared)) |cd| cd.is_enum else false;
+            const obj = try ctx.createObject(if (is_enum) "ReflectionEnum" else "ReflectionClass");
+            try obj.set(ctx.allocator, "name", key);
+            try obj.set(ctx.allocator, "__is_interface", .{ .bool = ctx.vm.interfaces.contains(declared) });
+            try obj.set(ctx.allocator, "__is_trait", .{ .bool = ctx.vm.traits.contains(declared) });
+            try arr.set(ctx.allocator, .{ .string = key.string }, .{ .object = obj });
+        } else {
+            try arr.append(ctx.allocator, key);
+        }
+    }
+    return NativeResult.borrowed(.{ .array = arr });
+}
+
+fn rextGetConstants(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const ext = extensionOfThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = try ctx.createArray();
+    const all = try ctx.vm.callByName("get_defined_constants", &.{});
+    defer ctx.vm.releaseValue(all);
+    if (all != .array) return NativeResult.borrowed(.{ .array = arr });
+    for (all.array.entries.items) |entry| {
+        if (entry.key != .string) continue;
+        const owner = extensions.constants.get(entry.key.string.bytes()) orelse continue;
+        if (!std.mem.eql(u8, owner, ext)) continue;
+        try arr.set(ctx.allocator, entry.key, entry.value);
+    }
+    return NativeResult.borrowed(.{ .array = arr });
+}
+
+fn rextGetIniEntries(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const ext = extensionOfThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = try ctx.createArray();
+    for (extensions.ini) |pair| {
+        const entry = pair[0];
+        if (!std.mem.eql(u8, pair[1], ext)) continue;
+        const v = try ctx.vm.callByName("ini_get", &.{.{ .string = Value.String.borrowed(entry) }});
+        try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(entry) }, if (v == .string) v else .null);
+    }
+    return NativeResult.borrowed(.{ .array = arr });
+}
+
+fn rextGetDependencies(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const ext = extensionOfThis(ctx) orelse return NativeResult.scalar(.null);
+    const arr = try ctx.createArray();
+    for (extensions.dependencies) |dep| {
+        if (!std.mem.eql(u8, dep[0], ext)) continue;
+        try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(dep[1]) }, .{ .string = Value.String.borrowed(dep[2]) });
+    }
+    return NativeResult.borrowed(.{ .array = arr });
+}
+
+// the ReflectionExtension of an extension name, or null for none
+fn extensionObject(ctx: *NativeContext, name: ?[]const u8) RuntimeError!NativeResult {
+    const ext = name orelse return NativeResult.scalar(.null);
+    const obj = try ctx.createObject("ReflectionExtension");
+    try obj.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(ext) });
+    return NativeResult.borrowed(.{ .object = obj });
+}
+
+fn extensionNameResult(name: ?[]const u8) NativeResult {
+    const ext = name orelse return NativeResult.scalar(.{ .bool = false });
+    return .{ .value = .{ .string = Value.String.borrowed(ext) } };
+}
+
+// the extension an internal class belongs to; a user class has none
+fn classExtension(ctx: *NativeContext) ?[]const u8 {
+    const this = getThis(ctx) orelse return null;
+    const name = if (this.get("name") == .string) this.get("name").string.bytes() else return null;
+    if (!isInternalClassName(ctx.vm, name)) return null;
+    return extensions.classes.get(name);
+}
+
+fn functionExtension(ctx: *NativeContext) ?[]const u8 {
+    const this = getThis(ctx) orelse return null;
+    if (this.get("__declaring_class") == .string) {
+        const declaring = this.get("__declaring_class").string.bytes();
+        if (!isInternalClassName(ctx.vm, declaring)) return null;
+        return extensions.classes.get(declaring);
+    }
+    const key = functionKey(this);
+    if (key != .string or ctx.vm.functions.contains(key.string.bytes())) return null;
+    return extensions.functions.get(key.string.bytes());
+}
+
+fn constantExtension(ctx: *NativeContext) ?[]const u8 {
+    const this = getThis(ctx) orelse return null;
+    const name = if (this.get("name") == .string) this.get("name").string.bytes() else return null;
+    return extensions.constants.get(name);
+}
+
+fn rcGetExtension(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return extensionObject(ctx, classExtension(ctx));
+}
+fn rcGetExtensionName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return extensionNameResult(classExtension(ctx));
+}
+fn rfGetExtension(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return extensionObject(ctx, functionExtension(ctx));
+}
+fn rfGetExtensionName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return extensionNameResult(functionExtension(ctx));
+}
+fn rconstGetExtension(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return extensionObject(ctx, constantExtension(ctx));
+}
+fn rconstGetExtensionName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return extensionNameResult(constantExtension(ctx));
+}
+
+// php's isIterable: an instantiable class implementing Traversable
+fn rcIsIterable(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    if (ctx.vm.interfaces.contains(name) or ctx.vm.traits.contains(name)) return NativeResult.scalar(.{ .bool = false });
+    const cls = ctx.vm.classes.get(name) orelse return NativeResult.scalar(.{ .bool = false });
+    if (cls.is_abstract) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = ctx.vm.isInstanceOf(name, "Traversable") });
 }
 
 fn rextToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
