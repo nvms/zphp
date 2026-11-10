@@ -832,28 +832,79 @@ pub fn readPathAs(ctx: *NativeContext, raw_path: []const u8, comptime func: ?[]c
     };
 }
 
+const FILE_APPEND: i64 = 8;
+const LOCK_EX: i64 = 2;
+
 fn native_file_put_contents(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const filename = try strArg(ctx, args, "file_put_contents", 0, "filename", true);
+    const data_arg: Value = if (args.len > 1) args[1] else .null;
+    if (data_arg == .resource and (!std.mem.eql(u8, data_arg.resource.class_name, "FileHandle") or value_mod.resourceClosed(data_arg.resource))) {
+        return throwStreamArg(ctx, "file_put_contents(): supplied resource is not a valid stream resource", .{});
+    }
+    const flags = try intArg(ctx, args, "file_put_contents", 2, "flags", 0);
+    if (args.len > 3 and args[3] == .resource and !std.mem.eql(u8, args[3].resource.class_name, "StreamContext")) {
+        return throwStreamArg(ctx, "file_put_contents(): supplied resource is not a valid Stream-Context resource", .{});
+    }
     try useContext(ctx, args, 3);
-    const result = try putContents(ctx, args);
+    if (filename.len == 0) return throwValueError(ctx, "Path must not be empty", .{});
+    var rendered = std.ArrayListUnmanaged(u8).empty;
+    defer rendered.deinit(ctx.allocator);
+    // null when the data has no string form: the file is still opened (and
+    // truncated) but nothing is written and the call fails
+    const data: ?[]const u8 = try putContentsData(ctx, data_arg, &rendered);
+    const result = try putContents(ctx, filename, data, flags);
     if (result.value == .int) transientStreams(ctx, 1);
     return result;
 }
 
-fn putContents(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const spelled_path = args[0].string.bytes();
-    var formatted = std.ArrayListUnmanaged(u8).empty;
-    defer formatted.deinit(ctx.allocator);
-    const data = if (args[1] == .string) args[1].string.bytes() else if (args[1] == .array) blk: {
-        // PHP writes an array argument as its elements concatenated, like
-        // implode('', $array) - each element coerced to string
-        for (args[1].array.entries.items) |entry| try entry.value.format(&formatted, ctx.allocator);
-        break :blk formatted.items;
-    } else blk: {
-        try args[1].format(&formatted, ctx.allocator);
-        break :blk formatted.items;
-    };
+// the bytes file_put_contents writes for its data argument: a string, a
+// scalar's string form, an array's elements joined, a stringable object, or
+// what is left to read in a stream
+fn putContentsData(ctx: *NativeContext, data: Value, out: *std.ArrayListUnmanaged(u8)) RuntimeError!?[]const u8 {
+    switch (data) {
+        .string => |str| return str.bytes(),
+        .array => |arr| {
+            for (arr.entries.items) |entry| switch (entry.value) {
+                .array => {
+                    try ctx.vm.emitWarning("Array to string conversion");
+                    try out.appendSlice(ctx.allocator, "Array");
+                },
+                .object => |o| {
+                    if (!ctx.vm.hasMethod(o.class_name, "__toString")) {
+                        const msg = try std.fmt.allocPrint(ctx.allocator, "Object of class {s} could not be converted to string", .{o.class_name});
+                        defer ctx.allocator.free(msg);
+                        try ctx.vm.setPendingException("Error", msg);
+                        return error.RuntimeError;
+                    }
+                    try out.appendSlice(ctx.allocator, try ctx.vm.objectToString(o));
+                },
+                else => try entry.value.format(out, ctx.allocator),
+            };
+            return out.items;
+        },
+        .object => |o| {
+            if (!ctx.vm.hasMethod(o.class_name, "__toString")) return null;
+            return try ctx.vm.objectToString(o);
+        },
+        .resource => |r| {
+            var buf: [read_chunk]u8 = undefined;
+            while (true) {
+                const n = (try streamReadInto(ctx, r, &buf)) orelse break;
+                if (n == 0) break;
+                try out.appendSlice(ctx.allocator, buf[0..n]);
+            }
+            return out.items;
+        },
+        else => {
+            try data.format(out, ctx.allocator);
+            return out.items;
+        },
+    }
+}
+
+fn putContents(ctx: *NativeContext, spelled_path: []const u8, maybe_data: ?[]const u8, flags: i64) RuntimeError!NativeResult {
     if (userWrapperFor(ctx.vm, spelled_path)) |class_name| {
+        const data = maybe_data orelse return NativeResult.scalar(.{ .bool = false });
         const opened = (try dispatchUserOpen(ctx, class_name, spelled_path, "wb")) orelse return NativeResult.scalar(.{ .bool = false });
         const wrapper = fileHandleWrapper(opened.resource) orelse return NativeResult.scalar(.{ .bool = false });
         const written = try ctx.callMethod(wrapper, "stream_write", &[_]Value{.{ .string = Value.String.borrowed(data) }});
@@ -861,40 +912,73 @@ fn putContents(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
             _ = try ctx.callMethod(wrapper, "stream_close", &.{});
         }
         if (written != .int) return NativeResult.scalar(.{ .bool = false });
+        if (written.int >= 0 and written.int < data.len) {
+            try warn(ctx, "file_put_contents(): Only {d} of {d} bytes written, possibly out of free disk space", .{ written.int, data.len });
+            return NativeResult.scalar(.{ .bool = false });
+        }
         return NativeResult.scalar(.{ .int = written.int });
     }
     if (extractScheme(spelled_path)) |s| {
         if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return NativeResult.scalar(.{ .bool = false });
     }
+    // an exclusive lock needs a plain file
+    if (flags & FILE_APPEND == 0 and flags & LOCK_EX != 0 and paths.hasScheme(spelled_path) and !std.ascii.startsWithIgnoreCase(spelled_path, "file://")) {
+        try warn(ctx, "file_put_contents(): Exclusive locks may only be set for regular files", .{});
+        return NativeResult.scalar(.{ .bool = false });
+    }
     if (std.mem.eql(u8, spelled_path, "php://stdout") or std.mem.eql(u8, spelled_path, "php://output")) {
+        const data = maybe_data orelse return NativeResult.scalar(.{ .bool = false });
         try ctx.vm.output.appendSlice(ctx.allocator, data);
         return NativeResult.scalar(.{ .int = @intCast(data.len) });
     }
     if (std.mem.eql(u8, spelled_path, "php://stderr")) {
+        const data = maybe_data orelse return NativeResult.scalar(.{ .bool = false });
         ctx.vm.flushOutputToStdout();
         const stderr = std.Io.File.stderr();
         const n = platform.write(stderr, data) catch return NativeResult.scalar(.{ .bool = false });
         return NativeResult.scalar(.{ .int = @intCast(n) });
     }
     if (std.mem.startsWith(u8, spelled_path, ZLIB_PREFIX)) {
+        const data = maybe_data orelse return NativeResult.scalar(.{ .bool = false });
         writeZlibFile(ctx.allocator, spelled_path, data) catch return NativeResult.scalar(.{ .bool = false });
         return NativeResult.scalar(.{ .int = @intCast(data.len) });
     }
-    const flags: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
-    const append = (flags & 8) != 0; // FILE_APPEND = 8
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = paths.streamPath(&path_buf, spelled_path);
-    bundle.prepareWrite(path, if (append) .edit else .create);
-    if (append) {
-        const file = std.Io.Dir.cwd().openFile(platform.io, path, .{ .mode = .write_only }) catch {
-            std.Io.Dir.cwd().writeFile(platform.io, .{ .sub_path = path, .data = data }) catch return NativeResult.scalar(.{ .bool = false });
-            return NativeResult.scalar(.{ .int = @intCast(data.len) });
+    var target = spelled_path;
+    switch (fileUrl(target)) {
+        .not_file => {},
+        .local => |local| target = local,
+        .remote => {
+            try warn(ctx, "file_put_contents(): Remote host file access not supported, {s}", .{spelled_path});
+            try warn(ctx, "file_put_contents({s}): Failed to open stream: no suitable wrapper could be found", .{spelled_path});
+            return NativeResult.scalar(.{ .bool = false });
+        },
+    }
+    const append = flags & FILE_APPEND != 0;
+    const lock = !append and flags & LOCK_EX != 0;
+    // "a", "c" (truncated once the lock is held), or "w"
+    const file = openWithMode(target, if (append) "ab" else if (lock) "cb" else "wb") catch |err| {
+        try warn(ctx, "file_put_contents({s}): Failed to open stream: {s}", .{ spelled_path, errorText(err) });
+        return NativeResult.scalar(.{ .bool = false });
+    };
+    defer file.close(platform.io);
+    if (lock) {
+        if (!platform.is_windows) sys.flock(file.handle, 2) catch {
+            try warn(ctx, "file_put_contents(): Exclusive locks are not supported for this stream", .{});
+            return NativeResult.scalar(.{ .bool = false });
         };
-        defer file.close(platform.io);
-        platform.seekFromEnd(file, 0) catch return NativeResult.scalar(.{ .bool = false });
-        _ = platform.write(file, data) catch return NativeResult.scalar(.{ .bool = false });
-    } else {
-        std.Io.Dir.cwd().writeFile(platform.io, .{ .sub_path = path, .data = data }) catch return NativeResult.scalar(.{ .bool = false });
+        file.setLength(platform.io, 0) catch {};
+    }
+    const data = maybe_data orelse return NativeResult.scalar(.{ .bool = false });
+    if (append) platform.seekFromEnd(file, 0) catch {};
+    var written: usize = 0;
+    while (written < data.len) {
+        const n = platform.write(file, data[written..]) catch break;
+        if (n == 0) break;
+        written += n;
+    }
+    if (written != data.len) {
+        try warn(ctx, "file_put_contents(): Only {d} of {d} bytes written, possibly out of free disk space", .{ written, data.len });
+        return NativeResult.scalar(.{ .bool = false });
     }
     return NativeResult.scalar(.{ .int = @intCast(data.len) });
 }
