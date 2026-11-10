@@ -7011,6 +7011,10 @@ pub const VM = struct {
                     }
                 },
 
+                .implicit_return => {
+                    if (try self.throwImplicitReturn()) continue;
+                },
+
                 .static_prop_bind_ref_source => {
                     var source = self.retainArgSource(self.ic.?.arg_stack[self.sp - 1]);
                     defer self.releaseArgSource(&source);
@@ -21890,13 +21894,29 @@ pub const VM = struct {
             const shown = if (frame.func) |f| (if (f.display_name.len > 0) f.display_name else func_name) else func_name;
             const msg = std.fmt.allocPrint(self.allocator, "{s}(): Return value must be of type {s}, {s} returned", .{ shown, try self.resolvedTypeText(ti.return_type, self.functionScope(func_name)), valueTypeName(val.*) }) catch return error.RuntimeError;
             defer self.allocator.free(msg);
-            try self.popFrame();
+            // raised inside the function, as php's VERIFY_RETURN_TYPE is
             if (try self.throwBuiltinException("TypeError", msg)) return true;
             self.setErrorMsg("{s}", .{msg});
             return error.RuntimeError;
         }
         if (@intFromEnum(accepted.?) != @intFromEnum(val.*) or !Value.identical(accepted.?, val.*)) self.replaceOwned(val, accepted.?);
         return false;
+    }
+
+    // a typed function reached its end without returning
+    noinline fn throwImplicitReturn(self: *VM) RuntimeError!bool {
+        const frame = &self.frames[self.frame_count - 1];
+        const func = frame.func orelse return false;
+        const ti = g_type_info.get(func.name) orelse return false;
+        if (ti.return_type.len == 0) return false;
+        const shown = if (func.display_name.len > 0) func.display_name else try self.callableDisplayName(func.name, func);
+        const msg = if (std.ascii.eqlIgnoreCase(ti.return_type, "never"))
+            try std.fmt.allocPrint(self.allocator, "{s}(): never-returning function must not implicitly return", .{shown})
+        else
+            try std.fmt.allocPrint(self.allocator, "{s}(): Return value must be of type {s}, none returned", .{ shown, try self.resolvedTypeText(ti.return_type, self.functionScope(func.name)) });
+        defer self.allocator.free(msg);
+        if (try self.throwBuiltinException("TypeError", msg)) return true;
+        return error.RuntimeError;
     }
 
     fn typeStrAllowsString(_: *VM, type_str: []const u8) bool {

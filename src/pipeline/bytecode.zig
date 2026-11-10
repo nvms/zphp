@@ -452,6 +452,9 @@ pub const OpCode = enum(u8) {
     static_prop_bind_ref_source,
     // `$a[k] = &<place>`: [array, key, reference source] -> [value]
     array_bind_ref_source,
+    // the end of a function body with a return type other than void: php's
+    // "none returned" TypeError, or a never function's implicit return
+    implicit_return,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {

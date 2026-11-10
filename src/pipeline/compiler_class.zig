@@ -1515,6 +1515,14 @@ fn paramDefaultValue(self: *Compiler, pnode: Ast.Node) Error!Value {
     return value;
 }
 
+// zend_emit_final_return: falling off the end of a function whose return
+// type isn't void is a TypeError when it runs
+fn emitImplicitReturn(sub: *Compiler, gen: bool) Error!void {
+    if (gen or sub.declared_return.len == 0) return;
+    if (std.ascii.eqlIgnoreCase(sub.declared_return, "void")) return;
+    try sub.emitOp(.implicit_return);
+}
+
 // a parameter whose default is null and that isn't promoted takes null
 // whatever its declared type says (zend_compile_params' force_nullable)
 fn implicitlyNullable(self: *Compiler, p: u32) bool {
@@ -1633,6 +1641,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     const body_idx = node.data.rhs & 0x3FFFFFFF;
     try sub.compileNode(body_idx);
     try sub.patchGotos();
+    try emitImplicitReturn(&sub, gen);
     try sub.emitOp(.op_null);
     try sub.emitOp(if (gen) .generator_return else .return_val);
 
@@ -1831,6 +1840,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     if (call_attrs.no_discard != null and !gen) try sub.emitOp(.check_nodiscard);
     try sub.compileNode(body_node);
     try sub.patchGotos();
+    try emitImplicitReturn(&sub, gen);
     try sub.emitOp(.op_null);
     try sub.emitOp(if (gen) .generator_return else .return_val);
 
@@ -3774,6 +3784,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     const body_idx = member.data.rhs & 0x07FFFFFF;
     try sub.compileNode(body_idx);
     try sub.patchGotos();
+    try emitImplicitReturn(&sub, method_gen);
     try sub.emitOp(.op_null);
     try sub.emitOp(if (method_gen) .generator_return else .return_val);
 
