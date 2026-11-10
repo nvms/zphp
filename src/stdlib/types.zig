@@ -152,8 +152,6 @@ pub const entries = .{
     .{ "ctype_punct", ctype_punct },
     .{ "ctype_cntrl", ctype_cntrl },
     .{ "ctype_graph", ctype_graph },
-    .{ "setlocale", native_setlocale },
-    .{ "localeconv", native_localeconv },
     .{ "nl_langinfo", native_nl_langinfo },
     .{ "func_get_args", native_func_get_args },
     .{ "func_num_args", native_func_num_args },
@@ -626,117 +624,6 @@ fn ctype_cntrl(_: *NativeContext, args: []const Value) RuntimeError!NativeResult
 }
 fn ctype_graph(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return NativeResult.scalar(ctypeCheck(args, isGraph));
-}
-
-// PHP's setlocale wraps libc setlocale. zphp doesn't actually flip the process
-// locale (libc setlocale isn't thread-safe and can cause surprising interactions
-// with intl/ICU), but applications use the return value to detect whether a
-// locale was accepted. return the requested locale string verbatim, or the
-// previous locale when querying with "0"
-var current_locale: [128]u8 = @as([128]u8, @splat(0));
-var current_locale_len: usize = 1;
-var current_locale_initialized: bool = false;
-
-// whether LC_CTYPE names a UTF-8 locale: php's multibyte-aware byte
-// scanning (the csv parser's mblen) reads characters as UTF-8 then. php 8.5
-// starts with LC_CTYPE set to C.UTF-8
-pub var ctype_utf8: bool = true;
-
-// a locale accepted for category: LC_ALL and LC_CTYPE set the character type
-// ("" takes it from the environment, as libc does)
-fn acceptLocale(category: Value, requested: []const u8) void {
-    const cat = Value.toInt(category);
-    if (cat != 0 and cat != 2) return;
-    var name = requested;
-    if (name.len == 0) {
-        name = "C";
-        for ([_][]const u8{ "LC_ALL", "LC_CTYPE", "LANG" }) |key| {
-            if (platform.getenv(key)) |v| if (v.len > 0) {
-                name = v;
-                break;
-            };
-        }
-    }
-    var lower: [128]u8 = undefined;
-    const n = @min(name.len, lower.len);
-    const l = std.ascii.lowerString(lower[0..n], name[0..n]);
-    ctype_utf8 = std.mem.indexOf(u8, l, "utf-8") != null or std.mem.indexOf(u8, l, "utf8") != null;
-}
-
-fn ensureLocaleInit() void {
-    if (current_locale_initialized) return;
-    current_locale[0] = 'C';
-    current_locale_len = 1;
-    current_locale_initialized = true;
-}
-
-fn native_setlocale(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    ensureLocaleInit();
-    // PHP: setlocale($category, ...$locales). first arg is category (int)
-    if (args.len < 1) return NativeResult.copyString(ctx.allocator, current_locale[0..current_locale_len]);
-
-    // collect candidate locale strings from args 1..n. each may be a string or an
-    // array (variadic / array form). first one that "works" wins; "0" queries
-    var i: usize = 1;
-    while (i < args.len) : (i += 1) {
-        switch (args[i]) {
-            .string => |s| {
-                if (std.mem.eql(u8, s.bytes(), "0")) {
-                    return NativeResult.copyString(ctx.allocator, current_locale[0..current_locale_len]);
-                }
-                // accept the string verbatim. empty string maps to "C"
-                const new = if (s.bytes().len == 0) "C" else s.bytes();
-                acceptLocale(args[0], s.bytes());
-                if (new.len <= current_locale.len) {
-                    @memcpy(current_locale[0..new.len], new);
-                    current_locale_len = new.len;
-                }
-                return NativeResult.copyString(ctx.allocator, new);
-            },
-            .array => |arr| {
-                for (arr.entries.items) |e| {
-                    if (e.value != .string) continue;
-                    const s = e.value.string.bytes();
-                    if (s.len == 0) continue;
-                    acceptLocale(args[0], s);
-                    if (s.len <= current_locale.len) {
-                        @memcpy(current_locale[0..s.len], s);
-                        current_locale_len = s.len;
-                    }
-                    return NativeResult.copyString(ctx.allocator, s);
-                }
-            },
-            else => continue,
-        }
-    }
-    // no acceptable locale provided
-    return NativeResult.scalar(.{ .bool = false });
-}
-
-// minimal localeconv: returns a default "C" locale info array. real apps use
-// this for currency formatting fallbacks; the intl extension is the real path
-fn native_localeconv(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const arr = try ctx.createArray();
-    const empty = "";
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("decimal_point") }, .{ .string = Value.String.borrowed(".") });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("thousands_sep") }, .{ .string = Value.String.borrowed(empty) });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("int_curr_symbol") }, .{ .string = Value.String.borrowed(empty) });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("currency_symbol") }, .{ .string = Value.String.borrowed(empty) });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("mon_decimal_point") }, .{ .string = Value.String.borrowed(empty) });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("mon_thousands_sep") }, .{ .string = Value.String.borrowed(empty) });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("positive_sign") }, .{ .string = Value.String.borrowed(empty) });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("negative_sign") }, .{ .string = Value.String.borrowed(empty) });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("int_frac_digits") }, .{ .int = 127 });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("frac_digits") }, .{ .int = 127 });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("p_cs_precedes") }, .{ .int = 127 });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("p_sep_by_space") }, .{ .int = 127 });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("n_cs_precedes") }, .{ .int = 127 });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("n_sep_by_space") }, .{ .int = 127 });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("p_sign_posn") }, .{ .int = 127 });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("n_sign_posn") }, .{ .int = 127 });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("grouping") }, .{ .array = try ctx.createArray() });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("mon_grouping") }, .{ .array = try ctx.createArray() });
-    return NativeResult.borrowed(.{ .array = arr });
 }
 
 fn native_nl_langinfo(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {

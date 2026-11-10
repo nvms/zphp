@@ -35,6 +35,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         const ignore = std.posix.Sigaction{ .handler = .{ .handler = std.posix.SIG.IGN }, .mask = std.posix.sigemptyset(), .flags = 0 };
         std.posix.sigaction(std.posix.SIG.PIPE, &ignore, null);
     }
+    @import("stdlib/locale.zig").resetCtype();
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer if (!release_allocator) {
         _ = gpa.deinit();

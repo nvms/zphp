@@ -2689,12 +2689,16 @@ pub const VM = struct {
         try c.put(a, "INPUT_GET", .{ .int = 1 });
         try c.put(a, "INPUT_COOKIE", .{ .int = 2 });
         try c.put(a, "INPUT_ENV", .{ .int = 4 });
-        try c.put(a, "LC_ALL", .{ .int = 0 });
-        try c.put(a, "LC_COLLATE", .{ .int = 1 });
-        try c.put(a, "LC_CTYPE", .{ .int = 2 });
-        try c.put(a, "LC_MONETARY", .{ .int = 3 });
-        try c.put(a, "LC_NUMERIC", .{ .int = 4 });
-        try c.put(a, "LC_TIME", .{ .int = 5 });
+        {
+            const lc = @import("../stdlib/locale.zig").lc;
+            try c.put(a, "LC_ALL", .{ .int = lc.all });
+            try c.put(a, "LC_COLLATE", .{ .int = lc.collate });
+            try c.put(a, "LC_CTYPE", .{ .int = lc.ctype });
+            try c.put(a, "LC_MONETARY", .{ .int = lc.monetary });
+            try c.put(a, "LC_NUMERIC", .{ .int = lc.numeric });
+            try c.put(a, "LC_TIME", .{ .int = lc.time });
+            if (lc.messages) |m| try c.put(a, "LC_MESSAGES", .{ .int = m });
+        }
         try c.put(a, "INPUT_SERVER", .{ .int = 5 });
         try c.put(a, "INPUT_SESSION", .{ .int = 6 });
         try c.put(a, "INPUT_REQUEST", .{ .int = 99 });
@@ -3223,6 +3227,7 @@ pub const VM = struct {
     }
 
     pub fn reset(self: *VM) void {
+        @import("../stdlib/locale.zig").resetAfterRequest();
         if (self.ic) |ic| {
             for (ic.arg_stack[0..ic.arg_stack_room.committed]) |*source| self.releaseArgSource(source);
             self.clearActiveArgSources();

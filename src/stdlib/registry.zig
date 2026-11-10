@@ -17,6 +17,7 @@ pub fn register(map: *@import("../runtime/vm.zig").NativeTable, allocator: std.m
         @import("strings.zig").entries,
         @import("string_ports.zig").entries,
         @import("scanf.zig").entries,
+        @import("locale.zig").entries,
         @import("formatted_print.zig").entries,
         @import("arrays.zig").entries,
         @import("array_diff.zig").entries,
@@ -69,6 +70,7 @@ test {
     _ = @import("strings.zig");
     _ = @import("string_ports.zig");
     _ = @import("scanf.zig");
+    _ = @import("locale.zig");
     _ = @import("formatted_print.zig");
     _ = @import("arrays.zig");
     _ = @import("array_diff.zig");

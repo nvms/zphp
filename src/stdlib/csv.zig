@@ -20,31 +20,7 @@ const e_deprecated = 8192;
 // PHP_CSV_NO_ESCAPE: an empty $escape turns escaping off
 pub const no_escape: i32 = -1;
 
-// php_mblen under the current LC_CTYPE: the length of the character at the
-// start of s, -1 for an invalid sequence, -2 for one cut short. in the C
-// locale every byte is a character
-fn mblen(s: []const u8) i32 {
-    if (s.len == 0) return 0;
-    if (!types.ctype_utf8) return 1;
-    const c = s[0];
-    if (c < 0x80) return 1;
-    const need: usize = if (c >= 0xC2 and c <= 0xDF) 2 else if (c >= 0xE0 and c <= 0xEF) 3 else if (c >= 0xF0 and c <= 0xF4) 4 else return -1;
-    var i: usize = 1;
-    while (i < need) : (i += 1) {
-        if (i >= s.len) return -2;
-        const b = s[i];
-        var lo: u8 = 0x80;
-        var hi: u8 = 0xBF;
-        if (i == 1) {
-            if (c == 0xE0) lo = 0xA0;
-            if (c == 0xED) hi = 0x9F;
-            if (c == 0xF0) lo = 0x90;
-            if (c == 0xF4) hi = 0x8F;
-        }
-        if (b < lo or b > hi) return -1;
-    }
-    return @intCast(need);
-}
+const mblen = @import("locale.zig").mblen;
 
 // the character length php's loops step by at buf[pos] (a nul is one byte)
 fn incLen(buf: []const u8, pos: usize, limit: usize) i32 {
@@ -116,6 +92,7 @@ const Line = struct {
 // line (callers turn it into [null])
 pub fn parse(ctx: *NativeContext, source: ?LineSource, delimiter: u8, enclosure: u8, escape: i32, first_line: []const u8) RuntimeError!?*PhpArray {
     const a = ctx.allocator;
+    @import("locale.zig").mbReset();
     var line = try Line.init(ctx, first_line);
     defer a.free(line.bytes);
 
