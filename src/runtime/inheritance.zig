@@ -463,11 +463,28 @@ pub fn checkClass(vm: *VM, class_name: []const u8, def: *const ClassDef) Runtime
 
 // the checks php makes while linking an interface: its constants against
 // the interfaces it extends
-pub fn checkInterface(vm: *VM, name: []const u8, def: *const ClassDef) RuntimeError!void {
+pub fn checkInterface(vm: *VM, name: []const u8, def: *const ClassDef, idef: *const vm_mod.InterfaceDef) RuntimeError!void {
     var arena_state = std.heap.ArenaAllocator.init(vm.allocator);
     defer arena_state.deinit();
+    const arena = arena_state.allocator();
     var pending: Pending = .{ .vm = vm, .name = name, .def = def, .is_interface = true };
-    checkConstants(&pending, arena_state.allocator()) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else err;
+    const p = &pending;
+    // the methods it redeclares against the interfaces it extends
+    var wanted: std.ArrayListUnmanaged([2][]const u8) = .empty;
+    var seen: std.StringHashMapUnmanaged(void) = .{};
+    if (idef.parent) |parent| interfaceMethods(p, parent, &wanted, arena, &seen) catch return error.OutOfMemory;
+    for (idef.parents.items) |parent| interfaceMethods(p, parent, &wanted, arena, &seen) catch return error.OutOfMemory;
+    for (wanted.items) |entry| {
+        const method = entry[1];
+        const declared = for (idef.methods.items) |own| {
+            if (std.ascii.eqlIgnoreCase(own, method)) break true;
+        } else false;
+        if (!declared) continue;
+        const child = (methodOf(p, arena, name, method, true) catch return error.OutOfMemory) orelse continue;
+        const proto = (methodOf(p, arena, entry[0], method, true) catch return error.OutOfMemory) orelse continue;
+        try checkMethod(p, arena, child, proto, std.ascii.eqlIgnoreCase(method, "__construct"));
+    }
+    checkConstants(p, arena) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else err;
 }
 
 // php's do_inherit_property type rules: a property keeps the type of the

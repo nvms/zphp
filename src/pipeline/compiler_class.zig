@@ -2143,6 +2143,9 @@ fn interfaceDeclEarlyBindable(self: *Compiler, node: Ast.Node) bool {
             const pname = resolveNodeClassName(self, pnode) catch return false;
             if (!self.hoisted_names.contains(pname)) return false;
         }
+        // its methods are checked against the interfaces it extends, with
+        // the classes known where php would bind it
+        if (parent_count > 0 and !methodTypesKnown(self, node, &self.hoisted_names)) return false;
     }
     for (self.ast.extraSlice(node.data.lhs)) |m_idx| {
         const m = self.ast.nodes[m_idx];

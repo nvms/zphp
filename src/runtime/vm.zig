@@ -8791,7 +8791,7 @@ pub const VM = struct {
                         var oi = old.value;
                         oi.deinit(self.allocator);
                     }
-                    inheritance.checkInterface(self, iface_name, &def) catch |err| {
+                    inheritance.checkInterface(self, iface_name, &def, &idef) catch |err| {
                         def.deinit(self.allocator);
                         idef.deinit(self.allocator);
                         return err;
