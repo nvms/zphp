@@ -2,6 +2,8 @@ const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
 const platform = @import("../platform.zig");
 const Value = @import("../runtime/value.zig").Value;
+const PhpArray = @import("../runtime/value.zig").PhpArray;
+const phpTypeName = @import("types.zig").phpTypeName;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
@@ -236,48 +238,6 @@ fn roundHelper(integral: f64, value: f64, exponent: f64, places: i32, mode: i64)
         },
         else => integral,
     };
-}
-
-fn native_min(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.null);
-    if (args.len == 1 and args[0] == .array) {
-        const arr = args[0].array;
-        if (arr.entries.items.len == 0) {
-            try ctx.vm.setPendingException("ValueError", "min(): Argument #1 ($value) must contain at least one element");
-            return error.RuntimeError;
-        }
-        var result = arr.entries.items[0].value;
-        for (arr.entries.items[1..]) |e| {
-            if (Value.lessThan(e.value, result)) result = e.value;
-        }
-        return NativeResult.share(result);
-    }
-    var result = args[0];
-    for (args[1..]) |a| {
-        if (Value.lessThan(a, result)) result = a;
-    }
-    return NativeResult.share(result);
-}
-
-fn native_max(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.null);
-    if (args.len == 1 and args[0] == .array) {
-        const arr = args[0].array;
-        if (arr.entries.items.len == 0) {
-            try ctx.vm.setPendingException("ValueError", "max(): Argument #1 ($value) must contain at least one element");
-            return error.RuntimeError;
-        }
-        var result = arr.entries.items[0].value;
-        for (arr.entries.items[1..]) |e| {
-            if (Value.lessThan(result, e.value)) result = e.value;
-        }
-        return NativeResult.share(result);
-    }
-    var result = args[0];
-    for (args[1..]) |a| {
-        if (Value.lessThan(result, a)) result = a;
-    }
-    return NativeResult.share(result);
 }
 
 fn native_lcg_value(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -634,4 +594,119 @@ fn native_fdiv(_: *NativeContext, args: []const Value) RuntimeError!NativeResult
     const num = Value.toFloat(args[0]);
     const den = Value.toFloat(args[1]);
     return NativeResult.scalar(.{ .float = num / den });
+}
+fn longFitsDouble(l: i64) bool {
+    const d: f64 = @floatFromInt(l);
+    return Value.floatFitsInt(d) and @as(i64, @intFromFloat(d)) == l;
+}
+
+// php's min() and max(): the array form through zend_hash_minmax, the list
+// form with its int and float fast paths, falling back to zend_compare
+fn minmax(ctx: *NativeContext, comptime func: []const u8, args: []const Value, comptime is_max: bool) RuntimeError!NativeResult {
+    const better = struct {
+        // whether candidate replaces current
+        fn f(c: *NativeContext, candidate: Value, current: Value) RuntimeError!bool {
+            const r = try c.vm.compareWithStringable(candidate, current);
+            return if (is_max) r > 0 else r < 0;
+        }
+    }.f;
+    if (args.len == 1) {
+        if (args[0] != .array) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, func ++ "(): Argument #1 ($value) must be of type array, {s} given", .{phpTypeName(args[0])});
+            defer ctx.allocator.free(msg);
+            try ctx.vm.setPendingException("TypeError", msg);
+            return error.RuntimeError;
+        }
+        const arr = args[0].array;
+        if (arr.entries.items.len == 0) {
+            try ctx.vm.setPendingException("ValueError", func ++ "(): Argument #1 ($value) must contain at least one element");
+            return error.RuntimeError;
+        }
+        const val = struct {
+            fn f(e: PhpArray.Entry) Value {
+                return if (e.ref) |cell| cell.* else e.value;
+            }
+        }.f;
+        var result = val(arr.entries.items[0]);
+        var i: usize = 1;
+        while (i < arr.entries.items.len) : (i += 1) {
+            const v = val(arr.entries.items[i]);
+            // zend_hash_minmax compares the kept value against the next
+            const r = try ctx.vm.compareWithStringable(result, v);
+            if (if (is_max) r < 0 else r > 0) result = v;
+        }
+        return NativeResult.share(result);
+    }
+    if (args.len == 2) {
+        // php's frameless two-argument form: a tie keeps the right operand
+        // for min and the left one for max
+        const lhs = args[0];
+        const rhs = args[1];
+        const num = struct {
+            fn f(v: Value) ?f64 {
+                return switch (v) {
+                    .float => |d| d,
+                    .int => |n| if (longFitsDouble(n)) @floatFromInt(n) else null,
+                    else => null,
+                };
+            }
+        }.f;
+        const take_lhs = if (lhs == .int and rhs == .int)
+            (if (is_max) lhs.int >= rhs.int else lhs.int < rhs.int)
+        else if ((lhs == .float or rhs == .float) and num(lhs) != null and num(rhs) != null)
+            (if (is_max) num(lhs).? >= num(rhs).? else num(lhs).? < num(rhs).?)
+        else blk: {
+            const r = try ctx.vm.compareWithStringable(lhs, rhs);
+            break :blk if (is_max) r >= 0 else r < 0;
+        };
+        return NativeResult.share(if (take_lhs) lhs else rhs);
+    }
+    var best: usize = 0;
+    var i: usize = 1;
+    if (args[0] == .int) {
+        var lval = args[0].int;
+        while (i < args.len) : (i += 1) {
+            if (args[i] == .int) {
+                if (if (is_max) lval < args[i].int else lval > args[i].int) {
+                    lval = args[i].int;
+                    best = i;
+                }
+            } else if (args[i] == .float and longFitsDouble(lval)) {
+                break;
+            } else {
+                // generic from here on
+                while (i < args.len) : (i += 1) {
+                    if (try better(ctx, args[i], args[best])) best = i;
+                }
+                return NativeResult.share(args[best]);
+            }
+        }
+        if (i == args.len) return NativeResult.scalar(.{ .int = lval });
+    }
+    if (args[best] == .int or args[best] == .float) {
+        var dval: f64 = if (args[best] == .int) @floatFromInt(args[best].int) else args[best].float;
+        while (i < args.len) : (i += 1) {
+            const d: f64 = switch (args[i]) {
+                .float => |f| f,
+                .int => |n| if (longFitsDouble(n)) @floatFromInt(n) else break,
+                else => break,
+            };
+            if (if (is_max) dval < d else dval > d) {
+                dval = d;
+                best = i;
+            }
+        }
+    }
+    while (i < args.len) : (i += 1) {
+        if (try better(ctx, args[i], args[best])) best = i;
+    }
+    return NativeResult.share(args[best]);
+}
+
+fn native_min(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return minmax(ctx, "min", args, false);
+}
+
+fn native_max(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return minmax(ctx, "max", args, true);
 }
