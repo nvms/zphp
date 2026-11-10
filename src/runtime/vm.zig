@@ -7007,7 +7007,11 @@ pub const VM = struct {
                         }
                         const frame = self.currentFrame();
                         const cell = try self.getOrCreateVarCell(frame, source_name);
-                        try self.bindPropToCell(obj_val.object, prop_name, cell);
+                        self.triggerLazyAccess(obj_val.object, prop_name) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        try self.bindPropToCell(obj_val.object.storage(), prop_name, cell);
                     }
                 },
 
@@ -7082,7 +7086,11 @@ pub const VM = struct {
                             if (try self.throwBuiltinException("Error", "Cannot assign by reference to overloaded object")) continue;
                             return error.RuntimeError;
                         }
-                        try self.bindPropToCell(obj_val.object, prop_name, cell);
+                        self.triggerLazyAccess(obj_val.object, prop_name) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        try self.bindPropToCell(obj_val.object.storage(), prop_name, cell);
                     }
                     self.push(cell.*);
                 },
@@ -7186,7 +7194,9 @@ pub const VM = struct {
                         try self.bindRefSlot(&frame.ref_slots, dst_name, c);
                     } else {
                         var obj_ptr = obj_val.object;
-                        const prop_owned = (try self.coerceToStringValue(name_val)).string.bytes();
+                        // interned: a lazy object's initializer runs php, whose
+                        // statement boundaries free transient strings
+                        const prop_owned = try self.internName(try self.valueToString(name_val));
                         self.triggerLazyAccess(obj_ptr, prop_owned) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
@@ -13426,7 +13436,7 @@ pub const VM = struct {
     fn widenIntDefault(self: *VM, val: Value, type_str: []const u8, class_name: []const u8, prop_name: []const u8) RuntimeError!Value {
         if (type_str.len == 0) return val;
         if (try self.propertyTypeAccepts(val, type_str, class_name, true)) |accepted| return accepted;
-        const msg = try std.fmt.allocPrint(self.allocator, "Cannot assign {s} to property {s}::${s} of type {s}", .{ valueTypeName(val), class_name, prop_name, try self.resolvedTypeText(type_str, class_name) });
+        const msg = try std.fmt.allocPrint(self.allocator, "Cannot assign {s} to property {s}::${s} of type {s}", .{ valueTypeName(val), class_name, prop_name, try self.propertyTypeText(type_str, class_name) });
         defer self.allocator.free(msg);
         try self.setPendingException("TypeError", msg);
         return error.RuntimeError;
@@ -14965,7 +14975,7 @@ pub const VM = struct {
     }
 
     fn throwIncdecRef(self: *VM, src: TypeSource, up: bool) RuntimeError {
-        const msg = std.fmt.allocPrint(self.allocator, "Cannot {s} a reference held by property {s}::${s} of type {s} past its {s} value", .{ if (up) "increment" else "decrement", src.class, src.prop, try self.resolvedTypeText(src.type_str, src.class), if (up) "maximal" else "minimal" }) catch return error.RuntimeError;
+        const msg = std.fmt.allocPrint(self.allocator, "Cannot {s} a reference held by property {s}::${s} of type {s} past its {s} value", .{ if (up) "increment" else "decrement", src.class, src.prop, try self.propertyTypeText(src.type_str, src.class), if (up) "maximal" else "minimal" }) catch return error.RuntimeError;
         defer self.allocator.free(msg);
         try self.setPendingException("TypeError", msg);
         return error.RuntimeError;
@@ -17859,7 +17869,7 @@ pub const VM = struct {
     // plain one is coerced in place
     fn verifyPropAssignableByRef(self: *VM, vr_in: VisResult, prop_name: []const u8, cell: *Value) RuntimeError!void {
         var vr = vr_in;
-        vr.type_str = try self.resolvedTypeText(vr.type_str, vr.defining_class);
+        vr.type_str = try self.propertyTypeText(vr.type_str, vr.defining_class);
         const strict = self.currentStrictTypes();
         const val = cell.*;
         var buf: [8]TypeSource = undefined;
@@ -17870,7 +17880,7 @@ pub const VM = struct {
             if (result < 0) {
                 if (try self.weakScalarHint(php_types.shape(vr.type_str).mask, val) != null) {
                     const first = sources[0];
-                    const msg = try std.fmt.allocPrint(self.allocator, "Reference with value of type {s} held by property {s}::${s} of type {s} is not compatible with property {s}::${s} of type {s}", .{ Value.typeName(val), first.class, first.prop, try self.resolvedTypeText(first.type_str, first.class), vr.defining_class, prop_name, vr.type_str });
+                    const msg = try std.fmt.allocPrint(self.allocator, "Reference with value of type {s} held by property {s}::${s} of type {s} is not compatible with property {s}::${s} of type {s}", .{ Value.typeName(val), first.class, first.prop, try self.propertyTypeText(first.type_str, first.class), vr.defining_class, prop_name, vr.type_str });
                     defer self.allocator.free(msg);
                     try self.setPendingException("TypeError", msg);
                     return error.RuntimeError;
@@ -21972,7 +21982,7 @@ pub const VM = struct {
             if (t.len > 0 and t[0] == '\\') t = t[1..];
             if (std.mem.eql(u8, t, "Closure") and self.isValueCallable(val.*)) return false;
         }
-        const shown = try self.resolvedTypeText(type_str, class_name);
+        const shown = try self.propertyTypeText(type_str, class_name);
         const msg = if (step_up) |up|
             std.fmt.allocPrint(self.allocator, "Cannot {s} property {s}::${s} of type {s} past its {s} value", .{ if (up) "increment" else "decrement", class_name, prop_name, shown, if (up) "maximal" else "minimal" }) catch return error.RuntimeError
         else
@@ -21999,6 +22009,12 @@ pub const VM = struct {
         const text = php_types.format(self.allocator, t) catch return error.OutOfMemory;
         defer self.allocator.free(text);
         return self.internName(text);
+    }
+
+    // a property's type in errors (zend_type_to_string): a named class's
+    // self was resolved when it compiled, an anonymous class's was not
+    pub fn propertyTypeText(self: *VM, type_str: []const u8, decl_class: []const u8) RuntimeError![]const u8 {
+        return self.resolvedTypeText(type_str, if (class_names.isAnonymous(decl_class)) null else decl_class);
     }
 
     // php's is_numeric_str_function: a whole numeric string (surrounding
@@ -22162,6 +22178,7 @@ pub const VM = struct {
     fn propertyTypeAccepts(self: *VM, val: Value, type_str: []const u8, decl_class: []const u8, strict: bool) RuntimeError!?Value {
         const shape = php_types.shape(type_str);
         if (self.typeHoldsExactly(val, type_str, shape, decl_class)) return val;
+        if (self.representationHolds(val, type_str, shape, decl_class)) return val;
         if (strict) {
             if (shape.mask & php_types.DOUBLE == 0 or val != .int) return null;
         } else if (val == .null) return null;
@@ -22245,14 +22262,14 @@ pub const VM = struct {
     }
 
     fn throwRefTypeError(self: *VM, src: TypeSource, val: Value) RuntimeError {
-        const msg = std.fmt.allocPrint(self.allocator, "Cannot assign {s} to reference held by property {s}::${s} of type {s}", .{ valueTypeName(val), src.class, src.prop, try self.resolvedTypeText(src.type_str, src.class) }) catch return error.RuntimeError;
+        const msg = std.fmt.allocPrint(self.allocator, "Cannot assign {s} to reference held by property {s}::${s} of type {s}", .{ valueTypeName(val), src.class, src.prop, try self.propertyTypeText(src.type_str, src.class) }) catch return error.RuntimeError;
         defer self.allocator.free(msg);
         try self.setPendingException("TypeError", msg);
         return error.RuntimeError;
     }
 
     fn throwConflictingCoercion(self: *VM, a: TypeSource, b: TypeSource, val: Value) RuntimeError {
-        const msg = std.fmt.allocPrint(self.allocator, "Cannot assign {s} to reference held by property {s}::${s} of type {s} and property {s}::${s} of type {s}, as this would result in an inconsistent type conversion", .{ valueTypeName(val), a.class, a.prop, try self.resolvedTypeText(a.type_str, a.class), b.class, b.prop, try self.resolvedTypeText(b.type_str, b.class) }) catch return error.RuntimeError;
+        const msg = std.fmt.allocPrint(self.allocator, "Cannot assign {s} to reference held by property {s}::${s} of type {s} and property {s}::${s} of type {s}, as this would result in an inconsistent type conversion", .{ valueTypeName(val), a.class, a.prop, try self.propertyTypeText(a.type_str, a.class), b.class, b.prop, try self.propertyTypeText(b.type_str, b.class) }) catch return error.RuntimeError;
         defer self.allocator.free(msg);
         try self.setPendingException("TypeError", msg);
         return error.RuntimeError;
