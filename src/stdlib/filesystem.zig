@@ -118,6 +118,8 @@ const common_entries = .{
     .{ "ftell", native_ftell },
     .{ "rewind", native_rewind },
     .{ "fflush", native_fflush },
+    .{ "fsync", native_fsync },
+    .{ "fdatasync", native_fdatasync },
     .{ "ftruncate", native_ftruncate },
     .{ "fgetcsv", csv.fgetcsv },
     .{ "fputcsv", csv.fputcsv },
@@ -2827,6 +2829,36 @@ fn native_fflush(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     // zig files are unbuffered at our level, this is a no-op
     _ = getFileHandle(obj) orelse return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = true });
+}
+
+fn native_fsync(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return syncStream(ctx, args, "fsync", false);
+}
+
+fn native_fdatasync(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return syncStream(ctx, args, "fdatasync", true);
+}
+
+extern "c" fn fsync(fd: c_int) c_int;
+extern "c" fn fdatasync(fd: c_int) c_int;
+
+// only a plain file descriptor can be synced; anything else (memory, data:,
+// sockets, user streams) is php's warning
+fn syncStream(ctx: *NativeContext, args: []const Value, comptime func: []const u8, comptime data_only: bool) RuntimeError!NativeResult {
+    const obj = try streamArg(ctx, args, .{ .func = func });
+    const is_memory = if (obj.get("__path") == .string) std.mem.startsWith(u8, obj.get("__path").string.bytes(), "php://memory") or std.mem.startsWith(u8, obj.get("__path").string.bytes(), "php://temp") else false;
+    const file = if (is_memory or isNetStream(obj) or getBufferBacking(obj) != null) null else getFileHandle(obj);
+    if (file == null or fileHandleWrapper(obj) != null) {
+        // php words it as fsync for both
+        try warn(ctx, func ++ "(): Can't fsync this stream!", .{});
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    if (platform.is_windows) {
+        file.?.sync(platform.io) catch return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.scalar(.{ .bool = true });
+    }
+    const rc = if (data_only and !platform.is_macos) fdatasync(file.?.handle) else fsync(file.?.handle);
+    return NativeResult.scalar(.{ .bool = rc == 0 });
 }
 
 fn native_ftruncate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
