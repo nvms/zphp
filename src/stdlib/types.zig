@@ -2129,7 +2129,10 @@ fn native_set_include_path(ctx: *NativeContext, args: []const Value) RuntimeErro
 }
 
 fn native_error_reporting(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const prev = ctx.vm.error_reporting_level;
+    // inside @ php's error_reporting is the level with only the fatal errors
+    // left (BEGIN_SILENCE), which an error handler reads to tell it apart
+    const fatal_only: i64 = 1 | 16 | 64 | 256 | 4096 | 4;
+    const prev = if (ctx.vm.error_silenced_depth > 0) ctx.vm.error_reporting_level & fatal_only else ctx.vm.error_reporting_level;
     if (args.len > 0) {
         ctx.vm.error_reporting_level = Value.toInt(args[0]);
     }

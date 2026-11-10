@@ -2044,6 +2044,8 @@ pub const VM = struct {
         // true in a debug build, as in php's own
         try c.put(a, "PHP_DEBUG", .{ .bool = @import("builtin").mode == .debug });
         try c.put(a, "PHP_ZTS", .{ .bool = false });
+        try c.put(a, "ZEND_THREAD_SAFE", .{ .bool = false });
+        try c.put(a, "ZEND_DEBUG_BUILD", .{ .bool = @import("builtin").mode == .debug });
         try c.put(a, "PHP_MAXPATHLEN", .{ .int = 1024 });
         try c.put(a, "ICONV_VERSION", .{ .string = Value.String.borrowed("1.11") });
         try c.put(a, "OPENSSL_VERSION_TEXT", .{ .string = Value.String.borrowed("OpenSSL 3") });
