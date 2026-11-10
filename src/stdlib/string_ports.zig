@@ -187,8 +187,8 @@ pub const Args = struct {
             const msg = if (from_string)
                 try std.fmt.allocPrint(self.ctx.allocator, "Implicit conversion from float-string \"{s}\" to int loses precision", .{self.args[index].string.bytes()})
             else blk: {
-                const shown = try self.ctx.vm.transientFormatted(.{ .float = f });
-                break :blk try std.fmt.allocPrint(self.ctx.allocator, "Implicit conversion from float {s} to int loses precision", .{shown.bytes()});
+                var tmp: [64]u8 = undefined;
+                break :blk try std.fmt.allocPrint(self.ctx.allocator, "Implicit conversion from float {s} to int loses precision", .{@import("output.zig").formatFloat(&tmp, f)});
             };
             defer self.ctx.allocator.free(msg);
             try self.ctx.vm.raiseError(e_deprecated, msg);
