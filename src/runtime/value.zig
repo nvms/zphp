@@ -828,6 +828,9 @@ pub const Generator = struct {
     // the delegate it waits on in yield from was aborted without returning:
     // its next resume throws php's ClosedGeneratorException at the yield from
     pending_closed_delegate: bool = false,
+    // php's ZEND_GENERATOR_FORCED_CLOSE: destroyed while suspended, it runs
+    // its finally blocks and may not yield again
+    forced_close: bool = false,
     pooled: bool = false,
     // how often it has been resumed
     resumes: u32 = 0,

@@ -757,6 +757,17 @@ pub const VM = struct {
     // objects the destructors of the current collection revived
     gc_revived: usize = 0,
     fiber_suspend_value: Value = .null,
+    // what unwinds a destroyed generator through its finally blocks: no
+    // catch matches it and nothing chains it, as php jumps straight to the
+    // finally blocks (zend_generator_dtor_storage). never a script value
+    unwind_marker: ?*PhpObject = null,
+    // a destructor or a destroyed generator's finally block run by a release
+    // drain left its exception pending, for the code that released the
+    // value to raise (php's zend_objects_destroy_object)
+    drain_raised: bool = false,
+    // the cli runs the shutdown destructors itself, after the shutdown
+    // functions and the report of an uncaught exception, in php's order
+    destructors_after_shutdown: bool = false,
     captures: std.ArrayListUnmanaged(CaptureEntry) = .empty,
     capture_index: std.StringHashMapUnmanaged(CaptureRange) = .{},
     interned_names: std.StringHashMapUnmanaged(void) = .{},
@@ -3002,6 +3013,10 @@ pub const VM = struct {
     }
 
     pub fn deinit(self: *VM) void {
+        if (self.unwind_marker) |marker| {
+            self.allocator.destroy(marker);
+            self.unwind_marker = null;
+        }
         self.setStrtokState(null);
         self.clearLastError();
         extension.vmDeinit(self);
@@ -3508,7 +3523,7 @@ pub const VM = struct {
         self.free_handles.clearRetainingCapacity();
         // at script end run every still-live object's __destruct (PHP's
         // shutdown guarantee), then drain - on success or error
-        defer self.runShutdownDestructors();
+        defer if (!self.destructors_after_shutdown) self.runShutdownDestructors();
         try self.raiseCompileWarnings(result);
         self.run() catch |err| return self.reportMemoryExhausted(err);
     }
@@ -3574,8 +3589,16 @@ pub const VM = struct {
     // pass destroys none; then every object left gets its destructor in
     // handle order
     pub fn runShutdownDestructors(self: *VM) void {
+        // where nothing reports what the destructors throw (serve, workers,
+        // embedding), the script's own exception stays the one pending
+        const prior = if (self.destructors_after_shutdown) null else self.takePending();
+        defer if (!self.destructors_after_shutdown) {
+            self.discardPending();
+            if (prior) |exception| self.setPendingOwned(exception);
+        };
         self.destroyGlobalsAtShutdown();
         var live: std.ArrayListUnmanaged(*PhpObject) = .empty;
+        defer self.drain_raised = false;
         defer live.deinit(self.allocator);
         for (self.objects.items) |obj| {
             if (obj.destructed or obj.pooled or obj.resource) continue;
@@ -3587,16 +3610,25 @@ pub const VM = struct {
             }
         }.lessThan);
         for (live.items) |obj| {
+            if (self.pending_exception != null and self.destructors_after_shutdown) break;
             if (obj.destructed) continue;
             if (self.pendingExceptionIs(obj)) continue;
             obj.destructed = true;
             if (obj.ownsDestructor() and !obj.destructor_called and self.hasMethod(obj.class_name, "__destruct")) {
                 _ = self.callMethod(obj, "__destruct", &.{}) catch {
-                    self.discardPending();
+                    // php's uncaught exception ends the destructors: the
+                    // objects left are freed without theirs
+                    if (self.pending_exception == null or !self.destructors_after_shutdown) self.discardPending();
                 };
             }
         }
+        self.drain_raised = false;
+        if (self.pending_exception != null and self.destructors_after_shutdown) {
+            for (live.items) |obj| obj.destructor_called = true;
+            return;
+        }
         self.drainPendingDestruct();
+        self.drain_raised = false;
     }
 
     fn destroyGlobalsAtShutdown(self: *VM) void {
@@ -3632,6 +3664,7 @@ pub const VM = struct {
                     ga.remove(.{ .string = Value.String.borrowed(key) });
                     self.releaseValue(removed.value);
                     self.drainPendingDestruct();
+                    if (self.pending_exception != null) return;
                     destroyed = true;
                 }
             }
@@ -3651,6 +3684,7 @@ pub const VM = struct {
                     if (self.globals_cells.get(name)) |cell| self.setCell(cell, .null);
                 }
                 self.drainPendingDestruct();
+                if (self.pending_exception != null) return;
                 destroyed = true;
             }
             if (!destroyed) break;
@@ -4182,6 +4216,10 @@ pub const VM = struct {
                     // expression
                     _ = self.pop();
                     if (self.hasPendingReleases()) self.drainPendingDestruct();
+                    if (self.drainRaised()) {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    }
                     // only a statement end leaves nothing of an expression in
                     // flight, so only there does the frame go back to the
                     // fast loop. a generator's frame shares its variables with
@@ -5144,7 +5182,13 @@ pub const VM = struct {
                     if (self.ob_stack.items.len == 0) self.headers_sent = true;
                 },
                 .halt => return,
-                .statement_end => if (self.hasPendingReleases()) self.drainPendingDestruct(),
+                .statement_end => {
+                    if (self.hasPendingReleases()) self.drainPendingDestruct();
+                    if (self.drainRaised()) {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    }
+                },
                 .new_reserve => {
                     const placeholder = try self.allocObject(.{ .class_name = new_reservation });
                     self.push(.{ .object = placeholder });
@@ -6603,17 +6647,15 @@ pub const VM = struct {
                 },
                 // the end of a foreach is a statement boundary: the iterable
                 // it drops is released here, as php frees it at FE_FREE
-                .iter_end => {
+                .iter_end, .iter_end_close => {
+                    // a generator the loop held last is destroyed as it is
+                    // released, as php's FE_FREE releases it
                     self.endForeach();
                     if (self.hasPendingReleases()) self.drainPendingDestruct();
-                },
-                .iter_end_close => {
-                    const iterable = self.stack[self.sp - 2];
-                    if (iterable == .generator and iterable.generator.state == .suspended) {
-                        try self.closeGenerator(iterable.generator, base_frame);
+                    if (self.drainRaised()) {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
                     }
-                    self.endForeach();
-                    if (self.hasPendingReleases()) self.drainPendingDestruct();
                 },
 
                 .silence_begin => {
@@ -7151,7 +7193,6 @@ pub const VM = struct {
                     const uframe = self.currentFrame();
                     const u_is_ref = uframe.ref_slots.contains(name);
                     if (uframe.vars.get(name)) |existing| {
-                        if (existing == .generator) self.closeGenerator(existing.generator, self.frame_count) catch {};
                         // release the object the variable held (Stage 1).
                         // skip ref-bound vars - the value lives in a shared
                         // cell, released through the ref machinery later
@@ -7211,6 +7252,10 @@ pub const VM = struct {
                     {
                         self.drainPendingDestruct();
                     }
+                    if (self.drainRaised()) {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    }
                 },
                 .unset_prop => {
                     const name_idx = self.readU16();
@@ -7264,6 +7309,10 @@ pub const VM = struct {
                         }
                     }
                     if (self.hasPendingReleases()) self.drainPendingDestruct();
+                    if (self.drainRaised()) {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    }
                 },
                 .unset_prop_dynamic => {
                     const name_val = self.popTransfer();
@@ -7312,6 +7361,10 @@ pub const VM = struct {
                         }
                     }
                     if (self.hasPendingReleases()) self.drainPendingDestruct();
+                    if (self.drainRaised()) {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    }
                 },
                 .separate_prop_array => {
                     const obj_val = self.stack[self.sp - 2];
@@ -7480,6 +7533,10 @@ pub const VM = struct {
                         self.unbindArrayElemRef(arr_val.array, u_ak);
                         self.arrayRemoveOwned(arr_val.array, u_ak);
                         if (self.hasPendingReleases()) self.drainPendingDestruct();
+                        if (self.drainRaised()) {
+                            if (self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        }
                     } else if (arr_val == .object) {
                         if (self.hasMethod(arr_val.object.class_name, "offsetUnset")) {
                             _ = self.callMethod(arr_val.object, "offsetUnset", &.{key}) catch {
@@ -8452,7 +8509,9 @@ pub const VM = struct {
                 .instance_check => {
                     const class_name_val = self.pop();
                     const obj_val = self.pop();
-                    if (obj_val == .object and class_name_val == .string) {
+                    if (self.isUnwindMarker(obj_val)) {
+                        self.push(.{ .bool = false });
+                    } else if (obj_val == .object and class_name_val == .string) {
                         // self/static/parent stay symbolic where the compiler
                         // cannot know the class (inside a trait)
                         const target = self.resolveRelativeClassName(class_name_val.string.bytes());
@@ -11109,11 +11168,16 @@ pub const VM = struct {
                 },
 
                 .yield_value => {
-                    const val = self.popTransfer();
                     const gen = self.currentFrame().generator orelse {
                         self.setErrorMsg("Fatal error: Cannot use yield outside of a generator", .{});
                         return error.RuntimeError;
                     };
+                    if (gen.forced_close) {
+                        self.stackRelease(self.popTransfer());
+                        if (try self.throwBuiltinException("Error", "Cannot yield from finally in a force-closed generator")) continue;
+                        return error.RuntimeError;
+                    }
+                    const val = self.popTransfer();
                     self.setGeneratorCurrent(gen, .{ .int = gen.implicit_key }, val, true);
                     gen.implicit_key +%= 1;
                     gen.ip = self.currentFrame().ip;
@@ -11131,12 +11195,18 @@ pub const VM = struct {
                 },
 
                 .yield_pair => {
-                    const val = self.popTransfer();
-                    const key = self.popTransfer();
                     const gen = self.currentFrame().generator orelse {
                         self.setErrorMsg("Fatal error: Cannot use yield outside of a generator", .{});
                         return error.RuntimeError;
                     };
+                    if (gen.forced_close) {
+                        self.stackRelease(self.popTransfer());
+                        self.stackRelease(self.popTransfer());
+                        if (try self.throwBuiltinException("Error", "Cannot yield from finally in a force-closed generator")) continue;
+                        return error.RuntimeError;
+                    }
+                    const val = self.popTransfer();
+                    const key = self.popTransfer();
                     self.setGeneratorCurrent(gen, key, val, true);
                     if (key == .int and key.int >= gen.implicit_key) gen.implicit_key = key.int +% 1;
                     gen.ip = self.currentFrame().ip;
@@ -12534,34 +12604,54 @@ pub const VM = struct {
         return self.throwBuiltinException("TypeError", msg);
     }
 
-    // close a suspended generator: inject a synthetic exception so any open
-    // try/finally blocks run during the unwind. swallow the marker if it
-    // propagates out (matches PHP's close-on-foreach-break semantics). a
-    // different exception raised by finally still propagates to the caller
-    pub fn closeGenerator(self: *VM, gen: *Generator, base_frame: usize) RuntimeError!void {
-        if (gen.state != .suspended) return;
-        const obj = try self.allocObject(.{ .class_name = "Exception" });
-        try obj.set(self.allocator, "message", .{ .string = Value.String.borrowed("Generator closed") });
-        try obj.set(self.allocator, "code", .{ .int = 0 });
-        const marker_ptr = @intFromPtr(obj);
+    // the unwind marker: pinned, so the operand stack's counting never
+    // frees it
+    pub fn unwindMarker(self: *VM) RuntimeError!*PhpObject {
+        if (self.unwind_marker) |marker| return marker;
+        const marker = try self.allocator.create(PhpObject);
+        marker.* = .{ .class_name = "\x00unwind", .id = std.math.maxInt(u32), .refcount = 1 << 30 };
+        self.unwind_marker = marker;
+        return marker;
+    }
 
-        stackRetain(.{ .object = obj });
-        gen.pending_throw = .{ .object = obj };
-        self.resumeGenerator(gen, .null) catch |err| {
-            // RuntimeError is expected when the marker (or another exception)
-            // exits the generator with no handler. handle the bookkeeping below
+    pub fn isUnwindMarker(self: *const VM, v: Value) bool {
+        const marker = self.unwind_marker orelse return false;
+        return v == .object and v.object == marker;
+    }
+
+    // php's zend_generator_dtor_storage: a generator destroyed before it
+    // finished leaves the yield from it waits in (the delegate is not
+    // touched) and runs the finally blocks around where it waits. a yield
+    // in one is an Error. an exception one throws reaches the code that
+    // destroyed the generator, taking an exception already in flight as its
+    // previous
+    pub fn closeGenerator(self: *VM, gen: *Generator, base_frame: usize) RuntimeError!void {
+        _ = base_frame;
+        if (gen.state == .completed or gen.state == .running) return;
+        if (gen.delegate) |delegate| {
+            gen.delegate = null;
+            switch (delegate) {
+                .gen => |inner| self.genRelease(inner),
+                .array => |state| self.arrayRelease(state.arr),
+            }
+        }
+        // no try block around where it waits: nothing to run
+        if (gen.state == .created or gen.saved_handlers.items.len == 0) return;
+        const marker = try self.unwindMarker();
+        const in_flight = self.takePending();
+        defer self.settleDrainException(in_flight);
+        gen.forced_close = true;
+        stackRetain(.{ .object = marker });
+        if (gen.pending_throw) |old| self.stackRelease(old);
+        gen.pending_throw = .{ .object = marker };
+        genRetain(gen);
+        defer self.genRelease(gen);
+        self.resumeGeneratorWithValue(gen, .null) catch |err| {
             if (err != error.RuntimeError) return err;
         };
         if (self.pending_exception) |ex| {
-            if (ex == .object and @intFromPtr(ex.object) == marker_ptr) {
-                self.discardPending();
-            } else {
-                // finally raised something other than our marker - dispatch into
-                // the caller's handler chain
-                _ = self.dispatchPendingException(base_frame);
-            }
+            if (self.isUnwindMarker(ex)) self.discardPending();
         }
-        self.releaseGeneratorVars(gen);
     }
 
     // release the generator's persistent locals (Stage 2 finer generator
@@ -13909,9 +13999,23 @@ pub const VM = struct {
             self.deinitFrameSlot(self.frame_count);
         }
         self.discardArgTransport(handler.sp);
+        // a handler pushed while a caught exception was still on the stack
+        // sits above slots the catch has since popped: nothing owns them
+        if (handler.sp > self.sp) @memset(self.stack[self.sp..handler.sp], .null);
         self.sp = handler.sp;
         self.error_silenced_depth = handler.silenced_depth;
-        if (ownership == .owned) self.pushTransfer(exc) else self.push(exc);
+        var thrown = exc;
+        if (ownership == .borrowed) stackRetain(thrown);
+        // what the unwound frames held is destroyed before the catch runs;
+        // a destructor's exception replaces the one caught, with it as its
+        // previous
+        if (self.hasPendingReleases()) {
+            self.pending_exception = thrown;
+            if (self.draining_destructors) self.drainNested() else self.drainPendingDestruct();
+            self.drain_raised = false;
+            thrown = self.takePending() orelse thrown;
+        }
+        self.pushTransfer(thrown);
         self.currentFrame().ip = handler.catch_ip;
     }
 
@@ -13927,7 +14031,7 @@ pub const VM = struct {
             const unwound = held.frame >= frame_count or (frame_count > 0 and held.frame == frame_count - 1 and held.slot >= sp);
             if (in_place and !unwound) continue;
             _ = self.held_exceptions.orderedRemove(i);
-            if (in_place and exc == .object) _ = self.chainPrevious(exc.object, held.exception) catch {};
+            if (in_place and exc == .object and !self.isUnwindMarker(.{ .object = held.exception })) _ = self.chainPrevious(exc.object, held.exception) catch {};
         }
     }
 
@@ -18505,9 +18609,12 @@ pub const VM = struct {
             if (v == .array) self.clearArgArraySources(v.array);
         };
         self.clearArgStackFrom(floor);
-        if (floor < self.sp) for (self.stack[floor..self.sp]) |v| {
-            if (v == .string) self.stackRelease(v);
-            if (v == .array and v.array.refcount == 0) self.queueArrayRelease(v.array);
+        // the operands an exception unwinds go with their references, as
+        // php frees a frame's live temporaries
+        if (floor < self.sp) for (self.stack[floor..self.sp]) |v| switch (v) {
+            .string, .object, .resource, .generator, .fiber => self.stackRelease(v),
+            .array => if (v.array.refcount == 0) self.queueArrayRelease(v.array),
+            else => {},
         };
     }
 
@@ -21639,6 +21746,17 @@ pub const VM = struct {
         }
         self.handler_count = 0;
         self.handler_floor = 0;
+        // what the unwound frames and operands held is destroyed before the
+        // exception is reported, as php frees them while it propagates; a
+        // destructor's exception goes on with it as its previous
+        if (self.frame_count > 0) {
+            self.discardArgTransport(0);
+            self.sp = 0;
+        }
+        if (self.pending_exception != null and self.hasPendingReleases() and !self.draining_destructors) {
+            self.drainPendingDestruct();
+            self.drain_raised = false;
+        }
     }
 
     // true while a native runs with no user frame pushed since it started
@@ -24334,6 +24452,30 @@ pub const VM = struct {
         return true;
     }
 
+    // after a destructor or a finally block a drain ran: its exception stays
+    // pending for the releasing code, with the one that was in flight
+    // before as its previous; with none, that one is in flight again
+    fn settleDrainException(self: *VM, in_flight: ?Value) void {
+        if (self.pending_exception) |ex| {
+            if (self.exit_requested or self.isUnwindMarker(ex)) {
+                if (in_flight) |previous| self.stackRelease(previous);
+                return;
+            }
+            self.drain_raised = true;
+            if (in_flight) |previous| {
+                if (ex == .object and previous == .object and !self.isUnwindMarker(previous)) _ = self.chainPrevious(ex.object, previous.object) catch {};
+                self.stackRelease(previous);
+            }
+        } else if (in_flight) |previous| self.setPendingOwned(previous);
+    }
+
+    // a drain left an exception for the code that released the value
+    inline fn drainRaised(self: *VM) bool {
+        if (!self.drain_raised) return false;
+        self.drain_raised = false;
+        return self.pending_exception != null;
+    }
+
     fn destroyReleasedObject(self: *VM, obj: *PhpObject, deferred_stack_arrays: *std.ArrayListUnmanaged(*PhpArray)) void {
         if (obj.refcount != 0 or obj.destructed) return;
         // the in-flight exception is a VM-level root: while it
@@ -24359,11 +24501,11 @@ pub const VM = struct {
             }
             self.fiber_switch_blocked += 1;
             defer self.fiber_switch_blocked -= 1;
-            _ = self.callMethod(obj, "__destruct", &.{}) catch {
-                // a throwing destructor must not corrupt the drop site
-                // it was called from - swallow (revisit for fidelity)
-                self.discardPending();
-            };
+            // an exception in flight waits while the destructor runs, and
+            // becomes the previous of one the destructor throws
+            const in_flight = self.takePending();
+            _ = self.callMethod(obj, "__destruct", &.{}) catch {};
+            self.settleDrainException(in_flight);
         }
         // a destructor that kept the object alive (stored $this, or a
         // suspended fiber holds its frame) revived it: it lives on with its
@@ -24411,10 +24553,18 @@ pub const VM = struct {
     fn destroyReleasedGenerator(self: *VM, gen: *Generator, deferred_stack_arrays: *std.ArrayListUnmanaged(*PhpArray)) void {
         // rescued if re-retained between queue and drain
         if (gen.refcount != 0 or gen.pooled) return;
+        // the generator it delegates to goes first, if this one held it last
+        if (gen.state != .completed and gen.state != .running) if (gen.delegate) |delegate| if (delegate == .gen) {
+            gen.delegate = null;
+            const inner = delegate.gen;
+            self.genRelease(inner);
+            if (inner.refcount == 0) self.destroyReleasedGenerator(inner, deferred_stack_arrays);
+        };
         // closeGenerator early-returns on .completed; releaseGeneratorVars
         // is idempotent. closing a suspended gen may queue more work
         self.closeGenerator(gen, self.frame_count) catch {};
         if (gen.refcount != 0) return;
+        gen.state = .completed;
         var dropped: std.ArrayListUnmanaged(ReleasedItem) = .empty;
         defer dropped.deinit(self.allocator);
         const outer_log = self.release_log;
@@ -24527,6 +24677,20 @@ pub const VM = struct {
             }
             self.released_objects.clearRetainingCapacity();
         }
+        self.drainQueues(&deferred_stack_arrays);
+    }
+
+    // a pass over what was queued since the drain running now reached it,
+    // for an exception unwinding inside a destructor or a destroyed
+    // generator: php frees the unwound frames' values before the catch
+    fn drainNested(self: *VM) void {
+        var deferred_stack_arrays: std.ArrayListUnmanaged(*PhpArray) = .empty;
+        defer deferred_stack_arrays.deinit(self.allocator);
+        self.drainQueues(&deferred_stack_arrays);
+        for (deferred_stack_arrays.items) |arr| self.queueArrayRelease(arr);
+    }
+
+    fn drainQueues(self: *VM, deferred_stack_arrays: *std.ArrayListUnmanaged(*PhpArray)) void {
         // the queues feed each other - a destructed object releases its
         // array-valued properties; a released array releases its object
         // elements; a closed generator releases its locals (more queues).
@@ -24541,19 +24705,19 @@ pub const VM = struct {
             while (self.destruct_cursor < self.pending_destruct.items.len) {
                 const obj = self.pending_destruct.items[self.destruct_cursor];
                 self.destruct_cursor += 1;
-                self.destroyReleasedObject(obj, &deferred_stack_arrays);
+                self.destroyReleasedObject(obj, deferred_stack_arrays);
             }
             while (self.array_release_cursor < self.pending_array_release.items.len) {
                 const arr = self.pending_array_release.items[self.array_release_cursor];
                 self.array_release_cursor += 1;
                 arr.release_queued = false;
-                self.destroyReleasedArray(arr, &deferred_stack_arrays);
+                self.destroyReleasedArray(arr, deferred_stack_arrays);
             }
             while (self.gen_release_cursor < self.pending_gen_release.items.len) {
                 const gen = self.pending_gen_release.items[self.gen_release_cursor];
                 self.gen_release_cursor += 1;
                 // rescued if re-retained between queue and drain
-                self.destroyReleasedGenerator(gen, &deferred_stack_arrays);
+                self.destroyReleasedGenerator(gen, deferred_stack_arrays);
             }
             while (self.fiber_release_cursor < self.pending_fiber_release.items.len) {
                 const fiber = self.pending_fiber_release.items[self.fiber_release_cursor];

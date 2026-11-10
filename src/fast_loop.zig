@@ -141,8 +141,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         // the temporaries this statement dropped, as .pop does
                         if (self.hasPendingReleases()) {
                             self.sp = sp;
+                            // a destructor's trace names this statement
+                            frame.ip = ip;
                             ic.slow.drain_pending_destruct(self);
                             sp = self.sp;
+                            if (self.drain_raised) return raiseDrained(self, frame, ip);
                         }
                     }
                     const _next = code[ip];
@@ -434,8 +437,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         self.stackRelease(stack[sp]);
                         if (self.hasPendingReleases()) {
                             self.sp = sp;
+                            // a destructor's trace names this statement
+                            frame.ip = ip;
                             ic.slow.drain_pending_destruct(self);
                             sp = self.sp;
+                            if (self.drain_raised) return raiseDrained(self, frame, ip);
                         }
                     }
                     const _next = code[ip];
@@ -453,8 +459,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         self.stackRelease(stack[sp]);
                         if (self.hasPendingReleases()) {
                             self.sp = sp;
+                            // a destructor's trace names this statement
+                            frame.ip = ip;
                             ic.slow.drain_pending_destruct(self);
                             sp = self.sp;
+                            if (self.drain_raised) return raiseDrained(self, frame, ip);
                         }
                     }
                     const _next = code[ip];
@@ -478,8 +487,10 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         // destructors run nested PHP on the shared operand
                         // stack: publish the local stack pointer first
                         self.sp = sp;
+                        frame.ip = ip;
                         ic.slow.drain_pending_destruct(self);
                         sp = self.sp;
+                        if (self.drain_raised) return raiseDrained(self, frame, ip);
                     }
                     const _next = code[ip];
                     ip += 1;
@@ -1631,6 +1642,15 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
             }
         }
     }
+}
+
+// a destructor the drain ran threw: the exception is raised here, where the
+// value was released, by the loop that called this one
+fn raiseDrained(self: *VM, frame: anytype, ip: usize) RuntimeError!void {
+    self.drain_raised = false;
+    frame.ip = ip;
+    if (self.pending_exception == null) return;
+    return error.RuntimeError;
 }
 
 // the main object's error values are not this object's, so its slow paths

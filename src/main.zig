@@ -672,6 +672,7 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
         allocator.destroy(vm);
     }
     vm.file_loader = &loadFile;
+    vm.destructors_after_shutdown = true;
     try initCliServerVars(vm, allocator);
     try initArgv(vm, allocator, script_path, script_args);
     vm.interpret(result) catch {
@@ -715,13 +716,23 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
 // the shutdown functions. one that fails ends them as php's fatal error does:
 // reported like the script's own, and the exit status is 255. exit() in one
 // is no failure. true when one failed
+// then, as php's php_request_shutdown, the destructors of the objects still
+// alive; one that throws is reported as an uncaught exception
 fn runShutdown(allocator: std.mem.Allocator, vm: *VM) !bool {
+    var failed = false;
     vm.runShutdownCallbacks() catch {
-        if (vm.exit_requested and vm.pending_exception == null) return false;
-        try reportRuntimeError(allocator, vm);
-        return true;
+        if (!vm.exit_requested or vm.pending_exception != null) {
+            try reportRuntimeError(allocator, vm);
+            failed = true;
+        }
     };
-    return false;
+    vm.discardPending();
+    vm.runShutdownDestructors();
+    if (vm.pending_exception != null) {
+        try reportRuntimeError(allocator, vm);
+        failed = true;
+    }
+    return failed;
 }
 
 // the script stopped on an error: an uncaught exception is reported as php
