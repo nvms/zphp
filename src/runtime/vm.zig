@@ -811,6 +811,10 @@ pub const VM = struct {
     // pointer to the same value. lets writes propagate live to recursive calls
     globals_cells: std.StringHashMapUnmanaged(*Value) = .{},
     pending_call_name: ?[]const u8 = null,
+    // set while $closure->__invoke() enters the closure: php calls it from
+    // the internal Closure::__invoke, so its argument errors name no call
+    // site and are never strict
+    invoking_closure: bool = false,
     // the native whose callback is being called (array_map, usort, ...) and
     // the frame depth it called from; a deeper frame means php code calls
     native_caller: struct { name: ?[]const u8 = null, frames: usize = 0 } = .{},
@@ -9895,7 +9899,9 @@ pub const VM = struct {
                         }
                         self.clearArgStackFrom(self.sp - 1);
                         self.sp -= 1;
+                        self.invoking_closure = true;
                         const called = self.callNamedFunction(closure, arg_count);
+                        self.invoking_closure = false;
                         self.stackRelease(obj_val);
                         called catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -16728,25 +16734,15 @@ pub const VM = struct {
                             pair.* = bound;
                             return .ok;
                         };
-                        return self.callableFailureInScope(failure);
+                        return .{ .failed = failure };
                     },
                 }
             }
         }
         return switch (try callables.resolveDynamic(self, callable)) {
             .callee => .ok,
-            .failure => |failure| self.callableFailureInScope(failure),
+            .failure => |failure| .{ .failed = failure },
         };
-    }
-
-    // a constant expression (a property or constant initializer) makes its
-    // closures in the declaring class's scope, which the running frame
-    // doesn't show
-    fn callableFailureInScope(self: *VM, failure: callables.Failure) CallableCheck {
-        if (failure == .inaccessible and self.frame_count > 0) if (self.currentFrame().func) |func| {
-            if (func.name.len > 0 and func.name[0] == 0) return .ok;
-        };
-        return .{ .failed = failure };
     }
 
     // a copy of a closure instance bound to new_this, scope (the class it
@@ -21577,7 +21573,8 @@ pub const VM = struct {
         if (g_type_info.count() == 0) return false;
         const ac: usize = arg_count;
         // runs before the callee frame is pushed, so the caller is the top frame
-        const exc = (try self.enforceArgTypes(name, self.stack[self.sp - ac .. self.sp], .{ .strict = self.topFrameStrict(), .stack_owned = true })) orelse return false;
+        const internal = self.invoking_closure;
+        const exc = (try self.enforceArgTypes(name, self.stack[self.sp - ac .. self.sp], .{ .strict = !internal and self.topFrameStrict(), .internal = internal, .stack_owned = true })) orelse return false;
         self.dropN(ac);
         if (self.throwObject(exc)) return true;
         return error.RuntimeError;

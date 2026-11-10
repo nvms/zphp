@@ -4129,6 +4129,10 @@ fn compileDeferredPropDefaults(self: *Compiler, class_name: []const u8, members:
     errdefer sub.discardOutput();
 
     const cname_idx = try sub.addConstant(.{ .string = Value.String.borrowed(class_name) });
+    // the defaults are evaluated in the class's scope: a closure among them
+    // is scoped to it
+    try sub.emitOp(.enter_class_scope);
+    try sub.emitU16(cname_idx);
     var first_tok: u32 = 0;
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
@@ -4143,6 +4147,7 @@ fn compileDeferredPropDefaults(self: *Compiler, class_name: []const u8, members:
         try sub.emitU16(p_idx);
         try sub.emitOp(.pop);
     }
+    try sub.emitOp(.leave_class_scope);
     try sub.emitOp(.op_null);
     try sub.emitOp(.return_val);
 
