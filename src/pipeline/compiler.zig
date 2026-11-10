@@ -358,6 +358,8 @@ pub const Compiler = struct {
     closure_signature: bool = false,
     // compiling a named function's signature: self and parent need a class
     named_signature: bool = false,
+    // the type names already warned about as confusable, by token
+    type_warned: std.AutoHashMapUnmanaged(u32, void) = .{},
     // a class constant's initializer: self and parent stay as written in
     // class constant fetches, resolved as it runs (its errors name them so)
     relative_const_classes: bool = false,
@@ -1714,6 +1716,7 @@ pub const Compiler = struct {
     // shared by value with sub-compilers, so only the root releases them
     pub fn deinitScratch(self: *Compiler) void {
         const a = self.allocator;
+        self.type_warned.deinit(a);
         self.break_jumps.deinit(a);
         self.continue_jumps.deinit(a);
         for (self.pending_gotos.items) |pg| a.free(pg.scopes);

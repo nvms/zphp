@@ -13992,15 +13992,12 @@ pub const VM = struct {
 
     pub fn errorLabel(level: i64) []const u8 {
         return switch (level) {
-            1, 256 => "Fatal error",
-            2, 512 => "Warning",
+            // php_error_cb's labels
+            1, 16, 64, 256 => "Fatal error",
+            2, 32, 128, 512 => "Warning",
             4 => "Parse error",
             8, 1024 => "Notice",
-            16 => "Core error",
-            32 => "Core warning",
-            64 => "Compile error",
-            128 => "Compile warning",
-            2048 => "Strict standards",
+            2048 => "Strict Standards",
             4096 => "Recoverable fatal error",
             8192, 16384 => "Deprecated",
             else => "Notice",

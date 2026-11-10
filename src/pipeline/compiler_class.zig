@@ -746,12 +746,30 @@ fn readTypeName(self: *Compiler, tok: *u32, end_tok: u32) Error!TypeName {
         });
         if (builtin.get(lower)) |mask| return .{ .written = written, .mask = mask };
     }
+    if (!qualified) try warnConfusableType(self, start, written);
     const scope_known = self.current_class.len > 0 and !self.in_trait and !class_names.isAnonymous(self.current_class);
     if (!qualified and scope_known and std.mem.eql(u8, lower, "self")) return .{ .written = written, .class = self.current_class };
     if (!qualified and scope_known and std.mem.eql(u8, lower, "parent") and self.current_parent.len > 0) return .{ .written = written, .class = self.current_parent };
     if (!qualified and (std.mem.eql(u8, lower, "self") or std.mem.eql(u8, lower, "parent"))) return .{ .written = written, .class = written };
     const class = if (written[0] == '\\') written[1..] else self.resolveClassName(written);
     return .{ .written = written, .class = class };
+}
+
+// zend_is_confusable_type: a name that reads like a built-in type but is a
+// class name, unless it was imported (each written type warns once)
+fn warnConfusableType(self: *Compiler, at: u32, written: []const u8) Error!void {
+    // matched as written: `Double` gets no warning
+    const correct: ?[]const u8 = if (std.mem.eql(u8, written, "boolean")) "bool" else if (std.mem.eql(u8, written, "integer")) "int" else if (std.mem.eql(u8, written, "double")) "float" else if (std.mem.eql(u8, written, "resource")) null else return;
+    var it = self.use_aliases.keyIterator();
+    while (it.next()) |alias| if (std.ascii.eqlIgnoreCase(alias.*, written)) return;
+    if ((try self.type_warned.getOrPut(self.allocator, at)).found_existing) return;
+    const class_name = self.resolveClassName(written);
+    const extra: []const u8 = if (self.namespace.len > 0) " or import the class with \"use\"" else "";
+    if (correct) |c| {
+        try self.warn(at, 128, "\"{s}\" will be interpreted as a class name. Did you mean \"{s}\"? Write \"\\{s}\"{s} to suppress this warning", .{ written, c, class_name, extra });
+    } else {
+        try self.warn(at, 128, "\"{s}\" is not a supported builtin type and will be interpreted as a class name. Write \"\\{s}\"{s} to suppress this warning", .{ written, class_name, extra });
+    }
 }
 
 // zend_is_scope_known while compiling a type: not in a closure or a
@@ -1158,7 +1176,7 @@ fn checkParams(self: *Compiler, func_name: []const u8, at: u32, param_nodes: []c
 
 fn isPrimitiveType(name: []const u8) bool {
     const primitives = [_][]const u8{
-        "int",    "integer", "float",     "double",   "bool",     "boolean",
+        "int",    "float",  "bool",
         "string", "array",   "object",    "callable", "void",     "null",
         "false",  "true",    "mixed",     "never",    "iterable", "self",
         "static", "parent",  "Generator", "Fiber",    "Closure",
