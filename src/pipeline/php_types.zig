@@ -95,7 +95,11 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, scope: ?[]const u8,
         var it = std.mem.splitScalar(u8, body, '&');
         while (it.next()) |part| try group.append(allocator, resolveName(std.mem.trim(u8, part, " "), scope, parent));
         try groups.append(allocator, try group.toOwnedSlice(allocator));
-        t.pure_intersection = true;
+        // an implicitly nullable intersection is (X&Y)|null
+        if (t.mask & NULL != 0) {
+            try order.append(allocator, 'i');
+            t.order = try order.toOwnedSlice(allocator);
+        } else t.pure_intersection = true;
         t.intersections = try groups.toOwnedSlice(allocator);
         return t;
     }

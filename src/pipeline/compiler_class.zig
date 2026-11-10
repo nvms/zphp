@@ -1447,10 +1447,37 @@ fn extractParamTypes(self: *Compiler, param_nodes: []const u32) Error![]const []
             const idx = type_extra_idx - 1;
             const start_tok = self.ast.extra_data[idx];
             const end_tok = self.ast.extra_data[idx + 1];
-            types[i] = try buildTypeString(self, start_tok, end_tok);
+            const text = try buildTypeString(self, start_tok, end_tok);
+            types[i] = if (implicitlyNullable(self, p) and php_types.shape(text).mask & php_types.NULL == 0) blk: {
+                // `T $x = null` declares ?T (deprecated, but still the type)
+                const nullable = try std.fmt.allocPrint(self.allocator, "?{s}", .{text});
+                try self.string_allocs.append(self.allocator, nullable);
+                break :blk nullable;
+            } else text;
         }
     }
     return types;
+}
+
+// a parameter's folded default; an int default of a float parameter is
+// stored as the float (zend_is_valid_default_value converts it)
+fn paramDefaultValue(self: *Compiler, pnode: Ast.Node) Error!Value {
+    const value = self.evalConstExpr(pnode.data.lhs);
+    if (value != .int) return value;
+    const type_extra = pnode.data.rhs >> 8;
+    if (type_extra == 0) return value;
+    const text = try buildTypeString(self, self.ast.extra_data[type_extra - 1], self.ast.extra_data[type_extra]);
+    const mask = php_types.shape(text).mask;
+    if (mask & php_types.DOUBLE != 0 and mask & php_types.LONG == 0) return .{ .float = @floatFromInt(value.int) };
+    return value;
+}
+
+// a parameter whose default is null and that isn't promoted takes null
+// whatever its declared type says (zend_compile_params' force_nullable)
+fn implicitlyNullable(self: *Compiler, p: u32) bool {
+    const node = self.ast.nodes[p];
+    const promoted = ((node.data.rhs >> 2) & 3) != 0 or (node.data.rhs & 16) != 0 or ((node.data.rhs >> 5) & 3) != 0;
+    return !promoted and node.data.lhs != 0 and foldedDefault(self, node.data.lhs) == .null;
 }
 
 fn extractReturnType(self: *Compiler, extra_base: u32, param_count: u32) Error![]const u8 {
