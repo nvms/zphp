@@ -813,9 +813,14 @@ pub const Generator = struct {
     locals: std.ArrayListUnmanaged(Value) = .empty,
     stack: std.ArrayListUnmanaged(Value) = .empty,
     ref_slots: std.StringHashMapUnmanaged(*Value) = .{},
+    // the reference index owner of its frame's bindings while it waits
+    ref_owner: RefIndex.OwnerId = 0,
     base_sp: usize = 0,
     current_value: Value = .null,
     current_key: Value = .null,
+    // the reference cell a by-reference yield handed out, which a foreach by
+    // reference binds its variable to. the generator's frame keeps it bound
+    current_ref: ?*Value = null,
     return_value: Value = .null,
     implicit_key: i64 = 0,
     handler_count: usize = 0,

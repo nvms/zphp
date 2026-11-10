@@ -458,6 +458,15 @@ pub const OpCode = enum(u8) {
     // the closure expression whose compiled name is on top becomes a new
     // Closure object, with the scope it was created in
     closure_new,
+    // yield in a generator that yields by reference. u16 the name a
+    // make_var_* bound the yielded storage to, u8 flags: 1 a key is under
+    // it on the stack, 2 the storage is a call's result (a notice when the
+    // callee did not return a reference), 4 the value is on the stack and
+    // is no reference (php's notice)
+    yield_ref,
+    // before a call whose returned reference is bound: no reference counts
+    // as returned until that call returns one
+    reset_return_ref,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -544,6 +553,7 @@ pub const OpCode = enum(u8) {
             => 5,
             .make_var_static_prop_ref => 7,
             .static_prop_bind_ref_source => 5,
+            .yield_ref => 4,
             .arg_guard_static_prop => 8,
             .check_rw_container => 2,
             .defer_class_const => 5,

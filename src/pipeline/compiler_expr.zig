@@ -1706,6 +1706,7 @@ pub fn compileReferenceBinding(self: *Compiler, source: u32, dst: u16) Error!boo
             try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(prop_name) }));
         },
         .call, .method_call, .static_call => {
+            try self.emitOp(.reset_return_ref);
             try self.compileNode(source);
             try self.emitOp(.bind_ref_from_return);
             try self.emitU16(dst);
@@ -2222,8 +2223,30 @@ fn checkYieldPlace(self: *Compiler, node: Ast.Node) Error!void {
     if (!self.is_generator) return self.fail(node.main_token, "The \"yield\" expression can only be used inside a function");
 }
 
+// php's ZEND_YIELD in a function returning by reference: the yielded
+// variable, element, property or reference-returning call becomes a
+// reference the generator hands out; anything else is yielded by value
+// with php's notice
+fn compileYieldRef(self: *Compiler, value_node: u32, has_key: bool) Error!void {
+    const name = try self.addConstant(.{ .string = Value.String.borrowed("\x00yield-reference") });
+    var flags: u8 = if (has_key) 1 else 0;
+    var target = value_node;
+    while (target != 0 and self.ast.nodes[target].tag == .grouped_expr) target = self.ast.nodes[target].data.lhs;
+    const tag = if (target != 0) self.ast.nodes[target].tag else .grouped_expr;
+    if (target != 0 and (tag == .call or tag == .method_call or tag == .static_call)) flags |= 2;
+    if (target == 0 or !try compileReferenceBinding(self, target, name)) {
+        if (value_node != 0) try self.compileNode(value_node) else try self.emitOp(.op_null);
+        // a bare yield gives null without the notice
+        flags |= if (value_node != 0) 4 else 8;
+    }
+    try self.emitOp(.yield_ref);
+    try self.emitU16(name);
+    try self.emitByte(flags);
+}
+
 pub fn compileYield(self: *Compiler, node: Ast.Node) Error!void {
     try checkYieldPlace(self, node);
+    if (self.returns_ref) return compileYieldRef(self, node.data.lhs, false);
     if (node.data.lhs != 0) {
         try self.compileNode(node.data.lhs);
     } else {
@@ -2234,6 +2257,10 @@ pub fn compileYield(self: *Compiler, node: Ast.Node) Error!void {
 
 pub fn compileYieldPair(self: *Compiler, node: Ast.Node) Error!void {
     try checkYieldPlace(self, node);
+    if (self.returns_ref) {
+        try self.compileNode(node.data.lhs);
+        return compileYieldRef(self, node.data.rhs, true);
+    }
     try self.compileNode(node.data.lhs);
     try self.compileNode(node.data.rhs);
     try self.emitOp(.yield_pair);

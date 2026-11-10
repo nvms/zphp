@@ -768,6 +768,12 @@ pub const VM = struct {
     // the cli runs the shutdown destructors itself, after the shutdown
     // functions and the report of an uncaught exception, in php's order
     destructors_after_shutdown: bool = false,
+    // the name the last bind_ref_from_return bound a copy of the value to,
+    // the call having returned no reference
+    ref_bind_degraded: ?[*]const u8 = null,
+    // last_return_ref is what the call whose reference is being bound handed
+    // back: a return_ref set it since reset_return_ref ran before the call
+    return_ref_fresh: bool = false,
     captures: std.ArrayListUnmanaged(CaptureEntry) = .empty,
     capture_index: std.StringHashMapUnmanaged(CaptureRange) = .{},
     interned_names: std.StringHashMapUnmanaged(void) = .{},
@@ -5089,6 +5095,11 @@ pub const VM = struct {
                     // value, then run the same frame-teardown as return_val.
                     const rr_name_idx = self.readU16();
                     const ref_name = self.currentChunk().constants.items[rr_name_idx].string;
+                    // a returned call that gave no reference: php's notice
+                    if (self.ref_bind_degraded == ref_name.bytes().ptr) {
+                        self.ref_bind_degraded = null;
+                        try self.raiseError(8, "Only variable references should be returned by reference");
+                    }
                     if (self.last_return_ref_owner != 0) {
                         if (self.ref_index) |ri| ri.releaseOwner(self.allocator, self.last_return_ref_owner);
                         self.last_return_ref_owner = 0;
@@ -5117,6 +5128,7 @@ pub const VM = struct {
                     }
                     const rr_saved_entry_sp = self.currentFrame().entry_sp;
                     try self.popFrame();
+                    self.return_ref_fresh = self.last_return_ref != null;
                     if (rr_saved_entry_sp > 0) self.sp = rr_saved_entry_sp;
                     self.pushTransfer(rr_result);
                     if (rr_ret_pin) |p| self.objRelease(p);
@@ -6692,7 +6704,19 @@ pub const VM = struct {
                     const key_val = self.pop();
                     const src_val = self.pop();
                     self.revertUncapturedForeachCell(name);
-                    if (src_val == .array) {
+                    // the loop's own iterable sits under these: a generator
+                    // yielding by reference hands out the cell it yielded
+                    const loop_iterable = self.stack[self.sp - 2];
+                    if (loop_iterable == .generator) {
+                        const gen = generatorRoot(loop_iterable.generator);
+                        const cell = gen.current_ref orelse fresh: {
+                            const c = try self.newRefCell();
+                            self.setCell(c, gen.current_value);
+                            break :fresh c;
+                        };
+                        try self.bindRefSlot(&self.currentFrame().ref_slots, name, cell);
+                        try self.mirrorBoundName(self.currentFrame(), name, cell.*);
+                    } else if (src_val == .array) {
                         const arr_ptr = src_val.array;
                         const key: PhpArray.Key = switch (key_val) {
                             .int => |i| .{ .int = i },
@@ -7106,12 +7130,17 @@ pub const VM = struct {
                         self.obj_ref_active = true;
                     }
                 },
+                .reset_return_ref => self.return_ref_fresh = false,
                 .bind_ref_from_return => {
                     const dst_idx = self.readU16();
                     const dst_name = self.currentChunk().constants.items[dst_idx].string.bytes();
                     const frame = self.currentFrame();
                     self.unbindRefSlot(&frame.ref_slots, dst_name);
-                    if (self.last_return_ref) |cell| {
+                    // a reference only from a call that returned one
+                    const returned_ref = if (self.return_ref_fresh) self.last_return_ref else null;
+                    self.return_ref_fresh = false;
+                    self.ref_bind_degraded = if (returned_ref == null) dst_name.ptr else null;
+                    if (returned_ref) |cell| {
                         try self.bindRefSlot(&frame.ref_slots, dst_name, cell);
                         const owner = try self.ensureRefOwner(frame);
                         if (self.last_return_ref_owner != 0) {
@@ -7123,9 +7152,10 @@ pub const VM = struct {
                         try self.mirrorBoundName(frame, dst_name, cell.*);
                         self.setReturnRef(null);
                     } else {
-                        // callee didn't return a ref - degrade to value copy
+                        // callee didn't return a ref - degrade to value copy.
+                        // a return by reference returns that copy
                         const val = self.peek();
-                        if (dst_name.len > 0 and dst_name[0] == 0) {
+                        if ((dst_name.len > 0 and dst_name[0] == 0) or std.mem.eql(u8, dst_name, "$__ret_ref")) {
                             const cell = try self.newRefCell();
                             self.setCell(cell, val);
                             try self.bindRefSlot(&frame.ref_slots, dst_name, cell);
@@ -11194,6 +11224,62 @@ pub const VM = struct {
                     return;
                 },
 
+                .yield_ref => {
+                    const name_idx = self.readU16();
+                    const flags = self.readByte();
+                    const gen = self.currentFrame().generator orelse {
+                        self.setErrorMsg("Fatal error: Cannot use yield outside of a generator", .{});
+                        return error.RuntimeError;
+                    };
+                    const has_key = flags & 1 != 0;
+                    if (gen.forced_close) {
+                        if (flags & 12 != 0) self.stackRelease(self.popTransfer());
+                        if (has_key) self.stackRelease(self.popTransfer());
+                        if (try self.throwBuiltinException("Error", "Cannot yield from finally in a force-closed generator")) continue;
+                        return error.RuntimeError;
+                    }
+                    // php's ZEND_YIELD for a function returning by reference
+                    var cell: ?*Value = null;
+                    var val: Value = .null;
+                    if (flags & 12 != 0) {
+                        val = self.popTransfer();
+                        if (flags & 4 != 0) try self.raiseError(8, "Only variable references should be yielded by reference");
+                    } else {
+                        const name = self.currentChunk().constants.items[name_idx].string.bytes();
+                        cell = self.currentFrame().ref_slots.get(name);
+                        val = if (cell) |c| c.* else .null;
+                        if (flags & 2 != 0 and self.ref_bind_degraded == name.ptr) {
+                            self.ref_bind_degraded = null;
+                            // a call that returned no reference: its value
+                            try self.raiseError(8, "Only variable references should be yielded by reference");
+                            cell = null;
+                        }
+                        retainValue(val);
+                        if (val == .array) arrayUnpin(val.array);
+                    }
+                    if (has_key) {
+                        const key = self.popTransfer();
+                        self.setGeneratorCurrent(gen, key, val, true);
+                        if (key == .int and key.int >= gen.implicit_key) gen.implicit_key = key.int +% 1;
+                    } else {
+                        self.setGeneratorCurrent(gen, .{ .int = gen.implicit_key }, val, true);
+                        gen.implicit_key +%= 1;
+                    }
+                    gen.current_ref = cell;
+                    gen.ip = self.currentFrame().ip;
+                    gen.vars = self.currentFrame().vars;
+                    gen.ref_slots = self.currentFrame().ref_slots;
+                    self.currentFrame().ref_slots = .{};
+                    self.saveFrameLocalsToGenerator(gen);
+                    try self.saveGeneratorStack(gen);
+                    try self.saveGeneratorHandlers(gen);
+                    gen.state = .suspended;
+                    self.currentFrame().generator = null;
+                    self.frame_count -= 1;
+                    self.genRelease(gen);
+                    return;
+                },
+
                 .yield_pair => {
                     const gen = self.currentFrame().generator orelse {
                         self.setErrorMsg("Fatal error: Cannot use yield outside of a generator", .{});
@@ -12655,11 +12741,14 @@ pub const VM = struct {
         self.releaseValue(gen.current_value);
         gen.current_key = key;
         gen.current_value = value;
+        gen.current_ref = null;
         gen.has_value = true;
     }
 
     pub fn releaseGeneratorVars(self: *VM, gen: *@import("value.zig").Generator) void {
+        gen.current_ref = null;
         self.deinitRefSlots(&gen.ref_slots);
+        self.releaseGeneratorBindings(gen);
         // release the inner gen the outer was delegating to (yield from path)
         self.dropGeneratorDelegate(gen);
         var vit = gen.vars.valueIterator();
@@ -14413,8 +14502,10 @@ pub const VM = struct {
             .func = gen.func,
             .generator = gen,
             .ref_slots = gen.ref_slots,
+            .ref_owner = gen.ref_owner,
         };
         gen.ref_slots = .{};
+        gen.ref_owner = 0;
         self.markArgsUnsaved();
         self.frame_count += 1;
         self.retainFrameObjects(self.frame_count - 1);
@@ -17130,12 +17221,22 @@ pub const VM = struct {
             self.allocator.free(frame.locals);
             self.currentFrame().locals = &.{};
         }
-        // generator doesn't preserve ref bindings - they re-bind via get_static
-        // on resume. drop the maps so frame_count -= 1 on suspend doesn't leak.
+        // the references its variables are bound to (an element, a property)
+        // stay registered while it waits: the frame's owner of those
+        // bindings goes with the generator and comes back when it resumes
         const f = self.currentFrame();
         self.deinitRefSlots(&f.ref_slots);
-        self.unregFrameBindings(f);
         f.ref_slots = .{};
+        if (f.ref_owner != 0 and gen.ref_owner != f.ref_owner) self.releaseGeneratorBindings(gen);
+        gen.ref_owner = f.ref_owner;
+        f.ref_owner = 0;
+    }
+
+    fn releaseGeneratorBindings(self: *VM, gen: *Generator) void {
+        if (gen.ref_owner == 0) return;
+        if (self.ref_index) |ri| ri.releaseOwner(self.allocator, gen.ref_owner);
+        self.releaseBoundArgSources(gen.ref_owner);
+        gen.ref_owner = 0;
     }
 
     fn saveGeneratorHandlers(self: *VM, gen: *Generator) RuntimeError!void {
