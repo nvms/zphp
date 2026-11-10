@@ -309,6 +309,8 @@ fn compileInterpolatedString(self: *Compiler, s: []const u8, quote: u8) (Allocat
         // "$var" alone is still a string: php casts it
         try self.emitOp(.cast_string);
     }
+    // "$x" alone is still a string
+    if (segment_count == 1 and literal_count == 0) try self.emitOp(.cast_string);
 }
 
 fn emitLiteralSegment(self: *Compiler, quote: u8, s: []const u8) (Allocator.Error || error{CompileError})!void {
