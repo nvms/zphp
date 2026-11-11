@@ -2221,6 +2221,24 @@ pub fn compileNewExprDynamic(self: *Compiler, node: Ast.Node) Error!void {
 // refuses it when compiling
 fn checkYieldPlace(self: *Compiler, node: Ast.Node) Error!void {
     if (!self.is_generator) return self.fail(node.main_token, "The \"yield\" expression can only be used inside a function");
+    // php's zend_mark_function_as_generator: a declared return type must
+    // admit a Generator
+    const declared = std.mem.trim(u8, self.declared_return, " \t\r\n");
+    if (declared.len > 0 and !generatorCompatibleType(declared)) {
+        return self.failFmt(if (self.function_token != 0) self.function_token else node.main_token, "Generator return type must be a supertype of Generator, {s} given", .{declared});
+    }
+}
+
+fn generatorCompatibleType(declared: []const u8) bool {
+    var members = std.mem.tokenizeAny(u8, declared, "|()&");
+    while (members.next()) |raw| {
+        var t = std.mem.trim(u8, raw, " \t\r\n?");
+        if (t.len > 0 and t[0] == '\\') t = t[1..];
+        for ([_][]const u8{ "object", "mixed", "iterable", "Traversable", "Iterator", "Generator" }) |ok| {
+            if (std.ascii.eqlIgnoreCase(t, ok)) return true;
+        }
+    }
+    return false;
 }
 
 // php's ZEND_YIELD in a function returning by reference: the yielded

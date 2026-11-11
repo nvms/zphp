@@ -319,6 +319,9 @@ pub const Compiler = struct {
     hoisted_names: std.StringHashMapUnmanaged(void) = .{},
     is_generator: bool = false,
     returns_ref: bool = false,
+    // the declaration of the function being compiled, where php reports
+    // what it checks of the function as a whole
+    function_token: u32 = 0,
     namespace: []const u8 = "",
     use_aliases: std.StringHashMapUnmanaged([]const u8) = .{},
     use_fn_aliases: std.StringHashMapUnmanaged([]const u8) = .{},
