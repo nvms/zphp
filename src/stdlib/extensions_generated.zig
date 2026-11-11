@@ -1125,6 +1125,7 @@ pub const functions = Map.initComptime(.{
     .{ "utf8_decode", "standard" },
     .{ "utf8_encode", "standard" },
     .{ "var_dump", "standard" },
+    .{ "debug_zval_dump", "standard" },
     .{ "var_export", "standard" },
     .{ "version_compare", "standard" },
     .{ "vfprintf", "standard" },

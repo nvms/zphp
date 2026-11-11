@@ -32,7 +32,171 @@ pub const entries = .{
     .{ "var_dump", var_dump },
     .{ "print_r", print_r },
     .{ "var_export", var_export },
+    .{ "debug_zval_dump", debug_zval_dump },
 };
+
+// php's php_debug_zval_dump: var_dump's layout with each refcounted value's
+// reference count, "interned" for strings and arrays php never counts, and
+// "packed" for list-shaped arrays. the counts are zphp's own, less the holds
+// this native call takes on its arguments; where zphp's model of sharing
+// differs from php's, so do they
+fn debug_zval_dump(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (ctx.vm.hasPendingReleases()) ctx.vm.drainPendingDestruct();
+    for (args) |arg| try debugZvalDump(ctx, arg, 1, true);
+    return NativeResult.scalar(.null);
+}
+
+// the holds the call takes on an argument beyond the one php counts for it,
+// measured against php for an argument read from a variable (a temporary
+// object or string shows one more than php does)
+const call_holds_scalar: u32 = 1;
+const call_holds_array: u32 = 1;
+
+fn dumpIndent(out: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, level: usize) !void {
+    if (level > 1) try appendIndent(out, a, level - 1);
+}
+
+fn isPacked(arr: *value_mod.PhpArray) bool {
+    var last: i64 = -1;
+    for (arr.entries.items) |entry| {
+        if (entry.key != .int or entry.key.int <= last) return false;
+        last = entry.key.int;
+    }
+    return true;
+}
+
+fn debugZvalDump(ctx: *NativeContext, val: Value, level: usize, top: bool) RuntimeError!void {
+    const out = &ctx.vm.output;
+    const a = ctx.allocator;
+    try dumpIndent(out, a, level);
+    switch (val) {
+        .null, .undef => try out.appendSlice(a, "NULL\n"),
+        .bool => |b| try out.appendSlice(a, if (b) "bool(true)\n" else "bool(false)\n"),
+        .int => |i| try out.print(a, "int({d})\n", .{i}),
+        .float => |f| {
+            var tmp: [64]u8 = undefined;
+            try out.print(a, "float({s})\n", .{formatSerializedFloat(&tmp, f)});
+        },
+        .string => |s| {
+            try out.print(a, "string({d}) \"", .{s.len});
+            try out.appendSlice(a, s.bytes());
+            // php interns literals and every string of at most one byte
+            if (s.owner) |owner| if (s.len > 1) {
+                const rc = if (top) owner.refcount -| call_holds_scalar else owner.refcount;
+                try out.print(a, "\" refcount({d})\n", .{@max(rc, 1)});
+                return;
+            };
+            try out.appendSlice(a, "\" interned\n");
+        },
+        .array => |arr| {
+            if (arr.recursion & Recursion.gc != 0) {
+                try out.appendSlice(a, "*RECURSION*\n");
+                return;
+            }
+            const count = arr.entries.items.len;
+            const packed_text: []const u8 = if (isPacked(arr)) "packed " else "";
+            if (count == 0) {
+                try out.appendSlice(a, "array(0) interned {\n");
+            } else {
+                const rc = if (top) arr.refcount -| call_holds_array else arr.refcount;
+                try out.print(a, "array({d}) {s}refcount({d}){{\n", .{ count, packed_text, @max(rc, 1) });
+            }
+            arr.recursion |= Recursion.gc;
+            defer arr.recursion &= ~Recursion.gc;
+            for (arr.entries.items) |entry| {
+                try appendIndent(out, a, level + 1);
+                switch (entry.key) {
+                    .int => |ki| try out.print(a, "[{d}]=>\n", .{ki}),
+                    .string => |ks| {
+                        try out.appendSlice(a, "[\"");
+                        try out.appendSlice(a, ks.bytes());
+                        try out.appendSlice(a, "\"]=>\n");
+                    },
+                }
+                if (entry.ref) |cell| {
+                    try dumpReference(ctx, cell, cell.*, level + 2);
+                } else {
+                    try debugZvalDump(ctx, entry.value, level + 2, false);
+                }
+            }
+            try dumpIndent(out, a, level);
+            try out.appendSlice(a, "}\n");
+        },
+        .object => |obj| {
+            const flag = objectFlag(ctx.vm, obj, Recursion.debug);
+            if (obj.recursion & flag != 0) {
+                try out.appendSlice(a, "*RECURSION*\n");
+                return;
+            }
+            obj.recursion |= flag;
+            defer obj.recursion &= ~flag;
+            const rc = if (top) obj.refcount -| call_holds_scalar else obj.refcount;
+            if (ctx.vm.classes.get(obj.class_name)) |cls_def| if (cls_def.is_enum) {
+                try out.print(a, "enum({s}::{s})\n", .{ obj.class_name, obj.get("name").string.bytes() });
+                return;
+            };
+            var listing = try object_properties.list(ctx.vm, obj, .debug, a);
+            defer listing.deinit(a);
+            const holder = listing.takeHolder();
+            defer object_properties.releaseHolder(ctx.vm, holder);
+            var shown: usize = 0;
+            for (listing.items.items) |prop| shown += @intFromBool(prop.uninitialized == null);
+            try out.appendSlice(a, object_properties.lazyPrefix(obj));
+            try out.print(a, "object({s})#{d} ({d}) refcount({d}){{\n", .{ class_names.display(obj.class_name), obj.id, shown, @max(rc, 1) });
+            for (listing.items.items) |prop| {
+                try appendIndent(out, a, level + 1);
+                switch (prop.key) {
+                    .int => |ki| try out.print(a, "[{d}]=>\n", .{ki}),
+                    .name => |name| try emitDumpKey(out, a, name, prop.declaring, prop.visibility),
+                }
+                if (prop.uninitialized) |type_str| {
+                    try appendIndent(out, a, level + 1);
+                    try out.print(a, "uninitialized({s})\n", .{type_str});
+                    continue;
+                }
+                const cell = switch (prop.key) {
+                    .name => |name| propertyCell(ctx, obj, name),
+                    .int => null,
+                };
+                if (cell) |c| {
+                    try dumpReference(ctx, c, prop.value, level + 2);
+                } else {
+                    try debugZvalDump(ctx, prop.value, level + 2, false);
+                }
+            }
+            try dumpIndent(out, a, level);
+            try out.appendSlice(a, "}\n");
+        },
+        .generator => |g| try out.print(a, "object(Generator)#{d} (0) refcount({d}){{\n}}\n", .{ g.handle, 1 }),
+        .fiber => |f| try out.print(a, "object(Fiber)#{d} (0) refcount({d}){{\n}}\n", .{ f.handle, 1 }),
+        .resource => |r| {
+            const rc = if (top) r.refcount -| call_holds_scalar else r.refcount;
+            try out.print(a, "resource({d}) of type ({s}) refcount({d})\n", .{ r.id, value_mod.resourceTypeName(r), @max(rc, 1) });
+        },
+    }
+}
+
+// a reference's holders: the slots bound to its cell, less the last
+// returned reference zphp keeps that php has already let go
+fn dumpReference(ctx: *NativeContext, cell: *Value, inner: Value, level: usize) RuntimeError!void {
+    const out = &ctx.vm.output;
+    const a = ctx.allocator;
+    var holders = value_mod.cellOf(cell).binders;
+    if (ctx.vm.last_return_ref == cell) holders -|= 1;
+    try dumpIndent(out, a, level);
+    try out.print(a, "reference refcount({d}) {{\n", .{@max(holders, 1)});
+    try debugZvalDump(ctx, inner, level + 2, false);
+    try dumpIndent(out, a, level);
+    try out.appendSlice(a, "}\n");
+}
+
+// the reference cell a property is bound to, if any
+fn propertyCell(ctx: *NativeContext, obj: *value_mod.PhpObject, name: []const u8) ?*Value {
+    const index = ctx.vm.ref_index orelse return null;
+    const cells = index.prop_rev.get(.{ .object = obj, .class_name = "", .prop_name = name }) orelse return null;
+    if (cells.items.len == 0) return null;
+    return cells.items[0];
+}
 
 fn var_dump(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     // php has already freed what the last statements dropped, so a reference

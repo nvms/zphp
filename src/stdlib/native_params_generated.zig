@@ -2531,6 +2531,7 @@ pub const map = std.StaticStringMap(Signature).initComptime(.{
     .{ "utf8_decode", Signature{ .params = &[_]Param{ .{ .name = "string", .type = "string" } }, .returns = "string" } },
     .{ "utf8_encode", Signature{ .params = &[_]Param{ .{ .name = "string", .type = "string" } }, .returns = "string" } },
     .{ "var_dump", Signature{ .params = &[_]Param{ .{ .name = "value", .type = "mixed" }, .{ .name = "values", .default = .unknown, .variadic = true, .type = "mixed" } }, .returns = "void" } },
+    .{ "debug_zval_dump", Signature{ .params = &[_]Param{ .{ .name = "value", .type = "mixed" }, .{ .name = "values", .default = .unknown, .variadic = true, .type = "mixed" } }, .returns = "void" } },
     .{ "var_export", Signature{ .params = &[_]Param{ .{ .name = "value", .type = "mixed" }, .{ .name = "return", .default = .{ .bool = false }, .type = "bool" } }, .returns = "?string" } },
     .{ "version_compare", Signature{ .params = &[_]Param{ .{ .name = "version1", .type = "string" }, .{ .name = "version2", .type = "string" }, .{ .name = "operator", .default = .null, .type = "?string" } }, .returns = "int|bool" } },
     .{ "vfprintf", Signature{ .params = &[_]Param{ .{ .name = "stream" }, .{ .name = "format", .type = "string" }, .{ .name = "values", .type = "array" } }, .returns = "int" } },
