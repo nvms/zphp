@@ -1261,7 +1261,7 @@ fn cachingNext(ctx: *NativeContext, d: Dual) RuntimeError!void {
     }
 }
 
-fn floatText(ctx: *NativeContext, f: f64) RuntimeError![]const u8 {
+pub fn floatText(ctx: *NativeContext, f: f64) RuntimeError![]const u8 {
     const s = try toPhpString(ctx, .{ .float = f });
     defer releaseString(s);
     return ctx.createString(s.string.bytes());
@@ -2329,17 +2329,35 @@ pub fn foreachRefusal(vm: *VM, obj: *PhpObject) ?[]const u8 {
 }
 
 // foreach steps a RecursiveIteratorIterator through its own iterator: no
-// method call, so no frame of one in a trace
-pub fn foreachDirect(vm: *VM, obj: *PhpObject) bool {
-    if (!ownIterator(vm, obj)) return false;
-    const r = recRaw(obj) orelse return false;
-    return r.levels() != null;
+// method call, so no frame of one in a trace. SplDoublyLinkedList and its
+// subclasses get an iterator of their own too (spl_dllist_it), kept on the
+// loop's marker. the mode is kept in the marker's native.extra
+pub const foreach_recursive: u8 = 1;
+pub const foreach_dllist: u8 = 2;
+pub fn foreachDirect(vm: *VM, obj: *PhpObject) u8 {
+    if (vm.isInstanceOf(obj.class_name, "SplDoublyLinkedList") and !userIterated(vm, obj.class_name)) return foreach_dllist;
+    if (!ownIterator(vm, obj)) return 0;
+    const r = recRaw(obj) orelse return 0;
+    return if (r.levels() != null) foreach_recursive else 0;
 }
 
 pub const ForeachStep = enum { rewind, valid, current, key, next };
 
-pub fn foreachStep(vm: *VM, obj: *PhpObject, comptime step: ForeachStep) RuntimeError!Value {
+pub fn foreachStep(vm: *VM, obj: *PhpObject, marker: *PhpObject, comptime step: ForeachStep) RuntimeError!Value {
     var ctx = vm.makeContext(null);
+    if (marker.native.extra == foreach_dllist) {
+        const dll = @import("spl_dllist.zig");
+        var result: Value = .null;
+        switch (step) {
+            .rewind => try dll.iterBegin(&ctx, obj, marker),
+            .valid => result = .{ .bool = dll.iterValid(marker) },
+            .current => result = try dll.iterCurrent(&ctx, obj, marker),
+            .key => result = dll.iterKey(marker),
+            .next => try dll.iterNext(&ctx, obj, marker),
+        }
+        if (pending(&ctx)) return error.RuntimeError;
+        return result;
+    }
     const r = recRaw(obj) orelse return .null;
     var result: Value = .null;
     switch (step) {

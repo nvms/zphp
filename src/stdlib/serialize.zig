@@ -268,6 +268,91 @@ fn keptClassName(ctx: *NativeContext, class_allowed: bool, orig_class: []const u
     return ctx.vm.stableClassName(orig_class);
 }
 
+// php_var_serialize as a Serializable::serialize() method calls it: values
+// written one after another, sharing the reference table of the serialize()
+// call that is running (BG(serialize)), or a table of their own
+pub const Writer = struct {
+    ctx: *NativeContext,
+    buf: std.ArrayListUnmanaged(u8) = .empty,
+    own: SerCtx = .{},
+    owner: bool = false,
+    outer: ?*SerCtx = null,
+
+    // call on the writer's final address
+    pub fn begin(self: *Writer) void {
+        self.outer = if (serialize_lock == 0) shared_ctx else null;
+        self.owner = self.outer == null and serialize_lock == 0;
+        if (self.owner) shared_ctx = &self.own;
+    }
+
+    fn sctx(self: *Writer) *SerCtx {
+        return self.outer orelse &self.own;
+    }
+
+    pub fn value(self: *Writer, v: Value) RuntimeError!void {
+        serializeValue(self.ctx, &self.buf, self.sctx(), v) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.RuntimeError;
+    }
+
+    pub fn raw(self: *Writer, bytes: []const u8) RuntimeError!void {
+        try self.buf.appendSlice(self.ctx.allocator, bytes);
+    }
+
+    // the written string, which the caller takes
+    pub fn finish(self: *Writer) RuntimeError!NativeResult {
+        const result = try self.buf.toOwnedSlice(self.ctx.allocator);
+        return NativeResult.takeString(try Value.String.adopt(self.ctx.allocator, result));
+    }
+
+    pub fn deinit(self: *Writer) void {
+        if (self.owner) shared_ctx = null;
+        self.own.deinit(self.ctx);
+        self.buf.deinit(self.ctx.allocator);
+    }
+};
+
+// php_var_unserialize as a Serializable::unserialize() method calls it:
+// values read one after another from `s`, sharing the back-reference table
+// of the unserialize() call that is running (BG(unserialize)), or a table
+// of their own
+pub const Reader = struct {
+    ctx: *NativeContext,
+    s: []const u8,
+    pos: usize = 0,
+    own: UnserCtx = .{},
+    outer: ?*UnserCtx = null,
+    owner: bool = false,
+
+    pub fn begin(self: *Reader) void {
+        self.outer = if (serialize_lock == 0) shared_uctx else null;
+        self.owner = self.outer == null and serialize_lock == 0;
+        if (self.owner) shared_uctx = &self.own;
+    }
+
+    // the next value, or null when the data is malformed there (an
+    // exception a constructor or __wakeup throws is error.RuntimeError). a
+    // string carries a reference the caller drops once it stored the value
+    pub fn value(self: *Reader) RuntimeError!?Value {
+        const uctx = self.outer orelse &self.own;
+        const saved_err = uctx.err_pos;
+        uctx.err_pos = 0;
+        defer uctx.err_pos = saved_err;
+        const r = unserializeValue(self.ctx, uctx, self.s, self.pos) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            if (uctx.threw or self.ctx.vm.pending_exception != null) return error.RuntimeError;
+            // php leaves its cursor where the value went wrong
+            self.pos = @max(self.pos, uctx.err_pos);
+            return null;
+        };
+        self.pos = r.pos;
+        return r.value;
+    }
+
+    pub fn deinit(self: *Reader) void {
+        if (self.owner) shared_uctx = null;
+        self.own.deinit(self.ctx.allocator);
+    }
+};
+
 pub fn unserializeFromString(ctx: *NativeContext, s: []const u8) ?Value {
     var uctx = UnserCtx{};
     defer uctx.deinit(ctx.allocator);

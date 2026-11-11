@@ -2058,6 +2058,7 @@ pub const VM = struct {
         try @import("../stdlib/spl.zig").register(vm, allocator);
         try @import("../stdlib/spl_iterators.zig").register(vm, allocator);
         try @import("../stdlib/spl_directory.zig").register(vm, allocator);
+        try @import("../stdlib/spl_dllist.zig").register(vm, allocator);
         try @import("../stdlib/pdo.zig").register(vm, allocator);
         try @import("../stdlib/websocket.zig").register(vm, allocator);
         try @import("../stdlib/filesystem.zig").register(vm, allocator);
@@ -6650,8 +6651,9 @@ pub const VM = struct {
                             // a RecursiveIteratorIterator php steps with its
                             // own iterator; the marker remembers that
                             const direct = spl_iterator_classes.foreachDirect(self, iterable.object);
-                            if (direct) self.stack[self.sp - 1].object.native.extra = 1;
-                            _ = (if (direct) spl_iterator_classes.foreachStep(self, iterable.object, .rewind) else self.callMethod(iterable.object, "rewind", &.{})) catch {
+                            const marker = self.stack[self.sp - 1].object;
+                            marker.native.extra = direct;
+                            _ = (if (direct != 0) spl_iterator_classes.foreachStep(self, iterable.object, marker, .rewind) else self.callMethod(iterable.object, "rewind", &.{})) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
@@ -6731,8 +6733,9 @@ pub const VM = struct {
                         }
                     } else if (idx_val == .object and iterable == .object) {
                         // Iterator protocol
-                        const direct = idx_val.object.native.extra == 1;
-                        const valid = (if (direct) spl_iterator_classes.foreachStep(self, iterable.object, .valid) else self.callMethod(iterable.object, "valid", &.{})) catch {
+                        const marker = idx_val.object;
+                        const direct = marker.native.extra != 0;
+                        const valid = (if (direct) spl_iterator_classes.foreachStep(self, iterable.object, marker, .valid) else self.callMethod(iterable.object, "valid", &.{})) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
@@ -6741,12 +6744,12 @@ pub const VM = struct {
                         } else {
                             // php fetches current() first, then key() only
                             // when the loop names a key
-                            const current = (if (direct) spl_iterator_classes.foreachStep(self, iterable.object, .current) else self.callMethod(iterable.object, "current", &.{})) catch {
+                            const current = (if (direct) spl_iterator_classes.foreachStep(self, iterable.object, marker, .current) else self.callMethod(iterable.object, "current", &.{})) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
                             self.push(current);
-                            const key = if (op == .iter_check_nokey) Value.null else (if (direct) spl_iterator_classes.foreachStep(self, iterable.object, .key) else self.callMethod(iterable.object, "key", &.{})) catch {
+                            const key = if (op == .iter_check_nokey) Value.null else (if (direct) spl_iterator_classes.foreachStep(self, iterable.object, marker, .key) else self.callMethod(iterable.object, "key", &.{})) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
@@ -6784,8 +6787,9 @@ pub const VM = struct {
                             self.stack[self.sp - 2] = .null;
                         }
                     } else if (self.stack[self.sp - 1] == .object and iterable == .object) {
-                        const direct = self.stack[self.sp - 1].object.native.extra == 1;
-                        _ = (if (direct) spl_iterator_classes.foreachStep(self, iterable.object, .next) else self.callMethod(iterable.object, "next", &.{})) catch {
+                        const marker = self.stack[self.sp - 1].object;
+                        const direct = marker.native.extra != 0;
+                        _ = (if (direct) spl_iterator_classes.foreachStep(self, iterable.object, marker, .next) else self.callMethod(iterable.object, "next", &.{})) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
