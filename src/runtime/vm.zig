@@ -16137,16 +16137,8 @@ pub const VM = struct {
                     self.error_msg = msg;
                     return error.RuntimeError;
                 }
-                var pcls_iter = parent_cls.methods.iterator();
-                while (pcls_iter.next()) |pe| {
-                    if (!pe.value_ptr.is_final) continue;
-                    if (def.methods.get(pe.key_ptr.*)) |_| {
-                        const msg = try std.fmt.allocPrint(self.allocator, "Cannot override final method {s}::{s}()", .{ parent_name, pe.key_ptr.* });
-                        try self.strings.append(self.allocator, msg);
-                        self.error_msg = msg;
-                        return error.RuntimeError;
-                    }
-                }
+                // a final method's override is refused by the inheritance
+                // checks, at the overriding method's line
             }
         }
 
@@ -16159,6 +16151,7 @@ pub const VM = struct {
             }
             try def.interfaces.append(self.allocator, iface);
         }
+        try self.checkInterfacesImplemented(&def, class_name);
 
         const trait_count = self.readByte();
         var trait_names: [64][]const u8 = undefined;
@@ -16248,6 +16241,17 @@ pub const VM = struct {
                         return self.raiseFatal(msg);
                     }
                 }
+                // a static property redeclared narrower than the parent's
+                for (parent_cls.static_props.keys()) |static_name| {
+                    const parent_vis = parent_cls.static_prop_visibility.get(static_name) orelse .public;
+                    if (parent_vis == .private) continue;
+                    if (!def.static_props.contains(static_name)) continue;
+                    const child_vis = def.static_prop_visibility.get(static_name) orelse .public;
+                    if (@intFromEnum(child_vis) > @intFromEnum(parent_vis)) {
+                        self.setErrorMsg("Access level to {s}::${s} must be {s} (as in class {s}){s}", .{ class_name, static_name, @tagName(parent_vis), parent_class_name, if (parent_vis == .public) "" else " or weaker" });
+                        return error.RuntimeError;
+                    }
+                }
                 for (parent_cls.properties.items) |parent_prop| {
                     for (def.properties.items) |child_prop| {
                         if (!std.mem.eql(u8, parent_prop.name, child_prop.name)) continue;
@@ -16275,7 +16279,7 @@ pub const VM = struct {
                             return self.raiseFatal(msg);
                         }
                         if (@intFromEnum(child_prop.visibility) > @intFromEnum(parent_prop.visibility)) {
-                            self.setErrorMsg("Access level to {s}::${s} must be {s} (as in class {s}) or weaker", .{ class_name, child_prop.name, @tagName(parent_prop.visibility), parent_class_name });
+                            self.setErrorMsg("Access level to {s}::${s} must be {s} (as in class {s}){s}", .{ class_name, child_prop.name, @tagName(parent_prop.visibility), parent_class_name, if (parent_prop.visibility == .public) "" else " or weaker" });
                             return error.RuntimeError;
                         }
                         // A virtual get-only property imposes no write contract.
@@ -16958,6 +16962,59 @@ pub const VM = struct {
         const msg = try std.fmt.allocPrint(self.allocator, "Required Trait {s} wasn't added to {s}", .{ name, owner });
         defer self.allocator.free(msg);
         return self.raiseFatal(msg);
+    }
+
+    // the interface_gets_implemented handlers of php's internal interfaces,
+    // run for every interface a class gets, its parents' included
+    fn checkInterfacesImplemented(self: *VM, def: *const ClassDef, class_name: []const u8) RuntimeError!void {
+        var all: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer all.deinit(self.allocator);
+        var current: ?*const ClassDef = def;
+        while (current) |cls| {
+            for (cls.interfaces.items) |iface| try self.collectInterface(&all, iface);
+            current = if (cls.parent) |p| self.classes.getPtr(p) else null;
+        }
+        const has = struct {
+            fn f(list: []const []const u8, name: []const u8) bool {
+                for (list) |item| if (std.ascii.eqlIgnoreCase(item, name)) return true;
+                return false;
+            }
+        }.f;
+        const kind = if (def.is_enum) "Enum" else "Class";
+        for (all.items) |iface| {
+            if (std.ascii.eqlIgnoreCase(iface, "Traversable")) {
+                if (def.is_abstract or has(all.items, "Iterator") or has(all.items, "IteratorAggregate")) continue;
+                const msg = try std.fmt.allocPrint(self.allocator, "{s} {s} must implement interface Traversable as part of either Iterator or IteratorAggregate", .{ kind, class_name });
+                defer self.allocator.free(msg);
+                // E_CORE_ERROR: reported with no source position
+                return self.raiseCompileFatal(msg, .{ .file = "Unknown", .line = 0 });
+            }
+            if ((std.ascii.eqlIgnoreCase(iface, "Iterator") and has(all.items, "IteratorAggregate")) or
+                (std.ascii.eqlIgnoreCase(iface, "IteratorAggregate") and has(all.items, "Iterator")))
+                return self.traitRuleFatal("Class {s} cannot implement both Iterator and IteratorAggregate at the same time", .{class_name});
+            if (std.ascii.eqlIgnoreCase(iface, "Throwable") and !self.extendsClass(def, "Exception") and !self.extendsClass(def, "Error"))
+                return self.traitRuleFatal("{s} {s} cannot implement interface Throwable, extend Exception or Error instead", .{ kind, class_name });
+            if (std.ascii.eqlIgnoreCase(iface, "DateTimeInterface") and !self.extendsClass(def, "DateTime") and !self.extendsClass(def, "DateTimeImmutable"))
+                return self.traitRuleFatal("DateTimeInterface can't be implemented by user classes", .{});
+        }
+    }
+
+    fn collectInterface(self: *VM, all: *std.ArrayListUnmanaged([]const u8), name: []const u8) !void {
+        for (all.items) |seen| if (std.ascii.eqlIgnoreCase(seen, name)) return;
+        try all.append(self.allocator, name);
+        const idef = self.interfaces.get(name) orelse return;
+        for (idef.parents.items) |p| try self.collectInterface(all, p);
+        if (idef.parent) |p| try self.collectInterface(all, p);
+    }
+
+    // whether a class being declared extends the named class
+    fn extendsClass(self: *VM, def: *const ClassDef, ancestor: []const u8) bool {
+        var parent = def.parent;
+        while (parent) |p| {
+            if (std.ascii.eqlIgnoreCase(p, ancestor)) return true;
+            parent = if (self.classes.getPtr(p)) |cls| cls.parent else null;
+        }
+        return false;
     }
 
     fn traitRuleFatal(self: *VM, comptime fmt: []const u8, args: anytype) RuntimeError {
