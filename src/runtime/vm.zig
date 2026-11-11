@@ -19268,6 +19268,39 @@ pub const VM = struct {
         self.obj_ref_active = true;
     }
 
+    // the reference cell a property shares, made for it (holding its value)
+    // when it shares none: unserialize's R: turning a property into a
+    // reference. scope is the declaring class of a private property
+    pub fn propertyReferenceCell(self: *VM, obj: *PhpObject, name: []const u8, scope: ?[]const u8) RuntimeError!*Value {
+        const index = try self.refIndex();
+        if (index.prop_rev.get(.{ .object = obj, .class_name = "", .prop_name = name })) |cells| {
+            if (cells.items.len > 0) return cells.items[0];
+        }
+        const fresh = try self.newRefCell();
+        self.setCell(fresh, obj.getForScope(name, scope));
+        try self.regRefObject(try self.persistentRefOwner(), fresh, obj, name);
+        self.obj_ref_active = true;
+        return fresh;
+    }
+
+    // a property joining a reference set, as `$o->p = &$r` makes it
+    pub fn bindPropertyToCell(self: *VM, obj: *PhpObject, name: []const u8, cell: *Value) RuntimeError!void {
+        return self.bindPropToCell(obj, name, cell);
+    }
+
+    // whether a typed property takes val without coercion, as unserialize
+    // checks it (zend_verify_prop_assignable_by_ref, strict)
+    pub fn unserializedPropertyFits(self: *VM, val: Value, type_str: []const u8, decl_class: []const u8) RuntimeError!bool {
+        return (try self.verifyDeclaredType(val, type_str, decl_class, true)) != null;
+    }
+
+    // a fresh reference cell holding val
+    pub fn newReferenceCell(self: *VM, val: Value) RuntimeError!*Value {
+        const cell = try self.newRefCell();
+        self.setCell(cell, val);
+        return cell;
+    }
+
     // `C::$p = &...`: the static property leaves the reference it held and
     // joins the cell, checked against its type as a property is
     fn bindStaticPropToCell(self: *VM, class_name: []const u8, prop_name: []const u8, cell: *Value) RuntimeError!void {
@@ -28025,7 +28058,7 @@ pub const VM = struct {
     // both refcounted (arrays: refcounting Stage 2)
     // container stores release what they replace through the release hook;
     // these remain the named VM-aware store entry points
-    fn detachArrayEntryRef(self: *VM, array: *PhpArray, key: PhpArray.Key) void {
+    pub fn detachArrayEntryRef(self: *VM, array: *PhpArray, key: PhpArray.Key) void {
         const entry = array.getPtr(key) orelse return;
         const cell = entry.ref orelse return;
         if (self.ref_index) |ri| ri.removeTargetAllOwners(self.allocator, cell, .{ .array = .{ .array = array, .key = entry.key } });

@@ -268,6 +268,17 @@ pub fn appendOwn(vm: *VM, obj: *PhpObject, purpose: Purpose, listing: *Listing, 
             try listing.items.append(allocator, .{ .key = .{ .name = name }, .value = entry.value_ptr.*, .declaring = obj.class_name });
             continue;
         };
+        // a dynamic property under a mangled name (unserialize keeps the
+        // names it reads for properties no class declares) lists as php's
+        // table shows it: protected or private to the class it names
+        if ((purpose == .debug or purpose == .serialize) and name.len > 0 and name[0] == 0) {
+            var prop = unmangle(name, entry.value_ptr.*);
+            if (prop.visibility != .public) {
+                prop.declared = false;
+                try listing.items.append(allocator, prop);
+                continue;
+            }
+        }
         const declared = vm.propertyDeclaration(obj.class_name, name);
         try listing.items.append(allocator, .{ .key = .{ .name = name }, .value = entry.value_ptr.*, .visibility = declared.visibility, .declaring = declared.defining_class });
     }

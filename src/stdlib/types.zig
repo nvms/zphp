@@ -1457,6 +1457,8 @@ fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "pcre.recursion_limit")) return "100000";
     if (std.mem.eql(u8, name, "pcre.jit")) return "1";
     if (std.mem.eql(u8, name, "serialize_precision")) return "-1";
+    if (std.mem.eql(u8, name, "unserialize_callback_func")) return "";
+    if (std.mem.eql(u8, name, "unserialize_max_depth")) return "4096";
     if (std.mem.eql(u8, name, "open_basedir")) return "";
     if (std.mem.eql(u8, name, "include_path")) return includes.default_include_path;
     if (std.mem.eql(u8, name, "log_errors")) return "1";
