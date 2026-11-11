@@ -2183,7 +2183,7 @@ pub const Compiler = struct {
     // PHP's behavior for 9223372036854775808, 0xFFFFFFFFFFFFFFFFF, etc.
     pub fn parsePhpIntLiteral(s: []const u8) Value {
         if (s.len == 0) return .{ .int = 0 };
-        var buf: [128]u8 = undefined;
+        var buf: [4096]u8 = undefined;
         var len: usize = 0;
         for (s) |c| {
             if (c != '_' and len < buf.len) {
@@ -2213,28 +2213,28 @@ pub const Compiler = struct {
         if (std.fmt.parseInt(i64, digits, radix)) |v| {
             return .{ .int = v };
         } else |_| {}
-        // overflowing non-decimal literal -> float. accumulate in u128 (exact
-        // for everything up to ~3.4e38) then convert to f64 once, so the
-        // rounding matches PHP's parse-then-cast instead of accumulating
-        // error digit by digit in f64
-        var acc: u128 = 0;
-        const r: u128 = radix;
+        // an overflowing non-decimal literal is a float, built digit by digit
+        // in a double as php's zend_hex_strtod, zend_oct_strtod and
+        // zend_bin_strtod do (a long one reaches INF). the octal and binary
+        // ones add the digit's character and then take '0' away, which rounds
+        // differently from adding the digit
+        var value: f64 = 0;
+        const r: f64 = @floatFromInt(radix);
         for (digits) |d| {
-            const dv: ?u128 = switch (d) {
-                '0'...'9' => d - '0',
-                'a'...'f' => d - 'a' + 10,
-                'A'...'F' => d - 'A' + 10,
-                else => null,
-            };
-            if (dv) |v| {
-                const m = @mulWithOverflow(acc, r);
-                if (m[1] != 0) return .{ .float = std.fmt.parseFloat(f64, digits) catch 0.0 };
-                const a = @addWithOverflow(m[0], v);
-                if (a[1] != 0) return .{ .float = std.fmt.parseFloat(f64, digits) catch 0.0 };
-                acc = a[0];
-            } else return .{ .int = 0 };
+            if (radix == 16) {
+                const dv: f64 = switch (d) {
+                    '0'...'9' => @floatFromInt(d - '0'),
+                    'a'...'f' => @floatFromInt(d - 'a' + 10),
+                    'A'...'F' => @floatFromInt(d - 'A' + 10),
+                    else => return .{ .int = 0 },
+                };
+                value = value * r + dv;
+            } else {
+                if (d < '0' or d >= '0' + radix) return .{ .int = 0 };
+                value = (value * r + @as(f64, @floatFromInt(d))) - @as(f64, '0');
+            }
         }
-        return .{ .float = @floatFromInt(acc) };
+        return .{ .float = value };
     }
 
     fn parsePhpFloat(s: []const u8) f64 {
