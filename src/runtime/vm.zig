@@ -7424,6 +7424,12 @@ pub const VM = struct {
                         if (!(obj.isUnset(prop_name) and self.magicApplies(obj, prop_name, .unset))) {
                             if (try self.checkPropertyMutation(obj, prop_name, .unset)) continue;
                         }
+                        if (self.propertyHooked(obj.class_name, prop_name) and !self.inPropHook(obj, prop_name)) {
+                            const msg = try std.fmt.allocPrint(self.allocator, "Cannot unset hooked property {s}::${s}", .{ obj.class_name, prop_name });
+                            defer self.allocator.free(msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        }
                         {
                             const vr = self.findPropertyVisibility(obj.class_name, prop_name);
                             if (vr.is_readonly and obj.get(prop_name) != .null) {
@@ -7481,6 +7487,12 @@ pub const VM = struct {
                         // is already running for this property
                         if (!(obj.isUnset(prop_name) and self.magicApplies(obj, prop_name, .unset))) {
                             if (try self.checkPropertyMutation(obj, prop_name, .unset)) continue;
+                        }
+                        if (self.propertyHooked(obj.class_name, prop_name) and !self.inPropHook(obj, prop_name)) {
+                            const msg = try std.fmt.allocPrint(self.allocator, "Cannot unset hooked property {s}::${s}", .{ obj.class_name, prop_name });
+                            defer self.allocator.free(msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
                         }
                         const vr = self.findPropertyVisibility(obj.class_name, prop_name);
                         if (vr.is_readonly and obj.get(prop_name) != .null) {
@@ -20722,6 +20734,12 @@ pub const VM = struct {
         if (self.inPropHook(obj, prop_name)) return null;
         if (!self.hasPropHook(obj.class_name, prop_name, if (kind == .get) .get else .set)) return null;
         const hook_name = try self.propHookName(prop_name, if (kind == .get) .get else .set);
+        if (kind == .get and self.isWriteOnlyVirtual(obj.class_name, prop_name)) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Property {s}::${s} is write-only", .{ obj.class_name, prop_name });
+            defer self.allocator.free(msg);
+            try self.setPendingException("Error", msg);
+            return error.RuntimeError;
+        }
         const args: []const Value = if (kind == .set) &.{value} else &.{};
         return try self.callMethod(obj, hook_name, args);
     }
@@ -20770,7 +20788,10 @@ pub const VM = struct {
         };
         var buf: [256]u8 = undefined;
         const hook_name = std.fmt.bufPrint(&buf, "{s}{s}", .{ prop_name, suffix }) catch return false;
-        const result = if (self.classes.getPtr(class_name)) |cls| self.resolvePropertyHook(cls, hook_name) != null else false;
+        var result = if (self.classes.getPtr(class_name)) |cls| self.resolvePropertyHook(cls, hook_name) != null else false;
+        // a virtual property with only a set hook is write-only: a read goes
+        // to callPropHook, which refuses it as php's read_property does
+        if (!result and kind == .get) result = self.isWriteOnlyVirtual(class_name, prop_name);
         self.has_hook_cache_class = class_name;
         self.has_hook_cache_prop = prop_name;
         self.has_hook_cache_kind = kind_bit;
@@ -20778,6 +20799,52 @@ pub const VM = struct {
         self.has_hook_cache_fn_count = fn_count;
         self.has_hook_cache_cls_count = cls_count;
         return result;
+    }
+
+    // the nearest declaration of a property in the class chain
+    pub fn nearestPropertyDef(self: *VM, class_name: []const u8, prop_name: []const u8) ?*const ClassDef.PropertyDef {
+        var current: ?[]const u8 = class_name;
+        while (current) |cn| {
+            const cls = self.classes.getPtr(cn) orelse return null;
+            for (cls.properties.items) |*p| if (std.mem.eql(u8, p.name, prop_name)) return p;
+            current = cls.parent;
+        }
+        return null;
+    }
+
+    // a virtual property with a set hook and no get hook
+    fn isWriteOnlyVirtual(self: *VM, class_name: []const u8, prop_name: []const u8) bool {
+        if (!self.propertyIsVirtual(class_name, prop_name)) return false;
+        const cls = self.classes.getPtr(class_name) orelse return false;
+        var buf: [256]u8 = undefined;
+        const getter = std.fmt.bufPrint(&buf, "{s}$hook_get", .{prop_name}) catch return false;
+        if (self.resolvePropertyHook(cls, getter) != null) return false;
+        var buf2: [256]u8 = undefined;
+        const setter = std.fmt.bufPrint(&buf2, "{s}$hook_set", .{prop_name}) catch return false;
+        return self.resolvePropertyHook(cls, setter) != null;
+    }
+
+    // php's ZEND_ACC_VIRTUAL after inheritance: a property is backed when
+    // any class in the chain declares it with storage
+    pub fn propertyIsVirtual(self: *VM, class_name: []const u8, prop_name: []const u8) bool {
+        var found = false;
+        var current: ?[]const u8 = class_name;
+        while (current) |cn| {
+            const cls = self.classes.getPtr(cn) orelse break;
+            for (cls.properties.items) |*p| if (std.mem.eql(u8, p.name, prop_name)) {
+                if (found and p.visibility == .private) break;
+                if (!p.is_virtual) return false;
+                found = true;
+                break;
+            };
+            current = cls.parent;
+        }
+        return found;
+    }
+
+    // a property with a hook of either kind, for unset's refusal
+    fn propertyHooked(self: *VM, class_name: []const u8, prop_name: []const u8) bool {
+        return self.hasPropHook(class_name, prop_name, .get) or self.hasPropHook(class_name, prop_name, .set);
     }
 
     pub fn ensureClassHierarchyLoaded(self: *VM, class_name: []const u8) void {
