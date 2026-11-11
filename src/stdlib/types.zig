@@ -2883,6 +2883,12 @@ pub fn countAs(ctx: *NativeContext, func: []const u8, args: []const Value) Runti
         .array => |a| return NativeResult.scalar(.{ .int = if (mode == 1) try countRecursive(ctx, func, a) else a.length() }),
         .object => |obj| if (ctx.vm.isInstanceOf(obj.class_name, "Countable") and ctx.vm.hasMethod(obj.class_name, "count")) {
             const r = try ctx.vm.callMethod(obj, "count", &.{});
+            // zval_get_long: an object without a cast warns and counts as 1
+            if (r == .object and @import("../runtime/value.zig").nativeCast(r.object, .int) == null) {
+                const m = try std.fmt.allocPrint(ctx.allocator, "Object of class {s} could not be converted to int", .{r.object.class_name});
+                defer ctx.allocator.free(m);
+                try ctx.vm.emitWarning(m);
+            }
             return NativeResult.scalar(.{ .int = switch (r) {
                 .int => |n| n,
                 .float => |f| if (Value.floatFitsInt(f)) @intFromFloat(@trunc(f)) else 0,
