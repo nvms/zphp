@@ -2698,6 +2698,18 @@ fn intervalSerialize(ctx: *NativeContext, _: []const Value) RuntimeError!NativeR
     return NativeResult.borrowed(.{ .array = out });
 }
 
+// zend_dval_to_lval, which warns for a float an int can't hold
+fn dvalToLvalWarn(ctx: *NativeContext, f: f64) RuntimeError!i64 {
+    if (!Value.floatFitsInt(f)) {
+        var buf: [64]u8 = undefined;
+        const shown: []const u8 = if (std.math.isNan(f)) "NAN" else if (std.math.isInf(f)) (if (f < 0) "-INF" else "INF") else @import("formatted_print.zig").gcvt(f, -1, '.', 'E', &buf);
+        const msg = try std.fmt.allocPrint(ctx.allocator, "The float {s} is not representable as an int, cast occurred", .{shown});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.emitWarning(msg);
+    }
+    return Value.dvalToLval(f);
+}
+
 fn hashField(data: *const PhpArray, name: []const u8) ?Value {
     const key: PhpArray.Key = .{ .string = Value.String.borrowed(name) };
     if (!data.contains(key)) return null;
@@ -2725,7 +2737,7 @@ fn initializeIntervalFromHash(ctx: *NativeContext, obj: *PhpObject, data: *const
         const v = hashField(data, name);
         try obj.set(ctx.allocator, name, .{ .int = if (v != null and isScalarField(v.?)) v.?.toInt() else -1 });
     }
-    const us: i64 = if (hashField(data, "f")) |f| Value.dvalToLval(Value.toFloat(f) * 1000000.0) else 0;
+    const us: i64 = if (hashField(data, "f")) |f| try dvalToLvalWarn(ctx, Value.toFloat(f) * 1000000.0) else 0;
     try obj.set(ctx.allocator, "f", .{ .float = @as(f64, @floatFromInt(us)) / 1000000.0 });
     const invert = hashField(data, "invert");
     try obj.set(ctx.allocator, "invert", .{ .int = if (invert != null and isScalarField(invert.?)) invert.?.toInt() else 0 });
