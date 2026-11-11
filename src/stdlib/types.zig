@@ -617,9 +617,14 @@ fn isGraph(c: u8) bool {
 
 fn get_class(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) {
-        const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.scalar(Value{ .bool = false });
-        if (this_val != .object) return NativeResult.scalar(.{ .bool = false });
-        return NativeResult.copyString(ctx.allocator, this_val.object.class_name);
+        // php 8.3+: the class of the calling scope, deprecated
+        const scope = ctx.vm.currentDefiningClass() orelse {
+            try ctx.vm.setPendingException("Error", "get_class() without arguments must be called from within a class");
+            return error.RuntimeError;
+        };
+        try ctx.vm.raiseError(8192, "Calling get_class() without arguments is deprecated");
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+        return NativeResult.copyString(ctx.allocator, ctx.vm.declaredClassName(scope));
     }
     if (args[0] == .object) return NativeResult.copyString(ctx.allocator, args[0].object.class_name);
     if (args[0] == .generator) return NativeResult.literal("Generator");
