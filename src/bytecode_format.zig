@@ -18,7 +18,7 @@ const MAGIC = "ZPHPC\x00";
 // v18 adds defer_prop_defaults; v19 gives interface, trait and enum
 // declarations their start line, end line and doc comment. v20 gives class
 // constants their own opcodes.
-pub const FORMAT_VERSION: u16 = 51;
+pub const FORMAT_VERSION: u16 = 52;
 
 // tag bytes for serialized values
 const TAG_NULL: u8 = 0;
@@ -267,7 +267,7 @@ fn serializeFunction(buf: *std.ArrayListUnmanaged(u8), allocator: Allocator, str
     if (func.strict_types) flags |= 64;
     if (func.has_param_types) flags |= 128;
     try buf.append(allocator, flags);
-    try buf.append(allocator, func.method_visibility | (if (func.is_final) @as(u8, 4) else 0));
+    try buf.append(allocator, func.method_visibility | (if (func.is_final) @as(u8, 4) else 0) | (if (func.is_abstract) @as(u8, 8) else 0));
     try writeU16(buf, allocator, func.cond_id);
     try buf.append(allocator, @intFromEnum(func.return_type_kind));
     try writeU32(buf, allocator, if (func.file_path.len > 0) try strtab.intern(allocator, func.file_path) else 0xFFFFFFFF);
@@ -733,6 +733,7 @@ fn deserializeFunction(r: *Reader, ctx: *DeserCtx) !ObjFunction {
         .has_param_types = (flags & 128) != 0,
         .method_visibility = method_flags & 3,
         .is_final = (method_flags & 4) != 0,
+        .is_abstract = (method_flags & 8) != 0,
         .return_type_kind = return_type_kind,
         .file_path = if (file_path_idx == 0xFFFFFFFF) "" else strings[file_path_idx],
         .start_line = start_line,

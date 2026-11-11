@@ -43,6 +43,13 @@ const Method = struct {
     // php's internal functions have no file or line
     file: []const u8,
     line: u32,
+    // the class `self` names in its types, when not `class`: a trait's
+    // method is checked as the using class's (fixup_trait_scope)
+    self_scope: []const u8 = "",
+
+    fn scope(m: Method) []const u8 {
+        return if (m.self_scope.len > 0) m.self_scope else m.class;
+    }
 };
 
 // the class being declared: not in the class table yet
@@ -237,7 +244,7 @@ fn declaration(p: *const Pending, arena: std.mem.Allocator, m: Method) ![]const 
     for (m.params, 0..) |param, i| {
         if (i > 0) try out.appendSlice(arena, ", ");
         if (param.type_text.len > 0) {
-            const t = try parseType(p, arena, param.type_text, m.class);
+            const t = try parseType(p, arena, param.type_text, m.scope());
             try out.appendSlice(arena, try php_types.format(arena, t));
             try out.append(arena, ' ');
         }
@@ -248,7 +255,7 @@ fn declaration(p: *const Pending, arena: std.mem.Allocator, m: Method) ![]const 
     }
     try out.append(arena, ')');
     if (m.return_text.len > 0) {
-        const t = try parseType(p, arena, m.return_text, m.class);
+        const t = try parseType(p, arena, m.return_text, m.scope());
         try out.print(arena, ": {s}", .{try php_types.format(arena, t)});
     }
     return out.items;
@@ -294,11 +301,11 @@ fn implementationCheck(p: *Pending, arena: std.mem.Allocator, fe: Method, proto:
         const pp = proto_param orelse continue;
         const fp = fe_param orelse return .failure;
         // zend_do_perform_arg_type_hint_check, contravariant
-        const fe_type = try canonicalType(p, arena, fp.type_text, fe.class);
+        const fe_type = try canonicalType(p, arena, fp.type_text, fe.scope());
         if (fe_type.isSet() and !(fe_type.mask == php_types.ANY and fe_type.names.len == 0 and fe_type.intersections.len == 0)) {
-            const proto_type = try canonicalType(p, arena, pp.type_text, proto.class);
+            const proto_type = try canonicalType(p, arena, pp.type_text, proto.scope());
             if (!proto_type.isSet()) return .failure;
-            switch (php_types.covariant(classes(p), proto.class, proto_type, fe_type)) {
+            switch (php_types.covariant(classes(p), proto.scope(), proto_type, fe_type)) {
                 .success => {},
                 .failure => return .failure,
                 .unresolved => status = .unresolved,
@@ -311,9 +318,9 @@ fn implementationCheck(p: *Pending, arena: std.mem.Allocator, fe: Method, proto:
             if (!proto.tentative) return .failure;
             return if (status == .success) .warning else status;
         }
-        const fe_type = try canonicalType(p, arena, fe.return_text, fe.class);
-        const proto_type = try canonicalType(p, arena, proto.return_text, proto.class);
-        switch (php_types.covariant(classes(p), fe.class, fe_type, proto_type)) {
+        const fe_type = try canonicalType(p, arena, fe.return_text, fe.scope());
+        const proto_type = try canonicalType(p, arena, proto.return_text, proto.scope());
+        switch (php_types.covariant(classes(p), fe.scope(), fe_type, proto_type)) {
             .success => {},
             .failure => return if (proto.tentative) .warning else .failure,
             .unresolved => return .unresolved,
@@ -351,6 +358,10 @@ fn visibilityName(v: ClassDef.Visibility) []const u8 {
 
 // do_inheritance_check_on_method with CHECK_PROTO and CHECK_VISIBILITY
 fn checkMethod(p: *Pending, arena: std.mem.Allocator, child: Method, parent: Method, is_ctor: bool) RuntimeError!void {
+    return checkMethodWith(p, arena, child, parent, is_ctor, true);
+}
+
+fn checkMethodWith(p: *Pending, arena: std.mem.Allocator, child: Method, parent: Method, is_ctor: bool, check_visibility: bool) RuntimeError!void {
     const vm = p.vm;
     if (parent.visibility == .private and !parent.is_abstract and !is_ctor) return;
     if (parent.is_final) return fatal(vm, child, "Cannot override final method {s}::{s}()", .{ parent.class, child.name });
@@ -361,7 +372,7 @@ fn checkMethod(p: *Pending, arena: std.mem.Allocator, child: Method, parent: Met
     if (child.is_abstract and !parent.is_abstract) return fatal(vm, child, "Cannot make non abstract method {s}::{s}() abstract in class {s}", .{ parent.class, child.name, child.class });
     // a constructor is only checked against an abstract or interface one
     if (is_ctor and !parent.is_abstract) return;
-    if (@backingInt(child.visibility) > @backingInt(parent.visibility)) {
+    if (check_visibility and @backingInt(child.visibility) > @backingInt(parent.visibility)) {
         return fatal(vm, child, "Access level to {s}::{s}() must be {s} (as in class {s}){s}", .{ child.class, child.name, visibilityName(parent.visibility), parent.class, if (parent.visibility == .public) "" else " or weaker" });
     }
     const outcome = implementationCheck(p, arena, child, parent) catch return error.OutOfMemory;
@@ -388,7 +399,7 @@ fn missingClass(p: *Pending, arena: std.mem.Allocator, child: Method, parent: Me
         for (m.params) |param| try texts.append(arena, param.type_text);
         try texts.append(arena, m.return_text);
         for (texts.items) |text| {
-            const t = try parseType(p, arena, text, m.class);
+            const t = try parseType(p, arena, text, m.scope());
             for (t.names) |name| if (!classExists(p, name)) return name;
             for (t.intersections) |group| for (group) |name| if (!classExists(p, name)) return name;
         }
@@ -422,6 +433,66 @@ fn interfaceMethods(p: *const Pending, iface: []const u8, out: *std.ArrayListUnm
         if (std.mem.indexOf(u8, method, "$hook_") != null) continue;
         try out.append(arena, .{ iface, method });
     }
+}
+
+// one side of a trait method check: a method by its code, named as `label`
+pub const TraitSide = struct {
+    label: []const u8,
+    self_scope: []const u8,
+    name: []const u8,
+    func: *const bytecode.ObjFunction,
+    visibility: ClassDef.Visibility,
+    is_static: bool,
+    is_abstract: bool,
+    is_final: bool,
+};
+
+fn traitSideMethod(arena: std.mem.Allocator, side: TraitSide) !Method {
+    const func = side.func;
+    const types = vm_mod.getTypeInfo(func.name);
+    var params = try arena.alloc(Param, func.params.len);
+    for (func.params, 0..) |raw, i| {
+        const param_name = if (raw.len > 0 and raw[0] == '$') raw[1..] else raw;
+        const variadic = func.is_variadic and i == func.params.len - 1;
+        params[i] = .{
+            .name = param_name,
+            .type_text = if (types) |t| (if (i < t.param_types.len) t.param_types[i] else "") else "",
+            .by_ref = i < func.ref_params.len and func.ref_params[i],
+            .variadic = variadic,
+            .default_text = if (i >= func.required_params and !variadic and i < func.defaults.len) try userDefaultText(arena, func.defaults[i]) else null,
+        };
+    }
+    return .{
+        .class = side.label,
+        .name = side.name,
+        .origin = if (std.mem.indexOf(u8, func.name, "::")) |sep| func.name[0..sep] else side.label,
+        .params = params,
+        .required = func.required_params,
+        .variadic = func.is_variadic,
+        .returns_ref = func.returns_ref,
+        .return_text = if (types) |t| t.return_type else "",
+        .tentative = false,
+        .visibility = side.visibility,
+        .is_static = side.is_static,
+        .is_abstract = side.is_abstract,
+        .is_final = side.is_final,
+        .file = func.file_path,
+        .line = func.start_line,
+        .self_scope = side.self_scope,
+    };
+}
+
+// zend_add_trait_method's check of an abstract trait method against the
+// method that satisfies it: ZEND_INHERITANCE_CHECK_PROTO without the
+// visibility rule, which "abstract protected" requirements relied on
+pub fn checkTraitMethod(vm: *VM, owner: []const u8, def: *const ClassDef, child: TraitSide, parent: TraitSide) RuntimeError!void {
+    var arena_state = std.heap.ArenaAllocator.init(vm.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var pending: Pending = .{ .vm = vm, .name = owner, .def = def };
+    const c = traitSideMethod(arena, child) catch return error.OutOfMemory;
+    const pm = traitSideMethod(arena, parent) catch return error.OutOfMemory;
+    try checkMethodWith(&pending, arena, c, pm, false, false);
 }
 
 // the checks php makes while linking `class_name` (declared as `def`)

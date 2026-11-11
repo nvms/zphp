@@ -1509,6 +1509,18 @@ fn emitTraitRules(self: *Compiler, members: []const u32) Error!void {
     try self.emitByte(@intCast(rules.items.len));
     for (rules.items) |rule| {
         const method_name = self.ast.tokenSlice(rule.main_token);
+        if (rule.tag == .trait_as) {
+            // zend_check_trait_alias_modifiers
+            const modifier_tok = self.ast.extra_data[rule.data.rhs];
+            if (modifier_tok != 0) switch (self.ast.tokens[modifier_tok].tag) {
+                .kw_static => return self.fail(modifier_tok, "Cannot use \"static\" as method modifier in trait alias"),
+                .kw_abstract => return self.fail(modifier_tok, "Cannot use \"abstract\" as method modifier in trait alias"),
+                .kw_readonly => return self.fail(modifier_tok, "Cannot use the readonly modifier on a method"),
+                else => {},
+            };
+        }
+        if (rule.data.lhs != 0) try rejectReservedParent(self, self.ast.nodes[rule.data.lhs], "trait");
+        if (rule.tag == .trait_insteadof) for (self.ast.extraSlice(rule.data.rhs)) |en| try rejectReservedParent(self, self.ast.nodes[en], "trait");
         // trait names resolve like any class name: namespace and imports
         const trait_name = if (rule.data.lhs == 0) "" else try resolveNodeClassName(self, self.ast.nodes[rule.data.lhs]);
         try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(method_name) }));
@@ -1523,9 +1535,20 @@ fn emitTraitRules(self: *Compiler, members: []const u32) Error!void {
             }
         } else {
             try self.emitByte(2);
-            const alias_token: u32 = rule.data.rhs & 0x3FFFFFFF;
-            try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(self.ast.tokenSlice(alias_token)) }));
-            try self.emitByte(@intCast(rule.data.rhs >> 30));
+            const modifier_tok = self.ast.extra_data[rule.data.rhs];
+            const alias_tok = self.ast.extra_data[rule.data.rhs + 1];
+            // an empty alias only changes the method's modifiers
+            const alias = if (alias_tok == 0) "" else self.ast.tokenSlice(alias_tok);
+            try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(alias) }));
+            // bits 0-1: 0 unchanged, 1 protected, 2 private, 3 public; bit 2: final
+            const modifiers: u8 = if (modifier_tok == 0) 0 else switch (self.ast.tokens[modifier_tok].tag) {
+                .kw_protected => 1,
+                .kw_private => 2,
+                .kw_public => 3,
+                .kw_final => 4,
+                else => 0,
+            };
+            try self.emitByte(modifiers);
         }
     }
 }
@@ -2769,10 +2792,14 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
             const default_idx = self.ast.extra_data[tmember.data.lhs];
             break :blk if (default_idx != 0) @as(u8, 1) else @as(u8, 0);
         } else if (tmember.data.lhs != 0) @as(u8, 1) else @as(u8, 0);
-        try self.emitByte(has_default | propertyVirtualFlag(self, tmember));
+        // bit 2: composed from a trait, whose name follows; bit 3: hooked
+        const hooked: u8 = if (tmember.tag == .class_property_hooks) 8 else 0;
+        try self.emitByte(has_default | propertyVirtualFlag(self, tmember) | 4 | hooked);
         try self.emitByte(@intCast(tmember.data.rhs & 0xff));
         try self.emitU16(try propertyTypeConst(self, tmember.data.rhs));
         try self.emitU16(try docCommentConst(self, tmember.main_token));
+        const owner = self.trait_property_owner.get(tpi) orelse "";
+        try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(owner) }));
     }
     // promoted constructor params as properties
     for (constructor_params) |p| {
@@ -2852,14 +2879,8 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
         if (member.tag == .trait_use) {
             for (self.ast.extraSlice(member.data.lhs)) |tn| {
                 const tn_node = self.ast.nodes[tn];
-                const is_absolute = tn_node.tag == .qualified_name and tn_node.data.rhs == 1;
-                const raw_name = if (tn_node.tag == .qualified_name) blk: {
-                    const parts = self.ast.extraSlice(tn_node.data.lhs);
-                    break :blk try self.buildQualifiedString(parts);
-                } else self.ast.tokenSlice(tn_node.main_token);
-                // FQN (had leading backslash): skip use-alias + namespace prefix
-                const resolved = if (is_absolute) raw_name else self.resolveClassName(raw_name);
-                try all_traits.append(self.allocator, resolved);
+                try rejectReservedParent(self, tn_node, "trait");
+                try all_traits.append(self.allocator, try resolveNodeClassName(self, tn_node));
             }
         }
     }
@@ -3323,6 +3344,13 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_method or member.tag == .static_class_method) {
             try compileClassMethodBody(self, trait_name, member);
+        } else if (member.tag == .interface_method) {
+            // an abstract method's signature, checked against the method
+            // that implements it in the using class
+            const prev_class = self.current_class;
+            self.current_class = trait_name;
+            defer self.current_class = prev_class;
+            try compileInterfaceMethodStub(self, trait_name, member);
         }
     }
 
@@ -3334,6 +3362,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         if (member.tag == .trait_use) {
             for (self.ast.extraSlice(member.data.lhs)) |tn| {
                 const tn_node = self.ast.nodes[tn];
+                try rejectReservedParent(self, tn_node, "trait");
                 try sub_traits.append(self.allocator, try @import("compiler_expr.zig").resolveNodeClassName(self, tn_node));
             }
         }
@@ -3366,6 +3395,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_property or member.tag == .class_property_hooks) {
             try own_props.append(self.allocator, member_idx);
+            try self.trait_property_owner.put(self.allocator, member_idx, trait_name);
         }
     }
 
@@ -3431,6 +3461,9 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         const default = if (pmember.tag == .class_property_hooks) self.ast.extra_data[pmember.data.lhs] else pmember.data.lhs;
         try self.emitByte(if (default != 0) @as(u8, 1) else @as(u8, 0));
         try self.emitByte(@intCast(pmember.data.rhs & 0xff));
+        try self.emitU16(try propertyTypeConst(self, pmember.data.rhs));
+        // a hooked property can't be composed beside another of its name
+        try self.emitByte(if (pmember.tag == .class_property_hooks) 1 else 0);
     }
     try self.emitByte(@intCast(static_props.items.len));
     for (static_props.items) |pi| {
@@ -3441,6 +3474,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitU16(pname_idx);
         try self.emitByte(if (pmember.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
         try self.emitByte(@intCast(pmember.data.rhs & 0xff));
+        try self.emitU16(try propertyTypeConst(self, pmember.data.rhs));
     }
 
     // trait constants (PHP 8.2+)
@@ -3649,11 +3683,8 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
         if (member.tag == .trait_use) {
             for (self.ast.extraSlice(member.data.lhs)) |tn| {
                 const tn_node = self.ast.nodes[tn];
-                const raw_name = if (tn_node.tag == .qualified_name) blk: {
-                    const parts = self.ast.extraSlice(tn_node.data.lhs);
-                    break :blk try self.buildQualifiedString(parts);
-                } else self.ast.tokenSlice(tn_node.main_token);
-                try enum_traits.append(self.allocator, self.resolveClassName(raw_name));
+                try rejectReservedParent(self, tn_node, "trait");
+                try enum_traits.append(self.allocator, try resolveNodeClassName(self, tn_node));
             }
         }
     }
@@ -3756,6 +3787,10 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     try self.string_allocs.append(self.allocator, full_name);
 
     const param_nodes = self.ast.extraSlice(member.data.lhs);
+    // zend_begin_method_decl
+    if ((member.data.rhs >> 30) & 3 == 2 and (member.data.rhs & (1 << 28)) != 0 and !std.ascii.eqlIgnoreCase(method_name, "__construct")) {
+        try self.warn(member.main_token, 128, "Private methods cannot be final as they are never overridden by other classes", .{});
+    }
     try checkParams(self, full_name, member.main_token, param_nodes, try extractReturnType(self, member.data.lhs, @intCast(param_nodes.len)), (member.data.rhs & (1 << 27)) != 0);
     var handed_over = false;
     const param_names = try self.allocator.alloc([]const u8, param_nodes.len);
@@ -4414,6 +4449,8 @@ fn compileInterfaceMethodStub(self: *Compiler, owner_name: []const u8, member: A
         .required_params = required,
         .is_variadic = is_variadic,
         .is_static = (member.data.rhs >> 30) & 1 != 0,
+        .is_abstract = true,
+        .method_visibility = @intCast((member.data.rhs >> 28) & 3),
         .returns_ref = (member.data.rhs >> 31) & 1 != 0,
         .params = param_names[0..param_nodes.len],
         .defaults = defaults_owned,

@@ -340,6 +340,8 @@ pub const Compiler = struct {
     file_path: []const u8 = "",
     file_dir: ?[]const u8 = null,
     trait_properties: std.StringHashMapUnmanaged([]const u32) = .{},
+    // the trait that declares each property node in trait_properties
+    trait_property_owner: std.AutoHashMapUnmanaged(u32, []const u8) = .{},
     local_slots: std.StringHashMapUnmanaged(u16) = .{},
     next_slot: u16 = 0,
     // set on an arrow-function sub-compiler: points at the enclosing
@@ -1736,6 +1738,7 @@ pub const Compiler = struct {
         var it = self.trait_properties.valueIterator();
         while (it.next()) |v| a.free(v.*);
         self.trait_properties.deinit(a);
+        self.trait_property_owner.deinit(a);
     }
 
     // hands everything a CompileResult owns to the caller and leaves this

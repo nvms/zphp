@@ -1450,8 +1450,17 @@ const Formatter = struct {
                 self.write("::");
             }
             self.write(self.ast.tokens[node.main_token].lexeme(self.source));
-            self.write(" as ");
-            self.write(self.ast.tokens[node.data.rhs].lexeme(self.source));
+            self.write(" as");
+            const modifier_tok = self.ast.extra_data[node.data.rhs];
+            const alias_tok = self.ast.extra_data[node.data.rhs + 1];
+            if (modifier_tok != 0) {
+                self.write(" ");
+                self.write(self.ast.tokens[modifier_tok].lexeme(self.source));
+            }
+            if (alias_tok != 0) {
+                self.write(" ");
+                self.write(self.ast.tokens[alias_tok].lexeme(self.source));
+            }
             self.write(";");
         }
     }

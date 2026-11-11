@@ -449,6 +449,10 @@ pub const ClassDef = struct {
         is_final: bool = false,
         is_promoted: bool = false,
         is_virtual: bool = false,
+        // a property with hooks, for a trait's property
+        is_hooked: bool = false,
+        // the trait a composed property came from
+        trait_origin: []const u8 = "",
         type_str: []const u8 = "",
         doc_comment: []const u8 = "",
     };
@@ -959,12 +963,15 @@ pub const VM = struct {
     constant_eval_depth: u32 = 0,
     // trait constants waiting for the using class's own value
     trait_constant_checks: std.ArrayListUnmanaged(struct { class: []const u8, name: []const u8, trait: []const u8, value: Value }) = .empty,
+    // a trait property's default waiting for the class's own to be installed
+    // (set_prop_default), as trait_constant_checks
+    trait_property_checks: std.ArrayListUnmanaged(struct { class: []const u8, name: []const u8, trait: []const u8, value: Value }) = .empty,
     // while traits compose into a class, which trait first gave each
     // constant it didn't declare itself
     trait_constant_sources: std.StringHashMapUnmanaged([]const u8) = .{},
-    // the trait (and its method name) each trait method of the class being
-    // declared came from, by lowercased applied name
-    trait_method_sources: std.StringHashMapUnmanaged(struct { trait: []const u8, method: []const u8 }) = .{},
+    // each trait's function table with its own `use` bound (traitTable)
+    trait_tables: std.StringHashMapUnmanaged([]TraitMethod) = .{},
+    trait_tables_retired: std.ArrayListUnmanaged([]TraitMethod) = .empty,
     // classes marked lazy_constants
     lazy_constant_classes: usize = 0,
     // the class a class constant fetch names, as written: php's
@@ -3155,8 +3162,11 @@ pub const VM = struct {
         self.initializer_scopes.deinit(self.allocator);
         self.constants_visited.deinit(self.allocator);
         self.trait_constant_checks.deinit(self.allocator);
+        self.trait_property_checks.deinit(self.allocator);
         self.trait_constant_sources.deinit(self.allocator);
-        self.trait_method_sources.deinit(self.allocator);
+        self.clearTraitTables();
+        self.trait_tables.deinit(self.allocator);
+        self.trait_tables_retired.deinit(self.allocator);
         self.cycle_candidates.deinit(self.allocator);
         self.cycle_array_candidates.deinit(self.allocator);
         self.cycle_gen_candidates.deinit(self.allocator);
@@ -3344,8 +3354,9 @@ pub const VM = struct {
         self.initializer_scopes.clearRetainingCapacity();
         self.constants_visited.clearRetainingCapacity();
         self.trait_constant_checks.clearRetainingCapacity();
+        self.trait_property_checks.clearRetainingCapacity();
         self.trait_constant_sources.clearRetainingCapacity();
-        self.trait_method_sources.clearRetainingCapacity();
+        self.clearTraitTables();
         self.constant_eval_depth = 0;
         self.lazy_constant_classes = 0;
         for (self.shutdown_callbacks.items) |cb| self.allocator.free(cb.args);
@@ -8815,6 +8826,10 @@ pub const VM = struct {
                     const trait_name = self.currentChunk().constants.items[name_idx].string.bytes();
                     try self.refuseRedeclaration(trait_name);
                     try self.traits.put(self.allocator, trait_name, {});
+                    // a table built from an earlier trait of this name. a
+                    // composition that autoloaded this trait may still read
+                    // it, so it is freed with the others later
+                    if (self.trait_tables.fetchRemove(trait_name)) |stale| try self.trait_tables_retired.append(self.allocator, stale.value);
                     try self.ic.?.trait_sites.put(self.allocator, trait_name, self.readDeclSite());
                     const sub_count = self.readByte();
                     if (sub_count > 0) {
@@ -8833,12 +8848,17 @@ pub const VM = struct {
                         var tp_has_default: [32]u8 = undefined;
                         var tp_vis: [32]ClassDef.Visibility = undefined;
                         var tp_flags: [32]u8 = undefined;
+                        var tp_types: [32][]const u8 = undefined;
+                        var tp_hooked: [32]bool = undefined;
                         for (0..tp_count) |pi| {
                             tp_names[pi] = self.currentChunk().constants.items[self.readU16()].string.bytes();
                             tp_has_default[pi] = self.readByte();
                             const vis_byte = self.readByte();
                             tp_vis[pi] = @enumFromInt(vis_byte & 0x03);
                             tp_flags[pi] = vis_byte;
+                            const type_idx = self.readU16();
+                            tp_types[pi] = if (type_idx == 0xffff) "" else self.currentChunk().constants.items[type_idx].string.bytes();
+                            tp_hooked[pi] = self.readByte() == 1;
                         }
                         const tp_defaults = self.popDefaults(32, tp_has_default[0..tp_count]);
                         const props = try self.allocator.alloc(ClassDef.PropertyDef, tp_count);
@@ -8871,6 +8891,10 @@ pub const VM = struct {
                                 .has_set_visibility = has_set_visibility,
                                 .is_readonly = (flags & 0x04) != 0,
                                 .is_final = (flags & 0x80) != 0 or (has_set_visibility and set_visibility == .private),
+                                .type_str = tp_types[pi],
+                                .has_default = tp_has_default[pi] == 1,
+                                .is_hooked = tp_hooked[pi],
+                                .trait_origin = trait_name,
                             };
                         }
                         try self.trait_props.put(self.allocator, trait_name, props);
@@ -8879,10 +8903,14 @@ pub const VM = struct {
                     if (sp_count > 0) {
                         var sp_names: [32][]const u8 = undefined;
                         var sp_has_default: [32]u8 = undefined;
+                        var sp_flags: [32]u8 = undefined;
+                        var sp_types: [32][]const u8 = undefined;
                         for (0..sp_count) |pi| {
                             sp_names[pi] = self.currentChunk().constants.items[self.readU16()].string.bytes();
                             sp_has_default[pi] = self.readByte();
-                            _ = self.readByte(); // visibility
+                            sp_flags[pi] = self.readByte();
+                            const type_idx = self.readU16();
+                            sp_types[pi] = if (type_idx == 0xffff) "" else self.currentChunk().constants.items[type_idx].string.bytes();
                         }
                         const sp_defaults = self.popDefaults(32, sp_has_default[0..sp_count]);
                         const sprops = try self.allocator.alloc(TraitStaticProp, sp_count);
@@ -8894,7 +8922,7 @@ pub const VM = struct {
                                 break :blk v;
                             } else Value{ .null = {} };
                             retainValue(sval);
-                            sprops[pi] = .{ .name = sp_names[pi], .value = sval };
+                            sprops[pi] = .{ .name = sp_names[pi], .value = sval, .flags = sp_flags[pi], .type_str = sp_types[pi] };
                         }
                         try self.trait_static_props.put(self.allocator, trait_name, sprops);
                     }
@@ -11594,6 +11622,7 @@ pub const VM = struct {
                                 };
                                 p.default = val;
                                 p.has_default = true;
+                                try self.settleTraitPropertyChecks(class_name, prop_name, val);
                                 break;
                             }
                         }
@@ -15522,6 +15551,10 @@ pub const VM = struct {
         const prop_promoted = try self.allocator.alloc(bool, prop_count);
         const prop_type = try self.allocator.alloc([]const u8, prop_count);
         const prop_doc = try self.allocator.alloc([]const u8, prop_count);
+        const prop_origin = try self.allocator.alloc([]const u8, prop_count);
+        defer self.allocator.free(prop_origin);
+        const prop_hooked = try self.allocator.alloc(bool, prop_count);
+        defer self.allocator.free(prop_hooked);
 
         defer self.allocator.free(prop_names);
         defer self.allocator.free(prop_has_default);
@@ -15568,6 +15601,8 @@ pub const VM = struct {
                 ""
             else
                 self.currentChunk().constants.items[doc_idx_p].string.bytes();
+            prop_origin[pi] = if ((default_flags & 4) != 0) self.currentChunk().constants.items[self.readU16()].string.bytes() else "";
+            prop_hooked[pi] = (default_flags & 8) != 0;
         }
 
         const static_prop_count = self.readU16();
@@ -15648,6 +15683,8 @@ pub const VM = struct {
                 .is_final = reflection_final,
                 .is_promoted = prop_promoted[pi],
                 .is_virtual = prop_virtual[pi],
+                .is_hooked = prop_hooked[pi],
+                .trait_origin = prop_origin[pi],
                 .type_str = prop_type[pi],
                 .doc_comment = prop_doc[pi],
             });
@@ -15736,19 +15773,13 @@ pub const VM = struct {
 
         const rules = try self.readTraitRules();
         defer rules.deinit(self.allocator);
-        const alias_rules = rules.aliases;
-        const insteadof_rules = rules.insteadofs;
-        const alias_count = alias_rules.len;
-        const insteadof_count = insteadof_rules.len;
 
         self.trait_constant_sources.clearRetainingCapacity();
-        self.trait_method_sources.clearRetainingCapacity();
-        try self.checkTraitRules(class_name, trait_names[0..trait_count], rules);
+        // checks a class declared before left waiting (a default it never installed)
+        self.trait_property_checks.clearRetainingCapacity();
         for (trait_names[0..trait_count]) |trait_name| try self.warnDeprecatedTraitUse(trait_name, class_name);
-        for (trait_names[0..trait_count]) |trait_name| {
-            try self.applyTrait(&def, class_name, trait_name, alias_rules[0..alias_count], insteadof_rules[0..insteadof_count], null);
-            try def.used_traits.append(self.allocator, self.declaredClassName(trait_name));
-        }
+        try self.bindClassTraits(&def, class_name, trait_names[0..trait_count], rules);
+        for (trait_names[0..trait_count]) |trait_name| try def.used_traits.append(self.allocator, self.declaredClassName(trait_name));
 
         const class_attrs = try self.readAttributeDefs();
         for (class_attrs) |a| try def.attributes.append(self.allocator, a);
@@ -15884,8 +15915,9 @@ pub const VM = struct {
         if (!def.is_abstract) {
             var di = def.methods.iterator();
             while (di.next()) |e| {
-                // an abstract hook is verifyAbstractClass's
-                if (e.value_ptr.is_abstract and std.mem.indexOf(u8, e.key_ptr.*, "$hook_") == null) {
+                // an abstract hook is verifyAbstractClass's, and so is an
+                // abstract method a trait gave
+                if (e.value_ptr.is_abstract and std.mem.indexOf(u8, e.key_ptr.*, "$hook_") == null and !self.isTraitBoundMethod(class_name, e.key_ptr.*)) {
                     const msg = if (class_names.isAnonymous(class_name))
                         try std.fmt.allocPrint(self.allocator, "Anonymous class method {s}() must not be abstract", .{e.key_ptr.*})
                     else
@@ -16111,11 +16143,8 @@ pub const VM = struct {
             enum_trait_names[ti] = self.currentChunk().constants.items[self.readU16()].string.bytes();
         }
         self.trait_constant_sources.clearRetainingCapacity();
-        self.trait_method_sources.clearRetainingCapacity();
         for (enum_trait_names[0..enum_trait_count]) |trait_name| try self.warnDeprecatedTraitUse(trait_name, enum_name);
-        for (enum_trait_names[0..enum_trait_count]) |trait_name| {
-            try self.applyTrait(&def, enum_name, trait_name, &.{}, &.{}, null);
-        }
+        try self.bindClassTraits(&def, enum_name, enum_trait_names[0..enum_trait_count], .{});
 
         const enum_attrs = try self.readAttributeDefs();
         for (enum_attrs) |a| try def.attributes.append(self.allocator, a);
@@ -16324,7 +16353,9 @@ pub const VM = struct {
     }
 
     const InsteadofRule = struct { method: []const u8, preferred: []const u8, excluded: [16][]const u8, excluded_count: u8 };
-    const AliasRule = struct { method: []const u8, trait: []const u8, alias: []const u8, visibility: u8 = 0 };
+    // alias "" changes only the modifiers: bits 0-1 a visibility (1
+    // protected, 2 private, 3 public), bit 2 final
+    const AliasRule = struct { method: []const u8, trait: []const u8, alias: []const u8, modifiers: u8 = 0 };
     // a declaration's insteadof and as rules (emitTraitRules); the names are
     // chunk constants
     pub const TraitRules = struct {
@@ -16336,33 +16367,6 @@ pub const VM = struct {
             allocator.free(self.insteadofs);
         }
     };
-
-    // zend_traits_init_trait_structures: every trait an insteadof or as rule
-    // names is a trait the class uses
-    fn checkTraitRules(self: *VM, class_name: []const u8, used: []const []const u8, rules: TraitRules) RuntimeError!void {
-        for (rules.insteadofs) |rule| {
-            try self.checkRuleTrait(class_name, used, rule.preferred);
-            for (rule.excluded[0..rule.excluded_count]) |ex| try self.checkRuleTrait(class_name, used, ex);
-        }
-        for (rules.aliases) |rule| if (rule.trait.len > 0) try self.checkRuleTrait(class_name, used, rule.trait);
-    }
-
-    fn checkRuleTrait(self: *VM, class_name: []const u8, used: []const []const u8, name: []const u8) RuntimeError!void {
-        const bare = if (name.len > 0 and name[0] == '\\') name[1..] else name;
-        if (!self.traits.contains(bare) and !self.classes.contains(bare) and !self.interfaces.contains(bare)) {
-            self.tryAutoload(bare) catch {};
-            if (self.pending_exception != null) return error.RuntimeError;
-        }
-        if (!self.traits.contains(bare) and (self.classes.contains(bare) or self.interfaces.contains(bare))) {
-            const msg = try std.fmt.allocPrint(self.allocator, "Class {s} is not a trait, Only traits may be used in 'as' and 'insteadof' statements", .{self.declaredClassName(bare)});
-            defer self.allocator.free(msg);
-            return self.raiseFatal(msg);
-        }
-        for (used) |u| if (std.ascii.eqlIgnoreCase(u, bare)) return;
-        const msg = try std.fmt.allocPrint(self.allocator, "Required Trait {s} wasn't added to {s}", .{ self.declaredClassName(bare), class_name });
-        defer self.allocator.free(msg);
-        return self.raiseFatal(msg);
-    }
 
     fn readTraitRules(self: *VM) !TraitRules {
         var aliases = std.ArrayListUnmanaged(AliasRule).empty;
@@ -16379,40 +16383,10 @@ pub const VM = struct {
                 try insteadofs.append(self.allocator, rule);
             } else {
                 const alias_name = self.currentChunk().constants.items[self.readU16()].string.bytes();
-                try aliases.append(self.allocator, .{ .method = method_name, .trait = rule_trait, .alias = alias_name, .visibility = self.readByte() });
+                try aliases.append(self.allocator, .{ .method = method_name, .trait = rule_trait, .alias = alias_name, .modifiers = self.readByte() });
             }
         }
         return .{ .aliases = try aliases.toOwnedSlice(self.allocator), .insteadofs = try insteadofs.toOwnedSlice(self.allocator) };
-    }
-
-    // php's zend_add_trait_method: the class's own method wins over a
-    // trait's; two traits giving the class the same name (an alias
-    // included) is a collision unless it is the same method
-    fn addTraitMethod(self: *VM, def: *ClassDef, class_name: []const u8, trait_name: []const u8, method: []const u8, applied: []const u8, func: *const ObjFunction, visibility: ClassDef.Visibility) !void {
-        const lower = try std.ascii.allocLowerString(self.allocator, applied);
-        try self.strings.append(self.allocator, lower);
-        const class_method = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, applied });
-        try self.strings.append(self.allocator, class_method);
-        if (def.methods.contains(applied)) {
-            const source = self.trait_method_sources.get(lower) orelse return;
-            if (self.functions.get(class_method)) |existing| if (existing == func) return;
-            const msg = try std.fmt.allocPrint(self.allocator, "Trait method {s}::{s} has not been applied as {s}::{s}, because of collision with {s}::{s}", .{ self.declaredClassName(trait_name), method, class_name, applied, source.trait, source.method });
-            defer self.allocator.free(msg);
-            return self.raiseFatal(msg);
-        }
-        // php names the method it collides with by the name it was applied as
-        try self.trait_method_sources.put(self.allocator, lower, .{ .trait = self.declaredClassName(trait_name), .method = applied });
-        if (!self.functions.contains(class_method)) {
-            try self.functions.put(self.allocator, class_method, func);
-            try self.indexFunctionByChunk(class_method, &func.chunk);
-        }
-        try def.addMethod(self.allocator, .{
-            .name = applied,
-            .arity = func.arity,
-            .is_static = func.is_static,
-            .is_final = func.is_final,
-            .visibility = visibility,
-        });
     }
 
     // a trait's own methods (name -> func) in declaration order, resolved
@@ -16446,92 +16420,411 @@ pub const VM = struct {
         return owned;
     }
 
-    // within: the trait whose own `use` brought this one in; that trait's
-    // own methods win over this one's
-    fn applyTrait(self: *VM, def: *ClassDef, class_name: []const u8, written_trait: []const u8, alias_rules: []const AliasRule, insteadof_rules: []const InsteadofRule, within: ?[]const u8) !void {
-        // autoload the trait if it hasn't been loaded yet
-        if (!self.traits.contains(written_trait)) {
-            try self.tryAutoload(written_trait);
-            if (self.pending_exception != null) return error.RuntimeError;
+    // a method a trait gives (zend_function as a trait's function_table
+    // holds it): its code, the name it is bound as, its modifiers after the
+    // `as` rules, and the trait or class whose table it came from
+    pub const TraitMethod = struct {
+        name: []const u8,
+        func: *const ObjFunction,
+        visibility: ClassDef.Visibility,
+        is_static: bool,
+        is_final: bool,
+        is_abstract: bool,
+        scope: []const u8,
+        // declared by the class (or trait) being composed
+        own: bool = false,
+    };
+
+    // a class or trait being composed: its function table while php's
+    // zend_do_bind_traits runs (own methods first, then trait ones)
+    const TraitComposer = struct {
+        owner: []const u8,
+        // the class whose parents an abstract trait method may be met by;
+        // null when a trait is composed
+        def: ?*const ClassDef,
+        entries: std.ArrayListUnmanaged(TraitMethod) = .empty,
+        index: class_names.MethodMap(usize) = .{},
+
+        fn deinit(c: *TraitComposer, allocator: Allocator) void {
+            c.entries.deinit(allocator);
+            c.index.deinit(allocator);
         }
-        if (!self.traits.contains(written_trait)) {
-            const msg = if (self.classes.contains(written_trait) or self.interfaces.contains(written_trait))
-                try std.fmt.allocPrint(self.allocator, "{s} cannot use {s} - it is not a trait", .{ within orelse class_name, self.declaredClassName(written_trait) })
-            else
-                try std.fmt.allocPrint(self.allocator, "Trait \"{s}\" not found", .{written_trait});
-            defer self.allocator.free(msg);
-            try self.setPendingException("Error", msg);
-            return error.RuntimeError;
+
+        fn append(c: *TraitComposer, allocator: Allocator, m: TraitMethod) !void {
+            try c.index.put(allocator, m.name, c.entries.items.len);
+            try c.entries.append(allocator, m);
         }
-        // the trait's methods, properties, and constants are keyed by the
-        // spelling it was declared with
-        const trait_name = self.traits.getKey(written_trait) orelse written_trait;
+    };
+
+    fn traitMethodOf(trait_name: []const u8, name: []const u8, func: *const ObjFunction) TraitMethod {
+        return .{
+            .name = name,
+            .func = func,
+            .visibility = @enumFromInt(func.method_visibility),
+            .is_static = func.is_static,
+            .is_final = func.is_final,
+            .is_abstract = func.is_abstract,
+            .scope = trait_name,
+        };
+    }
+
+    // a trait's function table once its own `use` is bound, as php links a
+    // trait: its own methods, then those of the traits it uses, every one
+    // scoped to it. cached until a trait is declared again
+    fn traitTable(self: *VM, trait_name: []const u8) RuntimeError![]const TraitMethod {
+        if (self.trait_tables.get(trait_name)) |cached| return cached;
+        var comp: TraitComposer = .{ .owner = trait_name, .def = null };
+        defer comp.deinit(self.allocator);
+        for (try self.traitMethods(trait_name)) |tm| {
+            var m = traitMethodOf(trait_name, tm.name, tm.func);
+            m.own = true;
+            try comp.append(self.allocator, m);
+        }
         if (self.trait_uses.get(trait_name)) |subs| {
-            const rules = self.trait_rules.get(trait_name) orelse TraitRules{};
+            const traits = try self.resolveUsedTraits(trait_name, subs);
+            defer self.allocator.free(traits);
+            try self.composeTraitMethods(&comp, traits, self.trait_rules.get(trait_name) orelse .{});
+        }
+        const table = try self.allocator.alloc(TraitMethod, comp.entries.items.len);
+        for (comp.entries.items, table) |m, *out| {
+            out.* = m;
+            out.scope = trait_name;
+            out.own = false;
+        }
+        try self.trait_tables.put(self.allocator, trait_name, table);
+        return table;
+    }
+
+    fn clearTraitTables(self: *VM) void {
+        var it = self.trait_tables.valueIterator();
+        while (it.next()) |t| self.allocator.free(t.*);
+        self.trait_tables.clearRetainingCapacity();
+        for (self.trait_tables_retired.items) |t| self.allocator.free(t);
+        self.trait_tables_retired.clearRetainingCapacity();
+    }
+
+    // the traits a `use` names, loaded, by their declared names; a trait
+    // named twice is used once (null in its later places)
+    fn resolveUsedTraits(self: *VM, user: []const u8, written: []const []const u8) RuntimeError![]?[]const u8 {
+        const traits = try self.allocator.alloc(?[]const u8, written.len);
+        errdefer self.allocator.free(traits);
+        for (written, traits, 0..) |w, *out, i| {
+            if (!self.traits.contains(w)) {
+                try self.tryAutoload(w);
+                if (self.pending_exception != null) return error.RuntimeError;
+            }
+            if (!self.traits.contains(w)) {
+                const msg = if (self.classes.contains(w) or self.interfaces.contains(w))
+                    try std.fmt.allocPrint(self.allocator, "{s} cannot use {s} - it is not a trait", .{ user, self.declaredClassName(w) })
+                else
+                    try std.fmt.allocPrint(self.allocator, "Trait \"{s}\" not found", .{w});
+                defer self.allocator.free(msg);
+                try self.setPendingException("Error", msg);
+                return error.RuntimeError;
+            }
+            const name = self.traits.getKey(w) orelse w;
+            out.* = name;
+            for (traits[0..i]) |earlier| if (earlier) |e| if (e.ptr == name.ptr) {
+                out.* = null;
+                break;
+            };
+        }
+        return traits;
+    }
+
+    fn traitTableHas(table: []const TraitMethod, name: []const u8) bool {
+        for (table) |m| if (std.ascii.eqlIgnoreCase(m.name, name)) return true;
+        return false;
+    }
+
+    // zend_check_trait_usage, after the class table lookup php makes for a
+    // trait an `as` or `insteadof` rule names (no autoloading)
+    fn ruleTraitIndex(self: *VM, owner: []const u8, traits: []const ?[]const u8, written: []const u8) RuntimeError!usize {
+        const bare = if (written.len > 0 and written[0] == '\\') written[1..] else written;
+        const name = self.traits.getKey(bare) orelse {
+            const msg = if (self.classes.contains(bare) or self.interfaces.contains(bare))
+                try std.fmt.allocPrint(self.allocator, "Class {s} is not a trait, Only traits may be used in 'as' and 'insteadof' statements", .{self.declaredClassName(bare)})
+            else
+                try std.fmt.allocPrint(self.allocator, "Could not find trait {s}", .{bare});
+            defer self.allocator.free(msg);
+            return self.raiseFatal(msg);
+        };
+        for (traits, 0..) |t, i| if (t) |tn| if (tn.ptr == name.ptr) return i;
+        const msg = try std.fmt.allocPrint(self.allocator, "Required Trait {s} wasn't added to {s}", .{ name, owner });
+        defer self.allocator.free(msg);
+        return self.raiseFatal(msg);
+    }
+
+    fn traitRuleFatal(self: *VM, comptime fmt: []const u8, args: anytype) RuntimeError {
+        const msg = try std.fmt.allocPrint(self.allocator, fmt, args);
+        defer self.allocator.free(msg);
+        return self.raiseFatal(msg);
+    }
+
+    // zend_traits_init_trait_structures, zend_do_traits_method_binding (the
+    // non-abstract methods, then the abstract ones) and
+    // zend_traits_copy_functions
+    fn composeTraitMethods(self: *VM, comp: *TraitComposer, traits: []const ?[]const u8, rules: TraitRules) RuntimeError!void {
+        const tables = try self.allocator.alloc([]const TraitMethod, traits.len);
+        defer self.allocator.free(tables);
+        for (traits, tables) |t, *table| table.* = if (t) |tn| try self.traitTable(tn) else &.{};
+
+        // the methods each trait's insteadof rules exclude
+        const excluded = try self.allocator.alloc(std.ArrayListUnmanaged([]const u8), traits.len);
+        for (excluded) |*e| e.* = .empty;
+        defer {
+            for (excluded) |*e| e.deinit(self.allocator);
+            self.allocator.free(excluded);
+        }
+        for (rules.insteadofs) |rule| {
+            const ti = try self.ruleTraitIndex(comp.owner, traits, rule.preferred);
+            const trait = traits[ti].?;
+            if (!traitTableHas(tables[ti], rule.method)) return self.traitRuleFatal("A precedence rule was defined for {s}::{s} but this method does not exist", .{ trait, rule.method });
+            for (rule.excluded[0..rule.excluded_count]) |ex| {
+                const ei = try self.ruleTraitIndex(comp.owner, traits, ex);
+                for (excluded[ei].items) |m| if (std.ascii.eqlIgnoreCase(m, rule.method))
+                    return self.traitRuleFatal("Failed to evaluate a trait precedence ({s}). Method of trait {s} was defined to be excluded multiple times", .{ rule.method, traits[ei].? });
+                try excluded[ei].append(self.allocator, rule.method);
+                if (ei == ti) return self.traitRuleFatal("Inconsistent insteadof definition. The method {s} is to be used from {s}, but {s} is also on the exclude list", .{ rule.method, trait, trait });
+            }
+        }
+
+        // the trait each `as` rule applies to
+        const alias_traits = try self.allocator.alloc(usize, rules.aliases.len);
+        defer self.allocator.free(alias_traits);
+        for (rules.aliases, alias_traits) |rule, *at| {
+            if (rule.trait.len > 0) {
+                at.* = try self.ruleTraitIndex(comp.owner, traits, rule.trait);
+                if (!traitTableHas(tables[at.*], rule.method)) return self.traitRuleFatal("An alias was defined for {s}::{s} but this method does not exist", .{ traits[at.*].?, rule.method });
+                continue;
+            }
+            var found: ?usize = null;
+            for (traits, tables, 0..) |t, table, i| {
+                if (t == null or !traitTableHas(table, rule.method)) continue;
+                if (found) |f| return self.traitRuleFatal("An alias was defined for method {s}(), which exists in both {s} and {s}. Use {s}::{s} or {s}::{s} to resolve the ambiguity", .{ rule.method, traits[f].?, t.?, traits[f].?, rule.method, t.?, rule.method });
+                found = i;
+            }
+            at.* = found orelse {
+                if (rule.alias.len > 0) return self.traitRuleFatal("An alias ({s}) was defined for method {s}(), but this method does not exist", .{ rule.alias, rule.method });
+                return self.traitRuleFatal("The modifiers of the trait method {s}() are changed, but this method does not exist. Error", .{rule.method});
+            };
+        }
+
+        for ([_]bool{ false, true }) |abstract_pass| {
+            for (tables, 0..) |table, ti| {
+                for (table) |m| {
+                    if (m.is_abstract != abstract_pass) continue;
+                    // aliases naming a new method
+                    for (rules.aliases, alias_traits) |rule, at| {
+                        if (rule.alias.len == 0 or at != ti or !std.ascii.eqlIgnoreCase(rule.method, m.name)) continue;
+                        var copy = m;
+                        applyAliasModifiers(&copy, rule.modifiers);
+                        try self.warnPrivateFinalTraitMethod(m, copy, rule.alias);
+                        try self.addComposedMethod(comp, rule.alias, copy);
+                    }
+                    const is_excluded = for (excluded[ti].items) |ex| {
+                        if (std.ascii.eqlIgnoreCase(ex, m.name)) break true;
+                    } else false;
+                    if (is_excluded) continue;
+                    var copy = m;
+                    for (rules.aliases, alias_traits) |rule, at| {
+                        if (rule.alias.len == 0 and rule.modifiers != 0 and at == ti and std.ascii.eqlIgnoreCase(rule.method, m.name)) applyAliasModifiers(&copy, rule.modifiers);
+                    }
+                    try self.warnPrivateFinalTraitMethod(m, copy, m.name);
+                    try self.addComposedMethod(comp, m.name, copy);
+                }
+            }
+        }
+    }
+
+    fn applyAliasModifiers(m: *TraitMethod, modifiers: u8) void {
+        switch (modifiers & 3) {
+            1 => m.visibility = .protected,
+            2 => m.visibility = .private,
+            3 => m.visibility = .public,
+            else => {},
+        }
+        if (modifiers & 4 != 0) m.is_final = true;
+    }
+
+    // zend_traits_check_private_final_inheritance
+    fn warnPrivateFinalTraitMethod(self: *VM, original: TraitMethod, copy: TraitMethod, name: []const u8) RuntimeError!void {
+        if (original.is_final or !copy.is_final or copy.visibility != .private or std.ascii.eqlIgnoreCase(name, "__construct")) return;
+        try self.raiseErrorAt(128, "Private methods cannot be final as they are never overridden by other classes", self.currentSourcePosition());
+    }
+
+    // zend_add_trait_method
+    fn addComposedMethod(self: *VM, comp: *TraitComposer, name: []const u8, m: TraitMethod) RuntimeError!void {
+        var bound = m;
+        bound.name = name;
+        if (comp.index.get(name)) |idx| {
+            const existing = comp.entries.items[idx];
+            if (!existing.own and existing.func == m.func and existing.visibility == m.visibility) return;
+            if (m.is_abstract) return self.checkAbstractTraitMethod(comp, existing, existing.own, m);
+            if (existing.own) return;
+            if (!existing.is_abstract) {
+                return self.traitRuleFatal("Trait method {s}::{s} has not been applied as {s}::{s}, because of collision with {s}::{s}", .{ m.scope, m.name, comp.owner, name, existing.scope, existing.name });
+            }
+            comp.entries.items[idx] = bound;
+            return;
+        }
+        // abstract methods are bound after inheritance: an inherited method
+        // meets one as the class's own would
+        if (m.is_abstract) if (comp.def) |def| {
+            var current = def.parent;
+            while (current) |parent_name| {
+                const parent = self.classes.getPtr(parent_name) orelse break;
+                if (parent.methods.get(name)) |info| {
+                    const declared = parent.methods.getKey(name).?;
+                    var key_buf: [512]u8 = undefined;
+                    const func = self.functions.get(class_names.memberKey(&key_buf, parent.name, declared)) orelse return;
+                    const inherited: TraitMethod = .{ .name = declared, .func = func, .visibility = info.visibility, .is_static = info.is_static, .is_final = info.is_final, .is_abstract = info.is_abstract, .scope = parent.name };
+                    return self.checkAbstractTraitMethod(comp, inherited, true, m);
+                }
+                current = parent.parent;
+            }
+        };
+        try comp.append(self.allocator, bound);
+    }
+
+    // an abstract trait method's signature must be met by the method that
+    // takes its place; `self` in either names the composing class
+    fn checkAbstractTraitMethod(self: *VM, comp: *const TraitComposer, existing: TraitMethod, existing_is_class: bool, abstract: TraitMethod) RuntimeError!void {
+        const placeholder: ClassDef = .{ .name = comp.owner, .is_internal = false };
+        const def: *const ClassDef = comp.def orelse &placeholder;
+        try inheritance.checkTraitMethod(self, comp.owner, def, .{
+            // a trait method bound before the abstract ones is the class's
+            // by then (zend_fixup_trait_method)
+            .label = if (existing_is_class) existing.scope else comp.owner,
+            .self_scope = if (existing_is_class) existing.scope else comp.owner,
+            .name = existing.name,
+            .func = existing.func,
+            .visibility = existing.visibility,
+            .is_static = existing.is_static,
+            .is_abstract = existing.is_abstract,
+            .is_final = existing.is_final,
+        }, .{
+            .label = abstract.scope,
+            .self_scope = comp.owner,
+            .name = abstract.name,
+            .func = abstract.func,
+            .visibility = abstract.visibility,
+            .is_static = abstract.is_static,
+            .is_abstract = true,
+            .is_final = abstract.is_final,
+        });
+    }
+
+    // zend_do_bind_traits for a class or enum: its methods from the traits
+    // it uses (the class's own win), then their properties and constants
+    fn bindClassTraits(self: *VM, def: *ClassDef, class_name: []const u8, written: []const []const u8, rules: TraitRules) RuntimeError!void {
+        if (written.len == 0) return;
+        // php links the parent first: an abstract trait method may be met
+        // by an inherited one
+        if (def.parent) |parent_name| if (!self.classes.contains(parent_name)) {
+            try self.tryAutoload(parent_name);
+            if (self.pending_exception != null) return error.RuntimeError;
+        };
+        const traits = try self.resolveUsedTraits(class_name, written);
+        defer self.allocator.free(traits);
+
+        var comp: TraitComposer = .{ .owner = class_name, .def = def };
+        defer comp.deinit(self.allocator);
+        var key_buf: [512]u8 = undefined;
+        for (def.method_order.items) |name| {
+            if (std.mem.indexOf(u8, name, "$hook_") != null) continue;
+            const info = def.methods.get(name) orelse continue;
+            const func = self.functions.get(class_names.memberKey(&key_buf, class_name, name)) orelse continue;
+            try comp.append(self.allocator, .{ .name = name, .func = func, .visibility = info.visibility, .is_static = info.is_static, .is_final = info.is_final, .is_abstract = info.is_abstract, .scope = class_name, .own = true });
+        }
+        try self.composeTraitMethods(&comp, traits, rules);
+
+        for (comp.entries.items) |m| {
+            if (m.own) continue;
+            const class_method = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, m.name });
+            try self.strings.append(self.allocator, class_method);
+            if (!self.functions.contains(class_method)) {
+                try self.functions.put(self.allocator, class_method, m.func);
+                try self.indexFunctionByChunk(class_method, &m.func.chunk);
+            }
+            try def.addMethod(self.allocator, .{
+                .name = m.name,
+                .arity = m.func.arity,
+                .is_static = m.is_static,
+                .is_final = m.is_final,
+                .is_abstract = m.is_abstract,
+                .visibility = m.visibility,
+            });
+        }
+        var composed: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer composed.deinit(self.allocator);
+        for (traits) |t| if (t) |tn| try self.applyTraitMembers(def, class_name, tn, &composed);
+    }
+
+    fn isTraitBoundMethod(self: *VM, class_name: []const u8, method: []const u8) bool {
+        var key_buf: [512]u8 = undefined;
+        const func = self.functions.get(class_names.memberKey(&key_buf, class_name, method)) orelse return false;
+        const sep = std.mem.indexOf(u8, func.name, "::") orelse return false;
+        return !std.ascii.eqlIgnoreCase(func.name[0..sep], class_name);
+    }
+
+    // a trait's properties, static properties and constants, those of the
+    // traits it uses first
+    // composed: the traits whose members are the class's already
+    fn applyTraitMembers(self: *VM, def: *ClassDef, class_name: []const u8, trait_name: []const u8, composed: *std.ArrayListUnmanaged([]const u8)) !void {
+        if (self.trait_uses.get(trait_name)) |subs| {
             for (subs) |sub| {
-                try self.applyTrait(def, class_name, sub, rules.aliases, rules.insteadofs, trait_name);
+                const sub_name = self.traits.getKey(sub) orelse continue;
+                try self.applyTraitMembers(def, class_name, sub_name, composed);
             }
         }
+        defer composed.append(self.allocator, trait_name) catch {};
 
-        const trait_methods = try self.traitMethods(trait_name);
-
-        const outer_methods: []const TraitMethodEntry = if (within) |outer| try self.traitMethods(outer) else &.{};
-        trait_methods: for (trait_methods) |tm| {
-            for (outer_methods) |om| if (std.ascii.eqlIgnoreCase(om.name, tm.name)) continue :trait_methods;
-            var vis_override: ?ClassDef.Visibility = null;
-            for (alias_rules) |rule| {
-                if (std.ascii.eqlIgnoreCase(rule.method, tm.name) and (rule.trait.len == 0 or std.ascii.eqlIgnoreCase(rule.trait, trait_name))) {
-                    const rule_vis: ClassDef.Visibility = switch (rule.visibility) {
-                        1 => .protected,
-                        2 => .private,
-                        3 => .public,
-                        else => .public,
-                    };
-                    if (std.mem.eql(u8, rule.alias, rule.method) and rule.visibility != 0) {
-                        // visibility-only change on same name
-                        vis_override = rule_vis;
-                    } else {
-                        try self.addTraitMethod(def, class_name, trait_name, tm.name, rule.alias, tm.func, if (rule.visibility != 0) rule_vis else @enumFromInt(tm.func.method_visibility));
-                    }
-                }
-            }
-
-            var excluded = false;
-            for (insteadof_rules) |rule| {
-                if (std.ascii.eqlIgnoreCase(rule.method, tm.name)) {
-                    if (std.ascii.eqlIgnoreCase(rule.preferred, trait_name)) break;
-                    for (rule.excluded[0..rule.excluded_count]) |ex| {
-                        if (std.ascii.eqlIgnoreCase(ex, trait_name)) {
-                            excluded = true;
-                            break;
-                        }
-                    }
-                    if (excluded) break;
-                }
-            }
-            if (excluded) continue;
-
-            try self.addTraitMethod(def, class_name, trait_name, tm.name, tm.name, tm.func, vis_override orelse @enumFromInt(tm.func.method_visibility));
-        }
-
+        // zend_do_traits_property_binding: a property the class already has
+        // (its own or an earlier trait's) must be declared the same way
         if (self.trait_props.get(trait_name)) |props| {
             for (props) |prop| {
-                var exists = false;
-                for (def.properties.items) |existing| {
-                    if (std.mem.eql(u8, existing.name, prop.name)) {
-                        exists = true;
-                        break;
+                var inlined = false;
+                const colliding: ?ClassDef.PropertyDef = for (def.properties.items) |existing| {
+                    if (!std.mem.eql(u8, existing.name, prop.name)) continue;
+                    // the compiler composed this trait's property already, and
+                    // those of traits composed after this one
+                    if (std.ascii.eqlIgnoreCase(existing.trait_origin, trait_name)) {
+                        inlined = true;
+                        continue;
                     }
+                    if (existing.trait_origin.len > 0) {
+                        const earlier = for (composed.items) |c| {
+                            if (std.ascii.eqlIgnoreCase(c, existing.trait_origin)) break true;
+                        } else false;
+                        if (!earlier) continue;
+                    }
+                    break existing;
+                } else null;
+                if (colliding) |existing| {
+                    try self.checkTraitProperty(def, class_name, trait_name, existing, prop);
+                    continue;
                 }
-                if (!exists) {
-                    try def.properties.append(self.allocator, prop);
-                    try def.trait_property_origins.put(self.allocator, prop.name, trait_name);
-                }
+                if (def.static_props.contains(prop.name)) return self.traitPropertyConflict(class_name, class_name, trait_name, prop.name, false);
+                if (def.is_readonly and !prop.is_readonly) return self.traitRuleFatal("Readonly class {s} cannot use trait with a non-readonly property {s}::${s}", .{ class_name, trait_name, prop.name });
+                if (inlined) continue;
+                try def.properties.append(self.allocator, prop);
+                try def.trait_property_origins.put(self.allocator, prop.name, trait_name);
             }
         }
 
         if (self.trait_static_props.get(trait_name)) |sprops| {
             for (sprops) |sp| {
+                for (def.properties.items) |existing| {
+                    if (!std.mem.eql(u8, existing.name, sp.name)) continue;
+                    return self.traitPropertyConflict(class_name, if (existing.trait_origin.len > 0) existing.trait_origin else class_name, trait_name, sp.name, false);
+                }
+                if (def.static_props.contains(sp.name)) {
+                    const own_vis: u8 = @intFromEnum(def.static_prop_visibility.get(sp.name) orelse .public);
+                    const own_type = def.static_prop_types.get(sp.name) orelse "";
+                    if (own_vis != (sp.flags & 3) or !try self.sameConstantType(own_type, class_name, sp.type_str, class_name))
+                        return self.traitPropertyConflict(class_name, class_name, trait_name, sp.name, false);
+                }
                 if (!def.static_props.contains(sp.name)) {
                     // each using class gets its own copy of the trait's static
                     // property - deep-clone so array values are not shared
@@ -16559,6 +16852,45 @@ pub const VM = struct {
                 }
             }
         }
+    }
+
+    fn traitPropertyConflict(self: *VM, class_name: []const u8, first: []const u8, trait_name: []const u8, name: []const u8, hooked: bool) RuntimeError {
+        if (hooked) return self.traitRuleFatal("{s} and {s} define the same hooked property (${s}) in the composition of {s}. Conflict resolution between hooked properties is currently not supported. Class was composed", .{ first, trait_name, name, class_name });
+        return self.traitRuleFatal("{s} and {s} define the same property (${s}) in the composition of {s}. However, the definition differs and is considered incompatible. Class was composed", .{ first, trait_name, name, class_name });
+    }
+
+    fn propertyHasHooks(self: *VM, def: *const ClassDef, prop: ClassDef.PropertyDef) bool {
+        if (prop.trait_origin.len > 0) return prop.is_hooked;
+        var buf: [256]u8 = undefined;
+        const getter = std.fmt.bufPrint(&buf, "{s}$hook_get", .{prop.name}) catch return false;
+        if (def.methods.contains(getter)) return true;
+        const setter = std.fmt.bufPrint(&buf, "{s}$hook_set", .{prop.name}) catch return false;
+        _ = self;
+        return def.methods.contains(setter);
+    }
+
+    // a trait property against the one the class already has: the same
+    // visibility, readonly, type and default. a class's own default is
+    // installed after the declaration, so that comparison waits for it
+    fn checkTraitProperty(self: *VM, def: *ClassDef, class_name: []const u8, trait_name: []const u8, existing: ClassDef.PropertyDef, prop: ClassDef.PropertyDef) RuntimeError!void {
+        const first = if (existing.trait_origin.len > 0) existing.trait_origin else class_name;
+        if (self.propertyHasHooks(def, existing) or prop.is_hooked) return self.traitPropertyConflict(class_name, first, trait_name, prop.name, true);
+        const compatible = existing.visibility == prop.visibility and existing.is_readonly == prop.is_readonly and
+            try self.sameConstantType(existing.type_str, class_name, prop.type_str, class_name);
+        if (!compatible) return self.traitPropertyConflict(class_name, first, trait_name, prop.name, false);
+        if (existing.trait_origin.len == 0 and existing.has_default) {
+            try self.trait_property_checks.append(self.allocator, .{ .class = class_name, .name = prop.name, .trait = trait_name, .value = prop.default });
+            return;
+        }
+        if (!traitDefaultsIdentical(existing, prop)) return self.traitPropertyConflict(class_name, first, trait_name, prop.name, false);
+    }
+
+    // an untyped property without a default is null, a typed one uninitialized
+    fn traitDefaultsIdentical(a: ClassDef.PropertyDef, b: ClassDef.PropertyDef) bool {
+        const a_undef = !a.has_default and a.type_str.len > 0;
+        const b_undef = !b.has_default and b.type_str.len > 0;
+        if (a_undef or b_undef) return a_undef == b_undef;
+        return Value.identical(if (a.has_default) a.default else .null, if (b.has_default) b.default else .null);
     }
 
     // php's do_trait_constant_check: a trait constant the class (or an
@@ -16600,6 +16932,19 @@ pub const VM = struct {
 
     // a class constant's value is set: what a trait it uses declared for the
     // same name must be identical
+    fn settleTraitPropertyChecks(self: *VM, class_name: []const u8, prop_name: []const u8, value: Value) RuntimeError!void {
+        var i: usize = 0;
+        while (i < self.trait_property_checks.items.len) {
+            const check = self.trait_property_checks.items[i];
+            if (!std.mem.eql(u8, check.class, class_name) or !std.mem.eql(u8, check.name, prop_name)) {
+                i += 1;
+                continue;
+            }
+            _ = self.trait_property_checks.orderedRemove(i);
+            if (!Value.identical(value, check.value)) return self.traitPropertyConflict(class_name, class_name, check.trait, prop_name, false);
+        }
+    }
+
     fn settleTraitConstantChecks(self: *VM, class_name: []const u8, const_name: []const u8, value: Value) RuntimeError!void {
         var i: usize = 0;
         while (i < self.trait_constant_checks.items.len) {

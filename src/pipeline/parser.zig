@@ -2084,33 +2084,26 @@ const Parser = struct {
                     }));
                 } else if (self.peek() == .kw_as) {
                     _ = self.advance();
-                    // optional visibility modifier before alias (use kind 3 = "public seen")
-                    // to differentiate from "no visibility seen"
-                    const vis_tag = self.peek();
-                    var vis_kind: u32 = 0; // 0=none, 1=protected, 2=private, 3=public-explicit
-                    var vis_seen = false;
-                    if (vis_tag == .kw_public or vis_tag == .kw_protected or vis_tag == .kw_private) {
-                        _ = self.advance();
-                        vis_seen = true;
-                        vis_kind = switch (vis_tag) {
-                            .kw_protected => 1,
-                            .kw_private => 2,
-                            else => 3,
-                        };
+                    // php's trait_alias: `as name`, `as modifier`, or
+                    // `as modifier name`; a modifier is any member modifier
+                    // (the compiler refuses static and abstract)
+                    var modifier_tok: u32 = 0;
+                    switch (self.peek()) {
+                        .kw_public, .kw_protected, .kw_private, .kw_static, .kw_abstract, .kw_final, .kw_readonly => modifier_tok = self.advance(),
+                        else => {},
                     }
                     var alias_tok: u32 = 0;
                     // an alias may be any name, a keyword too
                     if (self.peek() == .identifier or isSemiReserved(self.peek())) {
                         alias_tok = self.advance();
-                    } else if (vis_seen) {
-                        alias_tok = method_tok;
-                    } else {
-                        alias_tok = self.advance();
+                    } else if (modifier_tok == 0) {
+                        try self.addError(expectedError(.identifier));
+                        return error.ParseError;
                     }
                     try conflicts.append(self.allocator, try self.addNode(.{
                         .tag = .trait_as,
                         .main_token = method_tok,
-                        .data = .{ .lhs = trait_node, .rhs = alias_tok | (vis_kind << 30) },
+                        .data = .{ .lhs = trait_node, .rhs = try self.addExtra(&.{ modifier_tok, alias_tok }) },
                     }));
                 }
                 _ = try self.expect(.semicolon);

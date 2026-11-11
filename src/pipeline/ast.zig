@@ -159,7 +159,7 @@ pub const Ast = struct {
             trait_decl, // main_token = trait name, lhs = extra index -> {count, member_nodes...}
             trait_use, // main_token = use keyword, lhs = extra index -> {count, trait_name_nodes...}, rhs = extra index -> {count, conflict_nodes...} (0 = none)
             trait_insteadof, // main_token = method name, lhs = trait name node, rhs = extra index -> {count, excluded_trait_nodes...}
-            trait_as, // main_token = method name, lhs = trait name node, rhs = alias token index (identifier or visibility keyword)
+            trait_as, // main_token = method name, lhs = trait name node, rhs = extra index -> {modifier token or 0, alias token or 0}
             new_expr, // main_token = class name, lhs = extra index -> {count, arg...}
             new_expr_dynamic, // lhs = class name expression, rhs = extra index -> {count, arg...}
             anonymous_class, // main_token = new, lhs = extra (members), rhs = extra {ctor_arg_count, ctor_args..., parent, impl_count, impls...}

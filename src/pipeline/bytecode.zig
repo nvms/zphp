@@ -865,6 +865,8 @@ pub const ObjFunction = struct {
     // every imported method to public and non-final.
     method_visibility: u8 = 0, // 0=public, 1=protected, 2=private
     is_final: bool = false,
+    // an abstract method's signature stub (no body to run)
+    is_abstract: bool = false,
     // `&function foo() { ... }` - return is a reference, not a copy. when
     // such a function is called via `$r = &foo(...)`, the caller's $r binds
     // to the storage the function returned a ref to. the return-expression
