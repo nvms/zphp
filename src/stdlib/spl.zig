@@ -964,6 +964,8 @@ fn aoUnserialize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         try ctx.vm.setPendingException("TypeError", "unserialize(): Argument #1 ($data) must be of type string");
         return error.RuntimeError;
     }
+    if (args[0].string.bytes().len == 0) return NativeResult.scalar(.null);
+    try forbidDuringSort(ctx, obj);
     return @import("serialize.zig").unserializeSplArray(ctx, obj, args[0].string.bytes());
 }
 

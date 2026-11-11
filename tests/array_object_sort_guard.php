@@ -50,3 +50,11 @@ attempt('set subclass', fn() => $o->setIteratorClass('myiterator'));
 var_dump($o->getIteratorClass(), get_class($o->getIterator()));
 attempt('flags string', fn() => new ArrayObject([], 'x'));
 attempt('too many', fn() => new ArrayObject([], 0, 'ArrayIterator', 1));
+
+// unserialize() is a modification too, an empty payload aside
+$it = new ArrayIterator([2, 1]);
+$it->uksort(function ($a, $b) use ($it) {
+    attempt('unserialize', fn() => $it->unserialize($it->serialize()));
+    attempt('unserialize empty', fn() => $it->unserialize(''));
+    return $a <=> $b;
+});
