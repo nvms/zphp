@@ -810,6 +810,32 @@ pub fn arrayStorageRefTarget(ctx: *NativeContext, obj: *PhpObject, offset: Value
     }
 }
 
+// $o[$k]++: like a reference's target, but a missing element warns before
+// it is made, and null is the key "" (BP_VAR_RW)
+pub fn arrayStorageRefTargetRW(ctx: *NativeContext, obj: *PhpObject, offset: Value) RuntimeError!?RefTarget {
+    try forbidDuringSort(ctx, obj);
+    switch (try splStorage(ctx, obj)) {
+        .array => |s| {
+            const key = try splKey(ctx, obj, offset, .write);
+            const arr = try writableArray(ctx, s.holder, s.arr);
+            if (arr.getPtr(key) == null) {
+                try ctx.vm.emitUndefinedKeyWarning(key);
+                if (ctx.vm.pending_exception != null) return error.RuntimeError;
+                // a warning handler may have swapped the storage
+                const again = switch (try splStorage(ctx, obj)) {
+                    .array => |a| a,
+                    .object => return null,
+                };
+                const now = try writableArray(ctx, again.holder, again.arr);
+                if (now.getPtr(key) == null) try now.set(ctx.allocator, key, .null);
+                return .{ .arr = now, .key = key };
+            }
+            return .{ .arr = arr, .key = key };
+        },
+        .object => return null,
+    }
+}
+
 // $o[$k] ?? ...: the element, or null without a warning
 pub fn arrayStorageQuiet(ctx: *NativeContext, obj: *PhpObject, offset: Value) RuntimeError!Value {
     const key = try splKey(ctx, obj, offset, .isset);

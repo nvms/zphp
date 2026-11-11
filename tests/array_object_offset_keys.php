@@ -53,3 +53,25 @@ $r = 5;
 $q =& $ao['new'];
 $q = 7;
 var_dump($ao['x'], $ao->getArrayCopy());
+
+$ao = new ArrayObject;
+foreach ([1, 2, 3] as $i => $var) {
+    $ao[$i] = &$var;
+}
+var_dump($ao);
+try {
+    $ao[] = &$tail;
+} catch (Error $e) {
+    echo $e->getMessage(), "\n";
+}
+try {
+    $ao[[]] = &$tail;
+} catch (TypeError $e) {
+    echo $e->getMessage(), "\n";
+}
+var_dump(count($ao));
+
+// ++ and -- step the element in the storage, made null with a warning when
+// it is missing
+$y = new ArrayObject(['n' => 5]);
+var_dump($y['a']++, ++$y['n'], --$y['m'], $y['n']--, $y[null]++, $y->getArrayCopy());

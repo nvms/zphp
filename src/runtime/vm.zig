@@ -6569,19 +6569,34 @@ pub const VM = struct {
                         if (try self.throwBuiltinException("Error", "Cannot increment/decrement string offsets")) continue;
                         return error.RuntimeError;
                     }
-                    if (aei_arr == .array) {
-                        const ak = Value.toArrayKey(aei_key);
-                        const old = aei_arr.array.get(ak);
+                    var elem_arr: ?*PhpArray = if (aei_arr == .array) aei_arr.array else null;
+                    var elem_key: ?PhpArray.Key = null;
+                    if (aei_arr == .object and try self.splOwnOffsetGet(aei_arr.object)) {
+                        // spl_array_get_dimension_ptr for BP_VAR_RW: the step
+                        // happens on the storage's element
+                        var ctx = self.makeContext(null);
+                        const target = @import("../stdlib/spl.zig").arrayStorageRefTargetRW(&ctx, aei_arr.object, aei_key) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        if (target) |t| {
+                            elem_arr = t.arr;
+                            elem_key = t.key;
+                        }
+                    }
+                    if (elem_arr) |arr| {
+                        const ak = elem_key orelse Value.toArrayKey(aei_key);
+                        const old = arr.get(ak);
                         const new_val = try self.stepValue(old, op == .array_elem_inc) orelse continue;
                         // a referenced element steps the reference
-                        if (try self.writeArrayElemRef(aei_arr.array, PhpArray.normalizeKey(ak), new_val)) {
+                        if (try self.writeArrayElemRef(arr, PhpArray.normalizeKey(ak), new_val)) {
                             if (new_val == .string) self.releaseValue(new_val);
                             self.push(old);
                             continue;
                         }
                         // the element slot takes the new value and drops the old
                         // one; an adopted increment result is consumed here
-                        try self.arraySetOwned(aei_arr.array, ak, new_val);
+                        try self.arraySetOwned(arr, ak, new_val);
                         if (new_val == .string) self.releaseValue(new_val);
                         self.push(old);
                     } else {
@@ -6939,6 +6954,13 @@ pub const VM = struct {
                         try self.internName(varVarName(try self.valueToString(self.pop()), &buf));
                     const key_val = self.pop();
                     const arr_val = self.pop();
+                    if (try self.splRefTarget(arr_val, key_val)) |target| {
+                        self.push(try self.bindArrayElementRef(.{ .array = target.arr }, target.key, var_name));
+                        continue;
+                    } else if (self.pending_exception != null) {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    }
                     if (key_val == .resource) self.warnResourceOffset(key_val) catch if (try self.resumeRaised()) continue;
                     const key = PhpArray.normalizeKey(Value.toArrayKey(key_val));
                     self.push(try self.bindArrayElementRef(arr_val, key, var_name));
@@ -6952,6 +6974,15 @@ pub const VM = struct {
                     else
                         try self.internName(varVarName(try self.valueToString(self.pop()), &buf));
                     const arr_val = self.pop();
+                    if (arr_val == .object and try self.splOwnOffsetGet(arr_val.object)) {
+                        // read_dimension has no element for an append to hand
+                        // out, so there is nothing to bind
+                        const msg = try std.fmt.allocPrint(self.allocator, "Indirect modification of overloaded element of {s} has no effect", .{arr_val.object.class_name});
+                        defer self.allocator.free(msg);
+                        self.raiseError(8, msg) catch if (try self.resumeRaised()) continue;
+                        if (try self.throwBuiltinException("Error", "Cannot assign by reference to an array dimension of an object")) continue;
+                        return error.RuntimeError;
+                    }
                     if (arr_val == .array and arr_val.array.nextElementOccupied()) {
                         if (try self.throwNextElementOccupied()) continue;
                         return error.RuntimeError;
@@ -17359,6 +17390,18 @@ pub const VM = struct {
     // win, then the slot, then the map
     // the element at key (appended when null) becomes a reference to the
     // variable, which turns into a reference first if it isn't one
+    // `$o[$k] = &$var` on an ArrayObject or ArrayIterator without its own
+    // offsetGet binds the element of the storage array (read_dimension for
+    // BP_VAR_W); null with an exception pending when the offset is refused
+    fn splRefTarget(self: *VM, arr_val: Value, key_val: Value) RuntimeError!?@import("../stdlib/spl.zig").RefTarget {
+        if (arr_val != .object or !try self.splOwnOffsetGet(arr_val.object)) return null;
+        var ctx = self.makeContext(null);
+        return @import("../stdlib/spl.zig").arrayStorageRefTarget(&ctx, arr_val.object, key_val) catch |err| {
+            if (self.pending_exception != null) return null;
+            return err;
+        };
+    }
+
     fn bindArrayElementRef(self: *VM, arr_val: Value, key_opt: ?PhpArray.Key, var_name: []const u8) RuntimeError!Value {
         const cell = try self.getOrCreateVarCell(self.currentFrame(), var_name);
         if (arr_val == .array) {
