@@ -2856,6 +2856,7 @@ pub const VM = struct {
         // registry are still intact, since their frames release closures by name
         for (self.generators.items) |g| if (!g.pooled) {
             self.releaseGeneratorVars(g);
+            self.releaseGeneratorCurrent(g);
             self.releaseValue(g.return_value);
             g.return_value = .null;
             self.releaseGeneratorClosure(g);
@@ -10177,7 +10178,7 @@ pub const VM = struct {
                         if (func.is_generator) {
                             method_refs.deinit(self.allocator);
                             if (self.ref_index) |ri| ri.releaseOwner(self.allocator, method_owner);
-                            const gen = try self.allocGenerator(.{ .func = func, .vars = new_vars });
+                            const gen = try self.allocGenerator(.{ .func = func, .vars = new_vars, .called_class = obj.class_name });
                             retainVarsObjects(&gen.vars);
                             self.push(.{ .generator = gen });
                         } else {
@@ -11507,7 +11508,6 @@ pub const VM = struct {
                     if (val == .array) arrayRetain(val.array);
                     gen.return_value = val;
                     gen.has_return = true;
-                    self.setGeneratorCurrent(gen, .null, .null, true);
                     gen.state = .completed;
                     gen.vars = self.currentFrame().vars;
                     gen.ref_slots = self.currentFrame().ref_slots;
@@ -12830,6 +12830,8 @@ pub const VM = struct {
 
     pub fn releaseGeneratorVars(self: *VM, gen: *@import("value.zig").Generator) void {
         gen.current_ref = null;
+        for (gen.extra_args.items) |arg| self.releaseValue(arg);
+        gen.extra_args.clearRetainingCapacity();
         self.deinitRefSlots(&gen.ref_slots);
         self.releaseGeneratorBindings(gen);
         // release the inner gen the outer was delegating to (yield from path)
@@ -12849,10 +12851,9 @@ pub const VM = struct {
         // saved operand-stack slots follow stack ownership (arrays uncounted)
         for (gen.stack.items) |v| self.stackRelease(v);
         gen.stack.clearRetainingCapacity();
-        self.releaseValue(gen.current_value);
-        self.releaseValue(gen.current_key);
-        gen.current_value = .null;
-        gen.current_key = .null;
+        // the last value it yielded stays until it is freed: a generator
+        // that delegated to this one takes it when it reads its current
+        // value (php's zend_generator_update_current)
         // PHP fires the destructors at the generator-completion boundary, not
         // at the next statement; drain now so end-of-foreach + reassign order
         // matches. safe to call inline - drainPendingDestruct is reentrancy-
@@ -14406,7 +14407,12 @@ pub const VM = struct {
         if (gen.state == .completed or self.pending_exception != null) return;
         const root = generatorRoot(gen);
         const delegate = root.delegate orelse return;
-        if (delegate != .gen or delegate.gen.state != .completed or delegate.gen.has_return) return;
+        if (delegate != .gen or delegate.gen.state != .completed) return;
+        if (delegate.gen.has_return) {
+            // the delegate's last value is this one's until it resumes
+            self.setGeneratorCurrent(root, delegate.gen.current_key, delegate.gen.current_value, false);
+            return;
+        }
         root.delegate = null;
         self.genRelease(delegate.gen);
         root.pending_closed_delegate = true;
@@ -14540,6 +14546,21 @@ pub const VM = struct {
         return self.funcDisplayName(gen.func);
     }
 
+    fn releaseGeneratorCurrent(self: *VM, gen: *Generator) void {
+        self.releaseValue(gen.current_value);
+        self.releaseValue(gen.current_key);
+        gen.current_value = .null;
+        gen.current_key = .null;
+        gen.current_ref = null;
+    }
+
+    fn keepGeneratorExtraArgs(self: *VM, gen: *Generator, args: []const Value) RuntimeError!void {
+        for (args) |arg| {
+            retainValue(arg);
+            try gen.extra_args.append(self.allocator, arg);
+        }
+    }
+
     // php's zend_generator_rewind
     pub fn rewindGenerator(self: *VM, gen: *Generator) RuntimeError!void {
         try self.ensureGeneratorInitialized(gen);
@@ -14587,6 +14608,7 @@ pub const VM = struct {
             .generator = gen,
             .ref_slots = gen.ref_slots,
             .ref_owner = gen.ref_owner,
+            .called_class = gen.called_class,
         };
         gen.ref_slots = .{};
         gen.ref_owner = 0;
@@ -22631,7 +22653,16 @@ pub const VM = struct {
         // the callee's frame, not the top one: a callee that already ran in
         // the fast loop may have pushed frames of its own above it
         if (self.frame_count > fc_before)
-            self.frames[fc_before].called_class = class_name;
+            self.frames[fc_before].called_class = class_name
+        else
+            self.tagNewGenerator(class_name);
+    }
+
+    // a generator a call just made runs with the class the call named
+    fn tagNewGenerator(self: *VM, class_name: []const u8) void {
+        if (self.sp == 0) return;
+        const top = self.stack[self.sp - 1];
+        if (top == .generator and top.generator.state == .created and top.generator.called_class == null) top.generator.called_class = class_name;
     }
 
     fn callStaticUserFunction(self: *VM, func: *const ObjFunction, name: []const u8, arg_count: u32, class_name: []const u8) RuntimeError!void {
@@ -22644,7 +22675,9 @@ pub const VM = struct {
         // the callee's frame, not the top one: a callee that already ran in
         // the fast loop may have pushed frames of its own above it
         if (self.frame_count > fc_before)
-            self.frames[fc_before].called_class = class_name;
+            self.frames[fc_before].called_class = class_name
+        else
+            self.tagNewGenerator(class_name);
     }
 
     // the function a Closure made from a function's name calls
@@ -22919,6 +22952,13 @@ pub const VM = struct {
             }
         }
         self.saveFrameArgs(arg_count);
+        var extra_args: [16]Value = undefined;
+        const extra_count: usize = if (func.is_generator and !func.is_variadic and ac > func.arity) @min(ac - func.arity, extra_args.len) else 0;
+        for (0..extra_count) |i| {
+            extra_args[i] = self.stack[self.sp - ac + func.arity + i];
+            retainValue(extra_args[i]);
+        }
+        defer for (extra_args[0..extra_count]) |v| self.releaseValue(v);
         self.dropN(ac);
         if (!func.is_variadic) {
             try self.fillDefaults(&new_vars, func, @min(ac, func.arity));
@@ -22939,6 +22979,7 @@ pub const VM = struct {
             if (self.ref_index) |ri| ri.releaseOwner(self.allocator, callee_owner);
             const gen = try self.allocGenerator(.{ .func = func, .vars = new_vars, .ref_slots = callee_refs });
             retainVarsObjects(&gen.vars);
+            if (extra_count > 0) try self.keepGeneratorExtraArgs(gen, extra_args[0..extra_count]);
             self.keepGeneratorClosure(gen, name);
             self.push(.{ .generator = gen });
         } else {
@@ -23178,7 +23219,7 @@ pub const VM = struct {
             const trimmed = if (func.is_variadic) checked else checked[0..@min(checked.len, func.arity)];
             try self.bindArgs(&new_vars, func, trimmed);
             if (func.is_generator) {
-                const gen = try self.allocGenerator(.{ .func = func, .vars = new_vars });
+                const gen = try self.allocGenerator(.{ .func = func, .vars = new_vars, .called_class = obj.class_name });
                 retainVarsObjects(&gen.vars);
                 return .{ .generator = gen };
             }
@@ -23619,8 +23660,9 @@ pub const VM = struct {
             var closure_refs: std.StringHashMapUnmanaged(*Value) = .{};
             try self.bindClosures(&new_vars, &closure_refs, name);
             try self.bindArgs(&new_vars, func, if (func.is_variadic) args else args[0..@min(args.len, func.arity)]);
-            const gen = try self.allocGenerator(.{ .func = func, .vars = new_vars, .ref_slots = closure_refs });
+            const gen = try self.allocGenerator(.{ .func = func, .vars = new_vars, .ref_slots = closure_refs, .called_class = called_class });
             retainVarsObjects(&gen.vars);
+            if (!func.is_variadic and args.len > func.arity) try self.keepGeneratorExtraArgs(gen, args[func.arity..]);
             self.keepGeneratorClosure(gen, name);
             return .{ .generator = gen };
         }
@@ -24835,6 +24877,7 @@ pub const VM = struct {
         const outer_log = self.release_log;
         if (self.release_depth < max_release_depth) self.release_log = &dropped;
         self.releaseGeneratorVars(gen);
+        self.releaseGeneratorCurrent(gen);
         self.releaseValue(gen.return_value);
         gen.return_value = .null;
         self.releaseGeneratorClosure(gen);

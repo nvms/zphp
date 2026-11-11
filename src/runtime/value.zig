@@ -815,6 +815,11 @@ pub const Generator = struct {
     ref_slots: std.StringHashMapUnmanaged(*Value) = .{},
     // the reference index owner of its frame's bindings while it waits
     ref_owner: RefIndex.OwnerId = 0,
+    // the class static:: names in its body (a static method called through
+    // a subclass)
+    called_class: ?[]const u8 = null,
+    // the arguments passed past the declared parameters, for func_get_args
+    extra_args: std.ArrayListUnmanaged(Value) = .empty,
     base_sp: usize = 0,
     current_value: Value = .null,
     current_key: Value = .null,
@@ -871,6 +876,7 @@ pub const Generator = struct {
     pub const State = enum { created, suspended, running, completed };
 
     pub fn deinit(self: *Generator, allocator: std.mem.Allocator) void {
+        self.extra_args.deinit(allocator);
         self.saved_handlers.deinit(allocator);
         self.vars.deinit(allocator);
         self.locals.deinit(allocator);

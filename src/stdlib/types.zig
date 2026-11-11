@@ -2181,7 +2181,10 @@ fn getFrameParamValue(frame: anytype, slot_names: []const []const u8, param: []c
 fn native_func_get_args(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
 
-    if (ctx.vm.getFrameArgs()) |saved_args| {
+    // a resumed generator's frame has no saved arguments: its parameters
+    // hold them
+    const in_generator = ctx.vm.currentFrame().generator != null;
+    if (if (in_generator) null else ctx.vm.getFrameArgs()) |saved_args| {
         for (saved_args) |val| {
             try arr.append(ctx.allocator, val);
         }
@@ -2191,7 +2194,7 @@ fn native_func_get_args(ctx: *NativeContext, _: []const Value) RuntimeError!Nati
     const frame = ctx.vm.currentFrame();
     const func = frame.func orelse return NativeResult.borrowed(.{ .array = arr });
     const slot_names = func.slot_names;
-    const actual_ac: usize = if (ctx.vm.getFrameArgCount()) |ac| ac else func.arity;
+    const actual_ac: usize = if (in_generator) func.arity else if (ctx.vm.getFrameArgCount()) |ac| ac else func.arity;
 
     if (func.is_variadic) {
         const fixed: usize = func.arity - 1;
@@ -2210,6 +2213,7 @@ fn native_func_get_args(ctx: *NativeContext, _: []const Value) RuntimeError!Nati
             const val = getFrameParamValue(frame, slot_names, func.params[i]);
             try arr.append(ctx.allocator, val);
         }
+        if (frame.generator) |gen| for (gen.extra_args.items) |extra| try arr.append(ctx.allocator, extra);
     }
     return NativeResult.borrowed(.{ .array = arr });
 }
