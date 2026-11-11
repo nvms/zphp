@@ -8985,6 +8985,7 @@ pub const VM = struct {
                         trait_prop_attrs[tpi] = .{ .name = tpa_name, .attrs = tpa_attrs };
                     }
 
+                    try self.checkTraitConstantsOfUsedTraits(trait_name);
                     if (try self.deprecationOf(trait_attrs)) |suffix| try self.deprecated_traits.put(self.allocator, trait_name, suffix);
                     if (self.trait_uses.get(trait_name)) |subs| for (subs) |sub| try self.warnDeprecatedTraitUse(sub, trait_name);
                     if (trait_attrs.len > 0 or trait_method_attr_count > 0 or trait_prop_attr_count > 0) {
@@ -16949,6 +16950,24 @@ pub const VM = struct {
             try self.trait_constant_checks.append(self.allocator, .{ .class = class_name, .name = c.name, .trait = trait_name, .value = c.value });
         } else if (!Value.identical(def.constants.get(c.name) orelse .null, c.value)) {
             return self.traitConstantConflict(def, class_name, trait_name, first, c.name);
+        }
+    }
+
+    // php composes a trait's own `use` when the trait is declared: a
+    // constant it declares must agree with one a trait it uses declares
+    fn checkTraitConstantsOfUsedTraits(self: *VM, trait_name: []const u8) RuntimeError!void {
+        const subs = self.trait_uses.get(trait_name) orelse return;
+        const own = self.trait_constants.get(trait_name) orelse return;
+        for (subs) |sub| {
+            const sub_name = self.traits.getKey(sub) orelse continue;
+            const theirs = self.trait_constants.get(sub_name) orelse continue;
+            for (theirs) |c| for (own) |o| {
+                if (!std.mem.eql(u8, c.name, o.name)) continue;
+                if ((c.flags & 0x13) == (o.flags & 0x13) and
+                    try self.sameConstantType(o.type_str, trait_name, c.type_str, trait_name) and
+                    Value.identical(o.value, c.value)) continue;
+                return self.traitRuleFatal("{s} and {s} define the same constant ({s}) in the composition of {s}. However, the definition differs and is considered incompatible. Class was composed", .{ trait_name, sub_name, c.name, trait_name });
+            };
         }
     }
 

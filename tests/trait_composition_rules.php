@@ -63,3 +63,8 @@ run('trait T { public int $p; } class C { use T; public ?int $p; }');
 run('trait T { public int $p = 1; } trait U { public int $p = 1; } class C { use T, U; } var_dump(new C);');
 run('trait T { public $p { get => 1; } } class C { use T; public $p; }');
 run('trait T { public $p; } readonly class C { use T; }');
+
+// a trait using a trait: their constants must agree when it is declared
+run('trait A { public const C = 1; } trait B { use A; public const C = 2; }');
+run('trait A { public const C = 1; } trait B { use A; private const C = 1; }');
+run('trait A { public const C = 1; } trait B { use A; public const C = 1; } echo "agree\n";');
