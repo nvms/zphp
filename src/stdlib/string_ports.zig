@@ -3,6 +3,7 @@
 // ZEND_PARSE_PARAMETERS does it, and the functions' own edge cases
 
 const std = @import("std");
+const platform = @import("../platform.zig");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const vm_mod = @import("../runtime/vm.zig");
@@ -774,10 +775,14 @@ fn threeWay(a: usize, b: usize) i64 {
 extern "c" fn memcmp(a: [*]const u8, b: [*]const u8, n: usize) c_int;
 
 // php hands memcmp's own result back from strcmp and strncmp, whatever
-// magnitude the c library gives it, so this asks the same library
+// magnitude the c library gives it, so this asks the same library. php's
+// windows builds use microsoft's runtime, whose memcmp gives only the sign,
+// where zphp links mingw's
 fn libcMemcmp(a: []const u8, b: []const u8, n: usize) i64 {
     if (n == 0) return 0;
-    return memcmp(a.ptr, b.ptr, n);
+    const r = memcmp(a.ptr, b.ptr, n);
+    if (platform.is_windows) return std.math.sign(r);
+    return r;
 }
 
 // the first difference of the lowercased bytes, as zend_binary_strcasecmp
