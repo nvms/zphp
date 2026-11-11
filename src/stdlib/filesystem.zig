@@ -38,8 +38,6 @@ const posix_entries = .{
     .{ "is_link", native_is_link },
     .{ "symlink", native_symlink },
     .{ "link", native_link },
-    .{ "stat", native_stat },
-    .{ "lstat", native_lstat },
     .{ "flock", native_flock },
     .{ "popen", native_popen },
     .{ "pclose", native_pclose },
@@ -51,6 +49,8 @@ const posix_entries = .{
 };
 
 const common_entries = .{
+    .{ "stat", native_stat },
+    .{ "lstat", native_lstat },
     .{ "gzcompress", native_gzcompress },
     .{ "gzuncompress", native_gzuncompress },
     .{ "gzdeflate", native_gzdeflate },

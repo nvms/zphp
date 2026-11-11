@@ -1092,14 +1092,19 @@ fn native_trait_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Na
     return NativeResult.scalar(.{ .bool = ctx.vm.traits.contains(name) });
 }
 
-const ShellResult = struct { stdout: []u8, term: std.process.Child.Term };
+const ShellResult = struct { stdout: []u8, exit_code: i64 };
 
 // runs a command through the shell and collects its stdout. stdin and stderr
-// stay attached to zphp's, as in php: a command's errors reach the terminal
+// stay attached to zphp's, as in php: a command's errors reach the terminal.
+// on windows cmd.exe gets the line as php hands it (`/s /c "<command>"`)
 fn runShell(allocator: std.mem.Allocator, command: []const u8) !ShellResult {
+    if (platform.is_windows) {
+        const result = try @import("proc_win.zig").runShell(allocator, command);
+        return .{ .stdout = result.stdout, .exit_code = result.exit_code };
+    }
     const argv = platform.shellArgv(command);
     const result = try platform.runChild(allocator, &argv, .{});
-    return .{ .stdout = result.stdout, .term = result.term };
+    return .{ .stdout = result.stdout, .exit_code = platform.exitStatus(result.term) };
 }
 
 fn requireCommand(ctx: *NativeContext, comptime func: []const u8, command: Value) RuntimeError!void {
@@ -1147,7 +1152,7 @@ fn native_exec(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
         if (args[1] != .array) ctx.setCallerVar(1, args.len, .{ .array = arr });
     }
     // optional result_code (param 3, by-ref)
-    const exit_code: i64 = platform.exitStatus(result.term);
+    const exit_code: i64 = result.exit_code;
     if (args.len >= 3) ctx.setCallerVar(2, args.len, .{ .int = exit_code });
 
     if (lines.items.len == 0) return NativeResult.literal("");
@@ -1163,7 +1168,7 @@ fn native_system(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
 
     try ctx.vm.output.appendSlice(ctx.allocator, result.stdout);
 
-    const exit_code: i64 = platform.exitStatus(result.term);
+    const exit_code: i64 = result.exit_code;
     if (args.len >= 2) ctx.setCallerVar(1, args.len, .{ .int = exit_code });
 
     // last line of output
@@ -1183,7 +1188,7 @@ fn native_passthru(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     const result = runShell(ctx.allocator, args[0].string.bytes()) catch return NativeResult.scalar(.{ .bool = false });
     defer ctx.allocator.free(result.stdout);
     try ctx.vm.output.appendSlice(ctx.allocator, result.stdout);
-    const exit_code: i64 = platform.exitStatus(result.term);
+    const exit_code: i64 = result.exit_code;
     if (args.len >= 2 and args[1] == .array) {
         try args[1].array.append(ctx.allocator, .{ .int = exit_code });
     }

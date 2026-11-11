@@ -332,6 +332,20 @@ fn spawn(allocator: std.mem.Allocator, opts: SpawnOptions) !Spawned {
     return .{ .process = pi.hProcess, .pid = pi.dwProcessId, .pipes = pipes };
 }
 
+// shell_exec, exec, system and passthru: the line runs as proc_open's does,
+// stdout comes back through a pipe, stdin and stderr stay zphp's
+pub fn runShell(allocator: std.mem.Allocator, command: []const u8) !struct { stdout: []u8, exit_code: i64 } {
+    const descs = [_]Desc{.{ .role = 1, .spec = .pipe_w }};
+    var spawned = try spawn(allocator, .{ .command = .{ .shell = command }, .descs = &descs, .cwd = null, .env = .null });
+    defer spawned.pipes.deinit(allocator);
+    defer _ = win32.CloseHandle(spawned.process);
+    const fd = spawned.pipes.items[0].fd;
+    defer platform.closeFd(fd);
+    const file = platform.fileFromFd(fd) orelse return error.ProcSpawnFailed;
+    const stdout = try platform.readToEndAlloc(file, allocator, 64 * 1024 * 1024);
+    return .{ .stdout = stdout, .exit_code = waitExit(spawned.process) };
+}
+
 fn flushInheritedOutput(ctx: *NativeContext, descs: []const Desc) void {
     var stdout_owned = false;
     var stderr_owned = false;
