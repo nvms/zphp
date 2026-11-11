@@ -2483,6 +2483,7 @@ const ClassShape = struct {
 pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
     const unqualified = self.ast.tokenSlice(node.main_token);
     if (isReservedClassName(unqualified)) return self.failFmt(node.main_token, "Cannot use \"{s}\" as a class name as it is reserved", .{unqualified});
+    if (!class_names.isAnonymous(unqualified)) try warnUnderscoreName(self, node.main_token, "a class name");
     const class_name = self.declaredName(self.ast.tokenSlice(node.main_token));
     try checkImportCollision(self, node.main_token, .class, class_name);
     // rhs: {class_modifiers, parent_node, implements_count, impl_nodes...}
@@ -3162,8 +3163,20 @@ pub fn compileAnonymousClass(self: *Compiler, node: Ast.Node) Error!void {
     }
 }
 
+// zend_assert_valid_class_name's deprecation
+fn warnUnderscoreName(self: *Compiler, token: u32, comptime kind: []const u8) Error!void {
+    if (std.mem.eql(u8, self.ast.tokenSlice(token), "_")) try self.warn(token, 8192, "Using \"_\" as " ++ kind ++ " is deprecated since 8.4", .{});
+}
+
 pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
+    try warnUnderscoreName(self, node.main_token, "an interface name");
     const iface_name = self.declaredName(self.ast.tokenSlice(node.main_token));
+    for (self.ast.extraSlice(node.data.lhs)) |m| {
+        const member = self.ast.nodes[m];
+        if (member.tag != .trait_use) continue;
+        const first = self.ast.nodes[self.ast.extraSlice(member.data.lhs)[0]];
+        return self.failFmt(first.main_token, "Cannot use traits inside of interfaces. {s} is used in {s}", .{ self.ast.tokenSlice(first.main_token), iface_name });
+    }
     for (self.ast.extraSlice(node.data.lhs)) |m| try checkPropertyDeclaration(self, iface_name, self.ast.nodes[m], true);
     const members = self.ast.extraSlice(node.data.lhs);
     try checkImportCollision(self, node.main_token, .class, iface_name);
@@ -3330,6 +3343,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
+    try warnUnderscoreName(self, node.main_token, "a trait name");
     const trait_name = self.declaredName(self.ast.tokenSlice(node.main_token));
     const members = self.ast.extraSlice(node.data.lhs);
     try checkImportCollision(self, node.main_token, .class, trait_name);
@@ -3587,6 +3601,7 @@ fn checkEnumMembers(self: *Compiler, enum_name: []const u8, enum_tok: u32, backe
 }
 
 pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
+    try warnUnderscoreName(self, node.main_token, "an enum name");
     const enum_name = self.declaredName(self.ast.tokenSlice(node.main_token));
     const outer_class = self.current_class;
     self.current_class = enum_name;

@@ -15733,6 +15733,9 @@ pub const VM = struct {
             const written_parent = self.currentChunk().constants.items[parent_idx].string.bytes();
             const parent_name = self.declaredClassName(written_parent);
             def.parent = parent_name;
+            if (self.traits.contains(parent_name) or self.interfaces.contains(parent_name)) {
+                return self.traitRuleFatal("Class {s} cannot extend {s} {s}", .{ class_name, if (self.traits.contains(parent_name)) "trait" else "interface", parent_name });
+            }
             if (self.classes.get(parent_name)) |parent_cls| {
                 if (parent_cls.is_final) {
                     const msg = try std.fmt.allocPrint(self.allocator, "Class {s} cannot extend final class {s}", .{ class_name, parent_name });
@@ -15768,7 +15771,11 @@ pub const VM = struct {
         const iface_count = self.readByte();
         for (0..iface_count) |_| {
             const iname_idx = self.readU16();
-            try def.interfaces.append(self.allocator, self.declaredClassName(self.currentChunk().constants.items[iname_idx].string.bytes()));
+            const iface = self.declaredClassName(self.currentChunk().constants.items[iname_idx].string.bytes());
+            if (!self.interfaces.contains(iface) and (self.traits.contains(iface) or self.classes.contains(iface))) {
+                return self.traitRuleFatal("{s} cannot implement {s} - it is not an interface", .{ class_name, iface });
+            }
+            try def.interfaces.append(self.allocator, iface);
         }
 
         const trait_count = self.readByte();

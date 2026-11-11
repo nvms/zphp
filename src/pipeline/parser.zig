@@ -1655,6 +1655,11 @@ const Parser = struct {
 
         while (self.peek() != .r_brace and self.peek() != .eof) {
             try self.parseAttributes();
+            // the compiler refuses it, as php's does
+            if (self.peek() == .kw_use) {
+                try methods.append(self.allocator, try self.parseTraitUse());
+                continue;
+            }
             var is_static = false;
             var is_final = false;
             var is_abstract = false;
