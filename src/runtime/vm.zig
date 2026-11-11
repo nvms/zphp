@@ -3644,6 +3644,12 @@ pub const VM = struct {
         account.reporting = true;
         var buf: [160]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "Allowed memory size of {d} bytes exhausted (tried to allocate {d} bytes)", .{ account.limit, refused }) catch unreachable;
+        // php drops every output buffer before reporting it, unless a
+        // handler is running; their handlers are not run here
+        if (self.ob_running == null) {
+            if (self.ob_stack.items.len > 0) self.output.shrinkRetainingCapacity(@min(self.ob_stack.items[0].start, self.output.items.len));
+            output_control.releaseAll(self);
+        }
         self.raiseError(1, msg) catch |raised| return raised;
         return error.RuntimeError;
     }
