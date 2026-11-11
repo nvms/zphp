@@ -115,6 +115,9 @@ fn loadStartupFlags(allocator: std.mem.Allocator, raw_args: []const []const u8) 
             i += 1;
             try args.append(allocator, "run");
             try args.append(allocator, try flagValue(raw_args, i, "usage: zphp -f FILE [args]\n"));
+            // php's option parsing ends at a "--" right after the file,
+            // which the script's arguments don't include
+            if (i + 1 < raw_args.len and std.mem.eql(u8, raw_args[i + 1], "--")) i += 1;
             if (i + 1 < raw_args.len) try args.appendSlice(allocator, raw_args[i + 1 ..]);
             break;
         } else if (std.mem.startsWith(u8, arg, "-d") and arg.len > 2) {
