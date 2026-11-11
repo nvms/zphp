@@ -10199,7 +10199,10 @@ pub const VM = struct {
                     }
 
                     const mvr = self.findMethodVisibility(obj.class_name, method_name);
-                    if (!self.checkVisibility(mvr.defining_class, mvr.visibility) and !self.protectedRootVisible(mvr.defining_class, method_name, mvr.visibility)) {
+                    // the calling class's own private method runs on its
+                    // instances, whatever a subclass redeclares
+                    const scope_private = self.scopePrivateMethod(obj.class_name, method_name, mvr.defining_class);
+                    if (scope_private == null and !self.checkVisibility(mvr.defining_class, mvr.visibility) and !self.protectedRootVisible(mvr.defining_class, method_name, mvr.visibility)) {
                         const suffix = self.visScopeSuffix();
                         const msg = try std.fmt.allocPrint(self.allocator, "Call to {s} method {s}::{s}(){s}", .{
                             @tagName(mvr.visibility), mvr.defining_class, method_name, suffix,
@@ -10211,7 +10214,7 @@ pub const VM = struct {
                     }
 
                     // look up method in class hierarchy
-                    const full_name = self.resolveMethod(obj.class_name, method_name) catch {
+                    const full_name = scope_private orelse self.resolveMethod(obj.class_name, method_name) catch {
                         if (self.hasMethod(obj.class_name, "__call")) {
                             const obj_id = @intFromPtr(obj);
                             var in_call = false;
@@ -10270,7 +10273,7 @@ pub const VM = struct {
                             const mc_ip2 = self.currentFrame().ip - 4;
                             const mc_chunk_key2 = @intFromPtr(self.currentChunk());
                             const mc_idx2 = InlineCache.methodIndex(mc_chunk_key2, mc_ip2);
-                            if (mvr.visibility == .public) {
+                            if (mvr.visibility == .public and scope_private == null) {
                                 ic.method[mc_idx2] = .{ .key = mc_ip2, .chunk_key = mc_chunk_key2, .class_ptr = @intFromPtr(obj.class_name.ptr), .native = native, .full_name = full_name };
                             }
                         }
@@ -10339,7 +10342,7 @@ pub const VM = struct {
                             const mc_ip2 = self.currentFrame().ip - 4;
                             const mc_chunk_key2 = @intFromPtr(self.currentChunk());
                             const mc_idx2 = InlineCache.methodIndex(mc_chunk_key2, mc_ip2);
-                            if (mvr.visibility == .public) {
+                            if (mvr.visibility == .public and scope_private == null) {
                                 ic.method[mc_idx2] = .{ .key = mc_ip2, .chunk_key = mc_chunk_key2, .class_ptr = @intFromPtr(obj.class_name.ptr), .func = func, .full_name = full_name };
                             }
                         }
@@ -11907,22 +11910,47 @@ pub const VM = struct {
             }
         }
 
-        const full_name = self.resolveMethod(class_name, method_name) catch {
-            if (self.hasMethod(class_name, "__callStatic")) {
-                const ac: usize = arg_count;
-                var args_arr = try self.allocArray();
-                for (0..ac) |i| try args_arr.append(self.allocator, self.stack[self.sp - ac + i]);
-                self.dropN(ac);
-                const cs_name = try self.resolveMethod(class_name, "__callStatic");
-                self.push(.{ .string = Value.String.borrowed(method_name) });
-                self.push(.{ .array = args_arr });
-                try self.callStaticFunction(cs_name, 2, effective_called);
-                return;
+        // every method an interface declares is abstract, __callStatic too
+        if (self.interfaces.getEntry(class_name)) |ie| {
+            var declared: ?[]const u8 = null;
+            var magic = false;
+            for (ie.value_ptr.methods.items) |m| {
+                if (std.ascii.eqlIgnoreCase(m, method_name)) declared = m;
+                if (std.ascii.eqlIgnoreCase(m, "__callStatic")) magic = true;
             }
+            self.dropN(arg_count);
+            const msg = if (declared != null or magic)
+                try std.fmt.allocPrint(self.allocator, "Cannot call abstract method {s}::{s}()", .{ ie.key_ptr.*, declared orelse method_name })
+            else
+                try std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ ie.key_ptr.*, method_name });
+            defer self.allocator.free(msg);
+            if (try self.throwBuiltinException("Error", msg)) return;
+            return error.RuntimeError;
+        }
+        const full_name = self.resolveMethod(class_name, method_name) catch {
+            if (try self.staticCallFallback(class_name, method_name, arg_count, effective_called)) return;
             const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch return error.OutOfMemory;
             defer self.allocator.free(msg);
             if (try self.throwBuiltinException("Error", msg)) return;
             self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
+            return error.RuntimeError;
+        };
+        // a method the calling scope can't see: $this's __call or the
+        // class's __callStatic, else php's Error
+        const found = self.findMethodInfo(class_name, method_name);
+        if (found) |f| if (f.info.visibility != .public and !self.checkVisibility(f.defining, f.info.visibility) and !self.protectedRootVisible(f.defining, method_name, f.info.visibility)) {
+            if (try self.staticCallFallback(class_name, method_name, arg_count, effective_called)) return;
+            self.dropN(arg_count);
+            const msg = try std.fmt.allocPrint(self.allocator, "Call to {s} method {s}(){s}", .{ @tagName(f.info.visibility), full_name, self.visScopeSuffix() });
+            defer self.allocator.free(msg);
+            if (try self.throwBuiltinException("Error", msg)) return;
+            return error.RuntimeError;
+        };
+        if (found) |f| if (f.info.is_abstract) {
+            self.dropN(arg_count);
+            const msg = try std.fmt.allocPrint(self.allocator, "Cannot call abstract method {s}()", .{full_name});
+            defer self.allocator.free(msg);
+            if (try self.throwBuiltinException("Error", msg)) return;
             return error.RuntimeError;
         };
 
@@ -11947,8 +11975,19 @@ pub const VM = struct {
         const sc_target_is_static = if (sc_target) |scf| scf.is_static else false;
         if (site) |st| {
             if (sc_target) |func| {
-                if (func.is_static) st.entry.* = .{ .key = st.key, .chunk_key = st.chunk_key, .class_ptr = @intFromPtr(class_name.ptr), .func = func, .full_name = full_name };
+                const public = if (found) |f| f.info.visibility == .public else true;
+                if (func.is_static and public) st.entry.* = .{ .key = st.key, .chunk_key = st.chunk_key, .class_ptr = @intFromPtr(class_name.ptr), .func = func, .full_name = full_name };
             }
+        }
+        // an instance method called statically runs on $this when $this is
+        // an instance of the class, and is an Error otherwise
+        const this_fits = if (this_val) |tv| tv == .object and self.isInstanceOf(tv.object.class_name, class_name) else false;
+        if (sc_target != null and !sc_target_is_static and !this_fits) {
+            self.dropN(arg_count);
+            const msg = try std.fmt.allocPrint(self.allocator, "Non-static method {s}() cannot be called statically", .{full_name});
+            defer self.allocator.free(msg);
+            if (try self.throwBuiltinException("Error", msg)) return;
+            return error.RuntimeError;
         }
         if (this_val) |tv| {
             if (tv == .object and !sc_target_is_static) {
@@ -12054,6 +12093,61 @@ pub const VM = struct {
         } else {
             try self.callStaticFunction(full_name, arg_count, effective_called);
         }
+    }
+
+    // a method's declaration as the class or an ancestor makes it, or an
+    // interface's (abstract) one
+    fn findMethodInfo(self: *VM, class_name: []const u8, method_name: []const u8) ?struct { info: ClassDef.MethodInfo, defining: []const u8 } {
+        var current: ?[]const u8 = class_name;
+        while (current) |cn| {
+            const entry = self.classes.getEntry(cn) orelse break;
+            if (entry.value_ptr.methods.get(method_name)) |info| return .{ .info = info, .defining = entry.key_ptr.* };
+            current = entry.value_ptr.parent;
+        }
+        return null;
+    }
+
+    // get_static_method_fallback: $this's __call when $this is an instance
+    // of the class, else the class's __callStatic. false when neither exists
+    fn staticCallFallback(self: *VM, class_name: []const u8, method_name: []const u8, arg_count: u32, effective_called: []const u8) RuntimeError!bool {
+        const ac: usize = arg_count;
+        const this_val = self.currentThis();
+        if (this_val) |tv| if (tv == .object and self.hasMethod(class_name, "__call") and self.isInstanceOf(tv.object.class_name, class_name)) {
+            var args_arr = try self.allocArray();
+            for (0..ac) |i| try args_arr.append(self.allocator, self.stack[self.sp - ac + i]);
+            self.dropN(ac);
+            const result = try self.callMethod(tv.object, "__call", &.{ .{ .string = Value.String.borrowed(method_name) }, .{ .array = args_arr } });
+            self.push(result);
+            return true;
+        };
+        if (!self.hasMethod(class_name, "__callStatic")) return false;
+        const cs_name = try self.resolveMethod(class_name, "__callStatic");
+        if (self.findMethodInfo(class_name, "__callStatic")) |f| if (f.info.is_abstract) {
+            self.dropN(ac);
+            const msg = try std.fmt.allocPrint(self.allocator, "Cannot call abstract method {s}::{s}()", .{ f.defining, method_name });
+            defer self.allocator.free(msg);
+            if (try self.throwBuiltinException("Error", msg)) return true;
+            return error.RuntimeError;
+        };
+        var args_arr = try self.allocArray();
+        for (0..ac) |i| try args_arr.append(self.allocator, self.stack[self.sp - ac + i]);
+        self.dropN(ac);
+        self.push(.{ .string = Value.String.borrowed(method_name) });
+        self.push(.{ .array = args_arr });
+        try self.callStaticFunction(cs_name, 2, effective_called);
+        return true;
+    }
+
+    // $this in the running frame, a local slot or the frame's vars
+    fn currentThis(self: *VM) ?Value {
+        const f = self.currentFrame();
+        if (f.vars.get("$this")) |v| return v;
+        if (f.func) |fn_info| if (fn_info.locals_only) {
+            for (fn_info.slot_names, 0..) |sn, si| {
+                if (std.mem.eql(u8, sn, "$this") and si < f.locals.len and f.locals[si] == .object) return f.locals[si];
+            }
+        };
+        return null;
     }
 
     // the class a `$class::method()` call looks the method up in, and the
@@ -20544,6 +20638,20 @@ pub const VM = struct {
             current = cls.parent;
         }
         return false;
+    }
+
+    // zend_get_parent_private_method: when the executing scope declares a
+    // private method of that name and the object is an instance of it, a
+    // call through the object runs the scope's method, not the subclass's.
+    // the method's registered "Class::method", or null
+    fn scopePrivateMethod(self: *VM, class_name: []const u8, method_name: []const u8, found_in: []const u8) ?[]const u8 {
+        const scope = self.currentDefiningClass() orelse return null;
+        if (std.ascii.eqlIgnoreCase(scope, found_in)) return null;
+        const entry = self.classes.getEntry(scope) orelse return null;
+        const info = entry.value_ptr.methods.get(method_name) orelse return null;
+        if (info.visibility != .private) return null;
+        if (!self.isInstanceOf(class_name, scope)) return null;
+        return self.resolveMethod(entry.key_ptr.*, method_name) catch null;
     }
 
     pub fn findMethodVisibility(self: *VM, class_name: []const u8, method_name: []const u8) VisResult {
