@@ -17823,7 +17823,7 @@ pub const VM = struct {
         try self.indexFunctionByChunk(name, &func.chunk);
         const obj = try self.allocObject(.{
             .class_name = "Closure",
-            .native = .{ .kind = .closure, .ptr = @intFromPtr(name.ptr), .aux = name.len },
+            .native = .{ .kind = .closure, .ptr = @intFromPtr(name.ptr), .aux = name.len, .extra = @intFromPtr(func) },
         });
         obj.refcount = 1;
         try self.capture_index.put(self.allocator, name, .{
@@ -19717,8 +19717,8 @@ pub const VM = struct {
 
     inline fn valueIdentity(value: Value) ?usize {
         return switch (value) {
-            // a closure by its instance: its name keys one function
-            .object => |o| if (o.native.kind == .closure) o.native.ptr else @intFromPtr(o.class_name.ptr),
+            // a closure by its function (set when made), else its instance
+            .object => |o| if (o.native.kind != .closure) @intFromPtr(o.class_name.ptr) else if (o.native.extra != 0) o.native.extra else o.native.ptr,
             .string => |s| @intFromPtr(s.bytes().ptr),
             .array => null,
             else => 0,
