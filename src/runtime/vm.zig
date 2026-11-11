@@ -812,6 +812,8 @@ pub const VM = struct {
     // where the caller of a function returning by reference resumes when
     // that function returned no variable (php still hands back a reference)
     return_ref_value_at: ?struct { frame: usize, ip: usize } = null,
+    // the destructors php's request shutdown runs, with no script running
+    shutdown_destructors: bool = false,
     captures: std.ArrayListUnmanaged(CaptureEntry) = .empty,
     capture_index: std.StringHashMapUnmanaged(CaptureRange) = .{},
     interned_names: std.StringHashMapUnmanaged(void) = .{},
@@ -3705,6 +3707,8 @@ pub const VM = struct {
     // pass destroys none; then every object left gets its destructor in
     // handle order
     pub fn runShutdownDestructors(self: *VM) void {
+        self.shutdown_destructors = true;
+        defer self.shutdown_destructors = false;
         // what shutdown runs is called by the engine: no user frame calls it
         var engine = self.engineCall();
         self.native_call = &engine;
@@ -3763,6 +3767,7 @@ pub const VM = struct {
             if (self.pendingExceptionIs(obj)) continue;
             obj.destructed = true;
             if (obj.ownsDestructor() and !obj.destructor_called and self.hasMethod(obj.class_name, "__destruct")) {
+                if (self.destructorRefused(obj) catch true) continue;
                 _ = self.callMethod(obj, "__destruct", &.{}) catch {
                     // php's uncaught exception ends the destructors: the
                     // objects left are freed without theirs
@@ -3778,6 +3783,31 @@ pub const VM = struct {
         }
         self.drainPendingDestruct();
         self.drain_raised = false;
+    }
+
+    // zend_objects_destroy_object: a destructor the releasing scope can't
+    // call isn't run. during the script that is an Error; once it ended, a
+    // warning. true when it is refused
+    fn destructorRefused(self: *VM, obj: *PhpObject) RuntimeError!bool {
+        const found = self.findMethodInfo(obj.class_name, "__destruct") orelse return false;
+        const vis = found.info.visibility;
+        if (vis == .public) return false;
+        if (self.shutdown_destructors) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Call to {s} {s}::__destruct() from global scope during shutdown ignored", .{ @tagName(vis), obj.class_name });
+            defer self.allocator.free(msg);
+            try self.raiseErrorAt(E_WARNING, msg, .{ .file = "Unknown", .line = 0 });
+            return true;
+        }
+        const scope = self.currentDefiningClass();
+        const allowed = if (vis == .private)
+            (if (scope) |sc| std.ascii.eqlIgnoreCase(sc, obj.class_name) else false)
+        else
+            self.checkVisibility(found.defining, .protected) or self.protectedRootVisible(found.defining, "__destruct", .protected);
+        if (allowed) return false;
+        const msg = try std.fmt.allocPrint(self.allocator, "Call to {s} {s}::__destruct() from {s}{s}", .{ @tagName(vis), obj.class_name, if (scope != null) "scope " else "global scope", scope orelse "" });
+        defer self.allocator.free(msg);
+        try self.setPendingException("Error", msg);
+        return true;
     }
 
     // a generator's or fiber's dtor at shutdown; an exception it throws
@@ -8207,6 +8237,13 @@ pub const VM = struct {
                             if (try self.throwUncloneable(src.class_name)) continue;
                             return error.RuntimeError;
                         }
+                        // ZEND_CLONE: a __clone the scope can't call refuses the clone
+                        if (self.findMethodInfo(src.class_name, "__clone")) |f| if (f.info.visibility != .public and !self.checkVisibility(f.defining, f.info.visibility) and !self.protectedRootVisible(f.defining, "__clone", f.info.visibility)) {
+                            const msg = try std.fmt.allocPrint(self.allocator, "Call to {s} method {s}::__clone(){s}", .{ @tagName(f.info.visibility), f.defining, self.visScopeSuffix() });
+                            defer self.allocator.free(msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        };
                         const copy = try self.allocObject(.{ .class_name = src.class_name });
                         if (src.slots) |src_slots| {
                             const new_slots = try self.allocator.alloc(Value, src_slots.len);
@@ -26071,7 +26108,8 @@ pub const VM = struct {
             // an exception in flight waits while the destructor runs, and
             // becomes the previous of one the destructor throws
             const in_flight = self.takePending();
-            _ = self.callMethod(obj, "__destruct", &.{}) catch {};
+            const refused = self.destructorRefused(obj) catch true;
+            if (!refused) _ = self.callMethod(obj, "__destruct", &.{}) catch {};
             self.settleDrainException(in_flight);
         }
         // a destructor that kept the object alive (stored $this, or a
