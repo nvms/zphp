@@ -8,6 +8,7 @@ const php_version = @import("../php_version.zig");
 const class_names = @import("class_names.zig");
 const includes = @import("includes.zig");
 const open_basedir = @import("../stdlib/open_basedir.zig");
+const output_control = @import("../stdlib/output_control.zig");
 const php_types = @import("../pipeline/php_types.zig");
 const formatted_print = @import("../stdlib/formatted_print.zig");
 pub const stack_limit = @import("stack_limit.zig");
@@ -96,11 +97,19 @@ pub const PharCacheEntry = struct {
     parsed: @import("../stdlib/phar.zig").Phar,
 };
 
+// an output buffering level (php's php_output_handler); see output_control.zig
 pub const OutputBufferLevel = struct {
     start: usize,
     callback: ?Value = null,
-    started: bool = false,
-    disabled: bool = false,
+    // the handler's name as ob_list_handlers shows it, owned unless it is
+    // the default handler's
+    name: []const u8 = "",
+    flags: u32 = 0,
+    chunk_size: usize = 0,
+    buffer_size: usize = 0,
+    id: u64 = 0,
+    // zlib's ob_gzhandler, an internal handler
+    gzip: bool = false,
 };
 
 pub const ErrorHandlerEntry = struct { handler: Value, mask: i64 };
@@ -946,6 +955,13 @@ pub const VM = struct {
     prev_error_handler: ?Value = null,
     error_reporting_level: i64 = 30719,
     ob_stack: std.ArrayListUnmanaged(OutputBufferLevel) = .empty,
+    // the level whose handler is running, output buffering refused meanwhile
+    ob_running: ?usize = null,
+    // set once a handler misused output buffering: no buffer starts again
+    ob_deactivated: bool = false,
+    // some level has a chunk size, so an echo checks whether it filled
+    ob_chunk_watch: bool = false,
+    ob_next_id: u64 = 0,
     request_vars: std.StringHashMapUnmanaged(Value) = .{},
     profile_calls: std.StringHashMapUnmanaged(u64) = .{},
     // ZPHP_DBG_PROFILE env check cached at init. previously each native and
@@ -3098,6 +3114,7 @@ pub const VM = struct {
         if (platform.getenv("ZPHP_HEAP_STATS") != null) self.printHeapStats();
         self.releaseFrames();
         self.releaseCallbackRegistries();
+        output_control.releaseAll(self);
         self.freeHeapItems(true);
         self.gc_zero_sites.deinit(self.allocator);
         self.builtin_classes.deinit(self.allocator);
@@ -3323,6 +3340,8 @@ pub const VM = struct {
         self.installHooks();
         self.releaseFrames();
         self.releaseCallbackRegistries();
+        output_control.releaseAll(self);
+        self.ob_deactivated = false;
         // reap before freeHeapItems frees the proc objects (the map keys)
         self.reapProcChildren();
         extension.endRequest(self);
@@ -5353,6 +5372,7 @@ pub const VM = struct {
                         try v.format(&self.output, self.allocator);
                     }
                     if (self.ob_stack.items.len == 0) self.headers_sent = true;
+                    if (self.ob_chunk_watch) output_control.checkChunks(self) catch if (try self.resumeRaised()) continue;
                 },
                 .halt => return,
                 .statement_end => {
@@ -14138,6 +14158,16 @@ pub const VM = struct {
     // the stream. in serve the buffer is the response body and stays put
     pub fn flushOutputToStdout(self: *VM) void {
         if (self.serve_mode or self.output.items.len == 0) return;
+        // what output buffering holds stays in its buffers
+        if (self.ob_stack.items.len > 0) {
+            const sent = self.ob_stack.items[0].start;
+            if (sent == 0) return;
+            platform.writeStdout(self.output.items[0..sent]);
+            std.mem.copyForwards(u8, self.output.items, self.output.items[sent..]);
+            self.output.shrinkRetainingCapacity(self.output.items.len - sent);
+            for (self.ob_stack.items) |*level| level.start -= sent;
+            return;
+        }
         platform.writeStdout(self.output.items);
         self.output.clearRetainingCapacity();
     }
@@ -24235,10 +24265,6 @@ pub const VM = struct {
     }
 
     pub fn releaseCallbackRegistries(self: *VM) void {
-        for (self.ob_stack.items) |*level| {
-            if (level.callback) |cb| self.releaseValue(cb);
-            level.callback = null;
-        }
         for (self.shutdown_callbacks.items) |cb| {
             self.releaseValue(cb.callable);
             for (cb.args) |v| self.releaseValue(v);

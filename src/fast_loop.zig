@@ -766,6 +766,12 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     return;
                 },
                 .echo => {
+                    // a buffer with a chunk size runs its handler as it fills
+                    if (self.ob_chunk_watch) {
+                        frame.ip = ip - 1;
+                        self.sp = sp;
+                        return;
+                    }
                     const echo_val = stack[sp - 1];
                     sp -= 1;
                     if (echo_val == .string) {

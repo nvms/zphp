@@ -1,3 +1,4 @@
+const output_control = @import("stdlib/output_control.zig");
 const std = @import("std");
 const platform = @import("platform.zig");
 const parser = @import("pipeline/parser.zig");
@@ -730,12 +731,20 @@ fn runShutdown(allocator: std.mem.Allocator, vm: *VM) !bool {
         }
     };
     vm.discardPending();
-    if (vm.unclean_shutdown) return failed;
-    vm.runShutdownDestructors();
-    if (vm.pending_exception != null) {
-        try reportRuntimeError(allocator, vm);
-        failed = true;
+    if (!vm.unclean_shutdown) {
+        vm.runShutdownDestructors();
+        if (vm.pending_exception != null) {
+            try reportRuntimeError(allocator, vm);
+            failed = true;
+        }
     }
+    // then every output buffer is flushed through its handler
+    output_control.endAll(vm) catch {
+        if (vm.pending_exception != null) {
+            try reportRuntimeError(allocator, vm);
+            failed = true;
+        }
+    };
     return failed;
 }
 

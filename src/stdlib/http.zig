@@ -4,24 +4,10 @@ const platform = @import("../platform.zig");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
-const OutputBufferLevel = @import("../runtime/vm.zig").OutputBufferLevel;
 const VM = @import("../runtime/vm.zig").VM;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 pub const entries = .{
-    .{ "ob_start", native_ob_start },
-    .{ "ob_get_clean", native_ob_get_clean },
-    .{ "ob_end_clean", native_ob_end_clean },
-    .{ "ob_get_contents", native_ob_get_contents },
-    .{ "ob_get_level", native_ob_get_level },
-    .{ "ob_end_flush", native_ob_end_flush },
-    .{ "ob_get_flush", native_ob_get_flush },
-    .{ "ob_flush", native_ob_flush },
-    .{ "ob_clean", native_ob_clean },
-    .{ "ob_get_length", native_ob_get_length },
-    .{ "ob_implicit_flush", native_ob_implicit_flush },
-    .{ "ob_list_handlers", native_ob_list_handlers },
-    .{ "ob_get_status", native_ob_get_status },
     .{ "flush", native_flush },
     .{ "header", native_header },
     .{ "http_response_code", native_http_response_code },
@@ -33,179 +19,9 @@ pub const entries = .{
     .{ "http_clear_last_response_headers", native_http_clear_last_response_headers },
 };
 
-fn isCallable(v: Value) bool {
-    return switch (v) {
-        .object => true,
-        .string => |s| s.bytes().len > 0,
-        .array => |a| a.entries.items.len == 2,
-        else => false,
-    };
-}
-
-fn native_ob_start(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    var level: OutputBufferLevel = .{ .start = ctx.vm.output.items.len };
-    if (args.len >= 1 and args[0] != .null) {
-        // verify the handler resolves to a real callable; PHP returns false
-        // and does not start a buffer when the handler can't be found
-        if (args[0] == .string) {
-            const name = args[0].string.bytes();
-            if (!ctx.vm.functionExists(name)) return NativeResult.scalar(.{ .bool = false });
-        } else if (!isCallable(args[0])) {
-            return NativeResult.scalar(.{ .bool = false });
-        }
-        level.callback = args[0];
-    }
-    try ctx.vm.ob_stack.append(ctx.allocator, level);
-    if (level.callback) |cb| @import("../runtime/vm.zig").VM.retainValue(cb);
-    return NativeResult.scalar(.{ .bool = true });
-}
-
-// Keep the handler on the stack during invocation (ob_get_level/contents can
-// observe it). Counted input allows callbacks to retain their argument.
-fn processBuffer(ctx: *NativeContext, clean: bool, final: bool, get: bool) RuntimeError!NativeResult {
-    const len = ctx.vm.ob_stack.items.len;
-    if (len == 0) return NativeResult.scalar(.{ .bool = false });
-    const index = len - 1;
-    var level = ctx.vm.ob_stack.items[index];
-    if (level.disabled) level.start = ctx.vm.output.items.len;
-    const raw_owned = try Value.String.create(ctx.allocator, ctx.vm.output.items[level.start..]);
-    defer raw_owned.release();
-    const raw = raw_owned.bytes();
-    var transformed: []const u8 = raw;
-    const discard = clean and !level.disabled;
-    if (if (level.disabled) null else level.callback) |cb| {
-        const phase: i64 = (if (level.started) @as(i64, 0) else 1) |
-            (if (clean) @as(i64, 2) else 0) |
-            (if (final) @as(i64, 8) else if (!clean) @as(i64, 4) else 0);
-        ctx.vm.ob_stack.items[index].started = true;
-        const result = ctx.invokeCallable(cb, &.{
-            .{ .string = raw_owned }, .{ .int = phase },
-        }) catch |err| {
-            // PHP disables a throwing handler. Clean discards input; flush
-            // forwards it unchanged. Final operations still remove the level.
-            ctx.vm.ob_stack.items[index].callback = null;
-            ctx.vm.ob_stack.items[index].disabled = true;
-            ctx.vm.releaseValue(cb);
-            ctx.vm.output.shrinkRetainingCapacity(level.start);
-            if (!clean) try ctx.vm.output.appendSlice(ctx.allocator, raw);
-            if (final) {
-                _ = ctx.vm.ob_stack.pop();
-            } else {
-                ctx.vm.ob_stack.items[index].start = ctx.vm.output.items.len;
-            }
-            return err;
-        };
-        // A false return disables future handler processing, including clean.
-        if (result == .bool and !result.bool) {
-            ctx.vm.ob_stack.items[index].disabled = true;
-        } else if (result == .bool or result == .null) {
-            transformed = "";
-        } else {
-            transformed = try @import("strings.zig").coerceToString(ctx, result);
-        }
-    }
-    // Output produced inside a handler is not forwarded.
-    ctx.vm.output.shrinkRetainingCapacity(level.start);
-    if (!discard) try ctx.vm.output.appendSlice(ctx.allocator, transformed);
-    if (final) {
-        _ = ctx.vm.ob_stack.pop();
-        if (level.callback) |cb| ctx.vm.releaseValue(cb);
-    } else {
-        ctx.vm.ob_stack.items[index].start = ctx.vm.output.items.len;
-    }
-    return if (get) NativeResult.shareString(raw_owned) else NativeResult.scalar(.{ .bool = true });
-}
-
-fn native_ob_get_clean(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return processBuffer(ctx, true, true, true);
-}
-
-fn native_ob_end_clean(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return processBuffer(ctx, true, true, false);
-}
-
-fn native_ob_get_contents(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    if (ctx.vm.ob_stack.items.len == 0) return NativeResult.scalar(.{ .bool = false });
-    const level = ctx.vm.ob_stack.getLast();
-    if (level.disabled) return NativeResult.literal("");
-    return NativeResult.copyString(ctx.allocator, ctx.vm.output.items[level.start..]);
-}
-
-fn native_ob_get_level(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return NativeResult.scalar(.{ .int = @intCast(ctx.vm.ob_stack.items.len) });
-}
-
-fn native_ob_end_flush(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return processBuffer(ctx, false, true, false);
-}
-
-fn native_ob_get_flush(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return processBuffer(ctx, false, true, true);
-}
-
-fn native_ob_flush(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return processBuffer(ctx, false, false, false);
-}
-
-fn native_ob_clean(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return processBuffer(ctx, true, false, false);
-}
-
-fn native_ob_get_length(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    if (ctx.vm.ob_stack.items.len == 0) return NativeResult.scalar(.{ .bool = false });
-    const level = ctx.vm.ob_stack.getLast();
-    if (level.disabled) return NativeResult.scalar(.{ .int = 0 });
-    return NativeResult.scalar(.{ .int = @intCast(ctx.vm.output.items.len - level.start) });
-}
-
-fn native_ob_implicit_flush(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return NativeResult.scalar(.null);
-}
-
 fn native_flush(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // CLI: nothing to flush at HTTP level
     return NativeResult.scalar(.null);
-}
-
-fn native_ob_get_status(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const full_status = args.len >= 1 and args[0].isTruthy();
-    const stack_len = ctx.vm.ob_stack.items.len;
-    if (stack_len == 0) {
-        return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-    }
-    if (!full_status) {
-        const arr = try ctx.createArray();
-        try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("name") }, .{ .string = Value.String.borrowed("default output handler") });
-        try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("type") }, .{ .int = 0 });
-        try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("flags") }, .{ .int = 112 });
-        try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("level") }, .{ .int = @intCast(stack_len - 1) });
-        try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("chunk_size") }, .{ .int = 0 });
-        try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("buffer_size") }, .{ .int = 16384 });
-        try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("buffer_used") }, .{ .int = 0 });
-        return NativeResult.borrowed(.{ .array = arr });
-    }
-    const result = try ctx.createArray();
-    var i: usize = 0;
-    while (i < stack_len) : (i += 1) {
-        const sub = try ctx.createArray();
-        try sub.set(ctx.allocator, .{ .string = Value.String.borrowed("name") }, .{ .string = Value.String.borrowed("default output handler") });
-        try sub.set(ctx.allocator, .{ .string = Value.String.borrowed("type") }, .{ .int = 0 });
-        try sub.set(ctx.allocator, .{ .string = Value.String.borrowed("flags") }, .{ .int = 112 });
-        try sub.set(ctx.allocator, .{ .string = Value.String.borrowed("level") }, .{ .int = @intCast(i) });
-        try sub.set(ctx.allocator, .{ .string = Value.String.borrowed("chunk_size") }, .{ .int = 0 });
-        try sub.set(ctx.allocator, .{ .string = Value.String.borrowed("buffer_size") }, .{ .int = 16384 });
-        try sub.set(ctx.allocator, .{ .string = Value.String.borrowed("buffer_used") }, .{ .int = 0 });
-        try result.append(ctx.allocator, .{ .array = sub });
-    }
-    return NativeResult.borrowed(.{ .array = result });
-}
-
-fn native_ob_list_handlers(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const arr = try ctx.createArray();
-    for (0..ctx.vm.ob_stack.items.len) |_| {
-        try arr.append(ctx.allocator, .{ .string = Value.String.borrowed("default output handler") });
-    }
-    return NativeResult.borrowed(.{ .array = arr });
 }
 
 fn native_header(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

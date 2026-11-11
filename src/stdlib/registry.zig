@@ -26,6 +26,7 @@ pub fn register(map: *@import("../runtime/vm.zig").NativeTable, allocator: std.m
         @import("json.zig").entries,
         @import("filesystem.zig").entries,
         @import("http.zig").entries,
+        @import("output_control.zig").entries,
         @import("system.zig").entries,
         system_posix_entries,
         @import("datetime.zig").entries,
