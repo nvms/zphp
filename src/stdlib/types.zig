@@ -1439,6 +1439,7 @@ fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "error_reporting")) return "30719";
     if (std.mem.eql(u8, name, "zend.assertions")) return "1";
     if (std.mem.eql(u8, name, "zend.enable_gc")) return "1";
+    if (std.mem.eql(u8, name, "fiber.stack_size")) return "";
     if (std.mem.eql(u8, name, "assert.active")) return "1";
     if (std.mem.eql(u8, name, "assert.exception")) return "0";
     if (std.mem.eql(u8, name, "assert.bail")) return "0";
@@ -1465,6 +1466,11 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     try args[1].format(&buf, ctx.allocator);
+    // php's OnUpdateFiberStackSize
+    if (std.mem.eql(u8, name, "fiber.stack_size") and @import("../runtime/memory.zig").parseQuantity(buf.items).value < 0) {
+        try ctx.vm.emitWarning("fiber.stack_size must be a positive number");
+        return NativeResult.scalar(Value{ .bool = false });
+    }
     if (std.mem.eql(u8, name, "memory_limit")) {
         const requested = @import("../runtime/memory.zig").parseQuantity(buf.items).value;
         if (ctx.vm.memoryLimitCap(requested)) |cap| {

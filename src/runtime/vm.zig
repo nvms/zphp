@@ -23990,6 +23990,18 @@ pub const VM = struct {
         switch (method) {
             .start => {
                 if (fiber.state != .created) return self.fiberError("Cannot start a fiber that has already been started");
+                // php allocates the fiber's stack here: fiber.stack_size
+                // must leave a page and its guard page
+                if (self.ini_settings.get("fiber.stack_size")) |configured| {
+                    const minimum = 2 * std.heap.pageSize();
+                    const size = @import("memory.zig").parseQuantity(configured).value;
+                    if (size >= 0 and size < minimum) {
+                        const msg = try std.fmt.allocPrint(self.allocator, "Fiber stack size is too small, it needs to be at least {d} bytes", .{minimum});
+                        defer self.allocator.free(msg);
+                        try self.setPendingException("Exception", msg);
+                        return error.RuntimeError;
+                    }
+                }
                 return self.startFiber(fiber, args);
             },
             .@"resume", .throw => {
