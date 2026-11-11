@@ -368,9 +368,13 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
             const PropEntry = struct { key: object_properties.Key, value: Value };
             var props: std.ArrayListUnmanaged(PropEntry) = .empty;
             defer props.deinit(a);
+            // what get hooks returned, which props borrow
+            var hook_values: ?*value_mod.PhpArray = null;
+            defer if (vm) |v| object_properties.releaseHolder(v, hook_values);
             if (vm) |v| {
                 var listing = try object_properties.list(v, obj, .json, a);
                 defer listing.deinit(a);
+                hook_values = listing.takeHolder();
                 for (listing.items.items) |prop| {
                     if (prop.visibility != .public) continue;
                     try props.append(a, .{ .key = prop.key, .value = prop.value });

@@ -515,6 +515,7 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
             const item_indent = (depth + 1) * 2 + 1;
             var listing = try object_properties.list(ctx.vm, obj, .var_export, a);
             defer listing.deinit(a);
+            defer object_properties.releaseHolder(ctx.vm, listing.takeHolder());
             for (listing.items.items) |prop| {
                 for (0..item_indent) |_| try out.append(a, ' ');
                 switch (prop.key) {

@@ -6673,6 +6673,12 @@ pub const VM = struct {
                             var listing: object_properties.Listing = .{};
                             defer listing.deinit(self.allocator);
                             try object_properties.appendOwn(self, obj, .array_cast, &listing, self.allocator);
+                            // a hooked property is read through its get hook
+                            object_properties.applyHooks(self, obj, &listing, self.allocator, .{ .scope = scope_class }) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            defer object_properties.releaseHolder(self, listing.takeHolder());
                             for (listing.items.items) |prop| {
                                 if (!includeProp(self, scope_class, prop.visibility, prop.declaring)) continue;
                                 if (prop.declared) {
@@ -20812,6 +20818,14 @@ pub const VM = struct {
         return null;
     }
 
+    // a get hook the class chain declares for the property
+    pub fn hasRealGetHook(self: *VM, class_name: []const u8, prop_name: []const u8) bool {
+        const cls = self.classes.getPtr(class_name) orelse return false;
+        var buf: [256]u8 = undefined;
+        const getter = std.fmt.bufPrint(&buf, "{s}$hook_get", .{prop_name}) catch return false;
+        return self.resolvePropertyHook(cls, getter) != null;
+    }
+
     // a virtual property with a set hook and no get hook
     fn isWriteOnlyVirtual(self: *VM, class_name: []const u8, prop_name: []const u8) bool {
         if (!self.propertyIsVirtual(class_name, prop_name)) return false;
@@ -21077,6 +21091,9 @@ pub const VM = struct {
                     }
                 }
             }
+            // a virtual property has no storage, unless a parent declares it
+            // with storage (php keeps the parent's slot)
+            if (!found and prop.is_virtual) continue;
             if (!found) {
                 try all_names.append(self.allocator, prop.name);
                 try all_defaults.append(self.allocator, slotDefault(def, prop));

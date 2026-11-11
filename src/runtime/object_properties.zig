@@ -48,11 +48,105 @@ pub const Property = struct {
 
 pub const Listing = struct {
     items: std.ArrayListUnmanaged(Property) = .empty,
+    // the values get hooks returned, which the listing's items borrow:
+    // release it (releaseHolder) once they are no longer read
+    holder: ?*PhpArray = null,
 
     pub fn deinit(self: *Listing, allocator: std.mem.Allocator) void {
         self.items.deinit(allocator);
     }
+
+    pub fn takeHolder(self: *Listing) ?*PhpArray {
+        defer self.holder = null;
+        return self.holder;
+    }
 };
+
+pub fn releaseHolder(vm: *VM, holder: ?*PhpArray) void {
+    if (holder) |h| vm.releaseUnheldArray(h);
+}
+
+fn classHasHooks(vm: *VM, class_name: []const u8) bool {
+    if (!vm.any_prop_hooks) return false;
+    var current: ?[]const u8 = class_name;
+    while (current) |cn| {
+        const def = vm.classes.get(cn) orelse return false;
+        if (def.has_prop_hooks) return true;
+        current = def.parent;
+    }
+    return false;
+}
+
+// php's zend_hooked_object_build_properties, read as json_encode,
+// var_export, get_object_vars and foreach read it: declared properties in
+// declaration order from the topmost class down, a hooked one's value from
+// its get hook (a virtual one without a get hook left out), then dynamic
+// properties. access: the scope whose access is checked, when it is
+pub fn applyHooks(vm: *VM, obj: *PhpObject, listing: *Listing, allocator: std.mem.Allocator, access: ?struct { scope: ?[]const u8 }) RuntimeError!void {
+    if (!classHasHooks(vm, obj.class_name)) return;
+    const Entry = struct { name: []const u8, visibility: ClassDef.Visibility, declaring: []const u8 };
+    var order: std.ArrayListUnmanaged(Entry) = .empty;
+    defer order.deinit(allocator);
+    var chain: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer chain.deinit(allocator);
+    var current: ?[]const u8 = obj.class_name;
+    while (current) |cn| {
+        const def = vm.classes.get(cn) orelse break;
+        try chain.append(allocator, def.name);
+        current = def.parent;
+    }
+    var ci = chain.items.len;
+    while (ci > 0) {
+        ci -= 1;
+        const def = vm.classes.get(chain.items[ci]) orelse continue;
+        props: for (def.properties.items) |prop| {
+            if (prop.visibility != .private) {
+                for (order.items) |*e| if (e.visibility != .private and std.mem.eql(u8, e.name, prop.name)) {
+                    e.visibility = prop.visibility;
+                    e.declaring = def.name;
+                    continue :props;
+                };
+            }
+            try order.append(allocator, .{ .name = prop.name, .visibility = prop.visibility, .declaring = def.name });
+        }
+    }
+
+    var out: std.ArrayListUnmanaged(Property) = .empty;
+    errdefer out.deinit(allocator);
+    const holder = listing.holder orelse try vm.allocArray();
+    listing.holder = holder;
+    for (order.items) |e| {
+        if (access) |a| if (!accessible(vm, a.scope, e.visibility, e.declaring)) continue;
+        const existing: ?Property = for (listing.items.items) |p| {
+            if (!p.declared or p.key != .name or !std.mem.eql(u8, p.key.name, e.name)) continue;
+            if (e.visibility == .private and !std.mem.eql(u8, p.declaring, e.declaring)) continue;
+            break p;
+        } else null;
+        if (vm.hasPropHook(obj.class_name, e.name, .get) and !vm.inPropHook(obj, e.name)) {
+            // a virtual property with only a set hook has nothing to read
+            if (vm.propertyIsVirtual(obj.class_name, e.name) and !vm.hasRealGetHook(obj.class_name, e.name)) continue;
+            if (!vm.hasRealGetHook(obj.class_name, e.name)) {
+                if (existing) |p| try out.append(allocator, p);
+                continue;
+            }
+            const value = (try vm.callPropHook(obj, e.name, .get, .null)) orelse (if (existing) |p| p.value else continue);
+            try holder.append(vm.allocator, value);
+            try out.append(allocator, .{ .key = .{ .name = e.name }, .value = value, .visibility = e.visibility, .declaring = e.declaring, .declared = true });
+            continue;
+        }
+        if (existing) |p| try out.append(allocator, p);
+    }
+    for (listing.items.items) |p| if (!p.declared) try out.append(allocator, p);
+    listing.items.deinit(allocator);
+    listing.items = out;
+}
+
+fn accessible(vm: *VM, scope: ?[]const u8, visibility: ClassDef.Visibility, declaring: []const u8) bool {
+    if (visibility == .public) return true;
+    const sc = scope orelse return false;
+    if (visibility == .private) return std.mem.eql(u8, sc, declaring);
+    return vm.isInstanceOf(sc, declaring) or vm.isInstanceOf(declaring, sc);
+}
 
 // a built-in class's own table for a purpose, or null for its plain
 // properties. keys of private and protected entries are mangled as (array)
@@ -103,6 +197,11 @@ pub fn list(vm: *VM, obj: *PhpObject, purpose: Purpose, allocator: std.mem.Alloc
         return listing;
     }
     try appendOwn(vm, obj, purpose, &listing, allocator);
+    switch (purpose) {
+        .json => try applyHooks(vm, obj, &listing, allocator, .{ .scope = null }),
+        .var_export => try applyHooks(vm, obj, &listing, allocator, null),
+        else => {},
+    }
     return listing;
 }
 

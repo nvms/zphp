@@ -951,6 +951,8 @@ fn native_get_object_vars(ctx: *NativeContext, args: []const Value) RuntimeError
     var listing: object_properties.Listing = .{};
     defer listing.deinit(ctx.allocator);
     try object_properties.appendOwn(ctx.vm, obj, .array_cast, &listing, ctx.allocator);
+    try object_properties.applyHooks(ctx.vm, obj, &listing, ctx.allocator, .{ .scope = caller_class });
+    defer object_properties.releaseHolder(ctx.vm, listing.takeHolder());
     for (listing.items.items) |prop| {
         if (prop.visibility == .private and (caller_class == null or !std.mem.eql(u8, caller_class.?, prop.declaring))) continue;
         if (prop.visibility == .protected and !can_see_protected) continue;
@@ -1080,6 +1082,8 @@ fn native_get_class_vars(ctx: *NativeContext, args: []const Value) RuntimeError!
             .private => caller != null and std.mem.eql(u8, caller.?, class_name),
         };
         if (!visible) continue;
+        // a virtual property has no default to list
+        if (prop.is_virtual and ctx.vm.propertyIsVirtual(class_name, prop.name)) continue;
         try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(prop.name) }, prop.default);
     }
     // PHP's get_class_vars also includes static properties
