@@ -23,6 +23,7 @@ pub const entries = .{
     .{ "strlen", strlen },
     .{ "intval", intval },
     .{ "floatval", floatval },
+    .{ "doubleval", floatval },
     .{ "strval", strval },
     .{ "gettype", gettype },
     .{ "get_debug_type", get_debug_type },

@@ -14,6 +14,12 @@ const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 pub const entries = .{
     .{ "getopt", native_getopt },
+    .{ "getservbyname", native_getservbyname },
+    .{ "getservbyport", native_getservbyport },
+    .{ "getprotobyname", native_getprotobyname },
+    .{ "getprotobynumber", native_getprotobynumber },
+    .{ "connection_status", native_connection_status },
+    .{ "connection_aborted", native_connection_status },
     .{ "sleep", native_sleep },
     .{ "usleep", native_usleep },
     .{ "time_nanosleep", native_time_nanosleep },
@@ -358,124 +364,299 @@ fn native_posix_strerror(ctx: *NativeContext, args: []const Value) RuntimeError!
     return try NativeResult.copyString(ctx.allocator, std.mem.span(s));
 }
 
-// getopt(short, long?, &rest_index?) — PHP-style CLI option parser.
-// short is a string like "ab:c::" (a = no arg, b: = required, c:: = optional);
-// long is a list of strings with the same suffix convention. options stop at
-// the first non-option arg or at "--". returns assoc array of seen options.
-// an option getopt found: its value, or false for one that takes none
-fn putOption(ctx: *NativeContext, out: *PhpArray, name: []const u8, value: ?[]const u8) !void {
-    const key = try Value.String.create(ctx.allocator, name);
-    defer key.release();
-    if (value) |bytes| return out.setCopiedString(ctx.allocator, .{ .string = key }, bytes);
-    try out.set(ctx.allocator, .{ .string = key }, .{ .bool = false });
+// the c library's services and protocols databases, as php's
+// ext/standard/basic_functions.c reads them
+const Servent = extern struct { s_name: ?[*:0]const u8, s_aliases: ?*anyopaque, s_port: c_int, s_proto: ?[*:0]const u8 };
+const Protoent = extern struct { p_name: ?[*:0]const u8, p_aliases: ?*anyopaque, p_proto: c_int };
+extern fn getservbyname(name: [*:0]const u8, proto: [*:0]const u8) ?*Servent;
+extern fn getservbyport(port: c_int, proto: [*:0]const u8) ?*Servent;
+extern fn getprotobyname(name: [*:0]const u8) ?*Protoent;
+extern fn getprotobynumber(proto: c_int) ?*Protoent;
+
+fn native_getservbyname(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = @import("string_ports.zig").Args.init(ctx, "getservbyname", args);
+    const service = try ctx.allocator.dupeSentinel(u8, try p.str(0, "service"), 0);
+    defer ctx.allocator.free(service);
+    const protocol = try ctx.allocator.dupeSentinel(u8, try p.str(1, "protocol"), 0);
+    defer ctx.allocator.free(protocol);
+    if (platform.is_windows) return NativeResult.scalar(.{ .bool = false });
+    const serv = getservbyname(service.ptr, protocol.ptr) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .int = std.mem.bigToNative(u16, @truncate(@as(c_uint, @bitCast(serv.s_port)))) });
 }
 
-fn native_getopt(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const short: []const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else "";
-    const argv_val = ctx.vm.request_vars.get("$argv") orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-    if (argv_val != .array) return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-    const argv = argv_val.array;
-
-    var shorts: std.StringHashMapUnmanaged(u8) = .{};
-    defer shorts.deinit(ctx.allocator);
-    var i: usize = 0;
-    while (i < short.len) : (i += 1) {
-        const letter = short[i..][0..1];
-        var mode: u8 = 'n'; // none
-        if (i + 1 < short.len and short[i + 1] == ':') {
-            if (i + 2 < short.len and short[i + 2] == ':') {
-                mode = 'o'; // optional
-                i += 2;
-            } else {
-                mode = 'r'; // required
-                i += 1;
-            }
-        }
-        try shorts.put(ctx.allocator, letter, mode);
-    }
-
-    var longs: std.StringHashMapUnmanaged(u8) = .{};
-    defer longs.deinit(ctx.allocator);
-    if (args.len >= 2 and args[1] == .array) {
-        for (args[1].array.entries.items) |e| {
-            if (e.value != .string) continue;
-            var s = e.value.string.bytes();
-            var mode: u8 = 'n';
-            if (std.mem.endsWith(u8, s, "::")) {
-                mode = 'o';
-                s = s[0 .. s.len - 2];
-            } else if (std.mem.endsWith(u8, s, ":")) {
-                mode = 'r';
-                s = s[0 .. s.len - 1];
-            }
-            try longs.put(ctx.allocator, s, mode);
-        }
-    }
-
-    const out = try ctx.createArray();
-    var idx: usize = 1; // skip $argv[0] (script name)
-    while (idx < argv.entries.items.len) : (idx += 1) {
-        const v = argv.entries.items[idx].value;
-        if (v != .string) continue;
-        const arg = v.string.bytes();
-        if (std.mem.eql(u8, arg, "--")) {
-            idx += 1;
-            break;
-        }
-        if (arg.len < 2 or arg[0] != '-') break;
-        if (arg[1] == '-') {
-            // long
-            const eq_idx = std.mem.indexOfScalar(u8, arg[2..], '=');
-            const name = if (eq_idx) |e| arg[2 .. 2 + e] else arg[2..];
-            const inline_val: ?[]const u8 = if (eq_idx) |e| arg[2 + e + 1 ..] else null;
-            const mode = longs.get(name) orelse continue;
-            var stored: ?[]const u8 = null;
-            if (inline_val) |iv| {
-                stored = iv;
-            } else if (mode == 'r' and idx + 1 < argv.entries.items.len) {
-                idx += 1;
-                const nxt = argv.entries.items[idx].value;
-                if (nxt == .string) stored = nxt.string.bytes();
-            }
-            try putOption(ctx, out, name, stored);
-        } else {
-            // short cluster: -abc or -a value or -avalue
-            var j: usize = 1;
-            while (j < arg.len) : (j += 1) {
-                const ch = arg[j];
-                const key = &[_]u8{ch};
-                const mode = shorts.get(key) orelse continue;
-                var stored: ?[]const u8 = null;
-                if (mode == 'r' or mode == 'o') {
-                    if (j + 1 < arg.len) {
-                        stored = arg[j + 1 ..];
-                        j = arg.len;
-                    } else if (mode == 'r' and idx + 1 < argv.entries.items.len) {
-                        idx += 1;
-                        const nxt = argv.entries.items[idx].value;
-                        if (nxt == .string) stored = nxt.string.bytes();
-                    }
-                }
-                try putOption(ctx, out, key, stored);
-                if (j == arg.len) break;
-            }
-        }
-    }
-    if (args.len >= 3) ctx.setCallerVar(2, args.len, .{ .int = @intCast(idx) });
-    return NativeResult.borrowed(.{ .array = out });
+fn native_getservbyport(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = @import("string_ports.zig").Args.init(ctx, "getservbyport", args);
+    const port = try p.long(0, "port");
+    const protocol = try ctx.allocator.dupeSentinel(u8, try p.str(1, "protocol"), 0);
+    defer ctx.allocator.free(protocol);
+    if (platform.is_windows) return NativeResult.scalar(.{ .bool = false });
+    const net_port: u16 = std.mem.nativeToBig(u16, @truncate(@as(u64, @bitCast(port))));
+    const serv = getservbyport(@intCast(net_port), protocol.ptr) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.copyString(ctx.allocator, std.mem.span(serv.s_name orelse return NativeResult.scalar(.{ .bool = false })));
 }
 
-fn native_sleep(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .int = 0 });
-    const secs = Value.toInt(args[0]);
-    if (secs > 0) platform.sleep(@intCast(secs * 1_000_000_000));
+fn native_getprotobyname(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const name = try ctx.allocator.dupeSentinel(u8, try @import("string_ports.zig").Args.init(ctx, "getprotobyname", args).str(0, "protocol"), 0);
+    defer ctx.allocator.free(name);
+    if (platform.is_windows) return NativeResult.scalar(.{ .bool = false });
+    const ent = getprotobyname(name.ptr) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .int = ent.p_proto });
+}
+
+fn native_getprotobynumber(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const number = try @import("string_ports.zig").Args.init(ctx, "getprotobynumber", args).long(0, "protocol");
+    if (platform.is_windows) return NativeResult.scalar(.{ .bool = false });
+    const ent = getprotobynumber(@truncate(number)) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.copyString(ctx.allocator, std.mem.span(ent.p_name orelse return NativeResult.scalar(.{ .bool = false })));
+}
+
+// the cli never loses its connection: CONNECTION_NORMAL, and not aborted
+fn native_connection_status(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     return NativeResult.scalar(.{ .int = 0 });
 }
 
-fn native_usleep(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.null);
-    const usecs = Value.toInt(args[0]);
-    if (usecs > 0) platform.sleep(@intCast(usecs * 1_000));
+// php's opt_struct: a short option's character, or a long option's name
+// (opt_char 0); the list ends with opt_char '-'
+const GetoptOpt = struct {
+    opt_char: u8,
+    need_param: u8,
+    name: ?[]const u8,
+};
+
+const getopt_invalid: i32 = -2;
+const getopt_eof: i32 = -1;
+
+// main/getopt.c's php_getopt with its static state, which a getopt() call
+// starts afresh (prev_optarg differs each call)
+const Getopt = struct {
+    argv: []const []const u8,
+    opts: []const GetoptOpt,
+    optind: usize = 1,
+    optchr: usize = 0,
+    dash: bool = false,
+    optidx: isize = -1,
+    optarg: ?[]const u8 = null,
+
+    fn at(s: []const u8, i: usize) u8 {
+        return if (i < s.len) s[i] else 0;
+    }
+
+    fn next(g: *Getopt) i32 {
+        g.optidx = -1;
+        g.optarg = null;
+        const argc = g.argv.len;
+        if (g.optind >= argc) return getopt_eof;
+        var arg = g.argv[g.optind];
+        if (!g.dash) {
+            if (at(arg, 0) != '-') return getopt_eof;
+            if (at(arg, 1) == 0) return getopt_eof;
+        }
+        var arg_start: usize = undefined;
+        if (at(arg, 0) == '-' and at(arg, 1) == '-') {
+            // "--" ends the options unless a long option name follows
+            if (at(arg, 2) == 0) {
+                g.optind += 1;
+                return getopt_eof;
+            }
+            arg_start = 2;
+            var arg_end: usize = arg.len - 1;
+            if (std.mem.indexOfScalar(u8, arg[arg_start..][0 .. arg_end - arg_start], '=')) |pos| {
+                arg_end = pos;
+                arg_start += 1;
+            } else {
+                arg_end -= 1;
+            }
+            while (true) {
+                g.optidx += 1;
+                const o = g.opts[@intCast(g.optidx)];
+                if (o.opt_char == '-') {
+                    g.optind += 1;
+                    return getopt_invalid;
+                }
+                if (o.name) |name| {
+                    if (name.len == arg_end and std.mem.eql(u8, arg[2 .. 2 + arg_end], name)) break;
+                }
+            }
+            g.optchr = 0;
+            g.dash = false;
+            arg_start += g.opts[@intCast(g.optidx)].name.?.len;
+        } else {
+            if (!g.dash) {
+                g.dash = true;
+                g.optchr = 1;
+            }
+            if (at(arg, g.optchr) == ':') {
+                g.dash = false;
+                g.optind += 1;
+                return getopt_invalid;
+            }
+            arg_start = 1 + g.optchr;
+        }
+        if (g.optidx < 0) {
+            while (true) {
+                g.optidx += 1;
+                const o = g.opts[@intCast(g.optidx)];
+                if (o.opt_char == '-') {
+                    if (at(arg, g.optchr + 1) == 0) {
+                        g.dash = false;
+                        g.optind += 1;
+                    } else {
+                        g.optchr += 1;
+                    }
+                    return getopt_invalid;
+                }
+                if (at(arg, g.optchr) == o.opt_char) break;
+            }
+        }
+        const o = g.opts[@intCast(g.optidx)];
+        if (o.need_param != 0) {
+            g.dash = false;
+            if (at(arg, arg_start) == 0) {
+                g.optind += 1;
+                if (g.optind == argc) {
+                    if (o.need_param == 1) return getopt_invalid;
+                } else if (o.need_param == 1) {
+                    g.optarg = g.argv[g.optind];
+                    g.optind += 1;
+                }
+            } else if (arg[arg_start] == '=') {
+                g.optarg = arg[arg_start + 1 ..];
+                g.optind += 1;
+            } else {
+                g.optarg = arg[arg_start..];
+                g.optind += 1;
+            }
+            return o.opt_char;
+        }
+        // several short options in one argument
+        if (arg_start >= 2 and !(at(arg, 0) == '-' and at(arg, 1) == '-')) {
+            if (at(arg, g.optchr + 1) == 0) {
+                g.dash = false;
+                g.optind += 1;
+            } else {
+                g.optchr += 1;
+            }
+        } else {
+            g.optind += 1;
+        }
+        return o.opt_char;
+    }
+};
+
+fn isOptChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c);
+}
+
+// ext/standard's getopt(): the options php_getopt finds in $_SERVER['argv']
+// (or a global $argv), each option's values gathered into an array when it
+// repeats
+fn native_getopt(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const short = try @import("string_ports.zig").Args.init(ctx, "getopt", args).str(0, "short_options");
+    if (args.len >= 3) ctx.setCallerVar(2, args.len, .{ .int = 1 });
+    const server = ctx.vm.request_vars.get("$_SERVER");
+    const argv_val = blk: {
+        if (server) |s| if (s == .array) {
+            const v = s.array.get(.{ .string = Value.String.borrowed("argv") });
+            if (v != .null) break :blk v;
+        };
+        break :blk ctx.vm.request_vars.get("$argv") orelse return NativeResult.scalar(.{ .bool = false });
+    };
+    if (argv_val != .array) return NativeResult.scalar(.{ .bool = false });
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var argv: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (argv_val.array.entries.items) |entry| {
+        const v = if (entry.ref) |cell| cell.* else entry.value;
+        const s = try @import("strings.zig").coerceToString(ctx, v);
+        // php copies each argument as a c string
+        const nul = std.mem.indexOfScalar(u8, s, 0) orelse s.len;
+        try argv.append(a, try a.dupe(u8, s[0..nul]));
+    }
+    var opts: std.ArrayListUnmanaged(GetoptOpt) = .empty;
+    var i: usize = 0;
+    while (i < short.len and isOptChar(short[i])) {
+        var o: GetoptOpt = .{ .opt_char = short[i], .need_param = 0, .name = null };
+        i += 1;
+        if (i < short.len and short[i] == ':') {
+            o.need_param = 1;
+            i += 1;
+            if (i < short.len and short[i] == ':') {
+                o.need_param = 2;
+                i += 1;
+            }
+        }
+        try opts.append(a, o);
+    }
+    if (args.len >= 2 and args[1] == .array) {
+        for (args[1].array.entries.items) |entry| {
+            const v = if (entry.ref) |cell| cell.* else entry.value;
+            const s = try @import("strings.zig").coerceToString(ctx, v);
+            var name = s[0 .. std.mem.indexOfScalar(u8, s, 0) orelse s.len];
+            var need: u8 = 0;
+            if (name.len > 0 and name[name.len - 1] == ':') {
+                need = 1;
+                name = name[0 .. name.len - 1];
+                if (name.len > 0 and name[name.len - 1] == ':') {
+                    need = 2;
+                    name = name[0 .. name.len - 1];
+                }
+            }
+            try opts.append(a, .{ .opt_char = 0, .need_param = need, .name = try a.dupe(u8, name) });
+        }
+    }
+    try opts.append(a, .{ .opt_char = '-', .need_param = 0, .name = null });
+
+    const out = try ctx.createArray();
+    var g: Getopt = .{ .argv = argv.items, .opts = opts.items };
+    while (true) {
+        const o = g.next();
+        if (o == getopt_eof) break;
+        if (o == getopt_invalid) continue;
+        var one: [1]u8 = undefined;
+        const optname: []const u8 = if (o == 0) g.opts[@intCast(g.optidx)].name.? else blk: {
+            one[0] = if (o == 1) '-' else @intCast(o);
+            break :blk &one;
+        };
+        const val: Value = if (g.optarg) |arg| .{ .string = try Value.String.create(ctx.allocator, arg) } else .{ .bool = false };
+        defer if (val == .string) val.string.release();
+        const key: PhpArray.Key = blk: {
+            // is_numeric_string's IS_LONG
+            if (!(optname.len > 1 and optname[0] == '0') and Value.isNumericString(optname)) {
+                const t = std.mem.trim(u8, optname, " \t\n\r\x0b\x0c");
+                if (std.mem.indexOfAny(u8, t, ".eE") == null) if (std.fmt.parseInt(i64, t, 10)) |n| break :blk .{ .int = n } else |_| {};
+            }
+            break :blk .{ .string = try Value.String.create(ctx.allocator, optname) };
+        };
+        defer if (key == .string) key.string.release();
+        if (out.getPtr(key)) |existing| {
+            if (existing.value != .array) {
+                const arr = try ctx.createArray();
+                try arr.append(ctx.allocator, existing.value);
+                try out.set(ctx.allocator, key, .{ .array = arr });
+            }
+            try out.getPtr(key).?.value.array.append(ctx.allocator, val);
+        } else {
+            try out.set(ctx.allocator, key, val);
+        }
+    }
+    if (args.len >= 3) ctx.setCallerVar(2, args.len, .{ .int = @intCast(g.optind) });
+    return NativeResult.borrowed(.{ .array = out });
+}
+
+fn native_sleep(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = @import("string_ports.zig").Args.init(ctx, "sleep", args);
+    const secs = try p.long(0, "seconds");
+    if (secs < 0) return p.valueError(0, "seconds", "must be greater than or equal to 0");
+    if (secs > 0) platform.sleep(@as(u64, @intCast(@min(secs, std.math.maxInt(u32)))) * 1_000_000_000);
+    return NativeResult.scalar(.{ .int = 0 });
+}
+
+fn native_usleep(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = @import("string_ports.zig").Args.init(ctx, "usleep", args);
+    const usecs = try p.long(0, "microseconds");
+    if (usecs < 0) return p.valueError(0, "microseconds", "must be greater than or equal to 0");
+    if (usecs > 0) platform.sleep(@as(u64, @intCast(@min(usecs, std.math.maxInt(u32)))) * 1_000);
     return NativeResult.scalar(.null);
 }
 
@@ -556,8 +737,9 @@ extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 extern "c" fn _putenv_s(name: [*:0]const u8, value: [*:0]const u8) c_int;
 
 fn native_putenv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const setting = args[0].string.bytes();
+    const p = @import("string_ports.zig").Args.init(ctx, "putenv", args);
+    const setting = try p.str(0, "assignment");
+    if (setting.len == 0 or setting[0] == '=') return p.valueError(0, "assignment", "must have a valid syntax");
     if (std.mem.indexOfScalar(u8, setting, '=')) |eq| {
         const name = setting[0..eq];
         const val = setting[eq + 1 ..];
@@ -578,20 +760,24 @@ fn native_putenv(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
 threadlocal var previous_uniqid_microsecond: i128 = -1;
 
 fn native_uniqid(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const prefix = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else "";
-    const more_entropy = args.len >= 2 and args[1].isTruthy();
+    const p = @import("string_ports.zig").Args.init(ctx, "uniqid", args);
+    const prefix = if (p.has(0)) try p.str(0, "prefix") else "";
+    const more_entropy = try p.boolean(1, "more_entropy", false);
     var ns = platform.nanoTimestamp();
     while (@divFloor(ns, 1_000) == previous_uniqid_microsecond) ns = platform.nanoTimestamp();
     previous_uniqid_microsecond = @divFloor(ns, 1_000);
     const abs_ns: u64 = @intCast(if (ns < 0) -ns else ns);
-    const usec: u64 = @divTrunc(@mod(abs_ns, 1_000_000_000), 1_000);
-    const sec: u64 = @divTrunc(abs_ns, 1_000_000_000);
-    var buf: [128]u8 = undefined;
-    const hex = if (more_entropy)
-        std.fmt.bufPrint(&buf, "{s}{x:0>8}{x:0>5}.{d:0>8}", .{ prefix, sec, usec, platform.random.intRangeAtMost(u32, 0, 99999999) }) catch return NativeResult.literal("")
-    else
-        std.fmt.bufPrint(&buf, "{s}{x:0>8}{x:0>5}", .{ prefix, sec, usec }) catch return NativeResult.literal("");
-    return try NativeResult.copyString(ctx.allocator, hex);
+    const usec: u64 = @divTrunc(@mod(abs_ns, 1_000_000_000), 1_000) % 0x100000;
+    const sec: u32 = @truncate(@divTrunc(abs_ns, 1_000_000_000));
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(ctx.allocator);
+    try out.print(ctx.allocator, "{s}{x:0>8}{x:0>5}", .{ prefix, sec, usec });
+    if (more_entropy) {
+        // "%.8F" of a random double in [0, 10]
+        const seed = @as(f64, @floatFromInt(platform.random.int(u32))) / @as(f64, std.math.maxInt(u32)) * 10.0;
+        try out.print(ctx.allocator, "{d:.8}", .{seed});
+    }
+    return try NativeResult.copyString(ctx.allocator, out.items);
 }
 
 fn native_getcwd(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -610,10 +796,39 @@ fn native_php_ini_scanned_files(_: *NativeContext, _: []const Value) RuntimeErro
     return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_dl(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    // dynamic loading: PHP's dl() is restricted in CGI/CLI in modern installs;
-    // we don't support runtime extension loading, return false
+// php's dl() checks, before it would load anything: zphp loads extensions
+// only at startup (--extension), so a request to load one fails as a
+// library php can't open does
+fn native_dl(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const filename = try @import("string_ports.zig").Args.init(ctx, "dl", args).str(0, "extension_filename");
+    const enabled = ctx.vm.ini_settings.get("enable_dl") orelse "1";
+    if (!iniBool(enabled)) {
+        try ctx.vm.emitWarning("dl(): Dynamically loaded extensions aren't enabled");
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    if (filename.len >= 4096) {
+        try ctx.vm.emitWarning("dl(): Filename exceeds the maximum allowed length of 4096 characters");
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    if (std.mem.indexOfScalar(u8, filename, '/') != null or (platform.is_windows and std.mem.indexOfScalar(u8, filename, '\\') != null)) {
+        try ctx.vm.emitWarning("dl(): Temporary module name should contain only filename");
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    const msg = try std.fmt.allocPrint(ctx.allocator, "dl(): Unable to load dynamic library '{s}'", .{filename});
+    defer ctx.allocator.free(msg);
+    try ctx.vm.emitWarning(msg);
     return NativeResult.scalar(.{ .bool = false });
+}
+
+// zend_ini_parse_bool
+fn iniBool(v: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(v, "true") or std.ascii.eqlIgnoreCase(v, "yes") or std.ascii.eqlIgnoreCase(v, "on")) return true;
+    const t = std.mem.trimStart(u8, v, " \t\n\r\x0b\x0c");
+    var end: usize = 0;
+    if (end < t.len and (t[end] == '-' or t[end] == '+')) end += 1;
+    while (end < t.len and std.ascii.isDigit(t[end])) end += 1;
+    const n = std.fmt.parseInt(i64, t[0..end], 10) catch 0;
+    return n != 0;
 }
 
 fn native_phpinfo(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -659,7 +874,33 @@ fn native_php_strip_whitespace(ctx: *NativeContext, args: []const Value) Runtime
 }
 
 fn native_php_uname(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const mode = if (args.len >= 1 and args[0] == .string and args[0].string.len > 0) args[0].string.bytes()[0] else 'a';
+    const p = @import("string_ports.zig").Args.init(ctx, "php_uname", args);
+    const mode_str = if (p.has(0)) try p.str(0, "mode") else "a";
+    if (mode_str.len != 1) return p.valueError(0, "mode", "must be a single character");
+    const mode = mode_str[0];
+    if (std.mem.indexOfScalar(u8, "amnrsv", mode) == null) return p.valueError(0, "mode", "must be one of \"a\", \"m\", \"n\", \"r\", \"s\", or \"v\"");
+    if (!platform.is_windows) {
+        var uts: std.c.utsname = undefined;
+        if (std.c.uname(&uts) == 0) {
+            const field = struct {
+                fn f(bytes: anytype) []const u8 {
+                    return std.mem.sliceTo(@as([*:0]const u8, @ptrCast(bytes)), 0);
+                }
+            }.f;
+            if (mode == 'a') {
+                const all = try std.fmt.allocPrint(ctx.allocator, "{s} {s} {s} {s} {s}", .{ field(&uts.sysname), field(&uts.nodename), field(&uts.release), field(&uts.version), field(&uts.machine) });
+                defer ctx.allocator.free(all);
+                return NativeResult.copyString(ctx.allocator, all);
+            }
+            return NativeResult.copyString(ctx.allocator, switch (mode) {
+                's' => field(&uts.sysname),
+                'n' => field(&uts.nodename),
+                'r' => field(&uts.release),
+                'v' => field(&uts.version),
+                else => field(&uts.machine),
+            });
+        }
+    }
     const is_mac = platform.is_macos;
     const is_arm = @import("builtin").cpu.arch == .aarch64;
     const sysname: []const u8 = if (platform.is_windows) "Windows NT" else if (is_mac) "Darwin" else "Linux";
