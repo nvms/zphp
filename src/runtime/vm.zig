@@ -2658,20 +2658,24 @@ pub const VM = struct {
         try c.put(a, "PHP_FLOAT_MIN", .{ .float = std.math.floatMin(f64) });
         try c.put(a, "PHP_FLOAT_EPSILON", .{ .float = std.math.floatEps(f64) });
         try c.put(a, "PHP_MAXPATHLEN", .{ .int = 4096 });
-        try c.put(a, "M_PI", .{ .float = std.math.pi });
-        try c.put(a, "M_E", .{ .float = std.math.e });
-        try c.put(a, "M_SQRT2", .{ .float = std.math.sqrt2 });
-        try c.put(a, "M_SQRT1_2", .{ .float = 1.0 / std.math.sqrt2 });
-        try c.put(a, "M_LN2", .{ .float = std.math.ln2 });
-        try c.put(a, "M_LN10", .{ .float = @log(10.0) });
-        try c.put(a, "M_LOG2E", .{ .float = std.math.log2e });
-        try c.put(a, "M_LOG10E", .{ .float = std.math.log10e });
-        try c.put(a, "M_PI_2", .{ .float = std.math.pi / 2.0 });
-        try c.put(a, "M_PI_4", .{ .float = std.math.pi / 4.0 });
-        try c.put(a, "M_1_PI", .{ .float = 1.0 / std.math.pi });
-        try c.put(a, "M_2_PI", .{ .float = 2.0 / std.math.pi });
-        try c.put(a, "M_SQRTPI", .{ .float = @sqrt(std.math.pi) });
-        try c.put(a, "M_2_SQRTPI", .{ .float = 2.0 / @sqrt(std.math.pi) });
+        // the literals of php's basic_functions.stub.php
+        try c.put(a, "M_E", .{ .float = 2.718281828459045235360 });
+        try c.put(a, "M_LOG2E", .{ .float = 1.4426950408889634074 });
+        try c.put(a, "M_LOG10E", .{ .float = 0.43429448190325182765 });
+        try c.put(a, "M_LN2", .{ .float = 0.69314718055994530942 });
+        try c.put(a, "M_LN10", .{ .float = 2.30258509299404568402 });
+        try c.put(a, "M_PI", .{ .float = 3.14159265358979323846 });
+        try c.put(a, "M_PI_2", .{ .float = 1.57079632679489661923 });
+        try c.put(a, "M_PI_4", .{ .float = 0.78539816339744830962 });
+        try c.put(a, "M_1_PI", .{ .float = 0.31830988618379067154 });
+        try c.put(a, "M_2_PI", .{ .float = 0.63661977236758134308 });
+        try c.put(a, "M_SQRTPI", .{ .float = 1.77245385090551602729 });
+        try c.put(a, "M_2_SQRTPI", .{ .float = 1.12837916709551257390 });
+        try c.put(a, "M_LNPI", .{ .float = 1.14472988584940017414 });
+        try c.put(a, "M_EULER", .{ .float = 0.57721566490153286061 });
+        try c.put(a, "M_SQRT2", .{ .float = 1.41421356237309504880 });
+        try c.put(a, "M_SQRT1_2", .{ .float = 0.70710678118654752440 });
+        try c.put(a, "M_SQRT3", .{ .float = 1.73205080756887729352 });
         try c.put(a, "PHP_FLOAT_DIG", .{ .int = 15 });
         try c.put(a, "INF", .{ .float = std.math.inf(f64) });
         try c.put(a, "NAN", .{ .float = std.math.nan(f64) });
@@ -4882,6 +4886,10 @@ pub const VM = struct {
                         continue;
                     }
                     if (try self.checkArithOperands(a, b, "**")) continue;
+                    if (Value.powerOfZeroBase(a, b)) self.raiseError(E_DEPRECATED, "Power of base 0 and negative exponent is deprecated") catch {
+                        if (try self.resumeRaised()) continue;
+                        return error.RuntimeError;
+                    };
                     self.push(Value.power(a, b));
                 },
                 .negate => {
@@ -13602,6 +13610,22 @@ pub const VM = struct {
     fn resumeAfterThrow(self: *VM, base_frame: usize, handlers_before: usize) bool {
         if (self.handler_count < handlers_before) return true;
         return self.pending_exception != null and self.dispatchPendingException(base_frame);
+    }
+
+    // php's pow_function for pow(): an object's do_operation, the operand
+    // checks of **, and safe_pow's deprecation; errors are left pending
+    pub fn powFunction(self: *VM, a: Value, b: Value) RuntimeError!Value {
+        if (try self.objectBinop(.pow, a, b)) |r| return r;
+        if (!isArithOperand(a) or !isArithOperand(b)) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Unsupported operand types: {s} ** {s}", .{ Value.typeName(a), Value.typeName(b) });
+            defer self.allocator.free(msg);
+            try self.setPendingException("TypeError", msg);
+            return error.RuntimeError;
+        }
+        if (a == .string and isPartialNumericString(a.string.bytes())) try self.emitNonNumericWarning();
+        if (b == .string and isPartialNumericString(b.string.bytes())) try self.emitNonNumericWarning();
+        if (Value.powerOfZeroBase(a, b)) try self.raiseError(E_DEPRECATED, "Power of base 0 and negative exponent is deprecated");
+        return Value.power(a, b);
     }
 
     pub fn checkArithOperands(self: *VM, a: Value, b: Value, comptime op: []const u8) RuntimeError!bool {

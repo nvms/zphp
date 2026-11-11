@@ -138,7 +138,11 @@ pub const Args = struct {
                 try self.nullDeprecated(index, name, expected);
                 return "";
             },
-            .int, .float, .bool => if (!self.strict()) return strings.coerceToString(self.ctx, v),
+            .int, .float, .bool => if (!self.strict()) {
+                // zend_double_to_str
+                if (v == .float and std.math.isNan(v.float)) try self.ctx.vm.emitWarning("unexpected NAN value was coerced to string");
+                return strings.coerceToString(self.ctx, v);
+            },
             .object => |o| if (self.ctx.vm.hasMethod(o.class_name, "__toString")) return self.ctx.vm.objectToString(o),
             else => {},
         }
@@ -246,6 +250,32 @@ pub const Args = struct {
             .string => |s| if (!self.strict() and Value.isNumericString(s.bytes())) Value.toFloat(v) else self.typeError(index, name, "?float"),
             else => self.typeError(index, name, "?float"),
         };
+    }
+
+    // Z_PARAM_NUMBER (zend_parse_arg_number_slow): an int or a float, a
+    // numeric string read as the one it spells
+    pub fn number(self: Args, index: usize, name: []const u8) RuntimeError!Value {
+        const v = self.args[index];
+        switch (v) {
+            .int, .float => return v,
+            .null, .undef => if (!self.strict()) {
+                try self.nullDeprecated(index, name, "int|float");
+                return .{ .int = 0 };
+            },
+            .bool => |b| if (!self.strict()) return .{ .int = @intFromBool(b) },
+            .string => |s| if (!self.strict()) {
+                const bytes = s.bytes();
+                if (Value.isNumericString(bytes)) {
+                    const trimmed = std.mem.trim(u8, bytes, " \t\n\r\x0b\x0c");
+                    if (std.mem.indexOfAny(u8, trimmed, ".eE") == null) {
+                        if (std.fmt.parseInt(i64, trimmed, 10)) |i| return .{ .int = i } else |_| {}
+                    }
+                    return .{ .float = Value.toFloat(v) };
+                }
+            },
+            else => {},
+        }
+        return self.typeError(index, name, "int|float");
     }
 
     // Z_PARAM_DOUBLE (zend_parse_arg_double_weak)

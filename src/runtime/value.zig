@@ -1574,13 +1574,26 @@ pub const Value = union(enum) {
         return .{ .int = @rem(toInt(a), bi) };
     }
 
-    pub fn power(a: Value, b: Value) Value {
+    // php's safe_pow deprecation: the operands, as numbers, have a zero base
+    // and a negative exponent (int ** non-negative int never gets there)
+    pub fn powerOfZeroBase(a: Value, b: Value) bool {
+        const na = numericPromote(a);
+        const nb = numericPromote(b);
+        if (na == .int_kind and nb == .int_kind) return nb.int_kind < 0 and na.int_kind == 0;
+        return na.asFloat() == 0 and nb.asFloat() < 0;
+    }
+
+    pub fn power(a_in: Value, b_in: Value) Value {
+        // operands as php's pow_function converts them: a numeric string is
+        // the int or float it spells
+        const na = numericPromote(a_in);
+        const nb = numericPromote(b_in);
         // php's pow_function_base: int ** non-negative int by squaring, and
         // on overflow the rest in double from where it stopped
-        if (a == .int and b == .int and b.int >= 0) {
+        if (na == .int_kind and nb == .int_kind and nb.int_kind >= 0) {
             var l1: i64 = 1;
-            var l2: i64 = a.int;
-            var i: i64 = b.int;
+            var l2: i64 = na.int_kind;
+            var i: i64 = nb.int_kind;
             if (i == 0) return .{ .int = 1 };
             if (l2 == 0) return .{ .int = 0 };
             while (i >= 1) {
@@ -1601,7 +1614,7 @@ pub const Value = union(enum) {
             }
             return .{ .int = l1 };
         }
-        return .{ .float = c_pow(toFloat(a), toFloat(b)) };
+        return .{ .float = c_pow(na.asFloat(), nb.asFloat()) };
     }
 
     pub fn negate(self: Value) Value {
@@ -2339,6 +2352,13 @@ pub const Value = union(enum) {
     const NumericValue = union(enum) {
         int_kind: i64,
         float_kind: f64,
+
+        fn asFloat(self: NumericValue) f64 {
+            return switch (self) {
+                .int_kind => |i| @floatFromInt(i),
+                .float_kind => |f| f,
+            };
+        }
     };
 
     fn numericPromote(v: Value) NumericValue {
