@@ -619,8 +619,63 @@ fn tableKey(key: PhpArray.Key, buf: *[24]u8) []const u8 {
     };
 }
 
+// what a dimension access is for, which names it in an illegal offset error
+const KeyUse = enum { read, write, unset, isset };
+
+// get_hash_key: the storage key an offset stands for, or a TypeError thrown
+// for one that can't be a key (zend_illegal_container_offset)
+fn splKey(ctx: *NativeContext, obj: *PhpObject, offset: Value, use: KeyUse) RuntimeError!PhpArray.Key {
+    switch (offset) {
+        .null, .undef => {
+            try ctx.vm.raiseError(VM.E_DEPRECATED, "Using null as an array offset is deprecated, use an empty string instead");
+            if (ctx.vm.pending_exception != null) return error.RuntimeError;
+            return .{ .string = Value.String.borrowed("") };
+        },
+        .string => |str| return PhpArray.normalizeKey(.{ .string = str }),
+        .resource => {
+            try ctx.vm.warnResourceOffset(offset);
+            if (ctx.vm.pending_exception != null) return error.RuntimeError;
+            return .{ .int = offset.resource.id };
+        },
+        .float => |f| {
+            const n = Value.toInt(offset);
+            if (Value.floatFitsInt(f) and @as(f64, @floatFromInt(n)) != f) {
+                const msg = try std.fmt.allocPrint(ctx.allocator, "Implicit conversion from float {s} to int loses precision", .{try @import("spl_iterator_classes.zig").floatText(ctx, f)});
+                defer ctx.allocator.free(msg);
+                try ctx.vm.raiseError(VM.E_DEPRECATED, msg);
+                if (ctx.vm.pending_exception != null) return error.RuntimeError;
+            }
+            return .{ .int = n };
+        },
+        .bool => |b| return .{ .int = @intFromBool(b) },
+        .int => |n| return .{ .int = n },
+        else => {
+            const tn = if (offset == .object) offset.object.class_name else phpTypeName(offset);
+            const msg = switch (use) {
+                .isset => try std.fmt.allocPrint(ctx.allocator, "Cannot access offset of type {s} in isset or empty", .{tn}),
+                .unset => try std.fmt.allocPrint(ctx.allocator, "Cannot unset offset of type {s} on {s}", .{ tn, obj.class_name }),
+                .read, .write => try std.fmt.allocPrint(ctx.allocator, "Cannot access offset of type {s} on {s}", .{ tn, obj.class_name }),
+            };
+            defer ctx.allocator.free(msg);
+            try ctx.vm.setPendingException("TypeError", msg);
+            return error.RuntimeError;
+        },
+    }
+}
+
+// the offset splKey turned into a key, without its notices, for a nested
+// write's store back
+pub fn plainKey(offset: Value) Value {
+    return switch (offset) {
+        .null, .undef => .{ .string = Value.String.borrowed("") },
+        .resource => |r| .{ .int = r.id },
+        .float, .bool => .{ .int = Value.toInt(offset) },
+        else => offset,
+    };
+}
+
 fn splRead(ctx: *NativeContext, obj: *PhpObject, offset: Value) RuntimeError!NativeResult {
-    const key = offset.toArrayKey();
+    const key = try splKey(ctx, obj, offset, .read);
     switch (try splStorage(ctx, obj)) {
         .array => |s| if (s.arr.getPtr(key)) |entry| return NativeResult.share(if (entry.ref) |ref| ref.* else entry.value),
         .object => |o| {
@@ -640,13 +695,14 @@ fn splWrite(ctx: *NativeContext, obj: *PhpObject, offset: Value, value: Value) R
         .array => |s| {
             const arr = try writableArray(ctx, s.holder, s.arr);
             if (offset == .null) return arr.append(ctx.allocator, value);
-            detachSplReference(ctx, arr, offset.toArrayKey());
-            try arr.set(ctx.allocator, offset.toArrayKey(), value);
+            const key = try splKey(ctx, obj, offset, .write);
+            detachSplReference(ctx, arr, key);
+            try arr.set(ctx.allocator, key, value);
         },
         .object => |o| {
             var buf: [24]u8 = undefined;
             if (offset == .null) return tableWrite(ctx, o, tableKey(.{ .int = nextTableIndex(ctx.vm, o) }, &buf), value);
-            try tableWrite(ctx, o, tableKey(offset.toArrayKey(), &buf), value);
+            try tableWrite(ctx, o, tableKey(try splKey(ctx, obj, offset, .write), &buf), value);
         },
     }
 }
@@ -663,7 +719,7 @@ fn nextTableIndex(vm: *VM, o: *PhpObject) i64 {
 }
 
 fn splUnset(ctx: *NativeContext, obj: *PhpObject, offset: Value) RuntimeError!void {
-    const key = offset.toArrayKey();
+    const key = try splKey(ctx, obj, offset, .unset);
     switch (try splStorage(ctx, obj)) {
         .array => |s| ctx.vm.arrayRemoveOwned(try writableArray(ctx, s.holder, s.arr), key),
         .object => |o| {
@@ -677,7 +733,7 @@ fn splUnset(ctx: *NativeContext, obj: *PhpObject, offset: Value) RuntimeError!vo
 const ExistsCheck = enum { exists, isset, empty };
 
 fn splHas(ctx: *NativeContext, obj: *PhpObject, offset: Value, check: ExistsCheck) RuntimeError!bool {
-    const key = offset.toArrayKey();
+    const key = try splKey(ctx, obj, offset, .isset);
     const value: Value = switch (try splStorage(ctx, obj)) {
         .array => |s| if (s.arr.getPtr(key)) |entry| (if (entry.ref) |ref| ref.* else entry.value) else return false,
         .object => |o| blk: {
@@ -695,7 +751,36 @@ fn splHas(ctx: *NativeContext, obj: *PhpObject, offset: Value, check: ExistsChec
 
 // $o[$k] fetched for a nested write, quiet about a missing key
 pub fn arrayStorageFetch(ctx: *NativeContext, obj: *PhpObject, offset: Value) RuntimeError!Value {
-    const key = offset.toArrayKey();
+    const key = try splKey(ctx, obj, offset, .write);
+    switch (try splStorage(ctx, obj)) {
+        .array => |s| if (s.arr.getPtr(key)) |entry| return if (entry.ref) |ref| ref.* else entry.value,
+        .object => |o| {
+            var buf: [24]u8 = undefined;
+            if (tableFind(ctx.vm, o, tableKey(key, &buf), false)) |prop| return prop.value;
+        },
+    }
+    return .null;
+}
+
+// $r = &$o[$k]: the storage array and the key of the element to bind, made
+// null when missing; null for a storage that is an object's property table
+pub const RefTarget = struct { arr: *PhpArray, key: PhpArray.Key };
+
+pub fn arrayStorageRefTarget(ctx: *NativeContext, obj: *PhpObject, offset: Value) RuntimeError!?RefTarget {
+    switch (try splStorage(ctx, obj)) {
+        .array => |s| {
+            const key: PhpArray.Key = if (offset == .null) .{ .int = if (s.arr.has_int_keys) s.arr.next_int_key else 0 } else try splKey(ctx, obj, offset, .write);
+            const arr = try writableArray(ctx, s.holder, s.arr);
+            if (arr.getPtr(key) == null) try arr.set(ctx.allocator, key, .null);
+            return .{ .arr = arr, .key = key };
+        },
+        .object => return null,
+    }
+}
+
+// $o[$k] ?? ...: the element, or null without a warning
+pub fn arrayStorageQuiet(ctx: *NativeContext, obj: *PhpObject, offset: Value) RuntimeError!Value {
+    const key = try splKey(ctx, obj, offset, .isset);
     switch (try splStorage(ctx, obj)) {
         .array => |s| if (s.arr.getPtr(key)) |entry| return if (entry.ref) |ref| ref.* else entry.value,
         .object => |o| {

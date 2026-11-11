@@ -5598,6 +5598,15 @@ pub const VM = struct {
                             continue;
                         }
                         self.push(existing);
+                    } else if (arr_val == .object and op == .array_get_coalesce and try self.splOwnMethod(arr_val.object, "offsetGet") and try self.splOwnMethod(arr_val.object, "offsetExists")) {
+                        // spl_array_read_dimension for BP_VAR_IS: a quiet
+                        // fetch, with no offsetExists() of its own
+                        var ctx = self.makeContext(null);
+                        const found = @import("../stdlib/spl.zig").arrayStorageQuiet(&ctx, arr_val.object, key) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        self.push(found);
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetGet")) {
                         if (self.hasMethod(arr_val.object.class_name, "offsetExists")) {
                             const exists = self.callMethod(arr_val.object, "offsetExists", &.{key}) catch {
@@ -5899,6 +5908,7 @@ pub const VM = struct {
                     const ik = Value.toArrayKey(inner_key);
                     var existing: Value = .null;
                     var base_is_array_access_obj = false;
+                    var wb_key = outer_key;
                     if (base == .array) {
                         if (outer_key == .resource) self.warnResourceOffset(outer_key) catch if (try self.resumeRaised()) continue;
                         existing = base.array.get(Value.toArrayKey(outer_key));
@@ -5920,6 +5930,9 @@ pub const VM = struct {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
+                        // php writes into the element it fetched; the write back
+                        // goes to the key the fetch turned the offset into
+                        if (try self.splOwnOffsetGet(base.object)) wb_key = @import("../stdlib/spl.zig").plainKey(outer_key);
                         self.releaseValue(v);
                         self.releaseValue(inner_key);
                         self.releaseValue(outer_key);
@@ -5971,7 +5984,7 @@ pub const VM = struct {
                         if (base == .array) {
                             try self.arraySetOwned(base.array, ok, .{ .string = written });
                         } else if (base_is_array_access_obj) {
-                            _ = self.callMethod(base.object, "offsetSet", &.{ outer_key, .{ .string = written } }) catch {
+                            _ = self.callMethod(base.object, "offsetSet", &.{ wb_key, .{ .string = written } }) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
@@ -5999,7 +6012,7 @@ pub const VM = struct {
                                 try self.arraySetOwned(base.array, ok, .{ .array = inner });
                                 inner.refcount -= 1;
                             } else if (base_is_array_access_obj) {
-                                _ = self.callMethod(base.object, "offsetSet", &.{ outer_key, .{ .array = inner } }) catch {
+                                _ = self.callMethod(base.object, "offsetSet", &.{ wb_key, .{ .array = inner } }) catch {
                                     if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                     return error.RuntimeError;
                                 };
@@ -6022,7 +6035,7 @@ pub const VM = struct {
                         if (base == .array) {
                             try self.arraySetOwned(base.array, ok, .{ .array = new_arr });
                         } else if (base_is_array_access_obj) {
-                            _ = self.callMethod(base.object, "offsetSet", &.{ outer_key, .{ .array = new_arr } }) catch {
+                            _ = self.callMethod(base.object, "offsetSet", &.{ wb_key, .{ .array = new_arr } }) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
@@ -6994,7 +7007,18 @@ pub const VM = struct {
                     const arr_val = self.pop();
                     const frame = self.currentFrame();
                     self.unbindRefSlot(&frame.ref_slots, dst_name);
-                    if (arr_val != .array) {
+                    if (arr_val == .object and try self.splOwnOffsetGet(arr_val.object)) {
+                        // spl_array_get_dimension_ptr for BP_VAR_W: the
+                        // element of the storage array itself
+                        var ctx = self.makeContext(null);
+                        const target = @import("../stdlib/spl.zig").arrayStorageRefTarget(&ctx, arr_val.object, key_val) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        if (target) |t| {
+                            try self.bindSlotToElement(frame, dst_name, t.arr, t.key);
+                        } else try self.bindRefSlot(&frame.ref_slots, dst_name, try self.newRefCell());
+                    } else if (arr_val != .array) {
                         try self.bindRefSlot(&frame.ref_slots, dst_name, blk: {
                             const c = try self.newRefCell();
 
@@ -8033,13 +8057,12 @@ pub const VM = struct {
                 .isset_index => {
                     const key = self.pop();
                     const arr_val = self.pop();
-                    if ((arr_val == .array or (arr_val == .object and (std.mem.eql(u8, arr_val.object.class_name, "ArrayObject") or std.mem.eql(u8, arr_val.object.class_name, "ArrayIterator")))) and (key == .array or key == .object)) {
+                    if (arr_val == .array and (key == .array or key == .object)) {
                         if (try self.throwOffsetKeyType(key, .isset_or_empty)) continue;
                         return error.RuntimeError;
                     }
-                    if (arr_val == .object and (std.mem.eql(u8, arr_val.object.class_name, "ArrayObject") or std.mem.eql(u8, arr_val.object.class_name, "ArrayIterator"))) {
+                    if (arr_val == .object and try self.splOwnMethod(arr_val.object, "offsetExists")) {
                         // spl_array_has_dimension: isset() looks at the value
-                        if (key == .resource) self.warnResourceOffset(key) catch if (try self.resumeRaised()) continue;
                         var ctx = self.makeContext(null);
                         const set = @import("../stdlib/spl.zig").arrayStorageIsset(&ctx, arr_val.object, key) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -21117,12 +21140,23 @@ pub const VM = struct {
     // ArrayIterator's own offsetGet php's write fetch, which doesn't warn
     // about a missing key
     fn offsetGetForWrite(self: *VM, obj: *PhpObject, key: Value) RuntimeError!Value {
-        const method = try self.resolveMethod(obj.class_name, "offsetGet");
-        if (std.mem.eql(u8, method, "ArrayObject::offsetGet") or std.mem.eql(u8, method, "ArrayIterator::offsetGet")) {
+        if (try self.splOwnOffsetGet(obj)) {
             var ctx = self.makeContext(null);
             return @import("../stdlib/spl.zig").arrayStorageFetch(&ctx, obj, key);
         }
         return self.callMethod(obj, "offsetGet", &.{key});
+    }
+
+    // whether $obj[...] reaches ArrayObject's or ArrayIterator's own offsetGet
+    fn splOwnOffsetGet(self: *VM, obj: *PhpObject) RuntimeError!bool {
+        return self.splOwnMethod(obj, "offsetGet");
+    }
+
+    // whether the method an object runs is ArrayObject's or ArrayIterator's
+    // own, not a subclass's (spl_array's fptr_offset_* being unset)
+    fn splOwnMethod(self: *VM, obj: *PhpObject, comptime name: []const u8) RuntimeError!bool {
+        const method = self.resolveMethod(obj.class_name, name) catch return false;
+        return std.mem.eql(u8, method, "ArrayObject::" ++ name) or std.mem.eql(u8, method, "ArrayIterator::" ++ name);
     }
 
     pub fn resolveMethod(self: *VM, class_name: []const u8, method_name: []const u8) RuntimeError![]const u8 {
