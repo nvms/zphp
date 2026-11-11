@@ -13,6 +13,7 @@ const RuntimeError = error{ RuntimeError, OutOfMemory };
 extern "c" fn setlocale(category: c_int, locale: ?[*:0]const u8) ?[*:0]const u8;
 extern "c" fn mbrlen(s: [*]const u8, n: usize, ps: *anyopaque) usize;
 extern "c" fn localeconv() *const Lconv;
+extern "c" fn strcoll(a: [*:0]const u8, b: [*:0]const u8) c_int;
 
 // the members c requires, in its order; libraries add theirs after them
 const Lconv = extern struct {
@@ -47,6 +48,7 @@ pub const lc: Categories = switch (builtin.os.tag) {
 pub const entries = .{
     .{ "setlocale", native_setlocale },
     .{ "localeconv", native_localeconv },
+    .{ "strcoll", native_strcoll },
 };
 
 // set by a script's setlocale, so the end of a request puts the startup
@@ -181,4 +183,14 @@ fn native_localeconv(ctx: *NativeContext, _: []const Value) RuntimeError!NativeR
         try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(field) }, .{ .array = groups });
     }
     return NativeResult.borrowed(.{ .array = arr });
+}
+
+// php's strcoll is the c library's under LC_COLLATE, its result as given;
+// like php's, it compares up to the first nul byte
+fn native_strcoll(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const a = try ctx.allocator.dupeSentinel(u8, try strings.stringParam(ctx, "strcoll", args, 0, "string1"), 0);
+    defer ctx.allocator.free(a);
+    const b = try ctx.allocator.dupeSentinel(u8, try strings.stringParam(ctx, "strcoll", args, 1, "string2"), 0);
+    defer ctx.allocator.free(b);
+    return NativeResult.scalar(.{ .int = strcoll(a.ptr, b.ptr) });
 }

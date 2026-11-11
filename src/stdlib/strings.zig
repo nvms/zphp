@@ -21,9 +21,6 @@ pub const entries = .{
     .{ "str_shuffle", str_shuffle },
     .{ "ucfirst", ucfirst },
     .{ "lcfirst", lcfirst },
-    .{ "strcmp", native_strcmp },
-    .{ "strcoll", native_strcmp },
-    .{ "strcasecmp", native_strcasecmp },
     .{ "str_split", native_str_split },
     .{ "number_format", native_number_format },
     .{ "addslashes", native_addslashes },
@@ -306,32 +303,6 @@ fn lcfirst(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     @memcpy(buf, s);
     buf[0] = std.ascii.toLower(buf[0]);
     return NativeResult.takeString(try Value.String.adopt(ctx.allocator, buf));
-}
-
-fn native_strcmp(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2) return NativeResult.scalar(.{ .int = 0 });
-    const a = try coerceToString(ctx, args[0]);
-    const b = try coerceToString(ctx, args[1]);
-    const min_len = @min(a.len, b.len);
-    for (0..min_len) |i| {
-        if (a[i] != b[i]) return NativeResult.scalar(.{ .int = @as(i64, a[i]) - @as(i64, b[i]) });
-    }
-    if (a.len != b.len) return NativeResult.scalar(.{ .int = @as(i64, @intCast(a.len)) - @as(i64, @intCast(b.len)) });
-    return NativeResult.scalar(.{ .int = 0 });
-}
-
-fn native_strcasecmp(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2) return NativeResult.scalar(.{ .int = 0 });
-    const a = try coerceToString(ctx, args[0]);
-    const b = try coerceToString(ctx, args[1]);
-    const min_len = @min(a.len, b.len);
-    for (0..min_len) |i| {
-        const ca = std.ascii.toLower(a[i]);
-        const cb = std.ascii.toLower(b[i]);
-        if (ca != cb) return NativeResult.scalar(.{ .int = @as(i64, ca) - @as(i64, cb) });
-    }
-    if (a.len != b.len) return NativeResult.scalar(.{ .int = @as(i64, @intCast(a.len)) - @as(i64, @intCast(b.len)) });
-    return NativeResult.scalar(.{ .int = 0 });
 }
 
 fn native_str_split(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

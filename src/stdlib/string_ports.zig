@@ -32,6 +32,8 @@ pub const entries = .{
     .{ "strnatcmp", native_strnatcmp },
     .{ "strnatcasecmp", native_strnatcasecmp },
     .{ "strncmp", native_strncmp },
+    .{ "strcmp", native_strcmp },
+    .{ "strcasecmp", native_strcasecmp },
     .{ "strncasecmp", native_strncasecmp },
     .{ "substr_count", native_substr_count },
     .{ "substr_compare", native_substr_compare },
@@ -769,15 +771,48 @@ fn threeWay(a: usize, b: usize) i64 {
     return if (a == b) 0 else if (a < b) -1 else 1;
 }
 
+extern "c" fn memcmp(a: [*]const u8, b: [*]const u8, n: usize) c_int;
+
+// php hands memcmp's own result back from strcmp and strncmp, whatever
+// magnitude the c library gives it, so this asks the same library
+fn libcMemcmp(a: []const u8, b: []const u8, n: usize) i64 {
+    if (n == 0) return 0;
+    return memcmp(a.ptr, b.ptr, n);
+}
+
+// the first difference of the lowercased bytes, as zend_binary_strcasecmp
+// computes it
+fn foldedDifference(a: []const u8, b: []const u8, n: usize) i64 {
+    for (a[0..n], b[0..n]) |x, y| {
+        const cx = std.ascii.toLower(x);
+        const cy = std.ascii.toLower(y);
+        if (cx != cy) return @as(i64, cx) - @as(i64, cy);
+    }
+    return 0;
+}
+
+// zend_binary_strcmp / zend_binary_strcasecmp
+pub fn binaryStrcmp(a: []const u8, b: []const u8, fold: bool) i64 {
+    const n = @min(a.len, b.len);
+    const r = if (fold) foldedDifference(a, b, n) else libcMemcmp(a, b, n);
+    return if (r != 0) r else threeWay(a.len, b.len);
+}
+
 // zend_binary_strncmp / zend_binary_strncasecmp
 pub fn binaryStrncmp(a: []const u8, b: []const u8, length: usize, fold: bool) i64 {
     const n = @min(length, @min(a.len, b.len));
-    for (a[0..n], b[0..n]) |x, y| {
-        const cx = if (fold) std.ascii.toLower(x) else x;
-        const cy = if (fold) std.ascii.toLower(y) else y;
-        if (cx != cy) return @as(i64, cx) - @as(i64, cy);
-    }
-    return threeWay(@min(length, a.len), @min(length, b.len));
+    const r = if (fold) foldedDifference(a, b, n) else libcMemcmp(a, b, n);
+    return if (r != 0) r else threeWay(@min(length, a.len), @min(length, b.len));
+}
+
+fn native_strcmp(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = Args.init(ctx, "strcmp", args);
+    return NativeResult.scalar(.{ .int = binaryStrcmp(try p.str(0, "string1"), try p.str(1, "string2"), false) });
+}
+
+fn native_strcasecmp(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = Args.init(ctx, "strcasecmp", args);
+    return NativeResult.scalar(.{ .int = binaryStrcmp(try p.str(0, "string1"), try p.str(1, "string2"), true) });
 }
 
 fn strncmpCommon(ctx: *NativeContext, comptime func: []const u8, args: []const Value, fold: bool) RuntimeError!NativeResult {
