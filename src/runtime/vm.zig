@@ -21746,6 +21746,7 @@ pub const VM = struct {
         }
         self.handler_count = 0;
         self.handler_floor = 0;
+        self.error_silenced_depth = 0;
         // what the unwound frames and operands held is destroyed before the
         // exception is reported, as php frees them while it propagates; a
         // destructor's exception goes on with it as its previous
