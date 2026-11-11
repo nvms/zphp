@@ -12,6 +12,7 @@ const ClassDef = vm_mod.ClassDef;
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 const arrays_mod = @import("arrays.zig");
+const sic = @import("spl_iterator_classes.zig");
 const phpTypeName = @import("types.zig").phpTypeName;
 
 fn retainReturned(value: Value) Value {
@@ -619,6 +620,27 @@ fn tableKey(key: PhpArray.Key, buf: *[24]u8) []const u8 {
     };
 }
 
+// php's nApplyCount: a sort of the object's storage is running
+fn sorting(obj: *PhpObject) bool {
+    const n = obj.get("__sorting");
+    return n == .int and n.int > 0;
+}
+
+fn forbidDuringSort(ctx: *NativeContext, obj: *PhpObject) RuntimeError!void {
+    if (!sorting(obj)) return;
+    try ctx.vm.setPendingException("Error", "Modification of ArrayObject during sorting is prohibited");
+    return error.RuntimeError;
+}
+
+// the class a method's error messages name
+fn methodClass(vm: *VM, obj: *PhpObject) []const u8 {
+    return if (vm.isInstanceOf(obj.class_name, "ArrayIterator")) "ArrayIterator" else "ArrayObject";
+}
+
+fn label(ctx: *NativeContext, obj: *PhpObject, comptime method: []const u8) RuntimeError![]const u8 {
+    return std.fmt.allocPrint(ctx.allocator, "{s}::" ++ method, .{methodClass(ctx.vm, obj)});
+}
+
 // what a dimension access is for, which names it in an illegal offset error
 const KeyUse = enum { read, write, unset, isset };
 
@@ -691,6 +713,7 @@ fn splRead(ctx: *NativeContext, obj: *PhpObject, offset: Value) RuntimeError!Nat
 }
 
 fn splWrite(ctx: *NativeContext, obj: *PhpObject, offset: Value, value: Value) RuntimeError!void {
+    try forbidDuringSort(ctx, obj);
     switch (try splStorage(ctx, obj)) {
         .array => |s| {
             const arr = try writableArray(ctx, s.holder, s.arr);
@@ -719,6 +742,7 @@ fn nextTableIndex(vm: *VM, o: *PhpObject) i64 {
 }
 
 fn splUnset(ctx: *NativeContext, obj: *PhpObject, offset: Value) RuntimeError!void {
+    try forbidDuringSort(ctx, obj);
     const key = try splKey(ctx, obj, offset, .unset);
     switch (try splStorage(ctx, obj)) {
         .array => |s| ctx.vm.arrayRemoveOwned(try writableArray(ctx, s.holder, s.arr), key),
@@ -751,6 +775,7 @@ fn splHas(ctx: *NativeContext, obj: *PhpObject, offset: Value, check: ExistsChec
 
 // $o[$k] fetched for a nested write, quiet about a missing key
 pub fn arrayStorageFetch(ctx: *NativeContext, obj: *PhpObject, offset: Value) RuntimeError!Value {
+    try forbidDuringSort(ctx, obj);
     const key = try splKey(ctx, obj, offset, .write);
     switch (try splStorage(ctx, obj)) {
         .array => |s| if (s.arr.getPtr(key)) |entry| return if (entry.ref) |ref| ref.* else entry.value,
@@ -767,6 +792,7 @@ pub fn arrayStorageFetch(ctx: *NativeContext, obj: *PhpObject, offset: Value) Ru
 pub const RefTarget = struct { arr: *PhpArray, key: PhpArray.Key };
 
 pub fn arrayStorageRefTarget(ctx: *NativeContext, obj: *PhpObject, offset: Value) RuntimeError!?RefTarget {
+    try forbidDuringSort(ctx, obj);
     switch (try splStorage(ctx, obj)) {
         .array => |s| {
             const key: PhpArray.Key = if (offset == .null) .{ .int = if (s.arr.has_int_keys) s.arr.next_int_key else 0 } else try splKey(ctx, obj, offset, .write);
@@ -839,6 +865,7 @@ pub fn otherFlags(vm: *VM, storage: Value) i64 {
 // spl_array_set_array: a new storage for the constructor, exchangeArray and
 // __unserialize (`func`), with the flags the object ends with
 pub fn splSetStorage(ctx: *NativeContext, obj: *PhpObject, storage: Value, flags: i64, func: []const u8) RuntimeError!void {
+    try forbidDuringSort(ctx, obj);
     if (storage == .object) {
         const kind = if (ctx.vm.isInstanceOf(obj.class_name, "ArrayIterator")) "ArrayIterator" else "ArrayObject";
         const msg = try std.fmt.allocPrint(ctx.allocator, "{s}::{s}(): Using an object as a backing array for {s} is deprecated, as it allows violating class constraints and invariants", .{ kind, func, kind });
@@ -921,26 +948,51 @@ fn aoUnserialize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     return @import("serialize.zig").unserializeSplArray(ctx, obj, args[0].string.bytes());
 }
 
+// zpp's "C" for an iterator class: the name of ArrayIterator or a subclass
+fn argIteratorClass(ctx: *NativeContext, lbl: []const u8, args: []const Value, i: usize) RuntimeError![]const u8 {
+    const sv = try sic.toPhpString(ctx, args[i]);
+    if (sv == .undef) return error.RuntimeError;
+    defer sic.releaseString(sv);
+    const raw = sv.string.bytes();
+    const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
+    const vm = ctx.vm;
+    if (!vm.classes.contains(name)) {
+        vm.tryAutoload(name) catch |err| if (vm.pending_exception == null) return err;
+        if (sic.pending(ctx)) return error.RuntimeError;
+    }
+    if (vm.classes.getKey(name)) |k| {
+        if (vm.isInstanceOf(k, "ArrayIterator")) return k;
+    }
+    try sic.raise(ctx, "TypeError", "{s}(): Argument #{d} ($iteratorClass) must be a class name derived from ArrayIterator, {s} given", .{ lbl, i + 1, raw });
+    return error.RuntimeError;
+}
+
 fn aoConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len >= 3 and args[2] == .string) try obj.set(ctx.allocator, "__iter_class", args[2]);
-    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
-    if (args.len >= 1) {
-        try requireStorageArg(ctx, obj, "__construct", args[0]);
-        try splSetStorage(ctx, obj, args[0], if (args.len == 1) otherFlags(ctx.vm, args[0]) else flags, "__construct");
-    } else {
+    if (args.len == 0) {
         _ = try ensureData(ctx, obj);
-        try obj.set(ctx.allocator, "__flags", .{ .int = flags });
+        try obj.set(ctx.allocator, "__flags", .{ .int = 0 });
         try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
+        return NativeResult.scalar(.null);
     }
+    const lbl = "ArrayObject::__construct";
+    if (!try sic.argCount(ctx, lbl, args.len, 0, 3)) return error.RuntimeError;
+    try requireStorageArg(ctx, obj, "__construct", args[0]);
+    const flags = (try sic.argLong(ctx, lbl, args, 1, "flags", 0)) orelse return error.RuntimeError;
+    if (args.len > 2) {
+        const class = try argIteratorClass(ctx, lbl, args, 2);
+        try obj.set(ctx.allocator, "__iter_class", .{ .string = Value.String.borrowed(class) });
+    }
+    try splSetStorage(ctx, obj, args[0], if (args.len == 1) otherFlags(ctx.vm, args[0]) else flags, "__construct");
     return NativeResult.scalar(.null);
 }
 
 fn aiConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const flags: i64 = if (args.len >= 2) Value.toInt(args[1]) else 0;
+    if (!try sic.argCount(ctx, "ArrayIterator::__construct", args.len, 0, 2)) return error.RuntimeError;
+    if (args.len >= 1) try requireStorageArg(ctx, obj, "__construct", args[0]);
+    const flags = (try sic.argLong(ctx, "ArrayIterator::__construct", args, 1, "flags", 0)) orelse return error.RuntimeError;
     if (args.len >= 1) {
-        try requireStorageArg(ctx, obj, "__construct", args[0]);
         try splSetStorage(ctx, obj, args[0], if (args.len == 1) otherFlags(ctx.vm, args[0]) else flags, "__construct");
     } else {
         _ = try ensureData(ctx, obj);
@@ -1054,8 +1106,14 @@ const SplSort = union(enum) {
     natural: bool,
 };
 
+// spl_array_method: the sort function run on the storage, which nothing
+// may change while it runs
 fn splSort(ctx: *NativeContext, how: SplSort) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const before = obj.get("__sorting");
+    const depth: i64 = if (before == .int) before.int else 0;
+    try obj.set(ctx.allocator, "__sorting", .{ .int = depth + 1 });
+    defer obj.set(ctx.allocator, "__sorting", .{ .int = depth }) catch {};
     switch (try splStorage(ctx, obj)) {
         .array => |s| try sortEntries(ctx, try writableArray(ctx, s.holder, s.arr), how),
         .object => |o| {
@@ -1099,36 +1157,62 @@ fn sortEntries(ctx: *NativeContext, arr: *PhpArray, how: SplSort) RuntimeError!v
     });
 }
 
+// "|l": the sort flags
+fn sortFlags(ctx: *NativeContext, args: []const Value, comptime method: []const u8) RuntimeError!i64 {
+    const obj = getThis(ctx) orelse return 0;
+    const lbl = try label(ctx, obj, method);
+    defer ctx.allocator.free(lbl);
+    if (!try sic.argCount(ctx, lbl, args.len, 0, 1)) return error.RuntimeError;
+    return (try sic.argLong(ctx, lbl, args, 0, "flags", 0)) orelse error.RuntimeError;
+}
+
+// "z": the comparison callback, checked by the sort function it goes to
+fn sortCallback(ctx: *NativeContext, args: []const Value, comptime method: []const u8) RuntimeError!Value {
+    const obj = getThis(ctx) orelse return .null;
+    const lbl = try label(ctx, obj, method);
+    defer ctx.allocator.free(lbl);
+    if (!try sic.argCount(ctx, lbl, args.len, 1, 1)) return error.RuntimeError;
+    return args[0];
+}
+
+fn noSortArgs(ctx: *NativeContext, args: []const Value, comptime method: []const u8) RuntimeError!void {
+    const obj = getThis(ctx) orelse return;
+    const lbl = try label(ctx, obj, method);
+    defer ctx.allocator.free(lbl);
+    if (!try sic.argCount(ctx, lbl, args.len, 0, 0)) return error.RuntimeError;
+}
+
 fn aoKsort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return splSort(ctx, .{ .keys = if (args.len >= 1) Value.toInt(args[0]) else 0 });
+    return splSort(ctx, .{ .keys = try sortFlags(ctx, args, "ksort") });
 }
 
 fn aoAsort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return splSort(ctx, .{ .values = if (args.len >= 1) Value.toInt(args[0]) else 0 });
+    return splSort(ctx, .{ .values = try sortFlags(ctx, args, "asort") });
 }
 
 fn aoUasort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
-    return splSort(ctx, .{ .user_values = args[0] });
+    return splSort(ctx, .{ .user_values = try sortCallback(ctx, args, "uasort") });
 }
 
 fn aoUksort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
-    return splSort(ctx, .{ .user_keys = args[0] });
+    return splSort(ctx, .{ .user_keys = try sortCallback(ctx, args, "uksort") });
 }
 
-fn aoNatsort(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+fn aoNatsort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    try noSortArgs(ctx, args, "natsort");
     return splSort(ctx, .{ .natural = false });
 }
 
-fn aoNatcasesort(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+fn aoNatcasesort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    try noSortArgs(ctx, args, "natcasesort");
     return splSort(ctx, .{ .natural = true });
 }
 
 fn aoExchangeArray(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    if (args.len < 1) return NativeResult.scalar(.{ .bool = false });
+    if (!try sic.argCount(ctx, "ArrayObject::exchangeArray", args.len, 1, 1)) return error.RuntimeError;
     try requireStorageArg(ctx, obj, "exchangeArray", args[0]);
+    try forbidDuringSort(ctx, obj);
     const old = try splTableCopy(ctx, obj);
     errdefer ctx.vm.releaseValue(.{ .array = old });
     // the new storage's flags join the ones the object has
@@ -1138,9 +1222,10 @@ fn aoExchangeArray(ctx: *NativeContext, args: []const Value) RuntimeError!Native
 
 fn aoSetIteratorClass(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len >= 1 and args[0] == .string) {
-        try obj.set(ctx.allocator, "__iter_class", .{ .string = args[0].string });
-    }
+    const lbl = "ArrayObject::setIteratorClass";
+    if (!try sic.argCount(ctx, lbl, args.len, 1, 1)) return error.RuntimeError;
+    const class = try argIteratorClass(ctx, lbl, args, 0);
+    try obj.set(ctx.allocator, "__iter_class", .{ .string = Value.String.borrowed(class) });
     return NativeResult.scalar(.null);
 }
 
