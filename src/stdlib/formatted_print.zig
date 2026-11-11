@@ -612,7 +612,8 @@ fn getString(st: *State, v: Value, scratch: []u8) RuntimeError![]const u8 {
         .int => |i| std.fmt.bufPrint(scratch, "{d}", .{i}) catch unreachable,
         // php's precision ini, 14 by default
         .float => |f| {
-            const str = gcvt(f, 14, '.', 'E', scratch);
+            const precision = @import("../runtime/value.zig").hooks().precision;
+            const str = gcvt(f, if (precision == 0) 1 else precision, '.', 'E', scratch);
             if (std.math.isNan(f)) try st.warn(e_warning, "unexpected NAN value was coerced to string");
             return str;
         },
