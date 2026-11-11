@@ -10027,7 +10027,7 @@ pub const VM = struct {
                     }
 
                     const mvr = self.findMethodVisibility(obj.class_name, method_name);
-                    if (!self.checkVisibility(mvr.defining_class, mvr.visibility)) {
+                    if (!self.checkVisibility(mvr.defining_class, mvr.visibility) and !self.protectedRootVisible(mvr.defining_class, method_name, mvr.visibility)) {
                         const suffix = self.visScopeSuffix();
                         const msg = try std.fmt.allocPrint(self.allocator, "Call to {s} method {s}::{s}(){s}", .{
                             @tagName(mvr.visibility), mvr.defining_class, method_name, suffix,
@@ -10349,7 +10349,7 @@ pub const VM = struct {
                     }
                     const obj = obj_val.object;
                     const mvr = self.findMethodVisibility(obj.class_name, method_name);
-                    if (!self.checkVisibility(mvr.defining_class, mvr.visibility)) {
+                    if (!self.checkVisibility(mvr.defining_class, mvr.visibility) and !self.protectedRootVisible(mvr.defining_class, method_name, mvr.visibility)) {
                         self.dropN(ac + 1);
                         const suffix = self.visScopeSuffix();
                         const msg = std.fmt.allocPrint(self.allocator, "Call to {s} method {s}::{s}(){s}", .{ @tagName(mvr.visibility), mvr.defining_class, method_name, suffix }) catch null;
@@ -19840,17 +19840,37 @@ pub const VM = struct {
     }
 
     fn visScopeSuffix(self: *VM) []const u8 {
-        // PHP's "from global scope" / "from 'X' context" suffix for visibility errors
+        // php's "from global scope" / "from scope X" suffix for visibility
+        // errors (zend_bad_method_call): X is the executing scope
         const caller = if (self.frame_count > 0)
-            self.frames[self.frame_count - 1].called_class orelse self.currentDefiningClass()
+            self.currentDefiningClass() orelse self.frames[self.frame_count - 1].called_class
         else
             null;
         if (caller) |c| {
-            const s = std.fmt.allocPrint(self.allocator, " from '{s}' context", .{c}) catch return " from global scope";
+            const s = std.fmt.allocPrint(self.allocator, " from scope {s}", .{c}) catch return " from global scope";
             defer self.allocator.free(s);
             return self.internName(s) catch " from global scope";
         }
         return " from global scope";
+    }
+
+    // php's zend_check_protected(zend_get_function_root_class(fbc), scope):
+    // a protected method overriding an ancestor's is callable from wherever
+    // the topmost ancestor declaring it is
+    fn protectedRootVisible(self: *VM, defining: []const u8, method: []const u8, vis: ClassDef.Visibility) bool {
+        if (vis != .protected) return false;
+        var root = defining;
+        var current = if (self.classes.getPtr(defining)) |d| d.parent else null;
+        while (current) |name| {
+            const cls = self.classes.getPtr(name) orelse break;
+            if (cls.methods.get(method)) |info| {
+                if (info.visibility == .private) break;
+                root = cls.name;
+            }
+            current = cls.parent;
+        }
+        if (root.ptr == defining.ptr) return false;
+        return self.checkVisibility(root, vis);
     }
 
     pub fn checkVisibility(self: *VM, target_class: []const u8, vis: ClassDef.Visibility) bool {
