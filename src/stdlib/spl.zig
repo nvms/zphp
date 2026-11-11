@@ -817,6 +817,19 @@ pub fn arrayStorageQuiet(ctx: *NativeContext, obj: *PhpObject, offset: Value) Ru
     return .null;
 }
 
+// property_exists() on an ArrayObject or ArrayIterator with ARRAY_AS_PROPS:
+// whether the storage has the element (has_dimension with check_empty 2);
+// null for any other object
+pub fn propertyAsElementExists(ctx: *NativeContext, obj: *PhpObject, name: Value) RuntimeError!?bool {
+    if (!isSplArray(ctx.vm, obj) or !arrayAsProps(obj)) return null;
+    if (sic.userMethod(ctx.vm, obj.class_name, "offsetExists")) {
+        const r = try sic.callOn(ctx, obj, "offsetExists", &.{name});
+        if (sic.pending(ctx)) return error.RuntimeError;
+        return r.isTruthy();
+    }
+    return try splHas(ctx, obj, name, .exists);
+}
+
 // isset($o[$k]) on an ArrayObject or ArrayIterator, which looks at the value
 pub fn arrayStorageIsset(ctx: *NativeContext, obj: *PhpObject, offset: Value) RuntimeError!bool {
     return splHas(ctx, obj, offset, .isset);

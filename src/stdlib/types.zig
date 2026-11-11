@@ -758,6 +758,8 @@ fn property_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Native
             }
             current = cls.parent;
         }
+        // spl_array_has_property: under ARRAY_AS_PROPS, an element
+        if (try @import("spl.zig").propertyAsElementExists(ctx, obj, args[1])) |found| return NativeResult.scalar(.{ .bool = found });
         return NativeResult.scalar(.{ .bool = false });
     }
     if (args[0] == .string) {

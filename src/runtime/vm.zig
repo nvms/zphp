@@ -21152,6 +21152,15 @@ pub const VM = struct {
         return self.splOwnMethod(obj, "offsetGet");
     }
 
+    fn splOwnMagic(self: *VM, obj: *PhpObject, kind: MagicKind) RuntimeError!bool {
+        return switch (kind) {
+            .get => self.splOwnMethod(obj, "__get"),
+            .set => self.splOwnMethod(obj, "__set"),
+            .isset => self.splOwnMethod(obj, "__isset"),
+            .unset => self.splOwnMethod(obj, "__unset"),
+        };
+    }
+
     // whether the method an object runs is ArrayObject's or ArrayIterator's
     // own, not a subclass's (spl_array's fptr_offset_* being unset)
     fn splOwnMethod(self: *VM, obj: *PhpObject, comptime name: []const u8) RuntimeError!bool {
@@ -23989,7 +23998,39 @@ pub const VM = struct {
             .isset => "__isset",
             .unset => "__unset",
         };
+        if (self.splArrayAsProps(obj)) return true;
         return self.hasMethod(obj.class_name, method) and !self.magicGuarded(obj, name, kind);
+    }
+
+    fn isSplArray(self: *VM, obj: *PhpObject) bool {
+        return self.isInstanceOf(obj.class_name, "ArrayObject") or self.isInstanceOf(obj.class_name, "ArrayIterator");
+    }
+
+    // ArrayObject::ARRAY_AS_PROPS: a property that isn't there is an
+    // element of the storage, past any magic method
+    fn splArrayAsProps(self: *VM, obj: *PhpObject) bool {
+        if (!self.isSplArray(obj)) return false;
+        const flags = obj.get("__flags");
+        return flags == .int and flags.int & 2 != 0;
+    }
+
+    // spl_array's read, write, has and unset property handlers for a
+    // property that isn't there: the dimension handlers, which reach a
+    // subclass's offsetGet() and the rest
+    fn splPropertyAsDimension(self: *VM, obj: *PhpObject, kind: MagicKind, name: Value, value: Value) RuntimeError!Value {
+        return switch (kind) {
+            .get => self.callMethod(obj, "offsetGet", &.{name}),
+            .set => self.callMethod(obj, "offsetSet", &.{ name, value }),
+            .unset => self.callMethod(obj, "offsetUnset", &.{name}),
+            .isset => blk: {
+                if (try self.splOwnMethod(obj, "offsetExists")) {
+                    var ctx = self.makeContext(null);
+                    break :blk .{ .bool = try @import("../stdlib/spl.zig").arrayStorageIsset(&ctx, obj, name) };
+                }
+                const r = try self.callMethod(obj, "offsetExists", &.{name});
+                break :blk .{ .bool = r.isTruthy() };
+            },
+        };
     }
 
     // runs __get, __set, __isset or __unset for a property under its guard.
@@ -23998,6 +24039,18 @@ pub const VM = struct {
     pub fn callMagicProperty(self: *VM, obj: *PhpObject, kind: MagicKind, name: []const u8, value: Value) RuntimeError!Value {
         const owned = try Value.String.create(self.allocator, name);
         defer self.stackRelease(.{ .string = owned });
+        if (self.isSplArray(obj)) {
+            if (self.splArrayAsProps(obj)) return self.splPropertyAsDimension(obj, kind, .{ .string = owned }, value);
+            // php's std handlers behind ArrayObject's own: a property the
+            // scope can't see is an access error
+            if (kind != .isset and try self.splOwnMagic(obj, kind)) {
+                if (try self.accessDeniedMessage(obj, name)) |msg| {
+                    defer self.allocator.free(msg);
+                    try self.setPendingException("Error", msg);
+                    return error.RuntimeError;
+                }
+            }
+        }
         try self.magic_guards.append(self.allocator, .{ .obj = @intFromPtr(obj), .name = owned.bytes(), .kind = kind });
         defer self.dropMagicGuard(owned.bytes());
         const name_value: Value = .{ .string = owned };
