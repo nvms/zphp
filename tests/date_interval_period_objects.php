@@ -93,6 +93,8 @@ var_dump($u == $p, get_class($u->getDateInterval()));
 foreach (["start", "current", "end", "interval", "recurrences", "include_start_date", "include_end_date"] as $f) {
     try { $p->$f = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
     try { $r = &$p->$f; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    try { $p->$f[] = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    try { $p->$f["k"] = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
     try { unset($p->$f); } catch (Error $e) { echo $e->getMessage(), "\n"; }
 }
 

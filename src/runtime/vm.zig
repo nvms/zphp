@@ -5821,7 +5821,7 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
                     }
-                    if (existing != .object) {
+                    if (existing != .object or datePeriodField(self.findPropertyVisibility(obj.class_name, pname), pname)) {
                         if (try self.checkPropertyMutation(obj, pname, .indirect)) continue;
                     }
                     if (hook_cell) |cell| existing = try self.prepareHookArray(cell);
@@ -6455,7 +6455,7 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
                     }
-                    if (cur != .object) {
+                    if (cur != .object or datePeriodField(self.findPropertyVisibility(eap_obj.class_name, prop_name), prop_name)) {
                         if (try self.checkPropertyMutation(eap_obj, prop_name, .indirect)) continue;
                     }
                     if (hook_cell) |cell| cur = try self.prepareHookArray(cell);
@@ -7796,7 +7796,7 @@ pub const VM = struct {
                     if (obj_val == .object) {
                         const vr = self.findPropertyVisibility(obj_val.object.class_name, name);
                         const cur = obj_val.object.getForScope(name, vr.defining_class);
-                        if (cur != .object) {
+                        if (cur != .object or datePeriodField(vr, name)) {
                             if (try self.checkPropertyMutationVis(obj_val.object, name, .indirect, vr)) continue;
                         }
                     }
