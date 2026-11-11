@@ -1524,6 +1524,9 @@ pub const VM = struct {
         fn drainEntry(vm: *VM) void {
             vm.flushTopWrites();
             vm.drainPendingDestruct();
+            // the releases may have filled the collector's root buffer, which
+            // php collects as the root that fills it is added
+            vm.collectCyclesIfNeeded();
         }
 
         fn statusOf(err: anyerror) u8 {
@@ -4314,10 +4317,16 @@ pub const VM = struct {
                     // flight, so only there does the frame go back to the
                     // fast loop. a generator's frame shares its variables with
                     // the generator and stays here
+                    // a collection the releases call for runs at the statement
+                    // that made them, before the fast loop takes over
+                    self.collectCyclesIfNeeded();
+                    if (self.drainRaised()) {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    }
                     if (op == .pop_boundary and self.frame_count > base_frame and !self.arg_capture_pending and self.currentFrame().locals.len > 0 and self.currentFrame().generator == null) {
                         if (try self.resumeFastLoop(base_frame)) return;
                     }
-                    self.collectCyclesIfNeeded();
                 },
                 .dup => self.push(self.stack[self.sp - 1]),
                 .dup2 => {
@@ -4944,6 +4953,10 @@ pub const VM = struct {
                     try self.pollExecutionDeadline();
                     self.currentFrame().ip -= offset;
                     self.collectCyclesIfNeeded();
+                    if (self.drainRaised()) {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    }
                     if (self.currentFrame().locals.len > 0) {
                         try self.fastLoop();
                         if (self.frame_count <= base_frame) return;
@@ -12527,7 +12540,7 @@ pub const VM = struct {
         const scope = self.exceptionTraceScope(exc);
         const old = exc.getForScope("trace", scope);
         const trace = try self.allocArray();
-        const entry = try self.newTraceEntry(f, if (self.frame_count > 0) self.framePosition(self.frame_count - 1) else null);
+        const entry = try self.newTraceEntry(f, if (self.frame_count > 0 and !self.calledFromNative()) self.framePosition(self.frame_count - 1) else null);
         const entry_args = try self.traceArgs(entry);
         for (args) |a| try entry_args.append(self.allocator, a);
         try trace.append(self.allocator, .{ .array = entry });
@@ -24019,6 +24032,11 @@ pub const VM = struct {
         const in_flight = self.takePending();
         defer self.settleDrainException(in_flight);
         fiber.destroyed = true;
+        // the engine resumes it: its frames read as called from an internal
+        // function
+        var engine = self.engineCall();
+        self.native_call = &engine;
+        defer self.native_call = engine.outer;
         _ = self.resumeFiber(fiber, .{ .object = marker }, true) catch {};
         if (self.pending_exception) |ex| if (self.isUnwindMarker(ex)) {
             self.discardPending();
