@@ -20361,9 +20361,24 @@ pub const VM = struct {
         return self.checkPropertyMutationVis(obj, name, action, self.findPropertyVisibility(obj.class_name, name));
     }
 
+    // DatePeriod's virtual properties have handlers of their own
+    // (date_period_write_property and friends) that refuse every change
+    fn datePeriodField(vr: VisResult, name: []const u8) bool {
+        if (!std.mem.eql(u8, vr.defining_class, "DatePeriod")) return false;
+        for ([_][]const u8{ "start", "current", "end", "interval", "recurrences", "include_start_date", "include_end_date" }) |f| {
+            if (std.mem.eql(u8, name, f)) return true;
+        }
+        return false;
+    }
+
     fn checkPropertyMutationVis(self: *VM, obj: *PhpObject, name: []const u8, action: MutationAction, vr: VisResult) RuntimeError!bool {
         var msg: ?[]const u8 = null;
-        if (action == .write and vr.is_readonly and vr.set_visibility == .protected and obj.getForScope(name, vr.defining_class) != .null) {
+        if (datePeriodField(vr, name)) {
+            msg = if (action == .unset)
+                try std.fmt.allocPrint(self.allocator, "Cannot unset {s}::${s}", .{ self.declaredClassName(obj.class_name), name })
+            else
+                try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property DatePeriod::${s}", .{name});
+        } else if (action == .write and vr.is_readonly and vr.set_visibility == .protected and obj.getForScope(name, vr.defining_class) != .null) {
             msg = try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{ vr.defining_class, name });
         } else if (vr.set_visibility != vr.visibility and !self.checkVisibility(vr.defining_class, vr.set_visibility)) {
             const verb: []const u8 = switch (action) {

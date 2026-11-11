@@ -2343,11 +2343,14 @@ pub fn foreachRefusal(vm: *VM, obj: *PhpObject) ?[]const u8 {
 pub const foreach_recursive: u8 = 1;
 pub const foreach_dllist: u8 = 2;
 pub const foreach_fixedarray: u8 = 3;
+pub const foreach_period: u8 = 4;
 
 pub fn foreachDirect(vm: *VM, obj: *PhpObject) u8 {
     if (vm.isInstanceOf(obj.class_name, "SplDoublyLinkedList") and !userIterated(vm, obj.class_name)) return foreach_dllist;
     // SplFixedArray's get_iterator, unless a subclass has its own getIterator()
     if (vm.isInstanceOf(obj.class_name, "SplFixedArray") and !userMethod(vm, obj.class_name, "getIterator")) return foreach_fixedarray;
+    // DatePeriod's get_iterator (date_object_period_get_iterator)
+    if (vm.isInstanceOf(obj.class_name, "DatePeriod") and !userMethod(vm, obj.class_name, "getIterator")) return foreach_period;
     if (!ownIterator(vm, obj)) return 0;
     const r = recRaw(obj) orelse return 0;
     return if (r.levels() != null) foreach_recursive else 0;
@@ -2357,6 +2360,19 @@ pub const ForeachStep = enum { rewind, valid, current, key, next };
 
 pub fn foreachStep(vm: *VM, obj: *PhpObject, marker: *PhpObject, comptime step: ForeachStep) RuntimeError!Value {
     var ctx = vm.makeContext(null);
+    if (marker.native.extra == foreach_period) {
+        const dt = @import("datetime.zig");
+        var result: Value = .null;
+        switch (step) {
+            .rewind => try dt.periodIterRewind(&ctx, obj, marker),
+            .valid => result = .{ .bool = dt.periodIterValid(obj, marker) },
+            .current => result = try dt.periodIterCurrent(&ctx, obj),
+            .key => result = dt.periodIterKey(marker),
+            .next => try dt.periodIterNext(&ctx, obj, marker),
+        }
+        if (pending(&ctx)) return error.RuntimeError;
+        return result;
+    }
     if (marker.native.extra == foreach_fixedarray) {
         const fa = @import("spl_fixedarray.zig");
         var result: Value = .null;

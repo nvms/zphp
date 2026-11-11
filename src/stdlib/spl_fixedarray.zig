@@ -431,6 +431,12 @@ fn unserializeM(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
 fn getIterator(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = try this(ctx);
     try noArgs(ctx, "SplFixedArray::getIterator", args);
+    return NativeResult.borrowed(.{ .object = try internalIterator(ctx, obj) });
+}
+
+// zend_create_internal_iterator_zval: an InternalIterator over the object's
+// own iterator (SplFixedArray's, DatePeriod's)
+pub fn internalIterator(ctx: *NativeContext, obj: *PhpObject) RuntimeError!*PhpObject {
     // php's zend_object_iterator is an object of its own, made first and
     // freed with the InternalIterator holding it
     const iter = try ctx.vm.allocObject(.{ .class_name = "InternalIterator" });
@@ -440,8 +446,14 @@ fn getIterator(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     try it.set(ctx.allocator, "__ii_pos", .{ .int = 0 });
     try it.set(ctx.allocator, "__ii_index", .{ .int = 0 });
     try it.set(ctx.allocator, "__ii_rewound", .{ .bool = false });
-    return NativeResult.borrowed(.{ .object = it });
+    return it;
 }
+
+fn isPeriod(ctx: *NativeContext, obj: *PhpObject) bool {
+    return ctx.vm.isInstanceOf(obj.class_name, "DatePeriod");
+}
+
+const period_it = @import("datetime.zig");
 
 // ==========================================
 // debug view and clone
@@ -516,6 +528,7 @@ fn iiFetch(ctx: *NativeContext, label: []const u8, args: []const Value) RuntimeE
     if (!(it.get("__ii_rewound") == .bool and it.get("__ii_rewound").bool)) {
         try it.set(ctx.allocator, "__ii_rewound", .{ .bool = true });
         try it.set(ctx.allocator, "__ii_pos", .{ .int = 0 });
+        if (isPeriod(ctx, t.object)) try period_it.periodIterRewind(ctx, t.object, it);
     }
     return .{ .it = it, .target = t.object };
 }
@@ -527,6 +540,7 @@ fn iiPos(it: *PhpObject) i64 {
 
 fn iiCurrent(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const ii = try iiFetch(ctx, "InternalIterator::current", args);
+    if (isPeriod(ctx, ii.target)) return NativeResult.borrowed(try period_it.periodIterCurrent(ctx, ii.target));
     const pos = iiPos(ii.it);
     if (pos < 0 or pos >= sizeOf(ii.target)) {
         try outOfRange(ctx);
@@ -537,23 +551,34 @@ fn iiCurrent(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
 
 fn iiKey(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const ii = try iiFetch(ctx, "InternalIterator::key", args);
+    if (isPeriod(ctx, ii.target)) return NativeResult.scalar(period_it.periodIterKey(ii.it));
     return NativeResult.scalar(.{ .int = iiPos(ii.it) });
 }
 
 fn iiNext(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const ii = try iiFetch(ctx, "InternalIterator::next", args);
+    if (isPeriod(ctx, ii.target)) {
+        try period_it.periodIterNext(ctx, ii.target, ii.it);
+        return NativeResult.scalar(.null);
+    }
     try ii.it.set(ctx.allocator, "__ii_pos", .{ .int = iiPos(ii.it) + 1 });
     return NativeResult.scalar(.null);
 }
 
 fn iiValid(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const ii = try iiFetch(ctx, "InternalIterator::valid", args);
+    if (isPeriod(ctx, ii.target)) return NativeResult.scalar(.{ .bool = period_it.periodIterValid(ii.target, ii.it) });
     const pos = iiPos(ii.it);
     return NativeResult.scalar(.{ .bool = pos >= 0 and pos < sizeOf(ii.target) });
 }
 
 fn iiRewind(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const was_rewound = sic.thisObj(ctx) != null and sic.thisObj(ctx).?.get("__ii_rewound") == .bool and sic.thisObj(ctx).?.get("__ii_rewound").bool;
     const ii = try iiFetch(ctx, "InternalIterator::rewind", args);
+    if (isPeriod(ctx, ii.target)) {
+        if (was_rewound) try period_it.periodIterRewind(ctx, ii.target, ii.it);
+        return NativeResult.scalar(.null);
+    }
     try ii.it.set(ctx.allocator, "__ii_pos", .{ .int = 0 });
     return NativeResult.scalar(.null);
 }

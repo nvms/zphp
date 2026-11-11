@@ -145,6 +145,8 @@ pub const Arity = struct {
 
     pub fn of(name: []const u8) Arity {
         if (variadic_callbacks.get(name)) |min| return .{ .min = min, .max = unbounded };
+        // tries several argument lists and words its own TypeError
+        if (std.mem.eql(u8, name, "DatePeriod::__construct")) return .{};
         const signature = native_params.get(name) orelse return .{};
         var arity: Arity = .{ .max = 0 };
         for (signature.params) |param| {

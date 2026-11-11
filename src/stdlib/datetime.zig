@@ -17,6 +17,7 @@ const tzdb = @import("tzdb.zig");
 const date_format = @import("date_format.zig");
 const tz_abbr_table = @import("tz_abbr_table.zig");
 const string_ports = @import("string_ports.zig");
+const strings = @import("strings.zig");
 
 const DT_FORMAT_CONSTS = .{
     .{ "ATOM", "Y-m-d\\TH:i:sP" },
@@ -273,14 +274,14 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DateInterval::format", diFormat);
 
     // DatePeriod
-    var dp_def = ClassDef{ .name = "DatePeriod" };
+    var dp_def = ClassDef{ .name = "DatePeriod", .native_properties = periodProperties, .native_binop = dateBinop };
     try dp_def.properties.append(a, .{ .name = "start", .default = .null, .type_str = "?DateTimeInterface", .is_readonly = true, .readonly_undeclared = true });
     try dp_def.properties.append(a, .{ .name = "current", .default = .null, .type_str = "?DateTimeInterface", .is_readonly = true, .readonly_undeclared = true });
     try dp_def.properties.append(a, .{ .name = "end", .default = .null, .type_str = "?DateTimeInterface", .is_readonly = true, .readonly_undeclared = true });
     try dp_def.properties.append(a, .{ .name = "interval", .default = .null, .type_str = "?DateInterval", .is_readonly = true, .readonly_undeclared = true });
-    try dp_def.properties.append(a, .{ .name = "recurrences", .default = .{ .int = 1 }, .type_str = "int", .is_readonly = true, .readonly_undeclared = true });
-    try dp_def.properties.append(a, .{ .name = "include_start_date", .default = .{ .bool = true }, .type_str = "bool", .is_readonly = true, .readonly_undeclared = true });
-    try dp_def.properties.append(a, .{ .name = "include_end_date", .default = .{ .bool = false }, .type_str = "bool", .is_readonly = true, .readonly_undeclared = true });
+    try dp_def.properties.append(a, .{ .name = "recurrences", .default = .undef, .type_str = "int", .is_readonly = true, .readonly_undeclared = true });
+    try dp_def.properties.append(a, .{ .name = "include_start_date", .default = .undef, .type_str = "bool", .is_readonly = true, .readonly_undeclared = true });
+    try dp_def.properties.append(a, .{ .name = "include_end_date", .default = .undef, .type_str = "bool", .is_readonly = true, .readonly_undeclared = true });
     try dp_def.methods.put(a, "__serialize", .{ .name = "__serialize", .arity = 0 });
     try dp_def.methods.put(a, "__unserialize", .{ .name = "__unserialize", .arity = 1 });
     try dp_def.methods.put(a, "__set_state", .{ .name = "__set_state", .arity = 1, .is_static = true });
@@ -307,58 +308,117 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DatePeriod::getDateInterval", dpGetInterval);
     try vm.native_fns.put(a, "DatePeriod::getRecurrences", dpGetRecurrences);
     try vm.native_fns.put(a, "DatePeriod::getIterator", dpGetIterator);
-
-    var dpi_def = ClassDef{ .name = "DatePeriodIterator" };
-    try dpi_def.interfaces.append(a, "Iterator");
-    try dpi_def.methods.put(a, "current", .{ .name = "current", .arity = 0 });
-    try dpi_def.methods.put(a, "key", .{ .name = "key", .arity = 0 });
-    try dpi_def.methods.put(a, "next", .{ .name = "next", .arity = 0 });
-    try dpi_def.methods.put(a, "rewind", .{ .name = "rewind", .arity = 0 });
-    try dpi_def.methods.put(a, "valid", .{ .name = "valid", .arity = 0 });
-    try vm.classes.put(a, "DatePeriodIterator", dpi_def);
-    try vm.native_fns.put(a, "DatePeriodIterator::current", dpiCurrent);
-    try vm.native_fns.put(a, "DatePeriodIterator::key", dpiKey);
-    try vm.native_fns.put(a, "DatePeriodIterator::next", dpiNext);
-    try vm.native_fns.put(a, "DatePeriodIterator::rewind", dpiRewind);
-    try vm.native_fns.put(a, "DatePeriodIterator::valid", dpiValid);
 }
 
-// parse a "YYYY-MM-DD" or "YYYY-MM-DDTHH:MM:SS" (optional trailing Z) date
-// string to a unix timestamp interpreted as UTC. used by the ISO 8601
-// DatePeriod string form
+// ---- DatePeriod ----
+
 const period_fields = [_][]const u8{ "start", "current", "end", "interval", "recurrences", "include_start_date", "include_end_date" };
+
+fn isPeriodField(key: PhpArray.Key) bool {
+    if (key != .string) return false;
+    for (period_fields) |name| if (std.mem.eql(u8, key.string.bytes(), name)) return true;
+    return false;
+}
+
+fn periodInitialized(obj: *PhpObject) bool {
+    return obj.get("__init") == .bool;
+}
+
+// the period's copy of an interval: its relative time, shown as plain fields
+// (create_date_period_interval keeps neither from_string nor civil_or_wall);
+// the date string stays behind for its weekday and special parts
+fn periodInterval(ctx: *NativeContext, iv: *PhpObject) RuntimeError!*PhpObject {
+    const copy = try ctx.createObject("DateInterval");
+    for (interval_fields) |name| try copy.set(ctx.allocator, name, iv.get(name));
+    try copy.set(ctx.allocator, "from_string", .{ .bool = false });
+    if (iv.get("__date_string") == .string) try copy.set(ctx.allocator, "__date_string", iv.get("__date_string"));
+    try copy.set(ctx.allocator, "__wall", .{ .bool = false });
+    try markInterval(ctx, copy);
+    return copy;
+}
+
+const PeriodArgs = union(enum) {
+    recurrences: struct { start: *PhpObject, interval: *PhpObject, count: i64, options: i64 },
+    end: struct { start: *PhpObject, interval: *PhpObject, end: *PhpObject, options: i64 },
+    iso: struct { spec: []const u8, options: i64 },
+};
+
+// a long the way zend_parse_parameters reads one, or null where it would fail
+fn quietLong(v: Value) ?i64 {
+    return switch (v) {
+        .int => |i| i,
+        .bool => |b| @intFromBool(b),
+        .float => |f| if (std.math.isNan(f) or !Value.floatFitsInt(f)) null else @as(i64, @intFromFloat(@trunc(f))),
+        .string => |s| if (Value.isNumericString(s.bytes())) Value.toInt(v) else null,
+        else => null,
+    };
+}
+
+fn isDateObject(ctx: *NativeContext, v: Value, class: []const u8) bool {
+    return v == .object and ctx.vm.isInstanceOf(v.object.class_name, class);
+}
+
+// DatePeriod::__construct's three argument lists, tried in turn as php
+// tries them quietly
+fn periodArgs(ctx: *NativeContext, args: []const Value) RuntimeError!?PeriodArgs {
+    if (args.len >= 3 and args.len <= 4 and isDateObject(ctx, args[0], "DateTimeInterface") and isDateObject(ctx, args[1], "DateInterval")) {
+        const options: ?i64 = if (args.len == 4) quietLong(args[3]) else 0;
+        if (options) |opt| {
+            if (args[2] != .object and args[2] != .null) if (quietLong(args[2])) |count| {
+                return .{ .recurrences = .{ .start = args[0].object, .interval = args[1].object, .count = count, .options = opt } };
+            };
+            if (isDateObject(ctx, args[2], "DateTimeInterface")) {
+                return .{ .end = .{ .start = args[0].object, .interval = args[1].object, .end = args[2].object, .options = opt } };
+            }
+        }
+    }
+    if (args.len >= 1 and args.len <= 2) {
+        const options: ?i64 = if (args.len == 2) quietLong(args[1]) else 0;
+        if (options) |opt| switch (args[0]) {
+            .string => |s| return .{ .iso = .{ .spec = s.bytes(), .options = opt } },
+            .int, .float, .bool => return .{ .iso = .{ .spec = try strings.coerceToString(ctx, args[0]), .options = opt } },
+            .null, .undef => {
+                try ctx.vm.raiseError(VM.E_DEPRECATED, "DatePeriod::__construct(): Passing null to parameter #1 ($start) of type string is deprecated");
+                return .{ .iso = .{ .spec = "", .options = opt } };
+            },
+            else => {},
+        };
+    }
+    return null;
+}
 
 fn dpConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len >= 1 and args[0] == .string) {
-        try ctx.vm.raiseError(VM.E_DEPRECATED, "Calling DatePeriod::__construct(string $isostr, int $options = 0) is deprecated, use DatePeriod::createFromISO8601String() instead");
-        try initializePeriodFromIso(ctx, obj, args[0].string.bytes(), if (args.len >= 2) Value.toInt(args[1]) else 0, "DatePeriod::__construct", "DateTime");
-        return NativeResult.scalar(.null);
+    const parsed = (try periodArgs(ctx, args)) orelse {
+        try ctx.vm.setPendingException("TypeError", "DatePeriod::__construct() accepts (DateTimeInterface, DateInterval, int [, int]), or (DateTimeInterface, DateInterval, DateTime [, int]), or (string [, int]) as arguments");
+        return error.RuntimeError;
+    };
+    switch (parsed) {
+        .iso => |iso| {
+            try ctx.vm.raiseError(VM.E_DEPRECATED, "Calling DatePeriod::__construct(string $isostr, int $options = 0) is deprecated, use DatePeriod::createFromISO8601String() instead");
+            if (ctx.vm.pending_exception != null) return error.RuntimeError;
+            try initializePeriodFromIso(ctx, obj, iso.spec, iso.options, "DatePeriod::__construct", "DateTime");
+        },
+        .recurrences, .end => {
+            const start, const interval, const end, const count, const options = switch (parsed) {
+                .recurrences => |r| .{ r.start, r.interval, @as(?*PhpObject, null), r.count, r.options },
+                .end => |e| .{ e.start, e.interval, @as(?*PhpObject, e.end), @as(i64, 0), e.options },
+                else => unreachable,
+            };
+            // DATE_CHECK_INITIALIZED names the interface for the dates
+            if (start.get("__timestamp") == .null) return throwUninitialized(ctx, "DateTimeInterface");
+            if (end) |e| if (e.get("__timestamp") == .null) return throwUninitialized(ctx, "DateTimeInterface");
+            _ = try intervalOf(ctx, interval);
+            try obj.set(ctx.allocator, "start", .{ .object = try cloneDateObject(ctx, start) });
+            try obj.set(ctx.allocator, "interval", .{ .object = try periodInterval(ctx, interval) });
+            if (end) |e| try obj.set(ctx.allocator, "end", .{ .object = try cloneDateObject(ctx, e) });
+            try finishPeriod(ctx, obj, count, options, "DatePeriod::__construct");
+        },
     }
-    if (args.len < 3 or args[0] != .object or args[1] != .object) return NativeResult.scalar(.null);
-    const options: i64 = if (args.len >= 4) Value.toInt(args[3]) else 0;
-    var recurrences: i64 = 0;
-    if (args[2] == .object) {
-        try obj.set(ctx.allocator, "end", .{ .object = try cloneDateObject(ctx, args[2].object) });
-    } else {
-        recurrences = Value.toInt(args[2]);
-    }
-    try obj.set(ctx.allocator, "start", .{ .object = try cloneDateObject(ctx, args[0].object) });
-    try obj.set(ctx.allocator, "interval", .{ .object = try cloneDateObject(ctx, args[1].object) });
-    try finishPeriod(ctx, obj, recurrences, options, "DatePeriod::__construct");
     return NativeResult.scalar(.null);
 }
 
 const max_recurrences: i64 = 2147483639;
-
-// php counts the start and end dates it includes into recurrences
-fn setPeriodCount(ctx: *NativeContext, obj: *PhpObject, recurrences: i64, options: i64) RuntimeError!void {
-    const include_start = options & 1 == 0;
-    const include_end = options & 2 != 0;
-    try obj.set(ctx.allocator, "include_start_date", .{ .bool = include_start });
-    try obj.set(ctx.allocator, "include_end_date", .{ .bool = include_end });
-    try obj.set(ctx.allocator, "recurrences", .{ .int = recurrences + @intFromBool(include_start) + @intFromBool(include_end) });
-}
 
 // date_period_init_iso8601_string: start, end, interval and recurrences
 // from an ISO 8601 interval string; the dates are UTC, made as base_class
@@ -371,21 +431,18 @@ fn initializePeriodFromIso(ctx: *NativeContext, obj: *PhpObject, spec: []const u
     try obj.set(ctx.allocator, "start", .{ .object = try isoDate(ctx, base_class, begin) });
     if (parsed.end) |end| try obj.set(ctx.allocator, "end", .{ .object = try isoDate(ctx, base_class, end) });
     const interval = try ctx.createObject("DateInterval");
-    try interval.set(ctx.allocator, "y", .{ .int = period.y });
-    try interval.set(ctx.allocator, "m", .{ .int = period.m });
-    try interval.set(ctx.allocator, "d", .{ .int = period.d });
-    try interval.set(ctx.allocator, "h", .{ .int = period.h });
-    try interval.set(ctx.allocator, "i", .{ .int = period.i });
-    try interval.set(ctx.allocator, "s", .{ .int = period.s });
+    try putRelFields(ctx, interval, period.y, period.m, period.d, period.h, period.i, period.s, 0, false, null);
     try markInterval(ctx, interval);
     try obj.set(ctx.allocator, "interval", .{ .object = interval });
     try finishPeriod(ctx, obj, parsed.recurrences, options, func);
 }
 
 fn isoDate(ctx: *NativeContext, class: []const u8, d: iso_interval.Date) RuntimeError!*PhpObject {
+    var t = isoTime(d);
+    dp.updateTs(&t, null, parse_db);
     const date = try ctx.createObject(class);
-    try date.set(ctx.allocator, "__timestamp", .{ .int = dateToTimestamp(d.y, d.m, d.d, d.h, d.i, d.s) });
-    try date.set(ctx.allocator, "__timezone", .{ .string = Value.String.borrowed("+00:00") });
+    const zone = ParseZone.of("+00:00", false);
+    try storeInstant(ctx, date, t.sse, 0, &zone);
     return date;
 }
 
@@ -394,63 +451,73 @@ fn finishPeriod(ctx: *NativeContext, obj: *PhpObject, recurrences: i64, options:
     if (obj.get("end") == .null and (recurrences < 1 or recurrences > max_recurrences)) {
         return malformedPeriod(ctx, "{s}(): Recurrence count must be greater or equal to 1 and lower than 2147483640", .{func});
     }
-    try setPeriodCount(ctx, obj, recurrences, options);
+    const include_start = options & 1 == 0;
+    const include_end = options & 2 != 0;
+    const total = recurrences + @intFromBool(include_start) + @intFromBool(include_end);
+    if (total > max_recurrences) {
+        return throwFmt(ctx, "DateMalformedStringException", "{s}(): Recurrence count must be greater or equal to 1 and lower than 2147483640 (including options)", .{func});
+    }
+    try obj.set(ctx.allocator, "include_start_date", .{ .bool = include_start });
+    try obj.set(ctx.allocator, "include_end_date", .{ .bool = include_end });
+    try obj.set(ctx.allocator, "recurrences", .{ .int = total });
+    try obj.set(ctx.allocator, "__init", .{ .bool = true });
 }
 
 fn malformedPeriod(ctx: *NativeContext, comptime fmt: []const u8, args: anytype) RuntimeError {
-    const msg = try std.fmt.allocPrint(ctx.allocator, fmt, args);
-    defer ctx.allocator.free(msg);
-    try ctx.vm.setPendingException("DateMalformedPeriodStringException", msg);
-    return error.RuntimeError;
+    return throwFmt(ctx, "DateMalformedPeriodStringException", fmt, args);
 }
 
 fn periodFromIsoString(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = Args.init(ctx, "DatePeriod::createFromISO8601String", args);
+    const spec = try p.str(0, "specification");
+    const options = try p.optLong(1, "options", 0);
     const obj = try ctx.createObject(staticClass(ctx, "DatePeriod"));
-    const spec = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else "";
-    try initializePeriodFromIso(ctx, obj, spec, if (args.len >= 2) Value.toInt(args[1]) else 0, "DatePeriod::createFromISO8601String", "DateTimeImmutable");
+    try initializePeriodFromIso(ctx, obj, spec, options, "DatePeriod::createFromISO8601String", "DateTimeImmutable");
     return NativeResult.borrowed(.{ .object = obj });
 }
 
 // each read hands out a copy, so the period itself never changes
-fn periodCopy(ctx: *NativeContext, v: Value) RuntimeError!NativeResult {
-    if (v != .object) return NativeResult.scalar(.null);
-    return NativeResult.borrowed(.{ .object = try cloneDateObject(ctx, v.object) });
-}
-
 fn dpGetStart(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    return periodCopy(ctx, obj.get("start"));
+    const start = obj.get("start");
+    if (start != .object) return throwUninitialized(ctx, obj.class_name);
+    return NativeResult.borrowed(.{ .object = try cloneDateObject(ctx, start.object) });
 }
 
 fn dpGetEnd(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    return periodCopy(ctx, obj.get("end"));
+    const end = obj.get("end");
+    if (end != .object) return NativeResult.scalar(.null);
+    return NativeResult.borrowed(.{ .object = try cloneDateObject(ctx, end.object) });
 }
 
 fn dpGetInterval(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    return periodCopy(ctx, obj.get("interval"));
+    const interval = obj.get("interval");
+    if (interval != .object) return throwUninitialized(ctx, obj.class_name);
+    return NativeResult.borrowed(.{ .object = try periodInterval(ctx, interval.object) });
 }
 
 // the count given to the constructor, or null for a period with an end date
 fn dpGetRecurrences(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (!periodInitialized(obj)) return NativeResult.scalar(.null);
     const given = Value.toInt(obj.get("recurrences")) - @intFromBool(obj.get("include_start_date").isTruthy()) - @intFromBool(obj.get("include_end_date").isTruthy());
     return NativeResult.scalar(if (given == 0) .null else .{ .int = given });
 }
 
+// an InternalIterator over the period (zend_create_internal_iterator_zval)
 fn dpGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const iter = try ctx.vm.allocObject(.{ .class_name = "DatePeriodIterator" });
-    try iter.set(ctx.allocator, "__period", .{ .object = obj });
-    try iter.set(ctx.allocator, "__index", .{ .int = 0 });
-    return NativeResult.borrowed(.{ .object = iter });
+    return NativeResult.borrowed(.{ .object = try @import("spl_fixedarray.zig").internalIterator(ctx, obj) });
 }
 
-fn iteratedPeriod(ctx: *NativeContext) ?*PhpObject {
-    const this = getThis(ctx) orelse return null;
-    const period = this.get("__period");
-    return if (period == .object) period.object else null;
+// ---- the period's iterator (date_period_it_*); php keeps the current date
+// in the period and the position in the iterator ----
+
+fn stateIndex(state: *PhpObject) i64 {
+    const v = state.get("__dp_index");
+    return if (v == .int) v.int else 0;
 }
 
 // date_period_advance: the period's current date moved on by its interval
@@ -458,73 +525,79 @@ fn advancePeriod(ctx: *NativeContext, period: *PhpObject) RuntimeError!void {
     const current = period.get("current");
     const interval = period.get("interval");
     if (current != .object or interval != .object) return;
-    const us_v = current.object.get("__microseconds");
-    const next = try periodStep(ctx, getTimestamp(current.object), if (us_v == .int) us_v.int else 0, &objZoneOr(ctx, current.object), interval.object);
+    const next = try periodStep(ctx, getTimestamp(current.object), objMicros(current.object), &objZoneOr(ctx, current.object), interval.object);
     const moved = try cloneDateObject(ctx, current.object);
     try moved.set(ctx.allocator, "__timestamp", .{ .int = next.ts });
     if (next.us != 0 or moved.get("__microseconds") != .null) try moved.set(ctx.allocator, "__microseconds", .{ .int = next.us });
     try period.set(ctx.allocator, "current", .{ .object = moved });
 }
 
-fn dpiRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const period = iteratedPeriod(ctx) orelse return NativeResult.scalar(.null);
-    try getThis(ctx).?.set(ctx.allocator, "__index", .{ .int = 0 });
+pub fn periodIterRewind(ctx: *NativeContext, period: *PhpObject, state: *PhpObject) RuntimeError!void {
+    try state.set(ctx.allocator, "__dp_index", .{ .int = 0 });
     const start = period.get("start");
-    if (start != .object) {
-        try ctx.vm.setPendingException("Error", "The DatePeriod object has not been correctly initialized by its constructor");
-        return error.RuntimeError;
-    }
+    if (start != .object) return throwUninitialized(ctx, "DatePeriod");
     try period.set(ctx.allocator, "current", .{ .object = try cloneDateObject(ctx, start.object) });
     if (!period.get("include_start_date").isTruthy()) try advancePeriod(ctx, period);
-    return NativeResult.scalar(.null);
 }
 
 // date_period_it_has_more
-fn dpiValid(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const period = iteratedPeriod(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+pub fn periodIterValid(period: *PhpObject, state: *PhpObject) bool {
     const current = period.get("current");
-    if (current != .object) return NativeResult.scalar(.{ .bool = false });
+    if (current != .object) return false;
     const end = period.get("end");
     if (end == .object) {
         const ts = getTimestamp(current.object);
         const end_ts = getTimestamp(end.object);
-        return NativeResult.scalar(.{ .bool = if (period.get("include_end_date").isTruthy()) ts <= end_ts else ts < end_ts });
+        if (ts == end_ts) {
+            const us = objMicros(current.object);
+            const end_us = objMicros(end.object);
+            return if (period.get("include_end_date").isTruthy()) us <= end_us else us < end_us;
+        }
+        return ts < end_ts;
     }
-    return NativeResult.scalar(.{ .bool = Value.toInt(getThis(ctx).?.get("__index")) < Value.toInt(period.get("recurrences")) });
+    return stateIndex(state) < Value.toInt(period.get("recurrences"));
 }
 
 // the current date as the start date's base class, DateTime or
 // DateTimeImmutable
-fn dpiCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const period = iteratedPeriod(ctx) orelse return NativeResult.scalar(.null);
+pub fn periodIterCurrent(ctx: *NativeContext, period: *PhpObject) RuntimeError!Value {
     const current = period.get("current");
-    if (current != .object) return NativeResult.scalar(.null);
+    if (current != .object) return .null;
     const base: []const u8 = if (ctx.vm.isInstanceOf(current.object.class_name, "DateTimeImmutable")) "DateTimeImmutable" else "DateTime";
     const dt = try ctx.createObject(base);
-    try dt.set(ctx.allocator, "__timestamp", current.object.get("__timestamp"));
-    if (objZone(current.object)) |zone| try setObjZone(ctx, dt, &zone);
-    if (current.object.get("__microseconds") == .int) try dt.set(ctx.allocator, "__microseconds", current.object.get("__microseconds"));
-    return NativeResult.borrowed(.{ .object = dt });
+    try storeInstant(ctx, dt, getTimestamp(current.object), objMicros(current.object), &objZoneOr(ctx, current.object));
+    return .{ .object = dt };
 }
 
-fn dpiKey(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    return NativeResult.scalar(this.get("__index"));
+pub fn periodIterKey(state: *PhpObject) Value {
+    return .{ .int = stateIndex(state) };
 }
 
-fn dpiNext(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const period = iteratedPeriod(ctx) orelse return NativeResult.scalar(.null);
+pub fn periodIterNext(ctx: *NativeContext, period: *PhpObject, state: *PhpObject) RuntimeError!void {
     try advancePeriod(ctx, period);
-    const this = getThis(ctx).?;
-    try this.set(ctx.allocator, "__index", .{ .int = Value.toInt(this.get("__index")) + 1 });
-    return NativeResult.scalar(.null);
+    try state.set(ctx.allocator, "__dp_index", .{ .int = stateIndex(state) + 1 });
+}
+
+// date_period_object_to_hash: the seven fields
+fn putPeriodFields(ctx: *NativeContext, obj: *PhpObject, table: *PhpArray) RuntimeError!void {
+    for (period_fields) |name| try table.set(ctx.allocator, .{ .string = Value.String.borrowed(name) }, obj.get(name));
+}
+
+// the object's own properties, then the fields of an initialized period
+fn periodProperties(ctx: *NativeContext, obj: *PhpObject, _: object_properties.Purpose) RuntimeError!?*PhpArray {
+    const own = try object_properties.ownTable(ctx.vm, obj);
+    const table = try ctx.vm.allocArray();
+    for (own.entries.items) |entry| if (!isPeriodField(entry.key)) try table.set(ctx.allocator, entry.key, entry.value);
+    if (periodInitialized(obj)) try putPeriodFields(ctx, obj, table);
+    return table;
 }
 
 // the seven fields first, then the object's other properties
 fn periodSerialize(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (obj.get("start") != .object) return throwUninitialized(ctx, obj.class_name);
     const out = try ctx.createArray();
-    for (period_fields) |name| try out.set(ctx.allocator, .{ .string = Value.String.borrowed(name) }, obj.get(name));
+    try putPeriodFields(ctx, obj, out);
     const own = try object_properties.ownTable(ctx.vm, obj);
     for (own.entries.items) |entry| if (!out.contains(entry.key)) try out.set(ctx.allocator, entry.key, entry.value);
     return NativeResult.borrowed(.{ .array = out });
@@ -532,41 +605,43 @@ fn periodSerialize(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
 
 // php_date_period_initialize_from_hash
 fn initializePeriodFromHash(ctx: *NativeContext, obj: *PhpObject, data: *const PhpArray) RuntimeError!bool {
+    var have_start = false;
     for ([_][]const u8{ "start", "end", "current" }) |name| {
-        const key: PhpArray.Key = .{ .string = Value.String.borrowed(name) };
-        if (!data.contains(key)) return false;
-        const v = data.get(key);
+        const v = hashField(data, name) orelse return false;
         if (v == .object and ctx.vm.isInstanceOf(v.object.class_name, "DateTimeInterface")) {
             if (v.object.get("__timestamp") == .null) return false;
+            if (!std.mem.eql(u8, name, "start") and !have_start) return false;
+            if (std.mem.eql(u8, name, "start")) have_start = true;
             try obj.set(ctx.allocator, name, .{ .object = try cloneDateObject(ctx, v.object) });
-        } else if (v == .null) {
-            try obj.set(ctx.allocator, name, .null);
-        } else return false;
+        } else if (v != .null) return false;
     }
-    const interval = data.get(.{ .string = Value.String.borrowed("interval") });
-    if (interval != .object or !ctx.vm.isInstanceOf(interval.object.class_name, "DateInterval")) return false;
-    try obj.set(ctx.allocator, "interval", .{ .object = try cloneDateObject(ctx, interval.object) });
-    const recurrences = data.get(.{ .string = Value.String.borrowed("recurrences") });
+    const interval = hashField(data, "interval") orelse return false;
+    if (interval != .object or !std.mem.eql(u8, ctx.vm.declaredClassName(interval.object.class_name), "DateInterval") or !intervalInitialized(interval.object)) return false;
+    try obj.set(ctx.allocator, "interval", .{ .object = try periodInterval(ctx, interval.object) });
+    const recurrences = hashField(data, "recurrences") orelse return false;
     if (recurrences != .int or recurrences.int < 0 or recurrences.int > std.math.maxInt(i32)) return false;
     try obj.set(ctx.allocator, "recurrences", recurrences);
     for ([_][]const u8{ "include_start_date", "include_end_date" }) |name| {
-        const v = data.get(.{ .string = Value.String.borrowed(name) });
+        const v = hashField(data, name) orelse return false;
         if (v != .bool) return false;
         try obj.set(ctx.allocator, name, v);
     }
+    try obj.set(ctx.allocator, "__init", .{ .bool = true });
     return true;
 }
 
 fn periodUnserialize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len == 0 or args[0] != .array or !try initializePeriodFromHash(ctx, obj, args[0].array)) return invalidSerialization(ctx, "DatePeriod");
-    try restoreCustomProperties(ctx, obj, args[0].array, &period_fields);
+    const data = try arrayArg(ctx, "DatePeriod::__unserialize", args, "data");
+    if (!try initializePeriodFromHash(ctx, obj, data)) return invalidSerialization(ctx, "DatePeriod");
+    try restoreCustomProperties(ctx, obj, data, &period_fields);
     return NativeResult.scalar(.null);
 }
 
 fn periodSetState(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const data = try arrayArg(ctx, "DatePeriod::__set_state", args, "array");
     const obj = try ctx.createObject("DatePeriod");
-    if (args.len == 0 or args[0] != .array or !try initializePeriodFromHash(ctx, obj, args[0].array)) return invalidSerialization(ctx, "DatePeriod");
+    if (!try initializePeriodFromHash(ctx, obj, data)) return invalidSerialization(ctx, "DatePeriod");
     return NativeResult.borrowed(.{ .object = obj });
 }
 
@@ -574,6 +649,7 @@ fn periodWakeup(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const own = try object_properties.ownTable(ctx.vm, obj);
     if (!try initializePeriodFromHash(ctx, obj, own)) return invalidSerialization(ctx, "DatePeriod");
+    try restoreCustomProperties(ctx, obj, own, &period_fields);
     return NativeResult.scalar(.null);
 }
 
@@ -690,7 +766,15 @@ fn restoreCustomProperties(ctx: *NativeContext, obj: *PhpObject, data: *const Ph
         if (entry.key != .string or entry.ref != null) continue;
         const key = entry.key.string.bytes();
         for (internal) |name| if (std.mem.eql(u8, key, name)) continue :entries;
-        const name = if (key.len > 0 and key[0] == 0) if (std.mem.lastIndexOfScalar(u8, key[1..], 0)) |end| key[end + 2 ..] else key else key;
+        var name = key;
+        if (key.len > 0 and key[0] == 0) {
+            // update_property: a private property of a class that doesn't
+            // exist is dropped
+            const end = std.mem.indexOfScalarPos(u8, key, 1, 0) orelse continue;
+            const class = key[1..end];
+            if (!std.mem.eql(u8, class, "*") and !ctx.vm.classes.contains(class)) continue;
+            name = key[end + 1 ..];
+        }
         try obj.set(ctx.allocator, name, entry.value);
     }
 }
@@ -843,7 +927,7 @@ const IntervalSpec = struct { rel: dp.Rel, invert: bool, wall: bool };
 
 fn intervalSpec(ctx: *NativeContext, iv: *PhpObject) RuntimeError!IntervalSpec {
     var rel = dp.Rel{};
-    if (iv.get("from_string") == .bool and iv.get("from_string").bool and iv.get("__date_string") == .string) {
+    if (iv.get("__date_string") == .string) {
         var p = try parseDate(ctx, iv.get("__date_string").string.bytes());
         defer p.deinit(ctx.allocator);
         rel = p.time.relative;
@@ -915,20 +999,6 @@ fn setObjZone(ctx: *NativeContext, obj: *PhpObject, zone: *const ParseZone) Runt
     }
 }
 
-// procedural alias for DateInterval::createFromDateString
-fn native_date_interval_create_from_date_string(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return intervalFromDateString(ctx, args, false);
-}
-
-// procedural alias for DateInterval::format($interval, $format)
-fn native_date_interval_format(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2 or args[0] != .object or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
-    const saved = ctx.vm.currentFrame().vars.get("$this");
-    try ctx.vm.putFrameVar(&ctx.vm.currentFrame().vars, "$this", args[0]);
-    defer if (saved) |s| (ctx.vm.putFrameVar(&ctx.vm.currentFrame().vars, "$this", s) catch {});
-    return diFormat(ctx, args[1..]);
-}
-
 // the class a static factory was called on (Carbon::createFromFormat makes a
 // Carbon): the static call leaves it on the calling frame, and anything that
 // isn't a subclass of the factory's own class is not it
@@ -943,7 +1013,7 @@ fn isDigit(c: u8) bool {
 }
 // ---- DateTime and DateTimeImmutable (php_date.c) ----
 
-const CompareKind = enum { date, zone, interval };
+const CompareKind = enum { date, zone, interval, period };
 
 fn compareKind(ctx: *NativeContext, v: Value) ?CompareKind {
     if (v != .object) return null;
@@ -951,7 +1021,15 @@ fn compareKind(ctx: *NativeContext, v: Value) ?CompareKind {
     if (ctx.vm.isInstanceOf(class, "DateTime") or ctx.vm.isInstanceOf(class, "DateTimeImmutable")) return .date;
     if (ctx.vm.isInstanceOf(class, "DateTimeZone")) return .zone;
     if (ctx.vm.isInstanceOf(class, "DateInterval")) return .interval;
+    if (ctx.vm.isInstanceOf(class, "DatePeriod")) return .period;
     return null;
+}
+
+fn ownNonPeriod(ctx: *NativeContext, obj: *PhpObject) RuntimeError!*PhpArray {
+    const own = try object_properties.ownTable(ctx.vm, obj);
+    const out = try ctx.createArray();
+    for (own.entries.items) |entry| if (!isPeriodField(entry.key)) try out.set(ctx.allocator, entry.key, entry.value);
+    return out;
 }
 
 fn throwPlain(ctx: *NativeContext, class: []const u8, msg: []const u8) RuntimeError {
@@ -992,6 +1070,14 @@ fn dateBinop(ctx: *NativeContext, op: vm_mod.NativeBinop, a: Value, b: Value) Ru
             try ctx.vm.emitWarning("Cannot compare DateInterval objects");
             return .{ .int = 1 };
         },
+        // the standard comparison, over what php keeps as properties: the
+        // seven fields are virtual
+        .period => {
+            if (!std.mem.eql(u8, a.object.class_name, b.object.class_name)) return .{ .int = 1 };
+            const oa = try ownNonPeriod(ctx, a.object);
+            const ob = try ownNonPeriod(ctx, b.object);
+            return .{ .int = Value.compare(.{ .array = oa }, .{ .array = ob }) };
+        },
     }
 }
 
@@ -1026,7 +1112,6 @@ fn zoneArg(ctx: *NativeContext, p: Args, index: usize, name: []const u8) Runtime
         return error.RuntimeError;
     };
 }
-
 
 fn constructAs(comptime class: []const u8) NativeFn {
     return struct {
@@ -2256,66 +2341,59 @@ fn isLeapYear(y: i64) bool {
     return (@mod(y, 4) == 0 and @mod(y, 100) != 0) or @mod(y, 400) == 0;
 }
 
-const IsoDuration = struct { y: i64, m: i64, d: i64, h: i64, mi: i64, s: i64, f: f64 };
+// ---- the date string parser (date_parse.zig) wired to zphp's zones ----
 
-fn parseIsoDuration(spec: []const u8) IsoDuration {
-    var result = IsoDuration{ .y = 0, .m = 0, .d = 0, .h = 0, .mi = 0, .s = 0, .f = 0 };
-    if (spec.len == 0 or spec[0] != 'P') return result;
-    var in_time = false;
-    var num_start: ?usize = null;
-    for (spec[1..], 1..) |c, idx| {
-        if (c >= '0' and c <= '9' or c == '.') {
-            if (num_start == null) num_start = idx;
-        } else if (c == 'T') {
-            in_time = true;
-            num_start = null;
-        } else if (num_start) |ns| {
-            const num_str = spec[ns..idx];
-            if (std.mem.indexOf(u8, num_str, ".")) |_| {
-                const val = std.fmt.parseFloat(f64, num_str) catch 0.0;
-                if (in_time and c == 'S') {
-                    result.s = Value.dvalToLval(val);
-                    result.f = val - @as(f64, @floatFromInt(result.s));
-                }
-            } else {
-                const val = std.fmt.parseInt(i64, num_str, 10) catch 0;
-                if (!in_time) {
-                    switch (c) {
-                        'Y' => result.y = val,
-                        'M' => result.m = val,
-                        'D' => result.d = val,
-                        'W' => result.d = val * 7,
-                        else => {},
-                    }
-                } else {
-                    switch (c) {
-                        'H' => result.h = val,
-                        'M' => result.mi = val,
-                        'S' => result.s = val,
-                        else => {},
-                    }
-                }
-            }
-            num_start = null;
-        }
-    }
-    return result;
+// ---- DateInterval ----
+
+// a timelib time for an ISO 8601 date (always utc)
+fn isoTime(d: iso_interval.Date) dp.Time {
+    var t = dp.Time{};
+    t.y = d.y;
+    t.m = d.m;
+    t.d = d.d;
+    t.h = if (d.h == iso_interval.unset) 0 else d.h;
+    t.i = if (d.i == iso_interval.unset) 0 else d.i;
+    t.s = if (d.s == iso_interval.unset) 0 else d.s;
+    t.us = 0;
+    t.zone_type = dp.ZONETYPE_OFFSET;
+    t.z = 0;
+    t.dst = 0;
+    t.have_zone = 1;
+    return t;
 }
 
+fn putRelFields(ctx: *NativeContext, obj: *PhpObject, y: i64, m: i64, d: i64, h: i64, i: i64, s: i64, us: i64, invert: bool, days: ?i64) RuntimeError!void {
+    try obj.set(ctx.allocator, "y", .{ .int = y });
+    try obj.set(ctx.allocator, "m", .{ .int = m });
+    try obj.set(ctx.allocator, "d", .{ .int = d });
+    try obj.set(ctx.allocator, "h", .{ .int = h });
+    try obj.set(ctx.allocator, "i", .{ .int = i });
+    try obj.set(ctx.allocator, "s", .{ .int = s });
+    try obj.set(ctx.allocator, "f", .{ .float = @as(f64, @floatFromInt(us)) / 1000000.0 });
+    try obj.set(ctx.allocator, "invert", .{ .int = @intFromBool(invert) });
+    try obj.set(ctx.allocator, "days", if (days) |n| .{ .int = n } else .{ .bool = false });
+    try obj.set(ctx.allocator, "from_string", .{ .bool = false });
+}
+
+// date_interval_initialize: an ISO 8601 duration, or the difference between
+// the two dates of an ISO 8601 interval
 fn diConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len > 0 and args[0] == .string) {
-        const dur = parseIsoDuration(args[0].string.bytes());
-        try obj.set(ctx.allocator, "y", .{ .int = dur.y });
-        try obj.set(ctx.allocator, "m", .{ .int = dur.m });
-        try obj.set(ctx.allocator, "d", .{ .int = dur.d });
-        try obj.set(ctx.allocator, "h", .{ .int = dur.h });
-        try obj.set(ctx.allocator, "i", .{ .int = dur.mi });
-        try obj.set(ctx.allocator, "s", .{ .int = dur.s });
-        try obj.set(ctx.allocator, "f", .{ .float = dur.f });
+    const spec = try Args.init(ctx, "DateInterval::__construct", args).str(0, "duration");
+    const parsed = iso_interval.parse(spec);
+    if (parsed.errors > 0) return throwFmt(ctx, "DateMalformedIntervalStringException", "Unknown or bad format ({s})", .{spec});
+    if (parsed.period) |per| {
+        try putRelFields(ctx, obj, per.y, per.m, per.d, per.h, per.i, per.s, 0, false, null);
+    } else if (parsed.begin != null and parsed.end != null) {
+        var b = isoTime(parsed.begin.?);
+        var e = isoTime(parsed.end.?);
+        dp.updateTs(&b, null, parse_db);
+        dp.updateTs(&e, null, parse_db);
+        const rt = dp.diff(&b, &e, parse_db);
+        try putRelFields(ctx, obj, rt.y, rt.m, rt.d, rt.h, rt.i, rt.s, rt.us, rt.invert, rt.days);
+    } else {
+        return throwFmt(ctx, "DateMalformedIntervalStringException", "Failed to parse interval ({s})", .{spec});
     }
-    try obj.set(ctx.allocator, "invert", .{ .int = 0 });
-    try obj.set(ctx.allocator, "days", .{ .bool = false });
     // intervals from a duration add hours, minutes, and seconds as elapsed
     // time (timelib_add_wall); the others add on the wall clock
     try obj.set(ctx.allocator, "__wall", .{ .bool = true });
@@ -2323,16 +2401,27 @@ fn diConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     return NativeResult.scalar(.null);
 }
 
+fn throwFmt(ctx: *NativeContext, class: []const u8, comptime fmt: []const u8, fargs: anytype) RuntimeError {
+    const msg = try std.fmt.allocPrint(ctx.allocator, fmt, fargs);
+    defer ctx.allocator.free(msg);
+    try ctx.vm.setPendingException(class, msg);
+    return error.RuntimeError;
+}
+
 fn diCreateFromDateString(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return intervalFromDateString(ctx, args, true);
+}
+
+fn native_date_interval_create_from_date_string(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return intervalFromDateString(ctx, args, false);
 }
 
 // date_interval_create_from_date_string: the relative part of a date string.
 // a parse error or a date, time, or zone in the string throws from the method
 // and warns from the function
 fn intervalFromDateString(ctx: *NativeContext, args: []const Value, throws: bool) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const input = args[0].string.bytes();
+    const func = if (throws) "DateInterval::createFromDateString" else "date_interval_create_from_date_string";
+    const input = try Args.init(ctx, func, args).str(0, "datetime");
     var p = try parseDate(ctx, input);
     defer p.deinit(ctx.allocator);
     const t = &p.time;
@@ -2363,15 +2452,7 @@ fn intervalFromDateString(ctx: *NativeContext, args: []const Value, throws: bool
 // an interval made from a date string: its relative part, and the string,
 // which is what php shows and serializes
 fn storeStringInterval(ctx: *NativeContext, obj: *PhpObject, input: []const u8, r: *const dp.Rel) RuntimeError!void {
-    try obj.set(ctx.allocator, "y", .{ .int = r.y });
-    try obj.set(ctx.allocator, "m", .{ .int = r.m });
-    try obj.set(ctx.allocator, "d", .{ .int = r.d });
-    try obj.set(ctx.allocator, "h", .{ .int = r.h });
-    try obj.set(ctx.allocator, "i", .{ .int = r.i });
-    try obj.set(ctx.allocator, "s", .{ .int = r.s });
-    try obj.set(ctx.allocator, "f", .{ .float = @as(f64, @floatFromInt(r.us)) / 1000000.0 });
-    try obj.set(ctx.allocator, "invert", .{ .int = 0 });
-    try obj.set(ctx.allocator, "days", .{ .bool = false });
+    try putRelFields(ctx, obj, r.y, r.m, r.d, r.h, r.i, r.s, r.us, false, null);
     try obj.set(ctx.allocator, "from_string", .{ .bool = true });
     try obj.setCopiedString(ctx.allocator, "__date_string", input);
 }
@@ -2382,6 +2463,10 @@ fn isIntervalField(key: PhpArray.Key) bool {
     if (key != .string) return false;
     for (interval_fields) |name| if (std.mem.eql(u8, key.string.bytes(), name)) return true;
     return std.mem.eql(u8, key.string.bytes(), "date_string");
+}
+
+fn intervalInitialized(obj: *PhpObject) bool {
+    return obj.get("__init") == .bool;
 }
 
 // date_interval_object_to_hash: the ten fields, or for an interval from a
@@ -2397,17 +2482,18 @@ fn putIntervalFields(ctx: *NativeContext, obj: *PhpObject, table: *PhpArray) Run
 }
 
 // the object's own properties, then its fields, as php's get_properties
-// handler builds them
+// handler builds them; an interval whose constructor never ran has no fields
 fn intervalProperties(ctx: *NativeContext, obj: *PhpObject, _: object_properties.Purpose) RuntimeError!?*PhpArray {
     const own = try object_properties.ownTable(ctx.vm, obj);
     const table = try ctx.vm.allocArray();
     for (own.entries.items) |entry| if (!isIntervalField(entry.key)) try table.set(ctx.allocator, entry.key, entry.value);
-    try putIntervalFields(ctx, obj, table);
+    if (intervalInitialized(obj)) try putIntervalFields(ctx, obj, table);
     return table;
 }
 
 fn intervalSerialize(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    _ = try intervalOf(ctx, obj);
     const out = try ctx.createArray();
     try putIntervalFields(ctx, obj, out);
     const own = try object_properties.ownTable(ctx.vm, obj);
@@ -2415,42 +2501,44 @@ fn intervalSerialize(ctx: *NativeContext, _: []const Value) RuntimeError!NativeR
     return NativeResult.borrowed(.{ .array = out });
 }
 
+fn hashField(data: *const PhpArray, name: []const u8) ?Value {
+    const key: PhpArray.Key = .{ .string = Value.String.borrowed(name) };
+    if (!data.contains(key)) return null;
+    return data.get(key);
+}
+
 // php_date_interval_initialize_from_hash: a date string is parsed again;
-// otherwise each field is read with php's default, and an interval with no
-// civil_or_wall adds on the wall clock's civil rules
+// otherwise each field is read with php's default (-1 for a missing one), and
+// an interval with no civil_or_wall adds on the wall clock's civil rules
 fn initializeIntervalFromHash(ctx: *NativeContext, obj: *PhpObject, data: *const PhpArray) RuntimeError!void {
-    try markInterval(ctx, obj);
-    const date_string = data.get(.{ .string = Value.String.borrowed("date_string") });
-    if (date_string == .string) {
+    if (hashField(data, "date_string")) |date_string| if (date_string == .string) {
         const input = date_string.string.bytes();
         var p = try parseDate(ctx, input);
         defer p.deinit(ctx.allocator);
         if (p.errors.items.len > 0) {
             const e = p.errors.items[0];
-            const msg = try std.fmt.allocPrint(ctx.allocator, "Unknown or bad format ({s}) at position {d} ({c}) while unserializing: {s}", .{ input, e.pos, if (e.char == 0) ' ' else e.char, e.msg });
-            defer ctx.allocator.free(msg);
-            try ctx.vm.setPendingException("Exception", msg);
-            return error.RuntimeError;
+            return throwFmt(ctx, "Error", "Unknown or bad format ({s}) at position {d} ({c}) while unserializing: {s}", .{ input, e.pos, if (e.char == 0) ' ' else e.char, e.msg });
         }
         try storeStringInterval(ctx, obj, input, &p.time.relative);
         try obj.set(ctx.allocator, "__wall", .{ .bool = false });
+        try markInterval(ctx, obj);
         return;
-    }
+    };
     for ([_][]const u8{ "y", "m", "d", "h", "i", "s" }) |name| {
-        const v = data.get(.{ .string = Value.String.borrowed(name) });
-        try obj.set(ctx.allocator, name, .{ .int = if (isScalarField(v)) v.toInt() else -1 });
+        const v = hashField(data, name);
+        try obj.set(ctx.allocator, name, .{ .int = if (v != null and isScalarField(v.?)) v.?.toInt() else -1 });
     }
-    const f = data.get(.{ .string = Value.String.borrowed("f") });
-    const us: i64 = if (data.contains(.{ .string = Value.String.borrowed("f") })) Value.dvalToLval(Value.toFloat(f) * 1000000.0) else 0;
+    const us: i64 = if (hashField(data, "f")) |f| Value.dvalToLval(Value.toFloat(f) * 1000000.0) else 0;
     try obj.set(ctx.allocator, "f", .{ .float = @as(f64, @floatFromInt(us)) / 1000000.0 });
-    const invert = data.get(.{ .string = Value.String.borrowed("invert") });
-    try obj.set(ctx.allocator, "invert", .{ .int = if (isScalarField(invert)) invert.toInt() else 0 });
-    const days = data.get(.{ .string = Value.String.borrowed("days") });
-    const days_value: Value = if (days == .bool and !days.bool) .{ .bool = false } else if (isScalarField(days)) .{ .int = days.toInt() } else .{ .int = -1 };
+    const invert = hashField(data, "invert");
+    try obj.set(ctx.allocator, "invert", .{ .int = if (invert != null and isScalarField(invert.?)) invert.?.toInt() else 0 });
+    const days = hashField(data, "days");
+    const days_value: Value = if (days == null) .{ .int = -1 } else if (days.? == .bool and !days.?.bool) .{ .bool = false } else if (isScalarField(days.?)) .{ .int = days.?.toInt() } else .{ .int = -1 };
     try obj.set(ctx.allocator, "days", days_value);
     try obj.set(ctx.allocator, "from_string", .{ .bool = false });
-    const civil_or_wall = data.get(.{ .string = Value.String.borrowed("civil_or_wall") });
-    try obj.set(ctx.allocator, "__wall", .{ .bool = civil_or_wall != .null and civil_or_wall.toInt() == 2 });
+    const civil_or_wall = hashField(data, "civil_or_wall");
+    try obj.set(ctx.allocator, "__wall", .{ .bool = civil_or_wall != null and civil_or_wall.?.toInt() == 2 });
+    try markInterval(ctx, obj);
 }
 
 // what php reads as a number from a serialized field: null, a bool, a number
@@ -2464,107 +2552,93 @@ fn isScalarField(v: Value) bool {
 
 fn intervalUnserialize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len == 0 or args[0] != .array) return NativeResult.scalar(.null);
-    try initializeIntervalFromHash(ctx, obj, args[0].array);
-    entries: for (args[0].array.entries.items) |entry| {
-        if (entry.key != .string or entry.ref != null or isIntervalField(entry.key)) continue :entries;
-        const key = entry.key.string.bytes();
-        const name = if (key.len > 0 and key[0] == 0) if (std.mem.lastIndexOfScalar(u8, key[1..], 0)) |end| key[end + 2 ..] else key else key;
-        try obj.set(ctx.allocator, name, entry.value);
-    }
+    const data = try arrayArg(ctx, "DateInterval::__unserialize", args, "data");
+    try initializeIntervalFromHash(ctx, obj, data);
+    try restoreCustomProperties(ctx, obj, data, &.{ "date_string", "from_string", "y", "m", "d", "h", "i", "s", "f", "invert", "days" });
     return NativeResult.scalar(.null);
 }
 
 fn intervalSetState(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const data = try arrayArg(ctx, "DateInterval::__set_state", args, "array");
     const obj = try ctx.createObject("DateInterval");
-    if (args.len > 0 and args[0] == .array) try initializeIntervalFromHash(ctx, obj, args[0].array);
+    try initializeIntervalFromHash(ctx, obj, data);
     return NativeResult.borrowed(.{ .object = obj });
 }
 
+// __wakeup rebuilds the interval from the object's own properties
 fn intervalWakeup(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const own = try ctx.vm.allocArray();
-    for (interval_fields) |name| try own.set(ctx.allocator, .{ .string = Value.String.borrowed(name) }, obj.get(name));
-    if (obj.get("__date_string") == .string) try own.set(ctx.allocator, .{ .string = Value.String.borrowed("date_string") }, obj.get("__date_string"));
+    const own = try object_properties.ownTable(ctx.vm, obj);
+    if (obj.get("__date_string") == .string and !own.contains(.{ .string = Value.String.borrowed("date_string") })) {
+        try own.set(ctx.allocator, .{ .string = Value.String.borrowed("date_string") }, obj.get("__date_string"));
+    }
     try initializeIntervalFromHash(ctx, obj, own);
     return NativeResult.scalar(.null);
 }
 
-fn diFormat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len == 0 or args[0] != .string) return NativeResult.literal("");
-    const fmt = args[0].string.bytes();
-
-    // raw signed values (PHP's lowercase %d/%h/etc print signed values for
-    // intervals created from date strings); uppercase variants use abs/2-digit
-    const y_signed = Value.toInt(obj.get("y"));
-    const m_signed = Value.toInt(obj.get("m"));
-    const d_signed = Value.toInt(obj.get("d"));
-    const h_signed = Value.toInt(obj.get("h"));
-    const i_signed = Value.toInt(obj.get("i"));
-    const s_signed = Value.toInt(obj.get("s"));
-    const y: u64 = @intCast(@abs(y_signed));
-    const m: u64 = @intCast(@abs(m_signed));
-    const d: u64 = @intCast(@abs(d_signed));
-    const h: u64 = @intCast(@abs(h_signed));
-    const mi: u64 = @intCast(@abs(i_signed));
-    const s: u64 = @intCast(@abs(s_signed));
-    const f_us: u64 = blk: {
-        const fv = obj.get("f");
-        if (fv == .float) {
-            // diff() stores whole microseconds as f, which can come back a
-            // hair under the integer (0.250001 * 1e6 = 250000.99...)
-            const us: i64 = Value.dvalToLval(@round(fv.float * 1_000_000.0));
-            break :blk @intCast(@abs(us));
-        }
-        break :blk 0;
+// date_interval_format
+fn intervalFormatImpl(ctx: *NativeContext, obj: *PhpObject, p: Args) RuntimeError!NativeResult {
+    const fmt = try p.str(0, "format");
+    _ = try intervalOf(ctx, obj);
+    const f = obj.get("f");
+    // diff() keeps whole microseconds, which f can hold a hair under
+    const us: i64 = if (f == .float) Value.dvalToLval(@round(f.float * 1_000_000.0)) else Value.toInt(f);
+    const days = obj.get("days");
+    const fields = struct { y: i64, m: i64, d: i64, h: i64, i: i64, s: i64 }{
+        .y = Value.toInt(obj.get("y")),
+        .m = Value.toInt(obj.get("m")),
+        .d = Value.toInt(obj.get("d")),
+        .h = Value.toInt(obj.get("h")),
+        .i = Value.toInt(obj.get("i")),
+        .s = Value.toInt(obj.get("s")),
     };
-    const days_v = obj.get("days");
-    const has_days = days_v == .int;
-    const days_total: u64 = if (has_days) @intCast(@abs(days_v.int)) else 0;
     const invert = Value.toInt(obj.get("invert")) != 0;
-
-    var buf = std.array_list.Managed(u8).init(ctx.allocator);
-    defer buf.deinit();
-
-    var i: usize = 0;
-    while (i < fmt.len) : (i += 1) {
-        const c = fmt[i];
-        if (c != '%' or i + 1 >= fmt.len) {
-            try buf.append(c);
+    const a = ctx.allocator;
+    var out = std.ArrayListUnmanaged(u8).empty;
+    defer out.deinit(a);
+    var spec = false;
+    for (fmt) |c| {
+        if (!spec) {
+            if (c == '%') spec = true else try out.append(a, c);
             continue;
         }
-        i += 1;
-        switch (fmt[i]) {
-            'Y' => try buf.print("{d:0>2}", .{y}),
-            'y' => try buf.print("{d}", .{y_signed}),
-            'M' => try buf.print("{d:0>2}", .{m}),
-            'm' => try buf.print("{d}", .{m_signed}),
-            'D' => try buf.print("{d:0>2}", .{d}),
-            'd' => try buf.print("{d}", .{d_signed}),
-            'a' => if (has_days) try buf.print("{d}", .{days_total}) else try buf.appendSlice("(unknown)"),
-            'H' => try buf.print("{d:0>2}", .{h}),
-            'h' => try buf.print("{d}", .{h_signed}),
-            'I' => try buf.print("{d:0>2}", .{mi}),
-            'i' => try buf.print("{d}", .{i_signed}),
-            'S' => try buf.print("{d:0>2}", .{s}),
-            's' => try buf.print("{d}", .{s_signed}),
-            'F' => try buf.print("{d:0>6}", .{f_us}),
-            'f' => try buf.print("{d}", .{f_us}),
-            'R' => try buf.append(if (invert) '-' else '+'),
-            'r' => if (invert) try buf.append('-'),
-            '%' => try buf.append('%'),
+        spec = false;
+        // c's (int) casts for all but the seconds and microseconds
+        const int32 = struct {
+            fn cast(v: i64) i64 {
+                return @as(i32, @truncate(v));
+            }
+        }.cast;
+        switch (c) {
+            'Y' => try date_format.padded(&out, a, int32(fields.y), 2),
+            'y' => try out.print(a, "{d}", .{int32(fields.y)}),
+            'M' => try date_format.padded(&out, a, int32(fields.m), 2),
+            'm' => try out.print(a, "{d}", .{int32(fields.m)}),
+            'D' => try date_format.padded(&out, a, int32(fields.d), 2),
+            'd' => try out.print(a, "{d}", .{int32(fields.d)}),
+            'H' => try date_format.padded(&out, a, int32(fields.h), 2),
+            'h' => try out.print(a, "{d}", .{int32(fields.h)}),
+            'I' => try date_format.padded(&out, a, int32(fields.i), 2),
+            'i' => try out.print(a, "{d}", .{int32(fields.i)}),
+            'S' => try date_format.padded(&out, a, fields.s, 2),
+            's' => try out.print(a, "{d}", .{fields.s}),
+            'F' => try date_format.padded(&out, a, us, 6),
+            'f' => try out.print(a, "{d}", .{us}),
+            'a' => if (days == .int and int32(days.int) != dp.UNSET) try out.print(a, "{d}", .{int32(days.int)}) else try out.appendSlice(a, "(unknown)"),
+            'r' => if (invert) try out.append(a, '-'),
+            'R' => try out.append(a, if (invert) '-' else '+'),
+            '%' => try out.append(a, '%'),
             else => {
-                try buf.append('%');
-                try buf.append(fmt[i]);
+                try out.append(a, '%');
+                try out.append(a, c);
             },
         }
     }
-
-    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, try buf.toOwnedSlice()));
+    return NativeResult.takeString(try Value.String.adopt(a, try out.toOwnedSlice(a)));
 }
 
-// ---- the date string parser (date_parse.zig) wired to zphp's zones ----
+const diFormat = objMethod("DateInterval::format", intervalFormatImpl);
+const native_date_interval_format = objFunction("date_interval_format", "DateInterval", intervalFormatImpl);
 
 const dp = @import("date_parse.zig");
 

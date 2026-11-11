@@ -59,7 +59,7 @@ fn monthIndex(m: i64) usize {
 }
 
 // printf's "%0<w>d": the sign goes before the zero padding
-fn padded(out: *std.ArrayListUnmanaged(u8), a: Allocator, v: i64, width: usize) !void {
+pub fn padded(out: *std.ArrayListUnmanaged(u8), a: Allocator, v: i64, width: usize) !void {
     var buf: [24]u8 = undefined;
     const digits = std.fmt.bufPrint(&buf, "{d}", .{@abs(v)}) catch unreachable;
     if (v < 0) try out.append(a, '-');
