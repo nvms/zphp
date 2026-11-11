@@ -65,7 +65,12 @@ pub fn define(assignment: []const u8) void {
         add(std.mem.trim(u8, assignment, " \t"), "1");
         return;
     };
-    add(std.mem.trim(u8, assignment[0..eq], " \t"), cook(std.mem.trim(u8, assignment[eq + 1 ..], " \t")));
+    const value = std.mem.trim(u8, assignment[eq + 1 ..], " \t");
+    // php's cli passes a value that starts with a letter, a digit or a quote
+    // to the ini parser as written (so a ; starts a comment) and quotes any
+    // other value whole
+    const as_written = value.len == 0 or std.ascii.isAlphanumeric(value[0]) or value[0] == '"' or value[0] == '\'';
+    add(std.mem.trim(u8, assignment[0..eq], " \t"), if (as_written) cook(stripComment(value)) else expandEnv(value));
 }
 
 fn add(name: []const u8, value: []const u8) void {
@@ -242,7 +247,16 @@ pub fn applyToVm(vm: *VM) RuntimeError!void {
         if (std.mem.eql(u8, d.name, "error_reporting")) {
             vm.error_reporting_level = std.fmt.parseInt(i64, std.mem.trim(u8, d.value, " \t"), 10) catch vm.error_reporting_level;
         } else if (std.mem.eql(u8, d.name, "date.timezone")) {
-            if (d.value.len > 0) vm.default_tz_name = d.value;
+            // php's OnUpdate_date_timezone refuses an id its database lacks
+            // and keeps the default
+            if (@import("stdlib/tzdb.zig").isValid(d.value)) {
+                vm.default_tz_name = d.value;
+            } else {
+                try vm.ini_settings.put(vm.allocator, d.name, "UTC");
+                const msg = try std.fmt.allocPrint(vm.allocator, "PHP Startup: Invalid date.timezone value '{s}', using 'UTC' instead", .{d.value});
+                defer vm.allocator.free(msg);
+                try vm.raiseErrorAt(2, msg, .{ .file = "Unknown", .line = 0 });
+            }
         } else if (std.mem.eql(u8, d.name, "max_execution_time")) {
             vm.setExecutionLimit(std.fmt.parseInt(i64, std.mem.trim(u8, d.value, " \t"), 10) catch 0);
         } else if (std.mem.eql(u8, d.name, "memory_limit")) {

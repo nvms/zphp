@@ -1509,8 +1509,18 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         }
         if (!try setMemoryLimit(ctx, buf.items)) return NativeResult.scalar(Value{ .bool = false });
     }
+    // php's OnUpdate_date_timezone: an id its database lacks is refused
+    const is_tz = std.mem.eql(u8, name, "date.timezone");
+    if (is_tz and !@import("tzdb.zig").isValid(buf.items)) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "ini_set(): Invalid date.timezone value '{s}', using '{s}' instead", .{ buf.items, previous });
+        defer ctx.allocator.free(msg);
+        try ctx.vm.emitWarning(msg);
+        return NativeResult.scalar(Value{ .bool = false });
+    }
     const result = try NativeResult.copyString(ctx.allocator, previous);
     const new_val = try ctx.vm.setIni(name, buf.items);
+    // the ini value is the default zone unless the script set one
+    if (is_tz and ctx.vm.default_tz_name.ptr != &ctx.vm.default_tz_buf) ctx.vm.default_tz_name = @import("datetime.zig").internZoneName(new_val);
     // a few ini directives map directly to live VM state. mirror them now so
     // userland `ini_set('max_execution_time', '5')` actually arms the deadline
     if (std.mem.eql(u8, name, "max_execution_time")) {
