@@ -389,6 +389,7 @@ Zend/tests/bug55156.phpt
 Zend/tests/bug55247.phpt
 Zend/tests/bug55305.phpt
 Zend/tests/bug55578.phpt
+Zend/tests/bug55705.phpt
 Zend/tests/bug60169.phpt
 Zend/tests/bug60350.phpt
 Zend/tests/bug60362.phpt
@@ -455,6 +456,7 @@ Zend/tests/bug70332.phpt
 Zend/tests/bug70398.phpt
 Zend/tests/bug70478.phpt
 Zend/tests/bug70681.phpt
+Zend/tests/bug70689.phpt
 Zend/tests/bug70785.phpt
 Zend/tests/bug70895.phpt
 Zend/tests/bug70898.phpt
@@ -2333,6 +2335,7 @@ Zend/tests/nullable_types/covariant_nullable_return_succeds.phpt
 Zend/tests/nullable_types/float.phpt
 Zend/tests/nullable_types/int.phpt
 Zend/tests/nullable_types/invariant_param_and_return_succeeds.phpt
+Zend/tests/nullable_types/nullable_type_parameters_do_not_have_default_value.phpt
 Zend/tests/nullable_types/string.phpt
 Zend/tests/nullable_types/union_nullable_property_fails.phpt
 Zend/tests/nullsafe_operator/002.phpt
@@ -4525,9 +4528,11 @@ ext/reflection/tests/ReflectionMethod_getPrototype_basic.phpt
 ext/reflection/tests/ReflectionMethod_getStaticVariables_basic.phpt
 ext/reflection/tests/ReflectionMethod_hasPrototype_basic.phpt
 ext/reflection/tests/ReflectionMethod_invokeArgs_basic.phpt
+ext/reflection/tests/ReflectionMethod_invokeArgs_error1.phpt
 ext/reflection/tests/ReflectionMethod_invokeArgs_error2.phpt
 ext/reflection/tests/ReflectionMethod_invoke_basic.phpt
 ext/reflection/tests/ReflectionMethod_invoke_error1.phpt
+ext/reflection/tests/ReflectionMethod_invoke_error2.phpt
 ext/reflection/tests/ReflectionMethod_invoke_on_abstract_method_after_setAccessible.phpt
 ext/reflection/tests/ReflectionMethod_isDeprecated_interface.phpt
 ext/reflection/tests/ReflectionMethod_isDeprecated_parent.phpt
@@ -5851,6 +5856,7 @@ ext/standard/tests/array/gh17977.phpt
 ext/standard/tests/array/gh18480.phpt
 ext/standard/tests/array/gh19300_1.phpt
 ext/standard/tests/array/gh19300_2.phpt
+ext/standard/tests/array/gh19926.phpt
 ext/standard/tests/array/gh20043.phpt
 ext/standard/tests/array/gh22678.phpt
 ext/standard/tests/array/gh23576.phpt
@@ -7921,6 +7927,7 @@ tests/classes/interface_optional_arg_002.phpt
 tests/classes/interface_optional_arg_003.phpt
 tests/classes/interfaces_001.phpt
 tests/classes/interfaces_002.phpt
+tests/classes/interfaces_003.phpt
 tests/classes/iterators_001.phpt
 tests/classes/iterators_002.phpt
 tests/classes/iterators_003.phpt
