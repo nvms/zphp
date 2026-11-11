@@ -15,6 +15,7 @@ const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const ClassDef = @import("../runtime/vm.zig").ClassDef;
 const includes = @import("../runtime/includes.zig");
 const spl_iterator_classes = @import("spl_iterator_classes.zig");
+const open_basedir = @import("open_basedir.zig");
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 pub const entries = .{
@@ -1519,6 +1520,18 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         try ctx.vm.emitWarning(msg);
         return NativeResult.scalar(Value{ .bool = false });
     }
+    // php's OnUpdateBaseDir: at run time open_basedir may only tighten, and
+    // is stored with each entry expanded
+    if (std.mem.eql(u8, name, "open_basedir")) {
+        const narrowed = (try open_basedir.tightened(ctx.vm, buf.items)) orelse return NativeResult.scalar(Value{ .bool = false });
+        defer ctx.allocator.free(narrowed);
+        buf.clearRetainingCapacity();
+        try buf.appendSlice(ctx.allocator, narrowed);
+    }
+    // php's OnUpdateErrorLog and OnUpdateMailLog check the file at run time
+    if ((std.mem.eql(u8, name, "error_log") and !std.mem.eql(u8, buf.items, "syslog") or std.mem.eql(u8, name, "mail.log")) and buf.items.len > 0) {
+        if (!try open_basedir.allows(ctx.vm, "ini_set", buf.items)) return NativeResult.scalar(Value{ .bool = false });
+    }
     const result = try NativeResult.copyString(ctx.allocator, previous);
     const new_val = try ctx.vm.setIni(name, buf.items);
     // the ini value is the default zone unless the script set one
@@ -2003,6 +2016,12 @@ fn native_error_log(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
             if (args.len < 3 or args[2] != .string) return NativeResult.scalar(.{ .bool = false });
             var path_buf: [std.fs.max_path_bytes]u8 = undefined;
             const path = paths.streamPath(&path_buf, args[2].string.bytes());
+            if (open_basedir.setting(ctx.vm) != null and !paths.hasScheme(path) and !try open_basedir.allows(ctx.vm, "error_log", path)) {
+                const msg = try std.fmt.allocPrint(ctx.allocator, "error_log({s}): Failed to open stream: Operation not permitted", .{args[2].string.bytes()});
+                defer ctx.allocator.free(msg);
+                try ctx.vm.emitWarning(msg);
+                return NativeResult.scalar(.{ .bool = false });
+            }
             bundle.prepareWrite(path, .edit);
             const f = std.Io.Dir.cwd().createFile(platform.io, path, .{ .truncate = false }) catch return NativeResult.scalar(.{ .bool = false });
             defer f.close(platform.io);

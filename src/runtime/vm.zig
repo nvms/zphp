@@ -7,6 +7,7 @@ const platform = @import("../platform.zig");
 const php_version = @import("../php_version.zig");
 const class_names = @import("class_names.zig");
 const includes = @import("includes.zig");
+const open_basedir = @import("../stdlib/open_basedir.zig");
 const php_types = @import("../pipeline/php_types.zig");
 const formatted_print = @import("../stdlib/formatted_print.zig");
 pub const stack_limit = @import("stack_limit.zig");
@@ -13288,17 +13289,29 @@ pub const VM = struct {
             try self.setPendingException("ValueError", "Path must not be empty");
             return error.RuntimeError;
         }
-        if (try includes.resolve(self, path)) |found| return found;
+        if (try includes.resolve(self, path)) |found| {
+            // the plain files opener checks open_basedir on the resolved path
+            if (open_basedir.setting(self) != null and !includes.hasScheme(found) and !try open_basedir.allows(self, @tagName(kind), found)) {
+                try self.includeNotOpenedAs(kind, path, found, "Operation not permitted");
+                return null;
+            }
+            return found;
+        }
         try self.includeNotOpened(kind, path, "No such file or directory");
         return null;
     }
 
     // an include warns and evaluates to false; a require throws
     fn includeNotOpened(self: *VM, kind: IncludeKind, path: []const u8, reason: []const u8) RuntimeError!void {
+        return self.includeNotOpenedAs(kind, path, path, reason);
+    }
+
+    // `opened` is the path the open failed on, which the stream warning names
+    fn includeNotOpenedAs(self: *VM, kind: IncludeKind, path: []const u8, opened: []const u8, reason: []const u8) RuntimeError!void {
         const nul = std.mem.indexOfScalar(u8, path, 0);
         const shown = path[0 .. nul orelse path.len];
         if (nul == null) {
-            const msg = try std.fmt.allocPrint(self.allocator, "{s}({s}): Failed to open stream: {s}", .{ @tagName(kind), shown, reason });
+            const msg = try std.fmt.allocPrint(self.allocator, "{s}({s}): Failed to open stream: {s}", .{ @tagName(kind), opened, reason });
             defer self.allocator.free(msg);
             try self.emitWarning(msg);
         }

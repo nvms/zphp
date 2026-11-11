@@ -2,6 +2,7 @@ const std = @import("std");
 const class_names = @import("../runtime/class_names.zig");
 const bundle = @import("../bundle.zig");
 const platform = @import("../platform.zig");
+const open_basedir = @import("open_basedir.zig");
 const html = @import("html.zig");
 const php_version = @import("../php_version.zig");
 const Value = @import("../runtime/value.zig").Value;
@@ -726,11 +727,15 @@ fn native_tempnam(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
 
     // an empty directory means the system's; one that cannot hold the file
     // falls back to it with a notice
+    // open_basedir is checked on the directory given and on the fallback
+    const limited = open_basedir.setting(ctx.vm) != null;
     if (dir.len > 0) {
+        if (limited and !try open_basedir.allows(ctx.vm, "tempnam", dir)) return NativeResult.scalar(.{ .bool = false });
         bundle.ensureDir(dir);
         if (try createTempFile(ctx, dir, prefix)) |path| return NativeResult.takeString(path);
         try ctx.vm.raiseError(8, "tempnam(): file created in the system's temporary directory");
     }
+    if (limited and !try open_basedir.allows(ctx.vm, "tempnam", systemTempDir())) return NativeResult.scalar(.{ .bool = false });
     if (try createTempFile(ctx, systemTempDir(), prefix)) |path| return NativeResult.takeString(path);
     return NativeResult.scalar(.{ .bool = false });
 }
