@@ -27097,7 +27097,9 @@ pub const VM = struct {
         try array.append(self.allocator, value);
     }
 
-    pub fn arrayRemoveOwned(self: *VM, array: *PhpArray, key: PhpArray.Key) void {
+    pub fn arrayRemoveOwned(self: *VM, array: *PhpArray, raw_key: PhpArray.Key) void {
+        // "3" is the key 3, as for every other array access
+        const key = PhpArray.normalizeKey(raw_key);
         if (array == self.globals_array and key == .string) {
             var buf: [256]u8 = undefined;
             const name = varVarName(key.string.bytes(), &buf);
