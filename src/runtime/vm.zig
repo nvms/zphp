@@ -892,6 +892,8 @@ pub const VM = struct {
     source: []const u8 = "",
     file_path: []const u8 = "",
     autoload_callbacks: std.ArrayListUnmanaged(Value) = .empty,
+    // spl_autoload_extensions(), null for php's default ".inc,.php"
+    spl_autoload_extensions: ?[]u8 = null,
     autoload_depth: u8 = 0,
     // when a required script does an early `return X` at top level, the
     // return op pops its frame before the require handler runs the merge.
@@ -3271,6 +3273,7 @@ pub const VM = struct {
         self.ob_stack.deinit(self.allocator);
         self.request_vars.deinit(self.allocator);
         self.autoload_callbacks.deinit(self.allocator);
+        if (self.spl_autoload_extensions) |exts| self.allocator.free(exts);
         self.magic_guards.deinit(self.allocator);
         self.magic_call_guard.deinit(self.allocator);
         self.prop_hook_guard.deinit(self.allocator);
@@ -19785,14 +19788,23 @@ pub const VM = struct {
         try ic.autoloading.append(self.allocator, class_name);
         defer _ = ic.autoloading.pop();
 
-        for (self.autoload_callbacks.items) |callback| {
+        // spl_perform_autoload: an autoloader may add or remove autoloaders
+        // while the walk goes on
+        var i: usize = 0;
+        while (i < self.autoload_callbacks.items.len) {
+            const callback = self.autoload_callbacks.items[i];
+            retainValue(callback);
+            defer self.releaseValue(callback);
             if (callback == .string) {
                 _ = try self.callByName(callback.string.bytes(), &.{.{ .string = Value.String.borrowed(class_name) }});
             } else {
                 var ctx = self.makeContext(null);
                 _ = try ctx.invokeCallable(callback, &.{.{ .string = Value.String.borrowed(class_name) }});
             }
-            if (self.classes.contains(class_name)) return;
+            if (self.classes.contains(class_name) or self.interfaces.contains(class_name) or self.traits.contains(class_name)) return;
+            // php's hash position moves to the next bucket; one the
+            // autoloader removed leaves a hole that the step passes over too
+            i += 1;
         }
     }
 
@@ -24042,6 +24054,8 @@ pub const VM = struct {
         self.shutdown_callbacks.clearRetainingCapacity();
         for (self.autoload_callbacks.items) |cb| self.releaseValue(cb);
         self.autoload_callbacks.clearRetainingCapacity();
+        if (self.spl_autoload_extensions) |exts| self.allocator.free(exts);
+        self.spl_autoload_extensions = null;
         if (self.user_error_handler) |h| self.releaseValue(h);
         self.user_error_handler = null;
         for (self.error_handler_stack.items) |entry| self.releaseValue(entry.handler);

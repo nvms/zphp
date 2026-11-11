@@ -94,7 +94,6 @@ pub const entries = .{
     .{ "gmstrftime", native_gmstrftime },
     .{ "getmxrr", native_getmxrr },
     .{ "header_register_callback", native_noop_true },
-    .{ "spl_autoload_call", native_spl_autoload_call },
     .{ "spl_classes", native_spl_classes },
     .{ "iconv_mime_decode", native_iconv_mime_decode },
     .{ "iconv_mime_decode_headers", native_iconv_mime_decode_headers },
@@ -135,9 +134,6 @@ pub const entries = .{
     .{ "class_alias", native_class_alias },
     .{ "assert", native_assert },
     .{ "assert_options", native_assert_options },
-    .{ "spl_autoload_register", native_spl_autoload_register },
-    .{ "spl_autoload_unregister", native_spl_autoload_unregister },
-    .{ "spl_autoload_functions", native_spl_autoload_functions },
     .{ "spl_object_hash", native_spl_object_hash },
     .{ "is_scalar", is_scalar },
     .{ "is_iterable", is_iterable },
@@ -159,9 +155,6 @@ pub const entries = .{
     .{ "func_get_arg", native_func_get_arg },
     .{ "interface_exists", native_interface_exists },
     .{ "enum_exists", native_enum_exists },
-    .{ "class_implements", native_class_implements },
-    .{ "class_parents", native_class_parents },
-    .{ "class_uses", native_class_uses },
     .{ "iterator_to_array", spl_iterator_classes.iteratorToArray },
     .{ "iterator_count", spl_iterator_classes.iteratorCount },
     .{ "iterator_apply", spl_iterator_classes.iteratorApplyFn },
@@ -1940,18 +1933,6 @@ fn native_getmxrr(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
     return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_spl_autoload_call(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.null);
-    const name = args[0].string.bytes();
-    var i: usize = 0;
-    while (i < ctx.vm.autoload_callbacks.items.len) : (i += 1) {
-        const cb = ctx.vm.autoload_callbacks.items[i];
-        _ = ctx.invokeCallable(cb, &.{.{ .string = Value.String.borrowed(name) }}) catch {};
-        if (ctx.vm.classes.contains(name)) break;
-    }
-    return NativeResult.scalar(.null);
-}
-
 fn native_spl_classes(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
     const names = [_][]const u8{
@@ -2154,56 +2135,6 @@ fn native_class_alias(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_spl_autoload_register(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
-    try ctx.vm.autoload_callbacks.append(ctx.allocator, args[0]);
-    VM.retainValue(args[0]);
-    return NativeResult.scalar(.{ .bool = true });
-}
-
-fn native_spl_autoload_functions(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const arr = try ctx.createArray();
-    for (ctx.vm.autoload_callbacks.items) |cb| {
-        try arr.append(ctx.allocator, cb);
-    }
-    return NativeResult.borrowed(.{ .array = arr });
-}
-
-fn native_spl_autoload_unregister(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
-    const target = args[0];
-    var i: usize = 0;
-    while (i < ctx.vm.autoload_callbacks.items.len) {
-        const cb = ctx.vm.autoload_callbacks.items[i];
-        if (callablesEqual(cb, target)) {
-            ctx.vm.releaseValue(cb);
-            _ = ctx.vm.autoload_callbacks.orderedRemove(i);
-        } else {
-            i += 1;
-        }
-    }
-    return NativeResult.scalar(.{ .bool = true });
-}
-
-fn callablesEqual(a: Value, b: Value) bool {
-    if (a == .string and b == .string) return std.mem.eql(u8, a.string.bytes(), b.string.bytes());
-    if (a == .array and b == .array) {
-        const aa = a.array;
-        const ba = b.array;
-        if (aa.entries.items.len != ba.entries.items.len) return false;
-        for (aa.entries.items, ba.entries.items) |ae, be| {
-            if (ae.value == .string and be.value == .string) {
-                if (!std.mem.eql(u8, ae.value.string.bytes(), be.value.string.bytes())) continue;
-            } else if (ae.value == .object and be.value == .object) {
-                if (ae.value.object != be.value.object) return false;
-            } else return false;
-        }
-        return true;
-    }
-    if (a == .object and b == .object) return a.object == b.object;
-    return false;
-}
-
 fn getFrameParamValue(frame: anytype, slot_names: []const []const u8, param: []const u8) Value {
     for (slot_names, 0..) |sn, i| {
         if (std.mem.eql(u8, sn, param)) {
@@ -2333,127 +2264,6 @@ fn native_enum_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
         }
     }
     return NativeResult.scalar(.{ .bool = false });
-}
-
-fn native_class_implements(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
-    const raw = if (args[0] == .object)
-        args[0].object.class_name
-    else if (args[0] == .string)
-        args[0].string.bytes()
-    else
-        return NativeResult.scalar(Value{ .bool = false });
-    const class_name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
-
-    const cls = ctx.vm.classes.get(class_name);
-    const interface = ctx.vm.interfaces.get(class_name);
-    if (cls == null and interface == null and !ctx.vm.traits.contains(class_name)) return NativeResult.scalar(.{ .bool = false });
-
-    var result = try ctx.createArray();
-    var queue = std.ArrayListUnmanaged([]const u8).empty;
-    defer queue.deinit(ctx.allocator);
-    if (interface) |def| {
-        for (def.parents.items) |parent| try queue.append(ctx.allocator, parent);
-        if (def.parents.items.len == 0) {
-            if (def.parent) |parent| try queue.append(ctx.allocator, parent);
-        }
-    }
-    // PHP enumerates direct interfaces in declaration order, but interfaces
-    // reached via parent traversal in REVERSE declaration order. mimic both
-    if (cls) |def| {
-        for (def.interfaces.items) |iface| try queue.append(ctx.allocator, iface);
-    }
-
-    var parent = if (cls) |def| def.parent else null;
-    while (parent) |p| {
-        const pcls = ctx.vm.classes.get(p) orelse break;
-        var pi = pcls.interfaces.items.len;
-        while (pi > 0) {
-            pi -= 1;
-            try queue.append(ctx.allocator, pcls.interfaces.items[pi]);
-        }
-        parent = pcls.parent;
-    }
-
-    var i: usize = 0;
-    while (i < queue.items.len) : (i += 1) {
-        const iface = queue.items[i];
-        if (result.get(.{ .string = Value.String.borrowed(iface) }) != .null) continue;
-        try result.set(ctx.allocator, .{ .string = Value.String.borrowed(iface) }, .{ .string = Value.String.borrowed(iface) });
-        if (!ctx.vm.interfaces.contains(iface)) {
-            if (ctx.vm.classes.get(iface)) |idef| {
-                for (idef.interfaces.items) |sub| try queue.append(ctx.allocator, sub);
-            }
-        }
-        if (ctx.vm.interfaces.get(iface)) |idef| {
-            if (idef.parents.items.len == 0) {
-                if (idef.parent) |p| try queue.append(ctx.allocator, p);
-            }
-            var pi = idef.parents.items.len;
-            while (pi > 0) {
-                pi -= 1;
-                try queue.append(ctx.allocator, idef.parents.items[pi]);
-            }
-        }
-    }
-
-    return NativeResult.borrowed(.{ .array = result });
-}
-
-fn native_class_parents(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
-    const raw = if (args[0] == .object)
-        args[0].object.class_name
-    else if (args[0] == .string)
-        args[0].string.bytes()
-    else
-        return NativeResult.scalar(Value{ .bool = false });
-    const class_name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
-
-    // an interface has no parent classes
-    if (ctx.vm.interfaces.contains(class_name)) return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-    const cls = ctx.vm.classes.get(class_name) orelse {
-        try ctx.vm.tryAutoload(class_name);
-        if (ctx.vm.classes.get(class_name) == null and !ctx.vm.interfaces.contains(class_name)) return NativeResult.scalar(Value{ .bool = false });
-        const normalized = [_]Value{.{ .string = Value.String.borrowed(class_name) }};
-        return native_class_parents(ctx, &normalized);
-    };
-
-    var result = try ctx.createArray();
-    var parent = cls.parent;
-    while (parent) |p| {
-        try result.set(ctx.allocator, .{ .string = Value.String.borrowed(p) }, .{ .string = Value.String.borrowed(p) });
-        const pcls = ctx.vm.classes.get(p) orelse break;
-        parent = pcls.parent;
-    }
-
-    return NativeResult.borrowed(.{ .array = result });
-}
-
-fn native_class_uses(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
-    const raw = if (args[0] == .object)
-        args[0].object.class_name
-    else if (args[0] == .string)
-        args[0].string.bytes()
-    else
-        return NativeResult.scalar(Value{ .bool = false });
-    const class_name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
-
-    if (!ctx.vm.classes.contains(class_name) and !ctx.vm.traits.contains(class_name) and !ctx.vm.interfaces.contains(class_name)) {
-        if (args.len < 2 or args[1].isTruthy()) try ctx.vm.tryAutoload(class_name);
-        if (!ctx.vm.classes.contains(class_name) and !ctx.vm.traits.contains(class_name) and !ctx.vm.interfaces.contains(class_name)) return NativeResult.scalar(.{ .bool = false });
-    }
-    const used_traits = if (ctx.vm.classes.get(class_name)) |cls|
-        cls.used_traits.items
-    else
-        ctx.vm.trait_uses.get(class_name) orelse &.{};
-
-    var result = try ctx.createArray();
-    for (used_traits) |trait| {
-        try result.set(ctx.allocator, .{ .string = Value.String.borrowed(trait) }, .{ .string = Value.String.borrowed(trait) });
-    }
-    return NativeResult.borrowed(.{ .array = result });
 }
 
 fn native_filter_id(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
