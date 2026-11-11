@@ -13116,8 +13116,8 @@ pub const VM = struct {
     fn objectBinop(self: *VM, op: NativeBinop, a: Value, b: Value) RuntimeError!?Value {
         if (a != .object and b != .object) return null;
         const hook = blk: {
-            if (a == .object) if (self.classes.get(a.object.class_name)) |cls| if (cls.native_binop) |h| break :blk h;
-            if (b == .object) if (self.classes.get(b.object.class_name)) |cls| if (cls.native_binop) |h| break :blk h;
+            if (a == .object) if (self.nativeBinopHook(a.object.class_name)) |h| break :blk h;
+            if (b == .object) if (self.nativeBinopHook(b.object.class_name)) |h| break :blk h;
             return null;
         };
         var ctx = self.makeContext(null);
@@ -14128,6 +14128,19 @@ pub const VM = struct {
         if (s[i] == '+' or s[i] == '-') i += 1;
         if (i >= s.len) return false;
         return s[i] >= '0' and s[i] <= '9' or s[i] == '.';
+    }
+
+    // the hook sits on the builtin class; a user subclass inherits it
+    fn nativeBinopHook(self: *VM, class_name: []const u8) ?*const fn (*NativeContext, NativeBinop, Value, Value) RuntimeError!?Value {
+        var name: ?[]const u8 = class_name;
+        var depth: usize = 0;
+        while (name) |n| : (depth += 1) {
+            if (depth > 64) return null;
+            const def = self.classes.get(n) orelse return null;
+            if (def.native_binop) |hook| return hook;
+            name = def.parent;
+        }
+        return null;
     }
 
     // the hook sits on the builtin class; a user subclass inherits it

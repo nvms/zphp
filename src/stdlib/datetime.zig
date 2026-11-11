@@ -78,8 +78,8 @@ pub const entries = .{
     .{ "idate", native_idate },
     .{ "date_interval_create_from_date_string", native_date_interval_create_from_date_string },
     .{ "date_interval_format", native_date_interval_format },
-    .{ "date_offset_get", methodAlias("getOffset") },
-    .{ "date_isodate_set", methodAlias("setISODate") },
+    .{ "date_offset_get", native_date_offset_get },
+    .{ "date_isodate_set", native_date_isodate_set },
     .{ "timezone_transitions_get", native_timezone_transitions_get },
     .{ "timezone_location_get", native_timezone_location_get },
 };
@@ -99,7 +99,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.classes.put(a, "DateTimeInterface", dti_const);
 
     // DateTime class
-    var dt_def = ClassDef{ .name = "DateTime", .native_properties = dateProperties };
+    var dt_def = ClassDef{ .name = "DateTime", .native_properties = dateProperties, .native_binop = dateBinop };
     try dt_def.interfaces.append(a, "DateTimeInterface");
     try dt_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
     try dt_def.methods.put(a, "format", .{ .name = "format", .arity = 1 });
@@ -154,10 +154,10 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DateTime::getTimezone", dtGetTimezone);
     try vm.native_fns.put(a, "DateTime::setTimezone", dtSetTimezone);
     try vm.native_fns.put(a, "DateTime::getOffset", dtGetOffset);
-    try vm.native_fns.put(a, "DateTimeImmutable::getOffset", dtGetOffset);
+    try vm.native_fns.put(a, "DateTimeImmutable::getOffset", dtiGetOffset);
 
     // DateTimeImmutable
-    var dti_def = ClassDef{ .name = "DateTimeImmutable", .native_properties = dateProperties };
+    var dti_def = ClassDef{ .name = "DateTimeImmutable", .native_properties = dateProperties, .native_binop = dateBinop };
     try dti_def.interfaces.append(a, "DateTimeInterface");
     try dti_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
     try dti_def.methods.put(a, "format", .{ .name = "format", .arity = 1 });
@@ -190,18 +190,18 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DateTimeImmutable::__wakeup", dateWakeup);
     try vm.classes.put(a, "DateTimeImmutable", dti_def);
 
-    try vm.native_fns.put(a, "DateTimeImmutable::__construct", dtConstruct);
-    try vm.native_fns.put(a, "DateTimeImmutable::format", dtFormat);
-    try vm.native_fns.put(a, "DateTimeImmutable::getTimestamp", dtGetTimestamp);
+    try vm.native_fns.put(a, "DateTimeImmutable::__construct", dtiConstruct);
+    try vm.native_fns.put(a, "DateTimeImmutable::format", dtiFormat);
+    try vm.native_fns.put(a, "DateTimeImmutable::getTimestamp", dtiGetTimestamp);
     try vm.native_fns.put(a, "DateTimeImmutable::modify", dtiModify);
     try vm.native_fns.put(a, "DateTimeImmutable::add", dtiAdd);
     try vm.native_fns.put(a, "DateTimeImmutable::sub", dtiSub);
-    try vm.native_fns.put(a, "DateTimeImmutable::diff", dtDiff);
+    try vm.native_fns.put(a, "DateTimeImmutable::diff", dtiDiff);
     try vm.native_fns.put(a, "DateTimeImmutable::createFromTimestamp", dtiCreateFromTimestamp);
-    try vm.native_fns.put(a, "DateTimeImmutable::getMicrosecond", dtGetMicrosecond);
+    try vm.native_fns.put(a, "DateTimeImmutable::getMicrosecond", dtiGetMicrosecond);
     try vm.native_fns.put(a, "DateTimeImmutable::setMicrosecond", dtiSetMicrosecond);
     try vm.native_fns.put(a, "DateTimeImmutable::getLastErrors", dtGetLastErrors);
-    try vm.native_fns.put(a, "DateTimeImmutable::getTimezone", dtGetTimezone);
+    try vm.native_fns.put(a, "DateTimeImmutable::getTimezone", dtiGetTimezone);
     try vm.native_fns.put(a, "DateTimeImmutable::setTimezone", dtiSetTimezone);
     try vm.native_fns.put(a, "DateTimeImmutable::createFromFormat", dtiCreateFromFormat);
     try vm.native_fns.put(a, "DateTimeImmutable::setDate", dtiSetDate);
@@ -214,7 +214,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DateTimeImmutable::createFromInterface", dtiCreateFromInterface);
 
     // DateTimeZone class
-    var dtz_def = ClassDef{ .name = "DateTimeZone", .native_properties = timezoneProperties };
+    var dtz_def = ClassDef{ .name = "DateTimeZone", .native_properties = timezoneProperties, .native_binop = dateBinop };
     try dtz_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
     try dtz_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
     try dtz_def.methods.put(a, "getOffset", .{ .name = "getOffset", .arity = 1 });
@@ -246,7 +246,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "DateTimeZone::getTransitions", dtzGetTransitions);
 
     // DateInterval
-    var di_def = ClassDef{ .name = "DateInterval", .native_properties = intervalProperties };
+    var di_def = ClassDef{ .name = "DateInterval", .native_properties = intervalProperties, .native_binop = dateBinop };
     try di_def.properties.append(a, .{ .name = "y", .default = .{ .int = 0 } });
     try di_def.properties.append(a, .{ .name = "m", .default = .{ .int = 0 } });
     try di_def.properties.append(a, .{ .name = "d", .default = .{ .int = 0 } });
@@ -377,6 +377,7 @@ fn initializePeriodFromIso(ctx: *NativeContext, obj: *PhpObject, spec: []const u
     try interval.set(ctx.allocator, "h", .{ .int = period.h });
     try interval.set(ctx.allocator, "i", .{ .int = period.i });
     try interval.set(ctx.allocator, "s", .{ .int = period.s });
+    try markInterval(ctx, interval);
     try obj.set(ctx.allocator, "interval", .{ .object = interval });
     try finishPeriod(ctx, obj, parsed.recurrences, options, func);
 }
@@ -621,7 +622,7 @@ fn timezoneProperties(ctx: *NativeContext, obj: *PhpObject, _: object_properties
 // __serialize: the date fields first, then the object's own properties
 fn dateSerialize(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    try requireInitializedDate(ctx, obj);
+    _ = try instantOf(ctx, obj);
     const out = try ctx.createArray();
     try putDateFields(ctx, obj, out);
     try appendOwnMissing(ctx, obj, out);
@@ -630,8 +631,9 @@ fn dateSerialize(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
 
 fn timezoneSerialize(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const zone = try zoneOf(ctx, obj);
     const out = try ctx.createArray();
-    if (objZone(obj)) |zone| try putZoneFields(ctx, &zone, out);
+    try putZoneFields(ctx, &zone, out);
     try appendOwnMissing(ctx, obj, out);
     return NativeResult.borrowed(.{ .array = out });
 }
@@ -641,14 +643,6 @@ fn appendOwnMissing(ctx: *NativeContext, obj: *PhpObject, out: *PhpArray) Runtim
     for (own.entries.items) |entry| {
         if (!out.contains(entry.key)) try out.set(ctx.allocator, entry.key, entry.value);
     }
-}
-
-fn requireInitializedDate(ctx: *NativeContext, obj: *PhpObject) RuntimeError!void {
-    if (obj.get("__timestamp") != .null) return;
-    const msg = try std.fmt.allocPrint(ctx.allocator, "The DateTimeInterface object has not been correctly initialized by its constructor", .{});
-    defer ctx.allocator.free(msg);
-    try ctx.vm.setPendingException("Error", msg);
-    return error.RuntimeError;
 }
 
 // php_date_initialize_from_hash: date, timezone_type and timezone rebuild the
@@ -667,8 +661,9 @@ fn initializeDateFromHash(ctx: *NativeContext, obj: *PhpObject, data: *const Php
             return true;
         },
         dp.ZONETYPE_ID => {
-            const parsed = (try timezoneInitialize(ctx, zone.string.bytes(), "", false)) orelse return false;
-            if (parsed.kind != dp.ZONETYPE_ID) return false;
+            // php_date_parse_tzfile: only a database id, quietly
+            if (!tzdb.isValid(zone.string.bytes())) return false;
+            const parsed = ParseZone.of(zone.string.bytes(), true);
             const instant = (try resolveDate(ctx, date.string.bytes(), parsed, false)) orelse return false;
             try storeInstant(ctx, obj, instant.ts, instant.us, &instant.zone);
             return true;
@@ -682,7 +677,8 @@ fn initializeTimezoneFromHash(ctx: *NativeContext, obj: *PhpObject, data: *const
     const zone_type = data.get(.{ .string = Value.String.borrowed("timezone_type") });
     const zone = data.get(.{ .string = Value.String.borrowed("timezone") });
     if (zone_type != .int or zone_type.int < dp.ZONETYPE_OFFSET or zone_type.int > dp.ZONETYPE_ID or zone != .string) return false;
-    const parsed = (try timezoneInitialize(ctx, zone.string.bytes(), "", false)) orelse return false;
+    if (std.mem.indexOfScalar(u8, zone.string.bytes(), 0) != null) return false;
+    const parsed = (try timezoneInitialize(ctx, zone.string.bytes(), "", .silent)) orelse return false;
     try setObjZone(ctx, obj, &parsed);
     return true;
 }
@@ -710,24 +706,33 @@ fn dateBaseClass(ctx: *NativeContext, obj: *PhpObject) []const u8 {
     return if (ctx.vm.isInstanceOf(obj.class_name, "DateTimeImmutable")) "DateTimeImmutable" else "DateTime";
 }
 
+// Z_PARAM_ARRAY for the hash the restoring methods take
+fn arrayArg(ctx: *NativeContext, func: []const u8, args: []const Value, name: []const u8) RuntimeError!*PhpArray {
+    if (args.len > 0 and args[0] == .array) return args[0].array;
+    return Args.init(ctx, func, args).typeError(0, name, "array");
+}
+
 fn dateUnserialize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len == 0 or args[0] != .array or !try initializeDateFromHash(ctx, obj, args[0].array)) return invalidSerialization(ctx, dateBaseClass(ctx, obj));
+    _ = try arrayArg(ctx, if (std.mem.eql(u8, dateBaseClass(ctx, obj), "DateTime")) "DateTime::__unserialize" else "DateTimeImmutable::__unserialize", args, "data");
+    if (!try initializeDateFromHash(ctx, obj, args[0].array)) return invalidSerialization(ctx, dateBaseClass(ctx, obj));
     try restoreCustomProperties(ctx, obj, args[0].array, &.{ "date", "timezone_type", "timezone" });
     return NativeResult.scalar(.null);
 }
 
 fn timezoneUnserialize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len == 0 or args[0] != .array or !try initializeTimezoneFromHash(ctx, obj, args[0].array)) return invalidSerialization(ctx, "DateTimeZone");
+    _ = try arrayArg(ctx, "DateTimeZone::__unserialize", args, "data");
+    if (!try initializeTimezoneFromHash(ctx, obj, args[0].array)) return invalidSerialization(ctx, "DateTimeZone");
     try restoreCustomProperties(ctx, obj, args[0].array, &.{ "timezone_type", "timezone" });
     return NativeResult.scalar(.null);
 }
 
 // __set_state builds the base class, never a subclass
-fn dateSetStateOf(ctx: *NativeContext, args: []const Value, class: []const u8) RuntimeError!NativeResult {
+fn dateSetStateOf(ctx: *NativeContext, args: []const Value, comptime class: []const u8) RuntimeError!NativeResult {
+    const data = try arrayArg(ctx, class ++ "::__set_state", args, "array");
     const obj = try ctx.createObject(class);
-    if (args.len == 0 or args[0] != .array or !try initializeDateFromHash(ctx, obj, args[0].array)) return invalidSerialization(ctx, class);
+    if (!try initializeDateFromHash(ctx, obj, data)) return invalidSerialization(ctx, class);
     return NativeResult.borrowed(.{ .object = obj });
 }
 
@@ -740,8 +745,9 @@ fn immutableSetState(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
 }
 
 fn timezoneSetState(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const data = try arrayArg(ctx, "DateTimeZone::__set_state", args, "array");
     const obj = try ctx.createObject("DateTimeZone");
-    if (args.len == 0 or args[0] != .array or !try initializeTimezoneFromHash(ctx, obj, args[0].array)) return invalidSerialization(ctx, "DateTimeZone");
+    if (!try initializeTimezoneFromHash(ctx, obj, data)) return invalidSerialization(ctx, "DateTimeZone");
     return NativeResult.borrowed(.{ .object = obj });
 }
 
@@ -770,14 +776,6 @@ fn getTimestamp(obj: *PhpObject) i64 {
     return Value.toInt(obj.get("__timestamp"));
 }
 
-fn dtConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const input: []const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else "";
-    const instant = (try resolveDate(ctx, input, tzArgZone(args, 1), true)) orelse return error.RuntimeError;
-    try storeInstant(ctx, obj, instant.ts, instant.us, &instant.zone);
-    return NativeResult.scalar(.null);
-}
-
 // the zone of an optional DateTimeZone argument
 fn tzArgZone(args: []const Value, idx: usize) ?ParseZone {
     if (args.len <= idx or args[idx] != .object) return null;
@@ -793,15 +791,6 @@ fn cloneDateObject(ctx: *NativeContext, src: *PhpObject) RuntimeError!*PhpObject
     var it = src.properties.iterator();
     while (it.next()) |e| try copy.set(ctx.allocator, e.key_ptr.*, e.value_ptr.*);
     return copy;
-}
-
-fn dtFormat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len == 0 or args[0] != .string) return NativeResult.literal("");
-    const ts = getTimestamp(obj);
-    const us_v = obj.get("__microseconds");
-    const us: i64 = if (us_v == .int) us_v.int else 0;
-    return formatIn(ctx, ts, us, &objZoneOr(ctx, obj), args[0].string.bytes());
 }
 
 // date() and DateTimeInterface::format() over date_format.zig: the time's
@@ -844,26 +833,6 @@ fn formatGmt(ctx: *NativeContext, ts: i64, format: []const u8) RuntimeError!Nati
     date_format.fieldsAt(ts, 0, &t);
     const out = date_format.format(ctx.allocator, format, &t) catch return error.OutOfMemory;
     return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
-}
-
-fn dtGetTimestamp(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    return NativeResult.scalar(.{ .int = getTimestamp(obj) });
-}
-
-fn dtModify(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len == 0 or args[0] != .string) return NativeResult.borrowed(.{ .object = obj });
-    _ = try modifyDateObject(ctx, obj, args[0].string.bytes(), "DateTime::modify(): ", true);
-    return NativeResult.borrowed(.{ .object = obj });
-}
-
-fn dtiModify(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len == 0 or args[0] != .string) return NativeResult.borrowed(.{ .object = obj });
-    const new_obj = try cloneDateObject(ctx, obj);
-    _ = try modifyDateObject(ctx, new_obj, args[0].string.bytes(), "DateTimeImmutable::modify(): ", true);
-    return NativeResult.borrowed(.{ .object = new_obj });
 }
 
 // a DateInterval as timelib_rel_time. f holds the microseconds as a float;
@@ -914,19 +883,6 @@ fn periodStep(ctx: *NativeContext, ts: i64, us: i64, zone: *const ParseZone, iv:
 // the object's own timezone: split the instant into local fields, change some,
 // and turn the result back into an instant with the offset in effect then
 
-fn wallFields(ctx: *NativeContext, obj: *PhpObject) DateComponents {
-    const ts = getTimestamp(obj);
-    return baseComponents(ts + objZoneOr(ctx, obj).totalOffset(ctx.allocator, ts));
-}
-
-fn instantOfWall(ctx: *NativeContext, obj: *PhpObject, wall: i64) i64 {
-    const zone = objZoneOr(ctx, obj);
-    return switch (zone.kind) {
-        dp.ZONETYPE_ID => dp.utcOfWall(wall, zone.name(), parse_db),
-        else => wall - zone.totalOffset(ctx.allocator, wall),
-    };
-}
-
 // a date or DateTimeZone object's zone: `__timezone` names it, and
 // `__zone_type` marks an id whose name alone reads as an abbreviation (the
 // default zone "CET" is the id, a DateTimeZone("CET") the abbreviation)
@@ -959,268 +915,6 @@ fn setObjZone(ctx: *NativeContext, obj: *PhpObject, zone: *const ParseZone) Runt
     }
 }
 
-// the setters change an object in place; DateTime's methods apply them to
-// $this and DateTimeImmutable's to a clone, so both keep every other field
-// (microseconds, the zone, a subclass's own properties)
-const Mutation = fn (*NativeContext, *PhpObject, []const Value) RuntimeError!void;
-
-fn mutating(comptime f: Mutation) fn (*NativeContext, []const Value) RuntimeError!NativeResult {
-    return struct {
-        fn call(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-            const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-            try f(ctx, obj, args);
-            return NativeResult.borrowed(.{ .object = obj });
-        }
-    }.call;
-}
-
-fn immutable(comptime f: Mutation) fn (*NativeContext, []const Value) RuntimeError!NativeResult {
-    return struct {
-        fn call(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-            const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-            const copy = try cloneDateObject(ctx, obj);
-            try f(ctx, copy, args);
-            return NativeResult.borrowed(.{ .object = copy });
-        }
-    }.call;
-}
-
-fn addOn(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!void {
-    if (args.len == 0 or args[0] != .object) return;
-    const spec = try intervalSpec(ctx, args[0].object);
-    var t = objTime(ctx, obj);
-    if (spec.wall) dp.addWall(&t, &spec.rel, spec.invert, 1, parse_db) else dp.add(&t, &spec.rel, spec.invert, parse_db);
-    try storeTime(ctx, obj, &t);
-}
-
-// php_date_sub. a weekday or special interval can't be subtracted: the
-// methods throw, date_sub() (no method name) warns
-fn dtSubOn(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!void {
-    return subWith(ctx, obj, args, "DateTime::sub");
-}
-
-fn dtiSubOn(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!void {
-    return subWith(ctx, obj, args, "DateTimeImmutable::sub");
-}
-
-fn subWith(ctx: *NativeContext, obj: *PhpObject, args: []const Value, method: ?[]const u8) RuntimeError!void {
-    if (args.len == 0 or args[0] != .object) return;
-    const spec = try intervalSpec(ctx, args[0].object);
-    if (spec.rel.have_weekday_relative or spec.rel.have_special_relative) {
-        const what = "Only non-special relative time specifications are supported for subtraction";
-        if (method) |m| {
-            const msg = std.fmt.allocPrint(ctx.allocator, "{s}(): {s}", .{ m, what }) catch return error.OutOfMemory;
-            defer ctx.allocator.free(msg);
-            try ctx.vm.setPendingException("DateInvalidOperationException", msg);
-            return error.RuntimeError;
-        }
-        const msg = std.fmt.allocPrint(ctx.allocator, "date_sub(): {s}", .{what}) catch return error.OutOfMemory;
-        defer ctx.allocator.free(msg);
-        try ctx.vm.emitWarning(msg);
-        return;
-    }
-    var t = objTime(ctx, obj);
-    if (spec.wall) dp.addWall(&t, &spec.rel, spec.invert, -1, parse_db) else dp.sub(&t, &spec.rel, spec.invert, parse_db);
-    try storeTime(ctx, obj, &t);
-}
-
-fn setDateOn(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!void {
-    if (args.len < 3) return;
-    const c = wallFields(ctx, obj);
-    try obj.set(ctx.allocator, "__timestamp", .{ .int = instantOfWall(ctx, obj, dateToTimestamp(Value.toInt(args[0]), Value.toInt(args[1]), Value.toInt(args[2]), c.hour, c.min, c.sec)) });
-}
-
-fn setTimeOn(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!void {
-    if (args.len < 2) return;
-    const c = wallFields(ctx, obj);
-    const sec: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
-    try obj.set(ctx.allocator, "__timestamp", .{ .int = instantOfWall(ctx, obj, dateToTimestamp(c.year, c.month, c.day, Value.toInt(args[0]), Value.toInt(args[1]), sec)) });
-    // the 4th argument is microseconds, and without it they reset to 0
-    try obj.set(ctx.allocator, "__microseconds", .{ .int = if (args.len >= 4) Value.toInt(args[3]) else 0 });
-}
-
-fn setISODateOn(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!void {
-    if (args.len < 2) return;
-    const dow = if (args.len >= 3) Value.toInt(args[2]) else 1;
-    const c = wallFields(ctx, obj);
-    try obj.set(ctx.allocator, "__timestamp", .{ .int = instantOfWall(ctx, obj, isoWeekDateToTimestamp(Value.toInt(args[0]), Value.toInt(args[1]), dow, c.hour, c.min, c.sec)) });
-}
-
-fn setTimestampOn(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!void {
-    if (args.len < 1) return;
-    try obj.set(ctx.allocator, "__timestamp", .{ .int = Value.toInt(args[0]) });
-    if (obj.get("__microseconds") != .null) try obj.set(ctx.allocator, "__microseconds", .{ .int = 0 });
-}
-
-fn setTimezoneOn(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!void {
-    const zone = tzArgZone(args, 0) orelse return;
-    try setObjZone(ctx, obj, &zone);
-}
-
-fn setMicrosecondOn(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!void {
-    if (args.len >= 1 and args[0] == .int) try obj.set(ctx.allocator, "__microseconds", .{ .int = args[0].int });
-}
-
-const dtAdd = mutating(addOn);
-const dtSub = mutating(dtSubOn);
-const dtSetDate = mutating(setDateOn);
-const dtSetTime = mutating(setTimeOn);
-const dtSetISODate = mutating(setISODateOn);
-const dtSetTimestamp = mutating(setTimestampOn);
-const dtSetTimezone = mutating(setTimezoneOn);
-const dtSetMicrosecond = mutating(setMicrosecondOn);
-const dtiAdd = immutable(addOn);
-const dtiSub = immutable(dtiSubOn);
-const dtiSetDate = immutable(setDateOn);
-const dtiSetTime = immutable(setTimeOn);
-const dtiSetISODate = immutable(setISODateOn);
-const dtiSetTimestamp = immutable(setTimestampOn);
-const dtiSetTimezone = immutable(setTimezoneOn);
-const dtiSetMicrosecond = immutable(setMicrosecondOn);
-
-fn objMicros(obj: *PhpObject) i64 {
-    const v = obj.get("__microseconds");
-    return if (v == .int) v.int else 0;
-}
-
-fn dtDiff(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.null);
-    const absolute = args.len >= 2 and args[1].isTruthy();
-    return diffObjects(ctx, obj, args[0].object, absolute);
-}
-
-// timelib_diff over the two objects' wall-clock times
-fn diffObjects(ctx: *NativeContext, obj: *PhpObject, other: *PhpObject, absolute: bool) RuntimeError!NativeResult {
-    const zone1 = objZoneOr(ctx, obj);
-    const zone2 = objZoneOr(ctx, other);
-    const one = wallTime(ctx.allocator, getTimestamp(obj), objMicros(obj), &zone1);
-    const two = wallTime(ctx.allocator, getTimestamp(other), objMicros(other), &zone2);
-    const rt = dp.diff(&one, &two, parse_db);
-    const interval = try ctx.createObject("DateInterval");
-    try interval.set(ctx.allocator, "y", .{ .int = rt.y });
-    try interval.set(ctx.allocator, "m", .{ .int = rt.m });
-    try interval.set(ctx.allocator, "d", .{ .int = rt.d });
-    try interval.set(ctx.allocator, "days", .{ .int = rt.days });
-    try interval.set(ctx.allocator, "h", .{ .int = rt.h });
-    try interval.set(ctx.allocator, "i", .{ .int = rt.i });
-    try interval.set(ctx.allocator, "s", .{ .int = rt.s });
-    try interval.set(ctx.allocator, "f", .{ .float = @as(f64, @floatFromInt(rt.us)) / 1_000_000.0 });
-    try interval.set(ctx.allocator, "invert", .{ .int = if (rt.invert and !absolute) 1 else 0 });
-    return NativeResult.borrowed(.{ .object = interval });
-}
-
-// ISO 8601 week date -> Gregorian date: jan 4 always falls in ISO week 1
-// (the iso-week that contains the first Thursday of the year). The Monday
-// of week 1 is jan4 minus (iso_dow_of_jan4 - 1) days, then advance by
-// (week - 1) * 7 + (day - 1) days
-fn isoWeekDateToTimestamp(year: i64, week: i64, day_of_week: i64, h: i64, m: i64, s: i64) i64 {
-    // jan 4 unix timestamp at 00:00
-    const jan4_ts = dateToTimestamp(year, 1, 4, 0, 0, 0);
-    // PHP date('N') for jan 4: 1..7 (Monday..Sunday)
-    const day_of_jan4 = @divFloor(jan4_ts, 86400);
-    // 1970-01-01 was Thursday -> N=4. so iso_dow = ((day_of_jan4 + 3) mod 7) + 1
-    var dow = @mod(day_of_jan4 + 3, 7) + 1;
-    if (dow < 1) dow += 7;
-    const offset_days = (week - 1) * 7 + (day_of_week - 1) - (dow - 1);
-    const target_ts = jan4_ts + offset_days * 86400;
-    return target_ts + h * 3600 + m * 60 + s;
-}
-
-// a float timestamp keeps its sub-second part as microseconds
-fn setTimestampWithFraction(ctx: *NativeContext, obj: *PhpObject, ts: Value) !void {
-    if (ts == .float) {
-        const whole = @floor(ts.float);
-        try obj.set(ctx.allocator, "__timestamp", .{ .int = Value.dvalToLval(whole) });
-        const micros: i64 = Value.dvalToLval(@round((ts.float - whole) * 1_000_000.0));
-        if (micros != 0) try obj.set(ctx.allocator, "__microseconds", .{ .int = micros });
-        return;
-    }
-    try obj.set(ctx.allocator, "__timestamp", .{ .int = Value.toInt(ts) });
-}
-
-fn dtCreateFromTimestamp(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.null);
-    const obj = try ctx.createObject("DateTime");
-    try setTimestampWithFraction(ctx, obj, args[0]);
-    return NativeResult.borrowed(.{ .object = obj });
-}
-
-fn dtCreateFromFormat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return createFromFormatImpl(ctx, args, "DateTime", "DateTime::createFromFormat");
-}
-
-fn dtCreateFromImmutable(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return convertDateObject(ctx, args, "DateTime");
-}
-
-// a DateTime from a DateTimeImmutable or the reverse: same instant, zone, and
-// microseconds
-fn convertDateObject(ctx: *NativeContext, args: []const Value, class_name: []const u8) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.null);
-    const src = args[0].object;
-    const obj = try ctx.createObject(class_name);
-    try obj.set(ctx.allocator, "__timestamp", src.get("__timestamp"));
-    if (objZone(src)) |zone| try setObjZone(ctx, obj, &zone);
-    if (src.get("__microseconds") == .int) try obj.set(ctx.allocator, "__microseconds", src.get("__microseconds"));
-    return NativeResult.borrowed(.{ .object = obj });
-}
-
-fn dtiCreateFromMutable(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return convertDateObject(ctx, args, "DateTimeImmutable");
-}
-
-// createFromInterface accepts either DateTime or DateTimeImmutable and produces
-// the corresponding target type (called as DateTime::createFromInterface or
-// DateTimeImmutable::createFromInterface)
-fn dtCreateFromInterface(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return dtCreateFromImmutable(ctx, args);
-}
-
-fn dtiCreateFromInterface(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return dtiCreateFromMutable(ctx, args);
-}
-
-fn native_date_create_from_format(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return createFromFormatImpl(ctx, args, "DateTime", "date_create_from_format");
-}
-
-fn native_date_create_immutable_from_format(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return createFromFormatImpl(ctx, args, "DateTimeImmutable", "date_create_immutable_from_format");
-}
-
-fn createBareDt(ctx: *NativeContext, class_name: []const u8, args: []const Value) RuntimeError!NativeResult {
-    const input: []const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else "";
-    const instant = (try resolveDate(ctx, input, tzArgZone(args, 1), false)) orelse return NativeResult.scalar(.{ .bool = false });
-    const obj = try ctx.createObject(class_name);
-    try storeInstant(ctx, obj, instant.ts, instant.us, &instant.zone);
-    return NativeResult.borrowed(.{ .object = obj });
-}
-
-fn native_date_create(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return createBareDt(ctx, "DateTime", args);
-}
-
-fn native_date_create_immutable(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return createBareDt(ctx, "DateTimeImmutable", args);
-}
-
-fn argObj(args: []const Value) ?*PhpObject {
-    if (args.len == 0 or args[0] != .object) return null;
-    return args[0].object;
-}
-
-fn isImmutable(obj: *PhpObject) bool {
-    return std.mem.eql(u8, obj.class_name, "DateTimeImmutable");
-}
-
-fn native_date_format(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = argObj(args) orelse return NativeResult.scalar(.{ .bool = false });
-    if (args.len < 2 or args[1] != .string) return NativeResult.literal("");
-    const us_v = obj.get("__microseconds");
-    return formatIn(ctx, getTimestamp(obj), if (us_v == .int) us_v.int else 0, &objZoneOr(ctx, obj), args[1].string.bytes());
-}
-
 // procedural alias for DateInterval::createFromDateString
 fn native_date_interval_create_from_date_string(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return intervalFromDateString(ctx, args, false);
@@ -1235,81 +929,6 @@ fn native_date_interval_format(ctx: *NativeContext, args: []const Value) Runtime
     return diFormat(ctx, args[1..]);
 }
 
-fn native_date_modify(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = argObj(args) orelse return NativeResult.scalar(.{ .bool = false });
-    if (args.len < 2 or args[1] != .string) return NativeResult.borrowed(.{ .object = obj });
-    const target = if (isImmutable(obj)) try cloneDateObject(ctx, obj) else obj;
-    if (!try modifyDateObject(ctx, target, args[1].string.bytes(), "date_modify(): ", false)) return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.borrowed(.{ .object = target });
-}
-
-fn applyIntervalProc(ctx: *NativeContext, args: []const Value, sign: i64) RuntimeError!NativeResult {
-    const obj = argObj(args) orelse return NativeResult.scalar(.{ .bool = false });
-    if (args.len < 2 or args[1] != .object) return NativeResult.borrowed(.{ .object = obj });
-    const target = if (isImmutable(obj)) try cloneDateObject(ctx, obj) else obj;
-    if (sign > 0) try addOn(ctx, target, args[1..]) else try subWith(ctx, target, args[1..], null);
-    return NativeResult.borrowed(.{ .object = target });
-}
-
-fn native_date_add(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return applyIntervalProc(ctx, args, 1);
-}
-
-fn native_date_sub(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return applyIntervalProc(ctx, args, -1);
-}
-
-fn native_date_diff(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2 or args[0] != .object or args[1] != .object) return NativeResult.scalar(.{ .bool = false });
-    return diffObjects(ctx, args[0].object, args[1].object, args.len >= 3 and args[2].isTruthy());
-}
-
-fn native_date_timestamp_get(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = argObj(args) orelse return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.scalar(.{ .int = getTimestamp(obj) });
-}
-
-fn native_date_timestamp_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = argObj(args) orelse return NativeResult.scalar(.{ .bool = false });
-    if (args.len < 2) return NativeResult.borrowed(.{ .object = obj });
-    try obj.set(ctx.allocator, "__timestamp", .{ .int = Value.toInt(args[1]) });
-    return NativeResult.borrowed(.{ .object = obj });
-}
-
-// a procedural function that is a method of its first argument
-// (date_offset_get($d) is $d->getOffset())
-fn methodAlias(comptime method: []const u8) fn (*NativeContext, []const Value) RuntimeError!NativeResult {
-    return struct {
-        fn call(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-            if (args.len < 1 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
-            return NativeResult.share(try ctx.vm.callMethod(args[0].object, method, args[1..]));
-        }
-    }.call;
-}
-
-fn native_date_date_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = argObj(args) orelse return NativeResult.scalar(.{ .bool = false });
-    if (args.len < 4) return NativeResult.borrowed(.{ .object = obj });
-    const c = wallFields(ctx, obj);
-    const new_ts = instantOfWall(ctx, obj, dateToTimestamp(Value.toInt(args[1]), Value.toInt(args[2]), Value.toInt(args[3]), c.hour, c.min, c.sec));
-    try obj.set(ctx.allocator, "__timestamp", .{ .int = new_ts });
-    return NativeResult.borrowed(.{ .object = obj });
-}
-
-fn native_date_time_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const obj = argObj(args) orelse return NativeResult.scalar(.{ .bool = false });
-    if (args.len < 3) return NativeResult.borrowed(.{ .object = obj });
-    const c = wallFields(ctx, obj);
-    const sec: i64 = if (args.len >= 4) Value.toInt(args[3]) else 0;
-    const new_ts = instantOfWall(ctx, obj, dateToTimestamp(c.year, c.month, c.day, Value.toInt(args[1]), Value.toInt(args[2]), sec));
-    try obj.set(ctx.allocator, "__timestamp", .{ .int = new_ts });
-    return NativeResult.borrowed(.{ .object = obj });
-}
-
-fn dtiCreateFromFormat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return createFromFormatImpl(ctx, args, "DateTimeImmutable", "DateTimeImmutable::createFromFormat");
-}
-
 // the class a static factory was called on (Carbon::createFromFormat makes a
 // Carbon): the static call leaves it on the calling frame, and anything that
 // isn't a subclass of the factory's own class is not it
@@ -1319,47 +938,467 @@ fn staticClass(ctx: *NativeContext, base: []const u8) []const u8 {
     return if (ctx.vm.isInstanceOf(called, base)) ctx.vm.declaredClassName(called) else base;
 }
 
-fn createFromFormatImpl(ctx: *NativeContext, args: []const Value, default_class: []const u8, fn_name: []const u8) RuntimeError!NativeResult {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
-    try rejectNulBytes(ctx, fn_name, 2, "datetime", args[1].string.bytes());
-
-    const class_name = staticClass(ctx, default_class);
-
-    const instant = (try resolveDateWith(ctx, args[1].string.bytes(), args[0].string.bytes(), tzArgZone(args, 2), false)) orelse return NativeResult.scalar(.{ .bool = false });
-    const obj = try ctx.createObject(class_name);
-    try storeInstant(ctx, obj, instant.ts, instant.us, &instant.zone);
-    return NativeResult.borrowed(.{ .object = obj });
-}
-
 fn isDigit(c: u8) bool {
     return c >= '0' and c <= '9';
 }
-fn dtiCreateFromTimestamp(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.null);
-    const obj = try ctx.createObject("DateTimeImmutable");
-    try setTimestampWithFraction(ctx, obj, args[0]);
-    return NativeResult.borrowed(.{ .object = obj });
+// ---- DateTime and DateTimeImmutable (php_date.c) ----
+
+const CompareKind = enum { date, zone, interval };
+
+fn compareKind(ctx: *NativeContext, v: Value) ?CompareKind {
+    if (v != .object) return null;
+    const class = v.object.class_name;
+    if (ctx.vm.isInstanceOf(class, "DateTime") or ctx.vm.isInstanceOf(class, "DateTimeImmutable")) return .date;
+    if (ctx.vm.isInstanceOf(class, "DateTimeZone")) return .zone;
+    if (ctx.vm.isInstanceOf(class, "DateInterval")) return .interval;
+    return null;
 }
 
-fn dtGetMicrosecond(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
+fn throwPlain(ctx: *NativeContext, class: []const u8, msg: []const u8) RuntimeError {
+    try ctx.vm.setPendingException(class, msg);
+    return error.RuntimeError;
+}
+
+// the compare handlers of the date classes; objects of different kinds fall
+// back to php's standard object comparison
+fn dateBinop(ctx: *NativeContext, op: vm_mod.NativeBinop, a: Value, b: Value) RuntimeError!?Value {
+    if (op != .compare) return null;
+    const ka = compareKind(ctx, a) orelse return null;
+    const kb = compareKind(ctx, b) orelse return null;
+    if (ka != kb) return null;
+    // zend_compare finds an object equal to itself before any handler runs
+    if (a.object == b.object) return .{ .int = 0 };
+    switch (ka) {
+        .date => {
+            const ta = a.object.get("__timestamp");
+            const tb = b.object.get("__timestamp");
+            if (ta == .null or tb == .null) return throwPlain(ctx, "DateObjectError", "Trying to compare an incomplete DateTime or DateTimeImmutable object");
+            const sa = Value.toInt(ta);
+            const sb = Value.toInt(tb);
+            if (sa != sb) return .{ .int = if (sa < sb) -1 else 1 };
+            const ua = objMicros(a.object);
+            const ub = objMicros(b.object);
+            return .{ .int = if (ua == ub) 0 else if (ua < ub) -1 else 1 };
+        },
+        .zone => {
+            const za = objZone(a.object);
+            const zb = objZone(b.object);
+            if (za == null or zb == null) return throwPlain(ctx, "DateObjectError", "Trying to compare uninitialized DateTimeZone objects");
+            if (za.?.kind != zb.?.kind) return throwPlain(ctx, "DateException", "Cannot compare two different kinds of DateTimeZone objects");
+            const same = if (za.?.kind == dp.ZONETYPE_OFFSET) za.?.z == zb.?.z else std.mem.eql(u8, za.?.name(), zb.?.name());
+            return .{ .int = if (same) 0 else 1 };
+        },
+        .interval => {
+            try ctx.vm.emitWarning("Cannot compare DateInterval objects");
+            return .{ .int = 1 };
+        },
+    }
+}
+
+// a date object's time as timelib holds it, or DateObjectError when its
+// constructor never ran
+fn timeOf(ctx: *NativeContext, obj: *PhpObject) RuntimeError!dp.Time {
+    _ = try instantOf(ctx, obj);
+    return objTime(ctx, obj);
+}
+
+fn objMicros(obj: *PhpObject) i64 {
     const v = obj.get("__microseconds");
-    if (v == .int) return NativeResult.scalar(v);
-    return NativeResult.scalar(.{ .int = 0 });
+    return if (v == .int) v.int else 0;
 }
 
-fn dtGetTimezone(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+// an interval made by a constructor, a factory, diff() or unserialization
+fn markInterval(ctx: *NativeContext, obj: *PhpObject) RuntimeError!void {
+    try obj.set(ctx.allocator, "__init", .{ .bool = true });
+}
+
+fn intervalOf(ctx: *NativeContext, obj: *PhpObject) RuntimeError!*PhpObject {
+    if (obj.get("__init") != .bool) return throwUninitialized(ctx, obj.class_name);
+    return obj;
+}
+
+// an optional DateTimeZone argument; one whose constructor never ran is an
+// Error, as php_date_initialize finds it without a zone type
+fn zoneArg(ctx: *NativeContext, p: Args, index: usize, name: []const u8) RuntimeError!?ParseZone {
+    const tz = (try p.objectOrNull(index, name, "DateTimeZone")) orelse return null;
+    return objZone(tz) orelse {
+        try ctx.vm.setPendingException("Error", "The DateTimeZone object has not been correctly initialized by its constructor");
+        return error.RuntimeError;
+    };
+}
+
+
+fn constructAs(comptime class: []const u8) NativeFn {
+    return struct {
+        fn call(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+            const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+            const p = Args.init(ctx, class ++ "::__construct", args);
+            const input = try p.optStr(0, "datetime", "now");
+            const zone = try zoneArg(ctx, p, 1, "timezone");
+            const instant = (try resolveDateWith(ctx, input, null, zone, true)) orelse return error.RuntimeError;
+            try storeInstant(ctx, obj, instant.ts, instant.us, &instant.zone);
+            return NativeResult.scalar(.null);
+        }
+    }.call;
+}
+
+// date_create() and date_create_immutable(): false for a string that doesn't parse
+fn createAs(comptime func: []const u8, comptime class: []const u8) NativeFn {
+    return struct {
+        fn call(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+            const p = Args.init(ctx, func, args);
+            const input = try p.optStr(0, "datetime", "now");
+            const zone = try zoneArg(ctx, p, 1, "timezone");
+            const instant = (try resolveDateWith(ctx, input, null, zone, false)) orelse return NativeResult.scalar(.{ .bool = false });
+            const obj = try ctx.createObject(class);
+            try storeInstant(ctx, obj, instant.ts, instant.us, &instant.zone);
+            return NativeResult.borrowed(.{ .object = obj });
+        }
+    }.call;
+}
+
+// createFromFormat() and its procedural aliases: the object is of the class
+// the static call named
+fn createFromFormatAs(comptime func: []const u8, comptime class: []const u8) NativeFn {
+    return struct {
+        fn call(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+            const p = Args.init(ctx, func, args);
+            const format = try p.str(0, "format");
+            const input = try p.str(1, "datetime");
+            try rejectNulBytes(ctx, func, 2, "datetime", input);
+            const zone = try zoneArg(ctx, p, 2, "timezone");
+            const instant = (try resolveDateWith(ctx, input, format, zone, false)) orelse return NativeResult.scalar(.{ .bool = false });
+            const obj = try ctx.createObject(staticClass(ctx, class));
+            try storeInstant(ctx, obj, instant.ts, instant.us, &instant.zone);
+            return NativeResult.borrowed(.{ .object = obj });
+        }
+    }.call;
+}
+
+// createFromImmutable(), createFromMutable(), createFromInterface(): a copy of
+// another date object's time in the called class
+fn createFromObjectAs(comptime func: []const u8, comptime arg_class: []const u8, comptime class: []const u8) NativeFn {
+    return struct {
+        fn call(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+            const src = try Args.init(ctx, func, args).object(0, "object", arg_class);
+            const ts = try instantOf(ctx, src);
+            const obj = try ctx.createObject(staticClass(ctx, class));
+            try storeInstant(ctx, obj, ts, objMicros(src), &objZoneOr(ctx, src));
+            return NativeResult.borrowed(.{ .object = obj });
+        }
+    }.call;
+}
+
+// createFromTimestamp(): an int or float timestamp, in +00:00
+fn createFromTimestampAs(comptime func: []const u8, comptime class: []const u8) NativeFn {
+    return struct {
+        fn call(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+            const p = Args.init(ctx, func, args);
+            var v = args[0];
+            if (v == .string or v == .bool or v == .null or v == .undef) {
+                if (v == .string and Value.isNumericString(v.string.bytes())) {
+                    const f = Value.toFloat(v);
+                    const n = Value.toInt(v);
+                    v = if (f == @trunc(f) and @abs(f) < 9.2e18 and std.mem.indexOfAny(u8, v.string.bytes(), ".eE") == null) .{ .int = n } else .{ .float = f };
+                } else if (v == .bool) {
+                    v = .{ .int = @intFromBool(v.bool) };
+                } else if (v == .null or v == .undef) {
+                    _ = try p.long(0, "timestamp");
+                    v = .{ .int = 0 };
+                } else return p.typeError(0, "timestamp", "int|float");
+            } else if (v != .int and v != .float) return p.typeError(0, "timestamp", "int|float");
+            var sec: i64 = 0;
+            var usec: i64 = 0;
+            if (v == .int) {
+                sec = v.int;
+            } else {
+                const ts = v.float;
+                const whole = @trunc(ts);
+                const range = std.fmt.allocPrint(ctx.allocator, "{s}(): Argument #1 ($timestamp) must be a finite number between {d} and {d}.999999, {s} given", .{ func, std.math.minInt(i64), std.math.maxInt(i64), fmtG(ts) }) catch return error.OutOfMemory;
+                defer ctx.allocator.free(range);
+                if (std.math.isNan(whole) or !(whole >= -9223372036854775808.0 and whole < 9223372036854775808.0)) {
+                    try ctx.vm.setPendingException("DateRangeError", range);
+                    return error.RuntimeError;
+                }
+                sec = @intFromFloat(whole);
+                usec = @intFromFloat(@round(@rem(ts, 1) * 1000000));
+                if (@abs(usec) == 1000000) {
+                    sec += if (usec > 0) 1 else -1;
+                    usec = 0;
+                }
+                if (usec < 0) {
+                    if (sec == std.math.minInt(i64)) {
+                        try ctx.vm.setPendingException("DateRangeError", range);
+                        return error.RuntimeError;
+                    }
+                    sec -= 1;
+                    usec += 1000000;
+                }
+            }
+            const obj = try ctx.createObject(staticClass(ctx, class));
+            const zone = ParseZone.of("+00:00", false);
+            try storeInstant(ctx, obj, sec, usec, &zone);
+            return NativeResult.borrowed(.{ .object = obj });
+        }
+    }.call;
+}
+
+// printf's %g, as php's messages print a float
+fn fmtG(f: f64) []const u8 {
+    const S = struct {
+        threadlocal var buf: [64]u8 = undefined;
+    };
+    return @import("formatted_print.zig").gcvt(f, 6, '.', 'e', &S.buf);
+}
+
+// ---- the operations, for DateTime's methods, DateTimeImmutable's (on a
+// clone) and the procedural functions ----
+
+const Mode = enum { mutable, immutable, procedural };
+// false makes a procedural function return false
+const DateOp = fn (*NativeContext, *PhpObject, Args, Mode) RuntimeError!bool;
+
+fn dateMethod(comptime func: []const u8, comptime op: DateOp, comptime mode: Mode) NativeFn {
+    return struct {
+        fn call(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+            const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+            const p = Args.init(ctx, func, args);
+            const target = if (mode == .immutable) try cloneDateObject(ctx, this) else this;
+            _ = try op(ctx, target, p, mode);
+            return NativeResult.borrowed(.{ .object = target });
+        }
+    }.call;
+}
+
+fn dateFunction(comptime func: []const u8, comptime op: DateOp) NativeFn {
+    return struct {
+        fn call(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+            const obj = try Args.init(ctx, func, args).object(0, "object", "DateTime");
+            var p = Args.init(ctx, func, args[1..]);
+            p.shift = 1;
+            if (!try op(ctx, obj, p, .procedural)) return NativeResult.scalar(.{ .bool = false });
+            return NativeResult.borrowed(.{ .object = obj });
+        }
+    }.call;
+}
+
+fn modifyOp(ctx: *NativeContext, obj: *PhpObject, p: Args, mode: Mode) RuntimeError!bool {
+    const modifier = try p.str(0, "modifier");
+    _ = try instantOf(ctx, obj);
+    var prefix_buf: [64]u8 = undefined;
+    const prefix = std.fmt.bufPrint(&prefix_buf, "{s}(): ", .{p.func}) catch "";
+    return modifyDateObject(ctx, obj, modifier, prefix, mode != .procedural);
+}
+
+fn addOp(ctx: *NativeContext, obj: *PhpObject, p: Args, _: Mode) RuntimeError!bool {
+    const iv = try p.object(0, "interval", "DateInterval");
+    var t = try timeOf(ctx, obj);
+    const spec = try intervalSpec(ctx, try intervalOf(ctx, iv));
+    if (spec.wall) dp.addWall(&t, &spec.rel, spec.invert, 1, parse_db) else dp.add(&t, &spec.rel, spec.invert, parse_db);
+    try storeTime(ctx, obj, &t);
+    return true;
+}
+
+// a weekday or special interval can't be subtracted: the methods throw,
+// date_sub() warns and leaves the date as it was
+fn subOp(ctx: *NativeContext, obj: *PhpObject, p: Args, mode: Mode) RuntimeError!bool {
+    const iv = try p.object(0, "interval", "DateInterval");
+    var t = try timeOf(ctx, obj);
+    const spec = try intervalSpec(ctx, try intervalOf(ctx, iv));
+    if (spec.rel.have_weekday_relative or spec.rel.have_special_relative) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Only non-special relative time specifications are supported for subtraction", .{p.func});
+        defer ctx.allocator.free(msg);
+        if (mode == .procedural) {
+            try ctx.vm.emitWarning(msg);
+            return true;
+        }
+        try ctx.vm.setPendingException("DateInvalidOperationException", msg);
+        return error.RuntimeError;
+    }
+    if (spec.wall) dp.addWall(&t, &spec.rel, spec.invert, -1, parse_db) else dp.sub(&t, &spec.rel, spec.invert, parse_db);
+    try storeTime(ctx, obj, &t);
+    return true;
+}
+
+fn setTimezoneOp(ctx: *NativeContext, obj: *PhpObject, p: Args, _: Mode) RuntimeError!bool {
+    const tz = try p.object(0, "timezone", "DateTimeZone");
+    _ = try instantOf(ctx, obj);
+    if (objZone(tz)) |zone| try setObjZone(ctx, obj, &zone);
+    return true;
+}
+
+fn setTimeOp(ctx: *NativeContext, obj: *PhpObject, p: Args, _: Mode) RuntimeError!bool {
+    const h = try p.long(0, "hour");
+    const i = try p.long(1, "minute");
+    const s = try p.optLong(2, "second", 0);
+    const us = try p.optLong(3, "microsecond", 0);
+    var t = try timeOf(ctx, obj);
+    t.h = h;
+    t.i = i;
+    t.s = s;
+    t.us = us;
+    dp.updateTs(&t, null, parse_db);
+    try storeTime(ctx, obj, &t);
+    return true;
+}
+
+fn setDateOp(ctx: *NativeContext, obj: *PhpObject, p: Args, _: Mode) RuntimeError!bool {
+    const y = try p.long(0, "year");
+    const m = try p.long(1, "month");
+    const d = try p.long(2, "day");
+    var t = try timeOf(ctx, obj);
+    t.y = y;
+    t.m = m;
+    t.d = d;
+    dp.updateTs(&t, null, parse_db);
+    try storeTime(ctx, obj, &t);
+    return true;
+}
+
+fn setISODateOp(ctx: *NativeContext, obj: *PhpObject, p: Args, _: Mode) RuntimeError!bool {
+    const y = try p.long(0, "year");
+    const w = try p.long(1, "week");
+    const d = try p.optLong(2, "dayOfWeek", 1);
+    var t = try timeOf(ctx, obj);
+    t.y = y;
+    t.m = 1;
+    t.d = 1;
+    t.relative = .{};
+    t.relative.d = dp.daynrFromWeeknr(y, w, d);
+    t.have_relative = true;
+    dp.updateTs(&t, null, parse_db);
+    try storeTime(ctx, obj, &t);
+    return true;
+}
+
+fn setTimestampOp(ctx: *NativeContext, obj: *PhpObject, p: Args, _: Mode) RuntimeError!bool {
+    const ts = try p.long(0, "timestamp");
+    _ = try instantOf(ctx, obj);
+    try storeInstant(ctx, obj, ts, 0, &objZoneOr(ctx, obj));
+    return true;
+}
+
+fn setMicrosecondOp(ctx: *NativeContext, obj: *PhpObject, p: Args, _: Mode) RuntimeError!bool {
+    const us = try p.long(0, "microsecond");
+    if (us < 0 or us > 999999) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Argument #1 ($microsecond) must be between 0 and 999999, {d} given", .{ p.func, us });
+        defer ctx.allocator.free(msg);
+        try ctx.vm.setPendingException("DateRangeError", msg);
+        return error.RuntimeError;
+    }
+    _ = try instantOf(ctx, obj);
+    try obj.set(ctx.allocator, "__microseconds", .{ .int = us });
+    return true;
+}
+
+const dtModify = dateMethod("DateTime::modify", modifyOp, .mutable);
+const dtAdd = dateMethod("DateTime::add", addOp, .mutable);
+const dtSub = dateMethod("DateTime::sub", subOp, .mutable);
+const dtSetTimezone = dateMethod("DateTime::setTimezone", setTimezoneOp, .mutable);
+const dtSetTime = dateMethod("DateTime::setTime", setTimeOp, .mutable);
+const dtSetDate = dateMethod("DateTime::setDate", setDateOp, .mutable);
+const dtSetISODate = dateMethod("DateTime::setISODate", setISODateOp, .mutable);
+const dtSetTimestamp = dateMethod("DateTime::setTimestamp", setTimestampOp, .mutable);
+const dtSetMicrosecond = dateMethod("DateTime::setMicrosecond", setMicrosecondOp, .mutable);
+const dtiModify = dateMethod("DateTimeImmutable::modify", modifyOp, .immutable);
+const dtiAdd = dateMethod("DateTimeImmutable::add", addOp, .immutable);
+const dtiSub = dateMethod("DateTimeImmutable::sub", subOp, .immutable);
+const dtiSetTimezone = dateMethod("DateTimeImmutable::setTimezone", setTimezoneOp, .immutable);
+const dtiSetTime = dateMethod("DateTimeImmutable::setTime", setTimeOp, .immutable);
+const dtiSetDate = dateMethod("DateTimeImmutable::setDate", setDateOp, .immutable);
+const dtiSetISODate = dateMethod("DateTimeImmutable::setISODate", setISODateOp, .immutable);
+const dtiSetTimestamp = dateMethod("DateTimeImmutable::setTimestamp", setTimestampOp, .immutable);
+const dtiSetMicrosecond = dateMethod("DateTimeImmutable::setMicrosecond", setMicrosecondOp, .immutable);
+const native_date_modify = dateFunction("date_modify", modifyOp);
+const native_date_add = dateFunction("date_add", addOp);
+const native_date_sub = dateFunction("date_sub", subOp);
+const native_date_timezone_set = dateFunction("date_timezone_set", setTimezoneOp);
+const native_date_time_set = dateFunction("date_time_set", setTimeOp);
+const native_date_date_set = dateFunction("date_date_set", setDateOp);
+const native_date_isodate_set = dateFunction("date_isodate_set", setISODateOp);
+const native_date_timestamp_set = dateFunction("date_timestamp_set", setTimestampOp);
+
+// ---- what DateTimeInterface reads ----
+
+fn formatImpl(ctx: *NativeContext, obj: *PhpObject, p: Args) RuntimeError!NativeResult {
+    const format = try p.str(0, "format");
+    const ts = try instantOf(ctx, obj);
+    return formatIn(ctx, ts, objMicros(obj), &objZoneOr(ctx, obj), format);
+}
+
+fn getTimestampImpl(ctx: *NativeContext, obj: *PhpObject, _: Args) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .int = try instantOf(ctx, obj) });
+}
+
+fn getTimezoneImpl(ctx: *NativeContext, obj: *PhpObject, _: Args) RuntimeError!NativeResult {
+    _ = try instantOf(ctx, obj);
     const tz_obj = try ctx.createObject("DateTimeZone");
     try setObjZone(ctx, tz_obj, &objZoneOr(ctx, obj));
     return NativeResult.borrowed(.{ .object = tz_obj });
 }
 
-fn dtGetOffset(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
-    const ts = getTimestamp(obj);
+fn getOffsetImpl(ctx: *NativeContext, obj: *PhpObject, _: Args) RuntimeError!NativeResult {
+    const ts = try instantOf(ctx, obj);
     return NativeResult.scalar(.{ .int = objZoneOr(ctx, obj).totalOffset(ctx.allocator, ts) });
 }
+
+fn getMicrosecondImpl(ctx: *NativeContext, obj: *PhpObject, _: Args) RuntimeError!NativeResult {
+    _ = try instantOf(ctx, obj);
+    return NativeResult.scalar(.{ .int = objMicros(obj) });
+}
+
+fn diffImpl(ctx: *NativeContext, obj: *PhpObject, p: Args) RuntimeError!NativeResult {
+    const other = try p.object(0, "targetObject", "DateTimeInterface");
+    const absolute = try p.boolean(1, "absolute", false);
+    const one = try timeOf(ctx, obj);
+    const two = try timeOf(ctx, other);
+    const rt = dp.diff(&one, &two, parse_db);
+    const interval = try ctx.createObject("DateInterval");
+    try interval.set(ctx.allocator, "y", .{ .int = rt.y });
+    try interval.set(ctx.allocator, "m", .{ .int = rt.m });
+    try interval.set(ctx.allocator, "d", .{ .int = rt.d });
+    try interval.set(ctx.allocator, "days", .{ .int = rt.days });
+    try interval.set(ctx.allocator, "h", .{ .int = rt.h });
+    try interval.set(ctx.allocator, "i", .{ .int = rt.i });
+    try interval.set(ctx.allocator, "s", .{ .int = rt.s });
+    try interval.set(ctx.allocator, "f", .{ .float = @as(f64, @floatFromInt(rt.us)) / 1_000_000.0 });
+    try interval.set(ctx.allocator, "invert", .{ .int = if (rt.invert and !absolute) 1 else 0 });
+    try markInterval(ctx, interval);
+    return NativeResult.borrowed(.{ .object = interval });
+}
+
+const dtFormat = objMethod("DateTime::format", formatImpl);
+const dtGetTimestamp = objMethod("DateTime::getTimestamp", getTimestampImpl);
+const dtGetTimezone = objMethod("DateTime::getTimezone", getTimezoneImpl);
+const dtGetOffset = objMethod("DateTime::getOffset", getOffsetImpl);
+const dtGetMicrosecond = objMethod("DateTime::getMicrosecond", getMicrosecondImpl);
+const dtDiff = objMethod("DateTime::diff", diffImpl);
+const dtiFormat = objMethod("DateTimeImmutable::format", formatImpl);
+const dtiGetTimestamp = objMethod("DateTimeImmutable::getTimestamp", getTimestampImpl);
+const dtiGetTimezone = objMethod("DateTimeImmutable::getTimezone", getTimezoneImpl);
+const dtiGetOffset = objMethod("DateTimeImmutable::getOffset", getOffsetImpl);
+const dtiGetMicrosecond = objMethod("DateTimeImmutable::getMicrosecond", getMicrosecondImpl);
+const dtiDiff = objMethod("DateTimeImmutable::diff", diffImpl);
+const native_date_format = objFunction("date_format", "DateTimeInterface", formatImpl);
+const native_date_timestamp_get = objFunction("date_timestamp_get", "DateTimeInterface", getTimestampImpl);
+const native_date_timezone_get = objFunction("date_timezone_get", "DateTimeInterface", getTimezoneImpl);
+const native_date_offset_get = objFunction("date_offset_get", "DateTimeInterface", getOffsetImpl);
+const native_date_diff = objFunction("date_diff", "DateTimeInterface", diffImpl);
+
+const dtConstruct = constructAs("DateTime");
+const dtiConstruct = constructAs("DateTimeImmutable");
+const native_date_create = createAs("date_create", "DateTime");
+const native_date_create_immutable = createAs("date_create_immutable", "DateTimeImmutable");
+const dtCreateFromFormat = createFromFormatAs("DateTime::createFromFormat", "DateTime");
+const dtiCreateFromFormat = createFromFormatAs("DateTimeImmutable::createFromFormat", "DateTimeImmutable");
+const native_date_create_from_format = createFromFormatAs("date_create_from_format", "DateTime");
+const native_date_create_immutable_from_format = createFromFormatAs("date_create_immutable_from_format", "DateTimeImmutable");
+const dtCreateFromImmutable = createFromObjectAs("DateTime::createFromImmutable", "DateTimeImmutable", "DateTime");
+const dtCreateFromInterface = createFromObjectAs("DateTime::createFromInterface", "DateTimeInterface", "DateTime");
+const dtiCreateFromMutable = createFromObjectAs("DateTimeImmutable::createFromMutable", "DateTime", "DateTimeImmutable");
+const dtiCreateFromInterface = createFromObjectAs("DateTimeImmutable::createFromInterface", "DateTimeInterface", "DateTimeImmutable");
+const dtCreateFromTimestamp = createFromTimestampAs("DateTime::createFromTimestamp", "DateTime");
+const dtiCreateFromTimestamp = createFromTimestampAs("DateTimeImmutable::createFromTimestamp", "DateTimeImmutable");
 
 // Z_PARAM_PATH: php rejects a string argument with a nul byte in it
 fn rejectNulBytes(ctx: *NativeContext, fn_name: []const u8, pos: usize, param: []const u8, v: []const u8) RuntimeError!void {
@@ -1372,18 +1411,19 @@ fn rejectNulBytes(ctx: *NativeContext, fn_name: []const u8, pos: usize, param: [
 
 fn dtzConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len >= 1 and args[0] == .string) {
-        try rejectNulBytes(ctx, "DateTimeZone::__construct", 1, "timezone", args[0].string.bytes());
-        const zone = (try timezoneInitialize(ctx, args[0].string.bytes(), "DateTimeZone::__construct(): ", true)) orelse return error.RuntimeError;
-        try setObjZone(ctx, obj, &zone);
-    }
+    const name = try Args.init(ctx, "DateTimeZone::__construct", args).str(0, "timezone");
+    try rejectNulBytes(ctx, "DateTimeZone::__construct", 1, "timezone", name);
+    const zone = (try timezoneInitialize(ctx, name, "DateTimeZone::__construct(): ", .throw_)) orelse return error.RuntimeError;
+    try setObjZone(ctx, obj, &zone);
     return NativeResult.scalar(.null);
 }
 
 // timezone_initialize: a zone string read the way the date parser reads one,
 // so "cest" is the abbreviation CEST, "+0530" the offset +05:30, and anything
 // left over makes it a bad timezone
-fn timezoneInitialize(ctx: *NativeContext, name: []const u8, prefix: []const u8, throws: bool) RuntimeError!?ParseZone {
+const Report = enum { throw_, warn, silent };
+
+fn timezoneInitialize(ctx: *NativeContext, name: []const u8, prefix: []const u8, report: Report) RuntimeError!?ParseZone {
     const zp = dp.parseZoneString(name, parse_db);
     var what: ?[]const u8 = null;
     if (zp.time.z >= 100 * 3600 or zp.time.z <= -100 * 3600) {
@@ -1392,9 +1432,10 @@ fn timezoneInitialize(ctx: *NativeContext, name: []const u8, prefix: []const u8,
         what = "Unknown or bad timezone";
     }
     if (what) |w| {
+        if (report == .silent) return null;
         const msg = std.fmt.allocPrint(ctx.allocator, "{s}{s} ({s})", .{ prefix, w, name }) catch return error.OutOfMemory;
         defer ctx.allocator.free(msg);
-        if (throws) {
+        if (report == .throw_) {
             try ctx.vm.setPendingException("DateInvalidTimeZoneException", msg);
         } else {
             try ctx.vm.emitWarning(msg);
@@ -1865,10 +1906,10 @@ fn native_idate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
 }
 
 fn native_strtotime(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const input = args[0].string.bytes();
+    const p = Args.init(ctx, "strtotime", args);
+    const input = try p.str(0, "datetime");
+    const base = (try p.longOrNull(1, "baseTimestamp")) orelse platform.timestamp();
     if (input.len == 0) return NativeResult.scalar(.{ .bool = false });
-    const base: i64 = if (args.len >= 2 and args[1] != .null) Value.toInt(args[1]) else platform.timestamp();
     const ts = (try strtotimeIn(ctx, input, base)) orelse return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .int = ts });
 }
@@ -2199,26 +2240,12 @@ fn native_tz_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
 }
 
 fn native_timezone_open(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    try rejectNulBytes(ctx, "timezone_open", 1, "timezone", args[0].string.bytes());
-    const zone = (try timezoneInitialize(ctx, args[0].string.bytes(), "timezone_open(): ", false)) orelse return NativeResult.scalar(.{ .bool = false });
+    const name = try Args.init(ctx, "timezone_open", args).str(0, "timezone");
+    try rejectNulBytes(ctx, "timezone_open", 1, "timezone", name);
+    const zone = (try timezoneInitialize(ctx, name, "timezone_open(): ", .warn)) orelse return NativeResult.scalar(.{ .bool = false });
     const obj = try ctx.createObject("DateTimeZone");
     try setObjZone(ctx, obj, &zone);
     return NativeResult.borrowed(.{ .object = obj });
-}
-
-fn native_date_timezone_get(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
-    const zone = objZone(args[0].object) orelse return NativeResult.scalar(.{ .bool = false });
-    const tz_obj = try ctx.createObject("DateTimeZone");
-    try setObjZone(ctx, tz_obj, &zone);
-    return NativeResult.borrowed(.{ .object = tz_obj });
-}
-
-fn native_date_timezone_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2 or args[0] != .object or args[1] != .object) return NativeResult.scalar(.{ .bool = false });
-    if (objZone(args[1].object)) |zone| try setObjZone(ctx, args[0].object, &zone);
-    return NativeResult.share(args[0]);
 }
 
 fn native_tz_get(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -2292,6 +2319,7 @@ fn diConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     // intervals from a duration add hours, minutes, and seconds as elapsed
     // time (timelib_add_wall); the others add on the wall clock
     try obj.set(ctx.allocator, "__wall", .{ .bool = true });
+    try markInterval(ctx, obj);
     return NativeResult.scalar(.null);
 }
 
@@ -2328,6 +2356,7 @@ fn intervalFromDateString(ctx: *NativeContext, args: []const Value, throws: bool
     }
     const obj = try ctx.createObject("DateInterval");
     try storeStringInterval(ctx, obj, input, &t.relative);
+    try markInterval(ctx, obj);
     return NativeResult.borrowed(.{ .object = obj });
 }
 
@@ -2390,6 +2419,7 @@ fn intervalSerialize(ctx: *NativeContext, _: []const Value) RuntimeError!NativeR
 // otherwise each field is read with php's default, and an interval with no
 // civil_or_wall adds on the wall clock's civil rules
 fn initializeIntervalFromHash(ctx: *NativeContext, obj: *PhpObject, data: *const PhpArray) RuntimeError!void {
+    try markInterval(ctx, obj);
     const date_string = data.get(.{ .string = Value.String.borrowed("date_string") });
     if (date_string == .string) {
         const input = date_string.string.bytes();
@@ -2702,7 +2732,7 @@ var zone_names: std.StringHashMapUnmanaged(void) = .{};
 var zone_names_mutex: sync.Mutex = .{};
 threadlocal var last_zone_name_interned: []const u8 = "";
 
-fn internZoneName(name: []const u8) []const u8 {
+pub fn internZoneName(name: []const u8) []const u8 {
     if (std.mem.eql(u8, name, last_zone_name_interned)) return last_zone_name_interned;
     zone_names_mutex.lock();
     defer zone_names_mutex.unlock();
