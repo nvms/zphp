@@ -9190,11 +9190,8 @@ pub const VM = struct {
                         } else if (self.functions.get(cn)) |func| {
                             if (try self.checkParamTypes(cn, arg_count)) continue;
                             if (ac < func.required_params) {
+                                if (try self.throwTooFewArgs(cn, ac, func, self.stack[self.sp - ac .. self.sp])) continue;
                                 self.dropN(ac);
-                                const msg = try self.formatTooFewArgs(cn, ac, func);
-                                defer self.allocator.free(msg);
-                                if (try self.throwBuiltinException("ArgumentCountError", msg)) continue;
-                                self.setErrorMsg("Fatal error: Uncaught ArgumentCountError: {s}\n", .{msg});
                                 return error.RuntimeError;
                             }
                             if (func.locals_only and self.ic != null) {
@@ -10119,11 +10116,8 @@ pub const VM = struct {
                         }
                     } else if (self.functions.get(full_name)) |func| {
                         if (ac < func.required_params) {
+                            if (try self.throwTooFewArgs(full_name, ac, func, self.stack[self.sp - ac .. self.sp])) continue;
                             self.dropN(ac + 1);
-                            const msg = try self.formatTooFewArgs(full_name, ac, func);
-                            defer self.allocator.free(msg);
-                            if (try self.throwBuiltinException("ArgumentCountError", msg)) continue;
-                            self.setErrorMsg("Fatal error: Uncaught ArgumentCountError: {s}\n", .{msg});
                             return error.RuntimeError;
                         }
                         if (func.has_param_types) {
@@ -22914,10 +22908,7 @@ pub const VM = struct {
     fn enterUserFunction(self: *VM, func: *const ObjFunction, name: []const u8, arg_count: u32, named_extras: ?*PhpArray) RuntimeError!void {
         const ac: usize = arg_count;
         if (ac < func.required_params) {
-            const msg = try self.formatTooFewArgs(name, ac, func);
-            defer self.allocator.free(msg);
-            if (try self.throwBuiltinException("ArgumentCountError", msg)) return;
-            self.setErrorMsg("Fatal error: Uncaught ArgumentCountError: {s}\n", .{msg});
+            if (try self.throwTooFewArgs(name, ac, func, self.stack[self.sp - ac .. self.sp])) return;
             return error.RuntimeError;
         }
         if (func.has_param_types) {
@@ -23229,7 +23220,7 @@ pub const VM = struct {
             }
             return self.borrowCallResult(result);
         } else if (self.functions.get(full_name)) |func| {
-            if (args.len < func.required_params) return self.raiseTooFewArgs(full_name, args.len, func);
+            if (args.len < func.required_params) return self.raiseTooFewArgs(full_name, args, func);
             var checked_buf: [16]Value = undefined;
             const checked = try self.checkedArgs(full_name, func, args, &checked_buf);
             defer if (checked.ptr != &checked_buf and checked.ptr != args.ptr) self.allocator.free(checked);
@@ -23421,6 +23412,21 @@ pub const VM = struct {
         @import("../stdlib/pcntl.zig").releaseHandlers(self);
     }
 
+    // php raises a missing argument inside the callee: the error is at its
+    // declaration and the trace starts with the callee and the arguments it
+    // received. true when a handler took it
+    fn throwTooFewArgs(self: *VM, name: []const u8, ac: usize, func: *const ObjFunction, args: []const Value) RuntimeError!bool {
+        const msg = try self.formatTooFewArgs(name, ac, func);
+        defer self.allocator.free(msg);
+        const label = try self.callableDisplayName(name, func);
+        var record: NativeCall = undefined;
+        self.enterEngineMethod(&record, label, args, !func.is_static and std.mem.indexOf(u8, label, "::") != null);
+        defer self.native_call = record.outer;
+        if (try self.throwBuiltinExceptionAt("ArgumentCountError", msg, .{ .file = func.file_path, .line = func.start_line })) return true;
+        self.setErrorMsg("Fatal error: Uncaught ArgumentCountError: {s}\n", .{msg});
+        return false;
+    }
+
     // shared formatter for ArgumentCountError messages: matches PHP's
     // 'Too few arguments to function X(), N passed in <file> on line N and
     // exactly|at least M expected'. caller location is the current top frame
@@ -23442,7 +23448,8 @@ pub const VM = struct {
 
     // too few arguments for a call made from native code (call_user_func and
     // the like): the ArgumentCountError goes pending for the caller's handlers
-    fn raiseTooFewArgs(self: *VM, name: []const u8, ac: usize, func: *const ObjFunction) RuntimeError {
+    fn raiseTooFewArgs(self: *VM, name: []const u8, args: []const Value, func: *const ObjFunction) RuntimeError {
+        const ac = args.len;
         const display = try self.callableDisplayName(name, func);
         // php names the calling file and line only for a call from php code;
         // call_user_func compiles to one, a callback from array_map doesn't
@@ -23455,7 +23462,10 @@ pub const VM = struct {
             break :blk try std.fmt.allocPrint(self.allocator, "Too few arguments to function {s}(), {d} passed and {s} {d} expected", .{ display, ac, modifier, func.required_params });
         };
         defer self.allocator.free(msg);
-        try self.setPendingException("ArgumentCountError", msg);
+        var record: NativeCall = undefined;
+        self.enterEngineMethod(&record, display, args, !func.is_static and std.mem.indexOf(u8, display, "::") != null);
+        defer self.native_call = record.outer;
+        self.raise(.{ .object = try self.newBuiltinException("ArgumentCountError", msg, .{ .file = func.file_path, .line = func.start_line }) });
         return error.RuntimeError;
     }
 
@@ -23633,7 +23643,7 @@ pub const VM = struct {
             const result = try self.invokeNative(native, &ctx, .{ .args = args, .name = name });
             return self.borrowCallResult(result);
         } else if (self.functions.get(name)) |func| {
-            if (args.len < func.required_params) return self.raiseTooFewArgs(name, args.len, func);
+            if (args.len < func.required_params) return self.raiseTooFewArgs(name, args, func);
             var checked_buf: [16]Value = undefined;
             const checked = try self.checkedArgs(name, func, args, &checked_buf);
             defer if (checked.ptr != &checked_buf and checked.ptr != args.ptr) self.allocator.free(checked);
@@ -24202,7 +24212,7 @@ pub const VM = struct {
             if (t.called_class) |cc| self.frames[self.frame_count - 1].called_class = cc;
             return true;
         }
-        if (args.len < func.required_params) return self.raiseTooFewArgs(t.name, args.len, func);
+        if (args.len < func.required_params) return self.raiseTooFewArgs(t.name, args, func);
         var checked_buf: [16]Value = undefined;
         const checked = try self.checkedArgs(t.name, func, args, &checked_buf);
         defer if (checked.ptr != &checked_buf and checked.ptr != args.ptr) self.allocator.free(checked);
