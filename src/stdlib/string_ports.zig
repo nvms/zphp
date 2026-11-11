@@ -234,6 +234,20 @@ pub const Args = struct {
         return self.typeError(index, name, "?" ++ class);
     }
 
+    // Z_PARAM_DOUBLE_OR_NULL
+    pub fn doubleOrNull(self: Args, index: usize, name: []const u8) RuntimeError!?f64 {
+        if (index >= self.args.len) return null;
+        const v = self.args[index];
+        if (v == .null or v == .undef) return null;
+        return switch (v) {
+            .float => |f| f,
+            .int => |i| @floatFromInt(i),
+            .bool => |b| if (!self.strict()) @as(f64, if (b) 1 else 0) else self.typeError(index, name, "?float"),
+            .string => |s| if (!self.strict() and Value.isNumericString(s.bytes())) Value.toFloat(v) else self.typeError(index, name, "?float"),
+            else => self.typeError(index, name, "?float"),
+        };
+    }
+
     // Z_PARAM_DOUBLE (zend_parse_arg_double_weak)
     pub fn double(self: Args, index: usize, name: []const u8) RuntimeError!f64 {
         const v = self.args[index];

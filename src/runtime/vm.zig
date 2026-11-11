@@ -2664,6 +2664,9 @@ pub const VM = struct {
         try c.put(a, "DATE_RFC1123", .{ .string = Value.String.borrowed("D, d M Y H:i:s O") });
         try c.put(a, "DATE_RFC7231", .{ .string = Value.String.borrowed("D, d M Y H:i:s \\G\\M\\T") });
         try c.put(a, "DATE_RSS", .{ .string = Value.String.borrowed("D, d M Y H:i:s O") });
+        try c.put(a, "SUNFUNCS_RET_TIMESTAMP", .{ .int = 0 });
+        try c.put(a, "SUNFUNCS_RET_STRING", .{ .int = 1 });
+        try c.put(a, "SUNFUNCS_RET_DOUBLE", .{ .int = 2 });
         // signal numbers are registered above via std.posix.SIG.*; do not
         // re-register them here with hardcoded macOS values or they clobber
         // the platform-correct numbers on Linux (SIGUSR1=10 vs macOS=30)

@@ -1427,6 +1427,10 @@ fn native_get_current_user(ctx: *NativeContext, _: []const Value) RuntimeError!N
 
 fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "date.timezone")) return "UTC";
+    if (std.mem.eql(u8, name, "date.default_latitude")) return "31.7667";
+    if (std.mem.eql(u8, name, "date.default_longitude")) return "35.2333";
+    if (std.mem.eql(u8, name, "date.sunrise_zenith")) return "90.833333";
+    if (std.mem.eql(u8, name, "date.sunset_zenith")) return "90.833333";
     // PHP CLI default is "-1" (no limit); web SAPI default is "128M"
     if (std.mem.eql(u8, name, "memory_limit")) return "128M";
     if (std.mem.eql(u8, name, "max_memory_limit")) return "-1";

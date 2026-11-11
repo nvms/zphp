@@ -77,6 +77,9 @@ pub const entries = .{
     .{ "date_timezone_set", native_date_timezone_set },
     .{ "localtime", native_localtime },
     .{ "idate", native_idate },
+    .{ "date_sun_info", native_date_sun_info },
+    .{ "date_sunrise", native_date_sunrise },
+    .{ "date_sunset", native_date_sunset },
     .{ "date_interval_create_from_date_string", native_date_interval_create_from_date_string },
     .{ "date_interval_format", native_date_interval_format },
     .{ "date_offset_get", native_date_offset_get },
@@ -651,6 +654,115 @@ fn periodWakeup(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
     if (!try initializePeriodFromHash(ctx, obj, own)) return invalidSerialization(ctx, "DatePeriod");
     try restoreCustomProperties(ctx, obj, own, &period_fields);
     return NativeResult.scalar(.null);
+}
+
+// ---- sunrise, sunset and twilight (date_sun_info, date_sunrise, date_sunset) ----
+
+const astro = @import("date_astro.zig");
+
+// the day timelib_astro_rise_set_altitude works on: the local noon of the
+// instant's date in the default zone, and the utc midnight of that date
+const SunDay = struct { noon: i64, midnight: i64 };
+
+fn sunDay(ctx: *NativeContext, ts: i64) SunDay {
+    const zone = defaultZone(ctx);
+    var t = wallTime(ctx.allocator, ts, 0, &zone);
+    t.h = 12;
+    t.i = 0;
+    t.s = 0;
+    dp.updateTs(&t, null, parse_db);
+    var u = dp.Time{};
+    u.y = t.y;
+    u.m = t.m;
+    u.d = t.d;
+    u.h = 0;
+    u.i = 0;
+    u.s = 0;
+    u.us = 0;
+    u.z = 0;
+    u.dst = 0;
+    dp.updateTs(&u, null, parse_db);
+    return .{ .noon = t.sse, .midnight = u.sse };
+}
+
+fn putSunPair(ctx: *NativeContext, arr: *PhpArray, r: astro.RiseSet, begin: []const u8, end: []const u8) RuntimeError!void {
+    switch (r.rc) {
+        -1 => {
+            try putAssoc(ctx, arr, begin, .{ .bool = false });
+            try putAssoc(ctx, arr, end, .{ .bool = false });
+        },
+        1 => {
+            try putAssoc(ctx, arr, begin, .{ .bool = true });
+            try putAssoc(ctx, arr, end, .{ .bool = true });
+        },
+        else => {
+            try putAssoc(ctx, arr, begin, .{ .int = r.rise });
+            try putAssoc(ctx, arr, end, .{ .int = r.set });
+        },
+    }
+}
+
+fn native_date_sun_info(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = Args.init(ctx, "date_sun_info", args);
+    const ts = try p.long(0, "timestamp");
+    const lat = try p.double(1, "latitude");
+    const lon = try p.double(2, "longitude");
+    if (!std.math.isFinite(lat)) return p.valueError(1, "latitude", "must be finite");
+    if (!std.math.isFinite(lon)) return p.valueError(2, "longitude", "must be finite");
+    const day = sunDay(ctx, ts);
+    const arr = try ctx.createArray();
+    const sun = astro.riseSetAltitude(day.noon, day.midnight, lon, lat, -35.0 / 60.0, true);
+    try putSunPair(ctx, arr, sun, "sunrise", "sunset");
+    try putAssoc(ctx, arr, "transit", .{ .int = sun.transit });
+    try putSunPair(ctx, arr, astro.riseSetAltitude(day.noon, day.midnight, lon, lat, -6.0, false), "civil_twilight_begin", "civil_twilight_end");
+    try putSunPair(ctx, arr, astro.riseSetAltitude(day.noon, day.midnight, lon, lat, -12.0, false), "nautical_twilight_begin", "nautical_twilight_end");
+    try putSunPair(ctx, arr, astro.riseSetAltitude(day.noon, day.midnight, lon, lat, -18.0, false), "astronomical_twilight_begin", "astronomical_twilight_end");
+    return NativeResult.borrowed(.{ .array = arr });
+}
+
+// INI_FLT
+fn iniFloat(ctx: *NativeContext, name: []const u8, default: []const u8) f64 {
+    const raw = ctx.vm.ini_settings.get(name) orelse default;
+    return Value.toFloat(.{ .string = Value.String.borrowed(raw) });
+}
+
+// php_do_date_sunrise_sunset
+fn sunriseSunset(ctx: *NativeContext, args: []const Value, comptime func: []const u8, sunset: bool) RuntimeError!NativeResult {
+    const p = Args.init(ctx, func, args);
+    const ts = try p.long(0, "timestamp");
+    const format = try p.optLong(1, "returnFormat", 1);
+    const lat = (try p.doubleOrNull(2, "latitude")) orelse iniFloat(ctx, "date.default_latitude", "31.7667");
+    const lon = (try p.doubleOrNull(3, "longitude")) orelse iniFloat(ctx, "date.default_longitude", "35.2333");
+    const zenith = (try p.doubleOrNull(4, "zenith")) orelse if (sunset) iniFloat(ctx, "date.sunset_zenith", "90.833333") else iniFloat(ctx, "date.sunrise_zenith", "90.833333");
+    const offset_arg = try p.doubleOrNull(5, "utcOffset");
+    if (format < 0 or format > 2) return p.valueError(1, "returnFormat", "must be one of SUNFUNCS_RET_TIMESTAMP, SUNFUNCS_RET_STRING, or SUNFUNCS_RET_DOUBLE");
+    if (!std.math.isFinite(lat) or !std.math.isFinite(lon)) return NativeResult.scalar(.{ .bool = false });
+    // timelib_get_current_offset on a time whose sse is still 0
+    const gmt_offset = offset_arg orelse @as(f64, @floatFromInt(idOffset(defaultZone(ctx).name(), 0).offset)) / 3600.0;
+    const day = sunDay(ctx, ts);
+    const r = astro.riseSetAltitude(day.noon, day.midnight, lon, lat, 90 - zenith, true);
+    if (r.rc != 0) return NativeResult.scalar(.{ .bool = false });
+    if (format == 0) return NativeResult.scalar(.{ .int = if (sunset) r.set else r.rise });
+    var n = (if (sunset) r.h_set.? else r.h_rise.?) + gmt_offset;
+    if (n > 24 or n < 0) n -= @floor(n / 24) * 24;
+    if (!(n <= 24 and n >= 0)) return NativeResult.scalar(.{ .bool = false });
+    if (format == 2) return NativeResult.scalar(.{ .float = n });
+    const hours: i32 = @intFromFloat(@trunc(n));
+    const minutes: i32 = @intFromFloat(@trunc(60 * (n - @as(f64, @floatFromInt(hours)))));
+    var out = std.ArrayListUnmanaged(u8).empty;
+    defer out.deinit(ctx.allocator);
+    try date_format.padded(&out, ctx.allocator, hours, 2);
+    try out.append(ctx.allocator, ':');
+    try date_format.padded(&out, ctx.allocator, minutes, 2);
+    return NativeResult.copyString(ctx.allocator, out.items);
+}
+
+fn native_date_sunrise(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return sunriseSunset(ctx, args, "date_sunrise", false);
+}
+
+fn native_date_sunset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return sunriseSunset(ctx, args, "date_sunset", true);
 }
 
 fn dtGetLastErrors(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
