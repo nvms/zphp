@@ -477,7 +477,7 @@ fn periodFromIsoString(ctx: *NativeContext, args: []const Value) RuntimeError!Na
     const p = Args.init(ctx, "DatePeriod::createFromISO8601String", args);
     const spec = try p.str(0, "specification");
     const options = try p.optLong(1, "options", 0);
-    const obj = try ctx.createObject(staticClass(ctx, "DatePeriod"));
+    const obj = try ctx.createObject(try factoryClass(ctx, "DatePeriod::createFromISO8601String", "DatePeriod"));
     try initializePeriodFromIso(ctx, obj, spec, options, "DatePeriod::createFromISO8601String", "DateTimeImmutable");
     return NativeResult.borrowed(.{ .object = obj });
 }
@@ -1206,6 +1206,16 @@ fn staticClass(ctx: *NativeContext, base: []const u8) []const u8 {
     return if (ctx.vm.isInstanceOf(called, base)) ctx.vm.declaredClassName(called) else base;
 }
 
+// the class a factory makes: the called class for a static method, the base
+// class for a function; object_init_ex refuses an abstract one
+fn factoryClass(ctx: *NativeContext, comptime func: []const u8, base: []const u8) RuntimeError![]const u8 {
+    const class = if (comptime std.mem.indexOf(u8, func, "::") == null) base else staticClass(ctx, base);
+    if (ctx.vm.classes.get(class)) |def| if (def.is_abstract) {
+        return throwFmt(ctx, "Error", "Cannot instantiate abstract class {s}", .{class});
+    };
+    return class;
+}
+
 fn isDigit(c: u8) bool {
     return c >= '0' and c <= '9';
 }
@@ -1350,8 +1360,9 @@ fn createFromFormatAs(comptime func: []const u8, comptime class: []const u8) Nat
             const input = try p.str(1, "datetime");
             try rejectNulBytes(ctx, func, 2, "datetime", input);
             const zone = try zoneArg(ctx, p, 2, "timezone");
+            const made = try factoryClass(ctx, func, class);
             const instant = (try resolveDateWith(ctx, input, format, zone, false)) orelse return NativeResult.scalar(.{ .bool = false });
-            const obj = try ctx.createObject(staticClass(ctx, class));
+            const obj = try ctx.createObject(made);
             try storeInstant(ctx, obj, instant.ts, instant.us, &instant.zone);
             return NativeResult.borrowed(.{ .object = obj });
         }
@@ -1364,8 +1375,9 @@ fn createFromObjectAs(comptime func: []const u8, comptime arg_class: []const u8,
     return struct {
         fn call(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
             const src = try Args.init(ctx, func, args).object(0, "object", arg_class);
+            const made = try factoryClass(ctx, func, class);
             const ts = try instantOf(ctx, src);
-            const obj = try ctx.createObject(staticClass(ctx, class));
+            const obj = try ctx.createObject(made);
             try storeInstant(ctx, obj, ts, objMicros(src), &objZoneOr(ctx, src));
             return NativeResult.borrowed(.{ .object = obj });
         }
@@ -1418,7 +1430,7 @@ fn createFromTimestampAs(comptime func: []const u8, comptime class: []const u8) 
                     usec += 1000000;
                 }
             }
-            const obj = try ctx.createObject(staticClass(ctx, class));
+            const obj = try ctx.createObject(try factoryClass(ctx, func, class));
             const zone = ParseZone.of("+00:00", false);
             try storeInstant(ctx, obj, sec, usec, &zone);
             return NativeResult.borrowed(.{ .object = obj });
