@@ -839,7 +839,7 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
             return .{ .value = v, .pos = end + 1 };
         },
         's' => {
-            const r = try parseString(s, pos);
+            const r = try parseString(s, pos, &uctx.err_pos);
             const v: Value = .{ .string = try Value.String.create(ctx.allocator, r.str) };
             try uctx.slots.append(ctx.allocator, v);
             return .{ .value = v, .pos = r.pos };
@@ -1092,18 +1092,29 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
 
 const StringResult = struct { str: []const u8, pos: usize };
 
-fn parseString(s: []const u8, pos: usize) !StringResult {
-    // s:LEN:"...";
+// s:LEN:"..."; where php's scanner says a malformed one went wrong: past
+// the input (at the length), or at the closing quote or semicolon
+fn parseString(s: []const u8, pos: usize, err_pos: *usize) !StringResult {
     if (pos + 2 >= s.len or s[pos + 1] != ':') return error.RuntimeError;
     const len_start = pos + 2;
     const colon = std.mem.indexOfPos(u8, s, len_start, ":") orelse return error.RuntimeError;
     const str_len = std.fmt.parseInt(usize, s[len_start..colon], 10) catch return error.RuntimeError;
     if (colon + 1 >= s.len or s[colon + 1] != '"') return error.RuntimeError;
     const str_start = colon + 2;
-    if (str_start + str_len > s.len) return error.RuntimeError;
+    if (str_start + str_len > s.len) {
+        err_pos.* = len_start;
+        return error.RuntimeError;
+    }
     const str = s[str_start .. str_start + str_len];
     const end = str_start + str_len;
-    if (end + 1 >= s.len or s[end] != '"' or s[end + 1] != ';') return error.RuntimeError;
+    if (end >= s.len or s[end] != '"') {
+        err_pos.* = end;
+        return error.RuntimeError;
+    }
+    if (end + 1 >= s.len or s[end + 1] != ';') {
+        err_pos.* = end + 1;
+        return error.RuntimeError;
+    }
     return .{ .str = str, .pos = end + 2 };
 }
 
