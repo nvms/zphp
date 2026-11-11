@@ -4956,25 +4956,27 @@ pub const VM = struct {
                     };
                     self.push(.{ .bool = compared <= 0 });
                 },
+                // php compiles a > b as b < a, so a pair that doesn't
+                // compare (1 both ways) is neither greater nor smaller
                 .greater => {
                     const b = self.pop();
                     const a = self.pop();
                     const handlers_before = self.handler_count;
-                    const compared = self.compareWithStringable(a, b) catch {
+                    const compared = self.compareWithStringable(b, a) catch {
                         if (self.resumeAfterThrow(base_frame, handlers_before)) continue;
                         return error.RuntimeError;
                     };
-                    self.push(.{ .bool = compared > 0 });
+                    self.push(.{ .bool = compared < 0 });
                 },
                 .greater_equal => {
                     const b = self.pop();
                     const a = self.pop();
                     const handlers_before = self.handler_count;
-                    const compared = self.compareWithStringable(a, b) catch {
+                    const compared = self.compareWithStringable(b, a) catch {
                         if (self.resumeAfterThrow(base_frame, handlers_before)) continue;
                         return error.RuntimeError;
                     };
-                    self.push(.{ .bool = compared >= 0 });
+                    self.push(.{ .bool = compared <= 0 });
                 },
                 .spaceship => {
                     const b = self.pop();
