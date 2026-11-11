@@ -6732,6 +6732,16 @@ pub const VM = struct {
                 .iter_begin, .iter_begin_ref => {
                     const by_ref = op == .iter_begin_ref;
                     var iterable = self.stack[self.sp - 1];
+                    // ZEND_FE_RESET: anything but an array or object is
+                    // skipped with php's warning
+                    switch (iterable) {
+                        .array, .object, .generator, .fiber => {},
+                        else => {
+                            const msg = try std.fmt.allocPrint(self.allocator, "foreach() argument must be of type array|object, {s} given", .{iterable.valueName()});
+                            defer self.allocator.free(msg);
+                            self.emitWarning(msg) catch if (try self.resumeRaised()) continue;
+                        },
+                    }
                     if (iterable == .array) {
                         const src = iterable.array;
                         const copy = try self.allocArray();
