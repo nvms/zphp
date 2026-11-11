@@ -1409,10 +1409,13 @@ const Parser = struct {
             }
         }
 
-        if (self.peek() == .semicolon or self.peek() == .r_paren or
-            self.peek() == .r_bracket or self.peek() == .comma or self.peek() == .eof)
-        {
-            return self.addNode(.{ .tag = .yield_expr, .main_token = tok, .data = .{} });
+        // a token no expression starts with follows a bare yield, as in
+        // php's grammar: `yield * -1` multiplies what the yield receives
+        switch (self.peek()) {
+            .semicolon, .r_paren, .r_bracket, .r_brace, .comma, .eof, .colon, .question, .question_question, .star, .slash, .percent, .dot, .star_star, .equal_equal, .equal_equal_equal, .bang_equal, .bang_equal_equal, .lt, .gt, .lt_equal, .gt_equal, .lt_gt, .spaceship, .amp_amp, .pipe_pipe, .pipe, .caret, .lt_lt, .gt_gt, .kw_and, .kw_or, .kw_xor, .kw_instanceof, .pipe_gt, .close_tag => {
+                return self.addNode(.{ .tag = .yield_expr, .main_token = tok, .data = .{} });
+            },
+            else => {},
         }
 
         const expr = try self.parseExprPrec(1);
