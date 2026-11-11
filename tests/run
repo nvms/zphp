@@ -60,7 +60,7 @@ for f in "$SCRIPT_DIR"/*.php; do
         for stream in stdout stderr; do
             if ! cmp -s "$capture_dir/php.$stream" "$capture_dir/zphp.$stream"; then
                 printf '    %s differs (php / zphp):\n' "$stream"
-                diff -u "$capture_dir/php.$stream" "$capture_dir/zphp.$stream" || true
+                diff -a -u "$capture_dir/php.$stream" "$capture_dir/zphp.$stream" || true
             fi
         done
     fi

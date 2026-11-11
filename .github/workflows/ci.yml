@@ -192,6 +192,7 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
+          coverage: none
       - run: zig build
       - run: php --version
       - run: python3 ./tests/compat_runner_test
@@ -218,6 +219,7 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
+          coverage: none
       - run: zig build
       - run: ./tests/examples_test
 
@@ -241,6 +243,7 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
+          coverage: none
           extensions: mbstring, xml, sqlite3, curl, tokenizer
       - run: zig build
       - run: ./tests/laravel/setup
@@ -267,6 +270,7 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
+          coverage: none
           extensions: dom, mbstring, xml
       - run: zig build
       - run: ./tests/phpunit/setup
@@ -293,6 +297,7 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
+          coverage: none
           extensions: mbstring, xml, curl, openssl
       - run: zig build
       - run: ./tests/composer/setup
@@ -319,6 +324,7 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
+          coverage: none
       - run: zig build -Doptimize=fast
       - run: ./tests/phpt/setup
       - run: ./tests/phpt/run
@@ -344,6 +350,7 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
+          coverage: none
           extensions: mbstring, xml, sqlite3
       - run: zig build
       - run: ./tests/doctrine/setup
@@ -369,6 +376,7 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
+          coverage: none
           extensions: mbstring, xml, intl
       - run: zig build
       - run: ./tests/symfony/setup
@@ -395,6 +403,7 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
+          coverage: none
           extensions: mbstring, xml, sqlite3, curl, tokenizer, gd, intl, zip
       - run: zig build
       - run: ./tests/wordpress/setup
@@ -439,6 +448,7 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
+          coverage: none
           extensions: mbstring, xml, curl, openssl, sqlite3, pdo_sqlite, intl, gmp, gd, sodium, bcmath, ldap
       - name: build
         run: zig build
@@ -501,6 +511,7 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
+          coverage: none
           extensions: mbstring, xml, sqlite3, curl, tokenizer
       - run: zig build
       - run: ./tests/laravel/setup
