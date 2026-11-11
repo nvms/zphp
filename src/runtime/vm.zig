@@ -24103,6 +24103,20 @@ pub const VM = struct {
     }
 
     fn runFiber(self: *VM, fiber: *Fiber, fb: usize, sb: usize, hb: usize) RuntimeError!Value {
+        // each fiber has its own error_reporting, as php's fiber vm state:
+        // an @ outside doesn't reach in, nor one inside out
+        const outer_silence = self.error_silenced_depth;
+        const outer_level = self.error_reporting_level;
+        self.error_silenced_depth = fiber.saved_silence;
+        if (fiber.saved_level) |level| self.error_reporting_level = level;
+        defer {
+            if (fiber.state == .suspended) {
+                fiber.saved_silence = self.error_silenced_depth;
+                fiber.saved_level = self.error_reporting_level;
+            }
+            self.error_silenced_depth = outer_silence;
+            self.error_reporting_level = outer_level;
+        }
         _ = self.executeFiber(fiber, fb, sb, hb) catch |err| {
             if (fiber.state == .terminated and self.pending_exception != null) fiber.threw = true;
             return err;

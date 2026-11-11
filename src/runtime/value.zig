@@ -916,6 +916,9 @@ pub const Fiber = struct {
     destroyed: bool = false,
     // in the collector's candidate list
     cycle_queued: bool = false,
+    // its own @ depth and error_reporting while it is suspended
+    saved_silence: u32 = 0,
+    saved_level: ?i64 = null,
 
     pub const State = enum { created, running, suspended, terminated };
 
