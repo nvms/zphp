@@ -39,6 +39,22 @@ pub const Ast = struct {
     attr_ranges: []const AttrRange = &.{},
     allocator: std.mem.Allocator,
     halt_offset: ?u32 = null,
+    // the first error php's compiler raises for code the grammar accepts
+    // but the parser already sees is wrong (modifiers, interface members):
+    // a compile-time fatal, raised before anything compiles
+    compile_error: ?CompileErrorNote = null,
+
+    pub const CompileErrorNote = struct {
+        token: u32,
+        text: [256]u8 = undefined,
+        len: usize = 0,
+        // raised by php's parser itself (a modifier list): no stack trace
+        trace: bool = true,
+
+        pub fn message(self: *const CompileErrorNote) []const u8 {
+            return self.text[0..self.len];
+        }
+    };
 
     pub fn deinit(self: *Ast) void {
         self.allocator.free(self.tokens);

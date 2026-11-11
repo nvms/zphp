@@ -66,6 +66,7 @@ pub fn parse(allocator: Allocator, source: []const u8) Allocator.Error!Ast {
         .errors = errors_slice,
         .attr_ranges = attr_slice,
         .allocator = allocator,
+        .compile_error = p.compile_error,
     };
 }
 
@@ -73,6 +74,12 @@ const Parser = struct {
     source: []const u8,
     tokens: []const Token,
     pos: u32,
+    compile_error: ?Ast.CompileErrorNote = null,
+    // the class whose members are being parsed, for compile error messages
+    current_class_name: []const u8 = "",
+    // whether the abstract or interface method just parsed had a body
+    method_had_body: bool = false,
+
     nodes: std.ArrayListUnmanaged(Ast.Node),
     extra_data: std.ArrayListUnmanaged(u32),
     errors: std.ArrayListUnmanaged(Ast.Error),
@@ -817,6 +824,8 @@ const Parser = struct {
         var key: u32 = 0;
 
         if (self.peek() == .fat_arrow) {
+            // zend_compile_foreach: a key can't be taken by reference
+            if (val_by_ref == 1) self.deferCompileError(tok, "Key element cannot be a reference", .{});
             _ = self.advance();
             key = first;
             val_by_ref = 0;
@@ -1393,7 +1402,10 @@ const Parser = struct {
 
         var members = std.ArrayListUnmanaged(u32).empty;
         defer members.deinit(self.allocator);
+        const outer_class = self.current_class_name;
+        self.current_class_name = "class@anonymous";
         try self.parseClassMembers(&members);
+        self.current_class_name = outer_class;
         _ = try self.expect(.r_brace);
 
         const members_extra = try self.addExtraList(members.items);
@@ -1538,8 +1550,11 @@ const Parser = struct {
             if (self.peek() == .kw_use) {
                 try members.append(self.allocator, try self.parseTraitUse());
             } else if (self.peek() == .kw_function) {
+                if (is_abstract and is_final) self.deferModifierError(self.pos, "Cannot use the final modifier on an abstract method", .{});
                 if (is_abstract) {
                     const method = try self.parseInterfaceMethod(is_static);
+                    if (visibility == 2) self.deferCompileError(self.nodes.items[method].main_token, "Abstract function {s}::{s}() cannot be declared private", .{ self.current_class_name, self.tokenText(self.nodes.items[method].main_token) });
+                    if (self.method_had_body) self.deferCompileError(self.nodes.items[method].main_token, "Abstract function {s}::{s}() cannot contain body", .{ self.current_class_name, self.tokenText(self.nodes.items[method].main_token) });
                     // encode visibility in rhs bits 28-29; abstract is implicit for interface_method tag
                     self.nodes.items[method].data.rhs = self.nodes.items[method].data.rhs | (visibility << 28);
                     try members.append(self.allocator, method);
@@ -1569,6 +1584,9 @@ const Parser = struct {
                 try members.append(self.allocator, prop);
                 try self.continuePropertyList(members, prop);
             } else if (self.peek() == .kw_const) {
+                if (is_static) self.deferModifierError(self.pos, "Cannot use the static modifier on a class constant", .{});
+                if (is_abstract) self.deferModifierError(self.pos, "Cannot use the abstract modifier on a class constant", .{});
+                if (is_readonly) self.deferModifierError(self.pos, "Cannot use the readonly modifier on a class constant", .{});
                 try self.parseConstMembers(members, visibility | (if (is_final) @as(u32, 1) << 4 else 0));
             } else if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
                 const tr = self.collectTypeHint();
@@ -1631,7 +1649,10 @@ const Parser = struct {
         var members = std.ArrayListUnmanaged(u32).empty;
         defer members.deinit(self.allocator);
 
+        const outer_class = self.current_class_name;
+        self.current_class_name = self.tokenText(name_tok);
         try self.parseClassMembers(&members);
+        self.current_class_name = outer_class;
         _ = try self.expect(.r_brace);
 
         const extra = try self.addExtraList(members.items);
@@ -1695,14 +1716,22 @@ const Parser = struct {
                 _ = self.advance();
             }
             if (self.peek() == .kw_function) {
-                // an interface method can't be final
-                if (is_final) {
-                    try self.addError(.unexpected_token);
-                    return error.ParseError;
-                }
-                try methods.append(self.allocator, try self.parseInterfaceMethod(is_static));
+                const method = try self.parseInterfaceMethod(is_static);
+                const method_name = self.tokenText(self.nodes.items[method].main_token);
+                const at = self.nodes.items[method].main_token;
+                // zend_begin_method_decl's checks for an interface
+                if (visibility != 0) self.deferCompileError(at, "Access type for interface method {s}::{s}() must be public", .{ self.tokenText(name_tok), method_name });
+                if (is_final) self.deferCompileError(at, "Interface method {s}::{s}() must not be final", .{ self.tokenText(name_tok), method_name });
+                if (is_abstract) self.deferCompileError(at, "Interface method {s}::{s}() must not be abstract", .{ self.tokenText(name_tok), method_name });
+                if (self.method_had_body) self.deferCompileError(at, "Interface function {s}::{s}() cannot contain body", .{ self.tokenText(name_tok), method_name });
+                try methods.append(self.allocator, method);
             } else if (self.peek() == .kw_const) {
+                const first_const = methods.items.len;
                 try self.parseConstMembers(&methods, if (is_final) @as(u32, 1) << 4 else 0);
+                if (visibility != 0 and methods.items.len > first_const) {
+                    const const_name = self.nodes.items[methods.items[first_const]].main_token;
+                    self.deferCompileError(const_name, "Access type for interface constant {s}::{s} must be public", .{ self.tokenText(name_tok), self.tokenText(const_name) });
+                }
             } else {
                 const tr = self.collectTypeHint();
                 if (self.peek() != .variable) {
@@ -1711,10 +1740,7 @@ const Parser = struct {
                 }
                 const prop_token = self.pos;
                 const prop = try self.parseClassProperty();
-                if (self.nodes.items[prop].tag != .class_property_hooks) {
-                    try self.addErrorAt(prop_token, .unexpected_token);
-                    return error.ParseError;
-                }
+                if (self.nodes.items[prop].tag != .class_property_hooks) self.deferCompileError(prop_token, "Interfaces may only include hooked properties", .{});
                 // the modifiers stay for the compiler to refuse
                 var rhs: u32 = encodePropertyFlags(visibility, visibility, false, false, is_final) |
                     (if (is_abstract) PropertyHooks.prop_abstract else 0) | (if (is_static) PropertyHooks.prop_static_hooked else 0);
@@ -1766,7 +1792,11 @@ const Parser = struct {
             ret_range = self.collectTypeHint();
         }
 
-        _ = try self.expect(.semicolon);
+        // a body is the compiler's error, not the grammar's
+        self.method_had_body = self.peek() == .l_brace;
+        if (self.method_had_body) {
+            _ = try self.parseBlock();
+        } else _ = try self.expect(.semicolon);
         const extra = try self.addExtraListWithReturnType(params.items, ret_range);
         const flags: u32 = (if (is_static) @as(u32, 1) << 30 else 0) | (if (by_ref) @as(u32, 1) << 31 else 0);
         return self.addNode(.{ .tag = .interface_method, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = flags } });
@@ -3594,6 +3624,26 @@ const Parser = struct {
         try self.extra_data.appendSlice(self.allocator, items);
         try self.extra_data.appendSlice(self.allocator, &ret_range);
         return idx;
+    }
+
+    fn tokenText(self: *const Parser, token: u32) []const u8 {
+        return self.tokens[token].lexeme(self.source);
+    }
+
+    // php's compiler refuses what the grammar allowed: the first such error
+    // is kept for the compiler to raise
+    fn deferCompileError(self: *Parser, token: u32, comptime fmt: []const u8, args: anytype) void {
+        if (self.compile_error != null) return;
+        var note: Ast.CompileErrorNote = .{ .token = @min(token, @as(u32, @intCast(self.tokens.len - 1))) };
+        note.len = if (std.fmt.bufPrint(&note.text, fmt, args)) |written| written.len else |_| note.text.len;
+        self.compile_error = note;
+    }
+
+    // a compile error php's parser throws while it reads modifiers
+    fn deferModifierError(self: *Parser, token: u32, comptime fmt: []const u8, args: anytype) void {
+        if (self.compile_error != null) return;
+        self.deferCompileError(token, fmt, args);
+        self.compile_error.?.trace = false;
     }
 
     fn addError(self: *Parser, tag: Ast.Error.Tag) Error!void {

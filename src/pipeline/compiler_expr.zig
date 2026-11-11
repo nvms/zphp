@@ -10,6 +10,9 @@ const Error = Allocator.Error || error{CompileError};
 pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
     const target = self.ast.nodes[node.data.lhs];
     const op_tag = self.ast.tokens[node.main_token].tag;
+    // zend_try_compile_cv: $this is never written
+    if (target.tag == .variable and std.mem.eql(u8, self.ast.tokenSlice(target.main_token), "$this"))
+        return self.fail(target.main_token, "Cannot re-assign $this");
 
     if (op_tag == .equal and (target.tag == .variable or target.tag == .identifier)) {
         const rhs = self.ast.nodes[node.data.rhs];
@@ -951,6 +954,16 @@ fn compileUnsetDimensionBase(self: *Compiler, node_idx: u32) Error!void {
 pub fn compileTernary(self: *Compiler, node: Ast.Node) Error!void {
     const then_node = self.ast.extra_data[node.data.rhs];
     const else_node = self.ast.extra_data[node.data.rhs + 1];
+
+    // zend_compile_conditional: a ternary in an unparenthesized ternary's
+    // condition is refused, except two short ones
+    const cond = self.ast.nodes[node.data.lhs];
+    if (cond.tag == .ternary) {
+        const inner_full = self.ast.extra_data[cond.data.rhs] != 0;
+        if (inner_full and then_node != 0) return self.fail(node.main_token, "Unparenthesized `a ? b : c ? d : e` is not supported. Use either `(a ? b : c) ? d : e` or `a ? b : (c ? d : e)`");
+        if (inner_full) return self.fail(node.main_token, "Unparenthesized `a ? b : c ?: d` is not supported. Use either `(a ? b : c) ?: d` or `a ? b : (c ?: d)`");
+        if (then_node != 0) return self.fail(node.main_token, "Unparenthesized `a ?: b ? c : d` is not supported. Use either `(a ?: b) ? c : d` or `a ?: (b ? c : d)`");
+    }
 
     try self.compileNode(node.data.lhs);
 

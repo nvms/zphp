@@ -206,6 +206,12 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
     }
     errdefer c.discardOutput();
 
+    // an error php's compiler raises that the parser already found
+    if (ast.compile_error) |note| {
+        if (!note.trace) return c.failParse(note.token, "{s}", .{note.message()});
+        return c.fail(note.token, note.message());
+    }
+
     const root = ast.nodes[0];
     // PHP early-binds (relocates to before main execution) top-level class and
     // interface declarations that are self-sufficient at their declaration
@@ -306,6 +312,9 @@ pub const Compiler = struct {
     closure_count: u32 = 0,
     // the static variables the function being compiled declares
     static_vars: std.ArrayListUnmanaged(bytecode.StaticVar) = .empty,
+    // the statement token of each of the first static_vars, to tell a second
+    // declaration from the same one compiled again (a finally block's copies)
+    static_var_tokens: [64]u32 = undefined,
     // PHP hoists (early-binds) only function declarations that are direct
     // top-level statements of a file - reachable through bare blocks and
     // namespace declarations but not through if/loops/try or another function
@@ -1062,6 +1071,17 @@ pub const Compiler = struct {
         for (self.ast.extraSlice(target.data.lhs)) |slot| {
             if (slot != 0) break;
         } else return self.fail(target.main_token, "Cannot use empty list");
+        // zend_compile_list_assign: every entry has a key or none does
+        {
+            var keyed = false;
+            var unkeyed = false;
+            for (self.ast.extraSlice(target.data.lhs)) |slot| {
+                if (slot == 0) continue;
+                const entry = self.ast.nodes[slot];
+                if (entry.tag == .array_element and entry.data.rhs != 0) keyed = true else unkeyed = true;
+                if (keyed and unkeyed) return self.fail(target.main_token, "Cannot mix keyed and unkeyed array entries in assignments");
+            }
+        }
         // a nested list must be written the way the outer one is
         for (self.ast.extraSlice(target.data.lhs)) |slot| {
             if (slot == 0) continue;
@@ -1777,10 +1797,16 @@ pub const Compiler = struct {
 
     // a `static $x = expr;` the function declares: php lists it from the start,
     // with expr's value when it is a constant expression
-    pub fn noteStaticVar(self: *Compiler, name: []const u8, init_node: u32) Error!void {
-        for (self.static_vars.items) |sv| if (std.mem.eql(u8, sv.name, name)) return;
+    pub fn noteStaticVar(self: *Compiler, name: []const u8, init_node: u32, token: u32) Error!void {
+        for (self.static_vars.items, 0..) |sv, i| if (std.mem.eql(u8, sv.name, name)) {
+            if (i < self.static_var_tokens.len and self.static_var_tokens[i] != token)
+                return self.failFmt(token, "Duplicate declaration of static variable {s}", .{name});
+            return;
+        };
         const initial: Value = if (init_node != 0) self.evalConstExpr(init_node) else .null;
+        const index = self.static_vars.items.len;
         self.static_vars.append(self.allocator, .{ .name = name, .initial = initial }) catch return error.CompileError;
+        if (index < self.static_var_tokens.len) self.static_var_tokens[index] = token;
     }
 
     pub fn takeStaticVars(self: *Compiler) Error![]const bytecode.StaticVar {

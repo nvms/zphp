@@ -1066,12 +1066,18 @@ fn checkConstDecls(self: *Compiler, class_name: []const u8, members: []const u32
     const outer_class = self.current_class;
     self.current_class = class_name;
     defer self.current_class = outer_class;
-    for (members) |m_idx| {
+    for (members, 0..) |m_idx, i| {
         const m = self.ast.nodes[m_idx];
         if (m.tag != .const_decl) continue;
         const name = self.ast.tokenSlice(m.main_token);
         if (m.data.rhs & 0x3 == 2 and m.data.rhs & 0x10 != 0) {
             return self.failFmt(m.main_token, "Private constant {s}::{s} cannot be final as it is not visible to other classes", .{ class_name, name });
+        }
+        // zend_declare_typed_class_constant: constant names are case-sensitive
+        for (members[0..i]) |prev_idx| {
+            const prev = self.ast.nodes[prev_idx];
+            if (prev.tag == .const_decl and std.mem.eql(u8, self.ast.tokenSlice(prev.main_token), name))
+                return self.failFmt(m.main_token, "Cannot redefine class constant {s}::{s}", .{ class_name, name });
         }
         const type_extra = m.data.rhs >> 16;
         if (type_extra == 0) continue;
@@ -1122,6 +1128,14 @@ fn requiredParamCount(ast: *const Ast, param_nodes: []const u32) u8 {
     return count;
 }
 
+// zend_is_auto_global: the superglobals, named without the $
+pub fn isAutoGlobal(name: []const u8) bool {
+    inline for (.{ "GLOBALS", "_GET", "_POST", "_COOKIE", "_SERVER", "_ENV", "_REQUEST", "_FILES", "_SESSION" }) |g| {
+        if (std.mem.eql(u8, name, g)) return true;
+    }
+    return false;
+}
+
 fn paramName(self: *Compiler, p: u32) []const u8 {
     const raw = self.ast.tokenSlice(self.ast.nodes[p].main_token);
     return if (raw.len > 0 and raw[0] == '$') raw[1..] else raw;
@@ -1144,6 +1158,13 @@ fn checkParams(self: *Compiler, func_name: []const u8, at: u32, param_nodes: []c
     }
     for (param_nodes, 0..) |p, i| {
         const node = self.ast.nodes[p];
+        // the parameter's name: no superglobal, no repeat, no $this
+        const name = paramName(self, p);
+        if (isAutoGlobal(name)) return self.failFmt(node.main_token, "Cannot re-assign auto-global variable {s}", .{name});
+        for (param_nodes[0..i]) |prev| {
+            if (std.mem.eql(u8, paramName(self, prev), name)) return self.failFmt(node.main_token, "Redefinition of parameter ${s}", .{name});
+        }
+        if (std.mem.eql(u8, name, "this")) return self.fail(node.main_token, "Cannot use $this as parameter");
         const promoted = ((node.data.rhs >> 2) & 3) != 0 or (node.data.rhs & 16) != 0 or ((node.data.rhs >> 5) & 3) != 0;
         const default = foldedDefault(self, node.data.lhs);
         const force_nullable = default == .null and !promoted;
@@ -1668,6 +1689,8 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     self.named_signature = !std.mem.startsWith(u8, raw_name, "__closure_");
     defer self.named_signature = outer_named_signature;
     if (!std.mem.startsWith(u8, raw_name, "__closure_")) {
+        // zend_begin_func_decl: assert() is compiled specially
+        if (std.ascii.eqlIgnoreCase(raw_name, "assert")) return self.fail(name_tok, "Defining a custom assert() function is not allowed, as the function has special semantics");
         try checkImportCollision(self, name_tok, .function, name);
         try checkParams(self, name, name_tok, param_nodes, try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len)), (node.data.rhs & (1 << 30)) != 0);
     }
@@ -1885,7 +1908,25 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     const outer_closure_signature = self.closure_signature;
     self.closure_signature = true;
     defer self.closure_signature = outer_closure_signature;
+    // zend_compile_closure_binding's checks on the use list
+    for (use_vars, 0..) |use_var, i| {
+        const tok = self.ast.nodes[use_var].main_token;
+        const use_name = self.ast.tokenSlice(tok);
+        if (std.mem.eql(u8, use_name, "$this")) return self.fail(tok, "Cannot use $this as lexical variable");
+        if (use_name.len > 1 and isAutoGlobal(use_name[1..])) return self.fail(tok, "Cannot use auto-global as lexical variable");
+        for (use_vars[0..i]) |prev| {
+            if (std.mem.eql(u8, self.ast.tokenSlice(self.ast.nodes[prev].main_token), use_name)) return self.failFmt(tok, "Cannot use variable {s} twice", .{use_name});
+        }
+    }
     try checkParams(self, display_name, node.main_token, param_nodes, try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len)), closure_returns_ref);
+    // zend_compile_closure_uses: a lexical variable is no parameter
+    for (use_vars) |use_var| {
+        const tok = self.ast.nodes[use_var].main_token;
+        const use_name = self.ast.tokenSlice(tok);
+        for (param_nodes) |p| {
+            if (std.mem.eql(u8, self.ast.tokenSlice(self.ast.nodes[p].main_token), use_name)) return self.failFmt(tok, "Cannot use lexical variable {s} as a parameter name", .{use_name});
+        }
+    }
 
     var sub = Compiler{
         .ast = self.ast,
