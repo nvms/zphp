@@ -665,10 +665,17 @@ fn emitPlaceRead(self: *Compiler, place: Place, access: PlaceAccess) Error!void 
             try self.emitOp(.array_get);
         },
         .prop => |name| {
+            // a container that is no object is an Error, not a read
+            try self.emitOp(.check_rw_container);
+            try self.emitByte(2 + @intFromEnum(access));
             try self.emitOp(.get_prop);
             try self.emitU16(name);
         },
-        .prop_dyn => try self.emitOp(.get_prop_dynamic),
+        .prop_dyn => {
+            try self.emitOp(.check_rw_container);
+            try self.emitByte(4 + @intFromEnum(access));
+            try self.emitOp(.get_prop_dynamic);
+        },
         .static_prop => |sp| {
             try self.emitOp(.get_static_prop);
             try self.emitU16(sp.class);

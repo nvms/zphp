@@ -5600,6 +5600,28 @@ pub const VM = struct {
                 },
                 .check_rw_container => {
                     const access = self.readByte();
+                    if (access >= 2) {
+                        // zend_throw_non_object_error for ASSIGN_OBJ_OP and
+                        // the property increments
+                        const container = self.stack[self.sp - (if (access >= 4) @as(usize, 2) else 1)];
+                        switch (container) {
+                            .object, .generator, .fiber => continue,
+                            else => {},
+                        }
+                        const name: Value = if (access >= 4) self.stack[self.sp - 1] else blk: {
+                            const code = self.currentChunk().code.items;
+                            const ip = self.currentFrame().ip;
+                            break :blk self.currentChunk().constants.items[(@as(u16, code[ip + 1]) << 8) | code[ip + 2]];
+                        };
+                        var name_buf: std.ArrayListUnmanaged(u8) = .empty;
+                        defer name_buf.deinit(self.allocator);
+                        try name.format(&name_buf, self.allocator);
+                        const verb = if (access % 2 == 1) "increment/decrement" else "assign";
+                        const msg = try std.fmt.allocPrint(self.allocator, "Attempt to {s} property \"{s}\" on {s}", .{ verb, name_buf.items, container.valueName() });
+                        defer self.allocator.free(msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    }
                     if (self.stack[self.sp - 2] == .string) {
                         if (try self.throwBuiltinException("Error", if (access == 1) "Cannot increment/decrement string offsets" else "Cannot use assign-op operators with string offsets")) continue;
                         return error.RuntimeError;

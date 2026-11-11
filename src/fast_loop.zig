@@ -505,6 +505,23 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
+                .check_rw_container => {
+                    // the common cases pass through: an object under a
+                    // property's read-modify-write, an array under an
+                    // element's. anything else goes to the vm's handler
+                    const access = code[ip];
+                    const container = if (access >= 4) stack[sp - 2] else if (access >= 2) stack[sp - 1] else stack[sp - 2];
+                    const passes = if (access >= 2) container == .object else container == .array;
+                    if (!passes) {
+                        frame.ip = ip - 1;
+                        self.sp = sp;
+                        return;
+                    }
+                    ip += 1;
+                    const _next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                },
                 .dup2 => {
                     VM.stackRetain(stack[sp - 2]);
                     VM.stackRetain(stack[sp - 1]);

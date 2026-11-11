@@ -419,7 +419,9 @@ pub const OpCode = enum(u8) {
     arg_guard_static_prop,
     // before the read of a read-modify-write on [container, key]: a string
     // container is php's error (u8: 0 an assignment operator, 1 an increment
-    // or decrement)
+    // or decrement). 2 and 3 are the same for a property, [object] and the
+    // name in the get_prop after it; 4 and 5 for [object, name]: an object
+    // that is none is php's "Attempt to assign/increment property" Error
     check_rw_container,
     // u16 class, u16 constant: the constant's expression waits for its first
     // access (its initializer function evaluates it)
