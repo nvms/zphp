@@ -920,6 +920,10 @@ pub const VM = struct {
     // `from` is the message prefix of the function a native delegates to,
     // rewritten to `to`, the method php's active function is
     eh_throw: ?EhThrow = null,
+    // the frame depth a native offsetGet/offsetSet runs at when the vm calls
+    // it for `$obj[]`, which it passes as a null offset; SplFixedArray
+    // refuses the append where it would refuse `$obj[null]` otherwise
+    dim_append_depth: usize = std.math.maxInt(usize),
     last_error_type: i64 = 0,
     last_error_message: []const u8 = "",
     last_error_file: []const u8 = "",
@@ -2060,6 +2064,7 @@ pub const VM = struct {
         try @import("../stdlib/spl_directory.zig").register(vm, allocator);
         try @import("../stdlib/spl_dllist.zig").register(vm, allocator);
         try @import("../stdlib/spl_heap.zig").register(vm, allocator);
+        try @import("../stdlib/spl_fixedarray.zig").register(vm, allocator);
         try @import("../stdlib/pdo.zig").register(vm, allocator);
         try @import("../stdlib/websocket.zig").register(vm, allocator);
         try @import("../stdlib/filesystem.zig").register(vm, allocator);
@@ -5360,6 +5365,9 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetSet")) {
+                        const saved_append = self.dim_append_depth;
+                        self.dim_append_depth = self.frame_count + 1;
+                        defer self.dim_append_depth = saved_append;
                         _ = self.callMethod(arr_val.object, "offsetSet", &.{ .null, val }) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
@@ -5421,6 +5429,9 @@ pub const VM = struct {
                         if (op == .arg_array_push) try self.recordArgArraySource(arr_val.array, arr_val.array.entries.items[arr_val.array.entries.items.len - 1].key, source);
                         self.stackRelease(val);
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetSet")) {
+                        const saved_append = self.dim_append_depth;
+                        self.dim_append_depth = self.frame_count + 1;
+                        defer self.dim_append_depth = saved_append;
                         _ = self.callMethod(arr_val.object, "offsetSet", &.{ .null, val }) catch {
                             self.stackRelease(val);
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -5631,6 +5642,9 @@ pub const VM = struct {
                             self.push(.{ .array = new_arr });
                         },
                         .object => |obj| if (self.hasMethod(obj.class_name, "offsetGet")) {
+                            const saved_append = self.dim_append_depth;
+                            self.dim_append_depth = self.frame_count + 1;
+                            defer self.dim_append_depth = saved_append;
                             const result = self.callMethod(obj, "offsetGet", &.{.null}) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
@@ -6611,7 +6625,7 @@ pub const VM = struct {
                         var unwrap_dispatched = false;
                         var unwrap_failed = false;
                         var unwrap_steps: u8 = 0;
-                        unwrap: while (iterable == .object and self.hasMethod(iterable.object.class_name, "getIterator") and !self.isInstanceOf(iterable.object.class_name, "Iterator") and unwrap_steps < 8) {
+                        unwrap: while (iterable == .object and self.hasMethod(iterable.object.class_name, "getIterator") and !self.isInstanceOf(iterable.object.class_name, "Iterator") and spl_iterator_classes.foreachDirect(self, iterable.object) == 0 and unwrap_steps < 8) {
                             const inner = self.callMethod(iterable.object, "getIterator", &.{}) catch {
                                 if (self.dispatchPendingException(base_frame)) {
                                     unwrap_dispatched = true;
@@ -6647,7 +6661,7 @@ pub const VM = struct {
                             return error.RuntimeError;
                         };
                         // Iterator protocol
-                        if (iterable == .object and self.hasMethod(iterable.object.class_name, "rewind")) {
+                        if (iterable == .object and (self.hasMethod(iterable.object.class_name, "rewind") or spl_iterator_classes.foreachDirect(self, iterable.object) != 0)) {
                             try self.pushIteratorMarker();
                             // a RecursiveIteratorIterator php steps with its
                             // own iterator; the marker remembers that

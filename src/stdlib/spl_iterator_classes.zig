@@ -2334,8 +2334,12 @@ pub fn foreachRefusal(vm: *VM, obj: *PhpObject) ?[]const u8 {
 // loop's marker. the mode is kept in the marker's native.extra
 pub const foreach_recursive: u8 = 1;
 pub const foreach_dllist: u8 = 2;
+pub const foreach_fixedarray: u8 = 3;
+
 pub fn foreachDirect(vm: *VM, obj: *PhpObject) u8 {
     if (vm.isInstanceOf(obj.class_name, "SplDoublyLinkedList") and !userIterated(vm, obj.class_name)) return foreach_dllist;
+    // SplFixedArray's get_iterator, unless a subclass has its own getIterator()
+    if (vm.isInstanceOf(obj.class_name, "SplFixedArray") and !userMethod(vm, obj.class_name, "getIterator")) return foreach_fixedarray;
     if (!ownIterator(vm, obj)) return 0;
     const r = recRaw(obj) orelse return 0;
     return if (r.levels() != null) foreach_recursive else 0;
@@ -2345,6 +2349,19 @@ pub const ForeachStep = enum { rewind, valid, current, key, next };
 
 pub fn foreachStep(vm: *VM, obj: *PhpObject, marker: *PhpObject, comptime step: ForeachStep) RuntimeError!Value {
     var ctx = vm.makeContext(null);
+    if (marker.native.extra == foreach_fixedarray) {
+        const fa = @import("spl_fixedarray.zig");
+        var result: Value = .null;
+        switch (step) {
+            .rewind => try fa.iterRewind(&ctx, marker),
+            .valid => result = .{ .bool = fa.iterValid(obj, marker) },
+            .current => result = try fa.iterCurrent(&ctx, obj, marker),
+            .key => result = fa.iterKey(marker),
+            .next => try fa.iterNext(&ctx, marker),
+        }
+        if (pending(&ctx)) return error.RuntimeError;
+        return result;
+    }
     if (marker.native.extra == foreach_dllist) {
         const dll = @import("spl_dllist.zig");
         var result: Value = .null;
