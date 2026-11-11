@@ -9404,7 +9404,7 @@ pub const VM = struct {
                     if (!self.classes.contains(class_name)) {
                         const ac_drop: usize = arg_count;
                         self.dropN(ac_drop);
-                        const msg = try std.fmt.allocPrint(self.allocator, "Class \"{s}\" not found", .{class_name});
+                        const msg = try self.classNotFoundMessage(class_name);
                         defer self.allocator.free(msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
@@ -9649,7 +9649,7 @@ pub const VM = struct {
                     if (!self.classes.contains(class_name)) try self.tryAutoload(class_name);
                     if (!self.classes.contains(class_name)) {
                         self.dropN(ac + 1);
-                        const msg = try std.fmt.allocPrint(self.allocator, "Class \"{s}\" not found", .{class_name});
+                        const msg = try self.classNotFoundMessage(class_name);
                         defer self.allocator.free(msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
@@ -11389,6 +11389,19 @@ pub const VM = struct {
                         try self.tryAutoload(class_name);
                     }
                     const ac: usize = arg_count;
+                    // zend_fetch_class runs before the method name is read
+                    if (!self.classes.contains(class_name) and !self.interfaces.contains(class_name)) {
+                        if (self.pending_exception != null) {
+                            self.dropN(ac + 1);
+                            if (self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        }
+                        self.dropN(ac + 1);
+                        const msg = try self.classNotFoundMessage(class_name);
+                        defer self.allocator.free(msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    }
                     const method_val = self.stack[self.sp - ac - 1];
                     const method_name = if (method_val == .string) method_val.string.bytes() else {
                         self.setErrorMsg("Fatal error: dynamic method name must be a string", .{});
@@ -12058,6 +12071,18 @@ pub const VM = struct {
     // (dynamicStaticTarget). a site's resolution is fixed per target class;
     // static targets never forward $this, so a cache hit enters directly
     fn callStaticMethod(self: *VM, class_name: []const u8, method_name: []const u8, arg_count: u32, effective_called: []const u8, site: ?StaticCallSite) RuntimeError!void {
+        // self::, parent:: or static:: with no class scope to name
+        if (class_name.len >= 4 and class_name.len <= 6 and !self.classes.contains(class_name)) {
+            inline for (.{ "self", "parent", "static" }) |word| {
+                if (std.ascii.eqlIgnoreCase(class_name, word)) {
+                    self.dropN(arg_count);
+                    const msg = try self.classNotFoundMessage(class_name);
+                    defer self.allocator.free(msg);
+                    if (try self.throwBuiltinException("Error", msg)) return;
+                    return error.RuntimeError;
+                }
+            }
+        }
         if (site) |st| {
             const entry = st.entry;
             if (entry.key == st.key and entry.chunk_key == st.chunk_key and entry.class_ptr == @intFromPtr(class_name.ptr)) {
@@ -12088,6 +12113,15 @@ pub const VM = struct {
             return error.RuntimeError;
         }
         const full_name = self.resolveMethod(class_name, method_name) catch {
+            // a class that isn't there (after the autoloaders) is "not found"
+            if (!self.classes.contains(class_name) and !self.interfaces.contains(class_name)) {
+                if (self.pending_exception != null) return error.RuntimeError;
+                self.dropN(arg_count);
+                const missing = try self.classNotFoundMessage(class_name);
+                defer self.allocator.free(missing);
+                if (try self.throwBuiltinException("Error", missing)) return;
+                return error.RuntimeError;
+            }
             if (try self.staticCallFallback(class_name, method_name, arg_count, effective_called)) return;
             const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch return error.OutOfMemory;
             defer self.allocator.free(msg);
@@ -12253,6 +12287,15 @@ pub const VM = struct {
         } else {
             try self.callStaticFunction(full_name, arg_count, effective_called);
         }
+    }
+
+    // zend_fetch_class: self, parent and static with no class scope are
+    // their own error; any other missing class is "not found"
+    pub fn classNotFoundMessage(self: *VM, class_name: []const u8) ![]u8 {
+        inline for (.{ "self", "parent", "static" }) |word| {
+            if (std.ascii.eqlIgnoreCase(class_name, word)) return std.fmt.allocPrint(self.allocator, "Cannot access \"" ++ word ++ "\" when no class scope is active", .{});
+        }
+        return std.fmt.allocPrint(self.allocator, "Class \"{s}\" not found", .{class_name});
     }
 
     // a method's declaration as the class or an ancestor makes it, or an
@@ -12510,7 +12553,7 @@ pub const VM = struct {
             return false;
         }
         const msg = if (!self.classes.contains(class_name) and !self.interfaces.contains(class_name))
-            try std.fmt.allocPrint(self.allocator, "Class \"{s}\" not found", .{class_name})
+            try self.classNotFoundMessage(class_name)
         else
             try std.fmt.allocPrint(self.allocator, "Undefined constant {s}::{s}", .{ if (self.inInitializer() and self.class_const_written.len > 0) self.class_const_written else class_name, const_name });
         defer self.allocator.free(msg);
@@ -22051,7 +22094,7 @@ pub const VM = struct {
         const msg = if (self.classes.contains(class_name) or self.interfaces.contains(class_name))
             try std.fmt.allocPrint(self.allocator, "Access to undeclared static property {s}::${s}", .{ class_name, prop_name })
         else
-            try std.fmt.allocPrint(self.allocator, "Class \"{s}\" not found", .{class_name});
+            try self.classNotFoundMessage(class_name);
         defer self.allocator.free(msg);
         try self.setPendingException("Error", msg);
         return error.RuntimeError;
@@ -22850,7 +22893,7 @@ pub const VM = struct {
             try self.tryAutoload(class_name);
         }
         if (!self.classes.contains(class_name)) {
-            const msg = try std.fmt.allocPrint(self.allocator, "Class \"{s}\" not found", .{class_name});
+            const msg = try self.classNotFoundMessage(class_name);
             try self.strings.append(self.allocator, msg);
             self.error_msg = msg;
             return error.RuntimeError;
