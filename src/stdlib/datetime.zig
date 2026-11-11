@@ -59,6 +59,7 @@ pub const entries = .{
     .{ "strtotime", native_strtotime },
     .{ "time", native_time },
     .{ "microtime", native_microtime },
+    .{ "gettimeofday", native_gettimeofday },
     .{ "hrtime", native_hrtime },
     .{ "checkdate", native_checkdate },
     .{ "cal_days_in_month", native_cal_days_in_month },
@@ -2257,29 +2258,41 @@ fn native_hrtime(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn native_microtime(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const as_float = args.len >= 1 and args[0].isTruthy();
+// date/time utilities
+
+// gettimeofday(2): seconds and microseconds
+fn timeOfDay() struct { sec: i64, usec: i64 } {
     const ns = platform.nanoTimestamp();
-    if (as_float) {
-        const secs: f64 = @as(f64, @floatFromInt(ns)) / 1_000_000_000.0;
-        return NativeResult.scalar(.{ .float = secs });
-    }
-    const ts: i64 = @intCast(@divTrunc(ns, 1_000_000_000));
-    const usec: i64 = @intCast(@divTrunc(@mod(ns, 1_000_000_000), 1_000));
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(ctx.allocator);
-    var tmp: [32]u8 = undefined;
-    try buf.appendSlice(ctx.allocator, "0.");
-    const usec_str = std.fmt.bufPrint(&tmp, "{d:0>6}", .{@as(u64, @intCast(if (usec < 0) -usec else usec))}) catch "000000";
-    try buf.appendSlice(ctx.allocator, usec_str);
-    try buf.appendSlice(ctx.allocator, " ");
-    const ts_str = std.fmt.bufPrint(&tmp, "{d}", .{ts}) catch "0";
-    try buf.appendSlice(ctx.allocator, ts_str);
-    const result = try buf.toOwnedSlice(ctx.allocator);
-    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, result));
+    return .{ .sec = @intCast(@divFloor(ns, 1_000_000_000)), .usec = @intCast(@divFloor(@mod(ns, 1_000_000_000), 1_000)) };
 }
 
-// date/time utilities
+// _php_gettimeofday for microtime() (mode 0) and gettimeofday() (mode 1)
+fn timeOfDayAs(ctx: *NativeContext, args: []const Value, comptime func: []const u8, array_mode: bool) RuntimeError!NativeResult {
+    const as_float = try Args.init(ctx, func, args).boolean(0, "as_float", false);
+    const tp = timeOfDay();
+    if (as_float) return NativeResult.scalar(.{ .float = @as(f64, @floatFromInt(tp.sec)) + @as(f64, @floatFromInt(tp.usec)) / 1000000.0 });
+    if (array_mode) {
+        const off = idOffset(defaultZone(ctx).name(), tp.sec);
+        const arr = try ctx.createArray();
+        try putAssoc(ctx, arr, "sec", .{ .int = tp.sec });
+        try putAssoc(ctx, arr, "usec", .{ .int = tp.usec });
+        try putAssoc(ctx, arr, "minuteswest", .{ .int = @divTrunc(-@as(i64, off.offset), 60) });
+        try putAssoc(ctx, arr, "dsttime", .{ .int = @intFromBool(off.is_dst) });
+        return NativeResult.borrowed(.{ .array = arr });
+    }
+    // "%.8F %ld"
+    var buf: [64]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "0.{d:0>6}00 {d}", .{ @as(u64, @intCast(tp.usec)), tp.sec }) catch unreachable;
+    return NativeResult.copyString(ctx.allocator, text);
+}
+
+fn native_microtime(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return timeOfDayAs(ctx, args, "microtime", false);
+}
+
+fn native_gettimeofday(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return timeOfDayAs(ctx, args, "gettimeofday", true);
+}
 
 pub fn dateToTimestamp(year: i64, month: i64, day: i64, hour: i64, min: i64, sec: i64) i64 {
     // normalize month overflow/underflow (e.g. month 13 -> january next year)
