@@ -39,3 +39,4 @@ fopen_file_urls_modes.php: file:// urls on windows carry a drive letter, and the
 file_url_exists_checks.php: file:// urls on windows carry a drive letter, and the test builds them from a unix temp path
 fseek_unseekable_negative.php: the test pipes through cat, which windows does not have
 proc_open_descriptor_resource.php: the windows proc_open does not check descriptor resources yet
+date_strftime.php: the C library's strftime differs on windows (no tm_gmtoff or tm_zone, other %c and %x formats), as php's own strftime tests skip there

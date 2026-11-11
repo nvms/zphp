@@ -78,6 +78,8 @@ pub const entries = .{
     .{ "localtime", native_localtime },
     .{ "idate", native_idate },
     .{ "date_sun_info", native_date_sun_info },
+    .{ "strftime", native_strftime },
+    .{ "gmstrftime", native_gmstrftime },
     .{ "date_sunrise", native_date_sunrise },
     .{ "date_sunset", native_date_sunset },
     .{ "date_interval_create_from_date_string", native_date_interval_create_from_date_string },
@@ -763,6 +765,89 @@ fn native_date_sunrise(ctx: *NativeContext, args: []const Value) RuntimeError!Na
 
 fn native_date_sunset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return sunriseSunset(ctx, args, "date_sunset", true);
+}
+
+// ---- strftime() and gmstrftime() (php_strftime): the C library's strftime
+// over the time's broken-down fields, as php calls it ----
+
+const CTm = if (platform.is_windows) extern struct {
+    tm_sec: c_int,
+    tm_min: c_int,
+    tm_hour: c_int,
+    tm_mday: c_int,
+    tm_mon: c_int,
+    tm_year: c_int,
+    tm_wday: c_int,
+    tm_yday: c_int,
+    tm_isdst: c_int,
+} else extern struct {
+    tm_sec: c_int,
+    tm_min: c_int,
+    tm_hour: c_int,
+    tm_mday: c_int,
+    tm_mon: c_int,
+    tm_year: c_int,
+    tm_wday: c_int,
+    tm_yday: c_int,
+    tm_isdst: c_int,
+    tm_gmtoff: c_long,
+    tm_zone: [*:0]const u8,
+};
+
+extern "c" fn strftime(s: [*]u8, max: usize, format: [*:0]const u8, tm: *const CTm) usize;
+
+fn strftimeAs(ctx: *NativeContext, args: []const Value, comptime func: []const u8, gmt: bool) RuntimeError!NativeResult {
+    const p = Args.init(ctx, func, args);
+    const format = try p.str(0, "format");
+    const ts = (try p.longOrNull(1, "timestamp")) orelse platform.timestamp();
+    if (format.len == 0) return NativeResult.scalar(.{ .bool = false });
+    const t = if (gmt) blk: {
+        var g = date_format.Local{ .y = 0, .m = 1, .d = 1, .h = 0, .i = 0, .s = 0, .sse = ts, .localtime = false, .abbr = "GMT" };
+        date_format.fieldsAt(ts, 0, &g);
+        break :blk g;
+    } else defaultLocal(ctx, ts);
+    const a = ctx.allocator;
+    const zone_z = try a.dupeSentinel(u8, t.abbr, 0);
+    defer a.free(zone_z);
+    var tm: CTm = undefined;
+    tm.tm_sec = @truncate(t.s);
+    tm.tm_min = @truncate(t.i);
+    tm.tm_hour = @truncate(t.h);
+    tm.tm_mday = @truncate(t.d);
+    tm.tm_mon = @truncate(t.m - 1);
+    tm.tm_year = @truncate(t.y - 1900);
+    tm.tm_wday = @truncate(dp.dayOfWeek(t.y, t.m, t.d));
+    tm.tm_yday = @truncate(dp.dayOfYear(t.y, t.m, t.d));
+    tm.tm_isdst = @intFromBool(t.is_dst);
+    if (!platform.is_windows) {
+        tm.tm_gmtoff = @intCast(if (gmt) 0 else t.offset);
+        tm.tm_zone = zone_z.ptr;
+    }
+    // the format stops at a nul, as it does for php's call
+    const fmt_z = try a.dupeSentinel(u8, format[0 .. std.mem.indexOfScalar(u8, format, 0) orelse format.len], 0);
+    defer a.free(fmt_z);
+    var buf_len: usize = 256;
+    var reallocs: usize = 5;
+    var buf = try a.alloc(u8, buf_len);
+    defer a.free(buf);
+    var real_len = strftime(buf.ptr, buf_len, fmt_z.ptr, &tm);
+    while (real_len == buf_len or real_len == 0) {
+        buf_len *= 2;
+        buf = try a.realloc(buf, buf_len);
+        reallocs -= 1;
+        if (reallocs == 0) break;
+        real_len = strftime(buf.ptr, buf_len, fmt_z.ptr, &tm);
+    }
+    if (real_len == 0 or real_len == buf_len) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.copyString(a, buf[0..real_len]);
+}
+
+fn native_strftime(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return strftimeAs(ctx, args, "strftime", false);
+}
+
+fn native_gmstrftime(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return strftimeAs(ctx, args, "gmstrftime", true);
 }
 
 fn dtGetLastErrors(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {

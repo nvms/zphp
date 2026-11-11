@@ -90,8 +90,6 @@ pub const entries = .{
     .{ "opcache_is_script_cached", native_noop_false },
     .{ "opcache_reset", native_noop_true },
     .{ "ignore_user_abort", native_noop_zero },
-    .{ "strftime", native_strftime },
-    .{ "gmstrftime", native_gmstrftime },
     .{ "getmxrr", native_getmxrr },
     .{ "header_register_callback", native_noop_true },
     .{ "spl_classes", native_spl_classes },
@@ -1889,57 +1887,6 @@ fn native_highlight_string(_: *NativeContext, args: []const Value) RuntimeError!
 
 fn native_highlight_file(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     return NativeResult.scalar(.{ .bool = true });
-}
-
-fn native_strftime(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    // strftime is deprecated since 8.1; we delegate to date() with a best-effort
-    // format remap for the most common specifiers
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const fmt = args[0].string.bytes();
-    const ts: Value = if (args.len >= 2) args[1] else try ctx.vm.callByName("time", &.{});
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(ctx.allocator);
-    var i: usize = 0;
-    while (i < fmt.len) : (i += 1) {
-        if (fmt[i] != '%' or i + 1 >= fmt.len) {
-            try buf.append(ctx.allocator, fmt[i]);
-            continue;
-        }
-        i += 1;
-        const mapped: []const u8 = switch (fmt[i]) {
-            'Y' => "Y",
-            'y' => "y",
-            'm' => "m",
-            'd' => "d",
-            'H' => "H",
-            'M' => "i",
-            'S' => "s",
-            'p' => "A",
-            'P' => "a",
-            'A' => "l",
-            'a' => "D",
-            'B' => "F",
-            'b', 'h' => "M",
-            'e' => "j",
-            'j' => "z",
-            'n' => "\n",
-            't' => "\t",
-            's' => "U",
-            'u' => "N",
-            'w' => "w",
-            'z' => "O",
-            'Z' => "T",
-            '%' => "%%",
-            else => continue,
-        };
-        const r = try ctx.vm.callByName("date", &.{ .{ .string = Value.String.borrowed(mapped) }, ts });
-        if (r == .string) try buf.appendSlice(ctx.allocator, r.string.bytes());
-    }
-    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, try buf.toOwnedSlice(ctx.allocator)));
-}
-
-fn native_gmstrftime(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return native_strftime(ctx, args);
 }
 
 fn native_getmxrr(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
