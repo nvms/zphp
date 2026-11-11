@@ -8689,7 +8689,7 @@ pub const VM = struct {
                                 self.require_merge_depth = saved_merge_depth;
                                 self.global_slot_names = saved_slot_names;
                                 self.script_strict_types = saved_strict;
-                                if (self.sp <= sp_before) self.push(.{ .bool = true });
+                                if (self.sp <= sp_before) self.push(.{ .int = 1 });
                             } else if (self.ic.?.include_parse_error) |parse_error| {
                                 defer self.dropIncludeError(&self.ic.?.include_parse_error);
                                 if (try self.throwBuiltinExceptionAt("ParseError", parse_error.message, parse_error.at)) continue;
