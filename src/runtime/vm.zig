@@ -809,6 +809,9 @@ pub const VM = struct {
     // last_return_ref is what the call whose reference is being bound handed
     // back: a return_ref set it since reset_return_ref ran before the call
     return_ref_fresh: bool = false,
+    // where the caller of a function returning by reference resumes when
+    // that function returned no variable (php still hands back a reference)
+    return_ref_value_at: ?struct { frame: usize, ip: usize } = null,
     captures: std.ArrayListUnmanaged(CaptureEntry) = .empty,
     capture_index: std.StringHashMapUnmanaged(CaptureRange) = .{},
     interned_names: std.StringHashMapUnmanaged(void) = .{},
@@ -7400,6 +7403,7 @@ pub const VM = struct {
                 },
                 .reset_return_ref => self.return_ref_fresh = false,
                 .bind_ref_from_return => {
+                    const by_ref_function = self.returnedRefValueHere(self.currentFrame().ip - 1);
                     const dst_idx = self.readU16();
                     const dst_name = self.currentChunk().constants.items[dst_idx].string.bytes();
                     const frame = self.currentFrame();
@@ -7423,7 +7427,12 @@ pub const VM = struct {
                         // callee didn't return a ref - degrade to value copy.
                         // a return by reference returns that copy
                         const val = self.peek();
-                        if ((dst_name.len > 0 and dst_name[0] == 0) or std.mem.eql(u8, dst_name, "$__ret_ref")) {
+                        const internal_name = (dst_name.len > 0 and dst_name[0] == 0) or std.mem.eql(u8, dst_name, "$__ret_ref");
+                        // a function returning by value: php's notice. a
+                        // return or yield by reference gives its own
+                        const own_notice = std.mem.eql(u8, dst_name, "$__ret_ref") or std.mem.eql(u8, dst_name, "\x00yield-reference");
+                        if (!own_notice and !by_ref_function) self.raiseError(8, "Only variables should be assigned by reference") catch if (try self.resumeRaised()) continue;
+                        if (internal_name) {
                             const cell = try self.newRefCell();
                             self.setCell(cell, val);
                             try self.bindRefSlot(&frame.ref_slots, dst_name, cell);
@@ -9720,6 +9729,50 @@ pub const VM = struct {
                     const arg_sp = self.sp;
                     self.push(.null);
                     try self.captureDimensionCell(arg_sp, arr, key, base_source);
+                },
+                .arg_value, .arg_call_result => {
+                    const field = self.currentFrame().ip;
+                    const delta = self.readU16();
+                    const pos = self.readByte();
+                    const chunk = self.currentChunk();
+                    if (!self.argNeedsCapture(chunk, field, delta, pos, 1)) continue;
+                    // only a callee known to take a reference here
+                    const call_ip = field + delta;
+                    const args_base = self.argsBase(pos, 1) orelse continue;
+                    if (self.callSiteByValue(chunk, call_ip, pos, args_base) orelse true) continue;
+                    const sent = self.stack[self.sp - 1];
+                    if (op == .arg_call_result) {
+                        // SEND_VAR_NO_REF: a call that returned a reference
+                        // passes it; any other result is a temporary the
+                        // callee gets to itself, with php's notice
+                        if (self.return_ref_fresh) if (self.last_return_ref) |cell| if (sameReferent(cell.*, sent)) continue;
+                        if (self.returnedRefValueHere(field - 1)) continue;
+                        if (sent == .array and sent.array.refcount > 1) {
+                            const own = try self.cowSeparate(sent.array);
+                            if (own != sent.array) {
+                                self.stack[self.sp - 1] = .{ .array = own };
+                                self.stackRelease(sent);
+                            }
+                        }
+                        self.raiseError(8, "Only variables should be passed by reference") catch if (try self.resumeRaised()) continue;
+                        continue;
+                    }
+                    // SEND_VAL_EX: a value where the callee must take a
+                    // reference (array_multisort prefers one, and takes values)
+                    const callee = self.argCalleeName(chunk, call_ip, args_base) orelse continue;
+                    if (std.ascii.eqlIgnoreCase(callee, "array_multisort")) continue;
+                    const msg = try self.cannotPassByReference(callee, pos);
+                    defer self.allocator.free(msg);
+                    if (try self.throwBuiltinException("Error", msg)) continue;
+                    return error.RuntimeError;
+                },
+                .return_ref_value => {
+                    const at_end = self.readByte() == 1;
+                    if (self.frame_count >= 2) self.return_ref_value_at = .{ .frame = self.frame_count - 2, .ip = self.frames[self.frame_count - 2].ip };
+                    const msg = "Only variable references should be returned by reference";
+                    // the implicit return is at the body's closing brace
+                    const raised = if (at_end) if (self.currentFrame().func) |f| self.raiseErrorAt(8, msg, .{ .file = f.file_path, .line = f.end_line }) else self.raiseError(8, msg) else self.raiseError(8, msg);
+                    raised catch if (try self.resumeRaised()) continue;
                 },
                 .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim => {
                     const field = self.currentFrame().ip;
@@ -19345,6 +19398,85 @@ pub const VM = struct {
                 };
             },
             else => null,
+        };
+    }
+
+    // the registered name of the callee a call site will call, as far as it
+    // can be known before the call: a function, or "Class::method"
+    fn argCalleeName(self: *VM, chunk: *const Chunk, call_ip: usize, args_base: usize) ?[]const u8 {
+        const code = chunk.code.items;
+        const consts = chunk.constants.items;
+        if (call_ip >= code.len) return null;
+        const call_op = std.enums.fromInt(OpCode, code[call_ip]) orelse return null;
+        switch (call_op) {
+            .call, .call_spread => {
+                const raw = consts[callOpU16(code, call_ip + 1)].string.bytes();
+                const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
+                if (self.functions.getKey(name)) |key| return key;
+                if (self.native_fns.getKey(name)) |key| return key;
+                const sep = std.mem.lastIndexOfScalar(u8, name, '\\') orelse return null;
+                if (self.functions.getKey(name[sep + 1 ..])) |key| return key;
+                return self.native_fns.getKey(name[sep + 1 ..]);
+            },
+            .method_call, .method_call_spread => {
+                const receiver = self.stack[args_base - 1];
+                if (receiver != .object) return null;
+                return self.resolveMethod(receiver.object.class_name, consts[callOpU16(code, call_ip + 1)].string.bytes()) catch null;
+            },
+            .static_call, .static_call_spread => {
+                const class_name = self.intentClassName(consts[callOpU16(code, call_ip + 1)].string.bytes()) orelse return null;
+                return self.resolveMethod(class_name, consts[callOpU16(code, call_ip + 3)].string.bytes()) catch null;
+            },
+            .new_obj => {
+                const class_name = self.intentClassName(consts[callOpU16(code, call_ip + 1)].string.bytes()) orelse return null;
+                return self.resolveMethod(class_name, "__construct") catch null;
+            },
+            else => return null,
+        }
+    }
+
+    // zend_cannot_pass_by_reference's message for argument pos of a callee
+    fn cannotPassByReference(self: *VM, callee: []const u8, pos: u8) ![]u8 {
+        var param: []const u8 = "";
+        var shown: []const u8 = callee;
+        if (self.functions.get(callee)) |func| {
+            shown = try self.funcDisplayName(func);
+            if (func.params.len > 0) param = func.params[@min(pos, func.params.len - 1)];
+            if (param.len > 0 and param[0] == '$') param = param[1..];
+        } else {
+            var lower_buf: [256]u8 = undefined;
+            if (callee.len <= lower_buf.len) {
+                const signatures = @import("../stdlib/native_params_generated.zig").map;
+                const sig = signatures.get(callee) orelse signatures.get(std.ascii.lowerString(&lower_buf, callee));
+                if (sig) |sg| if (sg.params.len > 0) {
+                    param = sg.params[@min(pos, sg.params.len - 1)].name;
+                };
+            }
+        }
+        if (param.len == 0) return std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} could not be passed by reference", .{ shown, @as(usize, pos) + 1 });
+        return std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} (${s}) could not be passed by reference", .{ shown, @as(usize, pos) + 1, param });
+    }
+
+    // whether the call that just returned to the instruction at ip was to
+    // a function returning by reference that returned no variable
+    fn returnedRefValueHere(self: *VM, ip: usize) bool {
+        const at = self.return_ref_value_at orelse return false;
+        if (self.frame_count == 0 or at.frame != self.frame_count - 1 or at.ip != ip) return false;
+        self.return_ref_value_at = null;
+        return true;
+    }
+
+    // the same storage: a returned reference's value and the value pushed
+    fn sameReferent(a: Value, b: Value) bool {
+        return switch (a) {
+            .array => |x| b == .array and b.array == x,
+            .object => |x| b == .object and b.object == x,
+            .string => |x| b == .string and b.string.bytes().ptr == x.bytes().ptr,
+            .int => |x| b == .int and b.int == x,
+            .float => |x| b == .float and b.float == x,
+            .bool => |x| b == .bool and b.bool == x,
+            .null => b == .null,
+            else => false,
         };
     }
 

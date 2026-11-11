@@ -996,7 +996,8 @@ pub const ArgPos = struct {
     pub const max: u8 = 0xFD;
 };
 
-const ArgGuard = struct { pos: u8, guards: *ArgGuards };
+// by_value: the compiler knows the callee takes this argument by value
+const ArgGuard = struct { pos: u8, guards: *ArgGuards, by_value: bool = false };
 
 fn emitArgGuard(self: *Compiler, guard: ArgGuard, op: OpCode) Error!void {
     try self.emitOp(op);
@@ -1046,7 +1047,11 @@ fn compileArgLvalue(self: *Compiler, arg_idx: u32, guard: ArgGuard) Error!void {
             const member = if (arg.main_token != 0) self.ast.tokenSlice(arg.main_token) else "";
             const named = member.len > 1 and member[0] == '$' and (class_node.tag == .identifier or class_node.tag == .qualified_name);
             try self.compileNode(arg_idx);
-            if (!named) return;
+            // a class constant is a value; `$o::$p` a property all the same
+            if (!named) {
+                if (member.len > 0 and member[0] == '$') return;
+                return emitValueGuard(self, guard, .arg_value);
+            }
             const prop_name = member[1..];
             try self.emitOp(.arg_guard_static_prop);
             try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(try resolveNodeClassName(self, class_node)) }));
@@ -1063,8 +1068,75 @@ fn compileArgLvalue(self: *Compiler, arg_idx: u32, guard: ArgGuard) Error!void {
             try self.emitU16(0);
             try self.emitByte(guard.pos);
         },
-        else => try self.compileNode(arg_idx),
+        else => {
+            try self.compileNode(arg_idx);
+            // what php sends where the callee takes a reference: a call's
+            // result, with a notice unless it returned one, or a value, which
+            // is an Error
+            switch (argSendKind(self, arg_idx)) {
+                .call => try emitValueGuard(self, guard, .arg_call_result),
+                .value => try emitValueGuard(self, guard, .arg_value),
+                .reference => {},
+            }
+        },
     }
+}
+
+// a guard for an argument that can't be a reference, unless the compiler
+// knows the callee takes it by value (php's SEND_VAL) or the position is
+// a spread or named one, which the guard can't place
+fn emitValueGuard(self: *Compiler, guard: ArgGuard, op: OpCode) Error!void {
+    if (guard.by_value or guard.pos >= ArgPos.named) return;
+    try emitArgGuard(self, guard, op);
+}
+
+const SendKind = enum { reference, call, value };
+
+// how zend_compile_args sends an argument that is no plain variable: a call
+// (or `new`, include, eval: an IS_VAR) by SEND_VAR_NO_REF, a reference
+// assignment as the reference it makes, anything else as a value
+fn argSendKind(self: *Compiler, idx: u32) SendKind {
+    const node = self.ast.nodes[idx];
+    return switch (node.tag) {
+        .grouped_expr => switch (self.ast.nodes[node.data.lhs].tag) {
+            .variable, .variable_variable, .array_access, .property_access, .static_prop_access, .nullsafe_property_access => .reference,
+            else => argSendKind(self, node.data.lhs),
+        },
+        .variable, .variable_variable, .array_access, .array_push_target, .property_access, .static_prop_access, .nullsafe_property_access, .ref_target => .reference,
+        .assign => if (self.ast.nodes[node.data.rhs].tag == .ref_target) .reference else .value,
+        .call => if (compilesToInstruction(self, node)) .value else .call,
+        .method_call, .static_call, .dynamic_static_call, .nullsafe_method_call, .new_expr, .new_expr_dynamic, .anonymous_class, .require_expr => .call,
+        else => .value,
+    };
+}
+
+// zend_try_compile_special_func: a call to one of these builtins compiles
+// to an instruction whose result is a temporary, so it is sent as a value
+fn compilesToInstruction(self: *Compiler, node: Ast.Node) bool {
+    const callee = self.ast.nodes[node.data.lhs];
+    if (callee.tag != .identifier) return false;
+    const raw = self.ast.tokenSlice(callee.main_token);
+    const qualified = raw.len > 0 and raw[0] == '\\';
+    const name = if (qualified) raw[1..] else raw;
+    if (std.mem.indexOfScalar(u8, name, '\\') != null) return false;
+    if (!qualified and self.namespace.len > 0) return false;
+    const args = self.ast.extraSlice(node.data.rhs);
+    for (args) |a| if (self.ast.nodes[a].tag == .splat_expr) return false;
+    const Special = struct { name: []const u8, args: usize };
+    const specials = [_]Special{
+        .{ .name = "strlen", .args = 1 },        .{ .name = "is_null", .args = 1 },      .{ .name = "is_bool", .args = 1 },
+        .{ .name = "is_long", .args = 1 },       .{ .name = "is_int", .args = 1 },       .{ .name = "is_integer", .args = 1 },
+        .{ .name = "is_float", .args = 1 },      .{ .name = "is_double", .args = 1 },    .{ .name = "is_string", .args = 1 },
+        .{ .name = "is_array", .args = 1 },      .{ .name = "is_object", .args = 1 },    .{ .name = "is_resource", .args = 1 },
+        .{ .name = "is_scalar", .args = 1 },     .{ .name = "boolval", .args = 1 },      .{ .name = "intval", .args = 1 },
+        .{ .name = "floatval", .args = 1 },      .{ .name = "doubleval", .args = 1 },    .{ .name = "strval", .args = 1 },
+        .{ .name = "defined", .args = 1 },       .{ .name = "chr", .args = 1 },          .{ .name = "ord", .args = 1 },
+        .{ .name = "count", .args = 1 },         .{ .name = "sizeof", .args = 1 },       .{ .name = "gettype", .args = 1 },
+        .{ .name = "get_called_class", .args = 0 }, .{ .name = "func_num_args", .args = 0 }, .{ .name = "func_get_args", .args = 0 },
+        .{ .name = "array_key_exists", .args = 2 },
+    };
+    for (specials) |sp| if (args.len == sp.args and std.ascii.eqlIgnoreCase(name, sp.name)) return true;
+    return std.ascii.eqlIgnoreCase(name, "get_class") and args.len <= 1;
 }
 
 // whether php already knows, while compiling a call, that the callee takes
@@ -1098,11 +1170,18 @@ fn argKnownByValue(self: *Compiler, raw_name: []const u8, pos: usize, call_token
 const native_signatures = @import("../stdlib/native_params_generated.zig");
 
 fn compileArgs(self: *Compiler, args: []const u32) Error!ArgGuards {
+    return compileArgsFor(self, args, null);
+}
+
+const KnownCallee = struct { raw_name: []const u8, token: u32 };
+
+fn compileArgsFor(self: *Compiler, args: []const u32, callee: ?KnownCallee) Error!ArgGuards {
     var guards: ArgGuards = .empty;
     errdefer guards.deinit(self.allocator);
     for (args, 0..) |arg, i| {
         const pos: u8 = if (i <= ArgPos.max) @intCast(i) else ArgPos.spread;
-        try compileArgLvalue(self, arg, .{ .pos = pos, .guards = &guards });
+        const by_value = if (callee) |c| argKnownByValue(self, c.raw_name, i, c.token) else false;
+        try compileArgLvalue(self, arg, .{ .pos = pos, .guards = &guards, .by_value = by_value });
     }
     return guards;
 }
@@ -1235,7 +1314,7 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
             if (arg_node.tag == .array_push_target and argKnownByValue(self, raw_name, i, callee.main_token))
                 return self.fail(arg_node.main_token, "Cannot use [] for reading");
         }
-        var guards = try compileArgs(self, args);
+        var guards = try compileArgsFor(self, args, .{ .raw_name = raw_name, .token = callee.main_token });
         self.current_source_offset = call_offset;
         const idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });
         try emitCallOp(self, &guards, .call, .{ .a = idx, .argc = @intCast(args.len) });

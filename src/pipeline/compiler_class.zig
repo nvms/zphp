@@ -1618,9 +1618,13 @@ fn paramDefaultValue(self: *Compiler, pnode: Ast.Node) Error!Value {
 // zend_emit_final_return: falling off the end of a function whose return
 // type isn't void is a TypeError when it runs
 fn emitImplicitReturn(sub: *Compiler, gen: bool) Error!void {
-    if (gen or sub.declared_return.len == 0) return;
-    if (std.ascii.eqlIgnoreCase(sub.declared_return, "void")) return;
-    try sub.emitOp(.implicit_return);
+    if (gen) return;
+    if (sub.declared_return.len > 0 and !std.ascii.eqlIgnoreCase(sub.declared_return, "void")) try sub.emitOp(.implicit_return);
+    // a function returning by reference returns no variable at its end
+    if (sub.returns_ref) {
+        try sub.emitOp(.return_ref_value);
+        try sub.emitByte(1);
+    }
 }
 
 // a parameter whose default is null and that isn't promoted takes null

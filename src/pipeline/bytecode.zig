@@ -467,13 +467,25 @@ pub const OpCode = enum(u8) {
     // before a call whose returned reference is bound: no reference counts
     // as returned until that call returns one
     reset_return_ref,
+    // u16 delta, u8 pos, after an argument that is no variable and no call:
+    // php's SEND_VAL_EX, an Error when the callee takes it by reference
+    arg_value,
+    // u16 delta, u8 pos, after an argument that is a call's result: php's
+    // SEND_VAR_NO_REF_EX, a notice when the callee takes it by reference and
+    // the call returned no reference
+    arg_call_result,
+    // a function returning by reference returns no variable: php's notice
+    // "Only variable references should be returned by reference". u8 1 at
+    // the implicit return at the end of the body
+    return_ref_value,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
             .arg_variable => 6,
+            .return_ref_value => 2,
             .jump_if_class_declared, .bind_const_attributes => 5,
             .parent_hook_call => 7,
-            .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim, .arg_append => 4,
+            .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim, .arg_append, .arg_value, .arg_call_result => 4,
             .reference_source,
             .enter_class_scope,
             .constant,

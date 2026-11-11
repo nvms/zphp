@@ -638,6 +638,12 @@ pub const Compiler = struct {
                     self.finally_depth = saved_fd;
                     self.loops_ended = saved_ended;
                     self.pending_returns = saved_pending;
+                    // a function returning by reference that returns no
+                    // variable: php's notice, then the value
+                    if (!ref_return_emitted and self.returns_ref and !self.isCallLike(node.data.lhs)) {
+                        try self.emitOp(.return_ref_value);
+                        try self.emitByte(0);
+                    }
                     if (ref_return_emitted) {
                         // tryCompileRefReturn already emitted return_ref
                     } else if (node.data.lhs != 0) {
@@ -1924,6 +1930,18 @@ pub const Compiler = struct {
     // make_var_*_ref into a synthetic `__ret_ref` name, then return_ref.
     // returns true if it handled the return (caller does not need to emit
     // return_val), false to fall back to the regular value-return path
+    // a call's result, which is a reference when the callee returned one
+    // (php's ZEND_RETURNS_FUNCTION); 0 is no expression
+    fn isCallLike(self: *Compiler, expr_idx: u32) bool {
+        if (expr_idx == 0) return false;
+        var target = expr_idx;
+        while (self.ast.nodes[target].tag == .grouped_expr) target = self.ast.nodes[target].data.lhs;
+        return switch (self.ast.nodes[target].tag) {
+            .call, .method_call, .static_call, .dynamic_static_call, .nullsafe_method_call, .pipe_expr => true,
+            else => false,
+        };
+    }
+
     pub fn tryCompileRefReturn(self: *Compiler, expr_idx: u32) Error!bool {
         // php's tree has no node for parentheses: `return ($a);` returns $a
         var target = expr_idx;
