@@ -194,6 +194,7 @@ fn heapArrays(ctx: *NativeContext, obj: *PhpObject, pq: bool) RuntimeError!struc
 
 fn copyArray(ctx: *NativeContext, from: ?*PhpArray) RuntimeError!*PhpArray {
     const arr = try ctx.createArray();
+    arr.uncounted = true;
     if (from) |f| for (f.entries.items) |e| try arr.append(ctx.allocator, e.value);
     return arr;
 }

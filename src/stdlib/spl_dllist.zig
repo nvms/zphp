@@ -145,6 +145,8 @@ const List = struct {
 fn emptyList(ctx: *NativeContext, obj: *PhpObject) RuntimeError!List {
     const values = try ctx.createArray();
     const ids = try ctx.createArray();
+    values.uncounted = true;
+    ids.uncounted = true;
     try obj.set(ctx.allocator, P.values, .{ .array = values });
     try obj.set(ctx.allocator, P.ids, .{ .array = ids });
     try setInt(ctx, obj, P.head, 0);
@@ -171,6 +173,8 @@ fn writable(ctx: *NativeContext, obj: *PhpObject) RuntimeError!List {
 fn rebuild(ctx: *NativeContext, obj: *PhpObject, l: List, insert: ?struct { at: usize, value: Value, id: i64 }, drop: ?usize) RuntimeError!List {
     const values = try ctx.createArray();
     const ids = try ctx.createArray();
+    values.uncounted = true;
+    ids.uncounted = true;
     for (0..l.len() + 1) |i| {
         if (insert) |ins| if (ins.at == i) {
             try values.append(ctx.allocator, ins.value);

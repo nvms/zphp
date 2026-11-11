@@ -90,6 +90,14 @@ pub fn callOn(ctx: *NativeContext, target: *PhpObject, name: []const u8, args: [
     };
 }
 
+// callOn for an Iterator that may be a generator, which zphp keeps apart
+// from objects
+pub fn callAny(ctx: *NativeContext, target: Value, name: []const u8, args: []const Value) RuntimeError!Value {
+    if (target != .generator) return callOn(ctx, target.object, name, args);
+    if (pending(ctx)) return .undef;
+    return guarded(ctx, VM.generatorMethod, .{ ctx.vm, target.generator, name, args });
+}
+
 pub fn callValue(ctx: *NativeContext, callable: Value, args: []const Value) RuntimeError!Value {
     return guarded(ctx, NativeContext.invokeCallable, .{ ctx, callable, args });
 }

@@ -384,6 +384,10 @@ pub const ClassDef = struct {
     // properties (object_properties.zig), the way php's internal classes
     // build one
     native_properties: ?object_properties.Hook = null,
+    // php's unset_dimension handler: `unset($obj[$key])` handled without
+    // offsetUnset() when it returns true (SplObjectStorage's, which keeps
+    // the iteration position)
+    native_unset_dimension: ?*const fn (*NativeContext, *PhpObject, Value) RuntimeError!bool = null,
     // (int), (float), (bool), and the numeric conversion array_sum uses, for a
     // class whose value lives in its native handle (GMP)
     native_cast: ?*const fn (*PhpObject, @import("value.zig").NumericCast) ?Value = null,
@@ -2065,6 +2069,7 @@ pub const VM = struct {
         try @import("../stdlib/spl_dllist.zig").register(vm, allocator);
         try @import("../stdlib/spl_heap.zig").register(vm, allocator);
         try @import("../stdlib/spl_fixedarray.zig").register(vm, allocator);
+        try @import("../stdlib/spl_observer.zig").register(vm, allocator);
         try @import("../stdlib/pdo.zig").register(vm, allocator);
         try @import("../stdlib/websocket.zig").register(vm, allocator);
         try @import("../stdlib/filesystem.zig").register(vm, allocator);
@@ -7736,6 +7741,14 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
                     } else if (arr_val == .object) {
+                        if (self.classHook(arr_val.object.class_name, "native_unset_dimension")) |hook| {
+                            var ctx = self.makeContext(null);
+                            const handled = hook(&ctx, arr_val.object, key) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            if (handled) continue;
+                        }
                         if (self.hasMethod(arr_val.object.class_name, "offsetUnset")) {
                             _ = self.callMethod(arr_val.object, "offsetUnset", &.{key}) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -14171,6 +14184,17 @@ pub const VM = struct {
 
     // php's E_ERROR from inside the engine: the script ends past any
     // try/catch, reported as "Fatal error: <message>"
+    // a ClassDef hook the class or its nearest ancestor defines
+    pub fn classHook(self: *VM, class_name: []const u8, comptime field: []const u8) @FieldType(ClassDef, field) {
+        var name: ?[]const u8 = class_name;
+        while (name) |n| {
+            const def = self.classes.get(n) orelse return null;
+            if (@field(def, field)) |hook| return hook;
+            name = def.parent;
+        }
+        return null;
+    }
+
     pub fn raiseFatal(self: *VM, message: []const u8) RuntimeError {
         try self.setPendingException("Error", message);
         self.uncatchable_fatal = true;
@@ -25988,7 +26012,7 @@ pub const VM = struct {
             if (arr.scratch_rc == 0 and !arr.elements_released) {
                 arr.refcount = 0;
                 self.queueArrayRelease(arr);
-                collected += 1;
+                if (!arr.uncounted) collected += 1;
             }
         }
         // a garbage generator that finished, or a fiber that is not

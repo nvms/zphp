@@ -105,11 +105,13 @@ fn elementAt(arr: *PhpArray, i: usize) Value {
 fn writable(ctx: *NativeContext, obj: *PhpObject) RuntimeError!*PhpArray {
     const arr = elementsOf(obj) orelse {
         const fresh = try ctx.createArray();
+        fresh.uncounted = true;
         try obj.set(ctx.allocator, P.elements, .{ .array = fresh });
         return fresh;
     };
     if (arr.refcount <= 1) return arr;
     const copy = try ctx.createArray();
+    copy.uncounted = true;
     for (0..arr.entries.items.len) |i| try copy.append(ctx.allocator, elementAt(arr, i));
     try obj.set(ctx.allocator, P.elements, .{ .array = copy });
     return copy;
@@ -128,6 +130,7 @@ fn checkAllocation(ctx: *NativeContext, size: usize) RuntimeError!void {
 fn initElements(ctx: *NativeContext, obj: *PhpObject, size: usize) RuntimeError!void {
     try checkAllocation(ctx, size);
     const arr = try ctx.createArray();
+    arr.uncounted = true;
     for (0..size) |_| try arr.append(ctx.allocator, .null);
     try obj.set(ctx.allocator, P.elements, .{ .array = arr });
     try setResize(ctx, obj, -1);
@@ -291,6 +294,7 @@ fn fromArray(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
         };
     }
     const out = try ctx.createArray();
+    out.uncounted = true;
     const n = data.entries.items.len;
     if (n > 0 and save_indexes) {
         var max: u64 = 0;
@@ -380,6 +384,7 @@ fn wakeup(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     defer listing.deinit(ctx.allocator);
     defer object_properties.releaseHolder(ctx.vm, listing.takeHolder());
     const arr = try ctx.createArray();
+    arr.uncounted = true;
     for (listing.items.items) |p| try arr.append(ctx.allocator, p.value);
     try obj.set(ctx.allocator, P.elements, .{ .array = arr });
     try setResize(ctx, obj, -1);
@@ -411,6 +416,7 @@ fn unserializeM(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     }
     if (sizeOf(obj) != 0 or resizing(obj)) return NativeResult.scalar(.null);
     const arr = try ctx.createArray();
+    arr.uncounted = true;
     const members = try ctx.createArray();
     for (args[0].array.entries.items) |e| {
         const v = if (e.ref) |r| r.* else e.value;

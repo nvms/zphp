@@ -140,6 +140,10 @@ pub const PhpArray = struct {
     // the objects they name, so freeing it releases nothing and the cycle
     // collector ignores its edges
     weak: bool = false,
+    // a built-in object's internal storage (an SplObjectStorage's elements),
+    // which php keeps inside the object: the cycle collector frees it with
+    // the object without counting it as garbage of its own
+    uncounted: bool = false,
     // liveness pins taken by natives that hold this array by reference
     // (array_walk, sort): counted in refcount but not a value copy, so a
     // write through the reference set must not separate because of them
