@@ -377,6 +377,9 @@ pub const ClassDef = struct {
     defaults_pending: bool = false,
     // constants whose expression waits for first access hold `.undef`
     lazy_constants: bool = false,
+    // this class or an ancestor declares a private method, so a subclass
+    // redeclaring one has to look for it
+    hides_methods: bool = false,
     is_abstract: bool = false,
     is_final: bool = false,
     is_readonly: bool = false,
@@ -835,6 +838,9 @@ pub const VM = struct {
     cycle_work: std.ArrayListUnmanaged(CycleWork) = .empty,
     collecting_cycles: bool = false,
     closure_instance_count: u32 = 0,
+    // the closure instances self.functions holds: no call site names one, so
+    // creating or freeing one leaves every call site's callee as it was
+    live_closure_instances: usize = 0,
     captures_dead: usize = 0,
     debug_no_pool: bool = false,
     debug_gc_verify: bool = false,
@@ -997,6 +1003,11 @@ pub const VM = struct {
     // resolve a frame's class scope in O(K) (K = small) instead of O(N)
     // iterating self.functions (grows large in framework-heavy workloads).
     chunk_to_func_names: std.AutoHashMapUnmanaged(usize, std.ArrayListUnmanaged([]const u8)) = .{},
+    // the lowercased short names (after "::" or the namespace) of every
+    // registered user function or method with a by-reference parameter. a
+    // call site whose name isn't here takes its arguments by value, which
+    // spares the argument guards a full resolution of the callee
+    ref_param_names: std.StringHashMapUnmanaged(void) = .{},
     // class or trait name -> its "Name::method" keys in self.functions, kept
     // beside chunk_to_func_names, so a trait's methods are found without
     // scanning every function
@@ -1810,8 +1821,11 @@ pub const VM = struct {
             capture: bool = true,
         };
 
-        pub fn intentIndex(chunk_ptr: usize, ip: usize) u9 {
-            return @truncate((chunk_ptr ^ ip) *% 0x517CC1B727220A95);
+        pub const intent_bits = 11;
+
+        // the product's high bits mix every bit of the chunk and the ip
+        pub fn intentIndex(chunk_ptr: usize, ip: usize) u11 {
+            return @intCast(((chunk_ptr ^ ip) *% 0x517CC1B727220A95) >> (64 - intent_bits));
         }
 
         pub fn propIndex(chunk_ptr: usize, ip: usize) u7 {
@@ -2072,7 +2086,7 @@ pub const VM = struct {
         try vm.reserveCallRegions();
         vm.ic.?.active_args = try allocator.alloc(RefSource, 256);
         @memset(vm.ic.?.active_args, .none);
-        vm.ic.?.intent = try allocator.alloc(InlineCache.IntentIC, 512);
+        vm.ic.?.intent = try allocator.alloc(InlineCache.IntentIC, 1 << InlineCache.intent_bits);
         @memset(vm.ic.?.intent, .{});
         const locals_buf = try allocator.alloc(Value, 8192);
         vm.ic.?.locals_buf = locals_buf.ptr;
@@ -3177,6 +3191,9 @@ pub const VM = struct {
         var ctfn_iter = self.chunk_to_func_names.iterator();
         while (ctfn_iter.next()) |e| e.value_ptr.*.deinit(self.allocator);
         self.chunk_to_func_names.deinit(self.allocator);
+        var rpn_iter = self.ref_param_names.keyIterator();
+        while (rpn_iter.next()) |k| self.allocator.free(k.*);
+        self.ref_param_names.deinit(self.allocator);
         self.clearMethodNameIndex();
         self.method_names_by_class.deinit(self.allocator);
         self.chunk_to_result.deinit(self.allocator);
@@ -3974,6 +3991,7 @@ pub const VM = struct {
         }
         try self.noteFunctionName(func.name);
         try self.functions.put(self.allocator, func.name, func);
+        try self.noteRefParams(func.name, func);
         try self.indexFunctionByChunk(func.name, &func.chunk);
     }
 
@@ -3993,6 +4011,56 @@ pub const VM = struct {
     // a free function about to be declared: refuses a name that differs from
     // an existing one only by case, indexes its lowercase form, and forgets
     // cached resolutions it could now win
+    // the short name a call site names its callee by: the method after
+    // "::", the function after its namespace
+    fn calleeShortName(name: []const u8) []const u8 {
+        if (std.mem.lastIndexOf(u8, name, "::")) |sep| return name[sep + 2 ..];
+        if (std.mem.lastIndexOfScalar(u8, name, '\\')) |sep| return name[sep + 1 ..];
+        return name;
+    }
+
+    fn noteRefParams(self: *VM, name: []const u8, func: *const ObjFunction) !void {
+        if (std.mem.indexOfScalar(bool, func.ref_params, true) == null) return;
+        const lower = try std.ascii.allocLowerString(self.allocator, calleeShortName(name));
+        const gop = self.ref_param_names.getOrPut(self.allocator, lower) catch |err| {
+            self.allocator.free(lower);
+            return err;
+        };
+        if (gop.found_existing) self.allocator.free(lower);
+    }
+
+    // true when no callee by this name can take a reference: no user function
+    // or method with a by-reference parameter is registered under it, and no
+    // native by it takes one
+    fn nameTakesNoRef(self: *VM, raw: []const u8) bool {
+        const short = calleeShortName(raw);
+        var buf: [64]u8 = undefined;
+        if (short.len > buf.len) return false;
+        const lower = std.ascii.lowerString(buf[0..short.len], short);
+        if (self.ref_param_names.contains(lower)) return false;
+        return !byref_args.hasByRefParams(lower);
+    }
+
+    // true when the name a call site gives its callee shows every argument
+    // goes by value
+    fn callSiteNamesNoRef(self: *VM, chunk: *const Chunk, call_ip: usize) bool {
+        const code = chunk.code.items;
+        const consts = chunk.constants.items;
+        const call_op = std.enums.fromInt(OpCode, code[call_ip]) orelse return false;
+        return switch (call_op) {
+            .call, .call_spread => self.nameTakesNoRef(consts[callOpU16(code, call_ip + 1)].string.bytes()),
+            .method_call, .method_call_spread => blk: {
+                // a closure's __invoke is registered under the closure's name
+                const name = consts[callOpU16(code, call_ip + 1)].string.bytes();
+                if (std.ascii.eqlIgnoreCase(name, "__invoke")) break :blk false;
+                break :blk self.nameTakesNoRef(name);
+            },
+            .static_call, .static_call_spread => self.nameTakesNoRef(consts[callOpU16(code, call_ip + 3)].string.bytes()),
+            .new_obj, .new_obj_dynamic => self.nameTakesNoRef("__construct"),
+            else => false,
+        };
+    }
+
     fn noteFunctionName(self: *VM, name: []const u8) RuntimeError!void {
         if (!isFreeFunctionName(name)) return;
         const ic = self.ic.?;
@@ -8506,6 +8574,7 @@ pub const VM = struct {
                         }
                         try self.noteFunctionName(func.name);
                         try self.functions.put(self.allocator, func.name, func);
+                        try self.noteRefParams(func.name, func);
                         try self.indexFunctionByChunk(func.name, &func.chunk);
                         break;
                     }
@@ -9864,7 +9933,7 @@ pub const VM = struct {
                     const delta = self.readU16();
                     const pos = self.readByte();
                     const chunk = self.currentChunk();
-                    if (!self.argNeedsCapture(chunk, field, delta, pos, 1)) continue;
+                    if (!self.tempArgNeedsCheck(chunk, field, delta, pos)) continue;
                     // only a callee known to take a reference here
                     const call_ip = field + delta;
                     const args_base = self.argsBase(pos, 1) orelse continue;
@@ -16581,13 +16650,19 @@ pub const VM = struct {
         }
         if (def.has_prop_hooks) self.any_prop_hooks = true;
         // mark the methods that redeclare an ancestor's private one
-        if (def.parent) |parent_name| {
+        var own_mit = def.methods.valueIterator();
+        while (own_mit.next()) |info| if (info.visibility == .private) {
+            def.hides_methods = true;
+            break;
+        };
+        if (def.parent) |parent_name| if (self.classes.getPtr(parent_name)) |parent_def| if (parent_def.hides_methods) {
+            def.hides_methods = true;
             var mit = def.methods.iterator();
             while (mit.next()) |me| {
                 const inherited = self.findMethodInfo(parent_name, me.key_ptr.*) orelse continue;
                 if (inherited.info.visibility == .private or inherited.info.changed) me.value_ptr.changed = true;
             }
-        }
+        };
         try self.classes.put(self.allocator, class_name, def);
         registered = true;
         // a parent's constants still waiting are evaluated on this class's
@@ -17423,6 +17498,7 @@ pub const VM = struct {
             if (!self.functions.contains(class_method)) {
                 const copy = try self.traitMethodCopy(m.func, class_method);
                 try self.functions.put(self.allocator, copy.name, copy);
+                try self.noteRefParams(copy.name, copy);
                 try self.indexFunctionByChunk(copy.name, &copy.chunk);
             }
             try def.addMethod(self.allocator, .{
@@ -17741,7 +17817,9 @@ pub const VM = struct {
     // appended by the following closure_bind ops extend the registered range
     fn newClosureInstance(self: *VM, compile_name: []const u8, func: *const ObjFunction) !Value {
         const name = try self.allocClosureInstanceName(compile_name);
-        try self.functions.put(self.allocator, name, func);
+        const gop = try self.functions.getOrPut(self.allocator, name);
+        if (!gop.found_existing) self.live_closure_instances += 1;
+        gop.value_ptr.* = func;
         try self.indexFunctionByChunk(name, &func.chunk);
         const obj = try self.allocObject(.{
             .class_name = "Closure",
@@ -18043,6 +18121,7 @@ pub const VM = struct {
             self.captures_dead += range.len;
             if (range.has_statics) self.purgeClosureStatics(name);
             if (self.functions.fetchRemove(name)) |fn_entry| {
+                self.live_closure_instances -|= 1;
                 if (self.chunk_to_func_names.getPtr(@intFromPtr(&fn_entry.value.chunk))) |names| {
                     for (names.items, 0..) |existing, idx| if (existing.ptr == name.ptr) {
                         _ = names.swapRemove(idx);
@@ -19547,6 +19626,18 @@ pub const VM = struct {
     // side effects) or may run as a plain read. resolution never executes PHP
     // and never autoloads: an unregistered callee simply captures
     pub fn argNeedsCapture(self: *VM, chunk: *const Chunk, field: usize, delta: u16, pos: u8, operands: usize) bool {
+        return self.resolveArgIntent(chunk, field, delta, pos, operands, false);
+    }
+
+    // a temporary sent where the callee might take a reference matters only
+    // to a registered callee, so a name no by-reference callee goes by
+    // settles it. a variable can't skip resolving: a callee autoloaded or
+    // declared by the call itself still takes it by reference
+    fn tempArgNeedsCheck(self: *VM, chunk: *const Chunk, field: usize, delta: u16, pos: u8) bool {
+        return self.resolveArgIntent(chunk, field, delta, pos, 1, true);
+    }
+
+    fn resolveArgIntent(self: *VM, chunk: *const Chunk, field: usize, delta: u16, pos: u8, operands: usize, temporary: bool) bool {
         if (self.argCaptureCached(chunk, field, delta, pos, operands)) |cached| return cached;
         const code = chunk.code.items;
         const call_ip = field + delta;
@@ -19554,7 +19645,7 @@ pub const VM = struct {
         const args_base = self.argsBase(pos, operands) orelse return true;
         const slots = guardSlots(code, call_ip);
         const guard = self.guardIdentity(slots, args_base);
-        const by_value = self.callSiteByValue(chunk, call_ip, pos, args_base) orelse false;
+        const by_value = (temporary and self.callSiteNamesNoRef(chunk, call_ip)) or (self.callSiteByValue(chunk, call_ip, pos, args_base) orelse false);
         if (self.ic) |ic| if (guard) |g| {
             const chunk_key = @intFromPtr(chunk);
             ic.intent[InlineCache.intentIndex(chunk_key, field)] = .{ .key = field, .chunk_key = chunk_key, .guard = g, .generation = self.registryGeneration(), .slots = slots, .capture = !by_value };
@@ -19603,7 +19694,7 @@ pub const VM = struct {
     }
 
     inline fn registryGeneration(self: *VM) usize {
-        return self.functions.count() + self.native_fns.count() + self.classes.count();
+        return self.functions.count() - @min(self.live_closure_instances, self.functions.count()) + self.native_fns.count() + self.classes.count();
     }
 
     // stack index of the first argument slot (or of the spread array)
