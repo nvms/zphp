@@ -1441,52 +1441,118 @@ fn native_passthru(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     return NativeResult.scalar(.null);
 }
 
-fn native_escapeshellarg(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1 or args[0] != .string) return NativeResult.literal("''");
-    const s = args[0].string.bytes();
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    // cmd.exe has no single-quote syntax: php wraps in double quotes there
-    // and blanks the characters cmd would interpret
-    const quote: u8 = if (platform.is_windows) '"' else '\'';
-    try buf.append(ctx.allocator, quote);
-    for (s) |c| {
-        if (c == 0) continue;
-        if (platform.is_windows and (c == '"' or c == '%' or c == '!')) {
-            try buf.append(ctx.allocator, ' ');
-        } else if (!platform.is_windows and c == '\'') {
-            try buf.appendSlice(ctx.allocator, "'\\''");
-        } else {
-            try buf.append(ctx.allocator, c);
-        }
-    }
-    try buf.append(ctx.allocator, quote);
-    const out = try ctx.allocator.dupe(u8, buf.items);
-    buf.deinit(ctx.allocator);
-    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
+extern fn sysconf(name: c_int) c_long;
+
+// exec.c's cmd_max_len: the system's ARG_MAX
+fn cmdMaxLen() usize {
+    if (platform.is_windows) return 8192;
+    const sc_arg_max: c_int = if (platform.is_macos) 1 else 0;
+    const n = sysconf(sc_arg_max);
+    return if (n > 0) @intCast(n) else 4096;
 }
 
-fn native_escapeshellcmd(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1 or args[0] != .string) return NativeResult.literal("");
-    const s = args[0].string.bytes();
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    var in_squote = false;
-    var in_dquote = false;
-    for (s) |c| {
-        if (c == 0) continue;
-        const is_special = switch (c) {
-            '#', '&', ';', '`', '|', '*', '?', '~', '<', '>', '^', '(', ')', '[', ']', '{', '}', '$', '\\', '\x0a', '\xff' => true,
-            else => false,
-        };
-        if (c == '\'' and !in_dquote) {
-            in_squote = !in_squote;
-        } else if (c == '"' and !in_squote) {
-            in_dquote = !in_dquote;
-        } else if (is_special and !in_squote and !in_dquote) {
-            try buf.append(ctx.allocator, '\\');
+// Z_PARAM_PATH_STR: a string without NUL bytes
+fn pathArg(ctx: *NativeContext, func: []const u8, args: []const Value, name: []const u8) RuntimeError![]const u8 {
+    const p = @import("string_ports.zig").Args.init(ctx, func, args);
+    const s = try p.str(0, name);
+    if (std.mem.indexOfScalar(u8, s, 0) != null) return p.valueError(0, name, "must not contain any null bytes");
+    return s;
+}
+
+fn tooLong(ctx: *NativeContext, comptime what: []const u8, max: usize) RuntimeError {
+    const msg = try std.fmt.allocPrint(ctx.allocator, what ++ " exceeds the allowed length of {d} bytes", .{max});
+    defer ctx.allocator.free(msg);
+    try ctx.vm.setPendingException("ValueError", msg);
+    return error.RuntimeError;
+}
+
+// php_escape_shell_arg
+fn native_escapeshellarg(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const s = try pathArg(ctx, "escapeshellarg", args, "arg");
+    const max = cmdMaxLen();
+    if (s.len > max - 3) return tooLong(ctx, "Argument", max);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(ctx.allocator);
+    const a = ctx.allocator;
+    try out.append(a, if (platform.is_windows) '"' else '\'');
+    var x: usize = 0;
+    while (x < s.len) : (x += 1) {
+        const mb = @import("locale.zig").mblen(s[x..]);
+        // invalid multibyte sequences are dropped
+        if (mb < 0) continue;
+        if (mb > 1) {
+            const n: usize = @intCast(mb);
+            try out.appendSlice(a, s[x .. x + n]);
+            x += n - 1;
+            continue;
         }
-        try buf.append(ctx.allocator, c);
+        const c = s[x];
+        if (platform.is_windows) {
+            if (c == '"' or c == '%' or c == '!') {
+                try out.append(a, ' ');
+                continue;
+            }
+        } else if (c == '\'') {
+            try out.appendSlice(a, "'\\'");
+        }
+        try out.append(a, c);
     }
-    const out = try ctx.allocator.dupe(u8, buf.items);
-    buf.deinit(ctx.allocator);
-    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
+    if (platform.is_windows) {
+        // an odd run of trailing backslashes would escape the closing quote
+        var k: usize = 0;
+        while (k < out.items.len and out.items[out.items.len - 1 - k] == '\\') k += 1;
+        if (k % 2 == 1) try out.append(a, '\\');
+        try out.append(a, '"');
+    } else {
+        try out.append(a, '\'');
+    }
+    if (out.items.len > max + 1) return tooLong(ctx, "Escaped argument", max);
+    return NativeResult.copyString(a, out.items);
+}
+
+// php_escape_shell_cmd: shell metacharacters escaped, and a quote unless it
+// has a partner later in the command
+fn native_escapeshellcmd(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const s = try pathArg(ctx, "escapeshellcmd", args, "command");
+    if (s.len == 0) return NativeResult.literal("");
+    const max = cmdMaxLen();
+    if (s.len > max - 3) return tooLong(ctx, "Command", max);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(ctx.allocator);
+    const a = ctx.allocator;
+    const escape: u8 = if (platform.is_windows) '^' else '\\';
+    var pending_quote: ?usize = null;
+    var x: usize = 0;
+    while (x < s.len) : (x += 1) {
+        const mb = @import("locale.zig").mblen(s[x..]);
+        if (mb < 0) continue;
+        if (mb > 1) {
+            const n: usize = @intCast(mb);
+            try out.appendSlice(a, s[x .. x + n]);
+            x += n - 1;
+            continue;
+        }
+        const c = s[x];
+        switch (c) {
+            '"', '\'' => if (platform.is_windows) {
+                try out.append(a, escape);
+            } else if (pending_quote == null) {
+                if (std.mem.indexOfScalarPos(u8, s, x + 1, c)) |at| {
+                    pending_quote = at;
+                } else {
+                    try out.append(a, escape);
+                }
+            } else if (s[pending_quote.?] == c) {
+                pending_quote = null;
+            } else {
+                try out.append(a, escape);
+            },
+            '%', '!' => if (platform.is_windows) try out.append(a, escape),
+            '#', '&', ';', '`', '|', '*', '?', '~', '<', '>', '^', '(', ')', '[', ']', '{', '}', '$', '\\', '\x0a', '\xff' => try out.append(a, escape),
+            else => {},
+        }
+        try out.append(a, c);
+    }
+    if (out.items.len > max + 1) return tooLong(ctx, "Escaped command", max);
+    return NativeResult.copyString(a, out.items);
 }
