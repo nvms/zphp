@@ -1538,8 +1538,9 @@ pub const Value = union(enum) {
             if (av == 0.0) return .{ .float = std.math.nan(f64) };
             return .{ .float = if (av > 0.0) std.math.inf(f64) else -std.math.inf(f64) };
         }
-        const both_int = (a == .int or (a == .string and isNumericIntString(a.string.bytes()))) and
-            (b == .int or (b == .string and isNumericIntString(b.string.bytes())));
+        // operands as php converts them: a leading-numeric string ("123abc")
+        // is the int its prefix spells
+        const both_int = numericPromote(a) == .int_kind and numericPromote(b) == .int_kind;
         // both-int path: check exact divisibility in integer space so we don't
         // lose precision routing through f64 (PHP_INT_MAX is exactly divisible
         // by 7 but float div rounds the quotient down). PHP_INT_MIN / -1 stays
@@ -1610,7 +1611,8 @@ pub const Value = union(enum) {
             else
                 .{ .int = -i },
             .float => |f| .{ .float = -f },
-            else => .{ .int = -toInt(self) },
+            // php compiles -$a as $a * -1: a numeric string keeps its type
+            else => numericBinOp(self, .{ .int = -1 }, .mul),
         };
     }
 
@@ -1762,7 +1764,8 @@ pub const Value = union(enum) {
         if ((a == .float and (b == .float or b == .int)) or (a == .int and b == .float)) {
             const af: f64 = if (a == .int) @floatFromInt(a.int) else a.float;
             const bf: f64 = if (b == .int) @floatFromInt(b.int) else b.float;
-            return if (af < bf) -1 else if (af > bf) 1 else 0;
+            // ZEND_THREEWAY_COMPARE: a NaN on either side is "greater"
+            return if (af == bf) 0 else if (af < bf) -1 else 1;
         }
         if (a == .object and b == .object) {
             if (a.object == b.object) return 0;
@@ -1809,9 +1812,8 @@ pub const Value = union(enum) {
             if (isNumericString(a.string.bytes()) and isNumericString(b.string.bytes())) {
                 const af = toFloat(a);
                 const bf = toFloat(b);
-                if (af < bf) return -1;
-                if (af > bf) return 1;
-                return 0;
+                if (af == bf) return 0;
+                return if (af < bf) -1 else 1;
             }
             return switch (std.mem.order(u8, a.string.bytes(), b.string.bytes())) {
                 .lt => -1,
@@ -1863,11 +1865,11 @@ pub const Value = union(enum) {
             const bb: i64 = if (b.isTruthy()) 1 else 0;
             return if (ab < bb) -1 else if (ab > bb) 1 else 0;
         }
+        // ZEND_THREEWAY_COMPARE: a NaN on either side is "greater"
         const af = toFloat(a);
         const bf = toFloat(b);
-        if (af < bf) return -1;
-        if (af > bf) return 1;
-        return 0;
+        if (af == bf) return 0;
+        return if (af < bf) -1 else 1;
     }
 
     fn arrayHasKey(arr: *PhpArray, key: PhpArray.Key) bool {

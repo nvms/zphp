@@ -211,11 +211,13 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                             self.sp = sp;
                             return;
                         }
+                        // php's is_smaller(_or_equal), a > b being b < a: a NaN
+                        // compares "greater" both ways, so every one is false
                         const result = switch (cmp_op) {
-                            .less => Value.lessThan(x, y),
-                            .less_equal => !Value.lessThan(y, x),
-                            .greater => Value.lessThan(y, x),
-                            else => !Value.lessThan(x, y),
+                            .less => Value.compare(x, y) < 0,
+                            .less_equal => Value.compare(x, y) <= 0,
+                            .greater => Value.compare(y, x) < 0,
+                            else => Value.compare(y, x) <= 0,
                         };
                         self.stackRelease(x);
                         self.stackRelease(y);

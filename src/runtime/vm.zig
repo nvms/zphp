@@ -4825,8 +4825,9 @@ pub const VM = struct {
                         continue;
                     }
                     if (!isArithOperand(v)) {
-                        const tn = Value.typeName(v);
-                        const msg = try std.fmt.allocPrint(self.allocator, "Cannot negate {s}", .{tn});
+                        // php compiles -$a as $a * -1
+                        const tn = if (v == .object) v.object.class_name else Value.typeName(v);
+                        const msg = try std.fmt.allocPrint(self.allocator, "Unsupported operand types: {s} * int", .{tn});
                         defer self.allocator.free(msg);
                         if (try self.throwBuiltinException("TypeError", msg)) continue;
                         return error.RuntimeError;
@@ -4947,7 +4948,20 @@ pub const VM = struct {
                         continue;
                     }
                     switch (v) {
-                        .int, .float => self.push(.{ .int = ~Value.toInt(v) }),
+                        .int => self.push(.{ .int = ~v.int }),
+                        .float => |f| {
+                            // bitwise_not_function: a float past the int range is
+                            // php's warning, a fraction its deprecation
+                            if (!(f >= -9.2233720368547758e18 and f < 9.2233720368547758e18)) {
+                                var tmp: [64]u8 = undefined;
+                                const m = try std.fmt.allocPrint(self.allocator, "The float {s} is not representable as an int, cast occurred", .{formatted_print.gcvt(f, -1, '.', 'E', &tmp)});
+                                defer self.allocator.free(m);
+                                self.emitWarning(m) catch if (try self.resumeRaised()) continue;
+                            } else if (f != @trunc(f)) {
+                                self.warnLossyIntConversion(f, null) catch if (try self.resumeRaised()) continue;
+                            }
+                            self.push(.{ .int = ~Value.toInt(v) });
+                        },
                         .string => |str| {
                             const out = try self.stringAllocator().alloc(u8, str.bytes().len);
                             for (str.bytes(), out) |c, *o| o.* = ~c;
@@ -13515,11 +13529,11 @@ pub const VM = struct {
     }
 
     fn bitwiseStrings(self: *VM, a: []const u8, b: []const u8, comptime op: enum { and_op, or_op, xor_op }) !Value.String {
-        // PHP byte-wise op on two strings: AND truncates to shorter length,
-        // OR and XOR pad shorter side with NUL bytes
+        // PHP byte-wise op on two strings: AND and XOR stop at the shorter
+        // string, OR pads it with NUL bytes
         const len = switch (op) {
-            .and_op => @min(a.len, b.len),
-            .or_op, .xor_op => @max(a.len, b.len),
+            .and_op, .xor_op => @min(a.len, b.len),
+            .or_op => @max(a.len, b.len),
         };
         const out = try self.stringAllocator().alloc(u8, len);
         for (0..len) |i| {
