@@ -2976,12 +2976,12 @@ fn parseDate(ctx: *NativeContext, input: []const u8) RuntimeError!dp.Parsed {
     return dp.parse(ctx.allocator, input, parse_db) catch return error.OutOfMemory;
 }
 
-fn recordLastErrors(ctx: *NativeContext, p: *const dp.Parsed) void {
-    var rec = vm_mod.DtLastErrors{};
-    for (p.warnings.items) |w| rec.addWarning(w.pos, w.msg);
-    for (p.errors.items) |e| rec.addError(e.pos, e.msg);
+fn recordLastErrors(ctx: *NativeContext, p: *const dp.Parsed) RuntimeError!void {
+    const rec = &ctx.vm.last_dt;
+    rec.clear();
+    for (p.warnings.items) |w| try rec.addWarning(ctx.vm.allocator, w.pos, w.msg);
+    for (p.errors.items) |e| try rec.addError(ctx.vm.allocator, e.pos, e.msg);
     rec.set = rec.warning_count > 0 or rec.error_count > 0;
-    ctx.vm.last_dt = rec;
 }
 
 // "Failed to parse time string (%s) at position %d (%c): %s", with an optional
@@ -3041,7 +3041,7 @@ fn resolveDateWith(ctx: *NativeContext, input_arg: []const u8, format: ?[]const 
     else
         try parseDate(ctx, input);
     defer p.deinit(ctx.allocator);
-    recordLastErrors(ctx, &p);
+    try recordLastErrors(ctx, &p);
     if (p.errors.items.len > 0) {
         if (throws) {
             const msg = try parseFailure(ctx, "", input, &p);
@@ -3070,7 +3070,7 @@ fn resolveDateWith(ctx: *NativeContext, input_arg: []const u8, format: ?[]const 
 fn modifyDateObject(ctx: *NativeContext, obj: *PhpObject, input: []const u8, prefix: []const u8, throws: bool) RuntimeError!bool {
     var p = try parseDate(ctx, input);
     defer p.deinit(ctx.allocator);
-    recordLastErrors(ctx, &p);
+    try recordLastErrors(ctx, &p);
     if (p.errors.items.len > 0) {
         const msg = try parseFailure(ctx, prefix, input, &p);
         defer ctx.allocator.free(msg);
@@ -3146,9 +3146,9 @@ fn messagesArray(ctx: *NativeContext, msgs: []const vm_mod.DtMsg) RuntimeError!*
 
 fn putErrorContainer(ctx: *NativeContext, arr: *@import("../runtime/value.zig").PhpArray, rec: *const vm_mod.DtLastErrors) RuntimeError!void {
     try putAssoc(ctx, arr, "warning_count", .{ .int = rec.warning_count });
-    try putAssoc(ctx, arr, "warnings", .{ .array = try messagesArray(ctx, rec.warnings[0..rec.warnings_len]) });
+    try putAssoc(ctx, arr, "warnings", .{ .array = try messagesArray(ctx, rec.warnings.items) });
     try putAssoc(ctx, arr, "error_count", .{ .int = rec.error_count });
-    try putAssoc(ctx, arr, "errors", .{ .array = try messagesArray(ctx, rec.errors[0..rec.errors_len]) });
+    try putAssoc(ctx, arr, "errors", .{ .array = try messagesArray(ctx, rec.errors.items) });
 }
 
 // php_date_do_return_parsed_time
@@ -3168,8 +3168,9 @@ fn parsedTimeArray(ctx: *NativeContext, p: *const dp.Parsed) RuntimeError!Native
     try putAssoc(ctx, arr, "second", field(t.s));
     try putAssoc(ctx, arr, "fraction", if (t.us == dp.UNSET) .{ .bool = false } else .{ .float = @as(f64, @floatFromInt(t.us)) / 1000000.0 });
     var rec = vm_mod.DtLastErrors{};
-    for (p.warnings.items) |w| rec.addWarning(w.pos, w.msg);
-    for (p.errors.items) |e| rec.addError(e.pos, e.msg);
+    defer rec.deinit(ctx.allocator);
+    for (p.warnings.items) |w| try rec.addWarning(ctx.allocator, w.pos, w.msg);
+    for (p.errors.items) |e| try rec.addError(ctx.allocator, e.pos, e.msg);
     try putErrorContainer(ctx, arr, &rec);
     try putAssoc(ctx, arr, "is_localtime", .{ .bool = t.is_localtime });
     if (t.is_localtime) {

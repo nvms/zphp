@@ -603,29 +603,37 @@ pub const NativeInvocation = struct {
 // messages are static strings
 pub const DtMsg = struct { pos: u32 = 0, msg: []const u8 = "" };
 
+// the messages are the date parser's static texts; timelib keeps at most
+// 1000 of each kind
 pub const DtLastErrors = struct {
     set: bool = false,
     warning_count: u32 = 0,
     error_count: u32 = 0,
-    warnings: [16]DtMsg = undefined,
-    warnings_len: u8 = 0,
-    errors: [16]DtMsg = undefined,
-    errors_len: u8 = 0,
+    warnings: std.ArrayListUnmanaged(DtMsg) = .empty,
+    errors: std.ArrayListUnmanaged(DtMsg) = .empty,
 
-    pub fn addWarning(self: *DtLastErrors, pos: usize, msg: []const u8) void {
-        self.warning_count += 1;
-        if (self.warnings_len < self.warnings.len) {
-            self.warnings[self.warnings_len] = .{ .pos = @intCast(@min(pos, std.math.maxInt(u32))), .msg = msg };
-            self.warnings_len += 1;
-        }
+    pub fn clear(self: *DtLastErrors) void {
+        self.set = false;
+        self.warning_count = 0;
+        self.error_count = 0;
+        self.warnings.clearRetainingCapacity();
+        self.errors.clearRetainingCapacity();
     }
 
-    pub fn addError(self: *DtLastErrors, pos: usize, msg: []const u8) void {
+    pub fn addWarning(self: *DtLastErrors, a: Allocator, pos: usize, msg: []const u8) !void {
+        self.warning_count += 1;
+        try self.warnings.append(a, .{ .pos = @intCast(@min(pos, std.math.maxInt(u32))), .msg = msg });
+    }
+
+    pub fn addError(self: *DtLastErrors, a: Allocator, pos: usize, msg: []const u8) !void {
         self.error_count += 1;
-        if (self.errors_len < self.errors.len) {
-            self.errors[self.errors_len] = .{ .pos = @intCast(@min(pos, std.math.maxInt(u32))), .msg = msg };
-            self.errors_len += 1;
-        }
+        try self.errors.append(a, .{ .pos = @intCast(@min(pos, std.math.maxInt(u32))), .msg = msg });
+    }
+
+    pub fn deinit(self: *DtLastErrors, a: Allocator) void {
+        self.warnings.deinit(a);
+        self.errors.deinit(a);
+        self.* = .{};
     }
 };
 
@@ -3157,6 +3165,7 @@ pub const VM = struct {
         self.profile_calls.deinit(self.allocator);
         // the compile results own the attributes
         self.function_attributes.deinit(self.allocator);
+        self.last_dt.deinit(self.allocator);
         self.native_fns.deinit(self.allocator);
         self.output.deinit(self.allocator);
         self.strings.deinit(self.allocator);
@@ -3430,7 +3439,7 @@ pub const VM = struct {
         self.setStrtokState(null);
         self.strtok_pos = 0;
         self.clearLastError();
-        self.last_dt = .{};
+        self.last_dt.deinit(self.allocator);
         self.last_intl_error_code = 0;
         self.exit_code = 0;
         self.statics.clearRetainingCapacity();
