@@ -6047,6 +6047,7 @@ ext/standard/tests/file/bug32160.phpt
 ext/standard/tests/file/bug35740.phpt
 ext/standard/tests/file/bug37158.phpt
 ext/standard/tests/file/bug37864.phpt
+ext/standard/tests/file/bug38450_2.phpt
 ext/standard/tests/file/bug39367.phpt
 ext/standard/tests/file/bug39538.phpt
 ext/standard/tests/file/bug39673.phpt
