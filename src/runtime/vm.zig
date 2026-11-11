@@ -448,6 +448,9 @@ pub const ClassDef = struct {
         is_abstract: bool = false,
         is_final: bool = false,
         visibility: Visibility = .public,
+        // ZEND_ACC_CHANGED: an ancestor has a private (or changed) method of
+        // this name, so a call from that ancestor's scope may run its own
+        changed: bool = false,
     };
 
     pub fn addMethod(self: *ClassDef, allocator: Allocator, info: MethodInfo) !void {
@@ -10397,7 +10400,7 @@ pub const VM = struct {
                     const mvr = self.findMethodVisibility(obj.class_name, method_name);
                     // the calling class's own private method runs on its
                     // instances, whatever a subclass redeclares
-                    const scope_private = self.scopePrivateMethod(obj.class_name, method_name, mvr.defining_class);
+                    const scope_private = if (mvr.changed) self.scopePrivateMethod(obj.class_name, method_name, mvr.defining_class) else null;
                     if (scope_private == null and !self.checkVisibility(mvr.defining_class, mvr.visibility) and !self.protectedRootVisible(mvr.defining_class, method_name, mvr.visibility)) {
                         const suffix = self.visScopeSuffix();
                         const msg = try std.fmt.allocPrint(self.allocator, "Call to {s} method {s}::{s}(){s}", .{
@@ -12108,9 +12111,9 @@ pub const VM = struct {
     // static targets never forward $this, so a cache hit enters directly
     fn callStaticMethod(self: *VM, class_name: []const u8, method_name: []const u8, arg_count: u32, effective_called: []const u8, site: ?StaticCallSite) RuntimeError!void {
         // self::, parent:: or static:: with no class scope to name
-        if (class_name.len >= 4 and class_name.len <= 6 and !self.classes.contains(class_name)) {
+        if (class_name.len >= 4 and class_name.len <= 6) {
             inline for (.{ "self", "parent", "static" }) |word| {
-                if (std.ascii.eqlIgnoreCase(class_name, word)) {
+                if (std.ascii.eqlIgnoreCase(class_name, word) and !self.classes.contains(class_name)) {
                     self.dropN(arg_count);
                     const msg = try self.classNotFoundMessage(class_name);
                     defer self.allocator.free(msg);
@@ -12131,24 +12134,8 @@ pub const VM = struct {
             }
         }
 
-        // every method an interface declares is abstract, __callStatic too
-        if (self.interfaces.getEntry(class_name)) |ie| {
-            var declared: ?[]const u8 = null;
-            var magic = false;
-            for (ie.value_ptr.methods.items) |m| {
-                if (std.ascii.eqlIgnoreCase(m, method_name)) declared = m;
-                if (std.ascii.eqlIgnoreCase(m, "__callStatic")) magic = true;
-            }
-            self.dropN(arg_count);
-            const msg = if (declared != null or magic)
-                try std.fmt.allocPrint(self.allocator, "Cannot call abstract method {s}::{s}()", .{ ie.key_ptr.*, declared orelse method_name })
-            else
-                try std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ ie.key_ptr.*, method_name });
-            defer self.allocator.free(msg);
-            if (try self.throwBuiltinException("Error", msg)) return;
-            return error.RuntimeError;
-        }
         const full_name = self.resolveMethod(class_name, method_name) catch {
+            if (try self.refuseInterfaceStaticCall(class_name, method_name, arg_count)) return;
             // a class that isn't there (after the autoloaders) is "not found"
             if (!self.classes.contains(class_name) and !self.interfaces.contains(class_name)) {
                 if (self.pending_exception != null) return error.RuntimeError;
@@ -12167,7 +12154,9 @@ pub const VM = struct {
         };
         // a method the calling scope can't see: $this's __call or the
         // class's __callStatic, else php's Error
-        const found = self.findMethodInfo(class_name, method_name);
+        const found = self.methodInfoOf(full_name, class_name, method_name);
+        // an interface's method resolves to no class's declaration
+        if (found == null and try self.refuseInterfaceStaticCall(class_name, method_name, arg_count)) return;
         if (found) |f| if (f.info.visibility != .public and !self.checkVisibility(f.defining, f.info.visibility) and !self.protectedRootVisible(f.defining, method_name, f.info.visibility)) {
             if (try self.staticCallFallback(class_name, method_name, arg_count, effective_called)) return;
             self.dropN(arg_count);
@@ -12344,6 +12333,38 @@ pub const VM = struct {
             current = entry.value_ptr.parent;
         }
         return null;
+    }
+
+    // every method an interface declares is abstract, __callStatic too:
+    // a static call on an interface is php's Error. false when class_name
+    // names no interface
+    fn refuseInterfaceStaticCall(self: *VM, class_name: []const u8, method_name: []const u8, arg_count: u32) RuntimeError!bool {
+        const ie = self.interfaces.getEntry(class_name) orelse return false;
+        var declared: ?[]const u8 = null;
+        var magic = false;
+        for (ie.value_ptr.methods.items) |m| {
+            if (std.ascii.eqlIgnoreCase(m, method_name)) declared = m;
+            if (std.ascii.eqlIgnoreCase(m, "__callStatic")) magic = true;
+        }
+        self.dropN(arg_count);
+        const msg = if (declared != null or magic)
+            try std.fmt.allocPrint(self.allocator, "Cannot call abstract method {s}::{s}()", .{ ie.key_ptr.*, declared orelse method_name })
+        else
+            try std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ ie.key_ptr.*, method_name });
+        defer self.allocator.free(msg);
+        if (try self.throwBuiltinException("Error", msg)) return true;
+        return error.RuntimeError;
+    }
+
+    // the declaration behind a resolved "Class::method", else by a walk
+    fn methodInfoOf(self: *VM, full_name: []const u8, class_name: []const u8, method_name: []const u8) ?struct { info: ClassDef.MethodInfo, defining: []const u8 } {
+        if (std.mem.indexOf(u8, full_name, "::")) |sep| {
+            if (self.classes.getEntry(full_name[0..sep])) |entry| {
+                if (entry.value_ptr.methods.get(method_name)) |info| return .{ .info = info, .defining = entry.key_ptr.* };
+            }
+        }
+        const walked = self.findMethodInfo(class_name, method_name) orelse return null;
+        return .{ .info = walked.info, .defining = walked.defining };
     }
 
     // get_static_method_fallback: $this's __call when $this is an instance
@@ -16559,6 +16580,14 @@ pub const VM = struct {
             old_def.deinit(self.allocator);
         }
         if (def.has_prop_hooks) self.any_prop_hooks = true;
+        // mark the methods that redeclare an ancestor's private one
+        if (def.parent) |parent_name| {
+            var mit = def.methods.iterator();
+            while (mit.next()) |me| {
+                const inherited = self.findMethodInfo(parent_name, me.key_ptr.*) orelse continue;
+                if (inherited.info.visibility == .private or inherited.info.changed) me.value_ptr.changed = true;
+            }
+        }
         try self.classes.put(self.allocator, class_name, def);
         registered = true;
         // a parent's constants still waiting are evaluated on this class's
@@ -20946,7 +20975,7 @@ pub const VM = struct {
 
     // declared is false for a name no class declares, or one only an
     // ancestor declares private where the running scope can't see it
-    pub const VisResult = struct { visibility: ClassDef.Visibility, defining_class: []const u8, is_readonly: bool = false, set_visibility: ClassDef.Visibility = .public, type_str: []const u8 = "", declared: bool = true };
+    pub const VisResult = struct { visibility: ClassDef.Visibility, defining_class: []const u8, is_readonly: bool = false, set_visibility: ClassDef.Visibility = .public, type_str: []const u8 = "", declared: bool = true, changed: bool = false };
 
     pub fn findPropertyVisibility(self: *VM, class_name: []const u8, prop_name: []const u8) VisResult {
         // PHP rule for private properties: each declaring class gets its own
@@ -21034,7 +21063,7 @@ pub const VM = struct {
         while (current) |cn| {
             if (self.classes.getEntry(cn)) |entry| {
                 const cls = entry.value_ptr;
-                if (cls.methods.get(method_name)) |info| return .{ .visibility = info.visibility, .defining_class = entry.key_ptr.* };
+                if (cls.methods.get(method_name)) |info| return .{ .visibility = info.visibility, .defining_class = entry.key_ptr.*, .changed = info.changed };
                 current = cls.parent;
             } else break;
         }
