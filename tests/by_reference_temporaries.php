@@ -61,3 +61,16 @@ function &passThrough() {
 }
 var_dump(passThrough());
 echo count([1, 2]), " ", strlen("abc"), "\n";
+
+// the return type is verified before the notice, and array_multisort takes
+// call results without one (it prefers references)
+function &typed(): array {
+    return null;
+}
+try {
+    typed();
+} catch (TypeError $e) {
+    echo $e->getMessage(), "\n";
+}
+$data = [['k' => 2], ['k' => 1]];
+var_dump(array_multisort(array_column($data, 'k'), SORT_ASC, $data), $data[0]['k']);

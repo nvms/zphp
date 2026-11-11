@@ -9778,6 +9778,10 @@ pub const VM = struct {
                     const args_base = self.argsBase(pos, 1) orelse continue;
                     if (self.callSiteByValue(chunk, call_ip, pos, args_base) orelse true) continue;
                     const sent = self.stack[self.sp - 1];
+                    // array_multisort prefers a reference, and takes values
+                    // quietly (ZEND_ARG_SEND_PREFER_REF)
+                    const callee = self.argCalleeName(chunk, call_ip, args_base) orelse continue;
+                    if (std.ascii.eqlIgnoreCase(callee, "array_multisort")) continue;
                     if (op == .arg_call_result) {
                         // SEND_VAR_NO_REF: a call that returned a reference
                         // passes it; any other result is a temporary the
@@ -9794,17 +9798,22 @@ pub const VM = struct {
                         self.raiseError(8, "Only variables should be passed by reference") catch if (try self.resumeRaised()) continue;
                         continue;
                     }
-                    // SEND_VAL_EX: a value where the callee must take a
-                    // reference (array_multisort prefers one, and takes values)
-                    const callee = self.argCalleeName(chunk, call_ip, args_base) orelse continue;
-                    if (std.ascii.eqlIgnoreCase(callee, "array_multisort")) continue;
+                    // SEND_VAL_EX: a value where the callee must take a reference
                     const msg = try self.cannotPassByReference(callee, pos);
                     defer self.allocator.free(msg);
                     if (try self.throwBuiltinException("Error", msg)) continue;
                     return error.RuntimeError;
                 },
                 .return_ref_value => {
-                    const at_end = self.readByte() == 1;
+                    const kind = self.readByte();
+                    const at_end = kind == 1;
+                    // php verifies the return type first: a value it refuses
+                    // is the TypeError, without the notice
+                    if (kind == 0) {
+                        var returned = self.stack[self.sp - 1];
+                        if (try self.checkReturnType(&returned)) continue;
+                        self.stack[self.sp - 1] = returned;
+                    }
                     if (self.frame_count >= 2) self.return_ref_value_at = .{ .frame = self.frame_count - 2, .ip = self.frames[self.frame_count - 2].ip };
                     const msg = "Only variable references should be returned by reference";
                     // the implicit return is at the body's closing brace

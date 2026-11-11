@@ -653,7 +653,7 @@ pub const Compiler = struct {
                     // variable: php's notice, then the value
                     if (!ref_return_emitted and self.returns_ref and !self.isCallLike(node.data.lhs)) {
                         try self.emitOp(.return_ref_value);
-                        try self.emitByte(0);
+                        try self.emitByte(if (node.data.lhs != 0) 0 else 2);
                     }
                     if (ref_return_emitted) {
                         // tryCompileRefReturn already emitted return_ref

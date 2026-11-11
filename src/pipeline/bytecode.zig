@@ -475,8 +475,9 @@ pub const OpCode = enum(u8) {
     // the call returned no reference
     arg_call_result,
     // a function returning by reference returns no variable: php's notice
-    // "Only variable references should be returned by reference". u8 1 at
-    // the implicit return at the end of the body
+    // "Only variable references should be returned by reference". u8 0 with
+    // the returned value on the stack, 1 at the implicit return at the end
+    // of the body, 2 for a `return;`
     return_ref_value,
 
     pub fn width(self: OpCode) usize {
