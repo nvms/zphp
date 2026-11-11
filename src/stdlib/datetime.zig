@@ -1070,12 +1070,6 @@ fn getTimestamp(obj: *PhpObject) i64 {
     return Value.toInt(obj.get("__timestamp"));
 }
 
-// the zone of an optional DateTimeZone argument
-fn tzArgZone(args: []const Value, idx: usize) ?ParseZone {
-    if (args.len <= idx or args[idx] != .object) return null;
-    return objZone(args[idx].object);
-}
-
 // a copy of a date object of the same class, for the immutable methods
 fn cloneDateObject(ctx: *NativeContext, src: *PhpObject) RuntimeError!*PhpObject {
     const copy = try ctx.createObject(src.class_name);
@@ -1228,9 +1222,6 @@ fn factoryClass(ctx: *NativeContext, comptime func: []const u8, base: []const u8
     return class;
 }
 
-fn isDigit(c: u8) bool {
-    return c >= '0' and c <= '9';
-}
 // ---- DateTime and DateTimeImmutable (php_date.c) ----
 
 const CompareKind = enum { date, zone, interval, period };
@@ -2023,32 +2014,6 @@ const native_timezone_transitions_get = objFunction("timezone_transitions_get", 
 
 // standalone PHP functions: date(), mktime(), strtotime(), time(), microtime()
 
-fn appendOffsetColon(buf: *std.ArrayListUnmanaged(u8), a: Allocator, offset: i32) !void {
-    const abs: u32 = if (offset < 0) @intCast(-offset) else @intCast(offset);
-    const h = abs / 3600;
-    const m = (abs % 3600) / 60;
-    var tmp: [8]u8 = undefined;
-    const s = std.fmt.bufPrint(&tmp, "{c}{d:0>2}:{d:0>2}", .{
-        @as(u8, if (offset < 0) '-' else '+'),
-        h,
-        m,
-    }) catch "+00:00";
-    try buf.appendSlice(a, s);
-}
-
-fn appendOffsetCompact(buf: *std.ArrayListUnmanaged(u8), a: Allocator, offset: i32) !void {
-    const abs: u32 = if (offset < 0) @intCast(-offset) else @intCast(offset);
-    const h = abs / 3600;
-    const m = (abs % 3600) / 60;
-    var tmp: [8]u8 = undefined;
-    const s = std.fmt.bufPrint(&tmp, "{c}{d:0>2}{d:0>2}", .{
-        @as(u8, if (offset < 0) '-' else '+'),
-        h,
-        m,
-    }) catch "+0000";
-    try buf.appendSlice(a, s);
-}
-
 // the local time of an instant in the default zone (timelib_unixtime2local)
 fn defaultLocal(ctx: *NativeContext, ts: i64) date_format.Local {
     return localOf(ts, 0, &defaultZone(ctx));
@@ -2318,90 +2283,6 @@ fn native_gettimeofday(ctx: *NativeContext, args: []const Value) RuntimeError!Na
     return timeOfDayAs(ctx, args, "gettimeofday", true);
 }
 
-pub fn dateToTimestamp(year: i64, month: i64, day: i64, hour: i64, min: i64, sec: i64) i64 {
-    // normalize month overflow/underflow (e.g. month 13 -> january next year)
-    const adj_month = @mod(month - 1, @as(i64, 12)) + 1;
-    const adj_year = year + @divFloor(month - 1, @as(i64, 12));
-    const m = adj_month;
-    const y = adj_year - @as(i64, if (m <= 2) 1 else 0);
-    const era: i64 = @divFloor(if (y >= 0) y else y - 399, 400);
-    const yoe: i64 = y - era * 400;
-    const mp: i64 = if (m > 2) m - 3 else m + 9;
-    const doy = @divFloor(153 * mp + 2, 5) + day - 1;
-    const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
-    const days = era * 146097 + doe - 719468;
-    return days * 86400 + hour * 3600 + min * 60 + sec;
-}
-
-const DateComponents = struct { year: i64, month: i64, day: i64, hour: i64, min: i64, sec: i64 };
-
-const FmtDaySec = struct {
-    h: u32,
-    mi: u32,
-    s: u32,
-    pub fn getHoursIntoDay(self: @This()) u32 {
-        return self.h;
-    }
-    pub fn getMinutesIntoHour(self: @This()) u32 {
-        return self.mi;
-    }
-    pub fn getSecondsIntoMinute(self: @This()) u32 {
-        return self.s;
-    }
-};
-const FmtEpochDay = struct { day: i64 };
-const FmtYearDay = struct { year: i64 };
-const FmtMonth = struct {
-    v: u32,
-    pub fn numeric(s: @This()) u32 {
-        return s.v;
-    }
-};
-const FmtMonthDay = struct { month: FmtMonth, day_index: u32 };
-
-const IsoWeek = struct { year: i64, week: u32 };
-
-fn isoWeek(day_num: i64) IsoWeek {
-    // iso 8601 week-numbering: week 1 contains the year's first Thursday.
-    // the iso year is the calendar year of the Thursday in the same week.
-    // counted in days, so the extreme years php can hold don't overflow
-    const dow = @mod(@mod(day_num, 7) + 3, 7); // 0 is monday; 1970-01-01 was a thursday
-    const thu = day_num +% 3 -% dow;
-    var t = dp.Time{ .m = 1, .d = 1 };
-    var m: i64 = 0;
-    var d: i64 = 0;
-    dp.dateFromEpochDays(thu, &t.y, &m, &d);
-    const jan1_day = dp.epochDaysFromTime(&t);
-    const week_num: u32 = @intCast(@divFloor(thu -% jan1_day, 7) + 1);
-    return .{ .year = t.y, .week = week_num };
-}
-
-fn baseComponents(base: i64) DateComponents {
-    // Howard Hinnant's civil_from_days, works for any year including pre-1970
-    // seconds-of-day in [0,86400); @mod keeps the extreme timestamps from
-    // overflowing days * 86400
-    const days = @divFloor(base, 86400);
-    const sod: i64 = @mod(base, 86400);
-    const z = days + 719468;
-    const era = @divFloor(z, 146097);
-    const doe: i64 = z - era * 146097;
-    const yoe: i64 = @divFloor(doe - @divFloor(doe, 1460) + @divFloor(doe, 36524) - @divFloor(doe, 146096), 365);
-    const y_civil: i64 = yoe + era * 400;
-    const doy: i64 = doe - (365 * yoe + @divFloor(yoe, 4) - @divFloor(yoe, 100));
-    const mp: i64 = @divFloor(5 * doy + 2, 153);
-    const d_civil: i64 = doy - @divFloor(153 * mp + 2, 5) + 1;
-    const m_civil: i64 = if (mp < 10) mp + 3 else mp - 9;
-    const year: i64 = if (m_civil <= 2) y_civil + 1 else y_civil;
-    return .{
-        .year = year,
-        .month = m_civil,
-        .day = d_civil,
-        .hour = @divFloor(sod, 3600),
-        .min = @divFloor(@mod(sod, 3600), 60),
-        .sec = @mod(sod, 60),
-    };
-}
-
 fn eqlLower(a: []const u8, lower_b: []const u8) bool {
     if (a.len != lower_b.len) return false;
     for (a, lower_b) |ca, cb| {
@@ -2424,14 +2305,6 @@ fn daysInMonth(month: i64, year: i64) i64 {
 
 // ---- zones, read from php's bundled database (tzdb.zig) ----
 
-// an offset zone's name ("+05:30", "-0800")
-fn fixedOffsetOf(name: []const u8) ?i32 {
-    if (name.len == 0 or (name[0] != '+' and name[0] != '-')) return null;
-    if (parseFixedOffset(name)) |o| return o;
-    if (parseTimezoneOffset(name)) |o| return @intCast(o);
-    return null;
-}
-
 // the offset in effect in a zone id, utc for one the database lacks
 fn idOffset(name: []const u8, utc_ts: i64) struct { offset: i32, is_dst: bool } {
     const f = zoneFetch(name, utc_ts) orelse return .{ .offset = 0, .is_dst = false };
@@ -2441,41 +2314,6 @@ fn idOffset(name: []const u8, utc_ts: i64) struct { offset: i32, is_dst: bool } 
 fn zoneFetch(name: []const u8, utc_ts: i64) ?tzdb.Info.Fetched {
     const inf = tzdb.info(name) orelse return null;
     return inf.fetch(utc_ts);
-}
-
-pub fn tzOffsetForName(allocator: Allocator, name: []const u8, utc_ts: i64) i32 {
-    _ = allocator;
-    if (abbrZone(name)) |hit| return @intCast(hit.offset);
-    if (fixedOffsetOf(name)) |o| return o;
-    const f = zoneFetch(name, utc_ts) orelse return 0;
-    return f.t.offset;
-}
-
-pub fn tzIsDstForName(allocator: Allocator, name: []const u8, utc_ts: i64) bool {
-    _ = allocator;
-    if (abbrZone(name)) |hit| return hit.dst;
-    if (fixedOffsetOf(name) != null) return false;
-    const f = zoneFetch(name, utc_ts) orelse return false;
-    return f.t.isdst;
-}
-
-// the offset in effect at a wall-clock time (seconds as if the wall clock were
-// utc), resolved the way timelib resolves a time without a zone of its own
-pub fn tzOffsetForWallByName(allocator: Allocator, name: []const u8, wall_ts: i64) i32 {
-    _ = allocator;
-    if (abbrZone(name)) |hit| return @intCast(hit.offset);
-    if (fixedOffsetOf(name)) |o| return o;
-    if (!tzdb.isValid(name)) return 0;
-    return @intCast(wall_ts -% dp.utcOfWall(wall_ts, name, parse_db));
-}
-
-// the abbreviation in effect (caller frees), or null for an unknown zone
-pub fn tzAbbrevForName(allocator: Allocator, name: []const u8, utc_ts: i64) ?[]const u8 {
-    if (abbrZone(name) != null) return std.ascii.allocUpperString(allocator, name) catch null;
-    if (fixedOffsetOf(name) != null) return allocator.dupe(u8, name) catch null;
-    const inf = tzdb.info(name) orelse return null;
-    const f = inf.fetch(utc_ts) orelse return null;
-    return allocator.dupe(u8, inf.abbr(f.t)) catch null;
 }
 
 // timelib_timezone_id_is_valid
@@ -2569,10 +2407,6 @@ fn native_timezone_open(ctx: *NativeContext, args: []const Value) RuntimeError!N
 
 fn native_tz_get(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     return try NativeResult.copyString(ctx.allocator, ctx.vm.default_tz_name);
-}
-
-fn isLeapYear(y: i64) bool {
-    return (@mod(y, 4) == 0 and @mod(y, 100) != 0) or @mod(y, 400) == 0;
 }
 
 // ---- the date string parser (date_parse.zig) wired to zphp's zones ----
