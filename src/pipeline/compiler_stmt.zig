@@ -537,6 +537,8 @@ pub fn compileThrow(self: *Compiler, node: Ast.Node) Error!void {
 // subsequent `\Sub\Path` is appended verbatim
 fn resolveCatchClassName(self: *Compiler, node_idx: u32) Error![]const u8 {
     const node = self.ast.nodes[node_idx];
+    // `namespace\X`
+    if (node.tag == .qualified_name and node.data.rhs == 2) return @import("compiler_expr.zig").resolveNodeClassName(self, node);
     // for a `.identifier` node the main_token is the first identifier and
     // adjacent tokens might be `\`+identifier extending the qualified name.
     // walk forward from main_token while we keep seeing `\` + identifier

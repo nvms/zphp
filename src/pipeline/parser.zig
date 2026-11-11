@@ -1135,7 +1135,7 @@ const Parser = struct {
         var types = std.ArrayListUnmanaged(u32).empty;
         defer types.deinit(self.allocator);
 
-        if (self.peek() == .identifier or self.peek() == .backslash) {
+        if (self.peek() == .identifier or self.peek() == .backslash or (self.peek() == .kw_namespace and self.peekAt(1) == .backslash)) {
             try types.append(self.allocator, try self.parseQualifiedName());
 
             while (self.peek() == .pipe) {
