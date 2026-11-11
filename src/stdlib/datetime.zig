@@ -14,6 +14,7 @@ const ClassDef = vm_mod.ClassDef;
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 const tzdb = @import("tzdb.zig");
+const date_format = @import("date_format.zig");
 const tz_abbr_table = @import("tz_abbr_table.zig");
 const string_ports = @import("string_ports.zig");
 
@@ -457,7 +458,7 @@ fn advancePeriod(ctx: *NativeContext, period: *PhpObject) RuntimeError!void {
     const interval = period.get("interval");
     if (current != .object or interval != .object) return;
     const us_v = current.object.get("__microseconds");
-    const next = try periodStep(ctx, getTimestamp(current.object), if (us_v == .int) us_v.int else 0, objTzName(current.object, ctx.vm.default_tz_name), interval.object);
+    const next = try periodStep(ctx, getTimestamp(current.object), if (us_v == .int) us_v.int else 0, &objZoneOr(ctx, current.object), interval.object);
     const moved = try cloneDateObject(ctx, current.object);
     try moved.set(ctx.allocator, "__timestamp", .{ .int = next.ts });
     if (next.us != 0 or moved.get("__microseconds") != .null) try moved.set(ctx.allocator, "__microseconds", .{ .int = next.us });
@@ -500,7 +501,7 @@ fn dpiCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const base: []const u8 = if (ctx.vm.isInstanceOf(current.object.class_name, "DateTimeImmutable")) "DateTimeImmutable" else "DateTime";
     const dt = try ctx.createObject(base);
     try dt.set(ctx.allocator, "__timestamp", current.object.get("__timestamp"));
-    if (current.object.get("__timezone") == .string) try dt.set(ctx.allocator, "__timezone", current.object.get("__timezone"));
+    if (objZone(current.object)) |zone| try setObjZone(ctx, dt, &zone);
     if (current.object.get("__microseconds") == .int) try dt.set(ctx.allocator, "__microseconds", current.object.get("__microseconds"));
     return NativeResult.borrowed(.{ .object = dt });
 }
@@ -595,10 +596,9 @@ fn putDateFields(ctx: *NativeContext, obj: *PhpObject, table: *PhpArray) Runtime
     // a subclass that never called the parent constructor has no date
     if (obj.get("__timestamp") == .null) return;
     const ts = getTimestamp(obj);
-    const zone_v = obj.get("__timezone");
-    const zone = if (zone_v == .string) ParseZone.of(zone_v.string.bytes(), false) else ParseZone.of(ctx.vm.default_tz_name, true);
+    const zone = objZoneOr(ctx, obj);
     const us_v = obj.get("__microseconds");
-    const formatted = try formatTimestampTzMicros(ctx, ts, "x-m-d H:i:s.u", @intCast(zone.totalOffset(ctx.allocator, ts)), zone.name(), if (us_v == .int) us_v.int else 0);
+    const formatted = try formatIn(ctx, ts, if (us_v == .int) us_v.int else 0, &zone, "x-m-d H:i:s.u");
     defer if (formatted.value == .string) formatted.value.string.release();
     try table.set(ctx.allocator, .{ .string = Value.String.borrowed("date") }, formatted.value);
     try putZoneFields(ctx, &zone, table);
@@ -614,8 +614,7 @@ fn putZoneFields(ctx: *NativeContext, zone: *const ParseZone, table: *PhpArray) 
 // a DateTimeZone shows timezone_type and timezone
 fn timezoneProperties(ctx: *NativeContext, obj: *PhpObject, _: object_properties.Purpose) RuntimeError!?*PhpArray {
     const table = try object_properties.ownTable(ctx.vm, obj);
-    const name = obj.get("__timezone");
-    if (name == .string) try putZoneFields(ctx, &ParseZone.of(name.string.bytes(), false), table);
+    if (objZone(obj)) |zone| try putZoneFields(ctx, &zone, table);
     return table;
 }
 
@@ -632,8 +631,7 @@ fn dateSerialize(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
 fn timezoneSerialize(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const out = try ctx.createArray();
-    const name = obj.get("__timezone");
-    if (name == .string) try putZoneFields(ctx, &ParseZone.of(name.string.bytes(), false), out);
+    if (objZone(obj)) |zone| try putZoneFields(ctx, &zone, out);
     try appendOwnMissing(ctx, obj, out);
     return NativeResult.borrowed(.{ .array = out });
 }
@@ -671,7 +669,7 @@ fn initializeDateFromHash(ctx: *NativeContext, obj: *PhpObject, data: *const Php
         dp.ZONETYPE_ID => {
             const parsed = (try timezoneInitialize(ctx, zone.string.bytes(), "", false)) orelse return false;
             if (parsed.kind != dp.ZONETYPE_ID) return false;
-            const instant = (try resolveDate(ctx, date.string.bytes(), parsed.name(), false)) orelse return false;
+            const instant = (try resolveDate(ctx, date.string.bytes(), parsed, false)) orelse return false;
             try storeInstant(ctx, obj, instant.ts, instant.us, &instant.zone);
             return true;
         },
@@ -685,7 +683,7 @@ fn initializeTimezoneFromHash(ctx: *NativeContext, obj: *PhpObject, data: *const
     const zone = data.get(.{ .string = Value.String.borrowed("timezone") });
     if (zone_type != .int or zone_type.int < dp.ZONETYPE_OFFSET or zone_type.int > dp.ZONETYPE_ID or zone != .string) return false;
     const parsed = (try timezoneInitialize(ctx, zone.string.bytes(), "", false)) orelse return false;
-    try obj.setCopiedString(ctx.allocator, "__timezone", parsed.name());
+    try setObjZone(ctx, obj, &parsed);
     return true;
 }
 
@@ -775,16 +773,15 @@ fn getTimestamp(obj: *PhpObject) i64 {
 fn dtConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const input: []const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else "";
-    const instant = (try resolveDate(ctx, input, tzArgName(args, 1), true)) orelse return error.RuntimeError;
+    const instant = (try resolveDate(ctx, input, tzArgZone(args, 1), true)) orelse return error.RuntimeError;
     try storeInstant(ctx, obj, instant.ts, instant.us, &instant.zone);
     return NativeResult.scalar(.null);
 }
 
-// the zone name of an optional DateTimeZone argument
-fn tzArgName(args: []const Value, idx: usize) ?[]const u8 {
+// the zone of an optional DateTimeZone argument
+fn tzArgZone(args: []const Value, idx: usize) ?ParseZone {
     if (args.len <= idx or args[idx] != .object) return null;
-    const v = args[idx].object.get("__timezone");
-    return if (v == .string) v.string.bytes() else null;
+    return objZone(args[idx].object);
 }
 
 // a copy of a date object of the same class, for the immutable methods
@@ -802,302 +799,51 @@ fn dtFormat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len == 0 or args[0] != .string) return NativeResult.literal("");
     const ts = getTimestamp(obj);
-    const tz_val = obj.get("__timezone");
-    const tz_name = if (tz_val == .string) tz_val.string.bytes() else ctx.vm.default_tz_name;
-    const offset = tzOffsetForName(ctx.allocator, tz_name, ts);
     const us_v = obj.get("__microseconds");
     const us: i64 = if (us_v == .int) us_v.int else 0;
-    return formatTimestampTzMicros(ctx, ts, args[0].string.bytes(), offset, tz_name, us);
+    return formatIn(ctx, ts, us, &objZoneOr(ctx, obj), args[0].string.bytes());
 }
 
+// date() and DateTimeInterface::format() over date_format.zig: the time's
+// wall-clock fields in its zone and the offset in effect
 pub fn formatTimestamp(ctx: *NativeContext, timestamp: i64, format: []const u8) RuntimeError!NativeResult {
-    const tz_name = ctx.vm.default_tz_name;
-    const offset = tzOffsetForName(ctx.allocator, tz_name, timestamp);
-    return formatTimestampTzMicros(ctx, timestamp, format, offset, tz_name, 0);
+    return formatIn(ctx, timestamp, 0, &defaultZone(ctx), format);
 }
 
-pub fn formatTimestampTz(ctx: *NativeContext, timestamp: i64, format: []const u8, tz_offset: i32, tz_name: []const u8) RuntimeError!NativeResult {
-    return formatTimestampTzMicros(ctx, timestamp, format, tz_offset, tz_name, 0);
-}
-
-// the year as 'c' and 'r' print it: four characters with the sign counted,
-// so -2 is "-002"
-fn paddedYear(buf: *[24]u8, year: i64) []const u8 {
-    if (year >= 0) return std.fmt.bufPrint(buf, "{d:0>4}", .{@as(u64, @intCast(year))}) catch "0000";
-    return std.fmt.bufPrint(buf, "-{d:0>3}", .{@abs(year)}) catch "-000";
-}
-
-pub fn formatTimestampTzMicros(ctx: *NativeContext, timestamp: i64, format: []const u8, tz_offset: i32, tz_name: []const u8, microseconds: i64) RuntimeError!NativeResult {
-    // wraps at the ends of the range, as php's c arithmetic does
-    const local_ts = timestamp +% @as(i64, tz_offset);
-    const dc = baseComponents(local_ts);
-    const day_seconds = FmtDaySec{ .h = @intCast(dc.hour), .mi = @intCast(dc.min), .s = @intCast(dc.sec) };
-    const epoch_day = FmtEpochDay{ .day = @divFloor(local_ts, 86400) };
-    const year_day = FmtYearDay{ .year = dc.year };
-    const month_day = FmtMonthDay{ .month = .{ .v = @intCast(dc.month) }, .day_index = @intCast(dc.day - 1) };
-    const a = ctx.allocator;
-
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(a);
-    var fi: usize = 0;
-    while (fi < format.len) : (fi += 1) {
-        const c = format[fi];
-        switch (c) {
-            'Y' => {
-                // at least four digits, with the sign outside the padding
-                try buf.print(a, "{s}{d:0>4}", .{ if (year_day.year < 0) "-" else "", @abs(year_day.year) });
-            },
-            'm' => {
-                var tmp: [4]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{d:0>2}", .{month_day.month.numeric()}) catch "00";
-                try buf.appendSlice(a, s);
-            },
-            'd' => {
-                var tmp: [4]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{d:0>2}", .{month_day.day_index + 1}) catch "00";
-                try buf.appendSlice(a, s);
-            },
-            'H' => {
-                var tmp: [4]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{d:0>2}", .{day_seconds.getHoursIntoDay()}) catch "00";
-                try buf.appendSlice(a, s);
-            },
-            'i' => {
-                var tmp: [4]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{d:0>2}", .{day_seconds.getMinutesIntoHour()}) catch "00";
-                try buf.appendSlice(a, s);
-            },
-            's' => {
-                var tmp: [4]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{d:0>2}", .{day_seconds.getSecondsIntoMinute()}) catch "00";
-                try buf.appendSlice(a, s);
-            },
-            'U' => {
-                var tmp: [24]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{d}", .{timestamp}) catch "0";
-                try buf.appendSlice(a, s);
-            },
-            'N' => {
-                const day_num: i64 = @intCast(epoch_day.day);
-                const dow: u8 = @intCast(@mod(day_num + 3, 7) + 1);
-                var tmp: [2]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{d}", .{dow}) catch "0";
-                try buf.appendSlice(a, s);
-            },
-            'j' => {
-                var tmp: [4]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{d}", .{month_day.day_index + 1}) catch "0";
-                try buf.appendSlice(a, s);
-            },
-            'n' => {
-                var tmp: [4]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{d}", .{month_day.month.numeric()}) catch "0";
-                try buf.appendSlice(a, s);
-            },
-            'G' => {
-                var tmp: [4]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{d}", .{day_seconds.getHoursIntoDay()}) catch "0";
-                try buf.appendSlice(a, s);
-            },
-            'g' => {
-                const h = day_seconds.getHoursIntoDay();
-                const h12: u32 = if (h == 0) 12 else if (h > 12) h - 12 else h;
-                var tmp: [4]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{d}", .{h12}) catch "0";
-                try buf.appendSlice(a, s);
-            },
-            'h' => {
-                const h = day_seconds.getHoursIntoDay();
-                const h12: u32 = if (h == 0) 12 else if (h > 12) h - 12 else h;
-                var tmp: [4]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{d:0>2}", .{h12}) catch "00";
-                try buf.appendSlice(a, s);
-            },
-            'A' => try buf.appendSlice(a, if (day_seconds.getHoursIntoDay() < 12) "AM" else "PM"),
-            'a' => try buf.appendSlice(a, if (day_seconds.getHoursIntoDay() < 12) "am" else "pm"),
-            'l' => {
-                const day_num: i64 = @intCast(epoch_day.day);
-                const dow: usize = @intCast(@mod(day_num + 3, 7));
-                const names = [_][]const u8{ "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday" };
-                try buf.appendSlice(a, names[dow]);
-            },
-            'D' => {
-                const day_num: i64 = @intCast(epoch_day.day);
-                const dow: usize = @intCast(@mod(day_num + 3, 7));
-                const names = [_][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
-                try buf.appendSlice(a, names[dow]);
-            },
-            'F' => {
-                const names = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
-                try buf.appendSlice(a, names[month_day.month.numeric() - 1]);
-            },
-            'M' => {
-                const names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-                try buf.appendSlice(a, names[month_day.month.numeric() - 1]);
-            },
-            'y' => {
-                var tmp: [4]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{d:0>2}", .{@as(u32, @intCast(@mod(year_day.year, 100)))}) catch "00";
-                try buf.appendSlice(a, s);
-            },
-            't' => {
-                try buf.print(a, "{d}", .{daysInMonth(month_day.month.numeric(), year_day.year)});
-            },
-            'c' => {
-                // ISO 8601: YYYY-MM-DDTHH:MM:SS+00:00
-                var tmp: [32]u8 = undefined;
-                var ybuf: [24]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{s}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{
-                    paddedYear(&ybuf, year_day.year),
-                    month_day.month.numeric(),
-                    month_day.day_index + 1,
-                    day_seconds.getHoursIntoDay(),
-                    day_seconds.getMinutesIntoHour(),
-                    day_seconds.getSecondsIntoMinute(),
-                }) catch "0000-00-00T00:00:00";
-                try buf.appendSlice(a, s);
-                try appendOffsetColon(&buf, a, tz_offset);
-            },
-            'r' => {
-                const day_num: i64 = @intCast(epoch_day.day);
-                const dow: usize = @intCast(@mod(day_num + 3, 7));
-                const day_names = [_][]const u8{ "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
-                const mon_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-                try buf.appendSlice(a, day_names[dow]);
-                try buf.appendSlice(a, ", ");
-                var tmp: [32]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{d:0>2} ", .{month_day.day_index + 1}) catch "01 ";
-                try buf.appendSlice(a, s);
-                try buf.appendSlice(a, mon_names[month_day.month.numeric() - 1]);
-                var ybuf: [24]u8 = undefined;
-                const s2 = std.fmt.bufPrint(&tmp, " {s} {d:0>2}:{d:0>2}:{d:0>2} ", .{
-                    paddedYear(&ybuf, year_day.year),
-                    day_seconds.getHoursIntoDay(),
-                    day_seconds.getMinutesIntoHour(),
-                    day_seconds.getSecondsIntoMinute(),
-                }) catch " 0000 00:00:00 ";
-                try buf.appendSlice(a, s2);
-                try appendOffsetCompact(&buf, a, tz_offset);
-            },
-            'z' => {
-                const jan1_day = @divFloor(dateToTimestamp(year_day.year, 1, 1, 0, 0, 0), 86400);
-                try buf.print(a, "{d}", .{@as(i64, epoch_day.day) - jan1_day});
-            },
-            'W' => {
-                const week = isoWeek(@intCast(epoch_day.day));
-                var tmp: [4]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{d:0>2}", .{week.week}) catch "01";
-                try buf.appendSlice(a, s);
-            },
-            'w' => {
-                const day_num: i64 = @intCast(epoch_day.day);
-                const dow: u8 = @intCast(@mod(day_num + 4, 7)); // 0=sunday
-                var tmp: [2]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{d}", .{dow}) catch "0";
-                try buf.appendSlice(a, s);
-            },
-            'L' => {
-                try buf.append(a, if (isLeapYear(year_day.year)) '1' else '0');
-            },
-            'o' => {
-                const week = isoWeek(@intCast(epoch_day.day));
-                var tmp: [24]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{d}", .{week.year}) catch "0000";
-                try buf.appendSlice(a, s);
-            },
-            'X' => {
-                // PHP 8.4: ISO 8601 expanded year with mandatory leading sign,
-                // four-digit minimum
-                var tmp: [24]u8 = undefined;
-                const yr = year_day.year;
-                const s = if (yr >= 0)
-                    std.fmt.bufPrint(&tmp, "+{d:0>4}", .{@as(u64, @intCast(yr))}) catch "+0000"
-                else
-                    std.fmt.bufPrint(&tmp, "-{d:0>4}", .{@as(u64, @intCast(-yr))}) catch "-0000";
-                try buf.appendSlice(a, s);
-            },
-            'x' => {
-                // PHP 8.4: like X but the leading sign is omitted for years
-                // in [0, 9999]
-                var tmp: [24]u8 = undefined;
-                const yr = year_day.year;
-                const s = if (yr < 0)
-                    std.fmt.bufPrint(&tmp, "-{d:0>4}", .{@as(u64, @intCast(-yr))}) catch "-0000"
-                else if (yr > 9999)
-                    std.fmt.bufPrint(&tmp, "+{d}", .{@as(u64, @intCast(yr))}) catch "+0000"
-                else
-                    std.fmt.bufPrint(&tmp, "{d:0>4}", .{@as(u64, @intCast(yr))}) catch "0000";
-                try buf.appendSlice(a, s);
-            },
-            'S' => {
-                const day_val = month_day.day_index + 1;
-                const suffix: []const u8 = if (day_val == 11 or day_val == 12 or day_val == 13)
-                    "th"
-                else switch (@as(u8, @intCast(day_val % 10))) {
-                    1 => "st",
-                    2 => "nd",
-                    3 => "rd",
-                    else => "th",
-                };
-                try buf.appendSlice(a, suffix);
-            },
-            'u' => {
-                var tmp: [16]u8 = undefined;
-                const us_abs: u64 = @intCast(if (microseconds < 0) -microseconds else microseconds);
-                const s = std.fmt.bufPrint(&tmp, "{d:0>6}", .{us_abs}) catch "000000";
-                try buf.appendSlice(a, s);
-            },
-            'v' => {
-                var tmp: [16]u8 = undefined;
-                const ms_abs: u64 = @intCast(@divFloor(if (microseconds < 0) -microseconds else microseconds, 1000));
-                const s = std.fmt.bufPrint(&tmp, "{d:0>3}", .{ms_abs}) catch "000";
-                try buf.appendSlice(a, s);
-            },
-            'Z' => {
-                var tmp: [12]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{d}", .{tz_offset}) catch "0";
-                try buf.appendSlice(a, s);
-            },
-            'e' => {
-                try buf.appendSlice(a, tz_name);
-            },
-            'T' => {
-                // a fixed-offset zone has no abbreviation; php spells it GMT+hhmm
-                if (parseFixedOffset(tz_name)) |off| {
-                    const abs: u32 = @intCast(if (off < 0) -off else off);
-                    try buf.print(a, "GMT{c}{d:0>2}{d:0>2}", .{ @as(u8, if (off < 0) '-' else '+'), abs / 3600, (abs % 3600) / 60 });
-                } else if (tzAbbrevForName(a, tz_name, timestamp)) |ab| {
-                    defer a.free(ab);
-                    try buf.appendSlice(a, ab);
-                } else {
-                    try buf.appendSlice(a, tz_name);
-                }
-            },
-            'P' => {
-                try appendOffsetColon(&buf, a, tz_offset);
-            },
-            'O' => {
-                try appendOffsetCompact(&buf, a, tz_offset);
-            },
-            'I' => try buf.append(a, if (tzIsDstForName(a, tz_name, timestamp)) '1' else '0'),
-            'B' => {
-                // Swatch internet time: BMT = UTC+1; 1000 beats per day; .beats = (utc_secs+3600) / 86.4 % 1000
-                const utc_secs: i64 = @mod(timestamp, 86400);
-                const bmt = @mod(utc_secs + 3600, 86400);
-                const beats: u32 = @intFromFloat(@as(f64, @floatFromInt(bmt)) / 86.4);
-                var tmp: [4]u8 = undefined;
-                const s = std.fmt.bufPrint(&tmp, "{d:0>3}", .{beats}) catch "000";
-                try buf.appendSlice(a, s);
-            },
-            '\\' => {
-                fi += 1;
-                if (fi < format.len) try buf.append(a, format[fi]);
-            },
-            else => try buf.append(a, c),
-        }
+fn localOf(ts: i64, us: i64, zone: *const ParseZone) date_format.Local {
+    var t = date_format.Local{ .y = 0, .m = 1, .d = 1, .h = 0, .i = 0, .s = 0, .us = us, .sse = ts, .zone_type = zone.kind };
+    switch (zone.kind) {
+        dp.ZONETYPE_OFFSET => t.offset = zone.z,
+        dp.ZONETYPE_ABBR => {
+            t.offset = zone.z + zone.dst * 3600;
+            t.is_dst = zone.dst != 0;
+            t.abbr = zone.name();
+        },
+        else => {
+            t.tz_name = zone.name();
+            if (tzdb.info(zone.name())) |inf| if (inf.fetch(ts)) |f| {
+                t.offset = f.t.offset;
+                t.is_dst = f.t.isdst;
+                t.abbr = inf.abbr(f.t);
+            };
+        },
     }
-    const result = try buf.toOwnedSlice(a);
-    return NativeResult.takeString(try Value.String.adopt(a, result));
+    date_format.fieldsAt(ts, t.offset, &t);
+    return t;
+}
+
+fn formatIn(ctx: *NativeContext, ts: i64, us: i64, zone: *const ParseZone, format: []const u8) RuntimeError!NativeResult {
+    const t = localOf(ts, us, zone);
+    const out = date_format.format(ctx.allocator, format, &t) catch return error.OutOfMemory;
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
+}
+
+// gmdate(): utc, with the zone characters printing utc's
+fn formatGmt(ctx: *NativeContext, ts: i64, format: []const u8) RuntimeError!NativeResult {
+    var t = date_format.Local{ .y = 0, .m = 1, .d = 1, .h = 0, .i = 0, .s = 0, .sse = ts, .localtime = false };
+    date_format.fieldsAt(ts, 0, &t);
+    const out = date_format.format(ctx.allocator, format, &t) catch return error.OutOfMemory;
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
 }
 
 fn dtGetTimestamp(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -1146,21 +892,20 @@ fn intervalSpec(ctx: *NativeContext, iv: *PhpObject) RuntimeError!IntervalSpec {
 
 // the object's instant as timelib holds it: wall-clock fields in its zone
 fn objTime(ctx: *NativeContext, obj: *PhpObject) dp.Time {
-    const zone = ParseZone.of(objTzName(obj, ctx.vm.default_tz_name), false);
+    const zone = objZoneOr(ctx, obj);
     const us_v = obj.get("__microseconds");
     return wallTime(ctx.allocator, getTimestamp(obj), if (us_v == .int) us_v.int else 0, &zone);
 }
 
 fn storeTime(ctx: *NativeContext, obj: *PhpObject, t: *const dp.Time) RuntimeError!void {
-    const zone = ParseZone.of(objTzName(obj, ctx.vm.default_tz_name), false);
+    const zone = objZoneOr(ctx, obj);
     try storeInstant(ctx, obj, t.sse, t.us, &zone);
 }
 
 // one DatePeriod step from an instant in a zone
-fn periodStep(ctx: *NativeContext, ts: i64, us: i64, tz_name: []const u8, iv: *PhpObject) RuntimeError!struct { ts: i64, us: i64 } {
+fn periodStep(ctx: *NativeContext, ts: i64, us: i64, zone: *const ParseZone, iv: *PhpObject) RuntimeError!struct { ts: i64, us: i64 } {
     const spec = try intervalSpec(ctx, iv);
-    const zone = ParseZone.of(tz_name, false);
-    var t = wallTime(ctx.allocator, ts, us, &zone);
+    var t = wallTime(ctx.allocator, ts, us, zone);
     dp.periodAdvance(&t, &spec.rel, parse_db);
     return .{ .ts = t.sse, .us = t.us };
 }
@@ -1171,16 +916,47 @@ fn periodStep(ctx: *NativeContext, ts: i64, us: i64, tz_name: []const u8, iv: *P
 
 fn wallFields(ctx: *NativeContext, obj: *PhpObject) DateComponents {
     const ts = getTimestamp(obj);
-    return baseComponents(ts + tzOffsetForName(ctx.allocator, objTzName(obj, ctx.vm.default_tz_name), ts));
+    return baseComponents(ts + objZoneOr(ctx, obj).totalOffset(ctx.allocator, ts));
 }
 
 fn instantOfWall(ctx: *NativeContext, obj: *PhpObject, wall: i64) i64 {
-    return wall - tzOffsetForWallByName(ctx.allocator, objTzName(obj, ctx.vm.default_tz_name), wall);
+    const zone = objZoneOr(ctx, obj);
+    return switch (zone.kind) {
+        dp.ZONETYPE_ID => dp.utcOfWall(wall, zone.name(), parse_db),
+        else => wall - zone.totalOffset(ctx.allocator, wall),
+    };
 }
 
-fn objTzName(obj: *PhpObject, fallback: []const u8) []const u8 {
+// a date or DateTimeZone object's zone: `__timezone` names it, and
+// `__zone_type` marks an id whose name alone reads as an abbreviation (the
+// default zone "CET" is the id, a DateTimeZone("CET") the abbreviation)
+fn objZone(obj: *PhpObject) ?ParseZone {
     const v = obj.get("__timezone");
-    return if (v == .string) v.string.bytes() else fallback;
+    if (v != .string) return null;
+    const k = obj.get("__zone_type");
+    return ParseZone.of(v.string.bytes(), k == .int and k.int == dp.ZONETYPE_ID);
+}
+
+fn objZoneOr(ctx: *NativeContext, obj: *PhpObject) ParseZone {
+    return objZone(obj) orelse defaultZone(ctx);
+}
+
+// the default zone is always an id
+fn defaultZone(ctx: *NativeContext) ParseZone {
+    return ParseZone.of(ctx.vm.default_tz_name, true);
+}
+
+fn setObjZone(ctx: *NativeContext, obj: *PhpObject, zone: *const ParseZone) RuntimeError!void {
+    const cur = obj.get("__timezone");
+    if (cur != .string or !std.mem.eql(u8, cur.string.bytes(), zone.name())) {
+        try obj.set(ctx.allocator, "__timezone", .{ .string = Value.String.borrowed(internZoneName(zone.name())) });
+    }
+    const marked = zone.kind == dp.ZONETYPE_ID and ParseZone.of(zone.name(), false).kind != dp.ZONETYPE_ID;
+    if (marked) {
+        try obj.set(ctx.allocator, "__zone_type", .{ .int = dp.ZONETYPE_ID });
+    } else if (obj.get("__zone_type") != .null) {
+        try obj.set(ctx.allocator, "__zone_type", .null);
+    }
 }
 
 // the setters change an object in place; DateTime's methods apply them to
@@ -1277,7 +1053,8 @@ fn setTimestampOn(ctx: *NativeContext, obj: *PhpObject, args: []const Value) Run
 }
 
 fn setTimezoneOn(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!void {
-    try obj.setCopiedString(ctx.allocator, "__timezone", extractTimezoneName(args));
+    const zone = tzArgZone(args, 0) orelse return;
+    try setObjZone(ctx, obj, &zone);
 }
 
 fn setMicrosecondOn(ctx: *NativeContext, obj: *PhpObject, args: []const Value) RuntimeError!void {
@@ -1315,8 +1092,8 @@ fn dtDiff(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
 
 // timelib_diff over the two objects' wall-clock times
 fn diffObjects(ctx: *NativeContext, obj: *PhpObject, other: *PhpObject, absolute: bool) RuntimeError!NativeResult {
-    const zone1 = ParseZone.of(objTzName(obj, ctx.vm.default_tz_name), false);
-    const zone2 = ParseZone.of(objTzName(other, ctx.vm.default_tz_name), false);
+    const zone1 = objZoneOr(ctx, obj);
+    const zone2 = objZoneOr(ctx, other);
     const one = wallTime(ctx.allocator, getTimestamp(obj), objMicros(obj), &zone1);
     const two = wallTime(ctx.allocator, getTimestamp(other), objMicros(other), &zone2);
     const rt = dp.diff(&one, &two, parse_db);
@@ -1384,7 +1161,7 @@ fn convertDateObject(ctx: *NativeContext, args: []const Value, class_name: []con
     const src = args[0].object;
     const obj = try ctx.createObject(class_name);
     try obj.set(ctx.allocator, "__timestamp", src.get("__timestamp"));
-    if (src.get("__timezone") == .string) try obj.set(ctx.allocator, "__timezone", src.get("__timezone"));
+    if (objZone(src)) |zone| try setObjZone(ctx, obj, &zone);
     if (src.get("__microseconds") == .int) try obj.set(ctx.allocator, "__microseconds", src.get("__microseconds"));
     return NativeResult.borrowed(.{ .object = obj });
 }
@@ -1414,7 +1191,7 @@ fn native_date_create_immutable_from_format(ctx: *NativeContext, args: []const V
 
 fn createBareDt(ctx: *NativeContext, class_name: []const u8, args: []const Value) RuntimeError!NativeResult {
     const input: []const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else "";
-    const instant = (try resolveDate(ctx, input, tzArgName(args, 1), false)) orelse return NativeResult.scalar(.{ .bool = false });
+    const instant = (try resolveDate(ctx, input, tzArgZone(args, 1), false)) orelse return NativeResult.scalar(.{ .bool = false });
     const obj = try ctx.createObject(class_name);
     try storeInstant(ctx, obj, instant.ts, instant.us, &instant.zone);
     return NativeResult.borrowed(.{ .object = obj });
@@ -1440,11 +1217,8 @@ fn isImmutable(obj: *PhpObject) bool {
 fn native_date_format(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = argObj(args) orelse return NativeResult.scalar(.{ .bool = false });
     if (args.len < 2 or args[1] != .string) return NativeResult.literal("");
-    const ts = getTimestamp(obj);
-    const tz_val = obj.get("__timezone");
-    const tz_name = if (tz_val == .string) tz_val.string.bytes() else ctx.vm.default_tz_name;
-    const offset = tzOffsetForName(ctx.allocator, tz_name, ts);
-    return formatTimestampTz(ctx, ts, args[1].string.bytes(), offset, tz_name);
+    const us_v = obj.get("__microseconds");
+    return formatIn(ctx, getTimestamp(obj), if (us_v == .int) us_v.int else 0, &objZoneOr(ctx, obj), args[1].string.bytes());
 }
 
 // procedural alias for DateInterval::createFromDateString
@@ -1551,7 +1325,7 @@ fn createFromFormatImpl(ctx: *NativeContext, args: []const Value, default_class:
 
     const class_name = staticClass(ctx, default_class);
 
-    const instant = (try resolveDateWith(ctx, args[1].string.bytes(), args[0].string.bytes(), tzArgName(args, 2), false)) orelse return NativeResult.scalar(.{ .bool = false });
+    const instant = (try resolveDateWith(ctx, args[1].string.bytes(), args[0].string.bytes(), tzArgZone(args, 2), false)) orelse return NativeResult.scalar(.{ .bool = false });
     const obj = try ctx.createObject(class_name);
     try storeInstant(ctx, obj, instant.ts, instant.us, &instant.zone);
     return NativeResult.borrowed(.{ .object = obj });
@@ -1576,28 +1350,15 @@ fn dtGetMicrosecond(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRe
 
 fn dtGetTimezone(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const tz_val = obj.get("__timezone");
     const tz_obj = try ctx.createObject("DateTimeZone");
-    try tz_obj.set(ctx.allocator, "__timezone", if (tz_val == .string) tz_val else .{ .string = Value.String.borrowed("UTC") });
+    try setObjZone(ctx, tz_obj, &objZoneOr(ctx, obj));
     return NativeResult.borrowed(.{ .object = tz_obj });
 }
 
 fn dtGetOffset(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .int = 0 });
-    const tz_val = obj.get("__timezone");
-    const tz_name = if (tz_val == .string) tz_val.string.bytes() else "UTC";
     const ts = getTimestamp(obj);
-    return NativeResult.scalar(.{ .int = @intCast(tzOffsetForName(ctx.allocator, tz_name, ts)) });
-}
-
-fn extractTimezoneName(args: []const Value) []const u8 {
-    if (args.len == 0) return "UTC";
-    if (args[0] == .string) return args[0].string.bytes();
-    if (args[0] == .object) {
-        const tz_val = args[0].object.get("__timezone");
-        if (tz_val == .string) return tz_val.string.bytes();
-    }
-    return "UTC";
+    return NativeResult.scalar(.{ .int = objZoneOr(ctx, obj).totalOffset(ctx.allocator, ts) });
 }
 
 // Z_PARAM_PATH: php rejects a string argument with a nul byte in it
@@ -1614,7 +1375,7 @@ fn dtzConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     if (args.len >= 1 and args[0] == .string) {
         try rejectNulBytes(ctx, "DateTimeZone::__construct", 1, "timezone", args[0].string.bytes());
         const zone = (try timezoneInitialize(ctx, args[0].string.bytes(), "DateTimeZone::__construct(): ", true)) orelse return error.RuntimeError;
-        try obj.setCopiedString(ctx.allocator, "__timezone", zone.name());
+        try setObjZone(ctx, obj, &zone);
     }
     return NativeResult.scalar(.null);
 }
@@ -1788,9 +1549,7 @@ fn throwUninitialized(ctx: *NativeContext, class_name: []const u8) RuntimeError 
 
 // a DateTimeZone's zone, or DateObjectError when it was never initialized
 fn zoneOf(ctx: *NativeContext, obj: *PhpObject) RuntimeError!ParseZone {
-    const v = obj.get("__timezone");
-    if (v != .string) return throwUninitialized(ctx, obj.class_name);
-    return ParseZone.of(v.string.bytes(), false);
+    return objZone(obj) orelse throwUninitialized(ctx, obj.class_name);
 }
 
 // a date object's instant, or DateObjectError when it was never initialized
@@ -1829,7 +1588,7 @@ fn tzGetLocation(ctx: *NativeContext, obj: *PhpObject, _: Args) RuntimeError!Nat
 fn putTransition(ctx: *NativeContext, out: *PhpArray, inf: *const tzdb.Info, ts: i64, t: tzdb.TType) RuntimeError!void {
     const e = try ctx.createArray();
     try putAssoc(ctx, e, "ts", .{ .int = ts });
-    const time = try formatTimestampTz(ctx, ts, "x-m-d\\TH:i:sP", 0, "UTC");
+    const time = try formatGmt(ctx, ts, "x-m-d\\TH:i:sP");
     defer if (time.value == .string) time.value.string.release();
     try putAssoc(ctx, e, "time", time.value);
     try putAssoc(ctx, e, "offset", .{ .int = t.offset });
@@ -1942,33 +1701,167 @@ fn appendOffsetCompact(buf: *std.ArrayListUnmanaged(u8), a: Allocator, offset: i
     try buf.appendSlice(a, s);
 }
 
+// the local time of an instant in the default zone (timelib_unixtime2local)
+fn defaultLocal(ctx: *NativeContext, ts: i64) date_format.Local {
+    return localOf(ts, 0, &defaultZone(ctx));
+}
+
+// date() and gmdate(): the timestamp is optional and nullable
+fn dateAs(ctx: *NativeContext, args: []const Value, comptime func: []const u8, localtime: bool) RuntimeError!NativeResult {
+    const p = string_ports.Args.init(ctx, func, args);
+    const format = try p.str(0, "format");
+    const ts = (try p.longOrNull(1, "timestamp")) orelse platform.timestamp();
+    return if (localtime) formatIn(ctx, ts, 0, &defaultZone(ctx), format) else formatGmt(ctx, ts, format);
+}
+
 fn native_date(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.literal("");
-    const format = args[0].string.bytes();
-    const timestamp: i64 = if (args.len >= 2) Value.toInt(args[1]) else platform.timestamp();
-    return formatTimestamp(ctx, timestamp, format);
+    return dateAs(ctx, args, "date", true);
+}
+
+fn native_gmdate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return dateAs(ctx, args, "gmdate", false);
+}
+
+// php_mktime: fields not given come from now, a two-digit year is read as
+// 1970-2069, and the result is resolved in the default zone (or utc)
+fn mktimeAs(ctx: *NativeContext, args: []const Value, comptime func: []const u8, gmt: bool) RuntimeError!NativeResult {
+    const p = string_ports.Args.init(ctx, func, args);
+    const hour = try p.long(0, "hour");
+    const minute = try p.longOrNull(1, "minute");
+    const second = try p.longOrNull(2, "second");
+    const month = try p.longOrNull(3, "month");
+    const day = try p.longOrNull(4, "day");
+    const year = try p.longOrNull(5, "year");
+    const now = platform.timestamp();
+    const zone = defaultZone(ctx);
+    var t = if (gmt) blk: {
+        var g = dp.Time{};
+        var l = date_format.Local{ .y = 0, .m = 1, .d = 1, .h = 0, .i = 0, .s = 0, .sse = now };
+        date_format.fieldsAt(now, 0, &l);
+        g.y = l.y;
+        g.m = l.m;
+        g.d = l.d;
+        g.h = l.h;
+        g.i = l.i;
+        g.s = l.s;
+        g.us = 0;
+        g.z = 0;
+        g.dst = 0;
+        break :blk g;
+    } else wallTime(ctx.allocator, now, 0, &zone);
+    t.h = hour;
+    if (minute) |v| t.i = v;
+    if (second) |v| t.s = v;
+    if (month) |v| t.m = v;
+    if (day) |v| t.d = v;
+    if (year) |v| {
+        t.y = if (v >= 0 and v < 70) v + 2000 else if (v >= 70 and v <= 100) v + 1900 else v;
+    }
+    dp.updateTs(&t, if (gmt) null else zone.name(), parse_db);
+    return NativeResult.scalar(.{ .int = t.sse });
 }
 
 fn native_mktime(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const hour: i64 = if (args.len > 0) Value.toInt(args[0]) else 0;
-    const min: i64 = if (args.len > 1) Value.toInt(args[1]) else 0;
-    const sec: i64 = if (args.len > 2) Value.toInt(args[2]) else 0;
-    const month: i64 = if (args.len > 3) Value.toInt(args[3]) else 1;
-    const day: i64 = if (args.len > 4) Value.toInt(args[4]) else 1;
-    const year: i64 = if (args.len > 5) Value.toInt(args[5]) else 1970;
-    var ts = dateToTimestamp(year, month, day, hour, min, sec);
-    ts -= @as(i64, tzOffsetForWallByName(ctx.allocator, ctx.vm.default_tz_name, ts));
-    return NativeResult.scalar(.{ .int = ts });
+    return mktimeAs(ctx, args, "mktime", false);
 }
 
-fn native_gmmktime(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const hour: i64 = if (args.len > 0) Value.toInt(args[0]) else 0;
-    const min: i64 = if (args.len > 1) Value.toInt(args[1]) else 0;
-    const sec: i64 = if (args.len > 2) Value.toInt(args[2]) else 0;
-    const month: i64 = if (args.len > 3) Value.toInt(args[3]) else 1;
-    const day: i64 = if (args.len > 4) Value.toInt(args[4]) else 1;
-    const year: i64 = if (args.len > 5) Value.toInt(args[5]) else 1970;
-    return NativeResult.scalar(.{ .int = dateToTimestamp(year, month, day, hour, min, sec) });
+fn native_gmmktime(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return mktimeAs(ctx, args, "gmmktime", true);
+}
+
+fn native_getdate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = string_ports.Args.init(ctx, "getdate", args);
+    const ts = (try p.longOrNull(0, "timestamp")) orelse platform.timestamp();
+    const t = defaultLocal(ctx, ts);
+    const weekdays = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+    const months = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
+    const arr = try ctx.createArray();
+    const ints = [_]struct { []const u8, i64 }{
+        .{ "seconds", t.s },
+        .{ "minutes", t.i },
+        .{ "hours", t.h },
+        .{ "mday", t.d },
+        .{ "wday", dp.dayOfWeek(t.y, t.m, t.d) },
+        .{ "mon", t.m },
+        .{ "year", t.y },
+        .{ "yday", dp.dayOfYear(t.y, t.m, t.d) },
+    };
+    for (ints) |f| try putAssoc(ctx, arr, f[0], .{ .int = f[1] });
+    try putAssoc(ctx, arr, "weekday", .{ .string = Value.String.borrowed(weekdays[@intCast(dp.dayOfWeek(t.y, t.m, t.d))]) });
+    try putAssoc(ctx, arr, "month", .{ .string = Value.String.borrowed(months[@intCast(std.math.clamp(t.m, 1, 12) - 1)]) });
+    try arr.set(ctx.allocator, .{ .int = 0 }, .{ .int = ts });
+    return NativeResult.borrowed(.{ .array = arr });
+}
+
+fn native_localtime(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = string_ports.Args.init(ctx, "localtime", args);
+    const ts = (try p.longOrNull(0, "timestamp")) orelse platform.timestamp();
+    const assoc = try p.boolean(1, "associative", false);
+    const t = defaultLocal(ctx, ts);
+    const fields = [_]struct { []const u8, i64 }{
+        .{ "tm_sec", t.s },
+        .{ "tm_min", t.i },
+        .{ "tm_hour", t.h },
+        .{ "tm_mday", t.d },
+        .{ "tm_mon", t.m - 1 },
+        .{ "tm_year", t.y - 1900 },
+        .{ "tm_wday", dp.dayOfWeek(t.y, t.m, t.d) },
+        .{ "tm_yday", dp.dayOfYear(t.y, t.m, t.d) },
+        .{ "tm_isdst", @intFromBool(t.is_dst) },
+    };
+    const arr = try ctx.createArray();
+    for (fields) |f| {
+        if (assoc) try putAssoc(ctx, arr, f[0], .{ .int = f[1] }) else try arr.append(ctx.allocator, .{ .int = f[1] });
+    }
+    return NativeResult.borrowed(.{ .array = arr });
+}
+
+// php_idate: one format character, the result through a c int
+fn native_idate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = string_ports.Args.init(ctx, "idate", args);
+    const format = try p.str(0, "format");
+    const ts = (try p.longOrNull(1, "timestamp")) orelse platform.timestamp();
+    if (format.len != 1) {
+        try ctx.vm.emitWarning("idate(): idate format is one char");
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    const t = defaultLocal(ctx, ts);
+    var iso_week: i64 = 0;
+    var iso_year: i64 = 0;
+    dp.isoWeekFromDate(t.y, t.m, t.d, &iso_week, &iso_year);
+    const v: i64 = switch (format[0]) {
+        'd', 'j' => t.d,
+        'N' => dp.isoDayOfWeek(t.y, t.m, t.d),
+        'w' => dp.dayOfWeek(t.y, t.m, t.d),
+        'z' => dp.dayOfYear(t.y, t.m, t.d),
+        'W' => iso_week,
+        'm', 'n' => t.m,
+        't' => dp.daysInMonth(t.y, t.m),
+        'L' => @intFromBool(dp.isLeap(t.y)),
+        'y' => @rem(t.y, 100),
+        'Y' => t.y,
+        'o' => iso_year,
+        'B' => blk: {
+            var beat: i64 = (@rem(ts, 86400) + 3600) * 10;
+            if (beat < 0) beat += 864000;
+            break :blk @rem(@divTrunc(beat, 864), 1000);
+        },
+        'g', 'h' => if (@rem(t.h, 12) != 0) @rem(t.h, 12) else 12,
+        'H', 'G' => t.h,
+        'i' => t.i,
+        's' => t.s,
+        'I' => @intFromBool(t.is_dst),
+        'Z' => t.offset,
+        'U' => ts,
+        else => -1,
+    };
+    // php reports -1 as an unknown format character, whatever produced it
+    const r: i32 = @truncate(v);
+    if (r == -1) {
+        try ctx.vm.emitWarning("idate(): Unrecognized date format token");
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    return NativeResult.scalar(.{ .int = r });
 }
 
 fn native_strtotime(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -2025,30 +1918,6 @@ fn native_date_parse_from_format(ctx: *NativeContext, args: []const Value) Runti
     var p = dp.parseFromFormat(ctx.allocator, args[0].string.bytes(), args[1].string.bytes(), parse_db) catch return error.OutOfMemory;
     defer p.deinit(ctx.allocator);
     return parsedTimeArray(ctx, &p);
-}
-
-fn native_getdate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const timestamp: i64 = if (args.len >= 1 and args[0] != .null) Value.toInt(args[0]) else platform.timestamp();
-    const lp = localParts(ctx.allocator, timestamp, ctx.vm.default_tz_name);
-    const weekdays = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
-    const months = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
-
-    var arr = try ctx.createArray();
-    const ints = [_]struct { []const u8, i64 }{
-        .{ "seconds", lp.dc.sec },
-        .{ "minutes", lp.dc.min },
-        .{ "hours", lp.dc.hour },
-        .{ "mday", lp.dc.day },
-        .{ "wday", lp.dow },
-        .{ "mon", lp.dc.month },
-        .{ "year", lp.dc.year },
-        .{ "yday", lp.yday },
-    };
-    for (ints) |f| try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(f[0]) }, .{ .int = f[1] });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("weekday") }, .{ .string = Value.String.borrowed(weekdays[@intCast(lp.dow)]) });
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("month") }, .{ .string = Value.String.borrowed(months[@intCast(lp.dc.month - 1)]) });
-    try arr.set(ctx.allocator, .{ .int = 0 }, .{ .int = timestamp });
-    return NativeResult.borrowed(.{ .array = arr });
 }
 
 fn native_hrtime(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -2203,6 +2072,12 @@ fn fixedOffsetOf(name: []const u8) ?i32 {
     return null;
 }
 
+// the offset in effect in a zone id, utc for one the database lacks
+fn idOffset(name: []const u8, utc_ts: i64) struct { offset: i32, is_dst: bool } {
+    const f = zoneFetch(name, utc_ts) orelse return .{ .offset = 0, .is_dst = false };
+    return .{ .offset = f.t.offset, .is_dst = f.t.isdst };
+}
+
 fn zoneFetch(name: []const u8, utc_ts: i64) ?tzdb.Info.Fetched {
     const inf = tzdb.info(name) orelse return null;
     return inf.fetch(utc_ts);
@@ -2307,14 +2182,6 @@ fn parseTimezoneOffset(s: []const u8) ?i64 {
     return null;
 }
 
-// gmdate is identical to date since zphp timestamps are always UTC
-fn native_gmdate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.literal("");
-    const format = args[0].string.bytes();
-    const timestamp: i64 = if (args.len >= 2) Value.toInt(args[1]) else platform.timestamp();
-    return formatTimestampTz(ctx, timestamp, format, 0, "UTC");
-}
-
 fn native_tz_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const name = args[0].string.bytes();
@@ -2336,118 +2203,26 @@ fn native_timezone_open(ctx: *NativeContext, args: []const Value) RuntimeError!N
     try rejectNulBytes(ctx, "timezone_open", 1, "timezone", args[0].string.bytes());
     const zone = (try timezoneInitialize(ctx, args[0].string.bytes(), "timezone_open(): ", false)) orelse return NativeResult.scalar(.{ .bool = false });
     const obj = try ctx.createObject("DateTimeZone");
-    try obj.setCopiedString(ctx.allocator, "__timezone", zone.name());
+    try setObjZone(ctx, obj, &zone);
     return NativeResult.borrowed(.{ .object = obj });
 }
 
 fn native_date_timezone_get(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .object) return NativeResult.scalar(.{ .bool = false });
-    const tz_v = args[0].object.get("__timezone");
-    if (tz_v != .string) return NativeResult.scalar(.{ .bool = false });
+    const zone = objZone(args[0].object) orelse return NativeResult.scalar(.{ .bool = false });
     const tz_obj = try ctx.createObject("DateTimeZone");
-    try tz_obj.set(ctx.allocator, "__timezone", tz_v);
+    try setObjZone(ctx, tz_obj, &zone);
     return NativeResult.borrowed(.{ .object = tz_obj });
 }
 
 fn native_date_timezone_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2 or args[0] != .object or args[1] != .object) return NativeResult.scalar(.{ .bool = false });
-    const tz_name = args[1].object.get("__timezone");
-    if (tz_name == .string) {
-        try args[0].object.set(ctx.allocator, "__timezone", tz_name);
-    }
+    if (objZone(args[1].object)) |zone| try setObjZone(ctx, args[0].object, &zone);
     return NativeResult.share(args[0]);
 }
 
 fn native_tz_get(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     return try NativeResult.copyString(ctx.allocator, ctx.vm.default_tz_name);
-}
-
-// the broken-down local time of a timestamp in a zone, as localtime() and
-// idate() report it
-const LocalParts = struct {
-    dc: DateComponents,
-    offset: i32,
-    dst: bool,
-    dow: i64, // 0 = sunday
-    yday: i64,
-    day_num: i64,
-    local_ts: i64,
-};
-
-fn localParts(a: Allocator, timestamp: i64, tz_name: []const u8) LocalParts {
-    const offset = tzOffsetForName(a, tz_name, timestamp);
-    const local_ts = timestamp + offset;
-    const dc = baseComponents(local_ts);
-    const day_num = @divFloor(local_ts, 86400);
-    return .{
-        .dc = dc,
-        .offset = offset,
-        .dst = tzIsDstForName(a, tz_name, timestamp),
-        .dow = @mod(day_num + 4, 7),
-        .yday = day_num - @divFloor(dateToTimestamp(dc.year, 1, 1, 0, 0, 0), 86400),
-        .day_num = day_num,
-        .local_ts = local_ts,
-    };
-}
-
-fn native_localtime(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const timestamp: i64 = if (args.len >= 1 and args[0] != .null) Value.toInt(args[0]) else platform.timestamp();
-    const assoc = args.len >= 2 and args[1].isTruthy();
-    const lp = localParts(ctx.allocator, timestamp, ctx.vm.default_tz_name);
-    const fields = [_]struct { []const u8, i64 }{
-        .{ "tm_sec", lp.dc.sec },
-        .{ "tm_min", lp.dc.min },
-        .{ "tm_hour", lp.dc.hour },
-        .{ "tm_mday", lp.dc.day },
-        .{ "tm_mon", lp.dc.month - 1 },
-        .{ "tm_year", lp.dc.year - 1900 },
-        .{ "tm_wday", lp.dow },
-        .{ "tm_yday", lp.yday },
-        .{ "tm_isdst", @intFromBool(lp.dst) },
-    };
-    var arr = try ctx.createArray();
-    for (fields) |f| {
-        if (assoc) {
-            try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(f[0]) }, .{ .int = f[1] });
-        } else {
-            try arr.append(ctx.allocator, .{ .int = f[1] });
-        }
-    }
-    return NativeResult.borrowed(.{ .array = arr });
-}
-
-fn native_idate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string or args[0].string.bytes().len == 0) return NativeResult.scalar(.{ .bool = false });
-    const fmt = args[0].string.bytes()[0];
-    const timestamp: i64 = if (args.len >= 2 and args[1] != .null) Value.toInt(args[1]) else platform.timestamp();
-    const lp = localParts(ctx.allocator, timestamp, ctx.vm.default_tz_name);
-    const dc = lp.dc;
-
-    const v: i64 = switch (fmt) {
-        'd' => dc.day,
-        'h' => if (@mod(dc.hour, 12) == 0) 12 else @mod(dc.hour, 12),
-        'H' => dc.hour,
-        'i' => dc.min,
-        'm' => dc.month,
-        's' => dc.sec,
-        // php hands idate's result through a c int
-        'U' => @as(i32, @truncate(timestamp)),
-        'w' => lp.dow,
-        'y' => @mod(dc.year, 100),
-        'Y' => dc.year,
-        't' => daysInMonth(dc.month, dc.year),
-        'z' => lp.yday,
-        'I' => @intFromBool(lp.dst),
-        'L' => @intFromBool(isLeapYear(dc.year)),
-        'N' => if (lp.dow == 0) 7 else lp.dow,
-        'o' => isoWeek(lp.day_num).year,
-        'W' => isoWeek(lp.day_num).week,
-        // swatch beats are measured in utc+1
-        'B' => @divFloor(@mod(timestamp + 3600, 86400) * 10, 864),
-        'Z' => lp.offset,
-        else => return NativeResult.scalar(.{ .bool = false }),
-    };
-    return NativeResult.scalar(.{ .int = v });
 }
 
 fn isLeapYear(y: i64) bool {
@@ -2837,11 +2612,11 @@ const ParseZone = struct {
         return zone;
     }
 
-    fn totalOffset(self: *const ParseZone, a: Allocator, ts: i64) i64 {
+    fn totalOffset(self: *const ParseZone, _: Allocator, ts: i64) i64 {
         return switch (self.kind) {
             dp.ZONETYPE_OFFSET => self.z,
             dp.ZONETYPE_ABBR => self.z + self.dst * 3600,
-            else => tzOffsetForName(a, self.name(), ts),
+            else => idOffset(self.name(), ts).offset,
         };
     }
 };
@@ -2863,7 +2638,7 @@ fn wallTime(a: Allocator, ts: i64, us: i64, zone: *const ParseZone) dp.Time {
     const off = zone.totalOffset(a, ts);
     const wall = ts +% off;
     const days = @divFloor(wall, 86400);
-    const secs = wall - days * 86400;
+    const secs = @mod(wall, 86400);
     dp.dateFromEpochDays(days, &t.y, &t.m, &t.d);
     t.h = @divTrunc(secs, 3600);
     t.i = @divTrunc(@rem(secs, 3600), 60);
@@ -2884,7 +2659,7 @@ fn wallTime(a: Allocator, ts: i64, us: i64, zone: *const ParseZone) dp.Time {
         },
         else => {
             t.z = off;
-            t.dst = if (tzIsDstForName(a, zone.name(), ts)) 1 else 0;
+            t.dst = if (idOffset(zone.name(), ts).is_dst) 1 else 0;
             t.setId(zone.name());
         },
     }
@@ -2942,10 +2717,7 @@ fn internZoneName(name: []const u8) []const u8 {
 
 fn storeInstant(ctx: *NativeContext, obj: *PhpObject, ts: i64, us: i64, zone: *const ParseZone) RuntimeError!void {
     try obj.set(ctx.allocator, "__timestamp", .{ .int = ts });
-    const cur_zone = obj.get("__timezone");
-    if (cur_zone != .string or !std.mem.eql(u8, cur_zone.string.bytes(), zone.name())) {
-        try obj.set(ctx.allocator, "__timezone", .{ .string = Value.String.borrowed(internZoneName(zone.name())) });
-    }
+    try setObjZone(ctx, obj, zone);
     // a missing __microseconds reads as 0
     if (us != 0 or obj.get("__microseconds") != .null) try obj.set(ctx.allocator, "__microseconds", .{ .int = us });
 }
@@ -2955,13 +2727,13 @@ fn storeInstant(ctx: *NativeContext, obj: *PhpObject, ts: i64, us: i64, zone: *c
 // call fail. tz_arg is the DateTimeZone argument's zone name
 const Instant = struct { ts: i64, us: i64, zone: ParseZone };
 
-fn resolveDate(ctx: *NativeContext, input: []const u8, tz_arg: ?[]const u8, throws: bool) RuntimeError!?Instant {
+fn resolveDate(ctx: *NativeContext, input: []const u8, tz_arg: ?ParseZone, throws: bool) RuntimeError!?Instant {
     return resolveDateWith(ctx, input, null, tz_arg, throws);
 }
 
 // with a format, the string is read by timelib_parse_from_format and unset
 // time fields come from now instead of midnight (createFromFormat)
-fn resolveDateWith(ctx: *NativeContext, input_arg: []const u8, format: ?[]const u8, tz_arg: ?[]const u8, throws: bool) RuntimeError!?Instant {
+fn resolveDateWith(ctx: *NativeContext, input_arg: []const u8, format: ?[]const u8, tz_arg: ?ParseZone, throws: bool) RuntimeError!?Instant {
     const input = if (input_arg.len == 0 and format == null) "now" else input_arg;
     var p = if (format) |f|
         dp.parseFromFormat(ctx.allocator, f, input, parse_db) catch return error.OutOfMemory
@@ -2977,12 +2749,12 @@ fn resolveDateWith(ctx: *NativeContext, input_arg: []const u8, format: ?[]const 
         }
         return null;
     }
-    const zone = if (tz_arg) |n|
-        ParseZone.of(n, false)
+    const zone = if (tz_arg) |z|
+        z
     else if (p.time.zone_type == dp.ZONETYPE_ID and p.time.id() != null)
         ParseZone.of(p.time.id().?, true)
     else
-        ParseZone.of(ctx.vm.default_tz_name, true);
+        defaultZone(ctx);
     const now_t = currentTimeMicros();
     if (format == null and std.mem.eql(u8, input, "now")) return .{ .ts = now_t.ts, .us = now_t.us, .zone = zone };
     const now = nowOf(ctx.allocator, now_t.ts, now_t.us, &zone);
@@ -3008,7 +2780,7 @@ fn modifyDateObject(ctx: *NativeContext, obj: *PhpObject, input: []const u8, pre
         try ctx.vm.emitWarning(msg);
         return false;
     }
-    const zone = ParseZone.of(objTzName(obj, ctx.vm.default_tz_name), false);
+    const zone = objZoneOr(ctx, obj);
     const us_v = obj.get("__microseconds");
     var t = wallTime(ctx.allocator, getTimestamp(obj), if (us_v == .int) us_v.int else 0, &zone);
     const tmp = &p.time;
@@ -3048,7 +2820,7 @@ fn strtotimeIn(ctx: *NativeContext, input: []const u8, base: i64) RuntimeError!?
     var p = try parseDate(ctx, input);
     defer p.deinit(ctx.allocator);
     if (p.errors.items.len > 0) return null;
-    const zone = ParseZone.of(ctx.vm.default_tz_name, true);
+    const zone = defaultZone(ctx);
     const now = nowOf(ctx.allocator, base, 0, &zone);
     dp.fillHoles(&p.time, &now, false);
     dp.updateTs(&p.time, zone.name(), parse_db);

@@ -2351,6 +2351,47 @@ pub fn dayOfWeek(y: i64, m: i64, d: i64) i64 {
     return positiveMod(c1 +% y1 +% m1 +% @divTrunc(y1, 4) +% d, 7);
 }
 
+pub fn isoDayOfWeek(y: i64, m: i64, d: i64) i64 {
+    const dow = dayOfWeek(y, m, d);
+    return if (dow == 0) 7 else dow;
+}
+
+const d_table_common = [13]i64{ 0, 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
+const d_table_leap = [13]i64{ 0, 0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335 };
+
+pub fn dayOfYear(y: i64, m: i64, d: i64) i64 {
+    return (if (isLeap(y)) d_table_leap[monthIndex(m)] else d_table_common[monthIndex(m)]) +% d - 1;
+}
+
+// timelib_isoweek_from_date
+pub fn isoWeekFromDate(y: i64, m: i64, d: i64, iw: *i64, iy: *i64) void {
+    const y_leap: i64 = @intFromBool(isLeap(y));
+    const prev_y_leap = isLeap(y -% 1);
+    var doy = dayOfYear(y, m, d) + 1;
+    if (y_leap == 1 and m > 2) doy += 1;
+    var jan1weekday = dayOfWeek(y, 1, 1);
+    var weekday = dayOfWeek(y, m, d);
+    if (weekday == 0) weekday = 7;
+    if (jan1weekday == 0) jan1weekday = 7;
+    if (doy <= (8 - jan1weekday) and jan1weekday > 4) {
+        iy.* = y -% 1;
+        iw.* = if (jan1weekday == 5 or (jan1weekday == 6 and prev_y_leap)) 53 else 52;
+    } else {
+        iy.* = y;
+    }
+    if (iy.* == y) {
+        const days: i64 = if (y_leap == 1) 366 else 365;
+        if ((days - (doy - y_leap)) < (4 - weekday)) {
+            iy.* = y +% 1;
+            iw.* = 1;
+            return;
+        }
+        const j = doy + (7 - weekday) + (jan1weekday - 1);
+        iw.* = @divTrunc(j, 7);
+        if (jan1weekday > 4) iw.* -= 1;
+    }
+}
+
 pub fn daysInMonth(y: i64, m: i64) i64 {
     return if (isLeap(y)) ml_table_leap[monthIndex(m)] else ml_table_common[monthIndex(m)];
 }
