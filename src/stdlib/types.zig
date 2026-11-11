@@ -1,6 +1,7 @@
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
 const class_names = @import("../runtime/class_names.zig");
+const callables = @import("../runtime/callables.zig");
 const object_properties = @import("../runtime/object_properties.zig");
 const paths = @import("../paths.zig");
 const php_version = @import("../php_version.zig");
@@ -789,64 +790,71 @@ fn property_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     return NativeResult.scalar(.{ .bool = false });
 }
 
+// php's is_callable: zend_is_callable_ex against the calling scope (its
+// deprecations included), or only the shape of the value with
+// $syntax_only; $callable_name is always set, as zend_get_callable_name_ex
+// names the value
 fn native_is_callable(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     const val = args[0];
     const syntax_only = args.len > 1 and args[1].isTruthy();
-    // PHP's 3rd by-ref param receives the resolved callable name on success
-    // (or its string form). populated regardless of return value so caller
-    // code can inspect failed resolution attempts too
-    const fillName = struct {
-        fn run(c: *NativeContext, a: []const Value, name_str: []const u8) void {
-            if (a.len < 3) return;
-            const owned = Value.String.create(c.allocator, name_str) catch return;
-            defer owned.release();
-            c.setCallerVar(2, a.len, .{ .string = owned });
-        }
-    }.run;
-    if (val == .string) {
-        const raw = val.string.bytes();
-        const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
-        fillName(ctx, args, name);
-        if (syntax_only) return NativeResult.scalar(.{ .bool = true });
-        return NativeResult.scalar(.{ .bool = ctx.vm.isValueCallable(val) });
+    if (args.len >= 3) {
+        var name: std.ArrayListUnmanaged(u8) = .empty;
+        defer name.deinit(ctx.allocator);
+        try callableName(ctx, val, &name);
+        const owned = try Value.String.create(ctx.allocator, name.items);
+        defer owned.release();
+        ctx.setCallerVar(2, args.len, .{ .string = owned });
     }
-    if (val == .object) {
-        if (std.mem.eql(u8, val.object.class_name, "Closure")) {
-            // zend_get_callable_name: a closure's own name, or what a
-            // closure made from a callable calls
-            var name_buf: [512]u8 = undefined;
-            fillName(ctx, args, closureCallableName(ctx, val.object, &name_buf));
-            return NativeResult.scalar(.{ .bool = true });
-        }
-        var buf: [256]u8 = undefined;
-        const full = class_names.memberKey(&buf, val.object.class_name, "__invoke");
-        fillName(ctx, args, full);
-        return NativeResult.scalar(.{ .bool = ctx.vm.hasMethod(val.object.class_name, "__invoke") });
+    if (syntax_only) {
+        const ok = switch (val) {
+            .string => true,
+            .object => |o| std.mem.eql(u8, o.class_name, "Closure") or ctx.vm.hasMethod(o.class_name, "__invoke"),
+            .array => |arr| blk: {
+                if (arr.entries.items.len != 2) break :blk false;
+                const target = arr.get(.{ .int = 0 });
+                const method = arr.get(.{ .int = 1 });
+                break :blk (target == .string or target == .object) and method == .string;
+            },
+            else => false,
+        };
+        return NativeResult.scalar(.{ .bool = ok });
     }
-    if (val == .array) {
-        const arr = val.array;
-        if (arr.entries.items.len != 2) return NativeResult.scalar(.{ .bool = false });
-        const target = arr.entries.items[0].value;
-        const method_val = arr.entries.items[1].value;
-        if (method_val != .string) return NativeResult.scalar(.{ .bool = false });
-        const method = method_val.string.bytes();
-        const raw_class = if (target == .object)
-            target.object.class_name
-        else if (target == .string)
-            target.string.bytes()
-        else
-            return NativeResult.scalar(.{ .bool = false });
-        const class_name = if (raw_class.len > 0 and raw_class[0] == '\\') raw_class[1..] else raw_class;
-        {
-            var name_buf: [256]u8 = undefined;
-            const resolved = class_names.memberKey(&name_buf, class_name, method);
-            fillName(ctx, args, resolved);
-        }
-        if (syntax_only) return NativeResult.scalar(.{ .bool = true });
-        return NativeResult.scalar(.{ .bool = ctx.vm.isValueCallable(val) });
+    if (val != .string and val != .array and val != .object) return NativeResult.scalar(.{ .bool = false });
+    const resolution = try callables.resolveCallback(ctx.vm, val, .{});
+    if (ctx.vm.pending_exception != null) return error.RuntimeError;
+    return NativeResult.scalar(.{ .bool = resolution == .callee });
+}
+
+// zend_get_callable_name_ex
+fn callableName(ctx: *NativeContext, val: Value, out: *std.ArrayListUnmanaged(u8)) RuntimeError!void {
+    const a = ctx.allocator;
+    switch (val) {
+        .string => |s| try out.appendSlice(a, s.bytes()),
+        .array => |arr| {
+            const target = arr.get(.{ .int = 0 });
+            const method = arr.get(.{ .int = 1 });
+            if (arr.entries.items.len != 2 or !arr.contains(.{ .int = 0 }) or method != .string) return out.appendSlice(a, "Array");
+            switch (target) {
+                .string => |s| try out.print(a, "{s}::{s}", .{ s.bytes(), method.string.bytes() }),
+                .object => |o| try out.print(a, "{s}::{s}", .{ o.class_name, method.string.bytes() }),
+                else => try out.appendSlice(a, "Array"),
+            }
+        },
+        .object => |o| {
+            if (std.mem.eql(u8, o.class_name, "Closure")) {
+                var name_buf: [512]u8 = undefined;
+                return out.appendSlice(a, closureCallableName(ctx, o, &name_buf));
+            }
+            try out.print(a, "{s}::__invoke", .{o.class_name});
+        },
+        .generator, .fiber => try out.print(a, "{s}::__invoke", .{if (val == .generator) "Generator" else "Fiber"}),
+        .resource => |r| try out.print(a, "Resource id #{d}", .{r.id}),
+        .float => {
+            if (std.math.isNan(val.float)) try ctx.vm.emitWarning("unexpected NAN value was coerced to string");
+            try out.appendSlice(a, (try ctx.vm.transientFormatted(val)).bytes());
+        },
+        else => try val.format(out, a),
     }
-    return NativeResult.scalar(.{ .bool = false });
 }
 
 fn closureCallableName(ctx: *NativeContext, closure: *value_mod.PhpObject, buf: []u8) []const u8 {
