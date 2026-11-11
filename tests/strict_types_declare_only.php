@@ -14,7 +14,8 @@ $dir = sys_get_temp_dir() . '/zphp_strict_' . getmypid();
 @mkdir($dir);
 file_put_contents("$dir/strict.php", "<?php\ndeclare(strict_types=1);\nreturn function () { try { return takes_int('5'); } catch (TypeError \$e) { return \$e->getMessage(); } };\n");
 file_put_contents("$dir/off.php", "<?php\ndeclare(strict_types=0);\nreturn function () { return takes_int('6'); };\n");
-var_dump(str_replace($dir, 'DIR', (require "$dir/strict.php")()));
+// the message names the file in the platform's spelling
+var_dump(str_replace([$dir, str_replace('/', DIRECTORY_SEPARATOR, $dir)], 'DIR', (require "$dir/strict.php")()));
 var_dump((require "$dir/off.php")());
 unlink("$dir/strict.php");
 unlink("$dir/off.php");

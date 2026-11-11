@@ -1,6 +1,5 @@
 <?php
 var_dump(LC_ALL, LC_CTYPE, LC_NUMERIC, LC_MESSAGES);
-var_dump(setlocale(LC_ALL, 0));
 var_dump(setlocale(LC_CTYPE, 0));
 var_dump(setlocale(LC_ALL, 'xx_NOPE', 'C'));
 var_dump(setlocale(LC_ALL, ['nope', 'C.UTF-8']));
