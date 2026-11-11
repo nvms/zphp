@@ -24791,6 +24791,7 @@ pub const VM = struct {
         fiber.state = .running;
         // what the destructor releases is destructed as usual, not in this
         // fiber, which is busy
+        const prev_in_fiber = self.gc_dtors_in_fiber;
         self.gc_dtors_in_fiber = false;
         // php's gc_destructor_fiber calls it; an exception it throws goes on
         // to the code that ran the collection, with one in flight as its
@@ -24803,7 +24804,7 @@ pub const VM = struct {
         _ = self.executeFiber(fiber, base_frame, base_sp, base_handler) catch Value.null;
         self.native_call = record.outer;
         self.settleDrainException(in_flight);
-        self.gc_dtors_in_fiber = true;
+        self.gc_dtors_in_fiber = prev_in_fiber;
         if (fiber.state == .suspended) {
             // the destructor holds this fiber now; the application may
             // keep it or let it go
@@ -24813,6 +24814,19 @@ pub const VM = struct {
             fiber.state = .created;
         }
         return true;
+    }
+
+    // a garbage object's destructor, called before any garbage is freed:
+    // inside a fiber in php's gc destructor fiber
+    fn callGarbageDestructor(self: *VM, obj: *PhpObject) void {
+        if (self.current_fiber != null) {
+            if (self.callDestructorInGcFiber(obj)) return;
+        }
+        self.fiber_switch_blocked += 1;
+        defer self.fiber_switch_blocked -= 1;
+        const in_flight = self.takePending();
+        _ = self.callMethod(obj, "__destruct", &.{}) catch {};
+        self.settleDrainException(in_flight);
     }
 
     // after a destructor or a finally block a drain ran: its exception stays
@@ -25147,17 +25161,17 @@ pub const VM = struct {
     //    + free
     pub fn collectCycles(self: *VM) usize {
         var rerun = false;
-        var collected = self.collectCyclesPass(&rerun);
+        var collected = self.collectCyclesPass(&rerun, true);
         // destructors ran for garbage that was left out: php collects what
         // is still garbage in a second run, once
         if (rerun) {
             var again = false;
-            collected += self.collectCyclesPass(&again);
+            collected += self.collectCyclesPass(&again, false);
         }
         return collected;
     }
 
-    fn collectCyclesPass(self: *VM, rerun_needed: *bool) usize {
+    fn collectCyclesPass(self: *VM, rerun_needed: *bool, first: bool) usize {
         if (self.draining_destructors or self.collecting_cycles) return 0;
         self.collecting_cycles = true;
         defer self.collecting_cycles = false;
@@ -25301,8 +25315,32 @@ pub const VM = struct {
                 };
             }
         }
+        // php's gc calls the garbage's destructors while all of it is
+        // intact, and frees it in a second run: a destructor may use any of
+        // it (a closure the object holds, bug73989). inside a fiber the
+        // drain still runs them in the gc destructor fiber as it frees
+        var dtor_objs: std.ArrayListUnmanaged(*PhpObject) = .empty;
+        defer dtor_objs.deinit(self.allocator);
+        if (first and self.current_fiber == null) {
+            var dt_it = visited_objs.iterator();
+            while (dt_it.next()) |kv| {
+                const obj = kv.key_ptr.*;
+                if (obj.scratch_rc != 0 or obj.destructed or obj.destructor_called or !obj.ownsDestructor()) continue;
+                if (!self.hasMethod(obj.class_name, "__destruct")) continue;
+                dtor_objs.append(self.allocator, obj) catch continue;
+            }
+        }
+        for (dtor_objs.items) |obj| {
+            if (obj.destructed or obj.destructor_called) continue;
+            obj.destructor_called = true;
+            objRetain(obj);
+            self.callGarbageDestructor(obj);
+            self.objRelease(obj);
+        }
+        const freeing = dtor_objs.items.len == 0;
         var coll_it = visited_objs.iterator();
         while (coll_it.next()) |kv| {
+            if (!freeing) break;
             const obj = kv.key_ptr.*;
             if (obj.scratch_rc == 0 and !obj.destructed) {
                 // force refcount to 0 so the destruct drain processes it
@@ -25315,6 +25353,7 @@ pub const VM = struct {
         }
         var ca_it = visited_arrs.iterator();
         while (ca_it.next()) |kv| {
+            if (!freeing) break;
             const arr = kv.key_ptr.*;
             if (arr.scratch_rc == 0 and !arr.elements_released) {
                 arr.refcount = 0;
@@ -25325,12 +25364,14 @@ pub const VM = struct {
         // a garbage generator that finished, or a fiber that is not
         // suspended, has nothing left to run: what it holds goes
         for (self.cycle_gens.keys(), self.cycle_gens.values()) |g, scratch| {
+            if (!freeing) break;
             if (scratch != 0 or g.refcount == 0) continue;
             g.refcount = 0;
             self.pending_gen_release.append(self.allocator, g) catch {};
             collected += 1;
         }
         for (self.cycle_fibers.keys(), self.cycle_fibers.values()) |f, scratch| {
+            if (!freeing) break;
             if (scratch != 0 or f.refcount == 0) continue;
             f.refcount = 0;
             self.pending_fiber_release.append(self.allocator, f) catch {};
@@ -25340,9 +25381,21 @@ pub const VM = struct {
         for (self.cycle_array_candidates.items) |arr| arr.cycle_queued = false;
         self.cycle_candidates.clearRetainingCapacity();
         self.cycle_array_candidates.clearRetainingCapacity();
+        // what the destructors left is the second run's to free
+        if (!freeing) {
+            var keep_it = visited_objs.iterator();
+            while (keep_it.next()) |kv| {
+                const obj = kv.key_ptr.*;
+                if (obj.refcount == 0 or obj.destructed or obj.cycle_queued) continue;
+                obj.cycle_queued = true;
+                self.cycle_candidates.append(self.allocator, obj) catch {
+                    obj.cycle_queued = false;
+                };
+            }
+        }
         // generators and fibers whose destructor ran stay candidates for the
         // second run
-        const rerun = pending_gens.items.len > 0 or pending_fibers.items.len > 0;
+        const rerun = !freeing or pending_gens.items.len > 0 or pending_fibers.items.len > 0;
         var gi: usize = 0;
         while (gi < self.cycle_gen_candidates.items.len) {
             const g = self.cycle_gen_candidates.items[gi];
