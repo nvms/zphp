@@ -479,11 +479,14 @@ pub const OpCode = enum(u8) {
     // the returned value on the stack, 1 at the implicit return at the end
     // of the body, 2 for a `return;`
     return_ref_value,
+    // declare(ticks=N): u16 N. every Nth runs the tick functions
+    tick,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
             .arg_variable => 6,
             .return_ref_value => 2,
+            .tick => 3,
             .jump_if_class_declared, .bind_const_attributes => 5,
             .parent_hook_call => 7,
             .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim, .arg_append, .arg_value, .arg_call_result => 4,

@@ -299,6 +299,10 @@ pub const Compiler = struct {
     loop_is_foreach: [32]bool = @as([32]bool, @splat(false)),
     // the loop levels that are switch statements
     loop_is_switch: [32]bool = @as([32]bool, @splat(false)),
+    // declare(ticks=N) in effect: a tick follows each statement
+    ticks: u16 = 0,
+    // where the last tick emitted ends
+    tick_end: usize = std.math.maxInt(usize),
     // per-foreach: true when the iterable is anonymous (e.g. `gen()`) and
     // therefore should be closed when the loop exits. `break` uses this to
     // pick iter_end_close vs iter_end
@@ -547,6 +551,67 @@ pub const Compiler = struct {
     }
 
     pub fn compileNode(self: *Compiler, idx: u32) Error!void {
+        try self.compileNodeInner(idx);
+        // zend_compile_stmt: a tick after each statement while declare(ticks)
+        // is in effect (the declaration itself included)
+        // (zend_emit_tick: never two ticks in a row)
+        if (self.ticks != 0 and isTickedStatement(self.ast.nodes[idx].tag) and self.chunk.offset() != self.tick_end and !self.endsInTick(idx)) {
+            try self.emitOp(.tick);
+            try self.emitU16(self.ticks);
+            self.tick_end = self.chunk.offset();
+        }
+    }
+
+    // an if whose last branch ends with a ticked statement: php's last
+    // opcode for it is that tick, so it gets no second one
+    fn endsInTick(self: *Compiler, idx: u32) bool {
+        const node = self.ast.nodes[idx];
+        const last_branch: u32 = switch (node.tag) {
+            .if_simple => node.data.rhs,
+            .if_else => self.ast.extra_data[node.data.rhs + 1],
+            else => return false,
+        };
+        if (last_branch == 0) return false;
+        const branch = self.ast.nodes[last_branch];
+        if (branch.tag == .block) {
+            const stmts = self.ast.extraSlice(branch.data.lhs);
+            if (stmts.len == 0) return false;
+            const last = stmts[stmts.len - 1];
+            return isTickedStatement(self.ast.nodes[last].tag) or self.endsInTick(last);
+        }
+        return isTickedStatement(branch.tag) or self.endsInTick(last_branch);
+    }
+
+    fn isTickedStatement(tag: Ast.Node.Tag) bool {
+        return switch (tag) {
+            .expression_stmt, .echo_stmt, .return_stmt, .break_stmt, .continue_stmt, .if_simple, .if_else, .while_stmt, .do_while, .for_stmt, .foreach_stmt, .global_stmt, .static_var, .switch_stmt, .inline_html, .try_catch, .goto_stmt, .declare_stmt, .use_stmt, .use_fn_stmt, .use_const_stmt => true,
+            else => false,
+        };
+    }
+
+    // declare(ticks=N): N from a literal, as zend_compile_declare requires
+    fn declaredTicks(self: *Compiler, node: Ast.Node) Error!?u16 {
+        var t = node.main_token + 1;
+        while (t + 2 < node.data.lhs) : (t += 1) {
+            if (self.ast.tokens[t].tag != .identifier or !std.ascii.eqlIgnoreCase(self.ast.tokenSlice(t), "ticks")) continue;
+            const value = t + 2;
+            const after = self.ast.tokens[value + 1].tag;
+            const literal = switch (self.ast.tokens[value].tag) {
+                .integer, .float, .string => after == .r_paren or after == .comma,
+                else => false,
+            };
+            if (!literal) return self.fail(node.main_token, "declare(ticks) value must be a literal");
+            const n: i64 = switch (self.ast.tokens[value].tag) {
+                .integer => parsePhpInt(self.ast.tokenSlice(value)),
+                .float => @intFromFloat(std.fmt.parseFloat(f64, self.ast.tokenSlice(value)) catch 0),
+                else => std.fmt.parseInt(i64, std.mem.trim(u8, self.ast.tokenSlice(value), "'\""), 10) catch 0,
+            };
+            return @intCast(std.math.clamp(n, 0, std.math.maxInt(u16)));
+        }
+        return null;
+    }
+
+    fn compileNodeInner(self: *Compiler, idx: u32) Error!void {
         // early-bound class/interface declarations are relocated to a prelude
         // (see hoistEarlyClasses); their original location emits nothing
         if (self.hoisted_nodes.contains(idx)) return;
@@ -884,10 +949,16 @@ pub const Compiler = struct {
                     } else i += 1;
                 }
             },
-            // strict_types is read from the file's tokens; ticks and encoding have no effect
+            // strict_types is read from the file's tokens; ticks hold for the block, or the rest of the file
             .declare_stmt => {
                 try self.checkStrictTypesDeclare(node);
-                if (node.data.rhs != 0) try self.compileNode(node.data.rhs);
+                const ticks = try self.declaredTicks(node);
+                if (node.data.rhs != 0) {
+                    const outer_ticks = self.ticks;
+                    if (ticks) |n| self.ticks = n;
+                    defer self.ticks = outer_ticks;
+                    try self.compileNode(node.data.rhs);
+                } else if (ticks) |n| self.ticks = n;
             },
             .goto_stmt => {
                 const label = self.ast.tokenSlice(node.main_token);

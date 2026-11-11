@@ -1728,6 +1728,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     const returns_ref = (node.data.rhs & (1 << 30)) != 0;
 
     var sub = Compiler{
+        .ticks = self.ticks,
         .ast = self.ast,
         .diagnostic = self.diagnostic,
         .declared_return = try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len)),
@@ -1929,6 +1930,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     var sub = Compiler{
+        .ticks = self.ticks,
         .ast = self.ast,
         .diagnostic = self.diagnostic,
         .declared_return = try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len)),
@@ -3897,6 +3899,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     const method_returns_ref = (member.data.rhs & (1 << 27)) != 0;
 
     var sub = Compiler{
+        .ticks = self.ticks,
         .ast = self.ast,
         .diagnostic = self.diagnostic,
         .declared_return = try extractReturnType(self, member.data.lhs, @intCast(param_nodes.len)),
@@ -4185,6 +4188,7 @@ fn compileInitializer(self: *Compiler, name: []const u8, scope: InitializerScope
         .argument => self.current_class,
     };
     var sub = Compiler{
+        .ticks = self.ticks,
         .ast = self.ast,
         .diagnostic = self.diagnostic,
         .chunk = .{},
@@ -4263,6 +4267,7 @@ fn compileDeferredPropDefaults(self: *Compiler, class_name: []const u8, members:
     try self.string_allocs.append(self.allocator, name);
 
     var sub = Compiler{
+        .ticks = self.ticks,
         .ast = self.ast,
         .diagnostic = self.diagnostic,
         .chunk = .{},
@@ -4391,6 +4396,7 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
     @memset(defaults, .null);
 
     var sub = Compiler{
+        .ticks = self.ticks,
         .ast = self.ast,
         .diagnostic = self.diagnostic,
         .chunk = .{},

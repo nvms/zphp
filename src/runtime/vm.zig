@@ -114,6 +114,10 @@ pub const OutputBufferLevel = struct {
 
 pub const ErrorHandlerEntry = struct { handler: Value, mask: i64 };
 
+// a register_tick_function entry; calling keeps a tick inside it from
+// running it again
+pub const TickFunction = struct { callable: Value, args: []Value, id: u64, calling: bool = false };
+
 // a trait's own method (name without the `Trait::` prefix) + its compiled func,
 // cached per trait so applyTrait doesn't rescan the whole function table
 pub const TraitMethodEntry = struct { name: []const u8, func: *const ObjFunction };
@@ -854,6 +858,10 @@ pub const VM = struct {
     ini_callbacks: std.StringHashMapUnmanaged(Value) = .{},
     // register_shutdown_function's callables with the arguments they get
     shutdown_callbacks: std.ArrayListUnmanaged(ShutdownCallback) = .empty,
+    // register_tick_function's callbacks, run by declare(ticks) code
+    tick_functions: std.ArrayListUnmanaged(TickFunction) = .empty,
+    ticks_count: u32 = 0,
+    tick_function_ids: u64 = 0,
     strtok_state: ?[]const u8 = null,
     strtok_pos: usize = 0,
     classes: class_names.Map(ClassDef) = .{},
@@ -3207,6 +3215,7 @@ pub const VM = struct {
         self.ini_callbacks.deinit(self.allocator);
         for (self.shutdown_callbacks.items) |cb| self.allocator.free(cb.args);
         self.shutdown_callbacks.deinit(self.allocator);
+        self.tick_functions.deinit(self.allocator);
         self.error_handler_stack.deinit(self.allocator);
         self.arrays.deinit(self.allocator);
         self.free_arrays.deinit(self.allocator);
@@ -3783,6 +3792,40 @@ pub const VM = struct {
         }
         self.drainPendingDestruct();
         self.drain_raised = false;
+    }
+
+    // php_run_ticks: every tick function with its arguments, in the order
+    // they were registered (one may register or unregister others)
+    fn runTickFunctions(self: *VM) RuntimeError!void {
+        var i: usize = 0;
+        while (i < self.tick_functions.items.len) : (i += 1) {
+            const entry = self.tick_functions.items[i];
+            if (entry.calling) continue;
+            self.tick_functions.items[i].calling = true;
+            retainValue(entry.callable);
+            defer self.releaseValue(entry.callable);
+            var ctx = self.makeContext(null);
+            // no fiber switch inside a tick function (zend_fiber_switch_block)
+            self.fiber_switch_blocked += 1;
+            const result = ctx.invokeCallable(entry.callable, entry.args);
+            self.fiber_switch_blocked -= 1;
+            // the list may have changed while it ran
+            for (self.tick_functions.items, 0..) |*e, at| if (e.id == entry.id) {
+                e.calling = false;
+                i = at;
+                break;
+            };
+            self.releaseValue(try result);
+        }
+    }
+
+    pub fn releaseTickFunctions(self: *VM) void {
+        for (self.tick_functions.items) |cb| {
+            self.releaseValue(cb.callable);
+            for (cb.args) |v| self.releaseValue(v);
+            self.allocator.free(cb.args);
+        }
+        self.tick_functions.clearRetainingCapacity();
     }
 
     // zend_objects_destroy_object: a destructor the releasing scope can't
@@ -9803,6 +9846,14 @@ pub const VM = struct {
                     defer self.allocator.free(msg);
                     if (try self.throwBuiltinException("Error", msg)) continue;
                     return error.RuntimeError;
+                },
+                .tick => {
+                    const every = self.readU16();
+                    self.ticks_count += 1;
+                    if (self.ticks_count >= every) {
+                        self.ticks_count = 0;
+                        self.runTickFunctions() catch if (try self.resumeRaised()) continue;
+                    }
                 },
                 .return_ref_value => {
                     const kind = self.readByte();
@@ -24620,6 +24671,7 @@ pub const VM = struct {
             self.allocator.free(cb.args);
         }
         self.shutdown_callbacks.clearRetainingCapacity();
+        self.releaseTickFunctions();
         for (self.autoload_callbacks.items) |cb| self.releaseValue(cb);
         self.autoload_callbacks.clearRetainingCapacity();
         if (self.spl_autoload_extensions) |exts| self.allocator.free(exts);

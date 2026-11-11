@@ -121,6 +121,8 @@ pub const entries = .{
     .{ "get_error_handler", native_get_error_handler },
     .{ "get_exception_handler", native_get_exception_handler },
     .{ "register_shutdown_function", native_register_shutdown_function },
+    .{ "register_tick_function", native_register_tick_function },
+    .{ "unregister_tick_function", native_unregister_tick_function },
     .{ "error_reporting", native_error_reporting },
     .{ "error_get_last", native_error_get_last },
     .{ "error_clear_last", native_error_clear_last },
@@ -1598,6 +1600,51 @@ fn native_get_included_files(ctx: *NativeContext, _: []const Value) RuntimeError
         try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(path) });
     }
     return NativeResult.borrowed(.{ .array = arr });
+}
+
+// register_tick_function: the callback and its arguments run on each tick
+fn native_register_tick_function(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
+    const extra = try ctx.allocator.alloc(Value, args.len - 1);
+    errdefer ctx.allocator.free(extra);
+    @memcpy(extra, args[1..]);
+    ctx.vm.tick_function_ids += 1;
+    try ctx.vm.tick_functions.append(ctx.allocator, .{ .callable = args[0], .args = extra, .id = ctx.vm.tick_function_ids });
+    VM.retainValue(args[0]);
+    for (extra) |v| VM.retainValue(v);
+    return NativeResult.scalar(.{ .bool = true });
+}
+
+// unregister_tick_function: the first registration of the same callable
+// goes, unless it is running
+fn native_unregister_tick_function(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.null);
+    const list = &ctx.vm.tick_functions;
+    for (list.items, 0..) |entry, i| {
+        if (!sameCallable(entry.callable, args[0])) continue;
+        if (entry.calling) {
+            try ctx.vm.setPendingException("Error", "Registered tick function cannot be unregistered while it is being executed");
+            return error.RuntimeError;
+        }
+        const removed = list.orderedRemove(i);
+        ctx.vm.releaseValue(removed.callable);
+        for (removed.args) |v| ctx.vm.releaseValue(v);
+        ctx.allocator.free(removed.args);
+        break;
+    }
+    return NativeResult.scalar(.null);
+}
+
+fn sameCallable(a: Value, b: Value) bool {
+    return switch (a) {
+        .string => |s| b == .string and std.ascii.eqlIgnoreCase(std.mem.trimStart(u8, s.bytes(), "\\"), std.mem.trimStart(u8, b.string.bytes(), "\\")),
+        .object => |o| b == .object and b.object == o,
+        .array => |arr| blk: {
+            if (b != .array or arr.entries.items.len != 2 or b.array.entries.items.len != 2) break :blk false;
+            break :blk sameCallable(arr.entries.items[0].value, b.array.entries.items[0].value) and sameCallable(arr.entries.items[1].value, b.array.entries.items[1].value);
+        },
+        else => false,
+    };
 }
 
 fn native_register_shutdown_function(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
