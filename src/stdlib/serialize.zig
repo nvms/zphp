@@ -780,12 +780,6 @@ fn releaseParsed(v: Value) void {
     if (v == .string) v.string.release();
 }
 
-fn strippedKey(str: Value.String) Value.String {
-    const full = str.bytes();
-    const stripped = stripVisibilityPrefix(full);
-    return str.borrowedSlice(full.len - stripped.len, full.len);
-}
-
 const ParseResult = struct {
     value: Value,
     pos: usize,
@@ -994,7 +988,7 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
                 p = val_result.pos;
                 if (collected) |arr| {
                     const k: PhpArray.Key = switch (key_result.value) {
-                        .string => |str| .{ .string = strippedKey(str) },
+                        .string => |str| .{ .string = str },
                         .int => |n| .{ .int = n },
                         else => continue,
                     };
