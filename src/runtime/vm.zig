@@ -697,6 +697,9 @@ pub const VM = struct {
     // the innermost running native call; a user call made at its depth comes
     // from the native itself
     native_call: ?*const NativeCall = null,
+    // the frame depth a running call_user_func(_array) was called at: a
+    // native it calls is called by an internal function, never strictly
+    forwarding_depth: usize = std.math.maxInt(usize),
     // set once a #[\Deprecated] constant is declared: reads check for it only then
     has_deprecated_constants: bool = false,
     // #[\Deprecated] global constants: what follows "is deprecated"
@@ -22759,13 +22762,35 @@ pub const VM = struct {
                 if (a.array.refcount == 0) self.queueArrayRelease(a.array);
             };
         }
-        // the callable parameters are checked once the arguments are pinned:
-        // resolving one may autoload, which runs php
+        // scalar parameters take their coerced values, in order, up to the
+        // first callable or array parameter, which are checked next;
+        // resolving a callable may autoload, which runs php
+        const checked_kinds = native.callbacks | native.arrays;
+        const called_by_native = self.forwarding_depth == self.frame_count or if (outer) |o| o.depth == self.frame_count else false;
+        const first_checked: usize = if (checked_kinds == 0) native_args.len else @min(native_args.len, @ctz(checked_kinds));
+        if (native.scalars.positions != 0) if (name) |n| {
+            if (try self.scalarArgsNeedCoercion(native.scalars, native_args)) {
+                if (separated_args == null) {
+                    const copy = try self.copyStackArgs(&args_buf, native_args);
+                    separated_args = copy;
+                    native_args = copy;
+                }
+                try self.coerceScalarArgs(n, label, native.scalars, separated_args.?, 0, first_checked, called_by_native);
+            }
+        };
         if (native.callbacks != 0 or native.arrays != 0) if (name) |n| try self.checkCallbackArgs(n, label, native.callbacks, native.arrays, native_args);
+        if (native.scalars.positions != 0 and first_checked < native_args.len) if (name) |n| {
+            if (separated_args) |copy| try self.coerceScalarArgs(n, label, native.scalars, copy, first_checked, copy.len, called_by_native);
+        };
         // an object php can't make a string of, given for a string parameter
         if (native.strings != 0) if (name) |n| for (native_args, 0..) |arg, i| {
             if (arg == .object and i < 31 and native.strings & (@as(u32, 1) << @intCast(i)) != 0) try self.refuseObjectForString(n, label, i, arg.object);
         };
+        const outer_forwarding = self.forwarding_depth;
+        defer self.forwarding_depth = outer_forwarding;
+        // a native call_user_func makes is called by it; a user function it
+        // calls resets this for what it calls in turn by adding a frame
+        self.forwarding_depth = if (isUserCallForwarder(name)) self.frame_count else std.math.maxInt(usize);
         const result = try native.call(ctx, native_args);
         if (self.ic) |ic| if (ic.ref_write_refused) {
             ic.ref_write_refused = false;
@@ -25054,6 +25079,76 @@ pub const VM = struct {
         defer self.allocator.free(msg);
         const line: i64 = if (self.sourceLocation(frame.chunk, if (frame.ip > 0) frame.ip - 1 else 0)) |loc| @intCast(loc.line) else 0;
         try self.raiseErrorAt(E_WARNING, msg, .{ .file = self.frameFile(self.frame_count - 1), .line = line });
+    }
+
+    fn scalarArgFits(kind: natives_mod.ScalarParams.Kind, nullable: bool, arg: Value) bool {
+        return switch (arg) {
+            .null => nullable,
+            .int => kind == .int or kind == .float,
+            .float => kind == .float,
+            .bool => kind == .bool,
+            .string => kind == .string,
+            else => false,
+        };
+    }
+
+    fn scalarArgsNeedCoercion(self: *VM, scalars: natives_mod.ScalarParams, args: []const Value) RuntimeError!bool {
+        _ = self;
+        for (args, 0..) |arg, i| {
+            if (!scalars.has(i)) continue;
+            if (!scalarArgFits(scalars.kind(i), scalars.isNullable(i), arg)) return true;
+        }
+        return false;
+    }
+
+    // zend_parse_arg_{long,double,bool,str}_slow for a function's scalar
+    // parameters in [from, to): an argument of another type is coerced in
+    // weak mode (null deprecated) or refused with php's TypeError. a
+    // replacement is transient; the slot gives back the reference the
+    // original held for the call
+    fn coerceScalarArgs(self: *VM, name: []const u8, label: []const u8, scalars: natives_mod.ScalarParams, args: []Value, from: usize, to: usize, called_by_native: bool) RuntimeError!void {
+        const signature = native_params.get(name) orelse return;
+        // an internal function calling another is never strict
+        const strict = !called_by_native and self.topFrameStrict();
+        var i = from;
+        while (i < to) : (i += 1) {
+            if (!scalars.has(i)) continue;
+            const kind = scalars.kind(i);
+            const nullable = scalars.isNullable(i);
+            const arg = args[i];
+            if (scalarArgFits(kind, nullable, arg)) continue;
+            const param = signature.params[i];
+            const replacement: ?Value = if (arg == .null or arg == .undef) blk: {
+                if (strict) break :blk null;
+                const msg = try std.fmt.allocPrint(self.allocator, "{s}(): Passing null to parameter #{d} (${s}) of type {s} is deprecated", .{ label, i + 1, param.name, param.type });
+                defer self.allocator.free(msg);
+                try self.raiseError(E_DEPRECATED, msg);
+                if (self.pending_exception != null) return error.RuntimeError;
+                break :blk switch (kind) {
+                    .int => Value{ .int = 0 },
+                    .float => Value{ .float = 0 },
+                    .bool => Value{ .bool = false },
+                    .string => Value{ .string = Value.String.borrowed("") },
+                };
+            } else if (strict)
+                null
+            else switch (kind) {
+                .int => try self.weakScalarHint(php_types.LONG, arg),
+                .float => try self.weakScalarHint(php_types.DOUBLE, arg),
+                .bool => try self.weakScalarHint(php_types.BOOL, arg),
+                .string => try self.weakScalarHint(php_types.STRING, arg),
+            };
+            if (self.pending_exception != null) return error.RuntimeError;
+            const value = replacement orelse {
+                const msg = try std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given", .{ label, i + 1, param.name, param.type, valueTypeName(arg) });
+                defer self.allocator.free(msg);
+                try self.setPendingException("TypeError", msg);
+                return error.RuntimeError;
+            };
+            stackRetain(value);
+            self.stackRelease(args[i]);
+            args[i] = value;
+        }
     }
 
     // a native's `callable` and `array` parameters, checked in order as php's

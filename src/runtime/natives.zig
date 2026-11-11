@@ -28,12 +28,14 @@ pub fn Table(comptime NativeFn: type) type {
             deprecated: ?[]const u8,
             // it takes a parameter by reference
             byref: bool,
+            // the parameters php's argument parsing coerces to a scalar
+            scalars: ScalarParams,
         };
 
         map: std.StringHashMapUnmanaged(Native) = .{},
 
         pub fn put(self: *Self, allocator: Allocator, name: []const u8, call: NativeFn) !void {
-            try self.map.put(allocator, name, .{ .call = call, .arity = Arity.of(name), .callbacks = callbackParams(name), .arrays = arrayParams(name), .strings = stringParams(name), .no_discard = no_discard.get(name), .deprecated = deprecations.functions.get(name), .byref = byref_args.hasByRefParams(name) });
+            try self.map.put(allocator, name, .{ .call = call, .arity = Arity.of(name), .callbacks = callbackParams(name), .arrays = arrayParams(name), .strings = stringParams(name), .no_discard = no_discard.get(name), .deprecated = deprecations.functions.get(name), .byref = byref_args.hasByRefParams(name), .scalars = scalarParams(name) });
         }
 
         pub fn get(self: *const Self, name: []const u8) ?Native {
@@ -99,6 +101,67 @@ pub fn stringParams(name: []const u8) u32 {
         if (std.mem.eql(u8, param.type, "string") or std.mem.eql(u8, param.type, "?string")) positions |= @as(u32, 1) << @intCast(i);
     }
     return positions;
+}
+
+// the parameters a function declares as one scalar type, nullable or not
+// (int, float, bool, string), which php's argument parsing coerces before
+// the function runs: bit i of `positions` is parameter i, and `kinds` holds
+// two bits per position. methods, by-reference and variadic parameters are
+// left to the native
+pub const ScalarParams = struct {
+    positions: u32 = 0,
+    nullable: u32 = 0,
+    kinds: u64 = 0,
+
+    pub const Kind = enum(u2) { int, float, bool, string };
+
+    pub fn kind(self: ScalarParams, i: usize) Kind {
+        return @enumFromInt(@as(u2, @truncate(self.kinds >> @intCast(i * 2))));
+    }
+
+    pub fn has(self: ScalarParams, i: usize) bool {
+        return i < 32 and self.positions & (@as(u32, 1) << @intCast(i)) != 0;
+    }
+
+    pub fn isNullable(self: ScalarParams, i: usize) bool {
+        return self.nullable & (@as(u32, 1) << @intCast(i)) != 0;
+    }
+};
+
+// parameters whose argument parsing differs from the type php's stub
+// declares, which the native parses itself: number_format's $num is
+// Z_PARAM_NUMBER, fputcsv's $eol Z_PARAM_STR_OR_NULL
+const parsed_otherwise = std.StaticStringMap(u32).initComptime(.{
+    .{ "number_format", 1 << 0 },
+    .{ "fputcsv", 1 << 5 },
+});
+
+pub fn scalarParams(name: []const u8) ScalarParams {
+    if (std.mem.indexOf(u8, name, "::") != null) return .{};
+    const signature = native_params.get(name) orelse return .{};
+    const skipped = parsed_otherwise.get(name) orelse 0;
+    var out: ScalarParams = .{};
+    for (signature.params, 0..) |param, i| {
+        if (i >= 32 or param.variadic) break;
+        if (param.by_ref or skipped & (@as(u32, 1) << @intCast(i)) != 0) continue;
+        const nullable = param.type.len > 0 and param.type[0] == '?';
+        const bare = if (nullable) param.type[1..] else param.type;
+        const k: ScalarParams.Kind = if (std.mem.eql(u8, bare, "int"))
+            .int
+        else if (std.mem.eql(u8, bare, "float"))
+            .float
+        else if (std.mem.eql(u8, bare, "bool"))
+            .bool
+        else if (std.mem.eql(u8, bare, "string"))
+            .string
+        else
+            continue;
+        const bit = @as(u32, 1) << @intCast(i);
+        out.positions |= bit;
+        if (nullable) out.nullable |= bit;
+        out.kinds |= @as(u64, @intFromEnum(k)) << @intCast(i * 2);
+    }
+    return out;
 }
 
 // the parameters php's argument parsing requires to be arrays, for natives
