@@ -1402,6 +1402,7 @@ fn checkPropertyDeclaration(self: *Compiler, class_name: []const u8, member: Ast
         if (visibility != 0) return self.fail(at, "Property in interface cannot be protected or private");
         if (flags & (1 << 7) != 0) return self.fail(at, "Property in interface cannot be final");
     }
+    if (member.tag == .class_property and flags & (1 << 7) != 0 and visibility == 2) return self.fail(at, "Property cannot be both final and private");
     if (member.tag != .class_property_hooks) {
         if (member.tag == .class_property and flags & H.prop_abstract != 0) return self.fail(at, "Only hooked properties may be declared abstract");
         return;
@@ -1459,9 +1460,14 @@ fn checkPropertyDeclaration(self: *Compiler, class_name: []const u8, member: Ast
 // that needs to know classes is left to the declaration, as php defers it
 fn checkSetHookParamType(self: *Compiler, class_name: []const u8, prop: []const u8, prop_flags: u32, param: Ast.Node) Error!void {
     const prop_extra = prop_flags >> 16;
-    if (prop_extra == 0) return;
-    const prop_type = try buildTypeString(self, self.ast.extra_data[prop_extra - 1], self.ast.extra_data[prop_extra]);
     const param_extra = param.data.rhs >> 8;
+    // zend_verify_property_hook_variance: a typed parameter for an untyped
+    // property can't take everything the property holds
+    if (prop_extra == 0) {
+        if (param_extra != 0) return self.failFmt(param.main_token, "Type of parameter {s} of hook {s}::${s}::set must be compatible with property type", .{ self.ast.tokenSlice(param.main_token), class_name, prop });
+        return;
+    }
+    const prop_type = try buildTypeString(self, self.ast.extra_data[prop_extra - 1], self.ast.extra_data[prop_extra]);
     const incompatible = if (param_extra == 0) true else blk: {
         const param_type = try buildTypeString(self, self.ast.extra_data[param_extra - 1], self.ast.extra_data[param_extra]);
         const parent: ?[]const u8 = if (self.current_parent.len > 0) self.current_parent else null;
@@ -2530,6 +2536,10 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
     } else "";
     defer self.current_parent = prev_parent;
     for (members) |m| try checkPropertyDeclaration(self, class_name, self.ast.nodes[m], false);
+    // a readonly class makes its properties readonly
+    if (class_modifiers & 4 != 0) for (members) |m| {
+        if (self.ast.nodes[m].tag == .class_property_hooks) return self.fail(self.ast.nodes[m].main_token, "Hooked properties cannot be readonly");
+    };
 
     var method_count: u16 = 0;
     for (members) |member_idx| {

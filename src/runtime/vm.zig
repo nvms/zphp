@@ -12520,7 +12520,7 @@ pub const VM = struct {
                 while (current) |cls| {
                     for (cls.properties.items) |prop| {
                         if (!std.mem.eql(u8, prop.name, name[0..split])) continue;
-                        if (!prop.is_virtual and prop.visibility == .public and
+                        if (!prop.is_virtual and
                             !(std.mem.endsWith(u8, name, "$hook_set") and prop.is_readonly)) return true;
                     }
                     current = if (cls.parent) |parent| self.classes.getPtr(parent) else null;
@@ -15894,7 +15894,16 @@ pub const VM = struct {
                         }
                         // Private properties are separate declarations, not overrides.
                         if (parent_prop.visibility == .private) continue;
-                        if (child_prop.is_readonly != parent_prop.is_readonly and !parent_prop.readonly_undeclared) {
+                        // an abstract hooked property may be met by a readonly one
+                        const parent_abstract = blk: {
+                            var hbuf: [256]u8 = undefined;
+                            for ([_][]const u8{ "$hook_get", "$hook_set" }) |suffix| {
+                                const hook = std.fmt.bufPrint(&hbuf, "{s}{s}", .{ parent_prop.name, suffix }) catch continue;
+                                if (parent_cls.methods.get(hook)) |m| if (m.is_abstract) break :blk true;
+                            }
+                            break :blk false;
+                        };
+                        if (child_prop.is_readonly != parent_prop.is_readonly and !parent_prop.readonly_undeclared and !parent_abstract) {
                             const msg = try std.fmt.allocPrint(self.allocator, "Cannot redeclare {s} property {s}::${s} as {s} {s}::${s}", .{
                                 if (parent_prop.is_readonly) "readonly" else "non-readonly", parent_class_name, parent_prop.name,
                                 if (child_prop.is_readonly) "readonly" else "non-readonly", class_name, parent_prop.name,
@@ -15925,6 +15934,7 @@ pub const VM = struct {
             }
         }
 
+        try self.verifyHookedProperties(&def, class_name);
         for (def.properties.items) |prop| {
             if (!prop.is_virtual or !prop.has_set_visibility or prop.set_visibility == prop.visibility) continue;
             const setter = try std.fmt.allocPrint(self.allocator, "{s}$hook_set", .{prop.name});
@@ -20854,6 +20864,39 @@ pub const VM = struct {
             current = cls.parent;
         }
         return found;
+    }
+
+    // zend_verify_hooked_property for the hooked properties a class
+    // declares, once inheritance tells whether each has storage
+    fn verifyHookedProperties(self: *VM, def: *const ClassDef, class_name: []const u8) RuntimeError!void {
+        if (!def.has_prop_hooks) return;
+        for (def.properties.items) |prop| {
+            if (prop.trait_origin.len > 0) continue;
+            var key_buf: [512]u8 = undefined;
+            var hook_buf: [256]u8 = undefined;
+            const getter = std.fmt.bufPrint(&hook_buf, "{s}$hook_get", .{prop.name}) catch continue;
+            const get_info = def.methods.get(getter);
+            var set_buf: [256]u8 = undefined;
+            const setter = std.fmt.bufPrint(&set_buf, "{s}$hook_set", .{prop.name}) catch continue;
+            const set_info = def.methods.get(setter);
+            if (get_info == null and set_info == null) continue;
+            // storage a parent gives it
+            var inherited_backed = false;
+            var current = def.parent;
+            while (current) |pn| {
+                const pc = self.classes.getPtr(pn) orelse break;
+                for (pc.properties.items) |pp| if (std.mem.eql(u8, pp.name, prop.name) and pp.visibility != .private and !pp.is_virtual) {
+                    inherited_backed = true;
+                };
+                current = pc.parent;
+            }
+            const virtual = prop.is_virtual and !inherited_backed;
+            if (virtual and prop.has_default) return self.traitRuleFatal("Cannot specify default value for virtual hooked property {s}::${s}", .{ class_name, prop.name });
+            if (!virtual and set_info != null and get_info != null) {
+                const get_fn = self.functions.get(class_names.memberKey(&key_buf, class_name, getter)) orelse continue;
+                if (get_fn.returns_ref) return self.traitRuleFatal("Get hook of backed property {s}::{s} with set hook may not return by reference", .{ class_name, prop.name });
+            }
+        }
     }
 
     // a property with a hook of either kind, for unset's refusal
