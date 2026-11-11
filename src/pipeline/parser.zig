@@ -599,16 +599,32 @@ const Parser = struct {
         return self.addNode(.{ .tag = .return_stmt, .main_token = tok, .data = .{ .lhs = expr } });
     }
 
+    // php takes any expression after break and continue (optional_expr);
+    // the compiler refuses all but a positive integer literal. rhs: 0 no
+    // operand, 1 an integer literal (the token after the keyword), 2 another
+    // literal, 3 any other expression
     fn parseBreakContinue(self: *Parser, tag: NodeTag) Error!u32 {
         const tok = self.advance();
         var level: u32 = 0;
-        if (self.peek() == .integer) {
-            const lit = self.tokens[self.pos].lexeme(self.source);
-            level = std.fmt.parseInt(u32, lit, 10) catch 1;
-            _ = self.advance();
+        var kind: u32 = 0;
+        if (self.peek() != .semicolon) {
+            const next = self.peekAt(1);
+            const alone = next == .semicolon;
+            if (self.peek() == .integer and alone) {
+                const lit = self.tokens[self.pos].lexeme(self.source);
+                level = std.fmt.parseInt(u32, lit, 10) catch std.math.maxInt(u32);
+                kind = 1;
+                _ = self.advance();
+            } else if ((self.peek() == .float or self.peek() == .string) and alone) {
+                kind = 2;
+                _ = self.advance();
+            } else {
+                _ = try self.parseExpression();
+                kind = 3;
+            }
         }
         _ = try self.expect(.semicolon);
-        return self.addNode(.{ .tag = tag, .main_token = tok, .data = .{ .lhs = level } });
+        return self.addNode(.{ .tag = tag, .main_token = tok, .data = .{ .lhs = level, .rhs = kind } });
     }
 
     fn parseSimpleStmt(self: *Parser, tag: NodeTag) Error!u32 {

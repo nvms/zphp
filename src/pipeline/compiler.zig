@@ -291,6 +291,8 @@ pub const Compiler = struct {
     loop_depth: u32 = 0,
     foreach_depth: u32 = 0,
     loop_is_foreach: [32]bool = @as([32]bool, @splat(false)),
+    // the loop levels that are switch statements
+    loop_is_switch: [32]bool = @as([32]bool, @splat(false)),
     // per-foreach: true when the iterable is anonymous (e.g. `gen()`) and
     // therefore should be closed when the loop exits. `break` uses this to
     // pick iter_end_close vs iter_end
@@ -654,7 +656,7 @@ pub const Compiler = struct {
                 }
             },
             .break_stmt => {
-                const level = if (node.data.lhs > 0) node.data.lhs else 1;
+                const level = try self.breakContinueLevel(node, "break");
                 const target_depth = self.loop_depth -| level;
                 // emit any finally blocks declared inside loops being broken
                 const saved_fd = self.finally_depth;
@@ -679,8 +681,9 @@ pub const Compiler = struct {
                 });
             },
             .continue_stmt => {
+                const checked_level = try self.breakContinueLevel(node, "continue");
                 if (self.loop_start) |start| {
-                    const level = if (node.data.lhs > 0) node.data.lhs else 1;
+                    const level = checked_level;
                     // run any finally inside the loop(s) being continued/skipped
                     const target_depth = self.loop_depth -| level;
                     const saved_fd = self.finally_depth;
@@ -1940,6 +1943,38 @@ pub const Compiler = struct {
             .call, .method_call, .static_call, .dynamic_static_call, .nullsafe_method_call, .pipe_expr => true,
             else => false,
         };
+    }
+
+    // zend_compile_break_continue's checks: the operand is a positive
+    // integer literal, and that many loops or switches enclose the
+    // statement; continue aimed at a switch warns. the number of levels
+    pub fn breakContinueLevel(self: *Compiler, node: Ast.Node, comptime word: []const u8) Error!u32 {
+        const tok = node.main_token;
+        const depth: i64 = switch (node.data.rhs) {
+            0 => 1,
+            1 => switch (parsePhpIntLiteral(self.ast.tokenSlice(tok + 1))) {
+                .int => |i| i,
+                else => -1,
+            },
+            2 => -1,
+            else => return self.fail(tok, "'" ++ word ++ "' operator with non-integer operand is no longer supported"),
+        };
+        if (depth < 1) return self.fail(tok, "'" ++ word ++ "' operator accepts only positive integers");
+        if (self.loop_depth == 0) return self.fail(tok, "'" ++ word ++ "' not in the 'loop' or 'switch' context");
+        if (depth > self.loop_depth) return self.failFmt(tok, "Cannot '" ++ word ++ "' {d} level{s}", .{ depth, if (depth == 1) "" else "s" });
+        const level: u32 = @intCast(depth);
+        const target = self.loop_depth - level;
+        if (comptime std.mem.eql(u8, word, "continue")) if (target < 32 and self.loop_is_switch[target]) {
+            const outermost = target == 0;
+            if (level == 1) {
+                if (outermost) {
+                    try self.warn(tok, 2, "\"continue\" targeting switch is equivalent to \"break\"", .{});
+                } else try self.warn(tok, 2, "\"continue\" targeting switch is equivalent to \"break\". Did you mean to use \"continue {d}\"?", .{level + 1});
+            } else if (outermost) {
+                try self.warn(tok, 2, "\"continue {d}\" targeting switch is equivalent to \"break {d}\"", .{ level, level });
+            } else try self.warn(tok, 2, "\"continue {d}\" targeting switch is equivalent to \"break {d}\". Did you mean to use \"continue {d}\"?", .{ level, level, level + 1 });
+        };
+        return level;
     }
 
     pub fn tryCompileRefReturn(self: *Compiler, expr_idx: u32) Error!bool {

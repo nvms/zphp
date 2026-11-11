@@ -358,6 +358,7 @@ pub fn compileSwitch(self: *Compiler, node: Ast.Node) Error!void {
     // (continue 1 in a switch acts like break, continue N targets outer loop)
     self.loop_start = self.chunk.offset();
     if (self.loop_depth < 32) self.loop_is_foreach[self.loop_depth] = false;
+    if (self.loop_depth < 32) self.loop_is_switch[self.loop_depth] = true;
     self.loop_depth += 1;
     try self.pushJumpScope(false);
 
@@ -432,6 +433,7 @@ pub fn compileSwitch(self: *Compiler, node: Ast.Node) Error!void {
 
     if (end_no_match) |j| self.patchJump(j);
     self.loop_depth -= 1;
+    if (self.loop_depth < 32) self.loop_is_switch[self.loop_depth] = false;
     self.popJumpScope();
     const switch_depth = self.loop_depth;
     for (self.break_jumps.items) |bj| {
