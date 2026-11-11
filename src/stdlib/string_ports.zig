@@ -94,6 +94,9 @@ pub const Args = struct {
     ctx: *NativeContext,
     func: []const u8,
     args: []const Value,
+    // added to positions in messages: a procedural alias passes its object
+    // first, so the method's argument #1 is the function's #2
+    shift: usize = 0,
 
     pub fn init(ctx: *NativeContext, func: []const u8, args: []const Value) Args {
         return .{ .ctx = ctx, .func = func, .args = args };
@@ -108,20 +111,20 @@ pub const Args = struct {
     }
 
     pub fn typeError(self: Args, index: usize, name: []const u8, expected: []const u8) RuntimeError {
-        return throwFmt(self.ctx, "TypeError", "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given", .{ self.func, index + 1, name, expected, phpTypeName(self.args[index]) });
+        return throwFmt(self.ctx, "TypeError", "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given", .{ self.func, index + 1 + self.shift, name, expected, if (index < self.args.len) phpTypeName(self.args[index]) else "null" });
     }
 
     pub fn valueError(self: Args, index: usize, name: []const u8, comptime text: []const u8) RuntimeError {
-        return throwFmt(self.ctx, "ValueError", "{s}(): Argument #{d} (${s}) " ++ text, .{ self.func, index + 1, name });
+        return throwFmt(self.ctx, "ValueError", "{s}(): Argument #{d} (${s}) " ++ text, .{ self.func, index + 1 + self.shift, name });
     }
 
     // php names the type the parameter declares, not the one parsed
     fn nullDeprecated(self: Args, index: usize, name: []const u8, expected: []const u8) RuntimeError!void {
         var declared = expected;
         if (native_params.get(self.func)) |sig| {
-            if (index < sig.params.len and sig.params[index].type.len > 0) declared = sig.params[index].type;
+            if (index + self.shift < sig.params.len and sig.params[index + self.shift].type.len > 0) declared = sig.params[index + self.shift].type;
         }
-        const msg = try std.fmt.allocPrint(self.ctx.allocator, "{s}(): Passing null to parameter #{d} (${s}) of type {s} is deprecated", .{ self.func, index + 1, name, declared });
+        const msg = try std.fmt.allocPrint(self.ctx.allocator, "{s}(): Passing null to parameter #{d} (${s}) of type {s} is deprecated", .{ self.func, index + 1 + self.shift, name, declared });
         defer self.ctx.allocator.free(msg);
         try self.ctx.vm.raiseError(e_deprecated, msg);
     }
@@ -213,6 +216,39 @@ pub const Args = struct {
         const v = self.args[index];
         if (v == .null or v == .undef) return null;
         return try self.longAs(index, name, "?int");
+    }
+
+    // Z_PARAM_OBJECT_OF_CLASS
+    pub fn object(self: Args, index: usize, name: []const u8, class: []const u8) RuntimeError!*@import("../runtime/value.zig").PhpObject {
+        const v = if (index < self.args.len) self.args[index] else Value.null;
+        if (v == .object and self.ctx.vm.isInstanceOf(v.object.class_name, class)) return v.object;
+        return self.typeError(index, name, class);
+    }
+
+    // Z_PARAM_OBJECT_OF_CLASS_OR_NULL; the expected type reads "?Class"
+    pub fn objectOrNull(self: Args, index: usize, name: []const u8, comptime class: []const u8) RuntimeError!?*@import("../runtime/value.zig").PhpObject {
+        if (index >= self.args.len) return null;
+        const v = self.args[index];
+        if (v == .null or v == .undef) return null;
+        if (v == .object and self.ctx.vm.isInstanceOf(v.object.class_name, class)) return v.object;
+        return self.typeError(index, name, "?" ++ class);
+    }
+
+    // Z_PARAM_DOUBLE (zend_parse_arg_double_weak)
+    pub fn double(self: Args, index: usize, name: []const u8) RuntimeError!f64 {
+        const v = self.args[index];
+        switch (v) {
+            .float => |f| return f,
+            .int => |i| return @floatFromInt(i),
+            .null, .undef => if (!self.strict()) {
+                try self.nullDeprecated(index, name, "float");
+                return 0;
+            },
+            .bool => |b| if (!self.strict()) return if (b) 1 else 0,
+            .string => |s| if (!self.strict() and Value.isNumericString(s.bytes())) return Value.toFloat(v),
+            else => {},
+        }
+        return self.typeError(index, name, "float");
     }
 
     pub fn boolean(self: Args, index: usize, name: []const u8, default: bool) RuntimeError!bool {

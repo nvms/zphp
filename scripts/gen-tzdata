@@ -1,66 +1,128 @@
 #!/usr/bin/env python3
-# Regenerates src/stdlib/tzdata.bin.gz, the embedded IANA timezone database used
-# as a fallback when the host has no /usr/share/zoneinfo (e.g. musl/Alpine).
+# Regenerates zphp's timezone database from the one php bundles (timelib's
+# timezonedb.h, the "slim" variant php compiles in), so zone behavior follows
+# the php version zphp targets and never depends on the host's zoneinfo.
 #
-# It bundles the TZif files for exactly the zones zphp advertises via
-# timezone_identifiers_list(), so the embedded set matches the supported set.
-# The blob format is a flat, linearly-scanned index:
+#   src/stdlib/tzdata.bin.gz   php's zone index and data, gzip'd
+#   src/stdlib/tz_abbr_table.zig   timelib's timezonemap.h and fallbackmap.h
 #
-#   "ZTZ1" | u32 count | { u16 name_len | name | u32 data_len | tzif_bytes } *
+# tzdata.bin (before gzip, integers little-endian):
 #
-# all integers little-endian. gzip with a zero mtime so the artifact is
-# reproducible. run from the repo root: python3 scripts/gen-tzdata
+#   "ZTZ2" | u8 version_len | version | u32 count
+#   | { u8 name_len | name | u32 pos } * count      (php's index, in its order)
+#   | u32 data_len | data                           (php's data array verbatim)
 #
-# the zone list is sourced from the running zphp binary so it always matches the
-# build; the TZif bytes come from the build host's zoneinfo, so regenerate on a
-# host with a current tzdata (note the tzdb version in the commit message).
+# each data entry is timelib's "PHP2" record: a TZif v2+ file whose first 20
+# bytes carry php's preamble (bc flag, country code) and whose posix footer is
+# followed by the zone's location (latitude, longitude, comments).
+#
+# the sources are read from php-src at the tag zphp targets (the
+# tests/phpt/php-src checkout, which fetches the blobs on demand), or from a
+# directory holding ext/date/lib given with --src. run from anywhere:
+#   scripts/gen-tzdata [--src path/to/php-src]
 
-import os, sys, struct, gzip, subprocess
+import gzip
+import os
+import re
+import struct
+import subprocess
+import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ZPHP = os.path.join(REPO, "zig-out", "bin", "zphp")
-OUT = os.path.join(REPO, "src", "stdlib", "tzdata.bin.gz")
-
-ZONEINFO_DIRS = [
-    "/usr/share/zoneinfo",
-    "/var/db/timezone/zoneinfo",  # macOS
-    "/etc/zoneinfo",
-]
+STDLIB = os.path.join(REPO, "src", "stdlib")
 
 
-def zoneinfo_dir():
-    for d in ZONEINFO_DIRS:
-        if os.path.isfile(os.path.join(d, "UTC")) or os.path.isdir(os.path.join(d, "America")):
-            return d
-    sys.exit("no system zoneinfo directory found; install tzdata")
+def target_tag():
+    text = open(os.path.join(REPO, "src", "php_version.zig")).read()
+    part = lambda n: re.search(r"pub const %s = (\d+)" % n, text).group(1)
+    return "php-%s.%s.%s" % (part("major"), part("minor"), part("release"))
 
 
-def advertised_zones():
-    php = "<?php foreach (timezone_identifiers_list() as $z) echo $z, \"\\n\";"
-    out = subprocess.run([ZPHP, "run", "/dev/stdin"], input=php, capture_output=True, text=True)
+def read_source(src, name):
+    rel = "ext/date/lib/" + name
+    if src:
+        return open(os.path.join(src, rel), encoding="latin-1").read()
+    repo = os.path.join(REPO, "tests", "phpt", "php-src")
+    if not os.path.isdir(repo):
+        # a worktree shares the main checkout's php-src
+        common = subprocess.run(["git", "-C", REPO, "rev-parse", "--git-common-dir"], capture_output=True, text=True).stdout.strip()
+        repo = os.path.join(os.path.dirname(os.path.abspath(os.path.join(REPO, common))), "tests", "phpt", "php-src")
+    out = subprocess.run(["git", "-C", repo, "show", "%s:%s" % (target_tag(), rel)], capture_output=True)
     if out.returncode != 0:
-        sys.exit("failed to list zones from zphp: " + out.stderr)
-    return [z.strip() for z in out.stdout.splitlines() if z.strip()]
+        sys.exit("cannot read %s from %s (run tests/phpt/setup, or pass --src): %s" % (rel, repo, out.stderr.decode()))
+    return out.stdout.decode("latin-1")
+
+
+def slim_section(text):
+    start = text.index("#ifdef TIMELIB_SUPPORT_SLIM_FILE")
+    end = text.index("#else", start)
+    return text[start:end]
+
+
+def parse_db(text):
+    version = re.search(r'timezonedb_builtin = \{ "([^"]+)"', text).group(1)
+    slim = slim_section(text)
+    index = [(m.group(1), int(m.group(2), 16)) for m in re.finditer(r'\{ \(char\*\) "([^"]+)"\s*, 0x([0-9A-Fa-f]+) \}', slim)]
+    size = int(re.search(r"timelib_timezone_db_data_builtin\[(\d+)\]", slim).group(1))
+    body = slim[slim.index("timelib_timezone_db_data_builtin"):]
+    body = re.sub(r"/\*.*?\*/", "", body[body.index("{") + 1:], flags=re.S)
+    data = bytes(int(h, 16) for h in re.findall(r"0x([0-9A-Fa-f]{2})", body))
+    if len(data) != size:
+        sys.exit("data size %d does not match the declared %d" % (len(data), size))
+    return version, index, data
+
+
+def write_db(version, index, data):
+    buf = bytearray(b"ZTZ2")
+    buf += struct.pack("<B", len(version)) + version.encode()
+    buf += struct.pack("<I", len(index))
+    for name, pos in index:
+        nb = name.encode()
+        buf += struct.pack("<B", len(nb)) + nb + struct.pack("<I", pos)
+    buf += struct.pack("<I", len(data)) + data
+    gz = gzip.compress(bytes(buf), 9, mtime=0)
+    path = os.path.join(STDLIB, "tzdata.bin.gz")
+    open(path, "wb").write(gz)
+    print("wrote %s: %d zones, timezonedb %s, %d bytes (%d raw)" % (path, len(index), version, len(gz), len(buf)))
+
+
+ENTRY = re.compile(r'\{\s*"([^"]+)",\s*(\d+),\s*([-0-9 *]+),\s*(NULL|"[^"]*")\s*\}')
+
+
+def parse_map(text):
+    out = []
+    for m in ENTRY.finditer(text):
+        offset = eval(m.group(3))  # "-60 * 60" in fallbackmap.h
+        tz = None if m.group(4) == "NULL" else m.group(4)[1:-1]
+        out.append((m.group(1), m.group(2) == "1", int(offset), tz))
+    return out
+
+
+def write_abbr(lookup, fallback, tag):
+    def line(e):
+        tz = "null" if e[3] is None else '"%s"' % e[3]
+        return '    .{ .abbr = "%s", .dst = %s, .offset = %d, .id = %s },\n' % (e[0], "true" if e[1] else "false", e[2], tz)
+
+    out = "// generated by scripts/gen-tzdata from %s's ext/date/lib/timezonemap.h and\n" % tag
+    out += "// fallbackmap.h. order matters: the date parser takes the first entry for an abbreviation\n\n"
+    out += "pub const Entry = struct { abbr: []const u8, dst: bool, offset: i32, id: ?[]const u8 };\n\n"
+    out += "pub const entries = [_]Entry{\n" + "".join(line(e) for e in lookup) + "};\n\n"
+    out += "// abbr_search's last resort: the zone for an offset and dst flag\n"
+    out += "pub const fallback = [_]Entry{\n" + "".join(line(e) for e in fallback) + "};\n"
+    path = os.path.join(STDLIB, "tz_abbr_table.zig")
+    open(path, "w").write(out)
+    print("wrote %s: %d abbreviations, %d fallbacks" % (path, len(lookup), len(fallback)))
 
 
 def main():
-    zi = zoneinfo_dir()
-    zones = advertised_zones()
-    buf = bytearray(b"ZTZ1")
-    buf += struct.pack("<I", len(zones))
-    missing = 0
-    for z in zones:
-        path = os.path.join(zi, z)
-        if not os.path.isfile(path):
-            missing += 1
-            continue
-        data = open(path, "rb").read()
-        nb = z.encode()
-        buf += struct.pack("<H", len(nb)) + nb + struct.pack("<I", len(data)) + data
-    gz = gzip.compress(bytes(buf), 9, mtime=0)
-    open(OUT, "wb").write(gz)
-    print(f"wrote {OUT}: {len(gz)} bytes ({len(gz)//1024} KB) from {zi}")
-    print(f"zones: {len(zones)} ({missing} missing in host zoneinfo)")
+    src = None
+    args = sys.argv[1:]
+    if args[:1] == ["--src"] and len(args) == 2:
+        src = args[1]
+    elif args:
+        sys.exit("usage: scripts/gen-tzdata [--src path/to/php-src]")
+    write_db(*parse_db(read_source(src, "timezonedb.h")))
+    write_abbr(parse_map(read_source(src, "timezonemap.h")), parse_map(read_source(src, "fallbackmap.h")), target_tag())
 
 
 if __name__ == "__main__":

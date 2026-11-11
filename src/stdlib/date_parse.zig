@@ -1026,6 +1026,26 @@ pub fn abbrSearch(word: []const u8) ?AbbrHit {
     return null;
 }
 
+// timelib's abbr_search with an offset and dst hint, as
+// timezone_name_from_abbr() asks it: the zone id it finds, if any
+pub fn abbrSearchFull(word: []const u8, gmtoffset: i64, isdst: i64) ?[]const u8 {
+    if (std.ascii.eqlIgnoreCase(word, "utc") or std.ascii.eqlIgnoreCase(word, "gmt")) return "UTC";
+    var first: ?abbr_table.Entry = null;
+    for (abbr_table.entries) |e| {
+        if (!std.ascii.eqlIgnoreCase(word, e.abbr)) continue;
+        if (first == null) {
+            first = e;
+            if (gmtoffset == -1) return e.id;
+        }
+        if (e.offset == gmtoffset) return e.id;
+    }
+    if (first) |e| return e.id;
+    for (abbr_table.fallback) |e| {
+        if (e.offset == gmtoffset and @intFromBool(e.dst) == isdst) return e.id;
+    }
+    return null;
+}
+
 // names shorter than this are looked up as abbreviations (_POSIX_TZNAME_MAX)
 pub const MAX_ABBR_LEN = 6;
 
@@ -2596,6 +2616,16 @@ fn adjustTimezone(t: *Time, tzi: ?[]const u8, db: TzDb) void {
     if (t.zone_type != ZONETYPE_ID) t.setId(name);
     t.have_zone = 1;
     t.zone_type = ZONETYPE_ID;
+}
+
+// the instant a wall-clock time (seconds as if the wall clock were utc) names
+// in zone `id`, resolved as a time without a zone of its own is
+pub fn utcOfWall(wall: i64, id: []const u8, db: TzDb) i64 {
+    var t = Time{};
+    t.sse = wall;
+    t.dst = 0;
+    adjustTimezone(&t, id, db);
+    return t.sse;
 }
 
 // timelib_update_ts: apply the relative part and the zone, leaving the
