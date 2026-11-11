@@ -139,7 +139,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try ao_def.methods.put(a, "__isset", .{ .name = "__isset", .arity = 1 });
     try ao_def.methods.put(a, "__unset", .{ .name = "__unset", .arity = 1 });
     try ao_def.constants.put(a, "STD_PROP_LIST", .{ .int = 1 });
+    try ao_def.constant_order.append(a, "STD_PROP_LIST");
     try ao_def.constants.put(a, "ARRAY_AS_PROPS", .{ .int = 2 });
+    try ao_def.constant_order.append(a, "ARRAY_AS_PROPS");
     try ao_def.methods.put(a, "__serialize", .{ .name = "__serialize", .arity = 0 });
     try ao_def.methods.put(a, "__unserialize", .{ .name = "__unserialize", .arity = 1 });
     try ao_def.methods.put(a, "serialize", .{ .name = "serialize", .arity = 0 });
@@ -181,6 +183,10 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try ai_def.interfaces.append(a, "SeekableIterator");
     try ai_def.interfaces.append(a, "Countable");
     try ai_def.interfaces.append(a, "ArrayAccess");
+    try ai_def.constants.put(a, "STD_PROP_LIST", .{ .int = 1 });
+    try ai_def.constant_order.append(a, "STD_PROP_LIST");
+    try ai_def.constants.put(a, "ARRAY_AS_PROPS", .{ .int = 2 });
+    try ai_def.constant_order.append(a, "ARRAY_AS_PROPS");
     try ai_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
     try ai_def.methods.put(a, "rewind", .{ .name = "rewind", .arity = 0 });
     try ai_def.methods.put(a, "current", .{ .name = "current", .arity = 0 });

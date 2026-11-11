@@ -2566,9 +2566,13 @@ pub fn register(vm: *VM, a: Allocator) !void {
         .{ .name = "getMaxDepth", .f = riiGetMaxDepth },
     });
     try rii.constants.put(a, "LEAVES_ONLY", .{ .int = RIT_LEAVES_ONLY });
+    try rii.constant_order.append(a, "LEAVES_ONLY");
     try rii.constants.put(a, "SELF_FIRST", .{ .int = RIT_SELF_FIRST });
+    try rii.constant_order.append(a, "SELF_FIRST");
     try rii.constants.put(a, "CHILD_FIRST", .{ .int = RIT_CHILD_FIRST });
+    try rii.constant_order.append(a, "CHILD_FIRST");
     try rii.constants.put(a, "CATCH_GET_CHILD", .{ .int = RIT_CATCH_GET_CHILD });
+    try rii.constant_order.append(a, "CATCH_GET_CHILD");
 
     _ = try defineClass(vm, a, "IteratorIterator", null, &.{"OuterIterator"}, &.{
         .{ .name = "__construct", .arity = 2, .f = iiConstruct },
@@ -2637,11 +2641,17 @@ pub fn register(vm: *VM, a: Allocator) !void {
         .{ .name = "count", .f = ciCount },
     });
     try ci.constants.put(a, "CALL_TOSTRING", .{ .int = CIT_CALL_TOSTRING });
+    try ci.constant_order.append(a, "CALL_TOSTRING");
     try ci.constants.put(a, "CATCH_GET_CHILD", .{ .int = CIT_CATCH_GET_CHILD });
+    try ci.constant_order.append(a, "CATCH_GET_CHILD");
     try ci.constants.put(a, "TOSTRING_USE_KEY", .{ .int = CIT_TOSTRING_USE_KEY });
+    try ci.constant_order.append(a, "TOSTRING_USE_KEY");
     try ci.constants.put(a, "TOSTRING_USE_CURRENT", .{ .int = CIT_TOSTRING_USE_CURRENT });
+    try ci.constant_order.append(a, "TOSTRING_USE_CURRENT");
     try ci.constants.put(a, "TOSTRING_USE_INNER", .{ .int = CIT_TOSTRING_USE_INNER });
+    try ci.constant_order.append(a, "TOSTRING_USE_INNER");
     try ci.constants.put(a, "FULL_CACHE", .{ .int = CIT_FULL_CACHE });
+    try ci.constant_order.append(a, "FULL_CACHE");
 
     _ = try defineClass(vm, a, "RecursiveCachingIterator", "CachingIterator", &.{"RecursiveIterator"}, &.{
         .{ .name = "__construct", .arity = 2, .f = rciConstruct },
@@ -2686,12 +2696,19 @@ pub fn register(vm: *VM, a: Allocator) !void {
         .{ .name = "setPregFlags", .arity = 1, .f = rxSetPregFlags },
     });
     try rx.constants.put(a, "USE_KEY", .{ .int = REGIT_USE_KEY });
+    try rx.constant_order.append(a, "USE_KEY");
     try rx.constants.put(a, "INVERT_MATCH", .{ .int = REGIT_INVERTED });
+    try rx.constant_order.append(a, "INVERT_MATCH");
     try rx.constants.put(a, "MATCH", .{ .int = REGIT_MODE_MATCH });
+    try rx.constant_order.append(a, "MATCH");
     try rx.constants.put(a, "GET_MATCH", .{ .int = REGIT_MODE_GET_MATCH });
+    try rx.constant_order.append(a, "GET_MATCH");
     try rx.constants.put(a, "ALL_MATCHES", .{ .int = REGIT_MODE_ALL_MATCHES });
+    try rx.constant_order.append(a, "ALL_MATCHES");
     try rx.constants.put(a, "SPLIT", .{ .int = REGIT_MODE_SPLIT });
+    try rx.constant_order.append(a, "SPLIT");
     try rx.constants.put(a, "REPLACE", .{ .int = REGIT_MODE_REPLACE });
+    try rx.constant_order.append(a, "REPLACE");
     try rx.properties.append(a, .{ .name = "replacement", .default = .null, .has_default = true, .type_str = "?string" });
 
     _ = try defineClass(vm, a, "RecursiveRegexIterator", "RegexIterator", &.{"RecursiveIterator"}, &.{
@@ -2712,11 +2729,19 @@ pub fn register(vm: *VM, a: Allocator) !void {
         .{ .name = "getPostfix", .f = rtiGetPostfix },
     });
     try rti.constants.put(a, "BYPASS_CURRENT", .{ .int = RTIT_BYPASS_CURRENT });
+    try rti.constant_order.append(a, "BYPASS_CURRENT");
     try rti.constants.put(a, "BYPASS_KEY", .{ .int = RTIT_BYPASS_KEY });
+    try rti.constant_order.append(a, "BYPASS_KEY");
     try rti.constants.put(a, "PREFIX_LEFT", .{ .int = 0 });
+    try rti.constant_order.append(a, "PREFIX_LEFT");
     try rti.constants.put(a, "PREFIX_MID_HAS_NEXT", .{ .int = 1 });
+    try rti.constant_order.append(a, "PREFIX_MID_HAS_NEXT");
     try rti.constants.put(a, "PREFIX_MID_LAST", .{ .int = 2 });
+    try rti.constant_order.append(a, "PREFIX_MID_LAST");
     try rti.constants.put(a, "PREFIX_END_HAS_NEXT", .{ .int = 3 });
+    try rti.constant_order.append(a, "PREFIX_END_HAS_NEXT");
     try rti.constants.put(a, "PREFIX_END_LAST", .{ .int = 4 });
+    try rti.constant_order.append(a, "PREFIX_END_LAST");
     try rti.constants.put(a, "PREFIX_RIGHT", .{ .int = 5 });
+    try rti.constant_order.append(a, "PREFIX_RIGHT");
 }

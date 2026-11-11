@@ -2627,7 +2627,17 @@ pub fn visibleConstants(ctx: *NativeContext, class_name: []const u8, out: *std.A
         try chain.append(ctx.allocator, name);
         current = cls.parent;
     }
-    for (chain.items, 0..) |name, depth| try appendOwnConstants(ctx, name, depth == 0, out);
+    // a user class's table has its own constants before what it inherits;
+    // an internal class declares its own after inheriting its parent's, so
+    // the built-in part of the chain reads from the root down
+    var user_end: usize = 0;
+    while (user_end < chain.items.len and !ctx.vm.classes.get(chain.items[user_end]).?.is_internal) user_end += 1;
+    for (chain.items[0..user_end], 0..) |name, depth| try appendOwnConstants(ctx, name, depth == 0, out);
+    var i = chain.items.len;
+    while (i > user_end) {
+        i -= 1;
+        try appendOwnConstants(ctx, chain.items[i], i == 0, out);
+    }
     for (chain.items) |name| try appendInterfaceConstants(ctx, name, out, 0);
 }
 

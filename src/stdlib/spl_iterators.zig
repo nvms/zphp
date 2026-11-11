@@ -37,6 +37,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rai_def.methods.put(a, "hasChildren", .{ .name = "hasChildren", .arity = 0 });
     try rai_def.methods.put(a, "getChildren", .{ .name = "getChildren", .arity = 0 });
     try rai_def.constants.put(a, "CHILD_ARRAYS_ONLY", .{ .int = CHILD_ARRAYS_ONLY });
+    try rai_def.constant_order.append(a, "CHILD_ARRAYS_ONLY");
     try vm.classes.put(a, "RecursiveArrayIterator", rai_def);
     try vm.native_fns.put(a, "RecursiveArrayIterator::hasChildren", raiHasChildren);
     try vm.native_fns.put(a, "RecursiveArrayIterator::getChildren", raiGetChildren);
