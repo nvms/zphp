@@ -1644,6 +1644,23 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     ip += 1;
                     continue :dispatch @as(OpCode, @enumFromInt(next));
                 },
+                // a value or call result sent where the callee might take a
+                // reference: by value there is nothing to do
+                .arg_value, .arg_call_result => {
+                    const field = ip;
+                    const delta = (@as(u16, code[ip]) << 8) | code[ip + 1];
+                    const pos = code[ip + 2];
+                    self.sp = sp;
+                    const capture = self.argCaptureCached(frame.chunk, field, delta, pos, 1) orelse true;
+                    if (capture) {
+                        frame.ip = ip - 1;
+                        return;
+                    }
+                    ip += 3;
+                    const next = code[ip];
+                    ip += 1;
+                    continue :dispatch @as(OpCode, @enumFromInt(next));
+                },
                 .arg_guard_prop_dynamic, .arg_guard_dim => {
                     const field = ip;
                     const delta = (@as(u16, code[ip]) << 8) | code[ip + 1];
