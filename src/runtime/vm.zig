@@ -14157,7 +14157,11 @@ pub const VM = struct {
         // previous
         if (self.hasPendingReleases()) {
             self.pending_exception = thrown;
-            if (self.draining_destructors) self.drainNested() else self.drainPendingDestruct();
+            if (self.draining_destructors) self.drainNested() else {
+                self.drainPendingDestruct();
+                // the releases may fill the collector's root buffer
+                self.collectCyclesIfNeeded();
+            }
             self.drain_raised = false;
             thrown = self.takePending() orelse thrown;
         }
@@ -24755,13 +24759,18 @@ pub const VM = struct {
         // what the destructor releases is destructed as usual, not in this
         // fiber, which is busy
         self.gc_dtors_in_fiber = false;
-        const result = self.executeFiber(fiber, base_frame, base_sp, base_handler) catch blk: {
-            // a throwing destructor must not corrupt the drop site
-            self.discardPending();
-            break :blk Value.null;
-        };
+        // php's gc_destructor_fiber calls it; an exception it throws goes on
+        // to the code that ran the collection, with one in flight as its
+        // previous
+        var record: NativeCall = undefined;
+        self.enterEngineMethod(&record, "gc_destructor_fiber", &.{}, false);
+        record.depth = base_frame;
+        record.from_native = true;
+        const in_flight = self.takePending();
+        _ = self.executeFiber(fiber, base_frame, base_sp, base_handler) catch Value.null;
+        self.native_call = record.outer;
+        self.settleDrainException(in_flight);
         self.gc_dtors_in_fiber = true;
-        self.releaseValue(result);
         if (fiber.state == .suspended) {
             // the destructor holds this fiber now; the application may
             // keep it or let it go
