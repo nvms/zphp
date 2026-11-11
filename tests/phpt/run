@@ -121,12 +121,15 @@ try:
 except FileNotFoundError:
     baseline = set()
 in_scope = {t for t in baseline if dir_of(t) != "other"}
-regressed = sorted(t for t in in_scope if outcome.get(t) != "pass")
+# a listed test this machine skips (a locale or extension it lacks) is the
+# environment, as php would skip it too, not a regression
+skipped = sorted(t for t in in_scope if outcome.get(t) == "skip")
+regressed = sorted(t for t in in_scope if outcome.get(t) not in ("pass", "skip"))
 passing = {t for t, r in outcome.items() if r == "pass"}
 gained = sorted(passing - baseline)
 
 if update:
-    kept = {t for t in baseline if t not in in_scope}
+    kept = {t for t in baseline if t not in in_scope or t in skipped}
     with open(baseline_path, "w") as f:
         for t in sorted(kept | passing):
             f.write(t + "\n")
@@ -134,6 +137,8 @@ if update:
 elif gained:
     print(f"{len(gained)} tests now pass that the list doesn't have; rerun with --update to record them")
 
+if skipped:
+    print(f"{len(skipped)} tests in the passing list were skipped here")
 if regressed:
     print(f"\n{len(regressed)} tests in the passing list no longer pass:")
     for t in regressed[:50]:
