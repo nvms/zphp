@@ -12192,7 +12192,7 @@ pub const VM = struct {
     }
 
     // $this in the running frame, a local slot or the frame's vars
-    fn currentThis(self: *VM) ?Value {
+    pub fn currentThis(self: *VM) ?Value {
         const f = self.currentFrame();
         if (f.vars.get("$this")) |v| return v;
         if (f.func) |fn_info| if (fn_info.locals_only) {

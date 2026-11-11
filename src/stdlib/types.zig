@@ -625,13 +625,13 @@ fn get_class(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
     return throwObjectArg(ctx, "get_class", args[0]);
 }
 
+// zend_get_called_scope: the calling function's own class scope only
 fn get_called_class(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    var i = ctx.vm.frame_count;
-    while (i > 0) {
-        i -= 1;
-        if (ctx.vm.frames[i].called_class) |cc| return NativeResult.copyString(ctx.allocator, cc);
-    }
-    return NativeResult.scalar(.{ .bool = false });
+    const frame = ctx.vm.currentFrame();
+    if (frame.called_class) |cc| return NativeResult.copyString(ctx.allocator, cc);
+    if (ctx.vm.currentThis()) |this| if (this == .object) return NativeResult.copyString(ctx.allocator, this.object.class_name);
+    try ctx.vm.setPendingException("Error", "get_called_class() must be called from within a class");
+    return error.RuntimeError;
 }
 
 fn native_get_declared_classes(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -2117,25 +2117,40 @@ fn native_class_alias(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     return NativeResult.scalar(.{ .bool = false });
 }
 
+// a parameter's current value (php reads the CV, so a parameter the function
+// changed shows its new value); an unset one is null
 fn getFrameParamValue(frame: anytype, slot_names: []const []const u8, param: []const u8) Value {
+    if (frame.ref_slots.get(param)) |cell| return if (cell.* == .undef) .null else cell.*;
     for (slot_names, 0..) |sn, i| {
         if (std.mem.eql(u8, sn, param)) {
-            if (i < frame.locals.len) return frame.locals[i];
+            if (i < frame.locals.len) return if (frame.locals[i] == .undef) .null else frame.locals[i];
             break;
         }
     }
-    return frame.vars.get(param) orelse .null;
+    const v = frame.vars.get(param) orelse return .null;
+    return if (v == .undef) .null else v;
+}
+
+// php's ZEND_CALL_CODE check: the arguments functions need a function frame
+fn requireFunctionFrame(ctx: *NativeContext, comptime msg: []const u8) RuntimeError!*const @import("../pipeline/bytecode.zig").ObjFunction {
+    if (ctx.vm.currentFrame().func) |func| return func;
+    try ctx.vm.setPendingException("Error", msg);
+    return error.RuntimeError;
 }
 
 fn native_func_get_args(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const declared = try requireFunctionFrame(ctx, "func_get_args() cannot be called from the global scope");
     const arr = try ctx.createArray();
 
     // a resumed generator's frame has no saved arguments: its parameters
     // hold them
     const in_generator = ctx.vm.currentFrame().generator != null;
     if (if (in_generator) null else ctx.vm.getFrameArgs()) |saved_args| {
-        for (saved_args) |val| {
-            try arr.append(ctx.allocator, val);
+        // declared parameters as they are now, the extra ones as passed
+        const frame = ctx.vm.currentFrame();
+        const fixed: usize = if (declared.is_variadic) declared.arity - 1 else declared.arity;
+        for (saved_args, 0..) |val, i| {
+            try arr.append(ctx.allocator, if (i < fixed and i < declared.params.len) getFrameParamValue(frame, declared.slot_names, declared.params[i]) else val);
         }
         return NativeResult.borrowed(.{ .array = arr });
     }
@@ -2169,7 +2184,7 @@ fn native_func_get_args(ctx: *NativeContext, _: []const Value) RuntimeError!Nati
 
 fn native_func_num_args(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const frame = ctx.vm.currentFrame();
-    const func = frame.func orelse return NativeResult.scalar(.{ .int = 0 });
+    const func = try requireFunctionFrame(ctx, "func_num_args() must be called from a function context");
 
     if (ctx.vm.getFrameArgCount()) |ac| return NativeResult.scalar(.{ .int = @intCast(ac) });
 
@@ -2187,14 +2202,24 @@ fn native_func_num_args(ctx: *NativeContext, _: []const Value) RuntimeError!Nati
 }
 
 fn native_func_get_arg(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
-    const idx = Value.toInt(args[0]);
-    if (idx < 0) return NativeResult.scalar(.{ .bool = false });
+    const idx = try (@import("html.zig").Params{ .ctx = ctx, .func = "func_get_arg", .args = args }).int(0, "position", 0);
+    if (idx < 0) {
+        try ctx.vm.setPendingException("ValueError", "func_get_arg(): Argument #1 ($position) must be greater than or equal to 0");
+        return error.RuntimeError;
+    }
+    const declared = try requireFunctionFrame(ctx, "func_get_arg() cannot be called from the global scope");
     const index: usize = @intCast(idx);
+    const passed: usize = if (ctx.vm.getFrameArgCount()) |ac| ac else declared.arity;
+    if (index >= passed) {
+        try ctx.vm.setPendingException("ValueError", "func_get_arg(): Argument #1 ($position) must be less than the number of the arguments passed to the currently executed function");
+        return error.RuntimeError;
+    }
 
     if (ctx.vm.getFrameArgs()) |saved_args| {
+        const fixed: usize = if (declared.is_variadic) declared.arity - 1 else declared.arity;
+        if (index < fixed and index < declared.params.len) return NativeResult.share(getFrameParamValue(ctx.vm.currentFrame(), declared.slot_names, declared.params[index]));
         if (index < saved_args.len) return NativeResult.share(saved_args[index]);
-        return NativeResult.scalar(.{ .bool = false });
+        return NativeResult.scalar(.null);
     }
 
     const frame = ctx.vm.currentFrame();
