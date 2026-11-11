@@ -2450,15 +2450,58 @@ fn rcHasProperty(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
 }
 
 fn rcNewLazyProxy(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    ctx.vm.lazy_proxy_request = true;
+    defer ctx.vm.lazy_proxy_request = false;
     const result = try rcNewLazyGhost(ctx, args);
     if (result.value == .object) result.value.object.lazy.?.proxy = true;
     return result;
+}
+
+// reflection_class_new_lazy and zend_object_make_lazy's refusals, before an
+// object is made or reset lazy
+fn lazyPreconditions(ctx: *NativeContext, class_name: []const u8, options_arg: ?Value, reset: ?*PhpObject, method: []const u8) RuntimeError!void {
+    const options: i64 = if (options_arg) |o| (if (o == .int) o.int else 0) else 0;
+    const arg_num: u8 = if (reset != null) 3 else 2;
+    if (options & ~@as(i64, 8 | 16) != 0) return throwReflectionFmt(ctx, "ReflectionClass::{s}(): Argument #{d} ($options) contains invalid flags", .{ method, arg_num });
+    if (reset == null and options & 16 != 0) return throwReflectionFmt(ctx, "ReflectionClass::{s}(): Argument #2 ($options) does not accept ReflectionClass::SKIP_DESTRUCTOR", .{method});
+    // an initialized proxy may be reset; one being initialized is refused
+    // below, as zend_object_make_lazy does. zphp's cycle collector runs at
+    // other points than php's, so a destructor it runs may meet an object
+    // php's would not have made lazy yet; that reset is let through
+    if (reset) |obj| if (obj.lazy) |state| if (!ctx.vm.collecting_cycles) {
+        if (state.initializer != .null and !state.running) return throwReflection(ctx, "Object is already lazy");
+    };
+    const def = ctx.vm.classes.get(class_name) orelse return;
+    if (def.is_internal and !std.mem.eql(u8, def.name, "stdClass")) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot make instance of internal class lazy: {s} is internal", .{def.name});
+        defer ctx.allocator.free(msg);
+        _ = try ctx.vm.throwBuiltinException("Error", msg);
+        return error.RuntimeError;
+    }
+    var parent = def.parent;
+    while (parent) |pn| {
+        const pdef = ctx.vm.classes.get(pn) orelse break;
+        if (pdef.is_internal and !std.mem.eql(u8, pdef.name, "stdClass")) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot make instance of internal class lazy: {s} inherits internal class {s}", .{ def.name, pdef.name });
+            defer ctx.allocator.free(msg);
+            _ = try ctx.vm.throwBuiltinException("Error", msg);
+            return error.RuntimeError;
+        }
+        parent = pdef.parent;
+    }
+    if (reset) |obj| {
+        if (obj.lazy) |state| if (state.running) {
+            _ = try ctx.vm.throwBuiltinException("Error", "Can not reset an object while it is being initialized");
+            return error.RuntimeError;
+        };
+    }
 }
 
 fn rcNewLazyGhost(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
     if (args.len < 1) return NativeResult.scalar(.null);
+    try lazyPreconditions(ctx, class_name, if (args.len > 1) args[1] else null, null, if (ctx.vm.lazy_proxy_request) "newLazyProxy" else "newLazyGhost");
     // the lazy object owns its initializer until it runs or is cleared
     VM.retainValue(args[0]);
     const obj = try ctx.vm.allocObject(.{ .class_name = try ctx.vm.stableClassName(class_name) });
@@ -6629,6 +6672,26 @@ fn rconstToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
 fn rcResetAsLazy(ctx: *NativeContext, args: []const Value, proxy: bool) RuntimeError!NativeResult {
     if (args.len < 2 or args[0] != .object) return NativeResult.scalar(.null);
     const obj = args[0].object;
+    const method: []const u8 = if (proxy) "resetAsLazyProxy" else "resetAsLazyGhost";
+    if (getThis(ctx)) |this| if (this.get("name") == .string) {
+        const class_name = this.get("name").string.bytes();
+        if (!ctx.vm.isInstanceOf(obj.class_name, class_name)) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "ReflectionClass::{s}(): Argument #1 ($object) must be of type {s}, {s} given", .{ method, ctx.vm.declaredClassName(class_name), obj.class_name });
+            defer ctx.allocator.free(msg);
+            _ = try ctx.vm.throwBuiltinException("TypeError", msg);
+            return error.RuntimeError;
+        }
+        try lazyPreconditions(ctx, class_name, if (args.len > 2) args[2] else null, obj, method);
+    };
+    // the object is destructed first, unless asked not to or done already
+    const skip_destructor = args.len > 2 and args[2] == .int and (args[2].int & 16) != 0;
+    if (!skip_destructor and !obj.destructor_called and obj.lazy == null and ctx.vm.hasMethod(obj.class_name, "__destruct")) {
+        obj.destructor_called = true;
+        obj.refcount +%= 1;
+        defer obj.refcount -%= 1;
+        _ = try ctx.vm.callMethod(obj, "__destruct", &.{});
+    }
+    obj.destructor_called = false;
     if (obj.lazy) |state| {
         if (state.initializer != .null) ctx.vm.releaseValue(state.initializer);
         ctx.allocator.free(state.pending);

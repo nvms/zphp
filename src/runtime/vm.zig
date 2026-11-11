@@ -969,6 +969,8 @@ pub const VM = struct {
     // while traits compose into a class, which trait first gave each
     // constant it didn't declare itself
     trait_constant_sources: std.StringHashMapUnmanaged([]const u8) = .{},
+    // ReflectionClass::newLazyProxy is running (for its errors' wording)
+    lazy_proxy_request: bool = false,
     // each trait's function table with its own `use` bound (traitTable)
     trait_tables: std.StringHashMapUnmanaged([]TraitMethod) = .{},
     trait_tables_retired: std.ArrayListUnmanaged([]TraitMethod) = .empty,
@@ -20678,7 +20680,10 @@ pub const VM = struct {
             return;
         }
         const result = try ctx.invokeCallable(state.initializer, &.{.{ .object = obj }});
-        _ = result;
+        if (result != .null) {
+            try self.setPendingException("TypeError", "Lazy object initializer must return NULL or no value");
+            return error.RuntimeError;
+        }
         const initializer = state.initializer;
         state.initializer = .null;
         self.releaseValue(initializer);
