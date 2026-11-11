@@ -178,7 +178,8 @@ fn methodOf(p: *const Pending, arena: std.mem.Allocator, class: []const u8, name
                 .default_text = if (i >= func.required_params and !variadic and i < func.defaults.len) try userDefaultText(arena, func.defaults[i]) else null,
             };
         }
-        const origin = if (std.mem.indexOf(u8, func.name, "::")) |sep| func.name[0..sep] else class;
+        const code_name = if (func.trait_origin.len > 0) func.trait_origin else func.name;
+        const origin = if (std.mem.indexOf(u8, code_name, "::")) |sep| code_name[0..sep] else class;
         return .{
             .class = class,
             .name = if (info) |m| m.name else name,
@@ -465,7 +466,7 @@ fn traitSideMethod(arena: std.mem.Allocator, side: TraitSide) !Method {
     return .{
         .class = side.label,
         .name = side.name,
-        .origin = if (std.mem.indexOf(u8, func.name, "::")) |sep| func.name[0..sep] else side.label,
+        .origin = if (std.mem.indexOf(u8, if (func.trait_origin.len > 0) func.trait_origin else func.name, "::")) |sep| (if (func.trait_origin.len > 0) func.trait_origin else func.name)[0..sep] else side.label,
         .params = params,
         .required = func.required_params,
         .variadic = func.is_variadic,

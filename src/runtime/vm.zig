@@ -972,6 +972,10 @@ pub const VM = struct {
     // each trait's function table with its own `use` bound (traitTable)
     trait_tables: std.StringHashMapUnmanaged([]TraitMethod) = .{},
     trait_tables_retired: std.ArrayListUnmanaged([]TraitMethod) = .empty,
+    // the copies of trait methods classes were given (traitMethodCopy), by
+    // "Class::method"
+    trait_method_copies: std.StringHashMapUnmanaged(*ObjFunction) = .{},
+    trait_method_stale: std.ArrayListUnmanaged(*ObjFunction) = .empty,
     // classes marked lazy_constants
     lazy_constant_classes: usize = 0,
     // the class a class constant fetch names, as written: php's
@@ -3167,6 +3171,11 @@ pub const VM = struct {
         self.clearTraitTables();
         self.trait_tables.deinit(self.allocator);
         self.trait_tables_retired.deinit(self.allocator);
+        var copies = self.trait_method_copies.valueIterator();
+        while (copies.next()) |copy| self.allocator.destroy(copy.*);
+        self.trait_method_copies.deinit(self.allocator);
+        for (self.trait_method_stale.items) |copy| self.allocator.destroy(copy);
+        self.trait_method_stale.deinit(self.allocator);
         self.cycle_candidates.deinit(self.allocator);
         self.cycle_array_candidates.deinit(self.allocator);
         self.cycle_gen_candidates.deinit(self.allocator);
@@ -11938,18 +11947,13 @@ pub const VM = struct {
             }
             if (self.currentDefiningClass()) |dc| return dc;
         } else if (std.mem.eql(u8, name, "self")) {
-            // self:: from inside a trait static method needs to know WHICH
-            // using-class we were invoked through. called_class on the active
-            // frame carries that (set when X::method() is dispatched).
-            // currentDefiningClass falls back to chunk identity which is
-            // ambiguous when multiple classes share the same trait chunk
-            if (self.currentFrame().called_class) |cc| {
-                if (self.currentDefiningClass()) |dc| {
-                    if (self.traits.contains(dc)) return cc;
-                }
-                return cc;
-            }
-            if (self.currentDefiningClass()) |dc| return dc;
+            // the class whose method is running: a class's copy of a trait
+            // method is its own (traitMethodCopy). a trait method called on
+            // the trait itself takes the class it was called through
+            const defining = self.currentDefiningClass();
+            if (defining) |dc| if (!self.traits.contains(dc)) return dc;
+            if (self.currentFrame().called_class) |cc| return cc;
+            if (defining) |dc| return dc;
         } else if (std.mem.eql(u8, name, "parent")) {
             if (self.parentResolvingClass()) |dc| {
                 if (self.classes.get(dc)) |cls| {
@@ -13253,10 +13257,12 @@ pub const VM = struct {
     // class its expressions are evaluated in
     fn functionAttributesOf(self: *VM, func: *const ObjFunction) struct { attrs: ?[]const AttributeDef, scope: []const u8 } {
         if (self.function_attributes.get(func.name)) |attrs| return .{ .attrs = attrs, .scope = "" };
-        const sep = std.mem.indexOf(u8, func.name, "::") orelse return .{ .attrs = null, .scope = "" };
-        const class = func.name[0..sep];
+        // a trait method's attributes stay with the trait
+        const name = if (func.trait_origin.len > 0) func.trait_origin else func.name;
+        const sep = std.mem.indexOf(u8, name, "::") orelse return .{ .attrs = null, .scope = "" };
+        const class = name[0..sep];
         const cls = self.classes.get(class) orelse return .{ .attrs = null, .scope = class };
-        return .{ .attrs = cls.method_attributes.get(func.name[sep + 2 ..]), .scope = class };
+        return .{ .attrs = cls.method_attributes.get(name[sep + 2 ..]), .scope = class };
     }
 
     // php's ZEND_INIT_PARENT_PROPERTY_HOOK_CALL: the parent's hook for the
@@ -16741,11 +16747,12 @@ pub const VM = struct {
 
         for (comp.entries.items) |m| {
             if (m.own) continue;
-            const class_method = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, m.name });
-            try self.strings.append(self.allocator, class_method);
+            var method_buf: [512]u8 = undefined;
+            const class_method = class_names.memberKey(&method_buf, class_name, m.name);
             if (!self.functions.contains(class_method)) {
-                try self.functions.put(self.allocator, class_method, m.func);
-                try self.indexFunctionByChunk(class_method, &m.func.chunk);
+                const copy = try self.traitMethodCopy(m.func, class_method);
+                try self.functions.put(self.allocator, copy.name, copy);
+                try self.indexFunctionByChunk(copy.name, &copy.chunk);
             }
             try def.addMethod(self.allocator, .{
                 .name = m.name,
@@ -16761,11 +16768,38 @@ pub const VM = struct {
         for (traits) |t| if (t) |tn| try self.applyTraitMembers(def, class_name, tn, &composed);
     }
 
+    // php copies a trait's method into the class using it (scope fixed to
+    // the class). the copy shares the code; its own chunk address is what
+    // ties a frame running it to this class, and it is named as the class's
+    // the copy and its name live as long as the vm: serve mode declares the
+    // same classes on every request and gets the same copies back
+    fn traitMethodCopy(self: *VM, func: *const ObjFunction, class_method: []const u8) RuntimeError!*ObjFunction {
+        if (self.trait_method_copies.get(class_method)) |cached| {
+            if (cached.chunk.code.items.ptr == func.chunk.code.items.ptr) {
+                if (g_type_info.get(func.name)) |ti| try g_type_info.put(self.allocator, cached.name, ti);
+                return cached;
+            }
+        }
+        const name = try self.allocator.dupe(u8, class_method);
+        errdefer self.allocator.free(name);
+        try self.persistent_strings.append(self.allocator, name);
+        const copy = try self.allocator.create(ObjFunction);
+        errdefer self.allocator.destroy(copy);
+        copy.* = func.*;
+        copy.name = name;
+        if (func.trait_origin.len == 0) copy.trait_origin = func.name;
+        // a stale copy (the class was declared from other code) stays
+        // allocated: frames may still run it
+        if (try self.trait_method_copies.fetchPut(self.allocator, name, copy)) |old| try self.trait_method_stale.append(self.allocator, old.value);
+        if (g_type_info.get(func.name)) |ti| try g_type_info.put(self.allocator, name, ti);
+        if (self.chunk_to_result.get(@intFromPtr(&func.chunk))) |result| try self.chunk_to_result.put(self.allocator, @intFromPtr(&copy.chunk), result);
+        return copy;
+    }
+
     fn isTraitBoundMethod(self: *VM, class_name: []const u8, method: []const u8) bool {
         var key_buf: [512]u8 = undefined;
         const func = self.functions.get(class_names.memberKey(&key_buf, class_name, method)) orelse return false;
-        const sep = std.mem.indexOf(u8, func.name, "::") orelse return false;
-        return !std.ascii.eqlIgnoreCase(func.name[0..sep], class_name);
+        return func.trait_origin.len > 0;
     }
 
     // a trait's properties, static properties and constants, those of the
@@ -19581,6 +19615,8 @@ pub const VM = struct {
         // ObjFunction) are distinguished for static-var ownership
         if (self.frame_count > 0) {
             if (self.frames[self.frame_count - 1].call_name) |n| return n;
+            // a class's copy of a trait method has statics of its own
+            if (self.frames[self.frame_count - 1].func) |f| if (f.trait_origin.len > 0) return f.name;
         }
         const chunk_ptr = self.currentChunk();
         var it = self.functions.iterator();

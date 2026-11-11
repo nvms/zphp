@@ -3571,7 +3571,7 @@ fn rpGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Native
         // trait's method
         const method_key = class_names.memberKey(&key_buf, class_name, method_name);
         const func = ctx.vm.functions.get(method_key) orelse break :blk null;
-        const trait_key = try bytecode.paramAttributesName(ctx.allocator, func.name, param_name);
+        const trait_key = try bytecode.paramAttributesName(ctx.allocator, if (func.trait_origin.len > 0) func.trait_origin else func.name, param_name);
         defer ctx.allocator.free(trait_key);
         break :blk ctx.vm.function_attributes.get(trait_key);
     } orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
@@ -3839,9 +3839,10 @@ fn rfGetParameters(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
 }
 
 // the name a function was compiled under, which its attributes are filed
-// by: a closure instance (bound ones included) shares its function
+// by: a closure instance (bound ones included) shares its function, a
+// class's copy of a trait method keeps the trait's
 fn compiledFunctionName(vm: *VM, name: []const u8) []const u8 {
-    if (vm.functions.get(name)) |func| return func.name;
+    if (vm.functions.get(name)) |func| return if (func.trait_origin.len > 0) func.trait_origin else func.name;
     return vm.getOrigClosureName(name);
 }
 
@@ -5773,11 +5774,12 @@ fn methodAttributes(vm: *VM, class_name: []const u8, method_name: []const u8) ?[
     var key_buf: [512]u8 = undefined;
     const key = class_names.memberKey(&key_buf, class_name, method_name);
     const func = vm.functions.get(key) orelse return null;
-    const sep = std.mem.indexOf(u8, func.name, "::") orelse return null;
-    const origin = func.name[0..sep];
+    const code_name = if (func.trait_origin.len > 0) func.trait_origin else func.name;
+    const sep = std.mem.indexOf(u8, code_name, "::") orelse return null;
+    const origin = code_name[0..sep];
     if (std.mem.eql(u8, origin, class_name) or !vm.traits.contains(origin)) return null;
     const trait = vm.classes.get(origin) orelse return null;
-    return trait.method_attributes.get(method_name);
+    return trait.method_attributes.get(code_name[sep + 2 ..]);
 }
 
 fn rpIsPromoted(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {

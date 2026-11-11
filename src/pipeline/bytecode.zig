@@ -867,6 +867,9 @@ pub const ObjFunction = struct {
     is_final: bool = false,
     // an abstract method's signature stub (no body to run)
     is_abstract: bool = false,
+    // a class's copy of a trait method: the trait method's own name, under
+    // which its attributes are filed (set at run time, never serialized)
+    trait_origin: []const u8 = "",
     // `&function foo() { ... }` - return is a reference, not a copy. when
     // such a function is called via `$r = &foo(...)`, the caller's $r binds
     // to the storage the function returned a ref to. the return-expression
