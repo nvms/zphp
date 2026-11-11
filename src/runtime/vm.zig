@@ -3352,8 +3352,8 @@ pub const VM = struct {
         self.shutdown_callbacks.clearRetainingCapacity();
         self.cycle_candidates.clearRetainingCapacity();
         self.cycle_array_candidates.clearRetainingCapacity();
-        for (self.cycle_gen_candidates.items) |g| g.cycle_queued = false;
-        for (self.cycle_fiber_candidates.items) |f| f.cycle_queued = false;
+        // the request's generators and fibers are freed by now: the lists are
+        // dropped without reading them
         self.cycle_gen_candidates.clearRetainingCapacity();
         self.cycle_fiber_candidates.clearRetainingCapacity();
         self.captures.clearRetainingCapacity();
