@@ -17977,6 +17977,9 @@ pub const VM = struct {
             self.releaseFrameObjects(idx);
             self.releaseFrameVars(&self.frames[idx].vars);
         }
+        // the frame may have grown the generator's vars map: the generator
+        // keeps the one in use
+        if (frame_generator) |gen| gen.vars = self.frames[idx].vars;
         if (self.frames[idx].locals.len > 0) {
             if (frame_generator) |gen| {
                 gen.locals.clearRetainingCapacity();
