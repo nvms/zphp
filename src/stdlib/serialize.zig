@@ -62,10 +62,15 @@ const UnserCtx = struct {
     // 'Error at offset N of M bytes' warning. start at 0 which matches
     // PHP for entirely-bogus input
     err_pos: usize = 0,
+    // php delays each __unserialize() until the whole string is read, even
+    // when reading fails later on (var_destroy's VAR_UNSERIALIZE_FLAG calls)
+    // and each __wakeup() (data null) the same way
+    delayed: std.ArrayListUnmanaged(struct { obj: *PhpObject, data: ?*PhpArray }) = .empty,
 
     fn deinit(self: *UnserCtx, a: Allocator) void {
         self.array_targets.deinit(a);
         self.slots.deinit(a);
+        self.delayed.deinit(a);
     }
 
     fn classAllowed(self: *const UnserCtx, name: []const u8) bool {
@@ -349,6 +354,8 @@ pub const Reader = struct {
 
     pub fn deinit(self: *Reader) void {
         if (self.owner) shared_uctx = null;
+        // a table of its own runs its queued __unserialize() calls at the end
+        if (self.outer == null) runDelayed(self.ctx, &self.own);
         self.own.deinit(self.ctx.allocator);
     }
 };
@@ -356,6 +363,7 @@ pub const Reader = struct {
 pub fn unserializeFromString(ctx: *NativeContext, s: []const u8) ?Value {
     var uctx = UnserCtx{};
     defer uctx.deinit(ctx.allocator);
+    defer runDelayed(ctx, &uctx);
     const result = unserializeValue(ctx, &uctx, s, 0) catch return null;
     return result.value;
 }
@@ -754,6 +762,10 @@ fn native_unserialize(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
             uctx.depth = 0;
         }
     }
+    // the outermost call runs the queued __unserialize() calls last,
+    // whatever happened while reading; the first that throws ends them
+    const runs_delayed = outer == null;
+    errdefer if (runs_delayed) runDelayed(ctx, uctx);
     const result = unserializeValue(ctx, uctx, s, 0) catch {
         // an exception from __unserialize, __wakeup, or Serializable::unserialize
         // propagates; only a parse failure is a warning
@@ -769,9 +781,43 @@ fn native_unserialize(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
         const msg2 = std.fmt.allocPrint(ctx.allocator, "unserialize(): Error at offset {d} of {d} bytes", .{ uctx.err_pos, s.len }) catch return NativeResult.scalar(.{ .bool = false });
         defer ctx.allocator.free(msg2);
         try ctx.vm.emitWarning(msg2);
+        if (runs_delayed) {
+            runDelayed(ctx, uctx);
+            if (ctx.vm.pending_exception != null) return error.RuntimeError;
+        }
         return NativeResult.scalar(.{ .bool = false });
     };
+    if (runs_delayed) {
+        runDelayed(ctx, uctx);
+        if (ctx.vm.pending_exception != null) {
+            ctx.vm.releaseValue(result.value);
+            return error.RuntimeError;
+        }
+    }
     return NativeResult.transfer(result.value);
+}
+
+fn runDelayed(ctx: *NativeContext, uctx: *UnserCtx) void {
+    var failed = ctx.vm.pending_exception != null;
+    for (uctx.delayed.items) |d| {
+        if (!failed) {
+            serialize_lock += 1;
+            defer serialize_lock -= 1;
+            if (d.data) |data| {
+                _ = ctx.vm.callMethod(d.obj, "__unserialize", &.{.{ .array = data }}) catch {
+                    failed = true;
+                };
+            } else {
+                _ = ctx.vm.callMethod(d.obj, "__wakeup", &.{}) catch {
+                    failed = true;
+                };
+            }
+            if (ctx.vm.pending_exception != null) failed = true;
+        }
+        if (d.data) |data| ctx.vm.releaseValue(.{ .array = data });
+        ctx.vm.releaseValue(.{ .object = d.obj });
+    }
+    uctx.delayed.clearRetainingCapacity();
 }
 
 // every parsed string result carries one reference for its consumer; the
@@ -1018,23 +1064,23 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
                 try obj.set(ctx.allocator, "__size", .{ .int = @intCast(prop_count) });
                 try obj.set(ctx.allocator, "__cursor", .{ .int = 0 });
             }
+            // the call is queued once the elements are read, before the
+            // closing brace is checked
+            if (has_unserialize) {
+                if (collected) |arr| {
+                    VM.retainValue(.{ .object = obj });
+                    VM.retainValue(.{ .array = arr });
+                    try uctx.delayed.append(ctx.allocator, .{ .obj = obj, .data = arr });
+                }
+            } else if (ctx.vm.hasMethod(class_name, "__wakeup")) {
+                VM.retainValue(.{ .object = obj });
+                try uctx.delayed.append(ctx.allocator, .{ .obj = obj, .data = null });
+            }
             if (p >= s.len or s[p] != '}') {
                 uctx.err_pos = p;
                 return error.RuntimeError;
             }
             p += 1;
-
-            if (has_unserialize) {
-                if (collected) |arr| {
-                    serialize_lock += 1;
-                    defer serialize_lock -= 1;
-                    _ = try ctx.vm.callMethod(obj, "__unserialize", &.{.{ .array = arr }});
-                }
-            } else if (ctx.vm.hasMethod(class_name, "__wakeup")) {
-                serialize_lock += 1;
-                defer serialize_lock -= 1;
-                _ = try ctx.vm.callMethod(obj, "__wakeup", &.{});
-            }
 
             return .{ .value = .{ .object = obj }, .pos = p };
         },
@@ -1173,6 +1219,8 @@ pub fn unserializeSplArray(ctx: *NativeContext, obj: *PhpObject, s: []const u8) 
     if (s.len == 0) return NativeResult.scalar(.null); // PHP treats an empty payload as a no-op.
     var refs: UnserCtx = .{};
     defer refs.deinit(ctx.allocator);
+    // the table's queued __unserialize() calls run last (var_destroy)
+    defer runDelayed(ctx, &refs);
     var pos: usize = 0;
     parseSplArray(ctx, obj, &refs, s, &pos) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
@@ -1182,6 +1230,8 @@ pub fn unserializeSplArray(ctx: *NativeContext, obj: *PhpObject, s: []const u8) 
         try ctx.vm.setPendingException("UnexpectedValueException", msg);
         return error.RuntimeError;
     };
+    runDelayed(ctx, &refs);
+    if (ctx.vm.pending_exception != null) return error.RuntimeError;
     return NativeResult.scalar(.null);
 }
 

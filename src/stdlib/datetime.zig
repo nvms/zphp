@@ -973,6 +973,18 @@ fn restoreCustomProperties(ctx: *NativeContext, obj: *PhpObject, data: *const Ph
             if (!std.mem.eql(u8, class, "*") and !ctx.vm.classes.contains(class)) continue;
             name = key[end + 1 ..];
         }
+        // zend_update_property: a property nothing declares is a dynamic one
+        if (!obj.properties.contains(name) and !ctx.vm.classDeclaresProperty(obj.class_name, name)) {
+            switch (ctx.vm.dynamicPropertyRule(obj)) {
+                .allowed => {},
+                .deprecated => {
+                    const msg = try std.fmt.allocPrint(ctx.allocator, "Creation of dynamic property {s}::${s} is deprecated", .{ ctx.vm.declaredClassName(obj.class_name), name });
+                    defer ctx.allocator.free(msg);
+                    try ctx.vm.raiseError(VM.E_DEPRECATED, msg);
+                },
+                .forbidden => return throwFmt(ctx, "Error", "Cannot create dynamic property {s}::${s}", .{ ctx.vm.declaredClassName(obj.class_name), name }),
+            }
+        }
         try obj.set(ctx.allocator, name, entry.value);
     }
 }
