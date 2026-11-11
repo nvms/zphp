@@ -966,8 +966,28 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
             if (pos + 2 >= s.len or s[pos + 1] != ':') return error.RuntimeError;
             const colon1 = std.mem.indexOfPos(u8, s, pos + 2, ":") orelse return error.RuntimeError;
             const name_len = std.fmt.parseInt(usize, s[pos + 2 .. colon1], 10) catch return error.RuntimeError;
-            if (colon1 + 2 + name_len + 1 >= s.len) return error.RuntimeError;
+            if (colon1 + 1 >= s.len or s[colon1 + 1] != '"') return error.RuntimeError;
+            // where php's scanner stops on a malformed name: at the length,
+            // or at the closing quote or colon
+            if (name_len == 0 or colon1 + 2 + name_len > s.len) {
+                uctx.err_pos = pos + 2;
+                return error.RuntimeError;
+            }
+            if (colon1 + 2 + name_len >= s.len or s[colon1 + 2 + name_len] != '"') {
+                uctx.err_pos = colon1 + 2 + name_len;
+                return error.RuntimeError;
+            }
+            if (colon1 + 3 + name_len >= s.len or s[colon1 + 3 + name_len] != ':') {
+                uctx.err_pos = colon1 + 3 + name_len;
+                return error.RuntimeError;
+            }
             const orig_class = s[colon1 + 2 .. colon1 + 2 + name_len];
+            // php refuses a name no class could have before looking it up
+            // further (zend_is_valid_class_name), failing at the value's start
+            if (name_len == 0 or orig_class[0] == 0 or orig_class[0] == '\\') return error.RuntimeError;
+            if (!ctx.vm.classes.contains(orig_class)) for (orig_class) |c| {
+                if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '\\' or c >= 0x80)) return error.RuntimeError;
+            };
             const class_allowed = uctx.classAllowed(orig_class) and ctx.vm.classes.contains(orig_class) and !value_mod.isResourceClass(orig_class);
             if (class_allowed) try refuseNotSerializable(ctx, orig_class, .unserialize);
             const class_name = try keptClassName(ctx, class_allowed, orig_class);
@@ -1089,8 +1109,28 @@ fn unserializeValue(ctx: *NativeContext, uctx: *UnserCtx, s: []const u8, pos: us
             if (pos + 2 >= s.len or s[pos + 1] != ':') return error.RuntimeError;
             const colon1 = std.mem.indexOfPos(u8, s, pos + 2, ":") orelse return error.RuntimeError;
             const name_len = std.fmt.parseInt(usize, s[pos + 2 .. colon1], 10) catch return error.RuntimeError;
-            if (colon1 + 2 + name_len + 1 >= s.len) return error.RuntimeError;
+            if (colon1 + 1 >= s.len or s[colon1 + 1] != '"') return error.RuntimeError;
+            // where php's scanner stops on a malformed name: at the length,
+            // or at the closing quote or colon
+            if (name_len == 0 or colon1 + 2 + name_len > s.len) {
+                uctx.err_pos = pos + 2;
+                return error.RuntimeError;
+            }
+            if (colon1 + 2 + name_len >= s.len or s[colon1 + 2 + name_len] != '"') {
+                uctx.err_pos = colon1 + 2 + name_len;
+                return error.RuntimeError;
+            }
+            if (colon1 + 3 + name_len >= s.len or s[colon1 + 3 + name_len] != ':') {
+                uctx.err_pos = colon1 + 3 + name_len;
+                return error.RuntimeError;
+            }
             const orig_class = s[colon1 + 2 .. colon1 + 2 + name_len];
+            // php refuses a name no class could have before looking it up
+            // further (zend_is_valid_class_name), failing at the value's start
+            if (name_len == 0 or orig_class[0] == 0 or orig_class[0] == '\\') return error.RuntimeError;
+            if (!ctx.vm.classes.contains(orig_class)) for (orig_class) |c| {
+                if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '\\' or c >= 0x80)) return error.RuntimeError;
+            };
             const class_allowed = uctx.classAllowed(orig_class) and ctx.vm.classes.contains(orig_class) and !value_mod.isResourceClass(orig_class);
             if (class_allowed) try refuseNotSerializable(ctx, orig_class, .unserialize);
             const class_name = try keptClassName(ctx, class_allowed, orig_class);
