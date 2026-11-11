@@ -92,7 +92,7 @@ pub const entries = .{
     .{ "opcache_invalidate", native_noop_true },
     .{ "opcache_is_script_cached", native_noop_false },
     .{ "opcache_reset", native_noop_true },
-    .{ "ignore_user_abort", native_noop_zero },
+    .{ "ignore_user_abort", native_ignore_user_abort },
     .{ "getmxrr", native_getmxrr },
     .{ "header_register_callback", native_noop_true },
     .{ "spl_classes", native_spl_classes },
@@ -274,51 +274,44 @@ fn warnObjectToNumber(ctx: *NativeContext, v: Value, comptime target: []const u8
     try ctx.vm.emitWarning(msg);
 }
 
+extern fn strtoll(s: [*:0]const u8, end: ?*[*:0]u8, base: c_int) c_longlong;
+
+// php's intval(): zval_get_long for base 10 or a non-string, else c's
+// strtol in that base, after php's own handling of a 0b prefix
 fn intval(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .int = 0 });
-    try warnObjectToNumber(ctx, args[0], "int");
-    if (args.len >= 2 and args[1] == .int and args[1].int != 10 and args[0] == .string) {
-        var base: u8 = @intCast(@max(0, @min(36, args[1].int)));
-        var s = std.mem.trim(u8, args[0].string.bytes(), " \t\n\r");
-        var negative = false;
-        if (s.len > 0 and (s[0] == '-' or s[0] == '+')) {
-            negative = s[0] == '-';
-            s = s[1..];
+    const base = if (args.len >= 2) try @import("string_ports.zig").Args.init(ctx, "intval", args).long(1, "base") else 10;
+    if (args[0] != .string or base == 10) {
+        try warnObjectToNumber(ctx, args[0], "int");
+        // PHP: intval(array) is 0 for empty array, 1 for non-empty
+        if (args[0] == .array) {
+            return NativeResult.scalar(.{ .int = if (args[0].array.entries.items.len == 0) @as(i64, 0) else @as(i64, 1) });
         }
-        // base 0 means auto-detect from prefix: 0x = hex, 0b = binary, 0 = octal
-        if (base == 0) {
-            if (s.len >= 2 and s[0] == '0' and (s[1] == 'x' or s[1] == 'X')) {
-                base = 16;
-                s = s[2..];
-            } else if (s.len >= 2 and s[0] == '0' and (s[1] == 'b' or s[1] == 'B')) {
-                base = 2;
-                s = s[2..];
-            } else if (s.len >= 1 and s[0] == '0') {
-                base = 8;
-                s = s[1..];
-            } else {
-                base = 10;
+        return NativeResult.scalar(.{ .int = Value.toInt(args[0]) });
+    }
+    var s = args[0].string.bytes();
+    // c strings end at a nul
+    if (std.mem.indexOfScalar(u8, s, 0)) |nul| s = s[0..nul];
+    const a = ctx.allocator;
+    if (base == 0 or base == 2) {
+        var t = s;
+        while (t.len > 0 and (t[0] == ' ' or (t[0] >= '\t' and t[0] <= '\r'))) t = t[1..];
+        // three bytes or more cover "0b#" and "-0b"
+        if (t.len > 2) {
+            const offset: usize = if (t[0] == '-' or t[0] == '+') 1 else 0;
+            if (t[offset] == '0' and (t[offset + 1] == 'b' or t[offset + 1] == 'B')) {
+                const tmp = try a.allocSentinel(u8, t.len - 2, 0);
+                defer a.free(tmp);
+                if (offset == 1) tmp[0] = t[0];
+                @memcpy(tmp[offset..], t[offset + 2 ..]);
+                return NativeResult.scalar(.{ .int = strtoll(tmp.ptr, null, 2) });
             }
-        } else {
-            if (base == 16 and s.len >= 2 and s[0] == '0' and (s[1] == 'x' or s[1] == 'X')) s = s[2..];
-            if (base == 8 and s.len >= 1 and s[0] == '0') s = s[1..];
-            if (base == 2 and s.len >= 2 and s[0] == '0' and (s[1] == 'b' or s[1] == 'B')) s = s[2..];
         }
-        if (base < 2) base = 10;
-        var end: usize = 0;
-        while (end < s.len) : (end += 1) {
-            const c = s[end];
-            const digit: u8 = if (c >= '0' and c <= '9') c - '0' else if (c >= 'a' and c <= 'z') 10 + (c - 'a') else if (c >= 'A' and c <= 'Z') 10 + (c - 'A') else 255;
-            if (digit >= base) break;
-        }
-        const v = if (end == 0) @as(i64, 0) else (std.fmt.parseInt(i64, s[0..end], base) catch 0);
-        return NativeResult.scalar(.{ .int = if (negative) -v else v });
     }
-    // PHP: intval(array) is 0 for empty array, 1 for non-empty
-    if (args[0] == .array) {
-        return NativeResult.scalar(.{ .int = if (args[0].array.entries.items.len == 0) @as(i64, 0) else @as(i64, 1) });
-    }
-    return NativeResult.scalar(.{ .int = Value.toInt(args[0]) });
+    const z = try a.dupeSentinel(u8, s, 0);
+    defer a.free(z);
+    // c's strtol takes bases 2 to 36, and 0; any other yields 0
+    if (base != 0 and (base < 2 or base > 36)) return NativeResult.scalar(.{ .int = 0 });
+    return NativeResult.scalar(.{ .int = strtoll(z.ptr, null, @intCast(base)) });
 }
 
 fn floatval(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -882,16 +875,42 @@ fn closureCallableName(ctx: *NativeContext, closure: *value_mod.PhpObject, buf: 
     };
 }
 
+// the ignore_user_abort directive before the call, which a bool given sets
+fn native_ignore_user_abort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const current = ctx.vm.ini_settings.get("ignore_user_abort") orelse "0";
+    const previous = std.fmt.parseInt(i64, std.mem.trim(u8, current, " "), 10) catch @as(i64, if (std.ascii.eqlIgnoreCase(current, "on") or std.ascii.eqlIgnoreCase(current, "true") or std.ascii.eqlIgnoreCase(current, "yes")) 1 else 0);
+    if (args.len >= 1 and args[0] != .null) _ = try ctx.vm.setIni("ignore_user_abort", if (args[0].isTruthy()) "1" else "0");
+    return NativeResult.scalar(.{ .int = previous });
+}
+
 fn native_settype(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(.null);
     if (args.len < 2 or args[1] != .string) return NativeResult.share(args[0]);
     const type_name = args[1].string.bytes();
     const val = args[0];
-    if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "integer"))
+    const is = struct {
+        fn f(name: []const u8, comptime want: []const u8) bool {
+            return std.ascii.eqlIgnoreCase(name, want);
+        }
+    }.f;
+    if (is(type_name, "int") or is(type_name, "integer")) {
+        // convert_to_long: an object without a numeric form warns and is 1
+        if (val == .object and @import("../runtime/value.zig").nativeCast(val.object, .int) == null) {
+            try warnObjectToNumber(ctx, val, "int");
+            return NativeResult.scalar(.{ .int = 1 });
+        }
         return NativeResult.scalar(.{ .int = Value.toInt(val) });
-    if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "double"))
+    }
+    if (is(type_name, "float") or is(type_name, "double")) {
+        if (val == .object and @import("../runtime/value.zig").nativeCast(val.object, .float) == null) {
+            try warnObjectToNumber(ctx, val, "float");
+            return NativeResult.scalar(.{ .float = 1 });
+        }
+        // convert_to_double: an array is 1.0 when it has elements
+        if (val == .array) return NativeResult.scalar(.{ .float = if (val.array.entries.items.len > 0) 1 else 0 });
         return NativeResult.scalar(.{ .float = Value.toFloat(val) });
-    if (std.mem.eql(u8, type_name, "string")) {
+    }
+    if (is(type_name, "string")) {
         if (val == .string) return NativeResult.share(val);
         if (val == .array) try ctx.vm.emitWarning("Array to string conversion");
         // __toString, or php's "could not be converted to string" Error
@@ -905,17 +924,21 @@ fn native_settype(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         const s = try buf.toOwnedSlice(ctx.allocator);
         return NativeResult.takeString(try Value.String.adopt(ctx.allocator, s));
     }
-    if (std.mem.eql(u8, type_name, "bool") or std.mem.eql(u8, type_name, "boolean"))
+    if (is(type_name, "bool") or is(type_name, "boolean"))
         return NativeResult.scalar(.{ .bool = val.isTruthy() });
-    if (std.mem.eql(u8, type_name, "null"))
+    if (is(type_name, "null"))
         return NativeResult.scalar(.null);
-    if (std.mem.eql(u8, type_name, "array")) {
+    if (is(type_name, "array")) {
         if (val == .array) return NativeResult.share(val);
         return NativeResult.borrowed(try ctx.vm.castToArray(val));
     }
-    if (std.mem.eql(u8, type_name, "object")) {
+    if (is(type_name, "object")) {
         if (val == .object) return NativeResult.share(val);
         return NativeResult.borrowed(try ctx.vm.castToObject(val));
+    }
+    if (is(type_name, "resource")) {
+        try ctx.vm.setPendingException("ValueError", "Cannot convert to resource type");
+        return error.RuntimeError;
     }
     try ctx.vm.setPendingException("ValueError", "settype(): Argument #2 ($type) must be a valid type");
     return error.RuntimeError;
@@ -1467,6 +1490,7 @@ fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "serialize_precision")) return "-1";
     if (std.mem.eql(u8, name, "unserialize_callback_func")) return "";
     if (std.mem.eql(u8, name, "unserialize_max_depth")) return "4096";
+    if (std.mem.eql(u8, name, "ignore_user_abort")) return "0";
     if (std.mem.eql(u8, name, "open_basedir")) return "";
     if (std.mem.eql(u8, name, "include_path")) return includes.default_include_path;
     if (std.mem.eql(u8, name, "log_errors")) return "1";
