@@ -664,12 +664,28 @@ pub fn processEscapes(allocator: Allocator, s: []const u8, quote: u8) ![]const u
                                 i += 2;
                                 continue;
                             };
+                            // php encodes any code point up to U+10FFFF,
+                            // surrogates included
                             var utf8_buf: [4]u8 = undefined;
-                            const utf8_len = std.unicode.utf8Encode(cp, &utf8_buf) catch {
-                                try buf.append(allocator, '\\');
-                                try buf.append(allocator, 'u');
-                                i += 2;
-                                continue;
+                            const c: u32 = cp;
+                            const utf8_len: usize = if (c < 0x80) blk: {
+                                utf8_buf[0] = @intCast(c);
+                                break :blk 1;
+                            } else if (c < 0x800) blk: {
+                                utf8_buf[0] = @intCast(0xC0 | (c >> 6));
+                                utf8_buf[1] = @intCast(0x80 | (c & 0x3F));
+                                break :blk 2;
+                            } else if (c < 0x10000) blk: {
+                                utf8_buf[0] = @intCast(0xE0 | (c >> 12));
+                                utf8_buf[1] = @intCast(0x80 | ((c >> 6) & 0x3F));
+                                utf8_buf[2] = @intCast(0x80 | (c & 0x3F));
+                                break :blk 3;
+                            } else blk: {
+                                utf8_buf[0] = @intCast(0xF0 | (c >> 18));
+                                utf8_buf[1] = @intCast(0x80 | ((c >> 12) & 0x3F));
+                                utf8_buf[2] = @intCast(0x80 | ((c >> 6) & 0x3F));
+                                utf8_buf[3] = @intCast(0x80 | (c & 0x3F));
+                                break :blk 4;
                             };
                             try buf.appendSlice(allocator, utf8_buf[0..utf8_len]);
                             i = end + 1;

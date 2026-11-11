@@ -2918,7 +2918,10 @@ const Parser = struct {
         return switch (self.peek()) {
             .integer => self.addLiteral(.integer_literal),
             .float => self.addLiteral(.float_literal),
-            .string => self.addLiteral(.string_literal),
+            .string => blk: {
+                try self.checkUnicodeEscapes(self.pos);
+                break :blk self.addLiteral(.string_literal);
+            },
             .heredoc, .nowdoc => blk: {
                 try self.checkHeredocIndentation(self.pos);
                 break :blk self.addLiteral(.string_literal);
@@ -3644,6 +3647,37 @@ const Parser = struct {
         if (self.compile_error != null) return;
         self.deferCompileError(token, fmt, args);
         self.compile_error.?.trace = false;
+    }
+
+    // zend_scan_escape_string's \u{...} rules for a double-quoted string:
+    // hex digits between the braces, at least one, at most U+10FFFF. a \u
+    // without a brace stays as written
+    fn checkUnicodeEscapes(self: *Parser, token: u32) Error!void {
+        const text = self.tokens[token].lexeme(self.source);
+        if (text.len == 0 or text[0] != '"') return;
+        var i: usize = 1;
+        var newlines: u32 = 0;
+        while (i + 1 < text.len) : (i += 1) {
+            if (text[i] == '\n') newlines += 1;
+            if (text[i] != '\\') continue;
+            if (text[i + 1] != 'u' or i + 2 >= text.len or text[i + 2] != '{') {
+                i += 1;
+                continue;
+            }
+            var j = i + 3;
+            while (j < text.len and std.ascii.isHex(text[j])) j += 1;
+            if (j >= text.len or text[j] != '}' or j == i + 3) {
+                try self.errors.append(self.allocator, .{ .token = token, .tag = .unicode_escape_invalid, .line_delta = newlines });
+                return error.ParseError;
+            }
+            const digits = std.mem.trimStart(u8, text[i + 3 .. j], "0");
+            const too_large = digits.len > 6 or (std.fmt.parseInt(u32, if (digits.len == 0) "0" else digits, 16) catch 0x110000) > 0x10FFFF;
+            if (too_large) {
+                try self.errors.append(self.allocator, .{ .token = token, .tag = .unicode_escape_too_large, .line_delta = newlines });
+                return error.ParseError;
+            }
+            i = j;
+        }
     }
 
     fn addError(self: *Parser, tag: Ast.Error.Tag) Error!void {

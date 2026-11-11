@@ -253,6 +253,9 @@ pub const Ast = struct {
             void_cast_misplaced,
             heredoc_mixed_indentation,
             heredoc_body_indentation,
+            // php's scanner refuses a \u{...} escape it can't read
+            unicode_escape_invalid,
+            unicode_escape_too_large,
         };
     };
 };
