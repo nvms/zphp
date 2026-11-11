@@ -5877,6 +5877,14 @@ pub const VM = struct {
                         continue;
                     }
                     if (existing == .null or (existing == .bool and !existing.bool)) {
+                        // vivifying a property nothing declares creates it, as
+                        // ensure_array_prop does
+                        if (hook_cell == null and (obj.isUnset(pname) or !obj.properties.contains(pname)) and
+                            (obj.slots == null or obj.getSlotIndex(pname) == null) and !self.classDeclaresProperty(obj.class_name, pname) and
+                            !self.magicApplies(obj, pname, .get))
+                        {
+                            if (try self.checkDynamicProperty(obj, pname)) continue;
+                        }
                         const new_arr = try self.allocArray();
                         try new_arr.set(self.allocator, ik, v);
                         if (hook_cell) |cell| {
