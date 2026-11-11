@@ -154,7 +154,7 @@ pub const NativeContext = struct {
         if (vm.frame_count == 0) return;
         const arg_sources = vm.callerArgSources(arg_count);
         if (arg_index >= arg_sources.len) return;
-        const caller = vm.currentFrame();
+        const caller = if (vm.inNativeMethodFrame()) &vm.frames[vm.frame_count - 2] else vm.currentFrame();
 
         switch (arg_sources[arg_index]) {
             .cell => |c| {
@@ -327,6 +327,12 @@ pub const CaptureRange = struct {
     has_statics: bool = false,
     // RefIndex owner of this instance's by-ref capture bindings
     ref_owner: RefIndex.OwnerId = 0,
+};
+
+pub const EhThrow = struct {
+    class: []const u8,
+    from: []const u8 = "",
+    to: []const u8 = "",
 };
 
 pub const AttributeDef = struct {
@@ -908,6 +914,12 @@ pub const VM = struct {
     vars_pool: std.ArrayListUnmanaged(std.StringHashMapUnmanaged(Value)) = .empty,
     error_handler_stack: std.ArrayListUnmanaged(ErrorHandlerEntry) = .empty,
     error_silenced_depth: u32 = 0,
+    // php's EH_THROW error handling, which some internal methods switch on
+    // while they run: a warning becomes an exception of this class instead
+    // of being reported, and no user error handler sees any diagnostic.
+    // `from` is the message prefix of the function a native delegates to,
+    // rewritten to `to`, the method php's active function is
+    eh_throw: ?EhThrow = null,
     last_error_type: i64 = 0,
     last_error_message: []const u8 = "",
     last_error_file: []const u8 = "",
@@ -2045,7 +2057,7 @@ pub const VM = struct {
         try @import("../stdlib/datetime.zig").register(vm, allocator);
         try @import("../stdlib/spl.zig").register(vm, allocator);
         try @import("../stdlib/spl_iterators.zig").register(vm, allocator);
-        try @import("../stdlib/spl_file.zig").register(vm, allocator);
+        try @import("../stdlib/spl_directory.zig").register(vm, allocator);
         try @import("../stdlib/pdo.zig").register(vm, allocator);
         try @import("../stdlib/websocket.zig").register(vm, allocator);
         try @import("../stdlib/filesystem.zig").register(vm, allocator);
@@ -10003,6 +10015,7 @@ pub const VM = struct {
                                 const args_buf_s = try self.copyStackArgs(&args_buf, self.stack[self.sp - ac ..][0..ac]);
                                 defer self.freeStackArgs(args_buf_s, &args_buf);
                                 self.saveFrameArgs(arg_count);
+                                if (native.byref) self.captureArgSources(ac);
                                 self.dropN(ac + 1);
                                 var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                                 try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
@@ -10127,6 +10140,9 @@ pub const VM = struct {
                         const args_buf_s = try self.copyStackArgs(&args_buf, self.stack[self.sp - ac ..][0..ac]);
                         defer self.freeStackArgs(args_buf_s, &args_buf);
                         self.saveFrameArgs(arg_count);
+                        // a native method with by-reference parameters
+                        // (SplFileObject::fscanf) writes through the sources
+                        if (native.byref) self.captureArgSources(ac);
                         self.dropN(ac);
                         self.dropN(1);
 
@@ -13813,7 +13829,21 @@ pub const VM = struct {
     // raiseErrorAt for a message written by the script, which trigger_error
     // passes on whole
     pub fn raiseMessageAt(self: *VM, level: i64, msg: []const u8, at: SourcePosition) RuntimeError!void {
-        if (try self.callUserErrorHandler(level, msg, at)) return;
+        if (self.eh_throw) |eh| {
+            switch (level) {
+                E_WARNING, 32, 128, 512 => {
+                    // a pending exception is never replaced
+                    if (self.pending_exception != null) return;
+                    if (eh.from.len > 0 and std.mem.startsWith(u8, msg, eh.from)) {
+                        const renamed = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ eh.to, msg[eh.from.len..] });
+                        defer self.allocator.free(renamed);
+                        try self.setPendingException(eh.class, renamed);
+                    } else try self.setPendingException(eh.class, msg);
+                    return;
+                },
+                else => {},
+            }
+        } else if (try self.callUserErrorHandler(level, msg, at)) return;
         self.recordLastError(level, msg, at);
         const shown = self.error_silenced_depth == 0 and (self.error_reporting_level & level) != 0;
         if (shown) self.printError(level, msg, at);
@@ -19477,8 +19507,15 @@ pub const VM = struct {
     // consumer that binds while argument sources may change copies it first
     fn callerArgSources(self: *VM, ac: usize) []const RefSource {
         const ic = self.ic orelse return &.{};
-        if (ic.active_frame != self.frame_count) return &.{};
+        if (ic.active_frame != self.frame_count and !self.inNativeMethodFrame()) return &.{};
         return ic.active_args[0..@min(ac, ic.active_arg_count)];
+    }
+
+    // a native method runs in the temporary frame that holds its $this, one
+    // above the frame its arguments were captured in
+    pub fn inNativeMethodFrame(self: *VM) bool {
+        const ic = self.ic orelse return false;
+        return ic.active_frame + 1 == self.frame_count and self.frames[self.frame_count - 1].native;
     }
 
     fn captureArgSources(self: *VM, ac: usize) void {

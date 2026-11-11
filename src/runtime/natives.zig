@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const native_params = @import("../stdlib/native_params.zig");
 const deprecations = @import("../stdlib/deprecations_generated.zig");
+const byref_args = @import("../stdlib/byref_args.zig");
 
 // the natives a VM can call, each with the argument counts php accepts for it.
 // the counts come from the signature table once, at registration, so a call
@@ -25,12 +26,14 @@ pub fn Table(comptime NativeFn: type) type {
             no_discard: ?[]const u8,
             // what follows "is deprecated" for a native php marks #[\Deprecated]
             deprecated: ?[]const u8,
+            // it takes a parameter by reference
+            byref: bool,
         };
 
         map: std.StringHashMapUnmanaged(Native) = .{},
 
         pub fn put(self: *Self, allocator: Allocator, name: []const u8, call: NativeFn) !void {
-            try self.map.put(allocator, name, .{ .call = call, .arity = Arity.of(name), .callbacks = callbackParams(name), .arrays = arrayParams(name), .strings = stringParams(name), .no_discard = no_discard.get(name), .deprecated = deprecations.functions.get(name) });
+            try self.map.put(allocator, name, .{ .call = call, .arity = Arity.of(name), .callbacks = callbackParams(name), .arrays = arrayParams(name), .strings = stringParams(name), .no_discard = no_discard.get(name), .deprecated = deprecations.functions.get(name), .byref = byref_args.hasByRefParams(name) });
         }
 
         pub fn get(self: *const Self, name: []const u8) ?Native {

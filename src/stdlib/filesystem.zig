@@ -1120,7 +1120,7 @@ fn driveColon(path: []const u8, at: usize) bool {
 
 // zend_dirname: the path without its last segment and the separators around
 // it; "." when there is no separator, the separator alone for the root
-fn phpDirname(path: []const u8) []const u8 {
+pub fn phpDirname(path: []const u8) []const u8 {
     var prefix: usize = 0;
     // a windows drive spec stays as written
     if (platform.is_windows and path.len >= 2 and std.ascii.isAlphabetic(path[0]) and path[1] == ':') {
@@ -2419,6 +2419,12 @@ pub fn openWithMode(spelled: []const u8, mode: []const u8) !std.Io.File {
 fn native_fclose(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = try streamArg(ctx, args, .{ .func = "fclose" });
     if (!std.mem.eql(u8, obj.class_name, "FileHandle")) return NativeResult.scalar(.{ .bool = false });
+    // PHP_STREAM_FLAG_NO_FCLOSE: a stream an object owns (SplFileObject's)
+    const no_fclose = obj.get("__no_fclose");
+    if (no_fclose == .bool and no_fclose.bool) {
+        try warn(ctx, "fclose(): cannot close the provided stream, as it must not be manually closed", .{});
+        return NativeResult.scalar(.{ .bool = false });
+    }
     if (fileHandleWrapper(obj)) |wrapper| {
         if (ctx.vm.hasMethod(wrapper.class_name, "stream_close")) {
             _ = try ctx.callMethod(wrapper, "stream_close", &.{});
@@ -2674,6 +2680,13 @@ pub fn streamReadLine(ctx: *NativeContext, obj: *PhpObject, max_len: usize) Runt
         try buf.append(ctx.allocator, byte[0]);
         if (byte[0] == '\n') break;
     }
+    // a line read from php://temp fills php's read buffer through the
+    // inner memory stream's greedy read, which hits the end of the data and
+    // sets eof; feof reports it once the buffer is drained
+    if (!hit_eof and isTempStream(obj)) {
+        const n = io.read(&byte) catch 0;
+        if (n == 0) hit_eof = true else platform.seekBy(io.file, -1) catch {};
+    }
     if (hit_eof) try obj.set(ctx.allocator, "__eof", .{ .bool = true });
     if (buf.items.len == 0) {
         buf.deinit(ctx.allocator);
@@ -2767,16 +2780,10 @@ fn native_feof(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
         return NativeResult.scalar(.{ .bool = getBufferPos(obj) >= buffer.len });
     }
     const io = streamIo(obj) orelse return NativeResult.scalar(.{ .bool = true });
-    // memory/temp streams use peek-ahead semantics (PHP behavior for those streams)
-    const peek_eof = obj.get("__peek_eof");
-    if (peek_eof == .bool and peek_eof.bool) {
-        var byte: [1]u8 = undefined;
-        const n = io.read(&byte) catch return NativeResult.scalar(.{ .bool = true });
-        if (n == 0) return NativeResult.scalar(.{ .bool = true });
-        platform.seekBy(io.file, -1) catch {};
-        return NativeResult.scalar(.{ .bool = false });
-    }
-    // PHP file semantics: feof becomes true only after a read attempt returned 0
+    _ = io;
+    // feof becomes true only once a read came up short, for files and
+    // php://memory and php://temp alike (php's greedy read loop tries again
+    // after a short read, and that read returns nothing)
     const eof = obj.get("__eof");
     return NativeResult.scalar(.{ .bool = eof == .bool and eof.bool });
 }
@@ -2946,6 +2953,11 @@ fn native_flock(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
 // php's detect_is_seekable: pipes and sockets cannot seek, nor can
 // character devices, except linux's memory devices (/dev/null, /dev/zero,
 // /dev/full and kin, major 1)
+fn isTempStream(obj: *PhpObject) bool {
+    const path = obj.get("__path");
+    return path == .string and std.ascii.startsWithIgnoreCase(path.string.bytes(), "php://temp");
+}
+
 fn isSeekable(obj: *PhpObject) bool {
     if (getBufferBacking(obj) != null) return true;
     if (isNetStream(obj)) return false;

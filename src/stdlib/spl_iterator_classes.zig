@@ -31,17 +31,17 @@ const NativeFn = *const fn (*NativeContext, []const Value) RuntimeError!NativeRe
 // shared helpers
 // ==========================================
 
-fn thisObj(ctx: *NativeContext) ?*PhpObject {
+pub fn thisObj(ctx: *NativeContext) ?*PhpObject {
     const v = ctx.vm.currentFrame().vars.get("$this") orelse return null;
     return if (v == .object) v.object else null;
 }
 
-fn pending(ctx: *NativeContext) bool {
+pub fn pending(ctx: *NativeContext) bool {
     return ctx.vm.pending_exception != null;
 }
 
 // a method's result, or its exception: php returns with EG(exception) set
-fn finish(ctx: *NativeContext, result: NativeResult) RuntimeError!NativeResult {
+pub fn finish(ctx: *NativeContext, result: NativeResult) RuntimeError!NativeResult {
     if (pending(ctx)) {
         if (result.value == .string) result.value.string.release();
         return error.RuntimeError;
@@ -49,23 +49,23 @@ fn finish(ctx: *NativeContext, result: NativeResult) RuntimeError!NativeResult {
     return result;
 }
 
-fn finishNull(ctx: *NativeContext) RuntimeError!NativeResult {
+pub fn finishNull(ctx: *NativeContext) RuntimeError!NativeResult {
     return finish(ctx, NativeResult.scalar(.null));
 }
 
-fn raise(ctx: *NativeContext, class: []const u8, comptime fmt: []const u8, args: anytype) RuntimeError!void {
+pub fn raise(ctx: *NativeContext, class: []const u8, comptime fmt: []const u8, args: anytype) RuntimeError!void {
     const msg = try std.fmt.allocPrint(ctx.allocator, fmt, args);
     defer ctx.allocator.free(msg);
     try ctx.vm.setPendingException(class, msg);
 }
 
-fn throwNow(ctx: *NativeContext, class: []const u8, comptime fmt: []const u8, args: anytype) RuntimeError!NativeResult {
+pub fn throwNow(ctx: *NativeContext, class: []const u8, comptime fmt: []const u8, args: anytype) RuntimeError!NativeResult {
     try raise(ctx, class, fmt, args);
     return error.RuntimeError;
 }
 
 // runs php code the way zend_call_function does from inside a native
-fn guarded(ctx: *NativeContext, comptime f: anytype, args: anytype) RuntimeError!Value {
+pub fn guarded(ctx: *NativeContext, comptime f: anytype, args: anytype) RuntimeError!Value {
     const vm = ctx.vm;
     if (vm.pending_exception != null) return .undef;
     // a throw below lands here, never in a catch of the code that called
@@ -80,7 +80,7 @@ fn guarded(ctx: *NativeContext, comptime f: anytype, args: anytype) RuntimeError
 }
 
 // zend_call_method: .undef is php's UNDEF result
-fn callOn(ctx: *NativeContext, target: *PhpObject, name: []const u8, args: []const Value) RuntimeError!Value {
+pub fn callOn(ctx: *NativeContext, target: *PhpObject, name: []const u8, args: []const Value) RuntimeError!Value {
     if (pending(ctx)) return .undef;
     return guarded(ctx, VM.callMethod, .{ ctx.vm, target, name, args }) catch |err| {
         // a method that isn't there fails without an exception of its own
@@ -90,7 +90,7 @@ fn callOn(ctx: *NativeContext, target: *PhpObject, name: []const u8, args: []con
     };
 }
 
-fn callValue(ctx: *NativeContext, callable: Value, args: []const Value) RuntimeError!Value {
+pub fn callValue(ctx: *NativeContext, callable: Value, args: []const Value) RuntimeError!Value {
     return guarded(ctx, NativeContext.invokeCallable, .{ ctx, callable, args });
 }
 
@@ -117,7 +117,7 @@ fn rewindGenVoid(vm: *VM, gen: *Generator) RuntimeError!Value {
     return .null;
 }
 
-fn isInstance(vm: *VM, v: Value, class: []const u8) bool {
+pub fn isInstance(vm: *VM, v: Value, class: []const u8) bool {
     return switch (v) {
         .object => |o| vm.isInstanceOf(o.class_name, class),
         .generator => std.ascii.eqlIgnoreCase(class, "Generator") or std.ascii.eqlIgnoreCase(class, "Iterator") or std.ascii.eqlIgnoreCase(class, "Traversable"),
@@ -126,13 +126,13 @@ fn isInstance(vm: *VM, v: Value, class: []const u8) bool {
 }
 
 // the class declaring a method resolved on class_name is a user class
-fn userMethod(vm: *VM, class_name: []const u8, name: []const u8) bool {
+pub fn userMethod(vm: *VM, class_name: []const u8, name: []const u8) bool {
     const full = vm.resolveMethod(class_name, name) catch return false;
     return vm.functions.get(full) != null;
 }
 
 // object_init_with_constructor: .undef when it throws
-fn construct(ctx: *NativeContext, class_name: []const u8, args: []const Value) RuntimeError!Value {
+pub fn construct(ctx: *NativeContext, class_name: []const u8, args: []const Value) RuntimeError!Value {
     if (pending(ctx)) return .undef;
     if (ctx.vm.classes.get(class_name)) |cd| if (cd.is_abstract) {
         try raise(ctx, "Error", "Cannot instantiate abstract class {s}", .{class_name});
@@ -148,13 +148,13 @@ fn construct(ctx: *NativeContext, class_name: []const u8, args: []const Value) R
 }
 
 // a string toPhpString made, handed to the caller
-fn ownedResult(v: Value) NativeResult {
+pub fn ownedResult(v: Value) NativeResult {
     if (v == .string and v.string.owner != null) return NativeResult.takeString(v.string);
     return .{ .value = v };
 }
 
 // zval_get_string: .undef when it throws. the caller owns a string result
-fn toPhpString(ctx: *NativeContext, v: Value) RuntimeError!Value {
+pub fn toPhpString(ctx: *NativeContext, v: Value) RuntimeError!Value {
     if (pending(ctx)) return .undef;
     switch (v) {
         .string => |s| {
@@ -187,15 +187,15 @@ fn objectStringValue(vm: *VM, obj: *PhpObject) RuntimeError!Value {
 
 // keeps a value alive across php code; an array is left alone, since a
 // release at zero would queue it for freeing while its owner still holds it
-fn hold(v: Value) void {
+pub fn hold(v: Value) void {
     if (v != .array) VM.retainValue(v);
 }
 
-fn unhold(ctx: *NativeContext, v: Value) void {
+pub fn unhold(ctx: *NativeContext, v: Value) void {
     if (v != .array) ctx.vm.releaseValue(v);
 }
 
-fn releaseString(v: Value) void {
+pub fn releaseString(v: Value) void {
     if (v == .string) v.string.release();
 }
 
@@ -203,16 +203,16 @@ fn releaseString(v: Value) void {
 // argument parsing (zend_parse_parameters)
 // ==========================================
 
-fn typeError(ctx: *NativeContext, label: []const u8, n: usize, pname: []const u8, expected: []const u8, v: Value) RuntimeError!void {
+pub fn typeError(ctx: *NativeContext, label: []const u8, n: usize, pname: []const u8, expected: []const u8, v: Value) RuntimeError!void {
     try raise(ctx, "TypeError", "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given", .{ label, n, pname, expected, v.valueName() });
 }
 
-fn valueError(ctx: *NativeContext, label: []const u8, n: usize, pname: []const u8, comptime what: []const u8) RuntimeError!void {
+pub fn valueError(ctx: *NativeContext, label: []const u8, n: usize, pname: []const u8, comptime what: []const u8) RuntimeError!void {
     try raise(ctx, "ValueError", "{s}(): Argument #{d} (${s}) " ++ what, .{ label, n, pname });
 }
 
 // "O": an object of a class
-fn argObject(ctx: *NativeContext, label: []const u8, args: []const Value, i: usize, pname: []const u8, class: []const u8) RuntimeError!?Value {
+pub fn argObject(ctx: *NativeContext, label: []const u8, args: []const Value, i: usize, pname: []const u8, class: []const u8) RuntimeError!?Value {
     const v = args[i];
     if (isInstance(ctx.vm, v, class)) return v;
     try typeError(ctx, label, i + 1, pname, class, v);
@@ -220,7 +220,7 @@ fn argObject(ctx: *NativeContext, label: []const u8, args: []const Value, i: usi
 }
 
 // "l"
-fn argLong(ctx: *NativeContext, label: []const u8, args: []const Value, i: usize, pname: []const u8, default: i64) RuntimeError!?i64 {
+pub fn argLong(ctx: *NativeContext, label: []const u8, args: []const Value, i: usize, pname: []const u8, default: i64) RuntimeError!?i64 {
     if (i >= args.len) return default;
     const v = args[i];
     switch (v) {
@@ -254,7 +254,7 @@ fn argLong(ctx: *NativeContext, label: []const u8, args: []const Value, i: usize
 }
 
 // "S": the caller owns the string
-fn argString(ctx: *NativeContext, label: []const u8, args: []const Value, i: usize, pname: []const u8) RuntimeError!?Value.String {
+pub fn argString(ctx: *NativeContext, label: []const u8, args: []const Value, i: usize, pname: []const u8) RuntimeError!?Value.String {
     const v = args[i];
     switch (v) {
         .string => |s| {
@@ -284,7 +284,7 @@ fn argString(ctx: *NativeContext, label: []const u8, args: []const Value, i: usi
     return null;
 }
 
-fn argCount(ctx: *NativeContext, label: []const u8, n: usize, min: usize, max: usize) RuntimeError!bool {
+pub fn argCount(ctx: *NativeContext, label: []const u8, n: usize, min: usize, max: usize) RuntimeError!bool {
     if (n >= min and n <= max) return true;
     const few = n < min;
     const bound = if (few) min else max;

@@ -324,7 +324,7 @@ const Sink = struct {
 
 // php_sscanf_internal. vars are the by-reference arguments, which start at
 // args[arg_offset]
-fn scan(ctx: *NativeContext, input: []const u8, format_bytes: []const u8, args: []const Value, arg_offset: usize) RuntimeError!NativeResult {
+pub fn scan(ctx: *NativeContext, input: []const u8, format_bytes: []const u8, args: []const Value, arg_offset: usize) RuntimeError!NativeResult {
     const f = CStr.init(format_bytes);
     const s = CStr.init(input);
     const num_vars = args.len - arg_offset;
