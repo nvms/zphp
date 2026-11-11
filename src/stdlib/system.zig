@@ -1376,16 +1376,15 @@ fn native_exec(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     const result = runShell(ctx.allocator, args[0].string.bytes()) catch return NativeResult.scalar(.{ .bool = false });
     defer ctx.allocator.free(result.stdout);
 
+    // php_exec: each line, to and with its newline, less trailing
+    // whitespace (c's isspace)
     var lines = std.ArrayListUnmanaged([]const u8).empty;
     defer lines.deinit(ctx.allocator);
-    var iter = std.mem.splitScalar(u8, result.stdout, '\n');
-    while (iter.next()) |raw| {
-        var line = raw;
-        if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
-        try lines.append(ctx.allocator, line);
-    }
-    if (lines.items.len > 0 and lines.items[lines.items.len - 1].len == 0) {
-        _ = lines.pop();
+    var rest = result.stdout;
+    while (rest.len > 0) {
+        const end = if (std.mem.indexOfScalar(u8, rest, '\n')) |nl| nl + 1 else rest.len;
+        try lines.append(ctx.allocator, std.mem.trimEnd(u8, rest[0..end], " \t\n\r\x0b\x0c"));
+        rest = rest[end..];
     }
 
     // optional output array (param 2, by-ref)
