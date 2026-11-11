@@ -19626,7 +19626,8 @@ pub const VM = struct {
 
     inline fn valueIdentity(value: Value) ?usize {
         return switch (value) {
-            .object => |o| @intFromPtr(o.class_name.ptr),
+            // a closure by its instance: its name keys one function
+            .object => |o| if (o.native.kind == .closure) o.native.ptr else @intFromPtr(o.class_name.ptr),
             .string => |s| @intFromPtr(s.bytes().ptr),
             .array => null,
             else => 0,
