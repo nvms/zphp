@@ -568,7 +568,14 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
             var listing: object_properties.Listing = .{};
             defer listing.deinit(a);
             if (sleep_props == null) listing = try object_properties.list(ctx.vm, obj, .serialize, a);
-            const total_count: usize = if (sleep_props) |sp| sp.entries.items.len else listing.items.items.len;
+            // php_var_serialize_get_sleep_props: a typed property __sleep
+            // names that is uninitialized (a lazy object's included) is left out
+            var sleep_count: usize = 0;
+            if (sleep_props) |sp| for (sp.entries.items) |entry| {
+                if (entry.value != .string or sleepSkips(ctx.vm, obj, entry.value.string.bytes())) continue;
+                sleep_count += 1;
+            };
+            const total_count: usize = if (sleep_props != null) sleep_count else listing.items.items.len;
             const cl = std.fmt.bufPrint(&tmp, "{d}", .{total_count}) catch return;
             try buf.appendSlice(a, cl);
             try buf.appendSlice(a, ":{");
@@ -578,6 +585,7 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
                 for (sp.entries.items) |entry| {
                     if (entry.value != .string) continue;
                     const name = entry.value.string.bytes();
+                    if (sleepSkips(ctx.vm, obj, name)) continue;
                     const vis: ClassDef.Visibility = if (class_def) |c| findPropertyVisibility(c, name) else .public;
                     try emitObjectPropertyKey(buf, a, obj.class_name, name, vis);
                     const v = obj.get(name);
@@ -597,6 +605,13 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
         },
         else => try buf.appendSlice(a, "N;"),
     }
+}
+
+fn sleepSkips(vm: *VM, obj: *PhpObject, name: []const u8) bool {
+    const decl = vm.propertyDeclaration(obj.class_name, name);
+    if (decl.type_str.len == 0) return false;
+    if (obj.isLazySlot(name, decl.defining_class)) return true;
+    return obj.rawForScope(name, decl.defining_class) == .undef;
 }
 
 fn native_unserialize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
