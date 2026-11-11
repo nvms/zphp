@@ -1697,6 +1697,7 @@ pub const map = std.StaticStringMap(Signature).initComptime(.{
     .{ "get_include_path", Signature{ .params = &[_]Param{}, .returns = "string|false" } },
     .{ "get_included_files", Signature{ .params = &[_]Param{}, .returns = "array" } },
     .{ "get_loaded_extensions", Signature{ .params = &[_]Param{ .{ .name = "zend_extensions", .default = .{ .bool = false }, .type = "bool" } }, .returns = "array" } },
+    .{ "get_mangled_object_vars", Signature{ .params = &[_]Param{ .{ .name = "object", .type = "object" } }, .returns = "array" } },
     .{ "get_object_vars", Signature{ .params = &[_]Param{ .{ .name = "object", .type = "object" } }, .returns = "array" } },
     .{ "get_parent_class", Signature{ .params = &[_]Param{ .{ .name = "object_or_class", .default = .unknown, .type = "object|string" } }, .returns = "string|false" } },
     .{ "get_required_files", Signature{ .params = &[_]Param{}, .returns = "array" } },

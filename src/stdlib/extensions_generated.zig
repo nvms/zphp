@@ -345,6 +345,7 @@ pub const functions = Map.initComptime(.{
     .{ "get_include_path", "standard" },
     .{ "get_included_files", "Core" },
     .{ "get_loaded_extensions", "Core" },
+    .{ "get_mangled_object_vars", "Core" },
     .{ "get_object_vars", "Core" },
     .{ "get_parent_class", "Core" },
     .{ "get_required_files", "Core" },

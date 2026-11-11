@@ -59,6 +59,7 @@ pub const entries = .{
     .{ "call_user_func_array", native_call_user_func_array },
     .{ "function_exists", native_function_exists },
     .{ "get_object_vars", native_get_object_vars },
+    .{ "get_mangled_object_vars", native_get_mangled_object_vars },
     .{ "get_class_methods", native_get_class_methods },
     .{ "get_class_vars", native_get_class_vars },
     .{ "get_parent_class", native_get_parent_class },
@@ -962,6 +963,31 @@ fn native_get_object_vars(ctx: *NativeContext, args: []const Value) RuntimeError
             try arr.setCopiedKey(ctx.allocator, prop.key.name, prop.value);
         }
     }
+    return NativeResult.borrowed(.{ .array = arr });
+}
+
+// the object's own property table with (array)'s mangled keys, whatever the
+// scope, and without what a class's get_properties_for adds (SplFixedArray's
+// elements, ArrayObject's storage)
+fn native_get_mangled_object_vars(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len != 1) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "get_mangled_object_vars() expects exactly 1 argument, {d} given", .{args.len});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.setPendingException("ArgumentCountError", msg);
+        return error.RuntimeError;
+    }
+    if (args[0] != .object) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "get_mangled_object_vars(): Argument #1 ($object) must be of type object, {s} given", .{phpTypeName(args[0])});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.setPendingException("TypeError", msg);
+        return error.RuntimeError;
+    }
+    const obj = args[0].object.storage();
+    var listing: object_properties.Listing = .{};
+    defer listing.deinit(ctx.allocator);
+    try object_properties.appendOwn(ctx.vm, obj, .array_cast, &listing, ctx.allocator);
+    const arr = try ctx.createArray();
+    for (listing.items.items) |p| try object_properties.setMangled(ctx.vm, arr, p.key.name, p.visibility, p.declaring, p.value);
     return NativeResult.borrowed(.{ .array = arr });
 }
 
