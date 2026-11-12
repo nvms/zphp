@@ -3196,7 +3196,12 @@ pub fn fdWrite(ctx: *NativeContext, obj: *PhpObject, io: StreamIo, data: []const
         return @intCast(data.len);
     }
     if (!io.socket and platform.isStderr(file)) ctx.vm.flushOutputToStdout();
-    _ = obj;
+    // windows handles have no append flag: its c runtime moves an append-mode
+    // descriptor to the end before every write, as O_APPEND does elsewhere
+    if (platform.is_windows and !io.socket) {
+        const mode = obj.get("__mode");
+        if (mode == .string and mode.string.bytes().len > 0 and mode.string.bytes()[0] == 'a') platform.seekFromEnd(file, 0) catch {};
+    }
     // a blocking stream takes all of it; a non-blocking one what fits now
     var written: usize = 0;
     while (written < data.len) {
