@@ -467,9 +467,32 @@ fn emitCompoundOp(self: *Compiler, tag: Token.Tag) Error!void {
     });
 }
 
+// zend_compile_pipe: the operand is evaluated first, as a value. a
+// first-class callable of a named function on the right becomes a direct
+// call of it with the operand; anything else is called with it
 pub fn compilePipeExpr(self: *Compiler, node: Ast.Node) Error!void {
-    try self.compileNode(node.data.rhs);
+    const callable = self.ast.nodes[node.data.rhs];
+    if (callable.tag == .closure_expr and self.ast.tokens[callable.main_token].tag == .kw_fn)
+        return self.fail(callable.main_token, "Arrow functions on the right hand side of |> must be parenthesized");
+    if (callable.tag == .callable_ref) {
+        const callee = self.ast.nodes[callable.data.lhs];
+        if (callee.tag == .identifier or callee.tag == .qualified_name) {
+            const name = if (callee.tag == .identifier)
+                self.resolveFunctionName(self.ast.tokenSlice(callee.main_token))
+            else
+                try self.resolveQualifiedNonClassName(try self.buildQualifiedString(self.ast.extraSlice(callee.data.lhs)), callee.data.rhs);
+            var guards: ArgGuards = .empty;
+            errdefer guards.deinit(self.allocator);
+            try self.compileNode(node.data.lhs);
+            try emitValueGuard(self, .{ .pos = 0, .guards = &guards }, .arg_value);
+            const idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });
+            return emitCallOp(self, &guards, .call, .{ .a = idx, .argc = 1 });
+        }
+    }
     try self.compileNode(node.data.lhs);
+    try self.compileNode(node.data.rhs);
+    // call_indirect takes the callable under its argument
+    try self.emitOp(.swap);
     try self.emitOp(.call_indirect);
     try self.emitByte(1);
 }
