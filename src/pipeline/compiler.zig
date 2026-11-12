@@ -2460,7 +2460,7 @@ pub const Compiler = struct {
         return .{ .float = value };
     }
 
-    fn parsePhpFloat(s: []const u8) f64 {
+    pub fn parsePhpFloat(s: []const u8) f64 {
         var buf: [64]u8 = undefined;
         var len: usize = 0;
         for (s) |c| {

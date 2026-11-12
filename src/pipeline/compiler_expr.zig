@@ -1358,6 +1358,61 @@ fn compileArgsFor(self: *Compiler, args: []const u32, callee: ?KnownCallee) Erro
 
 pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
     const callee = self.ast.nodes[node.data.lhs];
+    if (isAssertCall(self, callee)) return compileAssert(self, node);
+    return compileCallPlain(self, node);
+}
+
+// a call php compiles with zend_compile_assert: `assert` unqualified (which
+// may still find a namespaced assert() at run time) or `\assert`
+fn isAssertCall(self: *Compiler, callee: Ast.Node) bool {
+    if (callee.tag == .identifier) {
+        const raw = self.ast.tokenSlice(callee.main_token);
+        return std.ascii.eqlIgnoreCase(raw, "assert") and self.use_fn_aliases.get(raw) == null;
+    }
+    if (callee.tag != .qualified_name or callee.data.rhs != 1) return false;
+    const parts = self.ast.extraSlice(callee.data.lhs);
+    return parts.len == 1 and std.ascii.eqlIgnoreCase(self.ast.tokenSlice(parts[0]), "assert");
+}
+
+// zend_compile_assert: the call runs only while zend.assertions is 1
+// (assert_check skips it, leaving true), and a call with only the assertion
+// gets "assert(<the assertion as source>)" as its description
+fn compileAssert(self: *Compiler, node: Ast.Node) Error!void {
+    const callee = self.ast.nodes[node.data.lhs];
+    const args = self.ast.extraSlice(node.data.rhs);
+    const check = try self.emitJump(.assert_check);
+    const arg_tag = if (args.len == 1) self.ast.nodes[args[0]].tag else Ast.Node.Tag.splat_expr;
+    if (arg_tag == .splat_expr) {
+        try compileCallPlain(self, node);
+        self.patchJump(check);
+        return;
+    }
+    const message = try @import("ast_export.zig").assertMessage(self.allocator, self.ast, args[0]);
+    try self.string_allocs.append(self.allocator, message);
+    const call_offset = self.current_source_offset;
+    const name = if (callee.tag == .identifier) self.resolveFunctionName(self.ast.tokenSlice(callee.main_token)) else "assert";
+    const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });
+    const message_idx = try self.addConstant(.{ .string = Value.String.borrowed(message) });
+    if (arg_tag == .named_arg) {
+        // a named assertion gets a named description, as positional after
+        // named isn't allowed
+        var guards = try emitSpreadArgs(self, args);
+        try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed("description") }));
+        try self.emitConstant(message_idx);
+        try self.emitOp(.arg_array_set);
+        self.current_source_offset = call_offset;
+        try emitCallOp(self, &guards, .call_spread, .{ .a = name_idx });
+    } else {
+        var guards = try compileArgsFor(self, args, null);
+        try self.emitConstant(message_idx);
+        self.current_source_offset = call_offset;
+        try emitCallOp(self, &guards, .call, .{ .a = name_idx, .argc = 2 });
+    }
+    self.patchJump(check);
+}
+
+fn compileCallPlain(self: *Compiler, node: Ast.Node) Error!void {
+    const callee = self.ast.nodes[node.data.lhs];
     const args = self.ast.extraSlice(node.data.rhs);
 
     if (callee.tag == .identifier and std.mem.eql(u8, self.ast.tokenSlice(callee.main_token), "unset")) {

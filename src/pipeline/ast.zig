@@ -181,7 +181,7 @@ pub const Ast = struct {
             anonymous_class, // main_token = new, lhs = extra (members), rhs = extra {ctor_arg_count, ctor_args..., parent, impl_count, impls...}
             method_call, // main_token = method name, lhs = object, rhs = extra index -> {count, arg...}
             static_call, // main_token = method name, lhs = class name node, rhs = extra index -> {count, arg...}
-            dynamic_static_call, // main_token = 0, lhs = class name node, rhs = extra index -> {method_expr, count, arg...}
+            dynamic_static_call, // main_token = the `$` of A::${expr}() (0 for A::{expr}()), lhs = class name node, rhs = extra index -> {method_expr, count, arg...}
             static_prop_access, // main_token = $variable, lhs = class name node
 
             // compound

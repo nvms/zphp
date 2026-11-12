@@ -3408,7 +3408,7 @@ const Parser = struct {
         // property name comes from an inner expression. produces the same
         // node shape as Class::{expr} (main_token 0, rhs = name expression)
         if (self.peek() == .dollar) {
-            _ = self.advance(); // $
+            const dollar_tok = self.advance(); // $
             const name_expr = if (self.peek() == .l_brace) blk: {
                 _ = self.advance(); // {
                 const e = try self.parseExpression();
@@ -3430,7 +3430,7 @@ const Parser = struct {
                 }
                 _ = try self.expect(.r_paren);
                 const extra = try self.addExtraList(args.items);
-                return self.addNode(.{ .tag = .dynamic_static_call, .main_token = 0, .data = .{ .lhs = class_node, .rhs = extra } });
+                return self.addNode(.{ .tag = .dynamic_static_call, .main_token = dollar_tok, .data = .{ .lhs = class_node, .rhs = extra } });
             }
             return self.addNode(.{ .tag = .static_prop_access, .main_token = 0, .data = .{ .lhs = class_node, .rhs = name_expr } });
         }

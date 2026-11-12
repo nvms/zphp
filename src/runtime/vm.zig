@@ -5417,6 +5417,14 @@ pub const VM = struct {
                     if (!self.peek().isNull()) self.currentFrame().ip += offset;
                 },
 
+                .assert_check => {
+                    const offset = self.readU16();
+                    if (self.assertionsMode() != 1) {
+                        self.push(.{ .bool = true });
+                        self.currentFrame().ip += offset;
+                    }
+                },
+
                 .call => {
                     const cf_scope = try self.enterCallFamily(op);
                     defer self.leaveCallFamily(cf_scope);
@@ -18628,6 +18636,13 @@ pub const VM = struct {
     }
 
     // a directive's runtime value; the previous runtime value is freed
+    // zend.assertions: 1 runs assert() calls, 0 skips them, -1 is php's
+    // "compiled out", which zphp also does at run time
+    pub fn assertionsMode(self: *VM) i64 {
+        const text = self.ini_settings.get("zend.assertions") orelse return 1;
+        return @import("memory.zig").parseQuantity(text).value;
+    }
+
     pub fn setIni(self: *VM, name: []const u8, value: []const u8) ![]const u8 {
         const key = try self.internName(name);
         const gop = try self.ic.?.ini_values.getOrPut(self.allocator, key);

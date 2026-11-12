@@ -492,6 +492,9 @@ pub const OpCode = enum(u8) {
     // function, after ensure_array_var); a string there gets the offset
     // written and the variable the new string
     array_set_var,
+    // php's ZEND_ASSERT_CHECK, before an assert() call: u16 jump past the
+    // call, pushing true, unless zend.assertions is 1
+    assert_check,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -512,6 +515,7 @@ pub const OpCode = enum(u8) {
             .jump_if_false,
             .jump_if_true,
             .jump_if_not_null,
+            .assert_check,
             .push_handler,
             .get_prop,
             .get_prop_coalesce,

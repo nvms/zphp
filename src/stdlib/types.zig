@@ -1534,7 +1534,7 @@ fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "zend.enable_gc")) return "1";
     if (std.mem.eql(u8, name, "fiber.stack_size")) return "";
     if (std.mem.eql(u8, name, "assert.active")) return "1";
-    if (std.mem.eql(u8, name, "assert.exception")) return "0";
+    if (std.mem.eql(u8, name, "assert.exception")) return "1";
     if (std.mem.eql(u8, name, "assert.bail")) return "0";
     if (std.mem.eql(u8, name, "assert.warning")) return "1";
     if (std.mem.eql(u8, name, "assert.callback")) return "";
@@ -1589,6 +1589,27 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     if (std.mem.eql(u8, name, "auto_detect_line_endings") and iniBoolText(buf.items)) {
         try ctx.vm.raiseError(8192, "auto_detect_line_endings is deprecated");
     }
+    // php's OnUpdateAssertions: -1 (compiled out) can't be left or entered
+    // at run time
+    if (std.mem.eql(u8, name, "zend.assertions")) {
+        const quantity = @import("../runtime/memory.zig").parseQuantity;
+        const old = quantity(previous).value;
+        const requested = quantity(buf.items).value;
+        if (old != requested and (old < 0 or requested < 0)) {
+            try ctx.vm.emitWarning("zend.assertions may be completely enabled or disabled only in php.ini");
+            return NativeResult.scalar(Value{ .bool = false });
+        }
+    }
+    // assert.c's handlers deprecate turning the assert.* settings away from
+    // their defaults
+    for ([_]struct { []const u8, bool }{ .{ "assert.active", false }, .{ "assert.bail", true }, .{ "assert.warning", false }, .{ "assert.exception", false } }) |entry| {
+        if (std.mem.eql(u8, name, entry[0]) and iniBoolText(buf.items) == entry[1]) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "ini_set(): {s} INI setting is deprecated", .{name});
+            defer ctx.allocator.free(msg);
+            try ctx.vm.raiseError(8192, msg);
+        }
+    }
+    if (std.mem.eql(u8, name, "assert.callback") and buf.items.len > 0) try ctx.vm.raiseError(8192, "ini_set(): assert.callback INI setting is deprecated");
     // php's OnUpdateFiberStackSize
     if (std.mem.eql(u8, name, "fiber.stack_size") and @import("../runtime/memory.zig").parseQuantity(buf.items).value < 0) {
         try ctx.vm.emitWarning("fiber.stack_size must be a positive number");
@@ -1875,27 +1896,48 @@ fn native_restore_error_handler(ctx: *NativeContext, _: []const Value) RuntimeEr
     return NativeResult.scalar(.{ .bool = true });
 }
 
+fn assertIni(ctx: *NativeContext, name: []const u8) bool {
+    return iniBoolText(ctx.vm.ini_settings.get(name) orelse iniDefault(name) orelse "0");
+}
+
+// php's PHP_FUNCTION(assert) (ext/standard/assert.c). the compiler skips the
+// call while zend.assertions isn't 1; a dynamic call checks it here
 fn native_assert(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .bool = true });
-    const active = ctx.vm.ini_settings.get("assert.active") orelse "1";
-    if (std.mem.eql(u8, active, "0")) return NativeResult.scalar(.{ .bool = true });
-    if (args[0].isTruthy()) return NativeResult.scalar(.{ .bool = true });
-    // a Throwable as the 2nd arg is always thrown on failure, regardless of assert.exception
+    if (!assertIni(ctx, "assert.active") or ctx.vm.assertionsMode() <= 0) return NativeResult.scalar(.{ .bool = true });
+    if (args.len == 0 or args[0].isTruthy()) return NativeResult.scalar(.{ .bool = true });
+    const description: ?[]const u8 = if (args.len >= 2 and args[1] == .string) args[1].string.bytes() else null;
+    // a Throwable description is thrown as it is
     if (args.len >= 2 and args[1] == .object) {
+        VM.retainValue(args[1]);
         ctx.vm.raise(args[1]);
         return error.RuntimeError;
     }
-    if (ctx.vm.ini_callbacks.get("assert.callback")) |cb| {
-        const file = ctx.vm.file_path;
-        const line: i64 = 0;
-        const expr: []const u8 = "assert(false)";
-        var cb_args = [_]Value{ .{ .string = Value.String.borrowed(file) }, .{ .int = line }, .{ .string = Value.String.borrowed(expr) } };
-        _ = ctx.invokeCallable(cb, &cb_args) catch {};
+    const callback: ?Value = ctx.vm.ini_callbacks.get("assert.callback") orelse blk: {
+        const text = ctx.vm.ini_settings.get("assert.callback") orelse break :blk null;
+        if (text.len == 0) break :blk null;
+        break :blk Value{ .string = Value.String.borrowed(text) };
+    };
+    if (callback) |cb| {
+        const pos = ctx.vm.currentSourcePosition();
+        var cb_args = [_]Value{ .{ .string = Value.String.borrowed(pos.file) }, .{ .int = @intCast(pos.line) }, .null, .null };
+        if (description) |d| cb_args[3] = .{ .string = Value.String.borrowed(d) };
+        // an exception the callback throws stays pending
+        if (ctx.invokeCallable(cb, cb_args[0 .. if (description != null) @as(usize, 4) else 3])) |ret| {
+            ctx.vm.releaseValue(ret);
+        } else |err| if (err != error.RuntimeError) return err;
     }
-    const ae = ctx.vm.ini_settings.get("assert.exception") orelse "0";
-    if (std.mem.eql(u8, ae, "1")) {
-        const msg: []const u8 = if (args.len >= 2 and args[1] == .string) args[1].string.bytes() else "assert(false)";
-        try ctx.vm.setPendingException("AssertionError", msg);
+    const bail = assertIni(ctx, "assert.bail");
+    if (assertIni(ctx, "assert.exception")) {
+        if (ctx.vm.pending_exception == null) try ctx.vm.setPendingException("AssertionError", description orelse "");
+        return error.RuntimeError;
+    } else if (assertIni(ctx, "assert.warning")) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "assert(): {s} failed", .{description orelse "Assertion"});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.emitWarning(msg);
+    }
+    if (ctx.vm.pending_exception != null) return error.RuntimeError;
+    if (bail) {
+        ctx.vm.exit_requested = true;
         return error.RuntimeError;
     }
     return NativeResult.scalar(.{ .bool = false });
