@@ -41,6 +41,7 @@ pub fn compileString(self: *Compiler, node: Ast.Node) (Allocator.Error || error{
 
     if (quote == '`') {
         // `cmd` is shell_exec("cmd"), resolved globally like php does
+        try self.warn(node.main_token, 8192, "The backtick (`) operator is deprecated, use shell_exec() instead", .{});
         if (std.mem.indexOf(u8, inner, "$") != null) {
             try compileInterpolatedString(self, inner, quote);
         } else {

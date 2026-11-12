@@ -247,6 +247,21 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
     const slot_names = try c.buildSlotNames();
     const strict = strictTypesDeclared(ast, c.root_stmts);
     for (c.functions.items) |*f| f.strict_types = strict;
+    // php's scanner deprecates the long cast spellings wherever they are
+    // (a cast the parser read twice has two nodes)
+    var cast_tokens: std.AutoHashMapUnmanaged(u32, void) = .{};
+    defer cast_tokens.deinit(allocator);
+    for (ast.nodes) |n| {
+        if (n.tag != .cast_expr) continue;
+        if ((try cast_tokens.getOrPut(allocator, n.main_token)).found_existing) continue;
+        const name = ast.tokenSlice(n.main_token);
+        const canonical: ?[]const u8 = if (std.ascii.eqlIgnoreCase(name, "integer")) "int" else if (std.ascii.eqlIgnoreCase(name, "double")) "float" else if (std.ascii.eqlIgnoreCase(name, "binary")) "string" else if (std.ascii.eqlIgnoreCase(name, "boolean")) "bool" else null;
+        if (canonical) |c_name| {
+            var lower: [8]u8 = undefined;
+            try c.warn(n.main_token, 8192, "Non-canonical cast ({s}) is deprecated, use the ({s}) cast instead", .{ std.ascii.lowerString(&lower, name), c_name });
+        }
+    }
+
     // php compiles a file top to bottom; zphp compiles early-bound classes
     // first, so its warnings are put back in source order
     std.sort.insertion(CompileWarning, c.warnings.items, {}, struct {
