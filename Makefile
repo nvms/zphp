@@ -60,6 +60,11 @@ php-deprecations: ## Regenerate the internal functions, methods and constants ph
 html-tables: ## Regenerate the html entity and charset tables from php's ext/standard/html_tables.h (run when src/php_version.zig moves)
 	python3 scripts/gen-html-tables
 
+.PHONY: hash-tables
+hash-tables: ## Regenerate the hash algorithms' constant tables from php's ext/hash (run when src/php_version.zig moves)
+	python3 scripts/gen-hash-tables
+	zig fmt src/stdlib/hash_tables_generated.zig
+
 .PHONY: php-grammar
 php-grammar: ## Regenerate php's parser tables, used to word syntax errors as php does (run when src/php_version.zig moves)
 	python3 scripts/gen-php-grammar

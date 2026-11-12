@@ -130,10 +130,12 @@ pub const ScalarParams = struct {
 
 // parameters whose argument parsing differs from the type php's stub
 // declares, which the native parses itself: number_format's $num is
-// Z_PARAM_NUMBER, fputcsv's $eol Z_PARAM_STR_OR_NULL
+// Z_PARAM_NUMBER, fputcsv's $eol Z_PARAM_STR_OR_NULL, hash_equals's two
+// strings are zvals it refuses unless they are strings
 const parsed_otherwise = std.StaticStringMap(u32).initComptime(.{
     .{ "number_format", 1 << 0 },
     .{ "fputcsv", 1 << 5 },
+    .{ "hash_equals", 0b11 },
 });
 
 pub fn scalarParams(name: []const u8) ScalarParams {

@@ -2184,10 +2184,7 @@ pub const VM = struct {
         try @import("../stdlib/ldap.zig").register(vm, allocator);
         try @import("../stdlib/tokenizer.zig").register(vm, allocator);
 
-        // HashContext is the type returned by hash_init - register so
-        // class_exists('HashContext') and instanceof checks see it
-        const hash_ctx_def = ClassDef{ .name = "HashContext" };
-        try vm.classes.put(allocator, "HashContext", hash_ctx_def);
+        try @import("../stdlib/hash.zig").register(vm, allocator);
 
         // tidy and tidyNode - stub classes for the deprecated tidy ext. zphp
         // doesn't link libtidy but class_exists checks still need to pass
@@ -3052,6 +3049,7 @@ pub const VM = struct {
         @import("../stdlib/xmlwriter.zig").cleanupResources(self.objects);
         @import("../stdlib/intl.zig").cleanupResources(self.objects);
         @import("../stdlib/gmp.zig").cleanupResources(self.objects);
+        @import("../stdlib/hash.zig").cleanupResources(self.objects);
         @import("../stdlib/workers.zig").cleanupResources(self.objects);
         @import("../stdlib/channel.zig").cleanupResources(self.objects);
         @import("../stdlib/buffer.zig").cleanupResources(self.objects);
@@ -8610,6 +8608,11 @@ pub const VM = struct {
                             try copy.putProperty(self.allocator, entry.key_ptr.*, try self.copyObjectCloneValue(entry.value_ptr.*));
                         }
                         if (native_clone) |hook| if (!hook(self, src, copy)) {
+                            // a hook may refuse with its class's own error
+                            if (self.pending_exception != null) {
+                                if (self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            }
                             if (try self.throwUncloneable(src.class_name)) continue;
                             return error.RuntimeError;
                         };
@@ -14325,6 +14328,12 @@ pub const VM = struct {
     pub fn warnDeprecatedConstant(self: *VM, name: []const u8) RuntimeError!void {
         if (deprecations.constants.get(name)) |suffix| {
             const msg = try std.fmt.allocPrint(self.allocator, "Constant {s} is deprecated{s}", .{ name, suffix });
+            defer self.allocator.free(msg);
+            return self.raiseError(E_DEPRECATED, msg);
+        }
+        // ext/hash registers these at startup, outside its stub
+        if (name.len > 6 and name[0] == 'M' and @import("../stdlib/hash.zig").isMhashConstant(name)) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Constant {s} is deprecated since 8.5, as the mhash*() functions were deprecated", .{name});
             defer self.allocator.free(msg);
             return self.raiseError(E_DEPRECATED, msg);
         }

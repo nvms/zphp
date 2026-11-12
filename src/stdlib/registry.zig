@@ -36,6 +36,7 @@ pub fn register(map: *@import("../runtime/vm.zig").NativeTable, allocator: std.m
         @import("testing.zig").entries,
         @import("session.zig").entries,
         @import("crypto.zig").entries,
+        @import("hash.zig").entries,
         @import("serialize.zig").entries,
         @import("pack.zig").entries,
         @import("ini.zig").entries,
@@ -90,6 +91,8 @@ test {
     _ = @import("testing.zig");
     _ = @import("session.zig");
     _ = @import("crypto.zig");
+    _ = @import("hash.zig");
+    _ = @import("hash_algos.zig");
     _ = @import("serialize.zig");
     _ = @import("pack.zig");
     _ = @import("ini.zig");
