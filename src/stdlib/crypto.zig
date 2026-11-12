@@ -129,7 +129,23 @@ fn native_password_hash(ctx: *NativeContext, args: []const Value) RuntimeError!N
     // argon2 family is routed to sodium_crypto_pwhash_str which produces the
     // PHP-compatible $argon2id$... encoding. without this, PASSWORD_ARGON2*
     // silently fell back to bcrypt
-    const algo: []const u8 = if (args.len >= 2 and args[1] == .string) args[1].string.bytes() else "2y";
+    // php_password_algo_find_zval: null and 0 are the default, 1-3 the
+    // legacy numbers of bcrypt, argon2i and argon2id
+    const algo: []const u8 = switch (if (args.len >= 2) args[1] else Value.null) {
+        .null, .undef => "2y",
+        .int => |n| switch (n) {
+            0, 1 => "2y",
+            2 => "argon2i",
+            3 => "argon2id",
+            else => "",
+        },
+        .string => |s| s.bytes(),
+        else => "",
+    };
+    if (!std.mem.eql(u8, algo, "2y") and !std.mem.eql(u8, algo, "argon2i") and !std.mem.eql(u8, algo, "argon2id")) {
+        try ctx.vm.setPendingException("ValueError", "password_hash(): Argument #2 ($algo) must be a valid password hashing algorithm");
+        return error.RuntimeError;
+    }
     if (std.mem.eql(u8, algo, "argon2i") or std.mem.eql(u8, algo, "argon2id")) {
         // default-ish "interactive" cost; PHP's default is memory_cost=65536, time_cost=4
         var ops: i64 = 4;
