@@ -391,7 +391,7 @@ pub const Lexer = struct {
         // the fractional part and exponent are optional
         if (self.pos < self.source.len and self.source[self.pos] == '.') {
             self.pos += 1;
-            self.skipDecimalDigits();
+            _ = self.skipDigitRun(isDigit, false);
             _ = self.skipExponent();
             return self.makeToken(.float, start);
         }
@@ -401,34 +401,46 @@ pub const Lexer = struct {
         return self.makeToken(.integer, start);
     }
 
-    fn skipDecimalDigits(self: *Lexer) void {
-        while (self.pos < self.source.len and (isDigit(self.source[self.pos]) or self.source[self.pos] == '_')) {
-            self.pos += 1;
+    // a run of digits, where a single `_` may separate two of them (php's
+    // LNUM, HNUM, BNUM, ONUM): `1__2`, `1_` and `0x_1` stop before the `_`.
+    // `started`: a digit of the run was already read. true when the run has
+    // a digit
+    fn skipDigitRun(self: *Lexer, comptime isRunDigit: fn (u8) bool, started: bool) bool {
+        var any = started;
+        while (self.pos < self.source.len) {
+            const c = self.source[self.pos];
+            if (isRunDigit(c)) {
+                self.pos += 1;
+                any = true;
+            } else if (c == '_' and any and self.pos + 1 < self.source.len and isRunDigit(self.source[self.pos + 1])) {
+                self.pos += 2;
+            } else break;
         }
+        return any;
+    }
+
+    fn isBinaryDigit(c: u8) bool {
+        return c == '0' or c == '1';
+    }
+
+    fn isOctalDigit(c: u8) bool {
+        return c >= '0' and c <= '7';
+    }
+
+    fn skipDecimalDigits(self: *Lexer) void {
+        _ = self.skipDigitRun(isDigit, self.pos > 0 and isDigit(self.source[self.pos - 1]));
     }
 
     fn skipHexDigits(self: *Lexer) bool {
-        const s = self.pos;
-        while (self.pos < self.source.len and (isHexDigit(self.source[self.pos]) or self.source[self.pos] == '_')) {
-            self.pos += 1;
-        }
-        return self.pos > s;
+        return self.skipDigitRun(isHexDigit, false);
     }
 
     fn skipBinaryDigits(self: *Lexer) bool {
-        const s = self.pos;
-        while (self.pos < self.source.len and (self.source[self.pos] == '0' or self.source[self.pos] == '1' or self.source[self.pos] == '_')) {
-            self.pos += 1;
-        }
-        return self.pos > s;
+        return self.skipDigitRun(isBinaryDigit, false);
     }
 
     fn skipOctalDigits(self: *Lexer) bool {
-        const s = self.pos;
-        while (self.pos < self.source.len and ((self.source[self.pos] >= '0' and self.source[self.pos] <= '7') or self.source[self.pos] == '_')) {
-            self.pos += 1;
-        }
-        return self.pos > s;
+        return self.skipDigitRun(isOctalDigit, false);
     }
 
     fn skipExponent(self: *Lexer) bool {
@@ -442,7 +454,7 @@ pub const Lexer = struct {
             self.pos += 1;
         }
         const digit_start = self.pos;
-        self.skipDecimalDigits();
+        _ = self.skipDigitRun(isDigit, false);
         if (self.pos == digit_start) {
             self.pos = save;
             return false;
