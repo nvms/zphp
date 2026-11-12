@@ -251,7 +251,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ArrayIterator::__unset", aoMagicUnset);
 
     // WeakMap (simplified - uses spl_object_id as key, no weak reference semantics)
-    var wm_def = ClassDef{ .name = "WeakMap" };
+    var wm_def = ClassDef{ .name = "WeakMap", .native_properties = weakMapProperties };
     try wm_def.interfaces.append(a, "ArrayAccess");
     try wm_def.interfaces.append(a, "Countable");
     try wm_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
@@ -370,13 +370,32 @@ fn weakRefProperties(ctx: *NativeContext, obj: *PhpObject, purpose: object_prope
 }
 
 fn weakRefConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    try ctx.vm.setPendingException("Error", "Cannot directly construct WeakReference, use WeakReference::create() instead");
+    try ctx.vm.setPendingException("Error", "Direct instantiation of WeakReference is not allowed, use WeakReference::create instead");
     return error.RuntimeError;
 }
 
 // =========================================================
 // WeakMap
 // =========================================================
+
+// zend_weakmap_get_properties_for: the debug view lists each entry as
+// ["key" => object, "value" => value], in the order they were added
+fn weakMapProperties(ctx: *NativeContext, obj: *PhpObject, purpose: object_properties.Purpose) RuntimeError!?*PhpArray {
+    if (purpose != .debug) return null;
+    const table = try ctx.vm.allocArray();
+    const keys_v = obj.get("__keys");
+    const data = getData(obj) orelse return table;
+    if (keys_v != .array) return table;
+    for (keys_v.array.entries.items) |entry| {
+        const id = wmObjKey(entry.value) orelse continue;
+        if (!data.contains(.{ .int = id })) continue;
+        const pair = try ctx.vm.allocArray();
+        try pair.set(ctx.allocator, .{ .string = Value.String.borrowed("key") }, entry.value);
+        try pair.set(ctx.allocator, .{ .string = Value.String.borrowed("value") }, data.get(.{ .int = id }));
+        try table.append(ctx.allocator, .{ .array = pair });
+    }
+    return table;
+}
 
 fn weakMapGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
@@ -1446,32 +1465,51 @@ fn wmConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult 
     return NativeResult.scalar(.null);
 }
 
+// zend_weakmap's dimension handlers refuse anything but an object key, and a
+// missing one (`$map[]`) is an append, which a WeakMap can't do
+fn wmKeyOf(ctx: *NativeContext, args: []const Value) RuntimeError!i64 {
+    const offset: Value = if (args.len > 0) args[0] else .null;
+    if (offset == .null) {
+        try ctx.vm.setPendingException("Error", "Cannot append to WeakMap");
+        return error.RuntimeError;
+    }
+    return wmObjKey(offset) orelse {
+        try ctx.vm.setPendingException("TypeError", "WeakMap key must be an object");
+        return error.RuntimeError;
+    };
+}
+
 fn wmOffsetExists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    if (args.len == 0 or args[0] != .object) {
+        try ctx.vm.setPendingException("TypeError", "WeakMap key must be an object");
+        return error.RuntimeError;
+    }
+    const key = try wmKeyOf(ctx, args);
     const arr = getData(obj) orelse return NativeResult.scalar(.{ .bool = false });
-    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
-    const key = wmObjKey(args[0]) orelse return NativeResult.scalar(.{ .bool = false });
     const k = PhpArray.Key{ .int = key };
     return NativeResult.scalar(.{ .bool = arr.get(k) != .null });
 }
 
 fn wmOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const arr = getData(obj) orelse return NativeResult.scalar(.null);
-    if (args.len == 0) return NativeResult.scalar(.null);
-    const key = wmObjKey(args[0]) orelse return NativeResult.scalar(.null);
-    return NativeResult.share(arr.get(.{ .int = key }));
+    const key = try wmKeyOf(ctx, args);
+    const arr = getData(obj);
+    if (arr == null or !arr.?.contains(.{ .int = key })) {
+        const o = args[0].object;
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Object {s}#{d} not contained in WeakMap", .{ o.class_name, o.id });
+        defer ctx.allocator.free(msg);
+        try ctx.vm.setPendingException("Error", msg);
+        return error.RuntimeError;
+    }
+    return NativeResult.share(arr.?.get(.{ .int = key }));
 }
 
 fn wmOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = try ensureData(ctx, obj);
     if (args.len < 2) return NativeResult.scalar(.null);
-    if (args[0] != .object) {
-        try ctx.vm.setPendingException("TypeError", "WeakMap key must be an object");
-        return error.RuntimeError;
-    }
-    const key = wmObjKey(args[0]) orelse return NativeResult.scalar(.null);
+    const key = try wmKeyOf(ctx, args);
     const is_new = arr.get(.{ .int = key }) == .null;
     try ctx.vm.arraySetOwned(arr, .{ .int = key }, args[1]);
     if (is_new and args[0] == .object) {
@@ -1487,8 +1525,11 @@ fn wmOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
 fn wmOffsetUnset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = getData(obj) orelse return NativeResult.scalar(.null);
-    if (args.len == 0) return NativeResult.scalar(.null);
-    const key = wmObjKey(args[0]) orelse return NativeResult.scalar(.null);
+    if (args.len == 0 or args[0] != .object) {
+        try ctx.vm.setPendingException("TypeError", "WeakMap key must be an object");
+        return error.RuntimeError;
+    }
+    const key = wmObjKey(args[0]).?;
     ctx.vm.arrayRemoveOwned(arr, .{ .int = key });
     if (args[0] == .object) {
         const keys_v = obj.get("__keys");
