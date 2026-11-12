@@ -78,6 +78,11 @@ fn sjisTrail(c: u8) bool {
     return c >= 0x40 and c != 0x7F and c < 0xFD;
 }
 
+// php_next_utf8_char
+pub fn nextUtf8Char(s: []const u8, cursor: *usize) ?u32 {
+    return nextChar(.utf_8, s, cursor);
+}
+
 // the next character of s at cursor (get_next_char). an ill-formed sequence
 // returns null with the cursor moved past the bytes php counts as its part
 fn nextChar(charset: Charset, s: []const u8, cursor: *usize) ?u32 {
