@@ -83,6 +83,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try attr_def.constants.put(a, "TARGET_ALL", .{ .int = 127 });
     try attr_def.constants.put(a, "IS_REPEATABLE", .{ .int = 128 });
     attr_def.is_final = true;
+    try attr_def.properties.append(a, .{ .name = "flags", .default = .undef, .type_str = "int" });
     try attr_def.attributes.append(a, .{ .name = "Attribute", .args = try attributeTargets(a, 1) });
     try vm.classes.put(a, "Attribute", attr_def);
     try vm.native_fns.put(a, "Attribute::__construct", attributeConstruct);
