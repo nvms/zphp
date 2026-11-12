@@ -23051,6 +23051,52 @@ pub const VM = struct {
         return copy;
     }
 
+    // a native that renumbers or moves an array's elements in place drops the
+    // bindings of its referenced elements first (they name elements by key)
+    // and registers them again under the new keys afterwards
+    pub fn detachArrayRefs(self: *VM, arr: *PhpArray) void {
+        if (!self.array_ref_active) return;
+        for (arr.entries.items) |entry| if (entry.ref != null) self.unbindArrayElemRef(arr, entry.key);
+    }
+
+    pub fn attachArrayRefs(self: *VM, arr: *PhpArray) RuntimeError!void {
+        try self.registerCloneRefs(arr);
+    }
+
+    // adds src's element to dst under key (the next index when null) the way
+    // php's array functions copy one: a reference another name still holds
+    // stays a reference (`Z_ISREF_P(entry) && Z_REFCOUNT_P(entry) == 1` is
+    // unwrapped), anything else is copied by value
+    pub fn arrayAddCarried(self: *VM, dst: *PhpArray, key: ?PhpArray.Key, entry: PhpArray.Entry, src: *PhpArray) RuntimeError!void {
+        return self.arrayAddEntry(dst, key, entry, carriedRef(entry.ref, src));
+    }
+
+    // adds the element to dst keeping `keep` (its reference, or null) as
+    // the new element's reference
+    pub fn arrayAddEntry(self: *VM, dst: *PhpArray, key: ?PhpArray.Key, entry: PhpArray.Entry, keep: ?*Value) RuntimeError!void {
+        const value = if (entry.ref) |cell| cell.* else entry.value;
+        if (key) |k| {
+            dst.set(self.allocator, k, value) catch return error.RuntimeError;
+        } else {
+            const before = dst.entries.items.len;
+            dst.append(self.allocator, value) catch return error.RuntimeError;
+            // append refuses past the largest index
+            if (dst.entries.items.len == before) return;
+        }
+        const carried = keep;
+        const ep = if (key) |k| dst.getPtr(k) orelse return else &dst.entries.items[dst.entries.items.len - 1];
+        // an element this replaced may have been a reference
+        if (ep.ref != carried) {
+            if (ep.ref != null) self.unbindArrayElemRef(dst, ep.key);
+            self.setEntryRef(ep, carried);
+        }
+        const cell = carried orelse return;
+        if (self.array_ref_active) {
+            self.array_ref_bindings.append(self.allocator, .{ .cell = cell, .array = dst, .key = ep.key }) catch return error.RuntimeError;
+            self.regRefArray(self.persistentRefOwner() catch return error.RuntimeError, cell, dst, ep.key) catch return error.RuntimeError;
+        }
+    }
+
     // src's entries where keep is set, in order, carrying references as
     // zend_array_dup does. inherit_next keeps src's next free index and
     // internal pointer, as php's dup-then-delete results do; otherwise the

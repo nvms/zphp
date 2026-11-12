@@ -168,10 +168,8 @@ fn array_values(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         return error.RuntimeError;
     }
     const src = args[0].array;
-    var arr = try ctx.createArray();
-    for (src.entries.items) |entry| {
-        try arr.append(ctx.allocator, entry.value);
-    }
+    const arr = try ctx.createArray();
+    for (src.entries.items) |entry| try ctx.vm.arrayAddCarried(arr, null, entry, src);
     return NativeResult.borrowed(.{ .array = arr });
 }
 
@@ -211,15 +209,13 @@ fn array_reverse(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     if (args.len == 0 or args[0] != .array) return NativeResult.scalar(.null);
     const src = args[0].array;
     const preserve = args.len >= 2 and args[1].isTruthy();
-    var arr = try ctx.createArray();
+    const arr = try ctx.createArray();
     var i: usize = src.entries.items.len;
     while (i > 0) {
         i -= 1;
         const entry = src.entries.items[i];
-        switch (entry.key) {
-            .int => if (preserve) try arr.set(ctx.allocator, entry.key, entry.value) else try arr.append(ctx.allocator, entry.value),
-            .string => try arr.set(ctx.allocator, entry.key, entry.value),
-        }
+        const key: ?PhpArray.Key = if (entry.key == .int and !preserve) null else entry.key;
+        try ctx.vm.arrayAddCarried(arr, key, entry, src);
     }
     return NativeResult.borrowed(.{ .array = arr });
 }
@@ -229,10 +225,8 @@ fn array_merge(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     for (args) |arg| {
         if (arg != .array) continue;
         for (arg.array.entries.items) |entry| {
-            switch (entry.key) {
-                .int => try arr.append(ctx.allocator, entry.value),
-                .string => |s| try ctx.vm.arraySetOwned(arr, .{ .string = s }, entry.value),
-            }
+            const key: ?PhpArray.Key = if (entry.key == .int) null else entry.key;
+            try ctx.vm.arrayAddCarried(arr, key, entry, arg.array);
         }
     }
     return NativeResult.borrowed(.{ .array = arr });
@@ -256,16 +250,10 @@ fn array_slice(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     const length: usize = @intCast(@max(0, @min(slen - offset, raw_length)));
     const end = @min(src.entries.items.len, uoffset + length);
 
-    var arr = try ctx.createArray();
+    const arr = try ctx.createArray();
     for (src.entries.items[uoffset..end]) |entry| {
-        switch (entry.key) {
-            .string => try arr.set(ctx.allocator, entry.key, entry.value),
-            .int => if (preserve_keys) {
-                try arr.set(ctx.allocator, entry.key, entry.value);
-            } else {
-                try arr.append(ctx.allocator, entry.value);
-            },
-        }
+        const key: ?PhpArray.Key = if (entry.key == .int and !preserve_keys) null else entry.key;
+        try ctx.vm.arrayAddCarried(arr, key, entry, src);
     }
     return NativeResult.borrowed(.{ .array = arr });
 }
@@ -275,15 +263,58 @@ fn array_unique(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     const src = args[0].array;
     // default in PHP is SORT_STRING (2)
     const raw_flag: i64 = if (args.len >= 2) Value.toInt(args[1]) else 2;
+
+    // nothing to compare: the array as it is
+    if (src.entries.items.len <= 1) {
+        const arr = try ctx.createArray();
+        for (src.entries.items) |entry| try ctx.vm.arrayAddCarried(arr, entry.key, entry, src);
+        return NativeResult.borrowed(.{ .array = arr });
+    }
+
+    // SORT_STRING: the first element of each string value, in order
+    if (raw_flag == 2) {
+        var seen = std.StringHashMapUnmanaged(void).empty;
+        var held = std.ArrayListUnmanaged(Value.String).empty;
+        defer {
+            seen.deinit(ctx.allocator);
+            for (held.items) |s| s.release();
+            held.deinit(ctx.allocator);
+        }
+        const arr = try ctx.createArray();
+        for (src.entries.items) |entry| {
+            const v = if (entry.ref) |cell| cell.* else entry.value;
+            const text: []const u8 = switch (v) {
+                .string => |s| s.bytes(),
+                .array => blk: {
+                    try ctx.vm.emitWarning("Array to string conversion");
+                    break :blk "Array";
+                },
+                else => blk: {
+                    const s = try valueAsStringForCompare(ctx, v);
+                    try held.append(ctx.allocator, s);
+                    break :blk s.bytes();
+                },
+            };
+            const gop = try seen.getOrPut(ctx.allocator, text);
+            if (gop.found_existing) continue;
+            try ctx.vm.arrayAddCarried(arr, entry.key, entry, src);
+        }
+        return NativeResult.borrowed(.{ .array = arr });
+    }
+
+    // the other flags compare pairs; php sorts and drops the later of equal
+    // neighbours, which keeps each value's first element
     const case_insensitive = (raw_flag & 8) != 0; // SORT_FLAG_CASE
     const flag = raw_flag & ~@as(i64, 8);
-    var arr = try ctx.createArray();
-    for (src.entries.items) |entry| {
-        var found = false;
-        for (arr.entries.items) |existing| {
+    const keep = try ctx.allocator.alloc(bool, src.entries.items.len);
+    defer ctx.allocator.free(keep);
+    for (src.entries.items, 0..) |entry, i| {
+        keep[i] = true;
+        for (src.entries.items[0..i], keep[0..i]) |existing, kept| {
+            if (!kept) continue;
             const eq = switch (flag) {
                 1 => Value.toFloat(entry.value) == Value.toFloat(existing.value), // SORT_NUMERIC
-                2, 5, 6 => blk: { // SORT_STRING, SORT_LOCALE_STRING, SORT_NATURAL
+                2, 5, 6 => blk: { // SORT_STRING with SORT_FLAG_CASE, SORT_LOCALE_STRING, SORT_NATURAL
                     const a_str = try valueAsStringForCompare(ctx, entry.value);
                     defer a_str.release();
                     const b_str = try valueAsStringForCompare(ctx, existing.value);
@@ -293,13 +324,12 @@ fn array_unique(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
                 else => Value.equal(entry.value, existing.value), // SORT_REGULAR
             };
             if (eq) {
-                found = true;
+                keep[i] = false;
                 break;
             }
         }
-        if (!found) try arr.set(ctx.allocator, entry.key, entry.value);
     }
-    return NativeResult.borrowed(.{ .array = arr });
+    return NativeResult.borrowed(.{ .array = try ctx.vm.copyKeptEntries(src, keep, true) });
 }
 
 fn valueAsString(v: Value, buf: *[64]u8) []const u8 {
@@ -381,7 +411,9 @@ fn array_map(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
             var tuple = try ctx.createArray();
             for (args[1..]) |a| {
                 if (a == .array and i < a.array.entries.items.len) {
-                    try tuple.append(ctx.allocator, a.array.entries.items[i].value);
+                    // ZVAL_COPY: a reference stays one
+                    const entry = a.array.entries.items[i];
+                    try ctx.vm.arrayAddEntry(tuple, null, entry, entry.ref);
                 } else {
                     try tuple.append(ctx.allocator, .null);
                 }
@@ -396,10 +428,8 @@ fn array_map(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
 
     // null callback with single array returns a copy preserving keys
     if (callback == .null) {
-        var result = try ctx.createArray();
-        for (src.entries.items) |entry| {
-            try result.set(ctx.allocator, entry.key, entry.value);
-        }
+        const result = try ctx.createArray();
+        for (src.entries.items) |entry| try ctx.vm.arrayAddCarried(result, entry.key, entry, src);
         return NativeResult.borrowed(.{ .array = result });
     }
 
@@ -437,10 +467,10 @@ fn array_filter(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     const src = args[0].array;
     const flag: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
 
-    var result = try ctx.createArray();
+    const result = try ctx.createArray();
     if (args.len < 2) {
         for (src.entries.items) |entry| {
-            if (entry.value.isTruthy()) try result.set(ctx.allocator, entry.key, entry.value);
+            if (entry.value.isTruthy()) try ctx.vm.arrayAddCarried(result, entry.key, entry, src);
         }
     } else {
         for (src.entries.items) |entry| {
@@ -456,7 +486,7 @@ fn array_filter(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
                 try ctx.invokeCallable(args[1], &.{key_val})
             else
                 try ctx.invokeCallable(args[1], &.{entry.value});
-            if (keep.isTruthy()) try result.set(ctx.allocator, entry.key, entry.value);
+            if (keep.isTruthy()) try ctx.vm.arrayAddCarried(result, entry.key, entry, src);
         }
     }
     return NativeResult.borrowed(.{ .array = result });
@@ -528,21 +558,19 @@ fn array_splice(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         ctx.allocator.free(replacement_values);
     }
     try arr.entries.ensureUnusedCapacity(ctx.allocator, replacement_values.len);
+    // php_splice moves elements as they are: a reference stays one in the
+    // removed array and an inserted reference is inserted as one
+    ctx.vm.detachArrayRefs(arr);
     const removed = try ctx.createArray();
-    var removed_int_idx: i64 = 0;
     for (arr.entries.items[uoffset..][0..length]) |entry| {
-        switch (entry.key) {
-            .string => try removed.set(ctx.allocator, entry.key, entry.value),
-            .int => {
-                try removed.set(ctx.allocator, .{ .int = removed_int_idx }, entry.value);
-                removed_int_idx += 1;
-            },
-        }
+        try ctx.vm.arrayAddEntry(removed, if (entry.key == .string) entry.key else null, entry, entry.ref);
     }
     for (0..length) |_| ctx.vm.arrayRemoveOwned(arr, arr.entries.items[uoffset].key);
+    const replacement_refs: []const PhpArray.Entry = if (args.len >= 4 and args[3] == .array) args[3].array.entries.items else &.{};
     for (replacement_values, 0..) |value, i| {
         VM.retainValue(value);
         arr.entries.insertAssumeCapacity(uoffset + i, .{ .key = .{ .int = 0 }, .value = value });
+        if (i < replacement_refs.len) if (replacement_refs[i].ref) |cell| ctx.vm.setEntryRef(&arr.entries.items[uoffset + i], cell);
     }
 
     // re-index numeric keys
@@ -556,6 +584,7 @@ fn array_splice(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     arr.next_int_key = next_int;
     arr.has_int_keys = next_int > 0;
     arr.rebuildStringIndexAssumeCapacity();
+    try ctx.vm.attachArrayRefs(arr);
 
     return NativeResult.borrowed(.{ .array = removed });
 }
@@ -612,15 +641,9 @@ fn array_chunk(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     var result = try ctx.createArray();
     var i: usize = 0;
     while (i < src.entries.items.len) {
-        var chunk = try ctx.createArray();
+        const chunk = try ctx.createArray();
         const end = @min(i + size, src.entries.items.len);
-        for (src.entries.items[i..end]) |entry| {
-            if (preserve_keys) {
-                try chunk.set(ctx.allocator, entry.key, entry.value);
-            } else {
-                try chunk.append(ctx.allocator, entry.value);
-            }
-        }
+        for (src.entries.items[i..end]) |entry| try ctx.vm.arrayAddCarried(chunk, if (preserve_keys) entry.key else null, entry, src);
         try result.append(ctx.allocator, .{ .array = chunk });
         i = end;
     }
@@ -978,12 +1001,12 @@ fn array_replace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     if (args[0] != .array) return NativeResult.scalar(.null);
     const result = try ctx.createArray();
     for (args[0].array.entries.items) |entry| {
-        try ctx.vm.arraySetOwned(result, entry.key, entry.value);
+        try ctx.vm.arrayAddCarried(result, entry.key, entry, args[0].array);
     }
     for (args[1..]) |arg| {
         if (arg != .array) continue;
         for (arg.array.entries.items) |entry| {
-            try ctx.vm.arraySetOwned(result, entry.key, entry.value);
+            try ctx.vm.arrayAddCarried(result, entry.key, entry, args[0].array);
         }
     }
     return NativeResult.borrowed(.{ .array = result });
@@ -1177,12 +1200,14 @@ fn mergeRecursiveInto(ctx: *NativeContext, dest: *PhpArray, src: *PhpArray) Runt
     for (src.entries.items) |entry| {
         const value = if (entry.ref) |ref| ref.* else entry.value;
         switch (entry.key) {
-            .int => if (!try dest.appendNew(ctx.allocator, value)) {
-                _ = try nextElementOccupied(ctx);
+            .int => {
+                const before = dest.entries.items.len;
+                try ctx.vm.arrayAddCarried(dest, null, entry, src);
+                if (dest.entries.items.len == before) _ = try nextElementOccupied(ctx);
             },
             .string => {
                 if (!dest.contains(entry.key)) {
-                    try ctx.vm.arraySetOwned(dest, entry.key, value);
+                    try ctx.vm.arrayAddCarried(dest, entry.key, entry, src);
                     continue;
                 }
                 const existing = dest.get(entry.key);

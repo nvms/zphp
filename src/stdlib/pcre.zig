@@ -1337,9 +1337,9 @@ fn preg_grep(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
         const bytes = try tmpBytes(ctx, v);
         const rc = exec(ctx, entry.code, bytes, 0, firstOptions(entry, bytes, v, 0), md);
         if (rc >= 0) {
-            if (!invert) try out.set(ctx.allocator, e.key, v);
+            if (!invert) try ctx.vm.arrayAddEntry(out, e.key, e, e.ref);
         } else if (rc == pcre2.ERROR_NOMATCH) {
-            if (invert) try out.set(ctx.allocator, e.key, v);
+            if (invert) try ctx.vm.arrayAddEntry(out, e.key, e, e.ref);
         } else {
             handleExecError(rc);
             break;
