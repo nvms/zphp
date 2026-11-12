@@ -297,7 +297,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .modulo => {
                     const b_mod = stack[sp - 1];
                     const a_mod = stack[sp - 2];
-                    if (a_mod == .object or b_mod == .object or a_mod == .resource or b_mod == .resource) {
+                    // ints only: runLoop has the float and string operands'
+                    // diagnostics and the division by zero
+                    if (a_mod != .int or b_mod != .int or b_mod.int == 0) {
                         frame.ip = ip - 1;
                         self.sp = sp;
                         return;
@@ -686,7 +688,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const ag_key = stack[sp - 1];
                     const ag_arr = stack[sp - 2];
                     const ag_elem: ?Value = switch (ag_arr) {
-                        .array => |arr| if (ag_key == .resource or ag_key == .array or ag_key == .object or arr == self.globals_array)
+                        .array => |arr| if (ag_key == .resource or ag_key == .float or ag_key == .array or ag_key == .object or arr == self.globals_array)
                             null
                         else if (arr.getPtr(Value.toArrayKey(ag_key))) |entry| entry.value else null,
                         .string => |str| if (code[ip - 1] == @intFromEnum(OpCode.array_get) and ag_key == .int and ag_key.int >= 0 and @as(usize, @intCast(ag_key.int)) < str.len) blk: {
@@ -720,7 +722,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const agv_key = stack[sp - 1];
                     const agv_arr = stack[sp - 2];
                     sp -= 2;
-                    if (agv_arr == .array and agv_key != .resource) {
+                    if (agv_arr == .array and agv_key != .resource and agv_key != .float) {
                         const agv_arr_key = Value.toArrayKey(agv_key);
                         const agv_existing = agv_arr.array.get(agv_arr_key);
                         if (agv_existing == .array) {
@@ -744,7 +746,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .array_elem_inc => {
                     const aei_key = stack[sp - 1];
                     const aei_arr = stack[sp - 2];
-                    if (aei_arr == .array and aei_key != .resource) {
+                    if (aei_arr == .array and aei_key != .resource and aei_key != .float) {
                         const ak = Value.toArrayKey(aei_key);
                         const old = aei_arr.array.get(ak);
                         if (old == .int) {
@@ -768,7 +770,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .array_elem_dec => {
                     const aei_key = stack[sp - 1];
                     const aei_arr = stack[sp - 2];
-                    if (aei_arr == .array and aei_key != .resource) {
+                    if (aei_arr == .array and aei_key != .resource and aei_key != .float) {
                         const ak = Value.toArrayKey(aei_key);
                         const old = aei_arr.array.get(ak);
                         if (old == .int) {
@@ -839,7 +841,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         self.sp = sp;
                         return;
                     }
-                    if (as_arr == .array and as_key != .resource) {
+                    if (as_arr == .array and as_key != .resource and as_key != .float) {
                         arraySetOwned(self, ic, as_arr.array, Value.toArrayKey(as_key), as_val) catch {
                             frame.ip = ip - 1;
                             self.sp = sp;
@@ -889,7 +891,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         self.sp = sp;
                         return;
                     }
-                    if (ase_arr == .array and ase_key != .resource) {
+                    if (ase_arr == .array and ase_key != .resource and ase_key != .float) {
                         arraySetOwned(self, ic, ase_arr.array, Value.toArrayKey(ase_key), ase_val) catch {
                             frame.ip = ip - 1;
                             self.sp = sp;

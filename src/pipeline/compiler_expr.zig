@@ -2393,6 +2393,10 @@ pub fn compileCast(self: *Compiler, node: Ast.Node) Error!void {
     const type_name = self.ast.tokenSlice(node.main_token);
     const eql = std.ascii.eqlIgnoreCase;
     if (eql(type_name, "unset")) return self.fail(node.main_token, "The (unset) cast is no longer supported");
+    // php's scanner deprecates the long spellings as it reads them
+    for ([_][2][]const u8{ .{ "integer", "int" }, .{ "double", "float" }, .{ "binary", "string" }, .{ "boolean", "bool" } }) |pair| {
+        if (eql(type_name, pair[0])) try self.warn(node.main_token, 8192, "Non-canonical cast ({s}) is deprecated, use the ({s}) cast instead", .{ pair[0], pair[1] });
+    }
     try self.compileNode(node.data.lhs);
     if (eql(type_name, "int") or eql(type_name, "integer")) {
         try self.emitOp(.cast_int);
