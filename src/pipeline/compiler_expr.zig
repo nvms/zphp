@@ -790,6 +790,36 @@ pub fn ensureWritable(self: *Compiler, target_idx: u32, op_token: u32) Error!voi
         else => {},
     }
     if (isShortCircuited(self, target_idx)) return self.fail(op_token, "Can't use nullsafe operator in write context");
+    try checkTemporaryBase(self, target_idx, op_token);
+}
+
+// zend_compile_var_inner in a write context: the innermost container of a
+// dimension or property chain must be a variable or a call's result
+pub fn checkTemporaryBase(self: *Compiler, target_idx: u32, op_token: u32) Error!void {
+    var idx = target_idx;
+    var chained = false;
+    while (true) {
+        const n = self.ast.nodes[idx];
+        switch (n.tag) {
+            .array_access, .array_push_target, .property_access, .nullsafe_property_access => {
+                idx = n.data.lhs;
+                chained = true;
+            },
+            .grouped_expr => idx = n.data.lhs,
+            .variable, .variable_variable, .call, .method_call, .nullsafe_method_call, .static_call, .dynamic_static_call, .pipe_expr => return,
+            // Class::$p is a variable, Class::C (the same node) a constant
+            .static_prop_access => {
+                const member = if (n.main_token != 0) self.ast.tokenSlice(n.main_token) else "$";
+                if (member.len > 0 and member[0] == '$') return;
+                if (chained) return self.fail(op_token, "Cannot use temporary expression in write context");
+                return;
+            },
+            else => {
+                if (chained) return self.fail(op_token, "Cannot use temporary expression in write context");
+                return;
+            },
+        }
+    }
 }
 
 // zend_ast_is_short_circuited: a nullsafe link anywhere down the chain
@@ -1593,6 +1623,7 @@ fn compileUnset(self: *Compiler, args: []const u32) Error!void {
     for (args) |arg_idx| {
         const arg = self.ast.nodes[arg_idx];
         if (isShortCircuited(self, arg_idx)) return self.fail(arg.main_token, "Can't use nullsafe operator in write context");
+        try checkTemporaryBase(self, arg_idx, arg.main_token);
         if (arg.tag == .variable) {
             const name = self.ast.tokenSlice(arg.main_token);
             const idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });
