@@ -11,7 +11,11 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
     const target = self.ast.nodes[node.data.lhs];
     const op_tag = self.ast.tokens[node.main_token].tag;
     if (target.tag != .list_destructure and target.tag != .array_literal) try ensureWritable(self, node.data.lhs, node.main_token);
-    if (self.ast.nodes[node.data.rhs].tag == .ref_target) try assertNotShortCircuited(self, self.ast.nodes[node.data.rhs].data.lhs, node.main_token);
+    if (target.tag == .list_destructure or target.tag == .array_literal) try ensureListWritable(self, node.data.lhs, node.main_token);
+    if (self.ast.nodes[node.data.rhs].tag == .ref_target) {
+        try assertNotShortCircuited(self, self.ast.nodes[node.data.rhs].data.lhs, node.main_token);
+        if (isGlobalsFetch(self, self.ast.nodes[node.data.rhs].data.lhs)) return self.fail(node.main_token, "Cannot acquire reference to $GLOBALS");
+    }
     // a list binding references takes them from its source
     if ((target.tag == .list_destructure or target.tag == .array_literal) and listHasRef(self, node.data.lhs)) try assertNotShortCircuited(self, node.data.rhs, node.main_token);
     // zend_try_compile_cv: $this is never written
@@ -790,7 +794,31 @@ pub fn ensureWritable(self: *Compiler, target_idx: u32, op_token: u32) Error!voi
         else => {},
     }
     if (isShortCircuited(self, target_idx)) return self.fail(op_token, "Can't use nullsafe operator in write context");
+    if (isGlobalsFetch(self, target_idx)) return self.fail(op_token, "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax");
+    const target = self.ast.nodes[target_idx];
+    if (target.tag == .array_push_target and isGlobalsFetch(self, target.data.lhs)) return self.fail(op_token, "Cannot append to $GLOBALS");
     try checkTemporaryBase(self, target_idx, op_token);
+}
+
+// is_globals_fetch: the variable $GLOBALS itself
+pub fn isGlobalsFetch(self: *Compiler, idx: u32) bool {
+    const n = self.ast.nodes[idx];
+    return n.tag == .variable and std.mem.eql(u8, self.ast.tokenSlice(n.main_token), "$GLOBALS");
+}
+
+// the variables a list assignment writes, as ensureWritable checks them
+fn ensureListWritable(self: *Compiler, idx: u32, op_token: u32) Error!void {
+    if (idx == 0) return;
+    const n = self.ast.nodes[idx];
+    switch (n.tag) {
+        .list_destructure, .array_literal => for (self.ast.extraSlice(n.data.lhs)) |slot| try ensureListWritable(self, slot, op_token),
+        .array_element => try ensureListWritable(self, n.data.lhs, op_token),
+        .ref_target => {
+            if (isGlobalsFetch(self, n.data.lhs)) return self.fail(op_token, "Cannot assign reference to non referenceable value");
+            try ensureListWritable(self, n.data.lhs, op_token);
+        },
+        else => if (isGlobalsFetch(self, idx)) return self.fail(op_token, "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax"),
+    }
 }
 
 // zend_compile_var_inner in a write context: the innermost container of a
@@ -1623,6 +1651,8 @@ fn compileUnset(self: *Compiler, args: []const u32) Error!void {
     for (args) |arg_idx| {
         const arg = self.ast.nodes[arg_idx];
         if (isShortCircuited(self, arg_idx)) return self.fail(arg.main_token, "Can't use nullsafe operator in write context");
+        if (arg.tag == .array_push_target) return self.fail(arg.main_token, "Cannot use [] for unsetting");
+        if (isGlobalsFetch(self, arg_idx)) return self.fail(arg.main_token, "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax");
         try checkTemporaryBase(self, arg_idx, arg.main_token);
         if (arg.tag == .variable) {
             const name = self.ast.tokenSlice(arg.main_token);

@@ -5839,7 +5839,18 @@ pub const VM = struct {
                         if (key == .resource or key == .float) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
                         const ak = Value.toArrayKey(key);
                         if (!capturing and !arr_val.array.contains(ak)) {
-                            self.emitUndefinedKeyWarning(ak) catch if (try self.resumeRaised()) continue;
+                            // ZEND_FETCH_GLOBALS reads $GLOBALS[k] as the global $k
+                            const is_globals = if (self.globals_array) |ga| arr_val.array == ga else false;
+                            if (is_globals) {
+                                var key_buf: [32]u8 = undefined;
+                                const key_text = switch (ak) {
+                                    .string => |ks| ks.bytes(),
+                                    .int => |ki| std.fmt.bufPrint(&key_buf, "{d}", .{ki}) catch "",
+                                };
+                                const msg = try std.fmt.allocPrint(self.allocator, "Undefined global variable ${s}", .{key_text});
+                                defer self.allocator.free(msg);
+                                self.emitWarning(msg) catch if (try self.resumeRaised()) continue;
+                            } else self.emitUndefinedKeyWarning(ak) catch if (try self.resumeRaised()) continue;
                         }
                         self.push(arr_val.array.get(ak));
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetGet")) {
