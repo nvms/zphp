@@ -302,7 +302,8 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                 if (v.classes.get(obj.class_name)) |cd| {
                     if (cd.is_enum) {
                         if (cd.backed_type == .none) {
-                            try v.setPendingException("JsonException", "Non-backed enums have no default serialization");
+                            last_error = 11;
+                            last_error_msg = "Non-backed enums have no default serialization";
                             return error.RuntimeError;
                         }
                         const enum_val = obj.get("value");
@@ -834,6 +835,8 @@ fn skipWhitespace(s: []const u8, pos: *usize) void {
 
 fn throwJsonException(ctx: *NativeContext, msg: []const u8) RuntimeError {
     ctx.vm.setPendingException("JsonException", msg) catch return error.OutOfMemory;
+    // the exception's code is the json error code
+    if (ctx.vm.pending_exception) |exc| if (exc == .object) exc.object.set(ctx.allocator, "code", .{ .int = last_error }) catch return error.OutOfMemory;
     return error.RuntimeError;
 }
 
