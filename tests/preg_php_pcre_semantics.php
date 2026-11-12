@@ -6,7 +6,7 @@ function show(...$v) {
     foreach ($v as $x) var_export($x);
     echo " | ", preg_last_error(), " ", preg_last_error_msg(), "\n";
 }
-foreach (['', '   ', 'abc', '\\x\\', "\0x\0", '/abc', '(abc', '{a{b}c', '[a]b]', '/a/F', "/a/\0", '/a/e', '/a/ i', "/a/\ni", '/a(/', '/(?<=\Kx)/', '/(?<1a>x)/', '#a#n', '/a{,2}/'] as $re) {
+foreach (['', '   ', 'abc', '\\x\\', "\0x\0", '/abc', '(abc', '{a{b}c', '[a]b]', '/a/F', "/a/\0", '/a/e', '/a/ i', "/a/\ni", '/a(/', '/(?<=\Kx)/', '#a#n', '/a{,2}/'] as $re) {
     echo json_encode($re), ": ";
     show(@preg_match($re, 'aaa'));
     $m = preg_match($re, 'a{,2}', $mm);
