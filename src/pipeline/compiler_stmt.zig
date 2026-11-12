@@ -233,6 +233,14 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     const val_by_ref = self.ast.extra_data[node.data.lhs + 3] != 0;
     try refuseThisTarget(self, val_n);
     if (key_n != 0) try refuseThisTarget(self, key_n);
+    // zend_compile_foreach: the loop variables are written
+    for ([_]u32{ val_n, key_n }) |target| {
+        if (target == 0) continue;
+        const t = self.ast.nodes[target];
+        const inner = if (t.tag == .ref_target) t.data.lhs else target;
+        if (t.tag == .ref_target) try compiler_expr.assertNotShortCircuited(self, inner, self.ast.nodes[inner].main_token);
+        if (self.ast.nodes[inner].tag != .list_destructure and self.ast.nodes[inner].tag != .array_literal) try compiler_expr.ensureWritable(self, inner, node.main_token);
+    }
 
     const prev_start = self.loop_start;
     var prev_breaks = self.break_jumps;

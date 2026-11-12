@@ -664,6 +664,7 @@ pub const Compiler = struct {
             },
             .return_stmt => {
                 try self.checkReturn(node);
+                if (self.returns_ref and node.data.lhs != 0) try compiler_expr.assertNotShortCircuited(self, node.data.lhs, node.main_token);
                 if (self.is_generator) {
                     if (node.data.lhs != 0) {
                         try self.compileNode(node.data.lhs);

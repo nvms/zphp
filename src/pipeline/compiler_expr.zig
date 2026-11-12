@@ -10,6 +10,10 @@ const Error = Allocator.Error || error{CompileError};
 pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
     const target = self.ast.nodes[node.data.lhs];
     const op_tag = self.ast.tokens[node.main_token].tag;
+    if (target.tag != .list_destructure and target.tag != .array_literal) try ensureWritable(self, node.data.lhs, node.main_token);
+    if (self.ast.nodes[node.data.rhs].tag == .ref_target) try assertNotShortCircuited(self, self.ast.nodes[node.data.rhs].data.lhs, node.main_token);
+    // a list binding references takes them from its source
+    if ((target.tag == .list_destructure or target.tag == .array_literal) and listHasRef(self, node.data.lhs)) try assertNotShortCircuited(self, node.data.rhs, node.main_token);
     // zend_try_compile_cv: $this is never written
     if (target.tag == .variable and std.mem.eql(u8, self.ast.tokenSlice(target.main_token), "$this"))
         return self.fail(target.main_token, "Cannot re-assign $this");
@@ -752,20 +756,49 @@ fn compilePlaceIncDec(self: *Compiler, place: Place, op_tag: Token.Tag, postfix:
 // the write-context fatals php raises at compile time for an increment or
 // decrement whose operand is not a variable
 fn checkIncDecTarget(self: *Compiler, target_idx: u32, op_token: u32) Error!void {
+    return ensureWritable(self, target_idx, op_token);
+}
+
+// zend_ensure_writable_variable
+pub fn ensureWritable(self: *Compiler, target_idx: u32, op_token: u32) Error!void {
     switch (self.ast.nodes[target_idx].tag) {
-        .call => return self.fail(op_token, "Can't use function return value in write context"),
-        .method_call, .static_call, .dynamic_static_call => return self.fail(op_token, "Can't use method return value in write context"),
+        .call, .pipe_expr => return self.fail(op_token, "Can't use function return value in write context"),
+        .method_call, .static_call, .dynamic_static_call, .nullsafe_method_call => return self.fail(op_token, "Can't use method return value in write context"),
         else => {},
     }
+    if (isShortCircuited(self, target_idx)) return self.fail(op_token, "Can't use nullsafe operator in write context");
+}
+
+// zend_ast_is_short_circuited: a nullsafe link anywhere down the chain
+pub fn isShortCircuited(self: *Compiler, target_idx: u32) bool {
     var idx = target_idx;
     while (idx != 0) {
         const n = self.ast.nodes[idx];
         switch (n.tag) {
-            .nullsafe_property_access, .nullsafe_method_call => return self.fail(op_token, "Can't use nullsafe operator in write context"),
-            .property_access, .array_access, .method_call => idx = n.data.lhs,
-            else => return,
+            .nullsafe_property_access, .nullsafe_method_call => return true,
+            .property_access, .array_access, .method_call, .static_prop_access, .static_call, .array_push_target => idx = n.data.lhs,
+            else => return false,
         }
     }
+    return false;
+}
+
+fn listHasRef(self: *Compiler, idx: u32) bool {
+    if (idx == 0) return false;
+    const n = self.ast.nodes[idx];
+    return switch (n.tag) {
+        .ref_target => true,
+        .list_destructure, .array_literal => for (self.ast.extraSlice(n.data.lhs)) |slot| {
+            if (listHasRef(self, slot)) break true;
+        } else false,
+        .array_element => listHasRef(self, n.data.lhs),
+        else => false,
+    };
+}
+
+// zend_assert_not_short_circuited, for the source of a reference
+pub fn assertNotShortCircuited(self: *Compiler, idx: u32, op_token: u32) Error!void {
+    if (isShortCircuited(self, idx)) return self.fail(op_token, "Cannot take reference of a nullsafe chain");
 }
 
 pub fn compilePrefixOp(self: *Compiler, node: Ast.Node) Error!void {
@@ -1536,6 +1569,7 @@ pub fn emitSpreadCallOp(self: *Compiler, guards: *ArgGuards, op: OpCode, a: ?u16
 fn compileUnset(self: *Compiler, args: []const u32) Error!void {
     for (args) |arg_idx| {
         const arg = self.ast.nodes[arg_idx];
+        if (isShortCircuited(self, arg_idx)) return self.fail(arg.main_token, "Can't use nullsafe operator in write context");
         if (arg.tag == .variable) {
             const name = self.ast.tokenSlice(arg.main_token);
             const idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });
