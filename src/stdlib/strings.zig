@@ -10,6 +10,7 @@ const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 const phpTypeName = @import("types.zig").phpTypeName;
 const html = @import("html.zig");
+const url_parse = @import("url.zig");
 
 pub const entries = .{
     .{ "substr", substr },
@@ -2940,160 +2941,41 @@ fn native_qp_decode(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
 
 fn native_parse_url(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const url = args[0].string.bytes();
+    const url = url_parse.parse(args[0].string.bytes()) orelse return NativeResult.scalar(.{ .bool = false });
+    const key: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else -1;
 
-    const component: ?i64 = if (args.len >= 2 and args[1] == .int) args[1].int else null;
-
-    var scheme_end: usize = 0;
-    var scheme: ?[]const u8 = null;
-    var authority_start: usize = 0;
-    var has_authority = false;
-
-    if (std.mem.indexOf(u8, url, "://")) |pos| {
-        // empty or invalid scheme - PHP treats the whole input as a path
-        // (a scheme must start with a letter and contain only [a-zA-Z0-9+.-])
-        var scheme_ok = pos > 0 and std.ascii.isAlphabetic(url[0]);
-        if (scheme_ok) {
-            for (url[0..pos]) |c| {
-                if (!std.ascii.isAlphanumeric(c) and c != '+' and c != '-' and c != '.') {
-                    scheme_ok = false;
-                    break;
-                }
-            }
-        }
-        if (!scheme_ok) {
-            const arr = try ctx.createArray();
-            try setUrlComponent(ctx, arr, "path", url);
-            return NativeResult.borrowed(.{ .array = arr });
-        }
-        scheme = url[0..pos];
-        scheme_end = pos + 3;
-        authority_start = scheme_end;
-        has_authority = true;
-    } else if (url.len >= 2 and url[0] == '/' and url[1] == '/') {
-        authority_start = 2;
-        scheme_end = 2;
-        has_authority = true;
-    } else if (std.mem.indexOf(u8, url, ":")) |colon| {
-        // scheme:path (no //) - e.g. mailto:user@example.com
-        if (colon > 0) {
-            var valid_scheme = true;
-            for (url[0..colon]) |c| {
-                if (!std.ascii.isAlphabetic(c) and c != '+' and c != '-' and c != '.') {
-                    valid_scheme = false;
-                    break;
-                }
-            }
-            if (valid_scheme) {
-                scheme = url[0..colon];
-                scheme_end = colon + 1;
-                authority_start = scheme_end;
-            }
-        }
-    }
-
-    var rest = url[authority_start..];
-
-    // split off fragment
-    var fragment: ?[]const u8 = null;
-    if (std.mem.indexOf(u8, rest, "#")) |pos| {
-        fragment = rest[pos + 1 ..];
-        rest = rest[0..pos];
-    }
-
-    // split off query
-    var query: ?[]const u8 = null;
-    if (std.mem.indexOf(u8, rest, "?")) |pos| {
-        query = rest[pos + 1 ..];
-        rest = rest[0..pos];
-    }
-
-    // split authority from path
-    var host: ?[]const u8 = null;
-    var port: ?i64 = null;
-    var user: ?[]const u8 = null;
-    var pass: ?[]const u8 = null;
-    var path: ?[]const u8 = null;
-
-    if (has_authority) {
-        var authority = rest;
-        if (std.mem.indexOf(u8, rest, "/")) |pos| {
-            authority = rest[0..pos];
-            path = rest[pos..];
-        }
-
-        if (std.mem.lastIndexOf(u8, authority, "@")) |pos| {
-            const userinfo = authority[0..pos];
-            authority = authority[pos + 1 ..];
-            if (std.mem.indexOf(u8, userinfo, ":")) |cp| {
-                user = userinfo[0..cp];
-                pass = userinfo[cp + 1 ..];
-            } else {
-                user = userinfo;
-            }
-        }
-
-        if (authority.len > 0 and authority[0] == '[') {
-            if (std.mem.indexOf(u8, authority, "]")) |bracket| {
-                host = authority[0 .. bracket + 1];
-                if (bracket + 1 < authority.len and authority[bracket + 1] == ':') {
-                    const port_str = authority[bracket + 2 ..];
-                    port = std.fmt.parseInt(i64, port_str, 10) catch return NativeResult.scalar(.{ .bool = false });
-                    if (port.? < 0 or port.? > 65535) return NativeResult.scalar(.{ .bool = false });
-                }
-            } else {
-                host = authority;
-            }
-        } else if (std.mem.lastIndexOf(u8, authority, ":")) |pos| {
-            host = authority[0..pos];
-            const port_str = authority[pos + 1 ..];
-            // PHP rejects URLs with non-numeric or out-of-range ports
-            port = std.fmt.parseInt(i64, port_str, 10) catch return NativeResult.scalar(.{ .bool = false });
-            if (port.? < 0 or port.? > 65535) return NativeResult.scalar(.{ .bool = false });
-        } else if (authority.len > 0) {
-            host = authority;
-        }
-    } else {
-        // for non-authority URLs, set path if non-empty OR if the entire URL is empty
-        if (rest.len > 0 or url.len == 0) path = rest;
-    }
-
-    // PHP rejects URLs whose authority section (after //) is invalid:
-    //   - no host but port or userinfo present ("http://:80", "http://user@:80")
-    //   - empty host with any non-file scheme ("http:///", "ftp:///")
-    //   - file:// is the one exception that allows an empty host
-    if (has_authority) {
-        const host_empty = if (host) |h| h.len == 0 else true;
-        if (host_empty) {
-            if (port != null or user != null or pass != null) return NativeResult.scalar(.{ .bool = false });
-            const is_file_scheme = if (scheme) |s| std.ascii.eqlIgnoreCase(s, "file") else false;
-            if (scheme != null and !is_file_scheme) return NativeResult.scalar(.{ .bool = false });
-        }
-    }
-
-    if (component) |c| {
-        return switch (c) {
-            0 => if (scheme) |s| try NativeResult.copyString(ctx.allocator, s) else NativeResult.scalar(.null),
-            1 => if (host) |h| try NativeResult.copyString(ctx.allocator, h) else NativeResult.scalar(.null),
-            2 => if (port) |p| NativeResult.scalar(.{ .int = p }) else NativeResult.scalar(.null),
-            3 => if (user) |u| try NativeResult.copyString(ctx.allocator, u) else NativeResult.scalar(.null),
-            4 => if (pass) |p| try NativeResult.copyString(ctx.allocator, p) else NativeResult.scalar(.null),
-            5 => if (path) |p| try NativeResult.copyString(ctx.allocator, p) else NativeResult.scalar(.null),
-            6 => if (query) |q| try NativeResult.copyString(ctx.allocator, q) else NativeResult.scalar(.null),
-            7 => if (fragment) |f| try NativeResult.copyString(ctx.allocator, f) else NativeResult.scalar(.null),
-            else => NativeResult.scalar(.{ .bool = false }),
+    if (key > -1) {
+        const part: ?[]const u8 = switch (key) {
+            0 => url.scheme,
+            1 => url.host,
+            2 => return if (url.has_port) NativeResult.scalar(.{ .int = url.port }) else NativeResult.scalar(.null),
+            3 => url.user,
+            4 => url.pass,
+            5 => url.path,
+            6 => url.query,
+            7 => url.fragment,
+            else => {
+                const msg = try std.fmt.allocPrint(ctx.allocator, "parse_url(): Argument #2 ($component) must be a valid URL component identifier, {d} given", .{key});
+                defer ctx.allocator.free(msg);
+                try ctx.vm.setPendingException("ValueError", msg);
+                return error.RuntimeError;
+            },
         };
+        const bytes = part orelse return NativeResult.scalar(.null);
+        const copy = try ctx.allocator.dupe(u8, bytes);
+        url_parse.replaceControlChars(copy);
+        return NativeResult.takeString(try Value.String.adopt(ctx.allocator, copy));
     }
 
     var arr = try ctx.createArray();
-    if (scheme) |s| try setUrlComponent(ctx, arr, "scheme", s);
-    if (host) |h| try setUrlComponent(ctx, arr, "host", h);
-    if (port) |p| try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("port") }, .{ .int = p });
-    if (user) |u| try setUrlComponent(ctx, arr, "user", u);
-    if (pass) |p| try setUrlComponent(ctx, arr, "pass", p);
-    if (path) |p| try setUrlComponent(ctx, arr, "path", p);
-    if (query) |q| try setUrlComponent(ctx, arr, "query", q);
-    if (fragment) |f| try setUrlComponent(ctx, arr, "fragment", f);
+    if (url.scheme) |s| try setUrlComponent(ctx, arr, "scheme", s);
+    if (url.host) |h| try setUrlComponent(ctx, arr, "host", h);
+    if (url.has_port) try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("port") }, .{ .int = url.port });
+    if (url.user) |u| try setUrlComponent(ctx, arr, "user", u);
+    if (url.pass) |p| try setUrlComponent(ctx, arr, "pass", p);
+    if (url.path) |p| try setUrlComponent(ctx, arr, "path", p);
+    if (url.query) |q| try setUrlComponent(ctx, arr, "query", q);
+    if (url.fragment) |f| try setUrlComponent(ctx, arr, "fragment", f);
     return NativeResult.borrowed(.{ .array = arr });
 }
 
@@ -3558,7 +3440,9 @@ fn setParsedEntry(ctx: *NativeContext, array: *PhpArray, key: PhpArray.Key, valu
 }
 
 fn setUrlComponent(ctx: *NativeContext, array: *PhpArray, comptime name: []const u8, bytes: []const u8) !void {
-    const value = try Value.String.create(ctx.allocator, bytes);
+    const copy = try ctx.allocator.dupe(u8, bytes);
+    url_parse.replaceControlChars(copy);
+    const value = try Value.String.adopt(ctx.allocator, copy);
     defer value.release();
     try array.set(ctx.allocator, .{ .string = Value.String.borrowed(name) }, .{ .string = value });
 }
