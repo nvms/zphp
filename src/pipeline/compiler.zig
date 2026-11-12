@@ -218,6 +218,12 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
     // point. emit those into a prelude first, then compile everything else with
     // the relocated declarations skipped at their original site
     c.root_stmts = ast.extraSlice(root.data.lhs);
+    try c.checkNamespaceDecls(c.root_stmts);
+    {
+        var imports: Compiler.ImportCheck = .{ .compiler = &c };
+        defer imports.deinit();
+        try imports.walk(c.root_stmts);
+    }
     const outer_keys = anon_class_keys;
     anon_class_keys = .{};
     defer {
@@ -977,15 +983,7 @@ pub const Compiler = struct {
             .qualified_name => {
                 const parts = self.ast.extraSlice(node.data.lhs);
                 const fqn = try self.buildQualifiedString(parts);
-                // strip leading backslash for root-namespace constant lookup
-                const stripped = if (fqn.len > 0 and fqn[0] == '\\') fqn[1..] else fqn;
-                // `namespace\CONST` resolves relative to the current namespace
-                const name = if (node.data.rhs == 2 and self.namespace.len > 0) blk: {
-                    const q = std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, stripped }) catch return error.CompileError;
-                    self.string_allocs.append(self.allocator, q) catch return error.CompileError;
-                    break :blk q;
-                } else stripped;
-                try self.emitGetVar(name);
+                try self.emitGetVar(try self.resolveQualifiedNonClassName(fqn, node.data.rhs));
             },
             .root => {},
         }
@@ -1703,6 +1701,13 @@ pub const Compiler = struct {
             return name;
         }
         if (std.mem.eql(u8, name, "static")) return name;
+        if (std.ascii.startsWithIgnoreCase(name, "namespace\\")) {
+            const rest = name["namespace\\".len..];
+            if (self.namespace.len == 0) return rest;
+            const qualified = std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, rest }) catch return name;
+            self.string_allocs.append(self.allocator, qualified) catch return name;
+            return qualified;
+        }
         if (self.use_aliases.get(name)) |fqn| return fqn;
         // for multi-segment names like `Assert\NotBlank` look up just the first
         // segment in use_aliases. PHP applies the alias to that prefix then
@@ -1720,6 +1725,184 @@ pub const Compiler = struct {
         const qualified = std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, name }) catch return name;
         self.string_allocs.append(self.allocator, qualified) catch return name;
         return qualified;
+    }
+
+    // zend_compile_namespace's and zend_verify_namespace's rules over the
+    // file's statements: bracketed and unbracketed declarations don't mix
+    // or nest, the first comes before any code but declare, and no code
+    // stands outside bracketed ones
+    fn checkNamespaceDecls(self: *Compiler, stmts: []const u32) Error!void {
+        var has_bracketed = false;
+        var in_namespace = false;
+        var current = false;
+        var code_before = false;
+        for (stmts) |idx| {
+            const node = self.ast.nodes[idx];
+            if (node.tag != .namespace_decl) {
+                // `;` alone is no statement to php
+                const nop = node.tag == .block and self.ast.tokens[node.main_token].tag == .semicolon;
+                if (nop) continue;
+                if (node.tag != .declare_stmt) code_before = true;
+                if (has_bracketed and !in_namespace) {
+                    const at = if (node.main_token == 0 and node.tag == .expression_stmt) self.ast.nodes[node.data.lhs].main_token else node.main_token;
+                    return self.fail(at, "No code may exist outside of namespace {}");
+                }
+                continue;
+            }
+            if (node.data.rhs == 2) {
+                in_namespace = false;
+                current = false;
+                continue;
+            }
+            const with_bracket = node.data.rhs != 0;
+            if (!has_bracketed) {
+                if (current and with_bracket) return self.fail(node.main_token, "Cannot mix bracketed namespace declarations with unbracketed namespace declarations");
+            } else if (!with_bracket) {
+                return self.fail(node.main_token, "Cannot mix bracketed namespace declarations with unbracketed namespace declarations");
+            } else if (current or in_namespace or node.data.rhs == 3) {
+                return self.fail(node.main_token, "Namespace declarations cannot be nested");
+            }
+            const first = (!with_bracket and !current) or (with_bracket and !has_bracketed);
+            if (first and code_before) return self.fail(node.main_token, "Namespace declaration statement has to be the very first statement or after any declare call in the script");
+            const parts = self.ast.extraSlice(node.data.lhs);
+            if (parts.len == 1 and std.ascii.eqlIgnoreCase(self.ast.tokenSlice(parts[0]), "namespace"))
+                return self.failFmt(node.main_token, "Cannot use '{s}' as namespace name", .{self.ast.tokenSlice(parts[0])});
+            current = parts.len > 0;
+            in_namespace = true;
+            if (with_bracket) has_bracketed = true;
+        }
+    }
+
+    // zend_compile_use's checks, and the names zend_register_seen_symbol
+    // records for them, over the file's top-level statements in order
+    const ImportCheck = struct {
+        compiler: *Compiler,
+        namespace: []const u8 = "",
+        // per kind: the lookup name (lowercase but for constants) to the
+        // imported name
+        imports: [3]std.StringHashMapUnmanaged([]const u8) = .{ .{}, .{}, .{} },
+        // declared names: lowercase, a constant's last segment as written
+        seen: std.StringHashMapUnmanaged(u8) = .{},
+        owned: std.ArrayListUnmanaged([]u8) = .empty,
+
+        const kind_bits = [3]u8{ 1, 2, 4 };
+        const kind_words = [3][]const u8{ "", " function", " const" };
+
+        fn deinit(self: *ImportCheck) void {
+            const a = self.compiler.allocator;
+            for (&self.imports) |*m| m.deinit(a);
+            self.seen.deinit(a);
+            for (self.owned.items) |o| a.free(o);
+            self.owned.deinit(a);
+        }
+
+        fn key(self: *ImportCheck, name: []const u8, kind: usize) Error![]const u8 {
+            const a = self.compiler.allocator;
+            const out = try a.alloc(u8, name.len);
+            try self.owned.append(a, out);
+            const last = std.mem.lastIndexOfScalar(u8, name, '\\');
+            for (name, 0..) |ch, i| {
+                const keep_case = kind == 2 and (last == null or i > last.?);
+                out[i] = if (keep_case) ch else std.ascii.toLower(ch);
+            }
+            return out;
+        }
+
+        fn qualified(self: *ImportCheck, name: []const u8, kind: usize) Error![]const u8 {
+            if (self.namespace.len == 0) return self.key(name, kind);
+            const a = self.compiler.allocator;
+            const full = try std.fmt.allocPrint(a, "{s}\\{s}", .{ self.namespace, name });
+            defer a.free(full);
+            return self.key(full, kind);
+        }
+
+        fn declare(self: *ImportCheck, name: []const u8, kind: usize) Error!void {
+            const k = try self.qualified(name, kind);
+            const gop = try self.seen.getOrPut(self.compiler.allocator, k);
+            if (!gop.found_existing) gop.value_ptr.* = 0;
+            gop.value_ptr.* |= kind_bits[kind];
+        }
+
+        fn walk(self: *ImportCheck, stmts: []const u32) Error!void {
+            const c = self.compiler;
+            for (stmts) |idx| {
+                const node = c.ast.nodes[idx];
+                switch (node.tag) {
+                    .namespace_decl => {
+                        self.namespace = if (node.data.rhs == 2) "" else try c.buildQualifiedString(c.ast.extraSlice(node.data.lhs));
+                        // zend_reset_import_tables forgets the names seen too
+                        for (&self.imports) |*m| m.clearRetainingCapacity();
+                        self.seen.clearRetainingCapacity();
+                    },
+                    .block => try self.walk(c.ast.extraSlice(node.data.lhs)),
+                    .use_stmt => try self.use(node, 0),
+                    .use_fn_stmt => try self.use(node, 1),
+                    .use_const_stmt => try self.use(node, 2),
+                    .class_decl, .interface_decl, .trait_decl, .enum_decl => {
+                        const name = c.ast.tokenSlice(node.main_token);
+                        if (class_names.isAnonymous(name)) continue;
+                        const lc = try self.qualified(name, 0);
+                        if (self.imports[0].get(try self.key(name, 0))) |imported| {
+                            if (!std.ascii.eqlIgnoreCase(imported, lc)) {
+                                const shown = if (self.namespace.len == 0) name else try std.fmt.allocPrint(c.allocator, "{s}\\{s}", .{ self.namespace, name });
+                                if (self.namespace.len > 0) try c.string_allocs.append(c.allocator, @constCast(shown));
+                                return c.failFmt(node.main_token, "Cannot redeclare class {s} (previously declared as local import)", .{shown});
+                            }
+                        }
+                        try self.declare(name, 0);
+                    },
+                    .function_decl => try self.declare(c.ast.tokenSlice(node.main_token), 1),
+                    .const_decl => try self.declare(c.ast.tokenSlice(node.main_token), 2),
+                    else => {},
+                }
+            }
+        }
+
+        fn use(self: *ImportCheck, node: Ast.Node, kind: usize) Error!void {
+            const c = self.compiler;
+            const parts = c.ast.extraSlice(node.data.lhs);
+            const old_name = try c.buildQualifiedString(parts);
+            const new_name = if (node.data.rhs != 0) c.ast.tokenSlice(node.data.rhs) else c.ast.tokenSlice(parts[parts.len - 1]);
+            if (node.data.rhs == 0 and parts.len == 1 and self.namespace.len == 0)
+                try c.warn(node.main_token, 2, "The use statement with non-compound name '{s}' has no effect", .{new_name});
+            const lookup = try self.key(new_name, kind);
+            const check = try self.qualified(new_name, kind);
+            if (self.seen.get(check)) |bits| if (bits & kind_bits[kind] != 0 and !std.ascii.eqlIgnoreCase(old_name, check))
+                return c.failFmt(node.main_token, "Cannot use{s} {s} as {s} because the name is already in use", .{ kind_words[kind], old_name, new_name });
+            const gop = try self.imports[kind].getOrPut(c.allocator, lookup);
+            if (gop.found_existing) return c.failFmt(node.main_token, "Cannot use{s} {s} as {s} because the name is already in use", .{ kind_words[kind], old_name, new_name });
+            gop.value_ptr.* = old_name;
+        }
+    };
+
+    // a `use` import's target by its alias, which php matches
+    // case-insensitively
+    pub fn classImport(self: *Compiler, alias: []const u8) ?[]const u8 {
+        if (self.use_aliases.get(alias)) |fqn| return fqn;
+        var it = self.use_aliases.iterator();
+        while (it.next()) |e| if (std.ascii.eqlIgnoreCase(e.key_ptr.*, alias)) return e.value_ptr.*;
+        return null;
+    }
+
+    // zend_resolve_non_class_name for a function or constant name written
+    // with a backslash: fully qualified as written; `namespace\` names and
+    // qualified ones are relative to the namespace, where the first segment
+    // of a qualified one may name a class import
+    // (`marker` is the parser's: 1 fully qualified, 2 `namespace\`)
+    pub fn resolveQualifiedNonClassName(self: *Compiler, written: []const u8, marker: u32) Error![]const u8 {
+        if (marker == 1) return written;
+        if (written.len > 0 and written[0] == '\\') return written[1..];
+        if (marker == 0) if (std.mem.indexOfScalar(u8, written, '\\')) |slash| {
+            if (self.classImport(written[0..slash])) |fqn| {
+                const q = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ fqn, written[slash..] });
+                try self.string_allocs.append(self.allocator, q);
+                return q;
+            }
+        };
+        if (self.namespace.len == 0) return written;
+        const q = try std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, written });
+        try self.string_allocs.append(self.allocator, q);
+        return q;
     }
 
     pub fn resolveFunctionName(self: *Compiler, name: []const u8) []const u8 {

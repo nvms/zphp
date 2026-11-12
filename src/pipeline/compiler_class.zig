@@ -661,6 +661,18 @@ fn buildTypeString(self: *Compiler, start_tok: u32, end_tok: u32) Error![]const 
             continue;
         }
 
+        // `namespace\X` names X in the current namespace
+        if (at_segment_start and tag == .kw_namespace and i + 1 < end_tok and self.ast.tokens[i + 1].tag == .backslash) {
+            if (self.namespace.len > 0) {
+                try buf.appendSlice(self.allocator, self.namespace);
+                try buf.append(self.allocator, '\\');
+            }
+            i += 1;
+            segment_is_fqn = true;
+            at_segment_start = false;
+            continue;
+        }
+
         // leading backslash means FQN for this segment - emit it but mark so
         // we don't apply namespace resolution to the first identifier
         if (at_segment_start and std.mem.eql(u8, lexeme, "\\")) {

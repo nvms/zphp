@@ -94,6 +94,8 @@ const Parser = struct {
     // has list() only as the left side of an assignment
     bare_list_at: u32 = std.math.maxInt(u32),
     pending_top_stmts: std.ArrayListUnmanaged(u32) = .empty,
+    // inside a bracketed namespace's body
+    in_namespace_block: bool = false,
 
     // root
 
@@ -385,12 +387,32 @@ const Parser = struct {
             }
         }
 
+        // namespace_decl rhs: 0 `namespace X;`, 1 a bracketed namespace's
+        // start, 2 its end, 3 one nested in another (php's compiler refuses
+        // it, so its body is parsed and dropped)
+        if (self.peek() == .l_brace and self.in_namespace_block) {
+            _ = self.advance();
+            while (self.peek() != .r_brace and self.peek() != .eof) {
+                _ = self.parseStatement() catch |err| switch (err) {
+                    error.ParseError => {
+                        self.synchronize();
+                        continue;
+                    },
+                    error.OutOfMemory => return error.OutOfMemory,
+                };
+            }
+            _ = try self.expect(.r_brace);
+            const nested_extra = try self.addExtraList(parts.items);
+            return self.addNode(.{ .tag = .namespace_decl, .main_token = tok, .data = .{ .lhs = nested_extra, .rhs = 3 } });
+        }
         if (self.peek() == .l_brace) {
             _ = self.advance(); // {
+            self.in_namespace_block = true;
+            defer self.in_namespace_block = false;
             const extra = try self.addExtraList(parts.items);
             // queue the namespace_decl as the next statement; remember to emit
             // a closing reset when we hit `}`
-            const ns_node = try self.addNode(.{ .tag = .namespace_decl, .main_token = tok, .data = .{ .lhs = extra } });
+            const ns_node = try self.addNode(.{ .tag = .namespace_decl, .main_token = tok, .data = .{ .lhs = extra, .rhs = 1 } });
             try self.pending_top_stmts.append(self.allocator, ns_node);
             // body statements: drain pending then loop
             while (self.peek() != .r_brace and self.peek() != .eof) {
@@ -407,7 +429,7 @@ const Parser = struct {
             // emit a reset namespace_decl (to global namespace) so subsequent
             // top-level code parses outside this namespace
             const empty_extra = try self.addExtraList(&.{});
-            const reset_node = try self.addNode(.{ .tag = .namespace_decl, .main_token = tok, .data = .{ .lhs = empty_extra } });
+            const reset_node = try self.addNode(.{ .tag = .namespace_decl, .main_token = tok, .data = .{ .lhs = empty_extra, .rhs = 2 } });
             try self.pending_top_stmts.append(self.allocator, reset_node);
             // return the first pending entry; the rest get drained from caller
             const first = self.pending_top_stmts.orderedRemove(0);
@@ -501,12 +523,19 @@ const Parser = struct {
             return self.addNode(.{ .tag = .block, .main_token = tok, .data = .{ .lhs = block_extra } });
         }
 
+        // the first name of a list may have its own alias
+        var first_alias: u32 = 0;
+        if (self.peek() == .kw_as and self.peekAt(2) == .comma) {
+            _ = self.advance();
+            first_alias = self.pos;
+            _ = try self.expect(.identifier);
+        }
         if (self.peek() == .comma) {
             var stmts = std.ArrayListUnmanaged(u32).empty;
             defer stmts.deinit(self.allocator);
             const first_extra = try self.addExtraList(prefix.items);
             const tag: Ast.Node.Tag = if (outer_is_fn) .use_fn_stmt else if (outer_is_const) .use_const_stmt else .use_stmt;
-            try stmts.append(self.allocator, try self.addNode(.{ .tag = tag, .main_token = tok, .data = .{ .lhs = first_extra } }));
+            try stmts.append(self.allocator, try self.addNode(.{ .tag = tag, .main_token = tok, .data = .{ .lhs = first_extra, .rhs = first_alias } }));
             while (self.peek() == .comma) {
                 _ = self.advance();
                 var parts = std.ArrayListUnmanaged(u32).empty;

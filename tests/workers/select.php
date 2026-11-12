@@ -40,9 +40,9 @@ var_dump($np->workers());
 $np->shutdown();
 attempt(fn() => $named->send(valu: 1));
 attempt(fn() => new Zphp\Buffer(size: 3));
-namespace Other;
+// a fully qualified call works the same (a namespace declaration can't
+// follow code in one file)
 attempt(fn() => \Zphp\select([new \Zphp\Channel], 0));
-namespace Main;
 
 $pool = new \Zphp\Pool(workers: 4, bootstrap: __DIR__ . "/worker.php");
 

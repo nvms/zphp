@@ -1300,7 +1300,7 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
         } else if (callee.tag == .qualified_name) {
             const parts = self.ast.extraSlice(callee.data.lhs);
             const fqn = try self.buildQualifiedString(parts);
-            const name = if (fqn.len > 0 and fqn[0] == '\\') fqn[1..] else fqn;
+            const name = try self.resolveQualifiedNonClassName(fqn, callee.data.rhs);
             const idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });
             var guards = try emitSpreadArgs(self, args);
             try emitCallOp(self, &guards, .call_spread, .{ .a = idx });
@@ -1342,14 +1342,7 @@ pub fn compileCall(self: *Compiler, node: Ast.Node) Error!void {
         const call_offset = self.current_source_offset;
         const parts = self.ast.extraSlice(callee.data.lhs);
         const fqn = try self.buildQualifiedString(parts);
-        const stripped = if (fqn.len > 0 and fqn[0] == '\\') fqn[1..] else fqn;
-        // `namespace\fn()` resolves the function relative to the current
-        // namespace (rhs == 2 marks the relative-namespace operator)
-        const name = if (callee.data.rhs == 2 and self.namespace.len > 0) blk: {
-            const q = std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, stripped }) catch return error.CompileError;
-            self.string_allocs.append(self.allocator, q) catch return error.CompileError;
-            break :blk q;
-        } else stripped;
+        const name = try self.resolveQualifiedNonClassName(fqn, callee.data.rhs);
         var guards = try compileArgs(self, args);
         self.current_source_offset = call_offset;
         const idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });
@@ -1641,12 +1634,7 @@ pub fn compileCallableRef(self: *Compiler, node: Ast.Node) Error!void {
     } else if (callee.tag == .qualified_name) {
         const parts = self.ast.extraSlice(callee.data.lhs);
         const fqn = try self.buildQualifiedString(parts);
-        const stripped = if (fqn.len > 0 and fqn[0] == '\\') fqn[1..] else fqn;
-        const name = if (callee.data.rhs == 2 and self.namespace.len > 0) blk: {
-            const q = std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, stripped }) catch return error.CompileError;
-            self.string_allocs.append(self.allocator, q) catch return error.CompileError;
-            break :blk q;
-        } else stripped;
+        const name = try self.resolveQualifiedNonClassName(fqn, callee.data.rhs);
         const idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });
         try self.emitOp(.constant);
         try self.emitU16(idx);

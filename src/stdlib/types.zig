@@ -206,7 +206,9 @@ fn native_defined(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
 
 fn native_constant(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.null);
-    const name = args[0].string.bytes();
+    // zend_get_constant_ex: a leading backslash names the same constant
+    const written = args[0].string.bytes();
+    const name = if (written.len > 0 and written[0] == '\\') written[1..] else written;
     if (ctx.vm.php_constants.get(name)) |v| {
         try ctx.vm.warnDeprecatedConstant(name);
         return NativeResult.share(v);
@@ -228,7 +230,7 @@ fn native_constant(ctx: *NativeContext, args: []const Value) RuntimeError!Native
             return NativeResult.share(v);
         }
     }
-    const msg = try std.fmt.allocPrint(ctx.allocator, "Undefined constant \"{s}\"", .{name});
+    const msg = try std.fmt.allocPrint(ctx.allocator, "Undefined constant \"{s}\"", .{written});
     defer ctx.allocator.free(msg);
     try ctx.vm.setPendingException("Error", msg);
     return error.RuntimeError;
