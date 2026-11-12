@@ -792,37 +792,117 @@ fn array_count_values(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
 
 fn array_walk(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2) return NativeResult.scalar(.{ .bool = false });
-    if (args[0] != .array and !(args[0] == .object and ctx.vm.isInstanceOf(args[0].object.class_name, "Traversable"))) {
-        try ctx.vm.setPendingException("TypeError", "array_walk(): Argument #1 ($array) must be of type array|object");
+    if (args[0] != .array and args[0] != .object) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "array_walk(): Argument #1 ($array) must be of type array, {s} given", .{phpTypeName(args[0])});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.setPendingException("TypeError", msg);
         return error.RuntimeError;
     }
-    if (args[0] != .array) return NativeResult.scalar(.{ .bool = false });
-    const arr = args[0].array;
-    const callback = args[1];
-    const has_userdata = args.len >= 3;
+    const userdata: ?Value = if (args.len >= 3) args[2] else null;
+    try walk(ctx, args[0], args[1], userdata, false);
+    return NativeResult.scalar(.{ .bool = true });
+}
 
-    // PHP's array_walk iterates by position (not snapshotted), so callbacks
-    // that append to the array also have those new elements visited. track
-    // by index and re-read len each step so growth is observed and removals
-    // are skipped. when the callback removes the current entry the key
-    // lookup re-locates by-key on writeback to apply to the original element
+fn array_walk_recursive(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2) return NativeResult.scalar(.{ .bool = false });
+    if (args[0] != .array and args[0] != .object) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "array_walk_recursive(): Argument #1 ($array) must be of type array, {s} given", .{phpTypeName(args[0])});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.setPendingException("TypeError", msg);
+        return error.RuntimeError;
+    }
+    const userdata: ?Value = if (args.len >= 3) args[2] else null;
+    try walk(ctx, args[0], args[1], userdata, true);
+    return NativeResult.scalar(.{ .bool = true });
+}
+
+fn keyValue(key: PhpArray.Key) Value {
+    return switch (key) {
+        .int => |k| .{ .int = k },
+        .string => |s| .{ .string = s },
+    };
+}
+
+// php_array_walk: each element goes to the callback as a reference, its key
+// and the user data as values (a callback taking those by reference warns).
+// the walk follows the array as the callback changes it, as foreach by
+// reference does: a removed element is skipped and an added one visited
+fn walk(ctx: *NativeContext, target: Value, callback: Value, userdata: ?Value, recursive: bool) RuntimeError!void {
+    if (target == .object) return walkObject(ctx, target.object, callback, userdata, recursive);
+    const arr = target.array;
+    const by_ref = try ctx.callableParamIsRef(callback, 0);
     var i: usize = 0;
-    while (i < arr.entries.items.len) : (i += 1) {
+    while (i < arr.entries.items.len) {
         const key = arr.entries.items[i].key;
         if (key == .string) key.string.retain();
         defer if (key == .string) key.string.release();
-        const key_val: Value = switch (key) {
-            .int => |k| .{ .int = k },
-            .string => |s| .{ .string = s },
-        };
-        var call_args = [3]Value{ arr.entries.items[i].value, key_val, if (has_userdata) args[2] else .null };
-        const slice: []Value = if (has_userdata) call_args[0..3] else call_args[0..2];
-        _ = try ctx.invokeCallableRef(callback, slice);
-        // re-locate the original entry by key in case the callback reordered
-        // or removed entries before it
-        if (findEntryIndex(arr, key) != null) try ctx.vm.arraySetOwned(arr, key, call_args[0]);
+        const next_key: ?PhpArray.Key = if (i + 1 < arr.entries.items.len) arr.entries.items[i + 1].key else null;
+        if (next_key) |nk| if (nk == .string) nk.string.retain();
+        defer if (next_key) |nk| if (nk == .string) nk.string.release();
+
+        const entry = arr.entries.items[i];
+        const value = if (entry.ref) |cell| cell.* else entry.value;
+        if (recursive and value == .array) {
+            var nested = value.array;
+            // the nested array is walked in place: one shared with another
+            // copy is separated first (SEPARATE_ARRAY)
+            if (entry.ref == null and nested.refcount > 1) {
+                nested = try ctx.vm.cowSeparate(nested);
+                arr.entries.items[i].value = .{ .array = nested };
+            }
+            const Recursion = @import("../runtime/value.zig").Recursion;
+            if (nested.recursion & Recursion.gc != 0) {
+                try ctx.vm.setPendingException("Error", "Recursion detected");
+                return error.RuntimeError;
+            }
+            nested.recursion |= Recursion.gc;
+            VM.retainValue(.{ .array = nested });
+            defer ctx.vm.releaseValue(.{ .array = nested });
+            defer nested.recursion &= ~Recursion.gc;
+            try walk(ctx, .{ .array = nested }, callback, userdata, recursive);
+        } else {
+            var call_args = [3]Value{ value, keyValue(key), userdata orelse .null };
+            const slice: []Value = if (userdata != null) call_args[0..3] else call_args[0..2];
+            _ = try ctx.invokeCallableRefWarned(callback, slice, 1);
+            // a by-reference parameter's change lands in the element, if the
+            // callback left it there
+            if (by_ref) if (findEntryIndex(arr, key) != null) try ctx.vm.arraySetOwned(arr, key, call_args[0]);
+        }
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+        if (findEntryIndex(arr, key)) |j| {
+            i = j + 1;
+        } else if (next_key) |nk| {
+            if (findEntryIndex(arr, nk)) |j| i = j;
+        }
     }
-    return NativeResult.scalar(.{ .bool = true });
+}
+
+// an object's property table, its private and protected names mangled as
+// (array) shows them; a by-reference change is written to the property
+fn walkObject(ctx: *NativeContext, obj: *@import("../runtime/value.zig").PhpObject, callback: Value, userdata: ?Value, recursive: bool) RuntimeError!void {
+    const table = try ctx.vm.castToArray(.{ .object = obj });
+    defer ctx.vm.releaseValue(table);
+    const by_ref = try ctx.callableParamIsRef(callback, 0);
+    for (table.array.entries.items) |entry| {
+        const value = if (entry.ref) |cell| cell.* else entry.value;
+        const name: []const u8 = switch (entry.key) {
+            .string => |s| blk: {
+                const b = s.bytes();
+                if (b.len > 0 and b[0] == 0) if (std.mem.indexOfScalarPos(u8, b, 1, 0)) |end| break :blk b[end + 1 ..];
+                break :blk b;
+            },
+            .int => "",
+        };
+        if (recursive and value == .array) {
+            try walk(ctx, value, callback, userdata, recursive);
+            continue;
+        }
+        var call_args = [3]Value{ value, keyValue(entry.key), userdata orelse .null };
+        const slice: []Value = if (userdata != null) call_args[0..3] else call_args[0..2];
+        _ = try ctx.invokeCallableRefWarned(callback, slice, 1);
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+        if (by_ref and entry.key == .string) try obj.set(ctx.allocator, name, call_args[0]);
+    }
 }
 
 fn findEntryIndex(arr: *PhpArray, key: PhpArray.Key) ?usize {
@@ -1166,30 +1246,6 @@ fn array_replace_recursive(ctx: *NativeContext, args: []const Value) RuntimeErro
         result = try deepReplace(ctx, result, arg.array);
     }
     return NativeResult.borrowed(.{ .array = result });
-}
-
-fn walkRecursive(ctx: *NativeContext, arr: *PhpArray, callback: Value, userdata: ?Value) RuntimeError!void {
-    for (arr.entries.items) |entry| {
-        if (entry.value == .array) {
-            try walkRecursive(ctx, entry.value.array, callback, userdata);
-        } else {
-            const key_val: Value = switch (entry.key) {
-                .int => |k| Value{ .int = k },
-                .string => |s| Value{ .string = s },
-            };
-            var call_args = [3]Value{ entry.value, key_val, userdata orelse .null };
-            const slice: []Value = if (userdata != null) call_args[0..3] else call_args[0..2];
-            _ = try ctx.invokeCallableRef(callback, slice);
-            try ctx.vm.arraySetOwned(arr, entry.key, call_args[0]);
-        }
-    }
-}
-
-fn array_walk_recursive(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2 or args[0] != .array) return NativeResult.scalar(.{ .bool = false });
-    const userdata: ?Value = if (args.len >= 3) args[2] else null;
-    try walkRecursive(ctx, args[0].array, args[1], userdata);
-    return NativeResult.scalar(.{ .bool = true });
 }
 
 // php_array_merge_recursive: integer keys are appended; a string key already

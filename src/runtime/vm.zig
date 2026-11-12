@@ -257,6 +257,10 @@ pub const NativeContext = struct {
     // zend_call_function: an internal function hands values, so a callback
     // parameter declared by reference warns and gets a temporary instead
     fn warnValuesForReferences(self: *NativeContext, callee: callables.Callee, count: usize) RuntimeError!void {
+        return self.warnValuesForReferencesFrom(callee, 0, count);
+    }
+
+    fn warnValuesForReferencesFrom(self: *NativeContext, callee: callables.Callee, from: usize, count: usize) RuntimeError!void {
         const name: []const u8 = switch (callee) {
             .function => |n| n,
             .closure => |obj| blk: {
@@ -269,6 +273,7 @@ pub const NativeContext = struct {
         const func = self.vm.functions.get(name) orelse return;
         if (func.ref_params.len == 0) return;
         for (0..@min(count, func.ref_params.len)) |i| {
+            if (i < from) continue;
             if (!func.ref_params[i] or i >= func.params.len) continue;
             const shown = try self.vm.callableDisplayName(name, func);
             const param = func.params[i];
@@ -288,6 +293,43 @@ pub const NativeContext = struct {
 
     fn invokeCallableRefAsCaller(self: *NativeContext, callable: Value, args: []Value) RuntimeError!Value {
         return callables.invokeRef(self.vm, try self.vm.callbackCallee(callable), args);
+    }
+
+    // invokeCallableRef where only args before `values_from` are references:
+    // the rest are values, so a callback taking one by reference warns as
+    // zend_call_function does
+    pub fn invokeCallableRefWarned(self: *NativeContext, callable: Value, args: []Value, values_from: usize) RuntimeError!Value {
+        const outer = self.vm.native_caller;
+        self.vm.native_caller = .{ .name = self.call_name, .frames = self.vm.frame_count };
+        defer self.vm.native_caller = outer;
+        const callee = try self.vm.callbackCallee(callable);
+        try self.warnValuesForReferencesFrom(callee, values_from, args.len);
+        return callables.invokeRef(self.vm, callee, args);
+    }
+
+    // whether the user function a callable names takes parameter i by reference
+    pub fn callableParamIsRef(self: *NativeContext, callable: Value, i: usize) RuntimeError!bool {
+        const callee = self.vm.callbackCallee(callable) catch {
+            self.vm.discardPending();
+            return true;
+        };
+        const func = self.calleeFunction(callee) orelse return true;
+        return i < func.ref_params.len and func.ref_params[i];
+    }
+
+    fn calleeFunction(self: *NativeContext, callee: callables.Callee) ?*const ObjFunction {
+        const name: []const u8 = switch (callee) {
+            .function => |n| n,
+            .closure => |obj| blk: {
+                if (obj.closureName()) |instance| break :blk instance;
+                const inner = obj.get("__callable");
+                break :blk if (inner == .string) inner.string.bytes() else return null;
+            },
+            .method => |m| m.registered orelse return null,
+            .static_method => |m| m.registered,
+            else => return null,
+        };
+        return self.vm.functions.get(name);
     }
 };
 
@@ -26160,6 +26202,7 @@ pub const VM = struct {
             if (func.ref_params.len == 0) {
                 return self.callByNameAs(name, args, called_class);
             }
+            if (args.len < func.required_params) return self.raiseTooFewArgs(name, args, func);
             // a variadic parameter collects what the fixed ones leave
             const fixed: usize = if (func.is_variadic) func.arity - 1 else func.arity;
             const bind_count = @min(args.len, fixed);
