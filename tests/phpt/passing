@@ -1067,6 +1067,7 @@ Zend/tests/enum/gh9775_1.phpt
 Zend/tests/enum/gh9775_2.phpt
 Zend/tests/enum/implements.phpt
 Zend/tests/enum/instanceof.phpt
+Zend/tests/enum/json_encode.phpt
 Zend/tests/enum/keyword-whitespace.phpt
 Zend/tests/enum/magic-constants.phpt
 Zend/tests/enum/name-property.phpt
@@ -1440,6 +1441,7 @@ Zend/tests/foreach/this_in_foreach_002.phpt
 Zend/tests/foreach/this_in_foreach_003.phpt
 Zend/tests/foreach/this_in_foreach_004.phpt
 Zend/tests/fr47160.phpt
+Zend/tests/frameless_bug_001.phpt
 Zend/tests/frameless_jmp_001.phpt
 Zend/tests/frameless_jmp_002.phpt
 Zend/tests/frameless_jmp_003.phpt
@@ -2102,6 +2104,7 @@ Zend/tests/lazy_objects/gc_004.phpt
 Zend/tests/lazy_objects/gc_005.phpt
 Zend/tests/lazy_objects/gc_006.phpt
 Zend/tests/lazy_objects/get_initializer.phpt
+Zend/tests/lazy_objects/gh15823.phpt
 Zend/tests/lazy_objects/gh15999_002.phpt
 Zend/tests/lazy_objects/gh17941.phpt
 Zend/tests/lazy_objects/gh17998.phpt
@@ -2141,6 +2144,7 @@ Zend/tests/lazy_objects/init_trigger_foreach.phpt
 Zend/tests/lazy_objects/init_trigger_get_mangled_object_vars.phpt
 Zend/tests/lazy_objects/init_trigger_get_object_vars.phpt
 Zend/tests/lazy_objects/init_trigger_json_encode.phpt
+Zend/tests/lazy_objects/init_trigger_json_encode_hooks.phpt
 Zend/tests/lazy_objects/init_trigger_reflection_object_toString.phpt
 Zend/tests/lazy_objects/init_trigger_serialize.phpt
 Zend/tests/lazy_objects/init_trigger_var_dump.phpt
@@ -6834,6 +6838,7 @@ ext/standard/tests/array/bug72031.phpt
 ext/standard/tests/array/bug72116.phpt
 ext/standard/tests/array/bug72369.phpt
 ext/standard/tests/array/bug72622.phpt
+ext/standard/tests/array/bug74345.phpt
 ext/standard/tests/array/bug74361.phpt
 ext/standard/tests/array/bug74361_2.phpt
 ext/standard/tests/array/bug75433.phpt
@@ -8492,6 +8497,7 @@ ext/standard/tests/streams/bug60455_03.phpt
 ext/standard/tests/streams/bug60817.phpt
 ext/standard/tests/streams/bug61019.phpt
 ext/standard/tests/streams/bug61115-1.phpt
+ext/standard/tests/streams/bug61115.phpt
 ext/standard/tests/streams/bug62922.phpt
 ext/standard/tests/streams/bug63240.phpt
 ext/standard/tests/streams/bug64166.phpt
