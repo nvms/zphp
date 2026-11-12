@@ -206,11 +206,12 @@ pub fn register(vm: *VM, a: Allocator) !void {
     var dir_def = ClassDef{ .name = "Directory", .is_final = true, .uncloneable = true };
     try dir_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
     // readonly and uninitialized until dir() fills them in
-    try dir_def.properties.append(a, .{ .name = "path", .default = .null, .is_readonly = true, .type_str = "string" });
-    try dir_def.properties.append(a, .{ .name = "handle", .default = .null, .is_readonly = true, .type_str = "mixed" });
-    try dir_def.methods.put(a, "read", .{ .name = "read", .arity = 0 });
-    try dir_def.methods.put(a, "rewind", .{ .name = "rewind", .arity = 0 });
+    try dir_def.properties.append(a, .{ .name = "path", .default = .undef, .is_readonly = true, .type_str = "string" });
+    try dir_def.properties.append(a, .{ .name = "handle", .default = .undef, .is_readonly = true, .type_str = "mixed" });
     try dir_def.methods.put(a, "close", .{ .name = "close", .arity = 0 });
+    try dir_def.methods.put(a, "rewind", .{ .name = "rewind", .arity = 0 });
+    try dir_def.methods.put(a, "read", .{ .name = "read", .arity = 0 });
+    dir_def.slot_layout = try vm.buildSlotLayout(&dir_def);
     try vm.classes.put(a, "Directory", dir_def);
     try vm.native_fns.put(a, "Directory::__construct", directoryConstruct);
     try vm.native_fns.put(a, "Directory::read", directoryRead);
@@ -1770,8 +1771,9 @@ fn renamePath(from: []const u8, to: []const u8) !void {
 
 fn native_scandir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    // SCANDIR_SORT_ASCENDING=0, _DESCENDING=1, _NONE=2
-    const order: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
+    if (args[0].string.bytes().len == 0) return throwValueError(ctx, "scandir(): Argument #1 ($directory) must not be empty", .{});
+    // SCANDIR_SORT_ASCENDING=0, _NONE=2, anything else descending
+    const order: i64 = if (args.len >= 2) try @import("string_ports.zig").Args.init(ctx, "scandir", args).long(1, "sorting_order") else 0;
     var names = std.ArrayListUnmanaged(Value.String).empty;
     defer names.deinit(ctx.allocator);
     defer for (names.items) |name| name.release();
@@ -1780,10 +1782,15 @@ fn native_scandir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         try warn(ctx, "scandir(): (errno 1): Operation not permitted", .{});
         return NativeResult.scalar(.{ .bool = false });
     }
-    if (!try directoryNames(ctx, args[0].string.bytes(), &names)) return NativeResult.scalar(.{ .bool = false });
+    if (!try directoryNames(ctx, args[0].string.bytes(), &names)) {
+        const err = dirOpenError(args[0].string.bytes());
+        if (userWrapperFor(ctx.vm, args[0].string.bytes()) == null) try warn(ctx, "scandir({s}): Failed to open directory: {s}", .{ args[0].string.bytes(), err.text });
+        try warn(ctx, "scandir(): (errno {d}): {s}", .{ err.errno, err.text });
+        return NativeResult.scalar(.{ .bool = false });
+    }
     transientStreams(ctx, 1);
 
-    if (order == 0 or order == 1) {
+    if (order != 2) {
         const lessAsc = struct {
             fn f(_: void, a: Value.String, b: Value.String) bool {
                 return std.mem.order(u8, a.bytes(), b.bytes()) == .lt;
@@ -1805,6 +1812,24 @@ fn native_scandir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
 // the names in a directory, `.` and `..` first: the disk and the executable's
 // packed application both contribute, a name once; false when neither has the
 // directory
+const DirOpenError = struct { errno: i64, text: []const u8 };
+
+// why the plain wrapper's opendir failed, as strerror(errno) words it
+fn dirOpenError(path: []const u8) DirOpenError {
+    var os_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = bundle.osPath(&os_buf, path);
+    var dir = std.Io.Dir.cwd().openDir(platform.io, dir_path, .{ .iterate = true }) catch |err| return switch (err) {
+        error.FileNotFound, error.BadPathName => .{ .errno = 2, .text = "No such file or directory" },
+        error.NotDir => .{ .errno = 20, .text = "Not a directory" },
+        error.AccessDenied, error.PermissionDenied => .{ .errno = 13, .text = "Permission denied" },
+        error.NameTooLong => .{ .errno = 36, .text = "File name too long" },
+        error.SymLinkLoop => .{ .errno = 40, .text = "Too many levels of symbolic links" },
+        else => .{ .errno = 2, .text = "No such file or directory" },
+    };
+    dir.close(platform.io);
+    return .{ .errno = 2, .text = "No such file or directory" };
+}
+
 fn directoryNames(ctx: *NativeContext, path: []const u8, names: *std.ArrayListUnmanaged(Value.String)) RuntimeError!bool {
     if (userWrapperFor(ctx.vm, path)) |class_name| {
         const context = try network.streamContext(ctx, null);
@@ -1873,28 +1898,34 @@ fn native_dir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     return NativeResult.borrowed(.{ .object = obj });
 }
 
+// php_dir_get_directory_stream_from_this: the handle property must still be
+// an open directory stream
+fn directoryHandle(ctx: *NativeContext, comptime method: []const u8) RuntimeError!Value {
+    const this = ctx.vm.currentFrame().vars.get("$this") orelse return error.RuntimeError;
+    const h = if (this == .object) this.object.get("handle") else Value.null;
+    if (h != .resource or !std.mem.eql(u8, h.resource.class_name, "DirectoryHandle")) {
+        if (h == .resource and value_mod.resourceClosed(h.resource)) {
+            try ctx.vm.setPendingException("TypeError", "Directory::" ++ method ++ "(): cannot use Directory resource after it has been closed");
+            return error.RuntimeError;
+        }
+        try ctx.vm.setPendingException("Error", "Internal directory stream has been altered");
+        return error.RuntimeError;
+    }
+    if (value_mod.resourceClosed(h.resource)) {
+        try ctx.vm.setPendingException("TypeError", "Directory::" ++ method ++ "(): cannot use Directory resource after it has been closed");
+        return error.RuntimeError;
+    }
+    return h;
+}
+
 fn directoryRead(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const this = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.scalar(.{ .bool = false });
-    if (this != .object) return NativeResult.scalar(.{ .bool = false });
-    const h = this.object.get("handle");
-    if (h != .resource) return NativeResult.scalar(.{ .bool = false });
-    return native_readdir(ctx, &.{h});
+    return native_readdir(ctx, &.{try directoryHandle(ctx, "read")});
 }
-
 fn directoryRewind(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const this = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.scalar(.null);
-    if (this != .object) return NativeResult.scalar(.null);
-    const h = this.object.get("handle");
-    if (h != .resource) return NativeResult.scalar(.null);
-    return native_rewinddir(ctx, &.{h});
+    return native_rewinddir(ctx, &.{try directoryHandle(ctx, "rewind")});
 }
-
 fn directoryClose(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const this = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.scalar(.null);
-    if (this != .object) return NativeResult.scalar(.null);
-    const h = this.object.get("handle");
-    if (h != .resource) return NativeResult.scalar(.null);
-    return native_closedir(ctx, &.{h});
+    return native_closedir(ctx, &.{try directoryHandle(ctx, "close")});
 }
 
 fn native_opendir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -1922,7 +1953,10 @@ fn openDirectory(ctx: *NativeContext, args: []const Value, comptime func: []cons
     var names = std.ArrayListUnmanaged(Value.String).empty;
     defer names.deinit(ctx.allocator);
     defer for (names.items) |name| name.release();
-    if (!try directoryNames(ctx, args[0].string.bytes(), &names)) return NativeResult.scalar(.{ .bool = false });
+    if (!try directoryNames(ctx, args[0].string.bytes(), &names)) {
+        try warn(ctx, func ++ "({s}): Failed to open directory: {s}", .{ args[0].string.bytes(), dirOpenError(args[0].string.bytes()).text });
+        return NativeResult.scalar(.{ .bool = false });
+    }
     const names_arr = try ctx.vm.allocArray();
     for (names.items) |name| try names_arr.append(ctx.allocator, .{ .string = name });
     const obj = try ctx.createResource("DirectoryHandle");
@@ -1937,6 +1971,7 @@ fn openDirectory(ctx: *NativeContext, args: []const Value, comptime func: []cons
 // opened last when it has none
 fn dirArg(ctx: *NativeContext, args: []const Value, comptime func: []const u8) RuntimeError!*PhpObject {
     if (args.len == 0 or args[0] == .null) {
+        try ctx.vm.raiseError(8192, func ++ "(): Passing null is deprecated, instead the last opened directory stream should be provided");
         const last = ctx.vm.last_directory orelse return throwStreamArg(ctx, "No resource supplied", .{});
         if (value_mod.resourceClosed(last)) return throwStreamArg(ctx, func ++ "(): Argument #1 ($dir_handle) must be an open stream resource", .{});
         return last;
@@ -4208,7 +4243,11 @@ fn native_chdir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     const path = bundle.osPath(&os_buf, args[0].string.bytes());
     if (open_basedir.setting(ctx.vm) != null and !try open_basedir.allows(ctx.vm, "chdir", args[0].string.bytes())) return NativeResult.scalar(.{ .bool = false });
     bundle.ensureDir(path);
-    var dir = std.Io.Dir.cwd().openDir(platform.io, path, .{}) catch return NativeResult.scalar(.{ .bool = false });
+    var dir = std.Io.Dir.cwd().openDir(platform.io, path, .{}) catch {
+        const err = dirOpenError(args[0].string.bytes());
+        try warnDocref(ctx, "{s} (errno {d})", .{ err.text, err.errno });
+        return NativeResult.scalar(.{ .bool = false });
+    };
     defer dir.close(platform.io);
     std.process.setCurrentDir(platform.io, dir) catch return NativeResult.scalar(.{ .bool = false });
     ctx.vm.clearRealDirCache();
