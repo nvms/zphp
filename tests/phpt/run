@@ -85,10 +85,23 @@ from collections import defaultdict
 log, baseline_path, update, src, dirs = sys.argv[1], sys.argv[2], sys.argv[3] == "1", sys.argv[4], sys.argv[5:]
 ansi = re.compile(r"\x1b\[[0-9;]*m")
 line_re = re.compile(r"^(PASS|FAIL|SKIP|BORK|XFAIL|LEAK|WARN|XLEAK)\b.*\[([^\[\]]+\.phpt)\]")
+# a title of several lines puts the status on the first and the file on the
+# last
+status_re = re.compile(r"^(PASS|FAIL|SKIP|BORK|XFAIL|LEAK|WARN|XLEAK)\b")
+file_re = re.compile(r"\[([^\[\]]+\.phpt)\]")
 outcome = {}
+pending = None
 with open(log, errors="replace") as f:
     for raw in f:
-        m = line_re.match(ansi.sub("", raw))
+        text = ansi.sub("", raw)
+        m = line_re.match(text)
+        if not m and pending:
+            tail = file_re.search(text)
+            if tail:
+                m = re.match(r"(\S+).*\[(.+)\]", pending + " [" + tail.group(1) + "]")
+            elif not status_re.match(text):
+                continue
+        pending = text.split(" ", 1)[0] if status_re.match(text) and not m else None
         if not m:
             continue
         status, name = m.groups()
