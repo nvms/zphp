@@ -352,6 +352,7 @@ pub const functions = Map.initComptime(.{
     .{ "get_required_files", "Core" },
     .{ "get_resource_id", "Core" },
     .{ "get_resource_type", "Core" },
+    .{ "get_resources", "Core" },
     .{ "getcwd", "standard" },
     .{ "getdate", "date" },
     .{ "getenv", "standard" },

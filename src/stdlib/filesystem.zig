@@ -219,6 +219,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     inline for (.{ .{ "STDIN", 0, "r" }, .{ "STDOUT", 1, "w" }, .{ "STDERR", 2, "w" } }) |spec| {
         const obj = try vm.newResource("FileHandle");
+        // the constants hold their streams for the whole run
+        obj.retain();
         try obj.set(a, "__fd", .{ .int = spec[1] });
         try obj.set(a, "__open", .{ .bool = true });
         try obj.set(a, "__mode", .{ .string = Value.String.borrowed(spec[2]) });

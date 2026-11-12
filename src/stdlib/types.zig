@@ -170,6 +170,7 @@ pub const entries = .{
     .{ "filter_var_array", native_filter_var_array },
     .{ "is_resource", native_is_resource },
     .{ "get_resource_type", native_get_resource_type },
+    .{ "get_resources", native_get_resources },
     .{ "get_resource_id", native_get_resource_id },
 };
 
@@ -3015,3 +3016,37 @@ fn count(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return countAs(ctx, "count", args);
 }
 
+// get_resources(?string $type = null): the live resources by id, of one
+// type when asked ("Unknown" for the closed ones)
+fn native_get_resources(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = @import("html.zig").Params{ .ctx = ctx, .func = "get_resources", .args = args };
+    const want: ?[]const u8 = if (args.len > 0 and args[0] != .null) try p.string(0, "type", "") else null;
+    if (want) |t| {
+        // the resource types php registers (zend_fetch_list_dtor_id), and the
+        // closed ones
+        const known = [_][]const u8{ "Unknown", "stream", "persistent stream", "stream-context", "stream filter", "process", "userfilter.bucket brigade", "userfilter.bucket", "stream_wrapper" };
+        var valid = false;
+        for (known) |k| if (std.mem.eql(u8, k, t)) {
+            valid = true;
+        };
+        if (!valid) {
+            try ctx.vm.setPendingException("ValueError", "get_resources(): Argument #1 ($type) must be a valid resource type");
+            return error.RuntimeError;
+        }
+    }
+    var live: std.ArrayListUnmanaged(*PhpObject) = .empty;
+    defer live.deinit(ctx.allocator);
+    for (ctx.vm.objects.items) |obj| {
+        if (!obj.resource or obj.pooled or obj.destructed or obj.id == 0) continue;
+        if (want) |t| if (!std.mem.eql(u8, value_mod.resourceTypeName(obj), t)) continue;
+        try live.append(ctx.allocator, obj);
+    }
+    std.mem.sort(*PhpObject, live.items, {}, struct {
+        fn lt(_: void, a: *PhpObject, b: *PhpObject) bool {
+            return a.id < b.id;
+        }
+    }.lt);
+    const arr = try ctx.createArray();
+    for (live.items) |obj| try arr.set(ctx.allocator, .{ .int = obj.id }, .{ .resource = obj });
+    return NativeResult.borrowed(.{ .array = arr });
+}

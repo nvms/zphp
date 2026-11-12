@@ -1704,6 +1704,7 @@ pub const map = std.StaticStringMap(Signature).initComptime(.{
     .{ "get_required_files", Signature{ .params = &[_]Param{}, .returns = "array" } },
     .{ "get_resource_id", Signature{ .params = &[_]Param{ .{ .name = "resource" } }, .returns = "int" } },
     .{ "get_resource_type", Signature{ .params = &[_]Param{ .{ .name = "resource" } }, .returns = "string" } },
+    .{ "get_resources", Signature{ .params = &[_]Param{ .{ .name = "type", .default = .null, .type = "?string" } }, .returns = "array" } },
     .{ "getcwd", Signature{ .params = &[_]Param{}, .returns = "string|false" } },
     .{ "getdate", Signature{ .params = &[_]Param{ .{ .name = "timestamp", .default = .null, .type = "?int" } }, .returns = "array" } },
     .{ "getenv", Signature{ .params = &[_]Param{ .{ .name = "name", .default = .null, .type = "?string" }, .{ .name = "local_only", .default = .{ .bool = false }, .type = "bool" } }, .returns = "array|string|false" } },
