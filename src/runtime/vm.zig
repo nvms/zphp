@@ -6744,6 +6744,51 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
                     }
+                    // a property the scope can't reach, with __get: php's
+                    // read_property(BP_VAR_W). a by-value __get hands back a
+                    // copy, so the write is lost
+                    if (hook_cell == null and self.magicApplies(eap_obj, prop_name, .get)) overloaded: {
+                        const vr = self.findPropertyVisibility(eap_obj.class_name, prop_name);
+                        const slot_present = eap_obj.slots != null and eap_obj.getSlotIndexForScope(prop_name, vr.defining_class) != null;
+                        const present = !eap_obj.isUnset(prop_name) and (slot_present or eap_obj.properties.contains(prop_name));
+                        if (present and !(vr.declared and !self.checkVisibility(vr.defining_class, vr.visibility))) break :overloaded;
+                        // &__get: the write goes through the reference it returns
+                        if (try self.magicGetReturnsRef(eap_obj)) {
+                            self.setReturnRef(null);
+                            cur = (implicit_call: {
+                                const handlers_before = self.handler_count;
+                                break :implicit_call self.callMagicGet(eap_obj, prop_name) catch {
+                                    if (self.resumeAfterThrow(base_frame, handlers_before)) continue;
+                                    return error.RuntimeError;
+                                };
+                            });
+                            hook_cell = try self.takeHookReturnCell();
+                            if (hook_cell) |cell| cur = cell.*;
+                            break :overloaded;
+                        }
+                        {
+                            const result = (implicit_call: {
+                                const handlers_before = self.handler_count;
+                                break :implicit_call self.callMagicGet(eap_obj, prop_name) catch {
+                                    if (self.resumeAfterThrow(base_frame, handlers_before)) continue;
+                                    return error.RuntimeError;
+                                };
+                            });
+                            if (result == .object) {
+                                self.push(result);
+                                continue;
+                            }
+                            const msg = try std.fmt.allocPrint(self.allocator, "Indirect modification of overloaded property {s}::${s} has no effect", .{ eap_obj.class_name, prop_name });
+                            defer self.allocator.free(msg);
+                            self.raiseError(8, msg) catch if (try self.resumeRaised()) continue;
+                            const temp = if (result == .array) try self.shallowCloneCow(result.array) else try self.allocArray();
+                            self.stackRelease(result);
+                            self.push(.{ .array = temp });
+                            // nothing holds the copy: it goes when the statement ends
+                            self.discardOrphan(.{ .array = temp });
+                            continue;
+                        }
+                    }
                     if (cur != .object or datePeriodField(self.findPropertyVisibility(eap_obj.class_name, prop_name), prop_name)) {
                         if (try self.checkPropertyMutation(eap_obj, prop_name, .indirect)) continue;
                     }
@@ -22007,6 +22052,12 @@ pub const VM = struct {
             try self.propagateCellWrite(cell, cell.*);
         }
         return cell.*;
+    }
+
+    fn magicGetReturnsRef(self: *VM, obj: *PhpObject) RuntimeError!bool {
+        const full_name = self.resolveMethod(obj.class_name, "__get") catch return false;
+        const func = self.functions.get(full_name) orelse return false;
+        return func.returns_ref;
     }
 
     fn propGetReturnsRef(self: *VM, obj: *PhpObject, prop_name: []const u8) RuntimeError!bool {
