@@ -4707,6 +4707,7 @@ ext/pcre/tests/errors06.phpt
 ext/pcre/tests/gh10968.phpt
 ext/pcre/tests/gh11956.phpt
 ext/pcre/tests/gh15205_1.phpt
+ext/pcre/tests/gh15205_2.phpt
 ext/pcre/tests/gh17122.phpt
 ext/pcre/tests/grep.phpt
 ext/pcre/tests/invalid_utf8.phpt
