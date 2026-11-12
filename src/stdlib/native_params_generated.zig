@@ -1896,6 +1896,7 @@ pub const map = std.StaticStringMap(Signature).initComptime(.{
     .{ "ini_alter", Signature{ .params = &[_]Param{ .{ .name = "option", .type = "string" }, .{ .name = "value", .type = "string|int|float|bool|null" } }, .returns = "string|false" } },
     .{ "ini_get", Signature{ .params = &[_]Param{ .{ .name = "option", .type = "string" } }, .returns = "string|false" } },
     .{ "ini_get_all", Signature{ .params = &[_]Param{ .{ .name = "extension", .default = .null, .type = "?string" }, .{ .name = "details", .default = .{ .bool = true }, .type = "bool" } }, .returns = "array|false" } },
+    .{ "ini_parse_quantity", Signature{ .params = &[_]Param{ .{ .name = "shorthand", .type = "string" } }, .returns = "int" } },
     .{ "ini_restore", Signature{ .params = &[_]Param{ .{ .name = "option", .type = "string" } }, .returns = "void" } },
     .{ "ini_set", Signature{ .params = &[_]Param{ .{ .name = "option", .type = "string" }, .{ .name = "value", .type = "string|int|float|bool|null" } }, .returns = "string|false" } },
     .{ "intdiv", Signature{ .params = &[_]Param{ .{ .name = "num1", .type = "int" }, .{ .name = "num2", .type = "int" } }, .returns = "int" } },

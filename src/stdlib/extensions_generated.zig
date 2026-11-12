@@ -541,6 +541,7 @@ pub const functions = Map.initComptime(.{
     .{ "ini_alter", "standard" },
     .{ "ini_get", "standard" },
     .{ "ini_get_all", "standard" },
+    .{ "ini_parse_quantity", "standard" },
     .{ "ini_restore", "standard" },
     .{ "ini_set", "standard" },
     .{ "intdiv", "standard" },

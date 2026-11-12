@@ -82,6 +82,7 @@ pub const entries = .{
     .{ "get_current_user", native_get_current_user },
     .{ "getmyinode", native_noop_zero },
     .{ "ini_get", native_ini_get },
+    .{ "ini_parse_quantity", native_ini_parse_quantity },
     .{ "ini_get_all", native_ini_get_all },
     .{ "ini_restore", native_ini_restore },
     .{ "get_cfg_var", native_get_cfg_var },
@@ -1551,6 +1552,18 @@ fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "syslog.ident")) return "php";
     if (std.mem.eql(u8, name, "syslog.facility")) return "LOG_USER";
     return null;
+}
+
+// php's ini_parse_quantity: zend_ini_parse_quantity, warning with its
+// complaint
+fn native_ini_parse_quantity(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const text = if (args.len > 0 and args[0] == .string) args[0].string.bytes() else "";
+    const report = try @import("../runtime/memory.zig").reportQuantity(ctx.allocator, text, true);
+    if (report.message) |msg| {
+        defer ctx.allocator.free(msg);
+        try ctx.vm.emitWarning(msg);
+    }
+    return NativeResult.scalar(.{ .int = @bitCast(report.value) });
 }
 
 fn native_ini_get(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
