@@ -13295,7 +13295,9 @@ pub const VM = struct {
         }
         if (!with_args) return entry;
         const args = try self.traceArgs(entry);
-        for (call.args) |a| try args.append(self.allocator, a);
+        // the parameters php's stubs mark #[\SensitiveParameter]
+        const sensitive = deprecations.sensitive_parameters.get(call.label) orelse 0;
+        for (call.args, 0..) |a, i| try args.append(self.allocator, try self.traceArgValue(a, sensitive, i));
         return entry;
     }
 

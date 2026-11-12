@@ -4887,6 +4887,7 @@ ext/hash/tests/ripemd128.phpt
 ext/hash/tests/ripemd160.phpt
 ext/hash/tests/ripemd256.phpt
 ext/hash/tests/ripemd320.phpt
+ext/hash/tests/sensitive_parameter.phpt
 ext/hash/tests/sha1.phpt
 ext/hash/tests/sha224.phpt
 ext/hash/tests/sha256.phpt
@@ -8325,6 +8326,7 @@ ext/standard/tests/network/unixloop.phpt
 ext/standard/tests/password/bug75221.phpt
 ext/standard/tests/password/password_bcrypt_short.phpt
 ext/standard/tests/password/password_default.phpt
+ext/standard/tests/password/password_hash_sensitive_parameter.phpt
 ext/standard/tests/password/password_verify_argon2.phpt
 ext/standard/tests/password/password_verify_error.phpt
 ext/standard/tests/serialize/001.phpt
