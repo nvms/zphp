@@ -8178,7 +8178,10 @@ pub const VM = struct {
                     if (obj_val == .object) {
                         const vr = self.findPropertyVisibility(obj_val.object.class_name, name);
                         const cur = obj_val.object.getForScope(name, vr.defining_class);
-                        if (cur != .object or datePeriodField(vr, name)) {
+                        // an unset fetch of an uninitialized property reads
+                        // nothing (zend_std_read_property with BP_VAR_UNSET)
+                        const uninit_readonly = vr.is_readonly and obj_val.object.rawForScope(name, vr.defining_class) == .undef;
+                        if ((cur != .object and !uninit_readonly) or datePeriodField(vr, name)) {
                             if (try self.checkPropertyMutationVis(obj_val.object, name, .indirect, vr)) continue;
                         }
                     }
@@ -21539,8 +21542,16 @@ pub const VM = struct {
                 try std.fmt.allocPrint(self.allocator, "Cannot unset {s}::${s}", .{ self.declaredClassName(obj.class_name), name })
             else
                 try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property DatePeriod::${s}", .{name});
-        } else if (action == .write and vr.is_readonly and vr.set_visibility == .protected and obj.getForScope(name, vr.defining_class) != .null) {
+        } else if (action == .write and vr.is_readonly and obj.rawForScope(name, vr.defining_class) != .undef) {
+            // zend_std_write_property: an initialized readonly property is
+            // refused before its set visibility is
             msg = try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{ vr.defining_class, name });
+        } else if (action == .unset and vr.is_readonly and obj.rawForScope(name, vr.defining_class) != .undef) {
+            msg = try std.fmt.allocPrint(self.allocator, "Cannot unset readonly property {s}::${s}", .{ vr.defining_class, name });
+        } else if (action == .indirect and vr.is_readonly and self.checkVisibility(vr.defining_class, vr.visibility)) {
+            // zend_std_read_property for writing: a readonly property is never
+            // modified in place, whatever the scope
+            msg = try std.fmt.allocPrint(self.allocator, "Cannot indirectly modify readonly property {s}::${s}", .{ vr.defining_class, name });
         } else if (vr.set_visibility != vr.visibility and !self.checkVisibility(vr.defining_class, vr.set_visibility)) {
             const verb: []const u8 = switch (action) {
                 .write => "modify",
