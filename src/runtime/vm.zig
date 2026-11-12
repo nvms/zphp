@@ -1760,6 +1760,8 @@ pub const VM = struct {
         // the function whose parameter default is being resolved, for the
         // location of the error an unresolvable default raises
         default_site: ?*const ObjFunction = null,
+        // the arguments the call passed, which its trace entry shows
+        default_args: []const Value = &.{},
         // values ini_set and friends stored in ini_settings, owned here by
         // directive name; the file's and extensions' values are borrowed
         ini_values: std.StringHashMapUnmanaged([]u8) = .{},
@@ -23168,6 +23170,10 @@ pub const VM = struct {
     // the frame is never entered, and the error lands in this loop's nearest
     // catch as a type check's does: true means it did and the call is over
     fn fillDefaultLocals(self: *VM, func: *const ObjFunction, locals: []Value, bound: usize, offset: usize) RuntimeError!bool {
+        const ic = self.ic.?;
+        const saved_args = ic.default_args;
+        ic.default_args = locals[offset..][0..bound];
+        defer ic.default_args = saved_args;
         for (bound..func.arity) |i| {
             if (i >= func.defaults.len) continue;
             locals[i + offset] = self.resolveParamDefault(func, i) catch |err| {
@@ -23186,6 +23192,10 @@ pub const VM = struct {
     // as fillDefaultLocals, for a call made on behalf of a native: the error
     // stays pending for the native's caller
     fn fillDefaultLocalsForCaller(self: *VM, func: *const ObjFunction, locals: []Value, bound: usize, offset: usize) RuntimeError!void {
+        const ic = self.ic.?;
+        const saved_args = ic.default_args;
+        ic.default_args = locals[offset..][0..bound];
+        defer ic.default_args = saved_args;
         for (bound..func.arity) |i| {
             if (i >= func.defaults.len) continue;
             locals[i + offset] = self.resolveParamDefault(func, i) catch |err| {
@@ -23199,8 +23209,12 @@ pub const VM = struct {
         if (self.resolving_quietly) return error.RuntimeError;
         const msg = try std.fmt.allocPrint(self.allocator, fmt, args);
         defer self.allocator.free(msg);
-        const at: ?SourcePosition = if (self.ic.?.default_site) |func| .{ .file = func.file_path, .line = func.start_line } else null;
-        self.raise(.{ .object = try self.newBuiltinException("Error", msg, at) });
+        const site = self.ic.?.default_site;
+        const at: ?SourcePosition = if (site) |func| .{ .file = func.file_path, .line = func.start_line } else null;
+        const exc = try self.newBuiltinException("Error", msg, at);
+        // php evaluates the default in the callee's frame (RECV_INIT)
+        if (site) |func| try self.prependCallToTrace(exc, func, self.ic.?.default_args);
+        self.raise(.{ .object = exc });
         return error.RuntimeError;
     }
 
