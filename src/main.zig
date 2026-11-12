@@ -689,8 +689,8 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
     vm.interpret(result) catch {
         if (vm.exit_requested) {
             const shutdown_failed = try runShutdown(allocator, vm);
-            if (vm.output.items.len > 0) try writeStdout(vm.output.items);
-            std.process.exit(if (shutdown_failed) 255 else vm.exit_code);
+            const aborted = !flushScriptOutput(vm);
+            std.process.exit(if (shutdown_failed or aborted) 255 else vm.exit_code);
         }
         // dispatch to user exception handler if one is installed and we have
         // an uncaught exception. handler runs, then we exit 0 unless it
@@ -704,9 +704,9 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
                 const handler_failed = vm.pending_exception != null and !vm.exit_requested;
                 if (handler_failed) try reportRuntimeError(allocator, vm);
                 const shutdown_failed = try runShutdown(allocator, vm);
-                if (vm.output.items.len > 0) try writeStdout(vm.output.items);
+                const aborted = !flushScriptOutput(vm);
                 if (platform.getenv("ZPHP_DBG_PROFILE") != null) dumpProfile(vm);
-                if (shutdown_failed) std.process.exit(255);
+                if (shutdown_failed or aborted) std.process.exit(255);
                 if (vm.exit_requested) std.process.exit(vm.exit_code);
                 if (handler_failed) std.process.exit(255);
                 return;
@@ -717,13 +717,13 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
         if (vm.pending_exception == null or vm.uncatchable_fatal) vm.unclean_shutdown = true;
         try reportRuntimeError(allocator, vm);
         _ = try runShutdown(allocator, vm);
-        if (vm.output.items.len > 0) try writeStdout(vm.output.items);
+        _ = flushScriptOutput(vm);
         if (platform.getenv("ZPHP_DBG_PROFILE") != null) dumpProfile(vm);
         std.process.exit(255);
     };
     const shutdown_failed = try runShutdown(allocator, vm);
-    if (vm.output.items.len > 0) try writeStdout(vm.output.items);
-    if (shutdown_failed) std.process.exit(255);
+    const aborted = !flushScriptOutput(vm);
+    if (shutdown_failed or aborted) std.process.exit(255);
     if (vm.exit_requested) std.process.exit(vm.exit_code);
 }
 
@@ -925,6 +925,14 @@ fn compileDiskEntry(allocator: std.mem.Allocator, entry: []const u8) !CompileRes
     const source = try readSource(allocator, entry);
     defer allocator.free(source);
     return compileSource(allocator, source, entry);
+}
+
+// the script's remaining output. a write the reader refused (a closed pipe)
+// is php's aborted connection: no message, and the run ends with 255
+fn flushScriptOutput(vm: *@import("runtime/vm.zig").VM) bool {
+    if (vm.output.items.len == 0) return true;
+    platform.writeAll(std.Io.File.stdout(), vm.output.items) catch return false;
+    return true;
 }
 
 fn writeStdout(msg: []const u8) !void {
