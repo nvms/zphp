@@ -1316,7 +1316,72 @@ fn native_set_time_limit(ctx: *NativeContext, args: []const Value) RuntimeError!
     return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_request_parse_body(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+// request_parse_body(?array $options = null): the options checked as php
+// caches them, then the request's body parsed. without a content type (the
+// cli) php throws
+fn native_request_parse_body(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const options: Value = if (args.len > 0) args[0] else .null;
+    if (options != .null and options != .array) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "request_parse_body(): Argument #1 ($options) must be of type ?array, {s} given", .{options.valueName()});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.setPendingException("TypeError", msg);
+        return error.RuntimeError;
+    }
+    if (options == .array) for (options.array.entries.items) |entry| {
+        const key = switch (entry.key) {
+            .int => {
+                try ctx.vm.setPendingException("ValueError", "Invalid integer key in $options argument");
+                return error.RuntimeError;
+            },
+            .string => |k| k.bytes(),
+        };
+        if (key.len == 0) {
+            try ctx.vm.setPendingException("ValueError", "Invalid empty string key in $options argument");
+            return error.RuntimeError;
+        }
+        const known = [_][]const u8{ "max_file_uploads", "max_input_vars", "max_multipart_body_parts", "post_max_size", "upload_max_filesize" };
+        var found = false;
+        for (known) |k| if (std.ascii.eqlIgnoreCase(k, key)) {
+            found = true;
+        };
+        if (!found) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Invalid key \"{s}\" in $options argument", .{key});
+            defer ctx.allocator.free(msg);
+            try ctx.vm.setPendingException("ValueError", msg);
+            return error.RuntimeError;
+        }
+        const v = if (entry.ref) |r| r.* else entry.value;
+        switch (v) {
+            .string => |str| {
+                const trimmed = std.mem.trim(u8, str.bytes(), " \t\n\r\x0b\x0c");
+                const q = @import("../runtime/memory.zig").parseQuantity(str.bytes());
+                if (q.problem) |problem| {
+                    const msg = switch (problem) {
+                        .no_digits => try std.fmt.allocPrint(ctx.allocator, "Invalid quantity \"{s}\": no valid leading digits, interpreting as \"0\" for backwards compatibility", .{trimmed}),
+                        .unknown_multiplier => |u| try std.fmt.allocPrint(ctx.allocator, "Invalid quantity \"{s}\": unknown multiplier \"{c}\", interpreting as \"{s}\" for backwards compatibility", .{ trimmed, u.multiplier, u.used }),
+                        .out_of_range => try std.fmt.allocPrint(ctx.allocator, "Invalid quantity \"{s}\": value is out of range, using overflow result for backwards compatibility", .{trimmed}),
+                    };
+                    defer ctx.allocator.free(msg);
+                    try ctx.vm.emitWarning(msg);
+                }
+            },
+            .int => {},
+            else => {
+                const msg = try std.fmt.allocPrint(ctx.allocator, "Invalid {s} value in $options argument", .{v.valueName()});
+                defer ctx.allocator.free(msg);
+                try ctx.vm.setPendingException("ValueError", msg);
+                return error.RuntimeError;
+            },
+        }
+    };
+    var has_content_type = false;
+    if (ctx.vm.request_vars.get("$_SERVER")) |server| if (server == .array) {
+        has_content_type = server.array.get(.{ .string = Value.String.borrowed("CONTENT_TYPE") }) == .string;
+    };
+    if (!ctx.vm.serve_mode or !has_content_type) {
+        try ctx.vm.setPendingException("RequestParseBodyException", "Request does not provide a content type");
+        return error.RuntimeError;
+    }
     var post = try ctx.createArray();
     var files = try ctx.createArray();
     if (ctx.vm.request_vars.get("$_POST")) |post_val| {

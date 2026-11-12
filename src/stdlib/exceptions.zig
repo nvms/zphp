@@ -104,6 +104,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
         .{ "UnderflowException", "RuntimeException" },
         .{ "PDOException", "RuntimeException" },
         .{ "JsonException", "Exception" },
+        .{ "RequestParseBodyException", "Exception" },
         .{ "DOMException", "Exception" },
         .{ "TypeError", "Error" },
         .{ "ArgumentCountError", "TypeError" },

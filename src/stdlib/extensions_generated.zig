@@ -1399,6 +1399,7 @@ pub const classes = Map.initComptime(.{
     .{ "mysqli_stmt", "mysqli" },
     .{ "mysqli_warning", "mysqli" },
     .{ "stdClass", "Core" },
+    .{ "RequestParseBodyException", "Core" },
 });
 
 pub const constants = Map.initComptime(.{
