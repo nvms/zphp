@@ -251,16 +251,49 @@ pub const NativeContext = struct {
     fn invokeCallableAsCaller(self: *NativeContext, callable: Value, args: []const Value) RuntimeError!Value {
         const callee = try self.vm.callbackCallee(callable);
         try self.warnValuesForReferences(callee, args.len);
+        // an internal function that changes its array argument in place gets
+        // its own copy of a value (php wraps the value in a temporary reference)
+        if (callee == .function and args.len > 0 and args.len <= 16 and args[0] == .array and args[0].array.refcount > 1 and
+            self.vm.native_fns.get(callee.function) != null and @import("../stdlib/byref_args.zig").arg0IsByRef(callee.function))
+        {
+            var copy: [16]Value = undefined;
+            @memcpy(copy[0..args.len], args);
+            const own = try self.vm.cloneArray(args[0].array);
+            copy[0] = .{ .array = own };
+            VM.retainValue(copy[0]);
+            defer self.vm.releaseValue(copy[0]);
+            return callables.invoke(self.vm, callee, copy[0..args.len]);
+        }
         return callables.invoke(self.vm, callee, args);
     }
 
     // zend_call_function: an internal function hands values, so a callback
     // parameter declared by reference warns and gets a temporary instead
     fn warnValuesForReferences(self: *NativeContext, callee: callables.Callee, count: usize) RuntimeError!void {
-        return self.warnValuesForReferencesFrom(callee, 0, count);
+        return self.warnValuesForReferencesMask(callee, count, &.{});
     }
 
-    fn warnValuesForReferencesFrom(self: *NativeContext, callee: callables.Callee, from: usize, count: usize) RuntimeError!void {
+    fn warnValuesForReferencesMask(self: *NativeContext, callee: callables.Callee, count: usize, is_ref: []const bool) RuntimeError!void {
+        // an internal function's by-reference parameter warns the same way
+        if (callee == .function and self.vm.native_fns.get(callee.function) != null) {
+            const byref = @import("../stdlib/byref_args.zig");
+            const name = callee.function;
+            for (0..count) |i| {
+                if (i < is_ref.len and is_ref[i]) continue;
+                if (!byref.isByRef(name, i)) continue;
+                // array_multisort and extract take values quietly
+                if (std.ascii.eqlIgnoreCase(name, "array_multisort") or std.ascii.eqlIgnoreCase(name, "extract")) continue;
+                const msg = try self.vm.cannotPassByReference(name, @intCast(@min(i, 255)));
+                defer self.allocator.free(msg);
+                // the same parameter naming as "could not be passed by reference"
+                const suffix = " could not be passed by reference";
+                const head = if (std.mem.endsWith(u8, msg, suffix)) msg[0 .. msg.len - suffix.len] else msg;
+                const warning = try std.fmt.allocPrint(self.allocator, "{s} must be passed by reference, value given", .{head});
+                defer self.allocator.free(warning);
+                try self.vm.emitWarning(warning);
+            }
+            return;
+        }
         const name: []const u8 = switch (callee) {
             .function => |n| n,
             .closure => |obj| blk: {
@@ -273,7 +306,7 @@ pub const NativeContext = struct {
         const func = self.vm.functions.get(name) orelse return;
         if (func.ref_params.len == 0) return;
         for (0..@min(count, func.ref_params.len)) |i| {
-            if (i < from) continue;
+            if (i < is_ref.len and is_ref[i]) continue;
             if (!func.ref_params[i] or i >= func.params.len) continue;
             const shown = try self.vm.callableDisplayName(name, func);
             const param = func.params[i];
@@ -299,11 +332,19 @@ pub const NativeContext = struct {
     // the rest are values, so a callback taking one by reference warns as
     // zend_call_function does
     pub fn invokeCallableRefWarned(self: *NativeContext, callable: Value, args: []Value, values_from: usize) RuntimeError!Value {
+        var refs: [16]bool = @splat(false);
+        for (0..@min(values_from, refs.len)) |i| refs[i] = true;
+        return self.invokeCallableRefMask(callable, args, refs[0..@min(args.len, refs.len)]);
+    }
+
+    // invokeCallableRef where is_ref says which args are references; a
+    // by-reference parameter given one of the others warns
+    pub fn invokeCallableRefMask(self: *NativeContext, callable: Value, args: []Value, is_ref: []const bool) RuntimeError!Value {
         const outer = self.vm.native_caller;
         self.vm.native_caller = .{ .name = self.call_name, .frames = self.vm.frame_count };
         defer self.vm.native_caller = outer;
         const callee = try self.vm.callbackCallee(callable);
-        try self.warnValuesForReferencesFrom(callee, values_from, args.len);
+        try self.warnValuesForReferencesMask(callee, args.len, is_ref);
         return callables.invokeRef(self.vm, callee, args);
     }
 
@@ -20022,6 +20063,13 @@ pub const VM = struct {
     // a reference cell owns the value it holds: every write retains the new
     // value and releases the previous one. mirrors (variable slots, array
     // elements, properties, captures) own their own references independently
+    // a write through a reference from native code: the cell and every
+    // storage that mirrors it
+    pub fn writeReference(self: *VM, cell: *Value, val: Value) RuntimeError!void {
+        self.setCell(cell, val);
+        self.propagateCellWrite(cell, val) catch return error.RuntimeError;
+    }
+
     pub fn setCell(self: *VM, cell: *Value, val: Value) void {
         // Native request consumers share the canonical binding too. The map
         // remains an owning mirror, including when the value is replaced.
@@ -20375,7 +20423,7 @@ pub const VM = struct {
     }
 
     // zend_cannot_pass_by_reference's message for argument pos of a callee
-    fn cannotPassByReference(self: *VM, callee: []const u8, pos: u8) ![]u8 {
+    pub fn cannotPassByReference(self: *VM, callee: []const u8, pos: u8) ![]u8 {
         var param: []const u8 = "";
         var shown: []const u8 = callee;
         if (self.functions.get(callee)) |func| {

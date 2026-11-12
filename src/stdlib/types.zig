@@ -970,6 +970,27 @@ fn native_call_user_func_array(ctx: *NativeContext, args: []const Value) Runtime
     if (args.len < 2) return NativeResult.scalar(.null);
     if (args[1] != .array) return NativeResult.share(try ctx.invokeCallable(args[0], &.{}));
     const arr = args[1].array;
+    // an element that is a reference is passed as that reference, so a
+    // callback taking it by reference writes through it
+    const items = arr.entries.items;
+    var has_ref = false;
+    for (items) |e| if (e.ref != null and e.key == .int) {
+        has_ref = true;
+    };
+    if (has_ref and items.len <= 16) {
+        var values: [16]Value = undefined;
+        var is_ref: [16]bool = undefined;
+        for (items, 0..) |e, i| {
+            values[i] = if (e.ref) |cell| cell.* else e.value;
+            is_ref[i] = e.ref != null;
+        }
+        const cells = try ctx.allocator.alloc(?*Value, items.len);
+        defer ctx.allocator.free(cells);
+        for (items, 0..) |e, i| cells[i] = e.ref;
+        const result = try ctx.invokeCallableRefMask(args[0], values[0..items.len], is_ref[0..items.len]);
+        for (cells, 0..) |maybe, i| if (maybe) |cell| try ctx.vm.writeReference(cell, values[i]);
+        return NativeResult.share(result);
+    }
     var buf: [16]Value = undefined;
     const call_args = try ctx.argsFromArray(arr, &buf);
     defer ctx.freeArgs(call_args, &buf);
