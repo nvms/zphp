@@ -1,5 +1,6 @@
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
+const error_format = @import("../error_format.zig");
 const class_names = @import("../runtime/class_names.zig");
 const callables = @import("../runtime/callables.zig");
 const object_properties = @import("../runtime/object_properties.zig");
@@ -2103,34 +2104,45 @@ fn native_error_reporting(ctx: *NativeContext, args: []const Value) RuntimeError
     return NativeResult.scalar(.{ .int = prev });
 }
 
-// runtime helper emitted by the compiler for match-without-default. produces
-// the message body PHP's UnhandledMatchError uses:
-//   int/float/bool/null  -> "Unhandled match case 99"
-//   string               -> "Unhandled match case 'hello'"
-//   array/object         -> "Unhandled match case of type array" / "...stdClass"
+// runtime helper emitted by the compiler for match-without-default:
+// zend_match_unhandled_error's message. a scalar or enum case as
+// smart_str_append_zval writes it (strings cut at
+// zend.exception_string_param_max_len), anything else, or everything under
+// zend.exception_ignore_args, by its type
 fn native_match_unhandled_msg(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const v = if (args.len > 0) args[0] else Value{ .null = {} };
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     try buf.appendSlice(ctx.allocator, "Unhandled match case ");
-    switch (v) {
-        .int => |i| try buf.print(ctx.allocator, "{d}", .{i}),
-        .float => try v.format(&buf, ctx.allocator),
-        .bool => |b| try buf.appendSlice(ctx.allocator, if (b) "true" else "false"),
-        .null, .undef => try buf.appendSlice(ctx.allocator, "null"),
-        .string => |s| {
-            try buf.append(ctx.allocator, '\'');
-            try buf.appendSlice(ctx.allocator, s.bytes());
-            try buf.append(ctx.allocator, '\'');
-        },
-        .array => try buf.appendSlice(ctx.allocator, "of type array"),
+    const ignore_args = if (ctx.vm.ini_settings.get("zend.exception_ignore_args")) |set| iniBoolText(set) else false;
+    const max_len: usize = if (ctx.vm.ini_settings.get("zend.exception_string_param_max_len")) |set| @intCast(@max(0, std.fmt.parseInt(i64, std.mem.trim(u8, set, " "), 10) catch 15)) else 15;
+    const by_type = ignore_args or (v == .string and max_len == 0) or switch (v) {
+        .null, .undef, .bool, .int, .float, .string => false,
+        .object => |o| !o.enum_case,
+        else => true,
+    };
+    if (by_type) {
+        try buf.appendSlice(ctx.allocator, "of type ");
+        try buf.appendSlice(ctx.allocator, switch (v) {
+            .null, .undef => "null",
+            .bool => "bool",
+            .object => |o| o.class_name,
+            .generator => "Generator",
+            .fiber => "Fiber",
+            else => v.typeName(),
+        });
+    } else switch (v) {
         .object => |o| {
-            try buf.appendSlice(ctx.allocator, "of type ");
-            try buf.appendSlice(ctx.allocator, o.class_name);
+            const name = o.get("name");
+            try buf.print(ctx.allocator, "{s}::{s}", .{ o.class_name, if (name == .string) name.string.bytes() else "" });
         },
-        .generator => try buf.appendSlice(ctx.allocator, "of type Generator"),
-        .fiber => try buf.appendSlice(ctx.allocator, "of type Fiber"),
-        .resource => try buf.appendSlice(ctx.allocator, "of type resource"),
+        .string => |str| {
+            const bytes = str.bytes();
+            try buf.append(ctx.allocator, '\'');
+            error_format.writeEscaped(&buf, ctx.allocator, bytes[0..@min(bytes.len, max_len)]);
+            try buf.appendSlice(ctx.allocator, if (bytes.len > max_len) "...'" else "'");
+        },
+        else => error_format.writeTraceArg(&buf, ctx.allocator, v),
     }
     const owned = try buf.toOwnedSlice(ctx.allocator);
     return NativeResult.takeString(try Value.String.adopt(ctx.allocator, owned));

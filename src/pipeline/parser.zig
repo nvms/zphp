@@ -1081,11 +1081,13 @@ const Parser = struct {
 
     fn parseMatchArm(self: *Parser) Error!u32 {
         if (self.peek() == .kw_default) {
-            _ = self.advance();
+            const default_tok = self.advance();
+            // `default,` takes a trailing comma as a condition list does
+            if (self.peek() == .comma) _ = self.advance();
             _ = try self.expect(.fat_arrow);
             const result = try self.parseExpression();
             const vals_extra = try self.addExtraList(&.{});
-            return self.addNode(.{ .tag = .match_arm, .main_token = 0, .data = .{ .lhs = vals_extra, .rhs = result } });
+            return self.addNode(.{ .tag = .match_arm, .main_token = default_tok, .data = .{ .lhs = vals_extra, .rhs = result } });
         }
 
         var values = std.ArrayListUnmanaged(u32).empty;

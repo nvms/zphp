@@ -498,6 +498,7 @@ pub fn compileMatch(self: *Compiler, node: Ast.Node) Error!void {
         const values = self.ast.extraSlice(arm.data.lhs);
 
         if (values.len == 0) {
+            if (default_arm != null) return self.fail(arm.main_token, "Match expressions may only contain one default arm");
             default_arm = arm_idx;
             continue;
         }

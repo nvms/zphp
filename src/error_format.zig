@@ -329,7 +329,7 @@ fn writeFrameArgs(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM, frame_i
 // bytes, Array and Object(Class) placeholders, scalars as they are
 // php's smart_str_append_escaped: backslashes and control bytes escaped,
 // anything outside printable ascii as \xHH
-fn writeEscaped(buf: *Writer, alloc: std.mem.Allocator, bytes: []const u8) void {
+pub fn writeEscaped(buf: *Writer, alloc: std.mem.Allocator, bytes: []const u8) void {
     for (bytes) |c| switch (c) {
         '\n' => write(buf, alloc, "\\n"),
         '\r' => write(buf, alloc, "\\r"),
