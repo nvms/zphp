@@ -364,6 +364,7 @@ pub fn writeTraceArg(buf: *Writer, alloc: std.mem.Allocator, v: Value) void {
         .object => |o| writeFmt(buf, alloc, "Object({s})", .{class_names.display(o.class_name)}),
         .generator => write(buf, alloc, "Object(Generator)"),
         .fiber => write(buf, alloc, "Object(Fiber)"),
+        .resource => |r| writeFmt(buf, alloc, "Resource id #{d}", .{r.id}),
         else => write(buf, alloc, "?"),
     }
 }
