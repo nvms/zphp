@@ -769,6 +769,9 @@ pub const VM = struct {
     // parameter i), worked out when a trace first shows the function
     sensitive_params: std.AutoHashMapUnmanaged(usize, u64) = .{},
     native_fns: NativeTable = .{},
+    // natives disable_functions removed: php code no longer sees them, but
+    // internal code that calls one directly in php still can
+    disabled_natives: std.StringHashMapUnmanaged(NativeTable.Native) = .{},
     output: std.ArrayListUnmanaged(u8) = .empty,
     strings: std.ArrayListUnmanaged([]const u8) = .empty,
     // persistent_strings are heap-allocated keys whose lifetime must outlive
@@ -3417,6 +3420,7 @@ pub const VM = struct {
         self.pending_gen_release.deinit(self.allocator);
         self.pending_fiber_release.deinit(self.allocator);
         self.weakmaps.deinit(self.allocator);
+        self.disabled_natives.deinit(self.allocator);
         self.weak_references.deinit(self.allocator);
         self.held_exceptions.deinit(self.allocator);
         self.initializer_scopes.deinit(self.allocator);

@@ -46,6 +46,11 @@ pub fn Table(comptime NativeFn: type) type {
             return self.map.contains(name);
         }
 
+        pub fn take(self: *Self, name: []const u8) ?Native {
+            const kv = self.map.fetchRemove(name) orelse return null;
+            return kv.value;
+        }
+
         pub fn count(self: *const Self) usize {
             return self.map.count();
         }

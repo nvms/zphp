@@ -270,6 +270,19 @@ pub fn applyToVm(vm: *VM) RuntimeError!void {
                 defer vm.allocator.free(msg);
                 try vm.raiseErrorAt(2, msg, .{ .file = "Unknown", .line = 0 });
             }
+        } else if (std.mem.eql(u8, d.name, "disable_functions")) {
+            // php's zend_disable_functions: names split at spaces and
+            // commas, matched as written; exit, die and clone stay
+            var names = std.mem.tokenizeAny(u8, d.value, ", ");
+            while (names.next()) |name| {
+                if (std.mem.eql(u8, name, "exit") or std.mem.eql(u8, name, "die") or std.mem.eql(u8, name, "clone")) {
+                    const msg = try std.fmt.allocPrint(vm.allocator, "Cannot disable function {s}()", .{name});
+                    defer vm.allocator.free(msg);
+                    try vm.raiseErrorAt(2, msg, .{ .file = "Unknown", .line = 0 });
+                    continue;
+                }
+                if (vm.native_fns.take(name)) |native| try vm.disabled_natives.put(vm.allocator, name, native);
+            }
         } else if (std.mem.eql(u8, d.name, "max_execution_time")) {
             vm.setExecutionLimit(std.fmt.parseInt(i64, std.mem.trim(u8, d.value, " \t"), 10) catch 0);
         } else if (std.mem.eql(u8, d.name, "memory_limit")) {

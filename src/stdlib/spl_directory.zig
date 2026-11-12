@@ -286,7 +286,7 @@ fn this(ctx: *NativeContext) RuntimeError!*PhpObject {
 // trace made inside it shows the method. .undef when it throws
 fn internalCall(ctx: *NativeContext, comptime func: []const u8, args: []const Value) RuntimeError!Value {
     if (sic.pending(ctx)) return .undef;
-    const native = ctx.vm.native_fns.get(func) orelse unreachable;
+    const native = ctx.vm.native_fns.get(func) orelse ctx.vm.disabled_natives.get(func) orelse unreachable;
     // the function names itself in its warnings, as when php code calls it
     const saved_name = ctx.call_name;
     ctx.call_name = func;
