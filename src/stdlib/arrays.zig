@@ -1616,7 +1616,7 @@ fn native_extract(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
                 } else if (!defined(ctx, frame, slot_names, key)) continue;
                 if (target != null) {
                     const var_name = try internVarName(ctx, "${s}", .{key});
-                    try ctx.vm.setVariableByName(frame, var_name, try ctx.vm.copyValue(value));
+                    if (flags & extr_refs != 0) try ctx.vm.bindVariableToElement(frame, var_name, arr, entry.key) else try ctx.vm.setVariableByName(frame, var_name, try ctx.vm.copyValue(value));
                     count += 1;
                     continue;
                 }
@@ -1640,7 +1640,7 @@ fn native_extract(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         const name = target.?;
         if (std.mem.eql(u8, name, "this")) return extractError(ctx, "Error", "Cannot re-assign $this");
         const var_name = try internVarName(ctx, "${s}", .{name});
-        try ctx.vm.setVariableByName(frame, var_name, try ctx.vm.copyValue(value));
+        if (flags & extr_refs != 0) try ctx.vm.bindVariableToElement(frame, var_name, arr, entry.key) else try ctx.vm.setVariableByName(frame, var_name, try ctx.vm.copyValue(value));
         count += 1;
     }
     return NativeResult.scalar(.{ .int = count });

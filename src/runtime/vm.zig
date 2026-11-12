@@ -1468,6 +1468,20 @@ pub const VM = struct {
         old.deinit(self.allocator);
     }
 
+    // extract(EXTR_REFS): the variable named `$name` in frame becomes a
+    // reference to arr[key]
+    pub fn bindVariableToElement(self: *VM, frame: *CallFrame, name: []const u8, arr: *PhpArray, key: PhpArray.Key) RuntimeError!void {
+        // the variable's old value goes only once everything names the
+        // element, so a destructor it runs sees the new binding
+        const old = self.frameVariable(frame, name) orelse Value.undef;
+        retainValue(old);
+        defer self.releaseValue(old);
+        try self.bindSlotToElement(frame, name, arr, key);
+        const entry = arr.getPtr(key) orelse return;
+        const val = if (entry.ref) |cell| cell.* else entry.value;
+        try self.setVariableByName(frame, name, val);
+    }
+
     // `$v = &$arr[$k]`: an element another name already references shares
     // that cell, anything else gets a fresh one
     fn bindSlotToElement(self: *VM, frame: *CallFrame, name: []const u8, arr: *PhpArray, key: PhpArray.Key) RuntimeError!void {
@@ -10257,10 +10271,10 @@ pub const VM = struct {
                     const args_base = self.argsBase(pos, 1) orelse continue;
                     if (self.callSiteByValue(chunk, call_ip, pos, args_base) orelse true) continue;
                     const sent = self.stack[self.sp - 1];
-                    // array_multisort prefers a reference, and takes values
+                    // array_multisort and extract prefer a reference, and take values
                     // quietly (ZEND_ARG_SEND_PREFER_REF)
                     const callee = self.argCalleeName(chunk, call_ip, args_base) orelse continue;
-                    if (std.ascii.eqlIgnoreCase(callee, "array_multisort")) continue;
+                    if (std.ascii.eqlIgnoreCase(callee, "array_multisort") or std.ascii.eqlIgnoreCase(callee, "extract")) continue;
                     if (op == .arg_call_result) {
                         // SEND_VAR_NO_REF: a call that returned a reference
                         // passes it; any other result is a temporary the
@@ -16409,7 +16423,7 @@ pub const VM = struct {
     // declared (including the top frame). PHP models $GLOBALS as a live view of
     // the global table, so a write must be visible to every active `global`
     // binding, not just the top-level script frame.
-    fn mirrorGlobalsWrite(self: *VM, key: []const u8, val: Value) !void {
+    fn mirrorGlobalsWrite(self: *VM, key: []const u8, val: Value) RuntimeError!void {
         const dollar_name = try self.internVarName(key);
         if (isSuperglobal(dollar_name)) {
             try self.putRequestVar(dollar_name, val);
@@ -16419,6 +16433,16 @@ pub const VM = struct {
         // top frame: vars + locals (slot lookup via top_slot_names — must
         // not use global_slot_names because it's overridden inside require)
         if (self.frame_count > 0) try self.putGlobalVar(dollar_name, val);
+
+        // a global that is a reference: the write goes through it to every
+        // other name for the same storage
+        if (self.frame_count > 0) if (self.frames[0].ref_slots.get(dollar_name)) |cell| {
+            // the cell's own mirror in $GLOBALS writes back here: once is enough
+            if (self.globals_cells.get(dollar_name) != cell and !sameReferent(cell.*, val)) {
+                self.setCell(cell, val);
+                try self.propagateCellWrite(cell, val);
+            }
+        };
 
         // shared global cell - so `global $key` inside any function picks
         // up writes done through $GLOBALS at the top level

@@ -496,12 +496,14 @@ const Column = struct {
 const MultisortContext = struct {
     ctx: *NativeContext,
     columns: []const Column,
+    // each column's values as the sort began: a comparison that runs php
+    // code may change or empty the arrays, and php compares its own copies
+    values: []const []Value,
 
     // php_multisort_compare: column by column, then the original row
     pub fn cmp(self: *MultisortContext, a: usize, b: usize) RuntimeError!i32 {
-        for (self.columns) |col| {
-            const items = col.arr.entries.items;
-            const r = try compareValues(self.ctx, col.kind, entryValue(items[a]), entryValue(items[b]));
+        for (self.columns, self.values) |col, items| {
+            const r = try compareValues(self.ctx, col.kind, items[a], items[b]);
             const result = if (col.reverse) -r else r;
             if (result != 0) return sign(result);
         }
@@ -573,7 +575,22 @@ fn native_array_multisort(ctx: *NativeContext, args: []const Value) RuntimeError
     const rows = try ctx.allocator.alloc(usize, size);
     defer ctx.allocator.free(rows);
     for (rows, 0..) |*r, i| r.* = i;
-    var mc = MultisortContext{ .ctx = ctx, .columns = columns.items };
+    const values = try ctx.allocator.alloc([]Value, columns.items.len);
+    defer ctx.allocator.free(values);
+    var filled: usize = 0;
+    defer for (values[0..filled]) |column| {
+        for (column) |v| ctx.vm.releaseValue(v);
+        ctx.allocator.free(column);
+    };
+    for (columns.items, values) |col, *column| {
+        column.* = try ctx.allocator.alloc(Value, size);
+        for (col.arr.entries.items, column.*) |entry, *v| {
+            v.* = entryValue(entry);
+            @import("../runtime/vm.zig").VM.retainValue(v.*);
+        }
+        filled += 1;
+    }
+    var mc = MultisortContext{ .ctx = ctx, .columns = columns.items, .values = values };
     try array_diff.zendSort(usize, rows, &mc);
 
     const tmp = try ctx.allocator.alloc(PhpArray.Entry, size);

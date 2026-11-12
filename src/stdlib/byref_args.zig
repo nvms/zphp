@@ -8,7 +8,7 @@ const arg0_by_ref = [_][]const u8{
     "sort",         "rsort",      "asort",                "arsort",          "ksort",      "krsort",    "natsort",     "natcasesort",
     "usort",        "uasort",     "uksort",               "shuffle",         "array_push", "array_pop", "array_shift", "array_unshift",
     "array_splice", "array_walk", "array_walk_recursive", "array_multisort", "end",        "reset",     "next",        "prev",
-    "each",
+    "each",         "extract",
 };
 
 // an unqualified builtin call inside a namespace resolves to the namespaced
@@ -91,6 +91,7 @@ const by_ref_names = std.StaticStringMap(void).initComptime(.{
     .{"uksort"},                .{"shuffle"},              .{"array_push"},            .{"array_pop"},                   .{"array_shift"},
     .{"array_unshift"},         .{"array_splice"},         .{"array_walk"},            .{"array_walk_recursive"},        .{"array_multisort"},
     .{"end"},                   .{"reset"},                .{"next"},                  .{"prev"},                        .{"each"},
+    .{"extract"},
     .{"pcntl_wait"},            .{"parse_str"},            .{"system"},                .{"passthru"},                    .{"exec"},
     .{"pcntl_waitpid"},         .{"curl_multi_exec"},      .{"curl_multi_info_read"},  .{"openssl_random_pseudo_bytes"}, .{"preg_match"},
     .{"preg_match_all"},        .{"similar_text"},         .{"is_callable"},           .{"getopt"},                      .{"proc_open"},
