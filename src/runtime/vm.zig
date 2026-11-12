@@ -5852,6 +5852,15 @@ pub const VM = struct {
                         }
                         if (key == .resource or key == .float) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
                         const norm_key = Value.toArrayKey(key);
+                        // zend_handle_named_arg: a name given twice
+                        if (op == .arg_array_set and key == .string and arr_val.array.contains(norm_key)) {
+                            self.releaseValue(val);
+                            const msg = try std.fmt.allocPrint(self.allocator, "Named parameter ${s} overwrites previous argument", .{key.string.bytes()});
+                            defer self.allocator.free(msg);
+                            try self.setPendingException("Error", msg);
+                            if (self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        }
                         if (op == .arg_array_set) try self.recordArgArraySource(arr_val.array, norm_key, source);
                         // A duplicate literal key replaces storage, not the value
                         // of the reference previously installed at that key.
