@@ -2007,6 +2007,7 @@ pub const map = std.StaticStringMap(Signature).initComptime(.{
     .{ "long2ip", Signature{ .params = &[_]Param{ .{ .name = "ip", .type = "int" } }, .returns = "string" } },
     .{ "lstat", Signature{ .params = &[_]Param{ .{ .name = "filename", .type = "string" } }, .returns = "array|false" } },
     .{ "ltrim", Signature{ .params = &[_]Param{ .{ .name = "string", .type = "string" }, .{ .name = "characters", .default = .{ .string = " \x0a\x0d\x09\x0b\x00" }, .type = "string" } }, .returns = "string" } },
+    .{ "mail", Signature{ .params = &[_]Param{ .{ .name = "to", .type = "string" }, .{ .name = "subject", .type = "string" }, .{ .name = "message", .type = "string" }, .{ .name = "additional_headers", .default = .empty_array, .type = "array|string" }, .{ .name = "additional_params", .default = .{ .string = "" }, .type = "string" } }, .returns = "bool" } },
     .{ "max", Signature{ .params = &[_]Param{ .{ .name = "value", .type = "mixed" }, .{ .name = "values", .default = .unknown, .variadic = true, .type = "mixed" } }, .returns = "mixed" } },
     .{ "mb_check_encoding", Signature{ .params = &[_]Param{ .{ .name = "value", .default = .null, .type = "array|string|null" }, .{ .name = "encoding", .default = .null, .type = "?string" } }, .returns = "bool" } },
     .{ "mb_chr", Signature{ .params = &[_]Param{ .{ .name = "codepoint", .type = "int" }, .{ .name = "encoding", .default = .null, .type = "?string" } }, .returns = "string|false" } },

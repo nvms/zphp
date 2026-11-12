@@ -53,7 +53,7 @@ io_opendir_partial_json.php: on windows ftell after fwrite on a "w" stream reads
 stream_buffering.php: on windows feof and fseek results differ after buffered reads on a plain file, a stream layer bug not yet diagnosed there
 stdout_closed_pipe_exit.php: what a windows pipe reader closing does to the writer's exit status hasn't been checked against php's windows build
 <<<<<<< Updated upstream
-=======
 mail_sendmail_path.php: the cases pipe the message to cat and exit through the shell, which cmd.exe lacks
 hash_algos_streaming_serialize.php: php's windows build serializes hash contexts with its own struct layout (a C long is 4 bytes there); zphp writes the linux layout
->>>>>>> Stashed changes
+=======
+>>>>>>> 43f925e0 (add mail() with php's sendmail_path pipe, headers checks and mail.log)

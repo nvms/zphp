@@ -54,6 +54,7 @@ pub fn register(map: *@import("../runtime/vm.zig").NativeTable, allocator: std.m
         @import("sodium.zig").entries,
         @import("ldap.zig").entries,
         @import("mysqli.zig").entries,
+        @import("mail.zig").entries,
         @import("syslog.zig").entries,
     };
     @setEvalBranchQuota(10000);

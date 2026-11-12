@@ -1518,6 +1518,18 @@ fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "assert.bail")) return "0";
     if (std.mem.eql(u8, name, "assert.warning")) return "1";
     if (std.mem.eql(u8, name, "assert.callback")) return "";
+    if (std.mem.eql(u8, name, "sendmail_path")) return @import("mail.zig").default_sendmail_path;
+    if (std.mem.eql(u8, name, "sendmail_from")) return "";
+    if (std.mem.eql(u8, name, "SMTP")) return "localhost";
+    if (std.mem.eql(u8, name, "smtp_port")) return "25";
+    if (std.mem.eql(u8, name, "mail.log")) return "";
+    if (std.mem.eql(u8, name, "mail.add_x_header")) return "0";
+    if (std.mem.eql(u8, name, "mail.mixed_lf_and_crlf")) return "0";
+    if (std.mem.eql(u8, name, "mail.cr_lf_mode")) return "crlf";
+    if (std.mem.eql(u8, name, "mail.force_extra_parameters")) return "";
+    if (std.mem.eql(u8, name, "syslog.filter")) return "no-ctrl";
+    if (std.mem.eql(u8, name, "syslog.ident")) return "php";
+    if (std.mem.eql(u8, name, "syslog.facility")) return "LOG_USER";
     return null;
 }
 
@@ -1547,8 +1559,9 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     }
     // PHP rejects unknown directives. Only allow known names.
     const previous: []const u8 = if (ctx.vm.ini_settings.get(name)) |s| s else if (iniDefault(name)) |d| d else return NativeResult.scalar(Value{ .bool = false });
-    // max_memory_limit can only be set at startup
-    if (std.mem.eql(u8, name, "max_memory_limit")) return NativeResult.scalar(Value{ .bool = false });
+    // max_memory_limit can only be set at startup, and so can the mail
+    // and syslog settings (PHP_INI_SYSTEM)
+    if (std.mem.eql(u8, name, "max_memory_limit") or @import("mail.zig").isSystemIni(name) or std.mem.eql(u8, name, "syslog.facility") or std.mem.eql(u8, name, "syslog.ident")) return NativeResult.scalar(Value{ .bool = false });
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     try args[1].format(&buf, ctx.allocator);
