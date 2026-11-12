@@ -41,3 +41,4 @@ fseek_unseekable_negative.php: the test pipes through cat, which windows does no
 proc_open_descriptor_resource.php: the windows proc_open does not check descriptor resources yet
 date_strftime.php: the C library's strftime differs on windows (no tm_gmtoff or tm_zone, other %c and %x formats), as php's own strftime tests skip there
 open_basedir.php: the test makes a symlink and removes its tree through rm -rf
+spl_directory_port.php: on windows SplFileInfo::getOwner/getGroup of a missing file don't throw (fileowner is stubbed there), DirectoryIterator's open failure lacks php's win32 message ("The system cannot find the file specifi (code: 2)"), rmdir doesn't warn "Directory not empty", and an SplTempFileObject handle is one higher
