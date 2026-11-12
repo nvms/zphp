@@ -4878,6 +4878,7 @@ ext/json/tests/bug73254.phpt
 ext/json/tests/bug73991.phpt
 ext/json/tests/bug77843.phpt
 ext/json/tests/json_decode_basic.phpt
+ext/json/tests/json_decode_exceptions.phpt
 ext/json/tests/json_decode_oom_utf8_substitute.phpt
 ext/json/tests/json_encode_basic.phpt
 ext/json/tests/json_encode_basic_utf8.phpt
