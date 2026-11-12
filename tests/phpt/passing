@@ -2323,6 +2323,8 @@ Zend/tests/lsb/lsb_017.phpt
 Zend/tests/lsb/lsb_018.phpt
 Zend/tests/lsb/lsb_019.phpt
 Zend/tests/lsb/lsb_020.phpt
+Zend/tests/lsb/lsb_023.phpt
+Zend/tests/lsb/lsb_024.phpt
 Zend/tests/magic_methods/bug19859.phpt
 Zend/tests/magic_methods/bug24635.phpt
 Zend/tests/magic_methods/bug28444.phpt
@@ -3337,15 +3339,18 @@ Zend/tests/traits/bug81192.phpt
 Zend/tests/traits/bugs/abstract-methods01.phpt
 Zend/tests/traits/bugs/abstract-methods02.phpt
 Zend/tests/traits/bugs/abstract-methods03.phpt
+Zend/tests/traits/bugs/abstract-methods04.phpt
 Zend/tests/traits/bugs/abstract-methods05.phpt
 Zend/tests/traits/bugs/abstract-methods06.phpt
 Zend/tests/traits/bugs/alias-semantics.phpt
+Zend/tests/traits/bugs/alias-semantics02.phpt
 Zend/tests/traits/bugs/alias01.phpt
 Zend/tests/traits/bugs/case-sensitive.phpt
 Zend/tests/traits/bugs/gh13177.phpt
 Zend/tests/traits/bugs/interfaces.phpt
 Zend/tests/traits/bugs/missing-trait.phpt
 Zend/tests/traits/bugs/overridding-conflicting-methods.phpt
+Zend/tests/traits/bugs/overridding-conflicting-property-initializer.phpt
 Zend/tests/traits/bugs/overridding-static-property-with-doc-block.phpt
 Zend/tests/traits/class_uses_static.phpt
 Zend/tests/traits/conflict001.phpt
@@ -3382,6 +3387,7 @@ Zend/tests/traits/error_011.phpt
 Zend/tests/traits/error_012.phpt
 Zend/tests/traits/error_013.phpt
 Zend/tests/traits/error_014.phpt
+Zend/tests/traits/error_015.phpt
 Zend/tests/traits/flattening001.phpt
 Zend/tests/traits/flattening002.phpt
 Zend/tests/traits/flattening003.phpt
@@ -4946,6 +4952,7 @@ ext/json/tests/bug69187.phpt
 ext/json/tests/bug71835.phpt
 ext/json/tests/bug72069.phpt
 ext/json/tests/bug72787.phpt
+ext/json/tests/bug73113.phpt
 ext/json/tests/bug73254.phpt
 ext/json/tests/bug73991.phpt
 ext/json/tests/bug77843.phpt
@@ -6470,6 +6477,7 @@ ext/standard/tests/array/array_diff_ukey_variation8.phpt
 ext/standard/tests/array/array_diff_variation10.phpt
 ext/standard/tests/array/array_diff_variation3.phpt
 ext/standard/tests/array/array_diff_variation4.phpt
+ext/standard/tests/array/array_diff_variation5.phpt
 ext/standard/tests/array/array_diff_variation6.phpt
 ext/standard/tests/array/array_diff_variation7.phpt
 ext/standard/tests/array/array_diff_variation8.phpt
@@ -8496,6 +8504,7 @@ ext/standard/tests/streams/bug54946.phpt
 ext/standard/tests/streams/bug60455_01.phpt
 ext/standard/tests/streams/bug60455_02.phpt
 ext/standard/tests/streams/bug60455_03.phpt
+ext/standard/tests/streams/bug60455_04.phpt
 ext/standard/tests/streams/bug60817.phpt
 ext/standard/tests/streams/bug61019.phpt
 ext/standard/tests/streams/bug61115-1.phpt
@@ -8711,6 +8720,7 @@ ext/standard/tests/strings/bug67151.phpt
 ext/standard/tests/strings/bug67249.phpt
 ext/standard/tests/strings/bug67252.phpt
 ext/standard/tests/strings/bug68636.phpt
+ext/standard/tests/strings/bug68710.phpt
 ext/standard/tests/strings/bug69144.phpt
 ext/standard/tests/strings/bug69751.phpt
 ext/standard/tests/strings/bug70487.phpt
@@ -8764,6 +8774,7 @@ ext/standard/tests/strings/count_chars.phpt
 ext/standard/tests/strings/count_chars_basic.phpt
 ext/standard/tests/strings/crc32.phpt
 ext/standard/tests/strings/crc32_basic.phpt
+ext/standard/tests/strings/crypt_blowfish_variation2.phpt
 ext/standard/tests/strings/default_charset.phpt
 ext/standard/tests/strings/dirname_basic.phpt
 ext/standard/tests/strings/dirname_error.phpt
@@ -8775,6 +8786,7 @@ ext/standard/tests/strings/explode_bug.phpt
 ext/standard/tests/strings/explode_variation4.phpt
 ext/standard/tests/strings/explode_variation5.phpt
 ext/standard/tests/strings/explode_variation6.phpt
+ext/standard/tests/strings/explode_variation7.phpt
 ext/standard/tests/strings/fprintf_error.phpt
 ext/standard/tests/strings/fprintf_variation_001.phpt
 ext/standard/tests/strings/fprintf_variation_002.phpt
