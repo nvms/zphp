@@ -6073,6 +6073,13 @@ pub const VM = struct {
                     defer self.releaseValue(inner_key);
                     defer self.releaseValue(prop_key);
                     defer self.releaseValue(base);
+                    if (base != .object and prop_key == .string) {
+                        // php's fetch for writing refuses a non-object
+                        const msg = try std.fmt.allocPrint(self.allocator, "Attempt to modify property \"{s}\" on {s}", .{ prop_key.string.bytes(), base.valueName() });
+                        defer self.allocator.free(msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    }
                     if (base != .object or prop_key != .string) {
                         self.push(v);
                         continue;
@@ -6696,6 +6703,27 @@ pub const VM = struct {
                     self.push(new_val);
                 },
 
+                .prepare_prop_w => {
+                    const prop_name = self.currentChunk().constants.items[self.readU16()].string.bytes();
+                    const container = self.peek();
+                    if (container != .object) {
+                        const msg = try std.fmt.allocPrint(self.allocator, "Attempt to modify property \"{s}\" on {s}", .{ prop_name, container.valueName() });
+                        defer self.allocator.free(msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    }
+                    const pw_obj = container.object;
+                    // zend_std_get_property_ptr_ptr: a property nothing has
+                    // (and no __get answers for) is created as null
+                    if (pw_obj.lazy == null and !self.magicApplies(pw_obj, prop_name, .get) and
+                        (pw_obj.isUnset(prop_name) or !pw_obj.properties.contains(prop_name)) and
+                        (pw_obj.slots == null or pw_obj.getSlotIndex(prop_name) == null) and !self.classDeclaresProperty(pw_obj.class_name, prop_name) and
+                        !badPropertyName(prop_name))
+                    {
+                        if (try self.checkDynamicProperty(pw_obj, prop_name)) continue;
+                        try pw_obj.set(self.allocator, prop_name, .null);
+                    }
+                },
                 .ensure_array_prop, .ensure_array_prop_dynamic => {
                     // load an object's property array for in-place write
                     // ($obj->prop[]=x, $obj->prop[k] op= v). COW-separate it
@@ -6711,8 +6739,12 @@ pub const VM = struct {
                     };
                     const obj_val = self.pop();
                     if (obj_val != .object) {
-                        self.push(.null);
-                        continue;
+                        // php's fetch for writing refuses a non-object
+                        const msg = try std.fmt.allocPrint(self.allocator, "Attempt to modify property \"{s}\" on {s}", .{ prop_name, obj_val.valueName() });
+                        defer self.allocator.free(msg);
+                        self.stackRelease(obj_val);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
                     }
                     var eap_obj = obj_val.object;
                     // Hook reads must precede vivification/COW. A by-value hook

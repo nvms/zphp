@@ -188,7 +188,7 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                 return;
             }
             if (target_lhs.tag == .property_access) {
-                try self.compileNode(target_lhs.data.lhs); // push $obj
+                try compilePropWriteBase(self, target_lhs.data.lhs); // push $obj
                 if (self.isDynamicProp(target_lhs)) {
                     try self.compileNode(target_lhs.data.rhs);
                 } else {
@@ -299,7 +299,7 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
             self.patchJump(end_jump);
             return;
         }
-        try self.compileNode(target.data.lhs);
+        try compilePropWriteBase(self, target.data.lhs);
         if (op_tag != .equal) {
             try self.emitOp(.dup);
             try self.emitOp(.get_prop);
@@ -553,7 +553,7 @@ fn emitPlaceOperands(self: *Compiler, target_idx: u32) Error!?Place {
             return .array_elem;
         },
         .property_access => {
-            try self.compileNode(target.data.lhs);
+            try compilePropFetchBase(self, target.data.lhs, true);
             if (!self.isDynamicProp(target)) return .{ .prop = try self.addConstant(.{ .string = Value.String.borrowed(self.propName(target)) }) };
             if (target.main_token == 0) {
                 try self.compileNode(target.data.rhs);
@@ -1681,6 +1681,35 @@ pub fn compileArrayAccess(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitOp(.array_get);
 }
 
+// the object a property write goes to, fetched for writing as php's
+// zend_fetch_property_address does: a variable without the undefined
+// warning, a property of a property through prepare_prop_w
+fn compilePropWriteBase(self: *Compiler, node_idx: u32) Error!void {
+    return compilePropFetchBase(self, node_idx, false);
+}
+
+// for a read-modify-write (`+=`, `++`) the variable is fetched as php's
+// BP_VAR_RW, which warns when it is undefined
+fn compilePropFetchBase(self: *Compiler, node_idx: u32, rw: bool) Error!void {
+    const node = self.ast.nodes[node_idx];
+    if (!rw and node.tag == .variable and !std.mem.eql(u8, self.ast.tokenSlice(node.main_token), "$this")) {
+        const saved = self.quiet_reads;
+        self.quiet_reads = true;
+        defer self.quiet_reads = saved;
+        return self.compileNode(node_idx);
+    }
+    if (node.tag == .property_access and !self.isDynamicProp(node)) {
+        try compilePropFetchBase(self, node.data.lhs, rw);
+        const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(self.propName(node)) });
+        try self.emitOp(.prepare_prop_w);
+        try self.emitU16(name_idx);
+        try self.emitOp(.get_prop);
+        try self.emitU16(name_idx);
+        return;
+    }
+    return self.compileNode(node_idx);
+}
+
 pub fn compileVivifyChain(self: *Compiler, node_idx: u32) Error!void {
     const node = self.ast.nodes[node_idx];
     if (node.tag == .array_access) {
@@ -1696,7 +1725,7 @@ pub fn compileVivifyChain(self: *Compiler, node_idx: u32) Error!void {
     } else if (node.tag == .property_access) {
         // $obj->prop[]=x / $obj->prop[k] op= v: load the property array for
         // in-place write with COW separation + write-back (ensure_array_prop)
-        try self.compileNode(node.data.lhs);
+        try compilePropWriteBase(self, node.data.lhs);
         if (self.isDynamicProp(node)) {
             try self.compileNode(node.data.rhs);
             try self.emitOp(.ensure_array_prop_dynamic);

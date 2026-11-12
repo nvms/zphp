@@ -483,6 +483,11 @@ pub const OpCode = enum(u8) {
     return_ref_value,
     // declare(ticks=N): u16 N. every Nth runs the tick functions
     tick,
+    // u16 property: php's fetch of a property for writing ($a->p->q = v,
+    // $a->p[k] = v) on the object on top, left in place: a non-object is
+    // "Attempt to modify property", a property nothing has is created null.
+    // the get_prop after it reads it
+    prepare_prop_w,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -530,6 +535,7 @@ pub const OpCode = enum(u8) {
             .get_static_prop_dyn_name_quiet,
             .ensure_array_local,
             .ensure_array_prop,
+            .prepare_prop_w,
             .cow_separate_local,
             .make_var_array_elem_ref,
             .break_var_ref,
