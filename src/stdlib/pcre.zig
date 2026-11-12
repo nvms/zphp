@@ -1,57 +1,182 @@
+// php's ext/pcre (php_pcre.c): the regex cache with php's delimiter and
+// modifier parsing and its warnings, preg_match / preg_match_all
+// (php_pcre_match_impl), the replace family (php_pcre_replace_impl and the
+// callback variant), preg_split, preg_quote, preg_grep and preg_last_error.
+// every match goes through exec, with the per-thread match context carrying
+// pcre.backtrack_limit and pcre.recursion_limit and php's jit stack
 const std = @import("std");
-const Value = @import("../runtime/value.zig").Value;
-const PhpArray = @import("../runtime/value.zig").PhpArray;
+const value_mod = @import("../runtime/value.zig");
+const Value = value_mod.Value;
+const PhpArray = value_mod.PhpArray;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
+const Args = @import("string_ports.zig").Args;
+const array_diff = @import("array_diff.zig");
+const callables = @import("../runtime/callables.zig");
 
-// coerce to string with __toString support. preg functions previously
-// bailed on Stringable objects (passing a Symfony Path-like wrapper or a
-// custom regex builder to preg_match returned false silently)
-// pcre checks a utf subject from the start offset to the end on every match,
-// so matching a long subject at many offsets costs quadratic time. as php
-// does, a subject known to be valid utf-8 skips the check: it is validated
-// once, and a string that owns its bytes remembers the result
-const UtfCheck = struct {
-    valid: bool,
-    subject: []const u8,
-    utf: bool = false,
+const pcre2 = struct {
+    const Code = opaque {};
+    const MatchData = opaque {};
 
-    fn init(code: *pcre2.Code, subject: []const u8, holder: ?Value) UtfCheck {
-        var all: u32 = 0;
-        _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_ALLOPTIONS, @ptrCast(&all));
-        if (all & pcre2.UTF == 0) return .{ .valid = false, .subject = subject };
-        if (initUtf(subject, holder)) return .{ .valid = true, .subject = subject, .utf = true };
-        return .{ .valid = false, .subject = subject, .utf = true };
-    }
+    const CASELESS: u32 = 0x00000008;
+    const MULTILINE: u32 = 0x00000400;
+    const DOTALL: u32 = 0x00000020;
+    const EXTENDED: u32 = 0x00000080;
+    const UTF: u32 = 0x00080000;
+    const JIT_COMPLETE: u32 = 0x00000001;
+    const NO_UTF_CHECK: u32 = 0x40000000;
+    const INFO_ALLOPTIONS: u32 = 0;
+    const UCP: u32 = 0x00020000;
+    const ANCHORED: u32 = 0x80000000;
+    const UNGREEDY: u32 = 0x00040000;
+    const DOLLAR_ENDONLY: u32 = 0x00000010;
+    const DUPNAMES: u32 = 0x00000040;
+    const NO_AUTO_CAPTURE: u32 = 0x00002000;
+    const NEVER_BACKSLASH_C: u32 = 0x00100000;
+    const EXTRA_CASELESS_RESTRICT: u32 = 0x00000080;
+    const NOTEMPTY_ATSTART: u32 = 0x00000008;
 
-    fn initUtf(subject: []const u8, holder: ?Value) bool {
-        const owner: ?*Value.String.Owner = if (holder) |h| switch (h) {
-            .string => |str| if (str.owner) |o| (if (str.ptr == o.bytes.ptr and str.len == o.bytes.len) o else null) else null,
-            else => null,
-        } else null;
-        if (owner) |o| if (o.utf8_valid) return true;
-        const valid = std.unicode.utf8ValidateSlice(subject);
-        if (valid) if (owner) |o| {
-            o.utf8_valid = true;
-        };
-        return valid;
-    }
+    const INFO_CAPTURECOUNT: u32 = 4;
+    const INFO_JITSIZE: u32 = 10;
+    const INFO_NAMECOUNT: u32 = 17;
+    const INFO_NAMEENTRYSIZE: u32 = 18;
+    const INFO_NAMETABLE: u32 = 19;
+    const ERROR_NOMATCH: c_int = -1;
+    const ERROR_UTF8_ERR1: c_int = -3;
+    const ERROR_UTF8_ERR21: c_int = -23;
+    const ERROR_BADOFFSET: c_int = -33;
+    const ERROR_BADUTFOFFSET: c_int = -36;
+    const ERROR_JIT_STACKLIMIT: c_int = -46;
+    const ERROR_MATCHLIMIT: c_int = -47;
+    const ERROR_DEPTHLIMIT: c_int = -53;
+    const ERROR_BACKSLASH_C_CALLER_DISABLED: c_int = 183;
+    const UNSET: usize = std.math.maxInt(usize);
+    const CONFIG_JIT: u32 = 1;
+    const CONFIG_VERSION: u32 = 11;
 
-    // how far past an empty match the next attempt starts: one character
-    fn step(self: UtfCheck, at: usize) usize {
-        if (!self.utf or at >= self.subject.len) return 1;
-        const len = utf8SeqLen(self.subject[at]);
-        return if (at + len > self.subject.len) 1 else len;
-    }
-
-    // the check may be skipped only from the start of a code point
-    fn options(self: UtfCheck, offset: usize) u32 {
-        if (!self.valid) return 0;
-        if (offset < self.subject.len and self.subject[offset] & 0xc0 == 0x80) return 0;
-        return pcre2.NO_UTF_CHECK;
-    }
+    extern "c" fn pcre2_compile_8(pattern: [*]const u8, length: usize, options: u32, errorcode: *c_int, erroroffset: *usize, ccontext: ?*anyopaque) callconv(.c) ?*Code;
+    extern "c" fn pcre2_code_free_8(code: ?*Code) callconv(.c) void;
+    extern "c" fn pcre2_get_error_message_8(errorcode: c_int, buffer: [*]u8, bufflen: usize) callconv(.c) c_int;
+    extern "c" fn pcre2_match_data_create_from_pattern_8(code: *const Code, gcontext: ?*anyopaque) callconv(.c) ?*MatchData;
+    extern "c" fn pcre2_match_data_free_8(match_data: ?*MatchData) callconv(.c) void;
+    extern "c" fn pcre2_match_context_create_8(gcontext: ?*anyopaque) callconv(.c) ?*anyopaque;
+    extern "c" fn pcre2_compile_context_create_8(gcontext: ?*anyopaque) callconv(.c) ?*anyopaque;
+    extern "c" fn pcre2_set_compile_extra_options_8(ccontext: *anyopaque, options: u32) callconv(.c) c_int;
+    extern "c" fn pcre2_jit_compile_8(code: *Code, options: u32) callconv(.c) c_int;
+    extern "c" fn pcre2_jit_stack_create_8(startsize: usize, maxsize: usize, gcontext: ?*anyopaque) callconv(.c) ?*anyopaque;
+    extern "c" fn pcre2_jit_stack_assign_8(mcontext: *anyopaque, callback: ?*anyopaque, data: ?*anyopaque) callconv(.c) void;
+    extern "c" fn pcre2_set_match_limit_8(mcontext: *anyopaque, value: u32) callconv(.c) c_int;
+    extern "c" fn pcre2_set_depth_limit_8(mcontext: *anyopaque, value: u32) callconv(.c) c_int;
+    extern "c" fn pcre2_match_8(code: *const Code, subject: [*]const u8, length: usize, startoffset: usize, options: u32, match_data: *MatchData, mcontext: ?*anyopaque) callconv(.c) c_int;
+    extern "c" fn pcre2_get_ovector_pointer_8(match_data: *MatchData) callconv(.c) [*]usize;
+    extern "c" fn pcre2_pattern_info_8(code: *const Code, what: u32, where: *anyopaque) callconv(.c) c_int;
+    extern "c" fn pcre2_get_mark_8(match_data: *MatchData) callconv(.c) ?[*:0]const u8;
+    extern "c" fn pcre2_config_8(what: u32, where_: ?*anyopaque) callconv(.c) c_int;
 };
+
+pub const entries = .{
+    .{ "preg_match", preg_match },
+    .{ "preg_match_all", preg_match_all },
+    .{ "preg_replace", preg_replace },
+    .{ "preg_filter", preg_filter },
+    .{ "preg_replace_callback", preg_replace_callback },
+    .{ "preg_replace_callback_array", preg_replace_callback_array },
+    .{ "preg_split", preg_split },
+    .{ "preg_quote", preg_quote },
+    .{ "preg_grep", preg_grep },
+    .{ "preg_last_error", preg_last_error },
+    .{ "preg_last_error_msg", preg_last_error_msg },
+    .{ "mb_split", mb_split },
+    .{ "mb_ereg_match", mb_ereg_match },
+};
+
+const PREG_PATTERN_ORDER: i64 = 1;
+const PREG_SET_ORDER: i64 = 2;
+const PREG_OFFSET_CAPTURE: i64 = 1 << 8;
+const PREG_UNMATCHED_AS_NULL: i64 = 1 << 9;
+const PREG_SPLIT_NO_EMPTY: i64 = 1 << 0;
+const PREG_SPLIT_DELIM_CAPTURE: i64 = 1 << 1;
+const PREG_SPLIT_OFFSET_CAPTURE: i64 = 1 << 2;
+const PREG_GREP_INVERT: i64 = 1 << 0;
+
+// the linked libpcre2 version string, e.g. "10.42 2022-12-11". php exposes this
+// as the PCRE_VERSION constant; vendor polyfills (symfony/polyfill-intl-grapheme)
+// gate behaviour on `(float) PCRE_VERSION`, so it must be defined and accurate.
+// written into a process-lifetime static buffer so the constant slice stays
+// valid without a heap allocation the constants map would leak
+var version_buf: [64]u8 = undefined;
+pub fn libVersion() []const u8 {
+    const n = pcre2.pcre2_config_8(pcre2.CONFIG_VERSION, &version_buf);
+    if (n <= 1 or @as(usize, @intCast(n)) > version_buf.len) return "";
+    return version_buf[0..@intCast(n - 1)]; // n includes the trailing nul
+}
+
+// pcre's section of phpinfo() in text mode (PHP_MINFO_FUNCTION(pcre))
+pub fn writeInfo(ctx: *NativeContext, out: *std.ArrayListUnmanaged(u8)) RuntimeError!void {
+    const a = ctx.allocator;
+    var unicode_buf: [32]u8 = undefined;
+    const ul = pcre2.pcre2_config_8(10, &unicode_buf);
+    const unicode = if (ul > 1) unicode_buf[0..@intCast(ul - 1)] else "";
+    try out.print(a, "\npcre\n\nPCRE (Perl Compatible Regular Expressions) Support => enabled\nPCRE Library Version => {s}\nPCRE Unicode Version => {s}\n", .{ libVersion(), unicode });
+    try out.print(a, "PCRE JIT Support => {s}\n", .{if (jitSupported()) "enabled" else "disabled"});
+    var target_buf: [128]u8 = undefined;
+    const tl = pcre2.pcre2_config_8(2, &target_buf);
+    if (tl > 1) try out.print(a, "PCRE JIT Target => {s}\n", .{target_buf[0..@intCast(tl - 1)]});
+    try out.appendSlice(a, "\nDirective => Local Value => Master Value\n");
+    inline for (.{ .{ "pcre.backtrack_limit", "1000000" }, .{ "pcre.jit", "1" }, .{ "pcre.recursion_limit", "100000" } }) |ini| {
+        const local = ctx.vm.ini_settings.get(ini[0]) orelse ini[1];
+        try out.print(a, "{s} => {s} => {s}\n", .{ ini[0], local, ini[1] });
+    }
+}
+
+// PCRE_JIT_SUPPORT
+pub fn jitSupported() bool {
+    var jit: u32 = 0;
+    _ = pcre2.pcre2_config_8(pcre2.CONFIG_JIT, &jit);
+    return jit != 0;
+}
+
+// ---------------------------------------------------------------------------
+// errors (PCRE_G(error_code))
+
+threadlocal var preg_error: i64 = 0;
+
+const NO_ERROR: i64 = 0;
+const INTERNAL_ERROR: i64 = 1;
+
+// pcre_handle_exec_error
+fn handleExecError(rc: c_int) void {
+    preg_error = switch (rc) {
+        pcre2.ERROR_MATCHLIMIT => 2,
+        pcre2.ERROR_DEPTHLIMIT => 3,
+        pcre2.ERROR_BADUTFOFFSET => 5,
+        pcre2.ERROR_JIT_STACKLIMIT => 6,
+        pcre2.ERROR_UTF8_ERR21...pcre2.ERROR_UTF8_ERR1 => 4,
+        else => INTERNAL_ERROR,
+    };
+}
+
+fn preg_last_error(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.{ .int = preg_error });
+}
+
+fn preg_last_error_msg(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const msg: []const u8 = switch (preg_error) {
+        0 => "No error",
+        1 => "Internal error",
+        2 => "Backtrack limit exhausted",
+        3 => "Recursion limit exhausted",
+        4 => "Malformed UTF-8 characters, possibly incorrectly encoded",
+        5 => "The offset did not correspond to the beginning of a valid UTF-8 code point",
+        6 => "JIT stack limit exhausted",
+        else => "Unknown error",
+    };
+    return NativeResult.copyString(ctx.allocator, msg);
+}
+
+// ---------------------------------------------------------------------------
+// matching
 
 // the match context carrying pcre.backtrack_limit and pcre.recursion_limit,
 // one per thread, updated when the settings change
@@ -87,224 +212,268 @@ fn exec(ctx: *NativeContext, code: *pcre2.Code, subject: []const u8, offset: usi
     return pcre2.pcre2_match_8(code, bytes, subject.len, offset, options, match_data, matchContext(ctx));
 }
 
-// a match that failed for a reason other than finding nothing, recorded for
-// preg_last_error as php_pcre's pcre_handle_exec_error records it
-fn execFailed(rc: c_int) bool {
-    if (rc >= 0 or rc == pcre2.ERROR_NOMATCH) return false;
-    setPregError(switch (rc) {
-        pcre2.ERROR_MATCHLIMIT => 2,
-        pcre2.ERROR_DEPTHLIMIT => 3,
-        pcre2.ERROR_UTF8_ERR21...pcre2.ERROR_UTF8_ERR1 => 4,
-        pcre2.ERROR_BADUTFOFFSET => 5,
-        pcre2.ERROR_JIT_STACKLIMIT => 6,
-        else => 1,
-    });
-    return true;
-}
-
-fn coerceStrArg(ctx: *NativeContext, v: Value) ?[]const u8 {
-    return switch (v) {
-        .string => |s| s.bytes(),
-        .object => |o| blk: {
-            if (!ctx.vm.hasMethod(o.class_name, "__toString")) break :blk null;
-            const r = ctx.vm.callMethod(o, "__toString", &.{}) catch break :blk null;
-            if (r == .string) break :blk r.string.bytes();
-            break :blk null;
-        },
+// pcre checks a utf subject from the start offset to the end on every match,
+// so matching a long subject at many offsets costs quadratic time. as php
+// does, a subject known to be valid utf-8 skips the check: it is validated
+// once, and a string that owns its bytes remembers the result
+fn utfKnownValid(subject: []const u8, holder: ?Value) bool {
+    const owner: ?*Value.String.Owner = if (holder) |h| switch (h) {
+        .string => |str| if (str.owner) |o| (if (str.ptr == o.bytes.ptr and str.len == o.bytes.len) o else null) else null,
         else => null,
+    } else null;
+    if (owner) |o| if (o.utf8_valid) return true;
+    const valid = std.unicode.utf8ValidateSlice(subject);
+    if (valid) if (owner) |o| {
+        o.utf8_valid = true;
     };
+    return valid;
 }
 
-const pcre2 = struct {
-    const Code = opaque {};
-    const MatchData = opaque {};
-
-    const CASELESS: u32 = 0x00000008;
-    const MULTILINE: u32 = 0x00000400;
-    const DOTALL: u32 = 0x00000020;
-    const EXTENDED: u32 = 0x00000080;
-    const UTF: u32 = 0x00080000;
-    const JIT_COMPLETE: u32 = 0x00000001;
-    const NO_UTF_CHECK: u32 = 0x40000000;
-    const INFO_ALLOPTIONS: u32 = 0;
-    const UCP: u32 = 0x00020000;
-    const ANCHORED: u32 = 0x80000000;
-    const UNGREEDY: u32 = 0x00040000;
-    const DOLLAR_ENDONLY: u32 = 0x00000010;
-    const DUPNAMES: u32 = 0x00000040;
-    const NO_AUTO_CAPTURE: u32 = 0x00002000;
-
-    const SUBSTITUTE_GLOBAL: u32 = 0x00000100;
-    const SUBSTITUTE_OVERFLOW_LENGTH: u32 = 0x00001000;
-
-    const INFO_CAPTURECOUNT: u32 = 4;
-    const INFO_NAMECOUNT: u32 = 17;
-    const INFO_NAMEENTRYSIZE: u32 = 18;
-    const INFO_NAMETABLE: u32 = 19;
-    const ERROR_NOMEMORY: c_int = -48;
-    const ERROR_NOMATCH: c_int = -1;
-    const ERROR_UTF8_ERR1: c_int = -3;
-    const ERROR_UTF8_ERR21: c_int = -23;
-    const ERROR_BADUTFOFFSET: c_int = -36;
-    const ERROR_JIT_STACKLIMIT: c_int = -46;
-    const ERROR_MATCHLIMIT: c_int = -47;
-    const ERROR_DEPTHLIMIT: c_int = -53;
-    const UNSET: usize = std.math.maxInt(usize);
-
-    extern "c" fn pcre2_compile_8(
-        pattern: [*]const u8,
-        length: usize,
-        options: u32,
-        errorcode: *c_int,
-        erroroffset: *usize,
-        ccontext: ?*anyopaque,
-    ) callconv(.c) ?*Code;
-
-    extern "c" fn pcre2_code_free_8(code: ?*Code) callconv(.c) void;
-
-    extern "c" fn pcre2_get_error_message_8(
-        errorcode: c_int,
-        buffer: [*]u8,
-        bufflen: usize,
-    ) callconv(.c) c_int;
-
-    extern "c" fn pcre2_match_data_create_from_pattern_8(
-        code: *const Code,
-        gcontext: ?*anyopaque,
-    ) callconv(.c) ?*MatchData;
-
-    extern "c" fn pcre2_match_data_free_8(match_data: ?*MatchData) callconv(.c) void;
-
-    extern "c" fn pcre2_match_context_create_8(gcontext: ?*anyopaque) callconv(.c) ?*anyopaque;
-    extern "c" fn pcre2_jit_compile_8(code: *Code, options: u32) callconv(.c) c_int;
-    extern "c" fn pcre2_jit_stack_create_8(startsize: usize, maxsize: usize, gcontext: ?*anyopaque) callconv(.c) ?*anyopaque;
-    extern "c" fn pcre2_jit_stack_assign_8(mcontext: *anyopaque, callback: ?*anyopaque, data: ?*anyopaque) callconv(.c) void;
-    extern "c" fn pcre2_set_match_limit_8(mcontext: *anyopaque, value: u32) callconv(.c) c_int;
-    extern "c" fn pcre2_set_depth_limit_8(mcontext: *anyopaque, value: u32) callconv(.c) c_int;
-
-    extern "c" fn pcre2_match_8(
-        code: *const Code,
-        subject: [*]const u8,
-        length: usize,
-        startoffset: usize,
-        options: u32,
-        match_data: *MatchData,
-        mcontext: ?*anyopaque,
-    ) callconv(.c) c_int;
-
-    extern "c" fn pcre2_get_ovector_pointer_8(
-        match_data: *MatchData,
-    ) callconv(.c) [*]usize;
-
-    extern "c" fn pcre2_pattern_info_8(
-        code: *const Code,
-        what: u32,
-        where: *anyopaque,
-    ) callconv(.c) c_int;
-
-    extern "c" fn pcre2_get_mark_8(
-        match_data: *MatchData,
-    ) callconv(.c) ?[*:0]const u8;
-
-    extern "c" fn pcre2_substitute_8(
-        code: *const Code,
-        subject: [*]const u8,
-        length: usize,
-        startoffset: usize,
-        options: u32,
-        match_data: ?*MatchData,
-        mcontext: ?*anyopaque,
-        replacement: [*]const u8,
-        rlength: usize,
-        outputbuffer: ?[*]u8,
-        outlengthptr: *usize,
-    ) callconv(.c) c_int;
-
-    extern "c" fn pcre2_config_8(what: u32, where_: ?*anyopaque) callconv(.c) c_int;
-    const CONFIG_VERSION: u32 = 11;
-};
-
-// the linked libpcre2 version string, e.g. "10.42 2022-12-11". php exposes this
-// as the PCRE_VERSION constant; vendor polyfills (symfony/polyfill-intl-grapheme)
-// gate behaviour on `(float) PCRE_VERSION`, so it must be defined and accurate.
-// written into a process-lifetime static buffer so the constant slice stays
-// valid without a heap allocation the constants map would leak
-var version_buf: [64]u8 = undefined;
-pub fn libVersion() []const u8 {
-    const n = pcre2.pcre2_config_8(pcre2.CONFIG_VERSION, &version_buf);
-    if (n <= 1 or @as(usize, @intCast(n)) > version_buf.len) return "";
-    return version_buf[0..@intCast(n - 1)]; // n includes the trailing nul
+// the options of a subject's first match: the utf check is skipped for a
+// subject known valid, from the start of a code point (is_known_valid_utf8)
+fn firstOptions(entry: *const Entry, subject: []const u8, holder: ?Value, offset: usize) u32 {
+    if (entry.coptions & pcre2.UTF == 0) return pcre2.NO_UTF_CHECK;
+    if (!utfKnownValid(subject, holder)) return 0;
+    if (offset < subject.len and subject[offset] & 0xc0 == 0x80) return 0;
+    return pcre2.NO_UTF_CHECK;
 }
 
-pub const entries = .{
-    .{ "preg_match", preg_match },
-    .{ "preg_match_all", preg_match_all },
-    .{ "preg_replace", preg_replace },
-    .{ "preg_filter", preg_filter },
-    .{ "preg_replace_callback", preg_replace_callback },
-    .{ "preg_replace_callback_array", preg_replace_callback_array },
-    .{ "preg_split", preg_split },
-    .{ "preg_quote", preg_quote },
-    .{ "preg_grep", preg_grep },
-    .{ "preg_last_error", preg_last_error },
-    .{ "preg_last_error_msg", preg_last_error_msg },
-    .{ "mb_split", mb_split },
-    .{ "mb_ereg_match", mb_ereg_match },
+// calculate_unit_length: how far past an empty match the next attempt starts
+fn unitLength(entry: *const Entry, subject: []const u8, at: usize) usize {
+    if (entry.coptions & pcre2.UTF == 0) return 1;
+    var end = at + 1;
+    while (end < subject.len and subject[end] & 0xc0 == 0x80) end += 1;
+    return end - at;
+}
+
+// ---------------------------------------------------------------------------
+// the regex cache (pcre_get_compiled_regex_cache)
+
+const Entry = struct {
+    code: *pcre2.Code,
+    coptions: u32,
+    capture_count: u32,
+    name_count: u32,
+    // the group names by number, made the first time a match needs them;
+    // the names point into the compiled code's name table
+    names: ?[]?[]const u8 = null,
+
+    fn destroy(self: *Entry) void {
+        pcre2.pcre2_code_free_8(self.code);
+        if (self.names) |n| std.heap.c_allocator.free(n);
+        std.heap.c_allocator.destroy(self);
+    }
+
+    // make_subpats_table
+    fn subpatNames(self: *Entry) RuntimeError!?[]?[]const u8 {
+        if (self.name_count == 0) return null;
+        if (self.names) |n| return n;
+        var table: [*]const u8 = undefined;
+        var entry_size: u32 = 0;
+        _ = pcre2.pcre2_pattern_info_8(self.code, pcre2.INFO_NAMETABLE, @ptrCast(&table));
+        _ = pcre2.pcre2_pattern_info_8(self.code, pcre2.INFO_NAMEENTRYSIZE, @ptrCast(&entry_size));
+        const names = try std.heap.c_allocator.alloc(?[]const u8, self.capture_count + 1);
+        @memset(names, null);
+        for (0..self.name_count) |i| {
+            const e = table + i * entry_size;
+            const idx = (@as(usize, e[0]) << 8) | e[1];
+            names[idx] = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(e + 2)), 0);
+        }
+        self.names = names;
+        return names;
+    }
 };
 
-const PatternInfo = struct {
+// php's PCRE_CACHE_SIZE. past it a pattern is compiled for its call and
+// freed after it: a cached code is never freed while a call (or a callback
+// it runs) could be using it
+const cache_size = 4096;
+threadlocal var pattern_cache: std.StringHashMapUnmanaged(*Entry) = .empty;
+threadlocal var compile_context: ?*anyopaque = null;
+
+const Compiled = struct {
+    entry: *Entry,
+    owned: bool,
+
+    fn release(self: Compiled) void {
+        if (self.owned) self.entry.destroy();
+    }
+};
+
+const Parsed = struct {
     pattern: []const u8,
-    flags: u32,
+    coptions: u32,
+    eoptions: u32,
 };
 
-fn parsePattern(raw_in: []const u8) ?PatternInfo {
-    // PHP skips leading whitespace before reading the delimiter, so an
-    // indented multi-line regex literal (e.g. Symfony's HeaderUtils::split)
-    // still parses with its real delimiter
-    var ws: usize = 0;
-    while (ws < raw_in.len and std.ascii.isWhitespace(raw_in[ws])) ws += 1;
-    const raw = raw_in[ws..];
-    if (raw.len < 2) return null;
-    const delim = raw[0];
-    if (delim == '\\' or std.ascii.isAlphanumeric(delim)) return null;
+const Problem = union(enum) {
+    empty,
+    delimiter,
+    no_end: u8,
+    no_end_matching: u8,
+    modifier: u8,
+    compile: struct { code: c_int, offset: usize },
+};
 
-    const close_delim: u8 = switch (delim) {
+fn isSpace(c: u8) bool {
+    return c == ' ' or (c >= '\t' and c <= '\r');
+}
+
+// the delimiters and modifiers of a regex
+fn parseRegex(regex: []const u8) union(enum) { ok: Parsed, problem: Problem } {
+    var p: usize = 0;
+    while (p < regex.len and isSpace(regex[p])) p += 1;
+    if (p >= regex.len) return .{ .problem = .empty };
+    const start_delimiter = regex[p];
+    p += 1;
+    if (std.ascii.isAlphanumeric(start_delimiter) or start_delimiter == '\\' or start_delimiter == 0) return .{ .problem = .delimiter };
+    const end_delimiter: u8 = switch (start_delimiter) {
         '(' => ')',
-        '{' => '}',
         '[' => ']',
+        '{' => '}',
         '<' => '>',
-        else => delim,
+        else => start_delimiter,
     };
-
-    var end = raw.len - 1;
-    while (end > 0 and raw[end] != close_delim) end -= 1;
-    if (end == 0) return null;
-
-    const pattern = raw[1..end];
-    const modifiers = raw[end + 1 ..];
-
-    var flags: u32 = 0;
-    for (modifiers) |m| {
-        switch (m) {
-            'i' => flags |= pcre2.CASELESS,
-            'm' => flags |= pcre2.MULTILINE,
-            's' => flags |= pcre2.DOTALL,
-            'x' => flags |= pcre2.EXTENDED,
-            'u' => flags |= pcre2.UTF | pcre2.UCP,
-            'A' => flags |= pcre2.ANCHORED,
-            'U' => flags |= pcre2.UNGREEDY,
-            'D' => flags |= pcre2.DOLLAR_ENDONLY,
-            'J' => flags |= pcre2.DUPNAMES,
-            'n' => flags |= pcre2.NO_AUTO_CAPTURE,
-            // 'S' (study) and 'X' (PCRE_EXTRA) are accepted by PHP but have no
-            // PCRE2 equivalent - treat as no-ops rather than rejecting
-            'S', 'X' => {},
-            // 'e' was removed in PHP 7; any other letter is an unknown
-            // modifier. PHP fails the whole call and returns false/null
-            else => return null,
+    var pp = p;
+    if (start_delimiter == end_delimiter) {
+        while (pp < regex.len) : (pp += 1) {
+            if (regex[pp] == '\\' and pp + 1 < regex.len) {
+                pp += 1;
+            } else if (regex[pp] == end_delimiter) break;
+        }
+    } else {
+        var brackets: usize = 1;
+        while (pp < regex.len) : (pp += 1) {
+            if (regex[pp] == '\\' and pp + 1 < regex.len) {
+                pp += 1;
+            } else if (regex[pp] == end_delimiter) {
+                brackets -= 1;
+                if (brackets == 0) break;
+            } else if (regex[pp] == start_delimiter) brackets += 1;
         }
     }
-    return .{ .pattern = pattern, .flags = flags };
+    if (pp >= regex.len) return .{ .problem = if (start_delimiter == end_delimiter) .{ .no_end = end_delimiter } else .{ .no_end_matching = end_delimiter } };
+    var parsed: Parsed = .{ .pattern = regex[p..pp], .coptions = 0, .eoptions = 0 };
+    for (regex[pp + 1 ..]) |m| {
+        switch (m) {
+            'i' => parsed.coptions |= pcre2.CASELESS,
+            'm' => parsed.coptions |= pcre2.MULTILINE,
+            'n' => parsed.coptions |= pcre2.NO_AUTO_CAPTURE,
+            's' => parsed.coptions |= pcre2.DOTALL,
+            'x' => parsed.coptions |= pcre2.EXTENDED,
+            'A' => parsed.coptions |= pcre2.ANCHORED,
+            'D' => parsed.coptions |= pcre2.DOLLAR_ENDONLY,
+            'r' => parsed.eoptions |= pcre2.EXTRA_CASELESS_RESTRICT,
+            'S', 'X' => {},
+            'U' => parsed.coptions |= pcre2.UNGREEDY,
+            // \C is unsafe in utf mode
+            'u' => parsed.coptions |= pcre2.UTF | pcre2.UCP | pcre2.NEVER_BACKSLASH_C,
+            'J' => parsed.coptions |= pcre2.DUPNAMES,
+            ' ', '\n', '\r' => {},
+            else => return .{ .problem = .{ .modifier = m } },
+        }
+    }
+    return .{ .ok = parsed };
+}
+
+fn compileParsed(parsed: Parsed, err_code: *c_int, err_offset: *usize) ?*pcre2.Code {
+    if (compile_context == null) compile_context = pcre2.pcre2_compile_context_create_8(null);
+    const cctx = compile_context orelse return null;
+    _ = pcre2.pcre2_set_compile_extra_options_8(cctx, parsed.eoptions);
+    if (normalizeOpenBoundQuantifier(parsed.pattern)) |buf| {
+        defer std.heap.c_allocator.free(buf);
+        return pcre2.pcre2_compile_8(buf.ptr, buf.len, parsed.coptions, err_code, err_offset, cctx);
+    }
+    const bytes: [*]const u8 = if (parsed.pattern.len == 0) "" else parsed.pattern.ptr;
+    return pcre2.pcre2_compile_8(bytes, parsed.pattern.len, parsed.coptions, err_code, err_offset, cctx);
+}
+
+// the warning text for a regex php refuses, without the function's name
+fn problemText(problem: Problem, buf: []u8) []const u8 {
+    return switch (problem) {
+        .empty => "Empty regular expression",
+        .delimiter => "Delimiter must not be alphanumeric, backslash, or NUL byte",
+        .no_end => |c| std.fmt.bufPrint(buf, "No ending delimiter '{c}' found", .{c}) catch "",
+        .no_end_matching => |c| std.fmt.bufPrint(buf, "No ending matching delimiter '{c}' found", .{c}) catch "",
+        .modifier => |c| if (c == 0) "NUL byte is not a valid modifier" else std.fmt.bufPrint(buf, "Unknown modifier '{c}'", .{c}) catch "",
+        .compile => |e| blk: {
+            var msg_buf: [256]u8 = undefined;
+            const msg: []const u8 = if (e.code == pcre2.ERROR_BACKSLASH_C_CALLER_DISABLED) "using \\C is incompatible with the 'u' modifier" else msg: {
+                const n = pcre2.pcre2_get_error_message_8(e.code, &msg_buf, msg_buf.len);
+                break :msg if (n > 0) msg_buf[0..@intCast(n)] else "";
+            };
+            break :blk std.fmt.bufPrint(buf, "Compilation failed: {s} at offset {d}", .{ msg, e.offset }) catch "";
+        },
+    };
+}
+
+// pcre_get_compiled_regex_cache: a regex php can't use is warned about as
+// the running function's and leaves PREG_INTERNAL_ERROR
+fn getCompiled(ctx: *NativeContext, func: []const u8, regex: []const u8) RuntimeError!?Compiled {
+    if (pattern_cache.get(regex)) |entry| return .{ .entry = entry, .owned = false };
+    var problem: ?Problem = null;
+    var code: ?*pcre2.Code = null;
+    var parsed: Parsed = undefined;
+    switch (parseRegex(regex)) {
+        .problem => |p| problem = p,
+        .ok => |pr| {
+            parsed = pr;
+            var err_code: c_int = 0;
+            var err_offset: usize = 0;
+            code = compileParsed(pr, &err_code, &err_offset);
+            if (code == null) problem = .{ .compile = .{ .code = err_code, .offset = err_offset } };
+        },
+    }
+    if (problem) |p| {
+        var buf: [512]u8 = undefined;
+        const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): {s}", .{ func, problemText(p, &buf) });
+        defer ctx.allocator.free(msg);
+        try ctx.vm.emitWarning(msg);
+        preg_error = INTERNAL_ERROR;
+        return null;
+    }
+    const c = code.?;
+    // as php does with pcre.jit on; a pattern the jit can't take still
+    // matches through the interpreter
+    if (iniLimit(ctx, "pcre.jit", 1) != 0) _ = pcre2.pcre2_jit_compile_8(c, pcre2.JIT_COMPLETE);
+    const entry = std.heap.c_allocator.create(Entry) catch {
+        pcre2.pcre2_code_free_8(c);
+        return error.OutOfMemory;
+    };
+    entry.* = .{ .code = c, .coptions = parsed.coptions, .capture_count = 0, .name_count = 0 };
+    _ = pcre2.pcre2_pattern_info_8(c, pcre2.INFO_CAPTURECOUNT, @ptrCast(&entry.capture_count));
+    _ = pcre2.pcre2_pattern_info_8(c, pcre2.INFO_NAMECOUNT, @ptrCast(&entry.name_count));
+    if (pattern_cache.count() < cache_size) {
+        const key = std.heap.c_allocator.dupe(u8, regex) catch return .{ .entry = entry, .owned = true };
+        pattern_cache.put(std.heap.c_allocator, key, entry) catch {
+            std.heap.c_allocator.free(key);
+            return .{ .entry = entry, .owned = true };
+        };
+        return .{ .entry = entry, .owned = false };
+    }
+    return .{ .entry = entry, .owned = true };
+}
+
+// what php's pcre_get_compiled_regex_cache warns about a regex it can't
+// use, without the function prefix; null for a usable one. the caller owns
+// the message
+pub fn patternProblem(ctx: *NativeContext, regex: []const u8) RuntimeError!?[]u8 {
+    switch (parseRegex(regex)) {
+        .problem => |p| {
+            var buf: [512]u8 = undefined;
+            return try ctx.allocator.dupe(u8, problemText(p, &buf));
+        },
+        .ok => |parsed| {
+            var err_code: c_int = 0;
+            var err_offset: usize = 0;
+            if (compileParsed(parsed, &err_code, &err_offset)) |code| {
+                pcre2.pcre2_code_free_8(code);
+                return null;
+            }
+            var buf: [512]u8 = undefined;
+            return try ctx.allocator.dupe(u8, problemText(.{ .compile = .{ .code = err_code, .offset = err_offset } }, &buf));
+        },
+    }
 }
 
 // PCRE2 10.43+ (what modern PHP bundles) recognizes {,n} as the quantifier
@@ -364,63 +533,6 @@ fn normalizeOpenBoundQuantifier(pattern: []const u8) ?[]u8 {
     return null;
 }
 
-// compiled patterns are kept per thread, as php keeps its pcre cache, up to
-// php's PCRE_CACHE_SIZE entries. past that a pattern is compiled for its call
-// and freed after it: a cached code is never freed while a call (or a
-// callback it runs) could be using it
-const cache_size = 4096;
-threadlocal var pattern_cache: std.StringHashMapUnmanaged(*pcre2.Code) = .empty;
-
-const Compiled = struct {
-    code: *pcre2.Code,
-    owned: bool,
-
-    fn release(self: Compiled) void {
-        if (self.owned) pcre2.pcre2_code_free_8(self.code);
-    }
-};
-
-fn compilePattern(ctx: *NativeContext, pattern: []const u8, flags: u32) ?Compiled {
-    var key_buf: [256]u8 = undefined;
-    const key_len = pattern.len + 4;
-    const key: ?[]u8 = if (key_len <= key_buf.len) key_buf[0..key_len] else null;
-    if (key) |k| {
-        std.mem.writeInt(u32, k[0..4], flags, .little);
-        @memcpy(k[4..], pattern);
-        if (pattern_cache.get(k)) |code| return .{ .code = code, .owned = false };
-    }
-    const code = compileUncached(pattern, flags) orelse return null;
-    // as php does with pcre.jit on; a pattern the jit can't take still
-    // matches through the interpreter
-    if (iniLimit(ctx, "pcre.jit", 1) != 0) _ = pcre2.pcre2_jit_compile_8(code, pcre2.JIT_COMPLETE);
-    if (key) |k| if (pattern_cache.count() < cache_size) {
-        const kept = std.heap.c_allocator.dupe(u8, k) catch return .{ .code = code, .owned = true };
-        pattern_cache.put(std.heap.c_allocator, kept, code) catch {
-            std.heap.c_allocator.free(kept);
-            return .{ .code = code, .owned = true };
-        };
-        return .{ .code = code, .owned = false };
-    };
-    return .{ .code = code, .owned = true };
-}
-
-fn compileUncached(pattern: []const u8, flags: u32) ?*pcre2.Code {
-    var err_code: c_int = 0;
-    var err_offset: usize = 0;
-    if (normalizeOpenBoundQuantifier(pattern)) |buf| {
-        defer std.heap.c_allocator.free(buf);
-        return pcre2.pcre2_compile_8(buf.ptr, buf.len, flags, &err_code, &err_offset, null);
-    }
-    return pcre2.pcre2_compile_8(
-        pattern.ptr,
-        pattern.len,
-        flags,
-        &err_code,
-        &err_offset,
-        null,
-    );
-}
-
 test "normalizeOpenBoundQuantifier" {
     const t = std.testing;
     try t.expectEqual(@as(?[]u8, null), normalizeOpenBoundQuantifier("a{2,4}b"));
@@ -457,1316 +569,776 @@ test "normalizeOpenBoundQuantifier" {
     }
 }
 
-// what php's pcre_get_compiled_regex_cache warns about a regex it can't
-// use, without the function prefix; null for a usable one. the caller owns
-// the message
-pub fn patternProblem(ctx: *NativeContext, regex: []const u8) RuntimeError!?[]u8 {
-    const a = ctx.allocator;
-    var p: usize = 0;
-    while (p < regex.len and std.ascii.isWhitespace(regex[p])) p += 1;
-    if (p >= regex.len) return try a.dupe(u8, "Empty regular expression");
-    const start = regex[p];
-    p += 1;
-    if (std.ascii.isAlphanumeric(start) or start == '\\' or start == 0) return try a.dupe(u8, "Delimiter must not be alphanumeric, backslash, or NUL byte");
-    const end: u8 = switch (start) {
-        '(' => ')',
-        '[' => ']',
-        '{' => '}',
-        '<' => '>',
-        else => start,
-    };
-    var pp = p;
-    var depth: usize = 1;
-    while (pp < regex.len) : (pp += 1) {
-        const c = regex[pp];
-        if (c == '\\' and pp + 1 < regex.len) {
-            pp += 1;
-        } else if (c == end) {
-            if (start == end) break;
-            depth -= 1;
-            if (depth == 0) break;
-        } else if (c == start and start != end) {
-            depth += 1;
-        }
-    }
-    if (pp >= regex.len) {
-        if (start == end) return try std.fmt.allocPrint(a, "No ending delimiter '{c}' found", .{end});
-        return try std.fmt.allocPrint(a, "No ending matching delimiter '{c}' found", .{end});
-    }
-    const pattern = regex[p..pp];
-    var flags: u32 = 0;
-    for (regex[pp + 1 ..]) |m| {
-        switch (m) {
-            'i' => flags |= pcre2.CASELESS,
-            'm' => flags |= pcre2.MULTILINE,
-            'n' => flags |= pcre2.NO_AUTO_CAPTURE,
-            's' => flags |= pcre2.DOTALL,
-            'x' => flags |= pcre2.EXTENDED,
-            'A' => flags |= pcre2.ANCHORED,
-            'D' => flags |= pcre2.DOLLAR_ENDONLY,
-            'U' => flags |= pcre2.UNGREEDY,
-            'u' => flags |= pcre2.UTF | pcre2.UCP,
-            'J' => flags |= pcre2.DUPNAMES,
-            'S', 'X', 'r', ' ', '\n', '\r' => {},
-            0 => return try a.dupe(u8, "NUL byte is not a valid modifier"),
-            else => return try std.fmt.allocPrint(a, "Unknown modifier '{c}'", .{m}),
-        }
+// a compiled pattern for mb_split and mb_ereg_match, which name their
+// options themselves
+fn compileRaw(ctx: *NativeContext, pattern: []const u8, coptions: u32) ?Compiled {
+    var key_buf: [260]u8 = undefined;
+    if (pattern.len + 5 <= key_buf.len) {
+        key_buf[0] = 0;
+        std.mem.writeInt(u32, key_buf[1..5], coptions, .little);
+        @memcpy(key_buf[5..][0..pattern.len], pattern);
+        if (pattern_cache.get(key_buf[0 .. pattern.len + 5])) |entry| return .{ .entry = entry, .owned = false };
     }
     var err_code: c_int = 0;
     var err_offset: usize = 0;
-    const probe = pcre2.pcre2_compile_8(pattern.ptr, pattern.len, flags, &err_code, &err_offset, null);
-    if (probe) |code| {
+    const code = compileParsed(.{ .pattern = pattern, .coptions = coptions, .eoptions = 0 }, &err_code, &err_offset) orelse return null;
+    if (iniLimit(ctx, "pcre.jit", 1) != 0) _ = pcre2.pcre2_jit_compile_8(code, pcre2.JIT_COMPLETE);
+    const entry = std.heap.c_allocator.create(Entry) catch {
         pcre2.pcre2_code_free_8(code);
         return null;
+    };
+    entry.* = .{ .code = code, .coptions = coptions, .capture_count = 0, .name_count = 0 };
+    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_CAPTURECOUNT, @ptrCast(&entry.capture_count));
+    if (pattern.len + 5 <= key_buf.len and pattern_cache.count() < cache_size) {
+        const key = std.heap.c_allocator.dupe(u8, key_buf[0 .. pattern.len + 5]) catch return .{ .entry = entry, .owned = true };
+        pattern_cache.put(std.heap.c_allocator, key, entry) catch {
+            std.heap.c_allocator.free(key);
+            return .{ .entry = entry, .owned = true };
+        };
+        return .{ .entry = entry, .owned = false };
     }
-    var msg_buf: [256]u8 = undefined;
-    const len = pcre2.pcre2_get_error_message_8(err_code, &msg_buf, msg_buf.len);
-    const text = if (len > 0) msg_buf[0..@intCast(len)] else "";
-    return try std.fmt.allocPrint(a, "Compilation failed: {s} at offset {d}", .{ text, err_offset });
+    return .{ .entry = entry, .owned = true };
 }
 
-// emit a PHP-format 'preg_<fn>(): Compilation failed: <message> at offset N'
-// warning for a pattern that fails to compile. callers should already have
-// set preg_last_error to 1 before invoking this
-fn emitCompileWarning(ctx: *NativeContext, fn_name: []const u8, pattern: []const u8, flags: u32) RuntimeError!void {
-    var err_code: c_int = 0;
-    var err_offset: usize = 0;
-    const probe = pcre2.pcre2_compile_8(pattern.ptr, pattern.len, flags, &err_code, &err_offset, null);
-    if (probe) |p| {
-        pcre2.pcre2_code_free_8(p);
-        return;
-    }
-    var msg_buf: [256]u8 = undefined;
-    const len = pcre2.pcre2_get_error_message_8(err_code, &msg_buf, msg_buf.len);
-    if (len <= 0) return;
-    const err_text = msg_buf[0..@intCast(len)];
-    const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Compilation failed: {s} at offset {d}", .{ fn_name, err_text, err_offset });
-    defer ctx.allocator.free(msg);
-    try ctx.vm.emitWarning(msg);
+// ---------------------------------------------------------------------------
+// match arrays
+
+fn subjectString(ctx: *NativeContext, subject: []const u8, start: usize, end: usize) RuntimeError!Value {
+    return .{ .string = try Value.String.create(ctx.allocator, subject[start..end]) };
 }
+
+// a value appended to an array the array now holds
+fn appendOwned(ctx: *NativeContext, arr: *PhpArray, v: Value) RuntimeError!void {
+    try arr.append(ctx.allocator, v);
+    if (v == .string) v.string.release();
+}
+
+// populate_match_value
+fn matchValue(ctx: *NativeContext, subject: []const u8, ov: [*]const usize, i: usize, unmatched_as_null: bool) RuntimeError!Value {
+    if (ov[2 * i] == pcre2.UNSET) return if (unmatched_as_null) .null else .{ .string = Value.String.borrowed("") };
+    return subjectString(ctx, subject, ov[2 * i], ov[2 * i + 1]);
+}
+
+// the (match, offset) pair of add_offset_pair
+fn offsetPair(ctx: *NativeContext, subject: []const u8, start: usize, end: usize, unmatched_as_null: bool) RuntimeError!Value {
+    const pair = try ctx.createArray();
+    if (start == pcre2.UNSET) {
+        try pair.append(ctx.allocator, if (unmatched_as_null) .null else .{ .string = Value.String.borrowed("") });
+        try pair.append(ctx.allocator, .{ .int = -1 });
+    } else {
+        try appendOwned(ctx, pair, try subjectString(ctx, subject, start, end));
+        try pair.append(ctx.allocator, .{ .int = @intCast(start) });
+    }
+    return .{ .array = pair };
+}
+
+// add_named: with duplicate names the group that matched wins
+fn addNamed(ctx: *NativeContext, arr: *PhpArray, name: []const u8, v: Value, unmatched: bool) RuntimeError!void {
+    const key = try Value.String.create(ctx.allocator, name);
+    defer key.release();
+    if (unmatched and arr.contains(.{ .string = key })) return;
+    try arr.set(ctx.allocator, .{ .string = key }, v);
+}
+
+fn addMark(ctx: *NativeContext, arr: *PhpArray, md: *pcre2.MatchData) RuntimeError!void {
+    const mark = pcre2.pcre2_get_mark_8(md) orelse return;
+    const s = try Value.String.create(ctx.allocator, std.mem.sliceTo(mark, 0));
+    defer s.release();
+    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("MARK") }, .{ .string = s });
+}
+
+// populate_subpat_array
+fn populateSubpats(ctx: *NativeContext, arr: *PhpArray, subject: []const u8, ov: [*]const usize, names: ?[]?[]const u8, num_subpats: usize, count: usize, md: *pcre2.MatchData, flags: i64) RuntimeError!void {
+    const offset_capture = flags & PREG_OFFSET_CAPTURE != 0;
+    const unmatched_as_null = flags & PREG_UNMATCHED_AS_NULL != 0;
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const v = if (offset_capture) try offsetPair(ctx, subject, ov[2 * i], ov[2 * i + 1], unmatched_as_null) else try matchValue(ctx, subject, ov, i, unmatched_as_null);
+        if (names) |n| if (n[i]) |name| try addNamed(ctx, arr, name, v, ov[2 * i] == pcre2.UNSET);
+        try appendOwned(ctx, arr, v);
+    }
+    if (unmatched_as_null) {
+        while (i < num_subpats) : (i += 1) {
+            const v = if (offset_capture) try offsetPair(ctx, subject, pcre2.UNSET, pcre2.UNSET, true) else Value.null;
+            if (names) |n| if (n[i]) |name| try addNamed(ctx, arr, name, v, true);
+            try arr.append(ctx.allocator, v);
+        }
+    }
+    try addMark(ctx, arr, md);
+}
+
+fn countFrom(rc: c_int, num_subpats: usize) usize {
+    // "Matched, but too many substrings" can't happen: the match data comes
+    // from the pattern
+    return if (rc == 0) num_subpats else @intCast(rc);
+}
+
+// ---------------------------------------------------------------------------
+// preg_match, preg_match_all
 
 fn preg_match(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2) return NativeResult.scalar(.{ .bool = false });
-    const pat_str = coerceStrArg(ctx, args[0]) orelse return NativeResult.scalar(.{ .bool = false });
-    const subj_str = coerceStrArg(ctx, args[1]) orelse return NativeResult.scalar(.{ .bool = false });
-    setPregError(0);
-    const info = parsePattern(pat_str) orelse {
-        setPregError(1);
-        return NativeResult.scalar(.{ .bool = false });
-    };
-    const subject = subj_str;
-
-    const compiled = compilePattern(ctx, info.pattern, info.flags) orelse {
-        setPregError(1);
-        try emitCompileWarning(ctx, "preg_match", info.pattern, info.flags);
-        return NativeResult.scalar(.{ .bool = false });
-    };
-    defer compiled.release();
-    const code = compiled.code;
-
-    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return NativeResult.scalar(.{ .bool = false });
-    defer pcre2.pcre2_match_data_free_8(match_data);
-
-    const flags: u32 = if (args.len >= 4) @intCast(@max(0, Value.toInt(args[3]))) else 0;
-    const offset_capture = (flags & 256) != 0;
-    const unmatched_as_null = (flags & 512) != 0;
-    const offset: usize = if (args.len >= 5 and args[4] == .int and args[4].int >= 0) @intCast(args[4].int) else 0;
-    const utf = UtfCheck.init(code, subject, args[1]);
-    const rc = exec(ctx, code, subject, offset, utf.options(offset), match_data);
-    if (rc < 0) {
-        // no match: $matches must still be set to an empty array so callers
-        // can safely iterate without an isset() guard
-        if (args.len >= 3) ctx.setCallerVar(2, args.len, .{ .array = try ctx.createArray() });
-        return NativeResult.scalar(if (execFailed(rc)) .{ .bool = false } else .{ .int = 0 });
-    }
-
-    if (args.len >= 3) {
-        // the output variable gets a new array; the one it held may be shared
-        const matches_arr = try ctx.createArray();
-        const ovector = pcre2.pcre2_get_ovector_pointer_8(match_data);
-        const matched_count: usize = @intCast(rc);
-
-        // with PREG_UNMATCHED_AS_NULL, include every group in the pattern
-        // (matched or not), so vendor code can index into named groups whose
-        // captures didn't fire without triggering "Undefined array key"
-        var total_groups: u32 = 0;
-        _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_CAPTURECOUNT, @ptrCast(&total_groups));
-        const count: usize = if (unmatched_as_null) @as(usize, total_groups) + 1 else matched_count;
-
-        for (0..count) |i| {
-            const start = ovector[i * 2];
-            const end = ovector[i * 2 + 1];
-            if (start == pcre2.UNSET or end == pcre2.UNSET) {
-                const val: Value = if (unmatched_as_null) .null else if (offset_capture) try makeOffsetPair(ctx, "", -1) else Value{ .string = Value.String.borrowed("") };
-                defer if (val == .string) val.string.release();
-                try matches_arr.append(ctx.allocator, val);
-            } else {
-                const str = subject[start..end];
-                const val = if (offset_capture) try makeOffsetPair(ctx, str, @intCast(start)) else Value{ .string = try Value.String.create(ctx.allocator, str) };
-                defer if (val == .string) val.string.release();
-                try matches_arr.append(ctx.allocator, val);
-            }
-        }
-        try addNamedGroupsInterleaved(ctx, matches_arr, code, ovector, subject, count, offset_capture, unmatched_as_null);
-        try setMark(ctx, matches_arr, .{ .string = Value.String.borrowed("MARK") }, match_data);
-        ctx.setCallerVar(2, args.len, .{ .array = matches_arr });
-    }
-
-    return NativeResult.scalar(.{ .int = 1 });
-}
-
-fn addNamedGroupsInterleaved(ctx: *NativeContext, arr: *PhpArray, code: *pcre2.Code, ovector: [*]usize, subject: []const u8, count: usize, offset_capture: bool, unmatched_as_null: bool) !void {
-    var name_count: u32 = 0;
-    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMECOUNT, @ptrCast(&name_count));
-    if (name_count == 0) return;
-    var name_entry_size: u32 = 0;
-    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMEENTRYSIZE, @ptrCast(&name_entry_size));
-    if (name_entry_size == 0) return;
-
-    var name_table: [*]const u8 = undefined;
-    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMETABLE, @ptrCast(&name_table));
-
-    // collect named groups sorted by group_num so we can insert in order
-    const NamedGroup = struct { group_num: usize, name: []const u8 };
-    var groups: [64]NamedGroup = undefined;
-    var group_len: usize = 0;
-    for (0..name_count) |i| {
-        const entry = name_table + i * name_entry_size;
-        const group_num = (@as(usize, entry[0]) << 8) | @as(usize, entry[1]);
-        const name_end = std.mem.indexOfScalar(u8, entry[2..name_entry_size], 0) orelse (name_entry_size - 2);
-        if (group_len < groups.len) {
-            groups[group_len] = .{ .group_num = group_num, .name = entry[2 .. 2 + name_end] };
-            group_len += 1;
-        }
-    }
-    // sort by group_num descending so we insert from the back
-    std.mem.sort(NamedGroup, groups[0..group_len], {}, struct {
-        fn f(_: void, a: NamedGroup, b: NamedGroup) bool {
-            return a.group_num > b.group_num;
-        }
-    }.f);
-
-    // With (?J), keep a single named entry per name. Value: pick the matched group
-    // (or first by group_num if none matched). Position: before the lowest group_num
-    // sharing that name.
-    var inserted_names: [64][]const u8 = undefined;
-    var inserted_count: usize = 0;
-    for (groups[0..group_len]) |ng| {
-        if (ng.group_num >= count) continue;
-        var dup = false;
-        for (inserted_names[0..inserted_count]) |n| {
-            if (std.mem.eql(u8, n, ng.name)) {
-                dup = true;
-                break;
-            }
-        }
-        if (dup) continue;
-
-        var chosen = ng.group_num;
-        var lowest = ng.group_num;
-        var found_match = false;
-        for (groups[0..group_len]) |other| {
-            if (!std.mem.eql(u8, other.name, ng.name)) continue;
-            if (other.group_num < lowest) lowest = other.group_num;
-            if (other.group_num >= count) continue;
-            const os = ovector[other.group_num * 2];
-            const oe = ovector[other.group_num * 2 + 1];
-            if (os != pcre2.UNSET and oe != pcre2.UNSET and !found_match) {
-                chosen = other.group_num;
-                found_match = true;
-            }
-        }
-        if (!found_match) chosen = lowest;
-
-        const start = ovector[chosen * 2];
-        const end = ovector[chosen * 2 + 1];
-        const val: Value = if (start == pcre2.UNSET or end == pcre2.UNSET) blk: {
-            if (unmatched_as_null) break :blk .null;
-            break :blk if (offset_capture) try makeOffsetPair(ctx, "", -1) else Value{ .string = Value.String.borrowed("") };
-        } else blk: {
-            const s = subject[start..end];
-            break :blk if (offset_capture) try makeOffsetPair(ctx, s, @intCast(start)) else Value{ .string = try Value.String.create(ctx.allocator, s) };
-        };
-        const insert_pos = lowest;
-        const named_entry = PhpArray.Entry{ .key = .{ .string = try Value.String.create(ctx.allocator, ng.name) }, .value = val };
-        defer named_entry.key.string.release();
-        defer if (val == .string) val.string.release();
-        try insertNamedMatch(ctx, arr, insert_pos, named_entry);
-        arr.rebuildStringIndexAssumeCapacity();
-        inserted_names[inserted_count] = ng.name;
-        inserted_count += 1;
-    }
-}
-
-fn addNamedGroups(ctx: *NativeContext, arr: *PhpArray, code: *pcre2.Code, ovector: [*]usize, subject: []const u8, count: usize) !void {
-    var name_count: u32 = 0;
-    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMECOUNT, @ptrCast(&name_count));
-    if (name_count == 0) return;
-    var name_entry_size: u32 = 0;
-    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMEENTRYSIZE, @ptrCast(&name_entry_size));
-    if (name_entry_size == 0) return;
-
-    var name_table: [*]const u8 = undefined;
-    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMETABLE, @ptrCast(&name_table));
-
-    for (0..name_count) |i| {
-        const entry = name_table + i * name_entry_size;
-        const group_num = (@as(usize, entry[0]) << 8) | @as(usize, entry[1]);
-        const name_end = std.mem.indexOfScalar(u8, entry[2..name_entry_size], 0) orelse (name_entry_size - 2);
-        const name = entry[2 .. 2 + name_end];
-        if (group_num < count) {
-            const start = ovector[group_num * 2];
-            const end = ovector[group_num * 2 + 1];
-            const val: Value = if (start == pcre2.UNSET or end == pcre2.UNSET)
-                .{ .string = Value.String.borrowed("") }
-            else
-                .{ .string = try Value.String.create(ctx.allocator, subject[start..end]) };
-            defer if (val == .string) val.string.release();
-            const key = try Value.String.create(ctx.allocator, name);
-            defer key.release();
-            try arr.set(ctx.allocator, .{ .string = key }, val);
-        }
-    }
-}
-
-// the name of the last (*MARK:name) the match passed, stored under `key`
-fn setMark(ctx: *NativeContext, arr: *PhpArray, key: PhpArray.Key, match_data: anytype) RuntimeError!void {
-    const mark_ptr = pcre2.pcre2_get_mark_8(match_data) orelse return;
-    const mark = std.mem.sliceTo(mark_ptr, 0);
-    if (mark.len == 0) return;
-    const owned = try Value.String.create(ctx.allocator, mark);
-    defer owned.release();
-    try arr.set(ctx.allocator, key, .{ .string = owned });
+    return doMatch(ctx, args, false);
 }
 
 fn preg_match_all(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
-    setPregError(0);
-    const info = parsePattern(args[0].string.bytes()) orelse {
-        setPregError(1);
-        return NativeResult.scalar(.{ .bool = false });
-    };
-    const subject = args[1].string.bytes();
+    return doMatch(ctx, args, true);
+}
 
-    const flags: u32 = if (args.len >= 4) @intCast(@max(0, Value.toInt(args[3]))) else 0;
-    const set_order = (flags & 2) != 0; // PREG_SET_ORDER
-    const offset_capture = (flags & 256) != 0; // PREG_OFFSET_CAPTURE
-    const unmatched_as_null = (flags & 512) != 0; // PREG_UNMATCHED_AS_NULL
-
-    const compiled = compilePattern(ctx, info.pattern, info.flags) orelse {
-        setPregError(1);
-        try emitCompileWarning(ctx, "preg_match_all", info.pattern, info.flags);
-        return NativeResult.scalar(.{ .bool = false });
-    };
+// php_do_pcre_match
+fn doMatch(ctx: *NativeContext, args: []const Value, global: bool) RuntimeError!NativeResult {
+    const func: []const u8 = if (global) "preg_match_all" else "preg_match";
+    const p = Args.init(ctx, func, args);
+    const regex = try p.str(0, "pattern");
+    const subject = try p.str(1, "subject");
+    const want_matches = args.len > 2;
+    const flags = try p.optLong(3, "flags", 0);
+    const start_offset = try p.optLong(4, "offset", 0);
+    const compiled = (try getCompiled(ctx, func, regex)) orelse return NativeResult.scalar(.{ .bool = false });
     defer compiled.release();
-    const code = compiled.code;
+    if (start_offset == std.math.minInt(i64)) return throwFmt(ctx, "ValueError", "{s}(): Argument #5 ($offset) must be greater than {d}", .{ func, std.math.minInt(i64) });
+    return matchImpl(ctx, compiled.entry, subject, args[1], want_matches, args.len, global, flags, start_offset);
+}
 
-    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return NativeResult.scalar(.{ .int = 0 });
-    defer pcre2.pcre2_match_data_free_8(match_data);
+fn throwFmt(ctx: *NativeContext, class: []const u8, comptime fmt: []const u8, fargs: anytype) RuntimeError {
+    const msg = try std.fmt.allocPrint(ctx.allocator, fmt, fargs);
+    defer ctx.allocator.free(msg);
+    try ctx.vm.setPendingException(class, msg);
+    return error.RuntimeError;
+}
 
-    var capture_count: u32 = 0;
-    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_CAPTURECOUNT, @ptrCast(&capture_count));
-    const group_count: usize = capture_count + 1;
-
-    const out = try ctx.createArray();
-
-    var group_arrays: ?std.ArrayListUnmanaged(*PhpArray) = null;
-    if (!set_order) {
-        var ga = std.ArrayListUnmanaged(*PhpArray).empty;
-        for (0..group_count) |_| {
-            try ga.append(ctx.allocator, try ctx.createArray());
+// php_pcre_match_impl
+fn matchImpl(ctx: *NativeContext, entry: *Entry, subject: []const u8, holder: Value, want_matches: bool, arg_count: usize, global: bool, flags: i64, start_offset: i64) RuntimeError!NativeResult {
+    const a = ctx.allocator;
+    // the output variable gets a new array; the one it held may be shared
+    const subpats: ?*PhpArray = if (want_matches) try ctx.createArray() else null;
+    if (subpats) |s| ctx.setCallerVar(2, arg_count, .{ .array = s });
+    var order: i64 = if (global) PREG_PATTERN_ORDER else 0;
+    if (flags & 0xff != 0) {
+        order = flags & 0xff;
+        if ((global and (order < PREG_PATTERN_ORDER or order > PREG_SET_ORDER)) or (!global and order != 0)) {
+            const func: []const u8 = if (global) "preg_match_all" else "preg_match";
+            return throwFmt(ctx, "ValueError", "{s}(): Argument #4 ($flags) must be a PREG_* constant", .{func});
         }
-        group_arrays = ga;
     }
-    defer if (group_arrays) |*ga| ga.deinit(ctx.allocator);
+    const offset_capture = flags & PREG_OFFSET_CAPTURE != 0;
+    const unmatched_as_null = flags & PREG_UNMATCHED_AS_NULL != 0;
 
-    var total_matches: i64 = 0;
-    var offset: usize = 0;
+    var offset: usize = if (start_offset < 0)
+        (if (@as(u64, @intCast(-start_offset)) <= subject.len) subject.len - @as(usize, @intCast(-start_offset)) else 0)
+    else
+        @intCast(@min(start_offset, std.math.maxInt(i64)));
+    if (offset > subject.len) {
+        handleExecError(pcre2.ERROR_BADOFFSET);
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    const num_subpats: usize = entry.capture_count + 1;
+    const names = if (subpats != null) try entry.subpatNames() else null;
+    preg_error = NO_ERROR;
+    const md = pcre2.pcre2_match_data_create_from_pattern_8(entry.code, null) orelse {
+        preg_error = INTERNAL_ERROR;
+        return NativeResult.scalar(.{ .bool = false });
+    };
+    defer pcre2.pcre2_match_data_free_8(md);
+
+    // the per-group arrays of PREG_PATTERN_ORDER
+    var match_sets: ?[]*PhpArray = null;
+    defer if (match_sets) |sets| a.free(sets);
+    if (global and subpats != null and order == PREG_PATTERN_ORDER) {
+        const sets = try a.alloc(*PhpArray, num_subpats);
+        for (sets) |*s| s.* = try ctx.createArray();
+        match_sets = sets;
+    }
     var marks: ?*PhpArray = null;
-    const utf = UtfCheck.init(code, subject, args[1]);
-
-    var failed = false;
-    while (offset <= subject.len) {
-        const rc = exec(ctx, code, subject, offset, utf.options(offset), match_data);
-        if (rc < 0) {
-            failed = execFailed(rc);
-            break;
-        }
-
-        const ovector = pcre2.pcre2_get_ovector_pointer_8(match_data);
-        const count: usize = @intCast(rc);
-
-        if (set_order) {
-            const match_arr = try ctx.createArray();
-            // PHP omits trailing unmatched groups in SET_ORDER unless
-            // PREG_UNMATCHED_AS_NULL is set, in which case they appear as null
-            const last_idx: usize = if (unmatched_as_null) group_count - 1 else blk: {
-                var last_matched: usize = 0;
-                for (0..group_count) |i| {
-                    if (i < count) {
-                        const s = ovector[i * 2];
-                        const e = ovector[i * 2 + 1];
-                        if (s != pcre2.UNSET and e != pcre2.UNSET) {
-                            last_matched = i;
+    const ov = pcre2.pcre2_get_ovector_pointer_8(md);
+    var matched: i64 = 0;
+    var rc = exec(ctx, entry.code, subject, offset, firstOptions(entry, subject, holder, offset), md);
+    while (true) {
+        if (rc >= 0) {
+            var count = countFrom(rc, num_subpats);
+            while (true) {
+                matched += 1;
+                if (subpats) |out| {
+                    if (global) {
+                        if (match_sets) |sets| {
+                            for (0..count) |i| try appendOwned(ctx, sets[i], if (offset_capture) try offsetPair(ctx, subject, ov[2 * i], ov[2 * i + 1], unmatched_as_null) else try matchValue(ctx, subject, ov, i, unmatched_as_null));
+                            if (pcre2.pcre2_get_mark_8(md)) |mark| {
+                                if (marks == null) marks = try ctx.createArray();
+                                const s = try Value.String.create(a, std.mem.sliceTo(mark, 0));
+                                defer s.release();
+                                try marks.?.set(a, .{ .int = matched - 1 }, .{ .string = s });
+                            }
+                            // groups past the last that took part are padded
+                            for (count..num_subpats) |i| {
+                                const v: Value = if (offset_capture) try offsetPair(ctx, subject, pcre2.UNSET, pcre2.UNSET, unmatched_as_null) else if (unmatched_as_null) .null else .{ .string = Value.String.borrowed("") };
+                                try sets[i].append(a, v);
+                            }
+                        } else {
+                            const set = try ctx.createArray();
+                            try populateSubpats(ctx, set, subject, ov, names, num_subpats, count, md, flags);
+                            try out.append(a, .{ .array = set });
                         }
+                    } else {
+                        try populateSubpats(ctx, out, subject, ov, names, num_subpats, count, md, flags);
+                        break;
                     }
                 }
-                break :blk last_matched;
-            };
-            for (0..last_idx + 1) |i| {
-                const val = try matchGroupValue(ctx, subject, ovector, count, i, offset_capture);
-                defer if (val == .string) val.string.release();
-                try match_arr.append(ctx.allocator, val);
+                // an empty match is tried again where it is, as long as it
+                // isn't empty; if that fails the search moves one character
+                offset = ov[1];
+                if (offset != ov[0]) break;
+                rc = exec(ctx, entry.code, subject, offset, pcre2.NO_UTF_CHECK | pcre2.NOTEMPTY_ATSTART | pcre2.ANCHORED, md);
+                if (rc >= 0) {
+                    if (!global) break;
+                    count = countFrom(rc, num_subpats);
+                    continue;
+                }
+                if (rc == pcre2.ERROR_NOMATCH) {
+                    if (offset < subject.len) {
+                        offset += unitLength(entry, subject, offset);
+                        rc = 0;
+                    }
+                } else {
+                    handleExecError(rc);
+                }
+                break;
             }
-            try addNamedGroupsToMatch(ctx, match_arr, code, ovector, subject, count, offset_capture);
-            try setMark(ctx, match_arr, .{ .string = Value.String.borrowed("MARK") }, match_data);
-            try out.append(ctx.allocator, .{ .array = match_arr });
+            // a failed retry at the end of the subject, or an error
+            if (rc < 0) break;
         } else {
-            for (0..group_count) |i| {
-                const val = try matchGroupValue(ctx, subject, ovector, count, i, offset_capture);
-                defer if (val == .string) val.string.release();
-                try group_arrays.?.items[i].append(ctx.allocator, val);
-            }
-            // pattern order keeps the marks in one array keyed by match number
-            if (pcre2.pcre2_get_mark_8(match_data) != null) {
-                if (marks == null) marks = try ctx.createArray();
-                try setMark(ctx, marks.?, .{ .int = total_matches }, match_data);
-            }
+            if (rc != pcre2.ERROR_NOMATCH) handleExecError(rc);
+            break;
         }
-
-        total_matches += 1;
-        const match_end = ovector[1];
-        if (match_end == offset) {
-            offset += utf.step(offset);
-        } else {
-            offset = match_end;
-        }
+        if (!global or (subpats != null and !global)) break;
+        rc = exec(ctx, entry.code, subject, offset, pcre2.NO_UTF_CHECK, md);
     }
 
-    if (!set_order) {
-        // add named group arrays interleaved with their numeric index
-        var name_count_val: u32 = 0;
-        _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMECOUNT, @ptrCast(&name_count_val));
-        var name_entry_size_val: u32 = 0;
-        _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMEENTRYSIZE, @ptrCast(&name_entry_size_val));
-
-        const NamedGroup = struct { group_num: usize, name: []const u8 };
-        var named_groups: [64]NamedGroup = undefined;
-        var named_len: usize = 0;
-        if (name_count_val > 0 and name_entry_size_val > 0) {
-            var name_table_ptr: [*]const u8 = undefined;
-            _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMETABLE, @ptrCast(&name_table_ptr));
-            for (0..name_count_val) |ni| {
-                const entry = name_table_ptr + ni * name_entry_size_val;
-                const gn = (@as(usize, entry[0]) << 8) | @as(usize, entry[1]);
-                const ne = std.mem.indexOfScalar(u8, entry[2..name_entry_size_val], 0) orelse (name_entry_size_val - 2);
-                if (named_len < named_groups.len) {
-                    named_groups[named_len] = .{ .group_num = gn, .name = entry[2 .. 2 + ne] };
-                    named_len += 1;
-                }
-            }
-            // sort by group_num descending for insertion
-            std.mem.sort(NamedGroup, named_groups[0..named_len], {}, struct {
-                fn f(_: void, a: NamedGroup, b: NamedGroup) bool {
-                    return a.group_num > b.group_num;
-                }
-            }.f);
-        }
-
-        for (group_arrays.?.items) |arr| {
-            try out.append(ctx.allocator, .{ .array = arr });
-        }
-
-        // PHP places the named key directly before its numeric counterpart.
-        // With (?J) duplicate-named groups, PHP keeps a single entry per name:
-        // value comes from the highest-numbered group, position is before the
-        // lowest-numbered group with that name.
-        var inserted_names: [64][]const u8 = undefined;
-        var inserted_count: usize = 0;
-        for (named_groups[0..named_len]) |ng| {
-            if (ng.group_num >= group_arrays.?.items.len) continue;
-            var dup = false;
-            for (inserted_names[0..inserted_count]) |n| {
-                if (std.mem.eql(u8, n, ng.name)) {
-                    dup = true;
-                    break;
-                }
-            }
-            if (dup) continue;
-            // find lowest group_num among groups sharing this name (named_groups is desc by group_num)
-            var lowest = ng.group_num;
-            for (named_groups[0..named_len]) |other| {
-                if (std.mem.eql(u8, other.name, ng.name) and other.group_num < lowest) lowest = other.group_num;
-            }
-            const insert_pos = lowest;
-            const named_entry = PhpArray.Entry{
-                .key = .{ .string = try Value.String.create(ctx.allocator, ng.name) },
-                .value = .{ .array = group_arrays.?.items[ng.group_num] },
+    if (match_sets) |sets| {
+        const out = subpats.?;
+        for (sets, 0..) |set, i| {
+            if (names) |n| if (n[i]) |name| {
+                const key = try Value.String.create(a, name);
+                defer key.release();
+                try out.set(a, .{ .string = key }, .{ .array = set });
             };
-            defer named_entry.key.string.release();
-            try insertNamedMatch(ctx, out, insert_pos, named_entry);
-            inserted_names[inserted_count] = ng.name;
-            inserted_count += 1;
+            try out.append(a, .{ .array = set });
         }
-        out.rebuildStringIndexAssumeCapacity();
-        if (marks) |m| try out.set(ctx.allocator, .{ .string = Value.String.borrowed("MARK") }, .{ .array = m });
+        if (marks) |m| try out.set(a, .{ .string = Value.String.borrowed("MARK") }, .{ .array = m });
     }
-
-    if (args.len >= 3) ctx.setCallerVar(2, args.len, .{ .array = out });
-
-    return NativeResult.scalar(if (failed) .{ .bool = false } else .{ .int = total_matches });
+    if (preg_error != NO_ERROR) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .int = matched });
 }
 
-fn matchGroupValue(ctx: *NativeContext, subject: []const u8, ovector: [*]usize, count: usize, i: usize, offset_capture: bool) RuntimeError!Value {
-    if (i < count) {
-        const start = ovector[i * 2];
-        const end = ovector[i * 2 + 1];
-        if (start == pcre2.UNSET or end == pcre2.UNSET) {
-            return if (offset_capture) try makeOffsetPair(ctx, "", -1) else Value{ .string = Value.String.borrowed("") };
-        }
-        const str = subject[start..end];
-        return if (offset_capture) try makeOffsetPair(ctx, str, @intCast(start)) else Value{ .string = try Value.String.create(ctx.allocator, str) };
+// ---------------------------------------------------------------------------
+// replacing
+
+// preg_get_backref: \n, $n or ${n}, one or two digits
+fn getBackref(s: []const u8, at: *usize) ?usize {
+    var walk = at.*;
+    if (walk + 1 >= s.len or s[walk + 1] == 0) return null;
+    var in_brace = false;
+    if (s[walk] == '$' and s[walk + 1] == '{') {
+        in_brace = true;
+        walk += 1;
     }
-    return if (offset_capture) try makeOffsetPair(ctx, "", -1) else Value{ .string = Value.String.borrowed("") };
+    walk += 1;
+    if (walk >= s.len or !std.ascii.isDigit(s[walk])) return null;
+    var backref: usize = s[walk] - '0';
+    walk += 1;
+    if (walk < s.len and std.ascii.isDigit(s[walk])) {
+        backref = backref * 10 + (s[walk] - '0');
+        walk += 1;
+    }
+    if (in_brace) {
+        if (walk >= s.len or s[walk] != '}') return null;
+        walk += 1;
+    }
+    at.* = walk;
+    return backref;
 }
 
-fn makeOffsetPair(ctx: *NativeContext, str: []const u8, offset: i64) RuntimeError!Value {
-    const pair = try ctx.createArray();
-    const owned = try Value.String.create(ctx.allocator, str);
-    defer owned.release();
-    try pair.append(ctx.allocator, .{ .string = owned });
-    try pair.append(ctx.allocator, .{ .int = offset });
-    return Value{ .array = pair };
+// the replacement of one match, with its backreferences and escapes
+fn appendReplacement(out: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, replace: []const u8, subject: []const u8, ov: [*]const usize, count: usize) RuntimeError!void {
+    if (std.mem.indexOfAny(u8, replace, "\\$") == null) return out.appendSlice(a, replace);
+    var walk: usize = 0;
+    var walk_last: u8 = 0;
+    while (walk < replace.len) {
+        const c = replace[walk];
+        if (c == '\\' or c == '$') {
+            if (walk_last == '\\') {
+                out.items[out.items.len - 1] = c;
+                walk += 1;
+                walk_last = 0;
+                continue;
+            }
+            if (getBackref(replace, &walk)) |backref| {
+                if (backref < count and ov[2 * backref] != pcre2.UNSET) try out.appendSlice(a, subject[ov[2 * backref]..ov[2 * backref + 1]]);
+                continue;
+            }
+        }
+        try out.append(a, c);
+        walk += 1;
+        walk_last = c;
+    }
 }
 
-fn addNamedGroupsToMatch(ctx: *NativeContext, arr: *PhpArray, code: *pcre2.Code, ovector: [*]usize, subject: []const u8, count: usize, offset_capture: bool) !void {
-    var name_count: u32 = 0;
-    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMECOUNT, @ptrCast(&name_count));
-    if (name_count == 0) return;
-    var name_entry_size: u32 = 0;
-    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMEENTRYSIZE, @ptrCast(&name_entry_size));
-    if (name_entry_size == 0) return;
+const Replacer = union(enum) {
+    string: []const u8,
+    callback: struct { callable: Value, flags: i64 },
+};
 
-    var name_table: [*]const u8 = undefined;
-    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMETABLE, @ptrCast(&name_table));
-
-    const NamedGroup = struct { group_num: usize, name: []const u8 };
-    var groups: [64]NamedGroup = undefined;
-    var group_len: usize = 0;
-    for (0..name_count) |i| {
-        const entry = name_table + i * name_entry_size;
-        const group_num = (@as(usize, entry[0]) << 8) | @as(usize, entry[1]);
-        const name_end = std.mem.indexOfScalar(u8, entry[2..name_entry_size], 0) orelse (name_entry_size - 2);
-        if (group_len < groups.len) {
-            groups[group_len] = .{ .group_num = group_num, .name = entry[2 .. 2 + name_end] };
-            group_len += 1;
+// php_pcre_replace_impl and php_pcre_replace_func_impl: null when the
+// match failed (or the callback threw)
+fn replaceImpl(ctx: *NativeContext, entry: *Entry, subject: []const u8, holder: ?Value, replacer: Replacer, limit_in: usize, replace_count: *i64) RuntimeError!?Value.String {
+    const a = ctx.allocator;
+    var limit = limit_in;
+    const num_subpats: usize = entry.capture_count + 1;
+    const names = if (replacer == .callback) try entry.subpatNames() else null;
+    preg_error = NO_ERROR;
+    const md = pcre2.pcre2_match_data_create_from_pattern_8(entry.code, null) orelse {
+        preg_error = INTERNAL_ERROR;
+        return null;
+    };
+    defer pcre2.pcre2_match_data_free_8(md);
+    const ov = pcre2.pcre2_get_ovector_pointer_8(md);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(a);
+    var replaced = false;
+    var start_offset: usize = 0;
+    var last_end: usize = 0;
+    var rc = exec(ctx, entry.code, subject, 0, firstOptions(entry, subject, holder, 0), md);
+    while (true) {
+        if (rc >= 0 and limit > 0) {
+            var count = countFrom(rc, num_subpats);
+            while (true) {
+                replace_count.* += 1;
+                replaced = true;
+                try out.appendSlice(a, subject[last_end..ov[0]]);
+                switch (replacer) {
+                    .string => |r| try appendReplacement(&out, a, r, subject, ov, count),
+                    .callback => |cb| {
+                        const arg = try ctx.createArray();
+                        try populateSubpats(ctx, arg, subject, ov, names, num_subpats, count, md, cb.flags);
+                        const result = ctx.invokeCallable(cb.callable, &.{.{ .array = arg }}) catch {
+                            preg_error = INTERNAL_ERROR;
+                            return error.RuntimeError;
+                        };
+                        if (result == .string) {
+                            try out.appendSlice(a, result.string.bytes());
+                        } else {
+                            var buf: [128]u8 = undefined;
+                            const s = array_diff.tmpString(ctx, result, &buf) catch |err| {
+                                preg_error = INTERNAL_ERROR;
+                                return err;
+                            };
+                            defer s.release(ctx);
+                            try out.appendSlice(a, s.bytes);
+                        }
+                    },
+                }
+                limit -= 1;
+                start_offset = ov[1];
+                last_end = ov[1];
+                if (start_offset != ov[0]) break;
+                // an empty match: tried again where it is, as long as it
+                // isn't empty, else the search moves one character on
+                rc = exec(ctx, entry.code, subject, start_offset, pcre2.NO_UTF_CHECK | pcre2.NOTEMPTY_ATSTART | pcre2.ANCHORED, md);
+                if (rc >= 0 and limit > 0) {
+                    count = countFrom(rc, num_subpats);
+                    continue;
+                }
+                if (rc == pcre2.ERROR_NOMATCH or limit == 0) {
+                    if (start_offset < subject.len) {
+                        start_offset += unitLength(entry, subject, start_offset);
+                        rc = 0;
+                    } else {
+                        rc = pcre2.ERROR_NOMATCH;
+                    }
+                } else {
+                    handleExecError(rc);
+                    return null;
+                }
+                break;
+            }
+            if (rc == pcre2.ERROR_NOMATCH) {
+                // the end of the subject after an empty match
+                try out.appendSlice(a, subject[last_end..]);
+                return try Value.String.create(a, out.items);
+            }
+        } else if (rc == pcre2.ERROR_NOMATCH or limit == 0) {
+            if (!replaced) return try Value.String.create(a, subject);
+            try out.appendSlice(a, subject[last_end..]);
+            return try Value.String.create(a, out.items);
+        } else {
+            handleExecError(rc);
+            return null;
         }
+        rc = exec(ctx, entry.code, subject, start_offset, pcre2.NO_UTF_CHECK, md);
     }
-    std.mem.sort(NamedGroup, groups[0..group_len], {}, struct {
-        fn f(_: void, a: NamedGroup, b: NamedGroup) bool {
-            return a.group_num > b.group_num;
-        }
-    }.f);
+}
 
-    for (groups[0..group_len]) |ng| {
-        if (ng.group_num >= count) continue;
-        const start = ovector[ng.group_num * 2];
-        const end = ovector[ng.group_num * 2 + 1];
-        const val: Value = if (start == pcre2.UNSET or end == pcre2.UNSET) blk: {
-            break :blk if (offset_capture) try makeOffsetPair(ctx, "", -1) else Value{ .string = Value.String.borrowed("") };
-        } else blk: {
-            const s = subject[start..end];
-            break :blk if (offset_capture) try makeOffsetPair(ctx, s, @intCast(start)) else Value{ .string = try Value.String.create(ctx.allocator, s) };
+// zval_get_tmp_string's bytes, kept alive for the call
+fn tmpBytes(ctx: *NativeContext, v_in: Value) RuntimeError![]const u8 {
+    const v = v_in;
+    if (v == .string) return v.string.bytes();
+    var buf: [128]u8 = undefined;
+    const had_exception = ctx.vm.pending_exception != null;
+    const s = try array_diff.tmpString(ctx, v, &buf);
+    defer s.release(ctx);
+    // an object without __toString, or one whose __toString threw
+    if (!had_exception and ctx.vm.pending_exception != null) return error.RuntimeError;
+    return (try ctx.vm.transientBytes(s.bytes)).bytes();
+}
+
+fn entryValue(e: PhpArray.Entry) Value {
+    return if (e.ref) |cell| cell.* else e.value;
+}
+
+// php_pcre_replace: a regex compiled (or warned about) and applied
+fn replaceOne(ctx: *NativeContext, func: []const u8, regex: []const u8, subject: []const u8, holder: ?Value, replacer: Replacer, limit: usize, replace_count: *i64) RuntimeError!?Value.String {
+    // php_pcre_replace aborts on a pending exception (a __toString that threw)
+    if (replacer == .string and ctx.vm.pending_exception != null) return null;
+    const compiled = (try getCompiled(ctx, func, regex)) orelse return null;
+    defer compiled.release();
+    return replaceImpl(ctx, compiled.entry, subject, holder, replacer, limit, replace_count);
+}
+
+// php_replace_in_subject / php_replace_in_subject_func: every regex of an
+// array applied in turn, each to the last one's result
+fn replaceInSubject(ctx: *NativeContext, func: []const u8, regex: Value, replacement: ?Value, callback: ?Value, cb_flags: i64, subject: []const u8, holder: ?Value, limit: usize, replace_count: *i64) RuntimeError!?Value.String {
+    if (regex != .array) {
+        const replacer: Replacer = if (callback) |cb| .{ .callback = .{ .callable = cb, .flags = cb_flags } } else .{ .string = replacement.?.string.bytes() };
+        return replaceOne(ctx, func, regex.string.bytes(), subject, holder, replacer, limit, replace_count);
+    }
+    var current = try Value.String.create(ctx.allocator, subject);
+    var replace_idx: usize = 0;
+    for (regex.array.entries.items) |e| {
+        const regex_bytes = tmpBytes(ctx, entryValue(e)) catch |err| {
+            // the callback form stops at a regex that won't convert and
+            // keeps what it has (php_replace_in_subject_func)
+            if (callback != null and ctx.vm.pending_exception != null) return current;
+            current.release();
+            return err;
         };
-        const insert_pos = ng.group_num;
-        const named_entry = PhpArray.Entry{ .key = .{ .string = try Value.String.create(ctx.allocator, ng.name) }, .value = val };
-        defer named_entry.key.string.release();
-        defer if (val == .string) val.string.release();
-        try insertNamedMatch(ctx, arr, insert_pos, named_entry);
-    }
-    arr.rebuildStringIndexAssumeCapacity();
-}
-
-fn insertNamedMatch(ctx: *NativeContext, arr: *PhpArray, position: usize, entry: PhpArray.Entry) !void {
-    try arr.set(ctx.allocator, entry.key, entry.value);
-    const last = arr.entries.items.len - 1;
-    if (position < last) {
-        const stored = arr.entries.items[last];
-        std.mem.copyBackwards(PhpArray.Entry, arr.entries.items[position + 1 ..], arr.entries.items[position..last]);
-        arr.entries.items[position] = stored;
-        arr.rebuildStringIndexAssumeCapacity();
-    }
-}
-
-fn translateReplacement(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
-    var out = std.ArrayListUnmanaged(u8).empty;
-    defer out.deinit(allocator);
-    var i: usize = 0;
-    while (i < src.len) {
-        const c = src[i];
-        // PHP preg_replace only expands $N / ${N} (numeric) - keep ${name}
-        // literal so pcre2 doesn't substitute it as a named group reference.
-        // pcre2 uses `$$` to emit a literal `$`.
-        if (c == '$' and i + 1 < src.len and src[i + 1] == '{') {
-            if (i + 2 < src.len and !(src[i + 2] >= '0' and src[i + 2] <= '9')) {
-                try out.append(allocator, '$');
-                try out.append(allocator, '$');
-                i += 1;
-                continue;
-            }
+        var replacer: Replacer = undefined;
+        if (callback) |cb| {
+            replacer = .{ .callback = .{ .callable = cb, .flags = cb_flags } };
+        } else if (replacement.? == .array) {
+            const items = replacement.?.array.entries.items;
+            const r: []const u8 = if (replace_idx < items.len) (tmpBytes(ctx, entryValue(items[replace_idx])) catch |err| {
+                current.release();
+                return err;
+            }) else "";
+            replace_idx += 1;
+            replacer = .{ .string = r };
+        } else {
+            replacer = .{ .string = replacement.?.string.bytes() };
         }
-        if (c == '\\' and i + 1 < src.len) {
-            const n = src[i + 1];
-            if (n >= '0' and n <= '9') {
-                try out.append(allocator, '$');
-                try out.append(allocator, n);
-                i += 2;
-                continue;
-            }
-            if (n == '\\') {
-                try out.append(allocator, '\\');
-                i += 2;
-                continue;
-            }
-            if (n == '$') {
-                // PHP '\$' means a literal '$' in the output. PCRE2 substitute
-                // emits a literal '$' for '$$', so translate accordingly
-                try out.append(allocator, '$');
-                try out.append(allocator, '$');
-                i += 2;
-                continue;
-            }
-            try out.append(allocator, c);
-            i += 1;
-            continue;
-        }
-        try out.append(allocator, c);
-        i += 1;
+        const next = replaceOne(ctx, func, regex_bytes, current.bytes(), .{ .string = current }, replacer, limit, replace_count) catch |err| {
+            current.release();
+            return err;
+        };
+        current.release();
+        current = next orelse return null;
     }
-    return out.toOwnedSlice(allocator);
+    return current;
 }
 
-fn preg_filter(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    setPregError(0);
-    if (args.len < 3) return NativeResult.scalar(.null);
-    if (args[2] == .array) {
-        const subj_arr = args[2].array;
-        const out = try ctx.vm.allocArray();
-        for (subj_arr.entries.items) |se| {
-            var sub_args: [3]Value = .{ args[0], args[1], se.value };
-            const replaced = (try preg_replace(ctx, sub_args[0..3])).value;
-            defer if (replaced == .string) replaced.string.release();
-            // PHP preg_filter keeps only entries where the replacement actually
-            // changed the string (i.e. at least one match)
-            if (replaced == .string and se.value == .string and !std.mem.eql(u8, replaced.string.bytes(), se.value.string.bytes())) {
-                try out.set(ctx.allocator, se.key, replaced);
-            }
-        }
-        return NativeResult.borrowed(.{ .array = out });
-    }
-    const replaced = try preg_replace(ctx, args);
-    if (replaced.value == .string and args[2] == .string and !std.mem.eql(u8, replaced.value.string.bytes(), args[2].string.bytes())) return replaced;
-    if (replaced.value == .string) replaced.value.string.release();
-    return NativeResult.scalar(.null);
+fn limitArg(limit: i64) usize {
+    return if (limit < 0) std.math.maxInt(usize) else @intCast(limit);
 }
 
-// PHP coerces a scalar subject to string before matching, so a scalar
-// always comes back as a string even when nothing matched
-fn replaceWithCoercedSubject(ctx: *NativeContext, args: []const Value, comptime idx: usize, comptime native: anytype) RuntimeError!?NativeResult {
-    if (args.len <= idx or args[idx] == .string or args[idx] == .array or args[idx] == .object) return null;
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(ctx.allocator);
-    try args[idx].format(&buf, ctx.allocator);
-    const subject = try Value.String.create(ctx.allocator, buf.items);
-    defer subject.release();
-    var coerced: [5]Value = undefined;
-    if (args.len > coerced.len) return null;
-    @memcpy(coerced[0..args.len], args);
-    coerced[idx] = .{ .string = subject };
-    return try native(ctx, coerced[0..args.len]);
+// preg_replace_common
+fn replaceCommon(ctx: *NativeContext, args: []const Value, comptime func: []const u8, is_filter: bool) RuntimeError!NativeResult {
+    const p = Args.init(ctx, func, args);
+    const regex = try regexOrArray(p, 0, "pattern");
+    const replacement = try regexOrArray(p, 1, "replacement");
+    const subject = try regexOrArray(p, 2, "subject");
+    const limit = limitArg(try p.optLong(3, "limit", -1));
+    if (replacement == .array and regex != .array) return throwFmt(ctx, "TypeError", func ++ "(): Argument #1 ($pattern) must be of type array when argument #2 ($replacement) is an array, string given", .{});
+    var replace_count: i64 = 0;
+    var result: NativeResult = undefined;
+    if (subject != .array) {
+        const r = try replaceInSubject(ctx, func, regex, replacement, null, 0, subject.string.bytes(), args[2], limit, &replace_count);
+        if (r) |s| {
+            if (!is_filter or replace_count > 0) {
+                result = NativeResult.takeString(s);
+            } else {
+                s.release();
+                result = NativeResult.scalar(.null);
+            }
+        } else result = NativeResult.scalar(.null);
+    } else {
+        const out = try ctx.createArray();
+        for (subject.array.entries.items) |e| {
+            const old_count = replace_count;
+            const v = entryValue(e);
+            const bytes = try tmpBytes(ctx, v);
+            const r = (try replaceInSubject(ctx, func, regex, replacement, null, 0, bytes, v, limit, &replace_count)) orelse continue;
+            defer r.release();
+            if (!is_filter or replace_count > old_count) try out.set(ctx.allocator, e.key, .{ .string = r });
+        }
+        result = NativeResult.borrowed(.{ .array = out });
+    }
+    if (args.len > 4) ctx.setCallerVar(4, args.len, .{ .int = replace_count });
+    if (ctx.vm.pending_exception != null) {
+        dropResult(ctx, result.value);
+        return error.RuntimeError;
+    }
+    return result;
+}
+
+// Z_PARAM_ARRAY_HT_OR_STR as a Value: the array, or a string the call
+// keeps alive
+fn regexOrArray(p: Args, index: usize, name: []const u8) RuntimeError!Value {
+    if (index < p.args.len and p.args[index] == .array) return p.args[index];
+    if (index < p.args.len and p.args[index] == .string) return p.args[index];
+    const s = try p.strAs(index, name, "array|string");
+    return .{ .string = try p.ctx.vm.transientBytes(s) };
 }
 
 fn preg_replace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 3) return NativeResult.scalar(.null);
-    setPregError(0);
-    if (try replaceWithCoercedSubject(ctx, args, 2, preg_replace)) |coerced| return coerced;
-    // subject can be an array - apply replacements element-wise and return array
-    if (args[2] == .array) {
-        const subj_arr = args[2].array;
-        const result_arr = try ctx.vm.allocArray();
-        for (subj_arr.entries.items) |se| {
-            var sub_args: [4]Value = undefined;
-            sub_args[0] = args[0];
-            sub_args[1] = args[1];
-            sub_args[2] = se.value;
-            var n: usize = 3;
-            if (args.len >= 4) {
-                sub_args[3] = args[3];
-                n = 4;
-            }
-            const replaced = (try preg_replace(ctx, sub_args[0..n])).value;
-            defer if (replaced == .string) replaced.string.release();
-            // a subject the match failed on is left out
-            if (replaced == .null) continue;
-            try result_arr.set(ctx.allocator, se.key, replaced);
-        }
-        return NativeResult.borrowed(.{ .array = result_arr });
-    }
-    // pattern can be array - call recursively for each (pattern, replacement) pair
-    if (args[0] == .array) {
-        return try pregReplaceArrayPattern(ctx, args);
-    }
-    if (args[0] != .string or args[2] != .string) return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
-    const info = parsePattern(args[0].string.bytes()) orelse {
-        setPregError(1);
-        return NativeResult.scalar(.null);
-    };
-    const replacement = if (args[1] == .string) args[1].string.bytes() else return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
-    const subject = args[2].string.bytes();
-    const limit: i64 = if (args.len >= 4 and args[3] != .null) Value.toInt(args[3]) else -1;
-
-    if (limit == 0) {
-        if (args.len >= 5) ctx.setCallerVar(4, args.len, .{ .int = 0 });
-        return NativeResult.takeString(try Value.String.create(ctx.allocator, subject));
-    }
-
-    const compiled = compilePattern(ctx, info.pattern, info.flags) orelse {
-        setPregError(1);
-        try emitCompileWarning(ctx, "preg_replace", info.pattern, info.flags);
-        return NativeResult.scalar(.null);
-    };
-    defer compiled.release();
-    const code = compiled.code;
-
-    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
-    defer pcre2.pcre2_match_data_free_8(match_data);
-
-    if (limit > 0) {
-        return pregReplaceLimited(ctx, code, match_data, subject, replacement, @intCast(limit), args);
-    }
-
-    const xrep = try translateReplacement(ctx.allocator, replacement);
-    defer ctx.allocator.free(xrep);
-
-    const sub_opts: u32 = pcre2.SUBSTITUTE_OVERFLOW_LENGTH | pcre2.SUBSTITUTE_GLOBAL | UtfCheck.init(code, subject, args[2]).options(0);
-
-    var out_len: usize = 0;
-    var rc = pcre2.pcre2_substitute_8(
-        code,
-        if (subject.len == 0) "" else subject.ptr,
-        subject.len,
-        0,
-        sub_opts,
-        match_data,
-        matchContext(ctx),
-        xrep.ptr,
-        xrep.len,
-        null,
-        &out_len,
-    );
-
-    if (rc >= 0) {
-        ctx.setCallerVar(4, args.len, .{ .int = @intCast(rc) });
-        return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
-    }
-    if (rc != pcre2.ERROR_NOMEMORY) {
-        ctx.setCallerVar(4, args.len, .{ .int = 0 });
-        if (execFailed(rc)) return NativeResult.scalar(.null);
-        return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
-    }
-
-    const buf = try ctx.allocator.alloc(u8, out_len);
-    rc = pcre2.pcre2_substitute_8(
-        code,
-        if (subject.len == 0) "" else subject.ptr,
-        subject.len,
-        0,
-        sub_opts,
-        match_data,
-        matchContext(ctx),
-        xrep.ptr,
-        xrep.len,
-        buf.ptr,
-        &out_len,
-    );
-
-    if (rc < 0) {
-        ctx.allocator.free(buf);
-        ctx.setCallerVar(4, args.len, .{ .int = 0 });
-        if (execFailed(rc)) return NativeResult.scalar(.null);
-        return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
-    }
-
-    ctx.setCallerVar(4, args.len, .{ .int = @intCast(rc) });
-    const result = try Value.String.adopt(ctx.allocator, buf);
-    return NativeResult.takeString(result.borrowedSlice(0, out_len));
+    return replaceCommon(ctx, args, "preg_replace", false);
 }
 
-fn pregReplaceArrayPattern(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const patterns = args[0].array;
-    var current: NativeResult = if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
-    errdefer if (current.value == .string) current.value.string.release();
-    var total_count: i64 = 0;
-    const limit_per: i64 = if (args.len >= 4) Value.toInt(args[3]) else -1;
-    for (patterns.entries.items, 0..) |pe, idx| {
-        if (pe.value != .string) continue;
-        var replacement: Value = if (args[1] == .string) args[1] else Value{ .string = Value.String.borrowed("") };
-        if (args[1] == .array) {
-            const rep_arr = args[1].array;
-            if (idx < rep_arr.entries.items.len and rep_arr.entries.items[idx].value == .string) {
-                replacement = rep_arr.entries.items[idx].value;
-            }
-        }
-        // count matches against the current subject (respecting limit)
-        if (current.value == .string) {
-            const before = current.value.string.bytes();
-            if (parsePattern(pe.value.string.bytes())) |info| {
-                if (compilePattern(ctx, info.pattern, info.flags)) |compiled| {
-                    defer compiled.release();
-                    const code = compiled.code;
-                    if (pcre2.pcre2_match_data_create_from_pattern_8(code, null)) |md| {
-                        defer pcre2.pcre2_match_data_free_8(md);
-                        var off: usize = 0;
-                        var matched: i64 = 0;
-                        const utf = UtfCheck.init(code, before, current.value);
-                        while (off <= before.len) {
-                            if (limit_per >= 0 and matched >= limit_per) break;
-                            const rc = exec(ctx, code, before, off, utf.options(off), md);
-                            if (rc < 0) break;
-                            const ov = pcre2.pcre2_get_ovector_pointer_8(md);
-                            const me = ov[1];
-                            matched += 1;
-                            if (me == off) off += utf.step(off) else off = me;
-                        }
-                        total_count += matched;
-                    }
-                }
-            }
-        }
-        var rest: [3]Value = undefined;
-        rest[0] = pe.value;
-        rest[1] = replacement;
-        rest[2] = current.value;
-        var single_args: [4]Value = undefined;
-        single_args[0] = rest[0];
-        single_args[1] = rest[1];
-        single_args[2] = rest[2];
-        var n: usize = 3;
-        if (args.len >= 4) {
-            single_args[3] = args[3];
-            n = 4;
-        }
-        const next = try preg_replace(ctx, single_args[0..n]);
-        if (current.value == .string) current.value.string.release();
-        current = next;
-    }
-    ctx.setCallerVar(4, args.len, .{ .int = total_count });
-    return current;
+fn preg_filter(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return replaceCommon(ctx, args, "preg_filter", true);
 }
 
-fn pregReplaceLimited(ctx: *NativeContext, code: *pcre2.Code, match_data: *pcre2.MatchData, subject: []const u8, replacement: []const u8, limit: usize, args: []const Value) RuntimeError!NativeResult {
-    var parts = std.ArrayListUnmanaged(u8).empty;
-    defer parts.deinit(ctx.allocator);
-    var offset: usize = 0;
-    var count: usize = 0;
-    const utf = UtfCheck.init(code, subject, null);
-
-    while (offset <= subject.len and count < limit) {
-        const rc = exec(ctx, code, subject, offset, utf.options(offset), match_data);
-        if (rc < 0) {
-            if (execFailed(rc)) return NativeResult.scalar(.null);
-            break;
-        }
-
-        const ovector = pcre2.pcre2_get_ovector_pointer_8(match_data);
-        const ms = ovector[0];
-        const me = ovector[1];
-
-        try parts.appendSlice(ctx.allocator, subject[offset..ms]);
-
-        // handle backreferences in replacement
-        var ri: usize = 0;
-        while (ri < replacement.len) {
-            if (replacement[ri] == '$' and ri + 1 < replacement.len and replacement[ri + 1] >= '0' and replacement[ri + 1] <= '9') {
-                const group = replacement[ri + 1] - '0';
-                ri += 2;
-                if (group < @as(u8, @intCast(rc))) {
-                    const gs = ovector[2 * @as(usize, group)];
-                    const ge = ovector[2 * @as(usize, group) + 1];
-                    if (gs <= subject.len and ge <= subject.len) {
-                        try parts.appendSlice(ctx.allocator, subject[gs..ge]);
-                    }
-                }
-            } else if (replacement[ri] == '\\' and ri + 1 < replacement.len and replacement[ri + 1] >= '0' and replacement[ri + 1] <= '9') {
-                const group = replacement[ri + 1] - '0';
-                ri += 2;
-                if (group < @as(u8, @intCast(rc))) {
-                    const gs = ovector[2 * @as(usize, group)];
-                    const ge = ovector[2 * @as(usize, group) + 1];
-                    if (gs <= subject.len and ge <= subject.len) {
-                        try parts.appendSlice(ctx.allocator, subject[gs..ge]);
-                    }
-                }
-            } else if (replacement[ri] == '\\' and ri + 1 < replacement.len and (replacement[ri + 1] == '\\' or replacement[ri + 1] == '$')) {
-                // \\ -> literal \; \$ -> literal $
-                try parts.append(ctx.allocator, replacement[ri + 1]);
-                ri += 2;
-            } else {
-                try parts.append(ctx.allocator, replacement[ri]);
-                ri += 1;
-            }
-        }
-
-        count += 1;
-        if (me == offset) {
-            const step = utf.step(offset);
-            if (offset < subject.len) {
-                try parts.appendSlice(ctx.allocator, subject[offset..@min(offset + step, subject.len)]);
-            }
-            offset += step;
-        } else {
-            offset = me;
-        }
+// php_preg_replace_func_impl: the string result, or the array of results
+// for an array subject; null when the replacement failed
+fn replaceFuncImpl(ctx: *NativeContext, func: []const u8, regex: Value, callback: Value, subject: Value, limit: usize, flags: i64, replace_count: *i64) RuntimeError!Value {
+    if (subject != .array) {
+        const r = (try replaceInSubject(ctx, func, regex, null, callback, flags, subject.string.bytes(), subject, limit, replace_count)) orelse return .null;
+        return .{ .string = r };
     }
-
-    if (offset <= subject.len) {
-        try parts.appendSlice(ctx.allocator, subject[offset..]);
+    const out = try ctx.createArray();
+    for (subject.array.entries.items) |e| {
+        const v = entryValue(e);
+        const bytes = tmpBytes(ctx, v) catch |err| {
+            if (ctx.vm.pending_exception != null) break;
+            return err;
+        };
+        const r = (try replaceInSubject(ctx, func, regex, null, callback, flags, bytes, v, limit, replace_count)) orelse continue;
+        defer r.release();
+        try out.set(ctx.allocator, e.key, .{ .string = r });
     }
-
-    const buf = try ctx.allocator.alloc(u8, parts.items.len);
-    @memcpy(buf, parts.items);
-    ctx.setCallerVar(4, args.len, .{ .int = @intCast(count) });
-    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, buf));
+    return .{ .array = out };
 }
 
 fn preg_replace_callback(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    setPregError(0);
-    if (args.len < 3) return NativeResult.scalar(.null);
-    if (try replaceWithCoercedSubject(ctx, args, 2, preg_replace_callback)) |coerced| return coerced;
-    if (args[2] == .array) {
-        const result = try ctx.createArray();
-        for (args[2].array.entries.items) |entry| {
-            var sub_args: [5]Value = undefined;
-            sub_args[0] = args[0];
-            sub_args[1] = args[1];
-            sub_args[2] = entry.value;
-            if (args.len >= 4) sub_args[3] = args[3];
-            const replaced = (try preg_replace_callback(ctx, sub_args[0..@min(args.len, 4)])).value;
-            defer if (replaced == .string) replaced.string.release();
-            try result.set(ctx.allocator, entry.key, replaced);
-        }
-        return NativeResult.borrowed(.{ .array = result });
-    }
-    if (args[0] == .array) {
-        var current: NativeResult = if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
-        errdefer if (current.value == .string) current.value.string.release();
-        for (args[0].array.entries.items) |pat_entry| {
-            if (pat_entry.value != .string) continue;
-            var sub_args: [5]Value = undefined;
-            sub_args[0] = pat_entry.value;
-            sub_args[1] = args[1];
-            sub_args[2] = current.value;
-            if (args.len >= 4) sub_args[3] = args[3];
-            const next = try preg_replace_callback(ctx, sub_args[0..@min(args.len, 4)]);
-            if (current.value == .string) current.value.string.release();
-            current = next;
-        }
-        return current;
-    }
-    if (args[0] != .string or args[2] != .string) return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
-    const info = parsePattern(args[0].string.bytes()) orelse return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
-    const callback = args[1];
-    const subject = args[2].string.bytes();
-
-    const compiled = compilePattern(ctx, info.pattern, info.flags) orelse return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
-    defer compiled.release();
-    const code = compiled.code;
-
-    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return if (args[2] == .string) NativeResult.takeString(try Value.String.create(ctx.allocator, args[2].string.bytes())) else NativeResult.share(args[2]);
-    defer pcre2.pcre2_match_data_free_8(match_data);
-
-    var capture_count: u32 = 0;
-    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_CAPTURECOUNT, @ptrCast(&capture_count));
-    const group_count: usize = capture_count + 1;
-
-    // collect named-group info once
-    var name_count: u32 = 0;
-    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMECOUNT, @ptrCast(&name_count));
-    var name_entry_size: u32 = 0;
-    _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMEENTRYSIZE, @ptrCast(&name_entry_size));
-    var name_table_ptr: [*]const u8 = undefined;
-    if (name_count > 0) _ = pcre2.pcre2_pattern_info_8(code, pcre2.INFO_NAMETABLE, @ptrCast(&name_table_ptr));
-
-    var result = std.ArrayListUnmanaged(u8).empty;
-    defer result.deinit(ctx.allocator);
-    var offset: usize = 0;
+    const p = Args.init(ctx, "preg_replace_callback", args);
+    const regex = try regexOrArray(p, 0, "pattern");
+    const subject = try regexOrArray(p, 2, "subject");
+    const limit = limitArg(try p.optLong(3, "limit", -1));
+    const flags = try p.optLong(5, "flags", 0);
     var replace_count: i64 = 0;
-    const limit: i64 = if (args.len >= 4) Value.toInt(args[3]) else -1;
-    const utf = UtfCheck.init(code, subject, args[2]);
-
-    while (offset <= subject.len) {
-        if (limit >= 0 and replace_count >= limit) break;
-        const rc = exec(ctx, code, subject, offset, utf.options(offset), match_data);
-        if (rc < 0) {
-            if (execFailed(rc)) return NativeResult.scalar(.null);
-            break;
-        }
-
-        const ovector = pcre2.pcre2_get_ovector_pointer_8(match_data);
-        const match_start = ovector[0];
-        const match_end = ovector[1];
-
-        try result.appendSlice(ctx.allocator, subject[offset..match_start]);
-
-        const matches_arr = try ctx.createArray();
-        for (0..group_count) |gi| {
-            const gs = ovector[gi * 2];
-            const ge = ovector[gi * 2 + 1];
-            const slice: []const u8 = if (gs == pcre2.UNSET or ge == pcre2.UNSET or gs > subject.len or ge > subject.len)
-                ""
-            else
-                subject[gs..ge];
-            const capture = try Value.String.create(ctx.allocator, slice);
-            defer capture.release();
-            // PHP places the named entry just before the numeric one
-            if (name_count > 0 and name_entry_size > 0) {
-                for (0..name_count) |ni| {
-                    const entry = name_table_ptr + ni * name_entry_size;
-                    const gn = (@as(usize, entry[0]) << 8) | @as(usize, entry[1]);
-                    if (gn == gi) {
-                        const ne = std.mem.indexOfScalar(u8, entry[2..name_entry_size], 0) orelse (name_entry_size - 2);
-                        const name = entry[2 .. 2 + ne];
-                        const key = try Value.String.create(ctx.allocator, name);
-                        defer key.release();
-                        try matches_arr.set(ctx.allocator, .{ .string = key }, .{ .string = capture });
-                    }
-                }
-            }
-            try matches_arr.append(ctx.allocator, .{ .string = capture });
-        }
-
-        try setMark(ctx, matches_arr, .{ .string = Value.String.borrowed("MARK") }, match_data);
-        const cb_result = try ctx.invokeCallable(callback, &.{.{ .array = matches_arr }});
-        if (cb_result == .string) {
-            try result.appendSlice(ctx.allocator, cb_result.string.bytes());
-        } else {
-            var buf = std.ArrayListUnmanaged(u8).empty;
-            try cb_result.format(&buf, ctx.allocator);
-            defer buf.deinit(ctx.allocator);
-            try result.appendSlice(ctx.allocator, buf.items);
-        }
-
-        replace_count += 1;
-        if (match_end == offset) {
-            const step = utf.step(offset);
-            if (offset < subject.len) {
-                try result.appendSlice(ctx.allocator, subject[offset..@min(offset + step, subject.len)]);
-            }
-            offset += step;
-        } else {
-            offset = match_end;
-        }
+    const result = try replaceFuncImpl(ctx, "preg_replace_callback", regex, args[1], subject, limit, flags, &replace_count);
+    if (args.len > 4) ctx.setCallerVar(4, args.len, .{ .int = replace_count });
+    if (ctx.vm.pending_exception != null) {
+        dropResult(ctx, result);
+        return error.RuntimeError;
     }
-
-    if (offset < subject.len) {
-        try result.appendSlice(ctx.allocator, subject[offset..]);
-    }
-
-    if (args.len >= 5) ctx.setCallerVar(4, args.len, .{ .int = replace_count });
-
-    const s = try result.toOwnedSlice(ctx.allocator);
-    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, s));
+    if (result == .string) return NativeResult.takeString(result.string);
+    return NativeResult.borrowed(result);
 }
 
 fn preg_replace_callback_array(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    setPregError(0);
-    if (args.len < 2 or args[0] != .array) return if (args.len >= 2) NativeResult.share(args[1]) else NativeResult.scalar(.null);
-    if (try replaceWithCoercedSubject(ctx, args, 1, preg_replace_callback_array)) |coerced| return coerced;
-    const map = args[0].array;
-    if (args[1] == .array) {
-        const result = try ctx.createArray();
-        for (args[1].array.entries.items) |entry| {
-            var sub_args: [4]Value = undefined;
-            sub_args[0] = args[0];
-            sub_args[1] = entry.value;
-            if (args.len >= 3) sub_args[2] = args[2];
-            const replaced = (try preg_replace_callback_array(ctx, sub_args[0..args.len])).value;
-            defer if (replaced == .string) replaced.string.release();
-            try result.set(ctx.allocator, entry.key, replaced);
-        }
-        return NativeResult.borrowed(.{ .array = result });
+    const p = Args.init(ctx, "preg_replace_callback_array", args);
+    const patterns: *PhpArray = if (args.len > 0 and args[0] == .array) args[0].array else return p.typeError(0, "pattern", "array");
+    // the current subject: the argument, then each pattern's result, which
+    // this call owns
+    var current = try regexOrArray(p, 1, "subject");
+    var owned = false;
+    defer if (owned) dropResult(ctx, current);
+    const limit = limitArg(try p.optLong(2, "limit", -1));
+    const flags = try p.optLong(4, "flags", 0);
+    var replace_count: i64 = 0;
+    for (patterns.entries.items) |e| {
+        if (e.key != .string) return throwFmt(ctx, "TypeError", "preg_replace_callback_array(): Argument #1 ($pattern) must contain only string patterns as keys", .{});
+        const callback = entryValue(e);
+        const resolution = try callables.resolveCallback(ctx.vm, callback, .{});
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+        if (resolution != .callee) return throwFmt(ctx, "TypeError", "preg_replace_callback_array(): Argument #1 ($pattern) must contain only valid callbacks", .{});
+        const next = try replaceFuncImpl(ctx, "preg_replace_callback_array", .{ .string = e.key.string }, callback, current, limit, flags, &replace_count);
+        if (owned) dropResult(ctx, current);
+        current = next;
+        owned = true;
+        if (next == .null) return NativeResult.scalar(.null);
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
     }
-    if (args[1] != .string) return NativeResult.share(args[1]);
-    var current = NativeResult.takeString(try Value.String.create(ctx.allocator, args[1].string.bytes()));
-    errdefer current.value.string.release();
-    var total_count: i64 = 0;
-    const limit: i64 = if (args.len >= 3) Value.toInt(args[2]) else -1;
-
-    for (map.entries.items) |entry| {
-        if (entry.key != .string) continue;
-        // count matches in current subject for this pattern
-        if (current.value == .string) {
-            const subject = current.value.string.bytes();
-            if (parsePattern(entry.key.string.bytes())) |info| {
-                if (compilePattern(ctx, info.pattern, info.flags)) |compiled| {
-                    defer compiled.release();
-                    const code = compiled.code;
-                    if (pcre2.pcre2_match_data_create_from_pattern_8(code, null)) |md| {
-                        defer pcre2.pcre2_match_data_free_8(md);
-                        var off: usize = 0;
-                        var matched: i64 = 0;
-                        const utf = UtfCheck.init(code, subject, current.value);
-                        while (off <= subject.len) {
-                            if (limit >= 0 and matched >= limit) break;
-                            const rc = exec(ctx, code, subject, off, utf.options(off), md);
-                            if (rc < 0) break;
-                            const ov = pcre2.pcre2_get_ovector_pointer_8(md);
-                            const me = ov[1];
-                            matched += 1;
-                            if (me == off) off += utf.step(off) else off = me;
-                        }
-                        total_count += matched;
-                    }
-                }
-            }
-        }
-        var sub_args: [4]Value = undefined;
-        sub_args[0] = .{ .string = entry.key.string };
-        sub_args[1] = entry.value;
-        sub_args[2] = current.value;
-        var n: usize = 3;
-        if (args.len >= 3) {
-            sub_args[3] = args[2];
-            n = 4;
-        }
-        const r = try preg_replace_callback(ctx, sub_args[0..n]);
-        if (r.value == .string) {
-            current.value.string.release();
-            current = r;
-        }
-    }
-    ctx.setCallerVar(3, args.len, .{ .int = total_count });
-    return current;
+    if (args.len > 3) ctx.setCallerVar(3, args.len, .{ .int = replace_count });
+    if (!owned) return NativeResult.share(current);
+    owned = false;
+    if (current == .string) return NativeResult.takeString(current.string);
+    return NativeResult.borrowed(current);
 }
 
-fn utf8SeqLen(lead: u8) usize {
-    if (lead < 0x80) return 1;
-    if (lead >= 0xF0) return 4;
-    if (lead >= 0xE0) return 3;
-    if (lead >= 0xC0) return 2;
-    return 1; // continuation byte / invalid - treat as single byte
+fn dropResult(ctx: *NativeContext, v: Value) void {
+    if (v == .string) v.string.release() else ctx.vm.discardOrphan(v);
 }
+
+// ---------------------------------------------------------------------------
+// preg_split
 
 fn preg_split(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    setPregError(0);
-    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
-    const info = parsePattern(args[0].string.bytes()) orelse {
-        setPregError(1);
-        return NativeResult.scalar(.{ .bool = false });
-    };
-    const subject = args[1].string.bytes();
-    const limit: i64 = if (args.len >= 3 and args[2] != .null) Value.toInt(args[2]) else -1;
-    const flags: i64 = if (args.len >= 4) Value.toInt(args[3]) else 0;
-    const delim_capture = (flags & 2) != 0;
-    const no_empty = (flags & 1) != 0;
-    const offset_capture = (flags & 4) != 0;
-
-    const compiled = compilePattern(ctx, info.pattern, info.flags) orelse return NativeResult.scalar(.null);
+    const p = Args.init(ctx, "preg_split", args);
+    const regex = try p.str(0, "pattern");
+    const subject = try p.str(1, "subject");
+    var limit = try p.optLong(2, "limit", -1);
+    const flags = try p.optLong(3, "flags", 0);
+    const compiled = (try getCompiled(ctx, "preg_split", regex)) orelse return NativeResult.scalar(.{ .bool = false });
     defer compiled.release();
-    const code = compiled.code;
-
-    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return NativeResult.scalar(.null);
-    defer pcre2.pcre2_match_data_free_8(match_data);
-
-    var result = try ctx.createArray();
-    // prev_end: source position where the next piece begins (end of last
-    // match). search: where to look for the next match. they diverge only
-    // around zero-width matches, where search advances a char past the match
-    // but the piece still starts at prev_end so each delimiter char becomes
-    // its own following piece (this is how '//' splits into characters)
-    var prev_end: usize = 0;
-    var search: usize = 0;
-    var splits: i64 = 1;
-    const is_utf = (info.flags & pcre2.UTF) != 0;
-    const utf = UtfCheck.init(code, subject, args[1]);
-
-    while (search <= subject.len) {
-        if (limit > 0 and splits >= limit) break;
-
-        const rc = exec(ctx, code, subject, search, utf.options(search), match_data);
-        if (rc < 0) {
-            if (execFailed(rc)) return NativeResult.scalar(.{ .bool = false });
-            break;
-        }
-
-        const ovector = pcre2.pcre2_get_ovector_pointer_8(match_data);
-        const match_start = ovector[0];
-        const match_end = ovector[1];
-        const zero_width = match_end == match_start;
-
-        // a zero-width match exactly at prev_end (other than at string start)
-        // would emit an empty piece in place - skip it and advance the search
-        if (zero_width and match_start == prev_end and search > 0) {
-            var step: usize = 1;
-            if (is_utf and search < subject.len) {
-                step = utf8SeqLen(subject[search]);
-                if (search + step > subject.len) step = 1;
-            }
-            search += step;
-            continue;
-        }
-
-        const piece = try Value.String.create(ctx.allocator, subject[prev_end..match_start]);
-        defer piece.release();
-        if (!no_empty or piece.len > 0) {
-            if (offset_capture) {
-                var pair = try ctx.createArray();
-                try pair.append(ctx.allocator, .{ .string = piece });
-                try pair.append(ctx.allocator, .{ .int = @intCast(prev_end) });
-                try result.append(ctx.allocator, .{ .array = pair });
-            } else {
-                try result.append(ctx.allocator, .{ .string = piece });
-            }
-        }
-        splits += 1;
-
-        if (delim_capture and rc > 1) {
-            var i: usize = 1;
-            while (i < @as(usize, @intCast(rc))) : (i += 1) {
-                const gs = ovector[2 * i];
-                const ge = ovector[2 * i + 1];
-                if (gs <= subject.len and ge <= subject.len) {
-                    const cap = try Value.String.create(ctx.allocator, subject[gs..ge]);
-                    defer cap.release();
-                    if (!no_empty or cap.len > 0) {
+    const entry = compiled.entry;
+    const a = ctx.allocator;
+    const no_empty = flags & PREG_SPLIT_NO_EMPTY != 0;
+    const delim_capture = flags & PREG_SPLIT_DELIM_CAPTURE != 0;
+    const offset_capture = flags & PREG_SPLIT_OFFSET_CAPTURE != 0;
+    const out = try ctx.createArray();
+    preg_error = NO_ERROR;
+    var last_match: usize = 0;
+    if (limit == 0) limit = -1;
+    if (limit == -1 or limit > 1) {
+        const md = pcre2.pcre2_match_data_create_from_pattern_8(entry.code, null) orelse {
+            preg_error = INTERNAL_ERROR;
+            return NativeResult.scalar(.{ .bool = false });
+        };
+        defer pcre2.pcre2_match_data_free_8(md);
+        const ov = pcre2.pcre2_get_ovector_pointer_8(md);
+        var start_offset: usize = 0;
+        var rc = exec(ctx, entry.code, subject, 0, firstOptions(entry, subject, args[1], 0), md);
+        outer: while (true) {
+            if (rc >= 0) {
+                var count = countFrom(rc, entry.capture_count + 1);
+                while (true) {
+                    if (!no_empty or ov[0] != last_match) {
                         if (offset_capture) {
-                            var pair = try ctx.createArray();
-                            try pair.append(ctx.allocator, .{ .string = cap });
-                            try pair.append(ctx.allocator, .{ .int = @intCast(gs) });
-                            try result.append(ctx.allocator, .{ .array = pair });
+                            try out.append(a, try offsetPair(ctx, subject, last_match, ov[0], false));
                         } else {
-                            try result.append(ctx.allocator, .{ .string = cap });
+                            try appendOwned(ctx, out, try subjectString(ctx, subject, last_match, ov[0]));
+                        }
+                        if (limit != -1) limit -= 1;
+                    }
+                    if (delim_capture) {
+                        for (1..count) |i| {
+                            if (!no_empty or ov[2 * i] != ov[2 * i + 1]) {
+                                const s = ov[2 * i];
+                                const e = ov[2 * i + 1];
+                                if (offset_capture) {
+                                    try out.append(a, try offsetPair(ctx, subject, s, e, false));
+                                } else if (s == pcre2.UNSET) {
+                                    try out.append(a, .{ .string = Value.String.borrowed("") });
+                                } else {
+                                    try appendOwned(ctx, out, try subjectString(ctx, subject, s, e));
+                                }
+                            }
                         }
                     }
-                } else if (!no_empty) {
-                    if (offset_capture) {
-                        var pair = try ctx.createArray();
-                        try pair.append(ctx.allocator, .{ .string = Value.String.borrowed("") });
-                        try pair.append(ctx.allocator, .{ .int = 0 });
-                        try result.append(ctx.allocator, .{ .array = pair });
-                    } else {
-                        try result.append(ctx.allocator, .{ .string = Value.String.borrowed("") });
+                    start_offset = ov[1];
+                    last_match = ov[1];
+                    if (start_offset != ov[0]) break;
+                    if (limit != -1 and limit <= 1) break :outer;
+                    rc = exec(ctx, entry.code, subject, start_offset, pcre2.NO_UTF_CHECK | pcre2.NOTEMPTY_ATSTART | pcre2.ANCHORED, md);
+                    if (rc >= 0) {
+                        count = countFrom(rc, entry.capture_count + 1);
+                        continue;
                     }
+                    if (rc == pcre2.ERROR_NOMATCH) {
+                        if (start_offset < subject.len) {
+                            start_offset += unitLength(entry, subject, start_offset);
+                        } else break :outer;
+                    } else {
+                        handleExecError(rc);
+                        break :outer;
+                    }
+                    break;
                 }
+            } else {
+                if (rc != pcre2.ERROR_NOMATCH) handleExecError(rc);
+                break;
             }
+            if (limit != -1 and limit <= 1) break;
+            rc = exec(ctx, entry.code, subject, start_offset, pcre2.NO_UTF_CHECK, md);
         }
-
-        prev_end = match_end;
-        if (zero_width) {
-            // advance the search past one char so we make progress; the
-            // skipped char stays in subject and becomes the next piece
-            var step: usize = 1;
-            if (is_utf and match_end < subject.len) {
-                step = utf8SeqLen(subject[match_end]);
-                if (match_end + step > subject.len) step = 1;
-            }
-            search = match_end + step;
-        } else {
-            search = match_end;
+        if (preg_error != NO_ERROR) {
+            ctx.vm.discardOrphan(.{ .array = out });
+            return NativeResult.scalar(.{ .bool = false });
         }
     }
-
-    const tail = try Value.String.create(ctx.allocator, subject[prev_end..]);
-    defer tail.release();
-    if (!no_empty or tail.len > 0) {
+    // the last piece, from the end of the last match
+    if (!no_empty or last_match < subject.len) {
         if (offset_capture) {
-            var pair = try ctx.createArray();
-            try pair.append(ctx.allocator, .{ .string = tail });
-            try pair.append(ctx.allocator, .{ .int = @intCast(prev_end) });
-            try result.append(ctx.allocator, .{ .array = pair });
+            try out.append(a, try offsetPair(ctx, subject, last_match, subject.len, false));
+        } else if (last_match == 0 and args[1] == .string) {
+            try out.append(a, args[1]);
         } else {
-            try result.append(ctx.allocator, .{ .string = tail });
+            try appendOwned(ctx, out, try subjectString(ctx, subject, last_match, subject.len));
         }
     }
-
-    return NativeResult.borrowed(.{ .array = result });
+    return NativeResult.borrowed(.{ .array = out });
 }
 
+// ---------------------------------------------------------------------------
+// preg_quote, preg_grep
+
 fn preg_quote(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.literal("");
-    const input = args[0].string.bytes();
-    const delimiter: ?u8 = if (args.len >= 2 and args[1] == .string and args[1].string.bytes().len > 0) args[1].string.bytes()[0] else null;
-
-    // pcre special chars: . \ + * ? [ ^ ] $ ( ) { } = ! < > | : - #
-    const specials = ".\\+*?[^]$(){}=!<>|:-#";
-
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    for (input) |c| {
-        if (delimiter != null and c == delimiter.?) {
-            try buf.append(ctx.allocator, '\\');
-        } else if (std.mem.indexOfScalar(u8, specials, c) != null) {
-            try buf.append(ctx.allocator, '\\');
+    const p = Args.init(ctx, "preg_quote", args);
+    const str = try p.str(0, "str");
+    const delim = try p.strOrNull(1, "delimiter");
+    if (str.len == 0) return NativeResult.copyString(ctx.allocator, "");
+    const delim_char: u8 = if (delim) |d| (if (d.len > 0) d[0] else 0) else 0;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(ctx.allocator);
+    try out.ensureTotalCapacity(ctx.allocator, str.len);
+    for (str) |c| {
+        switch (c) {
+            '.', '\\', '+', '*', '?', '[', '^', ']', '$', '(', ')', '{', '}', '=', '!', '>', '<', '|', ':', '-', '#' => {
+                try out.append(ctx.allocator, '\\');
+                try out.append(ctx.allocator, c);
+            },
+            0 => try out.appendSlice(ctx.allocator, "\\000"),
+            else => {
+                if (c == delim_char) try out.append(ctx.allocator, '\\');
+                try out.append(ctx.allocator, c);
+            },
         }
-        try buf.append(ctx.allocator, c);
     }
-    const result = try buf.toOwnedSlice(ctx.allocator);
-    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, result));
+    return NativeResult.copyString(ctx.allocator, out.items);
 }
 
 fn preg_grep(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    setPregError(0);
-    if (args.len < 2 or args[0] != .string or args[1] != .array) return NativeResult.scalar(.{ .bool = false });
-    const info = parsePattern(args[0].string.bytes()) orelse {
-        setPregError(1);
-        return NativeResult.scalar(.{ .bool = false });
-    };
-    const input = args[1].array;
-    const invert = args.len >= 3 and Value.toInt(args[2]) == 1;
-
-    const compiled = compilePattern(ctx, info.pattern, info.flags) orelse return NativeResult.scalar(.null);
+    const p = Args.init(ctx, "preg_grep", args);
+    const regex = try p.str(0, "pattern");
+    const input: *PhpArray = if (args.len > 1 and args[1] == .array) args[1].array else return p.typeError(1, "array", "array");
+    const flags = try p.optLong(2, "flags", 0);
+    const compiled = (try getCompiled(ctx, "preg_grep", regex)) orelse return NativeResult.scalar(.{ .bool = false });
     defer compiled.release();
-    const code = compiled.code;
-
-    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return NativeResult.scalar(.null);
-    defer pcre2.pcre2_match_data_free_8(match_data);
-
-    var result = try ctx.createArray();
-    for (input.entries.items) |entry| {
-        const str = if (entry.value == .string) entry.value.string.bytes() else continue;
-        const rc = exec(ctx, code, str, 0, UtfCheck.init(code, str, entry.value).options(0), match_data);
-        if (execFailed(rc)) break;
-        const matched = rc >= 0;
-        if (matched != invert) {
-            try result.set(ctx.allocator, entry.key, entry.value);
+    const entry = compiled.entry;
+    const invert = flags & PREG_GREP_INVERT != 0;
+    const out = try ctx.createArray();
+    preg_error = NO_ERROR;
+    const md = pcre2.pcre2_match_data_create_from_pattern_8(entry.code, null) orelse {
+        preg_error = INTERNAL_ERROR;
+        return NativeResult.borrowed(.{ .array = out });
+    };
+    defer pcre2.pcre2_match_data_free_8(md);
+    for (input.entries.items) |e| {
+        const v = entryValue(e);
+        const bytes = try tmpBytes(ctx, v);
+        const rc = exec(ctx, entry.code, bytes, 0, firstOptions(entry, bytes, v, 0), md);
+        if (rc >= 0) {
+            if (!invert) try out.set(ctx.allocator, e.key, v);
+        } else if (rc == pcre2.ERROR_NOMATCH) {
+            if (invert) try out.set(ctx.allocator, e.key, v);
+        } else {
+            handleExecError(rc);
+            break;
         }
     }
-    return NativeResult.borrowed(.{ .array = result });
+    return NativeResult.borrowed(.{ .array = out });
 }
 
-// global preg_last_error state - mirrors PHP's per-thread last error
-threadlocal var preg_last_error_code: i64 = 0;
-
-fn setPregError(code: i64) void {
-    preg_last_error_code = code;
-}
-
-fn preg_last_error(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return NativeResult.scalar(.{ .int = preg_last_error_code });
-}
-
-fn preg_last_error_msg(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const msg: []const u8 = switch (preg_last_error_code) {
-        0 => "No error",
-        1 => "Internal error",
-        2 => "Backtrack limit exhausted",
-        3 => "Recursion limit exhausted",
-        4 => "Malformed UTF-8 characters, possibly incorrectly encoded",
-        5 => "The offset did not correspond to the beginning of a valid UTF-8 code point",
-        6 => "JIT stack limit exhausted",
-        else => "Unknown error",
-    };
-    return try NativeResult.copyString(ctx.allocator, msg);
-}
+// ---------------------------------------------------------------------------
+// mbstring's regex functions on pcre
 
 fn mb_split(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.null);
@@ -1774,12 +1346,12 @@ fn mb_split(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     const subject = args[1].string.bytes();
     const limit: i64 = if (args.len >= 3 and args[2] != .null) Value.toInt(args[2]) else -1;
 
-    const compiled = compilePattern(ctx, pattern, pcre2.UTF) orelse return NativeResult.scalar(.null);
+    const compiled = compileRaw(ctx, pattern, pcre2.UTF) orelse return NativeResult.scalar(.null);
     defer compiled.release();
-    const code = compiled.code;
+    const entry = compiled.entry;
 
-    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return NativeResult.scalar(.null);
-    defer pcre2.pcre2_match_data_free_8(match_data);
+    const md = pcre2.pcre2_match_data_create_from_pattern_8(entry.code, null) orelse return NativeResult.scalar(.null);
+    defer pcre2.pcre2_match_data_free_8(md);
 
     // php_mbregex's loop: a match that ends past the search position closes
     // a piece; an empty one only moves the search on
@@ -1787,22 +1359,21 @@ fn mb_split(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     var chunk: usize = 0;
     var pos: usize = 0;
     var pieces: i64 = 1;
-    const utf = UtfCheck.init(code, subject, args[1]);
 
     while (pos < subject.len) {
         if (limit > 0 and pieces >= limit) break;
-        const rc = exec(ctx, code, subject, pos, utf.options(pos), match_data);
+        const rc = exec(ctx, entry.code, subject, pos, firstOptions(entry, subject, args[1], pos), md);
         if (rc < 0) break;
-        const ovector = pcre2.pcre2_get_ovector_pointer_8(match_data);
-        const match_start = ovector[0];
-        const match_end = ovector[1];
+        const ov = pcre2.pcre2_get_ovector_pointer_8(md);
+        const match_start = ov[0];
+        const match_end = ov[1];
         if (match_end > pos) {
             try result.appendCopiedString(ctx.allocator, subject[chunk..@max(chunk, match_start)]);
             pieces += 1;
             chunk = match_end;
             pos = match_end;
         } else {
-            pos += utf.step(pos);
+            pos += unitLength(entry, subject, pos);
         }
     }
     try result.appendCopiedString(ctx.allocator, subject[chunk..]);
@@ -1815,13 +1386,13 @@ fn mb_ereg_match(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     const pattern = args[0].string.bytes();
     const subject = args[1].string.bytes();
 
-    const compiled = compilePattern(ctx, pattern, pcre2.UTF | pcre2.ANCHORED) orelse return NativeResult.scalar(.{ .bool = false });
+    const compiled = compileRaw(ctx, pattern, pcre2.UTF | pcre2.ANCHORED) orelse return NativeResult.scalar(.{ .bool = false });
     defer compiled.release();
-    const code = compiled.code;
+    const entry = compiled.entry;
 
-    const match_data = pcre2.pcre2_match_data_create_from_pattern_8(code, null) orelse return NativeResult.scalar(.{ .bool = false });
-    defer pcre2.pcre2_match_data_free_8(match_data);
+    const md = pcre2.pcre2_match_data_create_from_pattern_8(entry.code, null) orelse return NativeResult.scalar(.{ .bool = false });
+    defer pcre2.pcre2_match_data_free_8(md);
 
-    const rc = exec(ctx, code, subject, 0, UtfCheck.init(code, subject, args[1]).options(0), match_data);
+    const rc = exec(ctx, entry.code, subject, 0, firstOptions(entry, subject, args[1], 0), md);
     return NativeResult.scalar(.{ .bool = rc >= 0 });
 }

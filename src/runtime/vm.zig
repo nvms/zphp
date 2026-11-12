@@ -2837,6 +2837,7 @@ pub const VM = struct {
         try c.put(a, "PREG_BAD_UTF8_ERROR", .{ .int = 4 });
         try c.put(a, "PREG_BAD_UTF8_OFFSET_ERROR", .{ .int = 5 });
         try c.put(a, "PREG_JIT_STACKLIMIT_ERROR", .{ .int = 6 });
+        try c.put(a, "PCRE_JIT_SUPPORT", .{ .bool = @import("../stdlib/pcre.zig").jitSupported() });
         try c.put(a, "LOCK_SH", .{ .int = 1 });
         try c.put(a, "LOCK_EX", .{ .int = 2 });
         try c.put(a, "LOCK_UN", .{ .int = 3 });

@@ -838,6 +838,7 @@ fn native_phpinfo(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     // minimal output: enough for callers to verify the function exists. real
     // PHP prints a giant HTML/text dump of the environment
     try ctx.vm.output.appendSlice(ctx.allocator, "PHP Version => " ++ php_version.string ++ "\n");
+    try @import("pcre.zig").writeInfo(ctx, &ctx.vm.output);
     return NativeResult.scalar(.{ .bool = true });
 }
 
