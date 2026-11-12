@@ -978,7 +978,29 @@ pub fn compilePostfixOp(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitOp(.pop);
 }
 
+// the truth of a literal operand, which php's zend_compile_short_circuiting
+// decides at compile time: `0 && x` is false without compiling x at all
+fn literalTruth(self: *Compiler, idx: u32) ?bool {
+    const n = self.ast.nodes[idx];
+    switch (n.tag) {
+        .grouped_expr => return literalTruth(self, n.data.lhs),
+        .true_literal => return true,
+        .false_literal, .null_literal => return false,
+        .integer_literal, .float_literal => return self.evalConstExpr(idx).isTruthy(),
+        .string_literal => {
+            const raw = self.ast.tokenSlice(n.main_token);
+            if (raw.len < 2 or raw[0] != '\'') return null;
+            return self.evalConstExpr(idx).isTruthy();
+        },
+        else => return null,
+    }
+}
+
 pub fn compileLogicalAnd(self: *Compiler, node: Ast.Node) Error!void {
+    if (literalTruth(self, node.data.lhs) == false) {
+        try self.emitOp(.op_false);
+        return;
+    }
     try self.compileNode(node.data.lhs);
     const end_jump = try self.emitJump(.jump_if_false);
     try self.emitOp(.pop_boundary);
@@ -988,6 +1010,10 @@ pub fn compileLogicalAnd(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 pub fn compileLogicalOr(self: *Compiler, node: Ast.Node) Error!void {
+    if (literalTruth(self, node.data.lhs) == true) {
+        try self.emitOp(.op_true);
+        return;
+    }
     try self.compileNode(node.data.lhs);
     const end_jump = try self.emitJump(.jump_if_true);
     try self.emitOp(.pop_boundary);
