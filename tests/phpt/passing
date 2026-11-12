@@ -1,4 +1,3 @@
-PASS Bug #73113 (Segfault with throwing JsonSerializable)
 Zend/tests/67468.phpt
 Zend/tests/ArrayAccess/bug30346.phpt
 Zend/tests/ArrayAccess/bug33710.phpt
