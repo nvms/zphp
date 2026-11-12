@@ -1491,6 +1491,9 @@ fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "unserialize_callback_func")) return "";
     if (std.mem.eql(u8, name, "unserialize_max_depth")) return "4096";
     if (std.mem.eql(u8, name, "ignore_user_abort")) return "0";
+    if (std.mem.eql(u8, name, "docref_root")) return "";
+    if (std.mem.eql(u8, name, "docref_ext")) return "";
+    if (std.mem.eql(u8, name, "user_agent")) return "";
     if (std.mem.eql(u8, name, "open_basedir")) return "";
     if (std.mem.eql(u8, name, "include_path")) return includes.default_include_path;
     if (std.mem.eql(u8, name, "log_errors")) return "1";
@@ -1524,6 +1527,13 @@ fn native_ini_get(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
 fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2 or args[0] != .string) return NativeResult.scalar(Value{ .bool = false });
     const name = args[0].string.bytes();
+    switch (args[1]) {
+        .array, .object, .resource, .generator, .fiber => {
+            try ctx.vm.setPendingException("TypeError", "ini_set(): Argument #2 ($value) must be of type string|int|float|bool|null");
+            return error.RuntimeError;
+        },
+        else => {},
+    }
     // PHP rejects unknown directives. Only allow known names.
     const previous: []const u8 = if (ctx.vm.ini_settings.get(name)) |s| s else if (iniDefault(name)) |d| d else return NativeResult.scalar(Value{ .bool = false });
     // max_memory_limit can only be set at startup
