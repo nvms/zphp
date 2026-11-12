@@ -4680,6 +4680,7 @@ ext/pcre/tests/pcre_extra.phpt
 ext/pcre/tests/pcre_reentrancy.phpt
 ext/pcre/tests/preg_filter.phpt
 ext/pcre/tests/preg_grep_basic.phpt
+ext/pcre/tests/preg_match_all_error3.phpt
 ext/pcre/tests/preg_match_basic.phpt
 ext/pcre/tests/preg_match_basic_002.phpt
 ext/pcre/tests/preg_match_basic_edit.phpt
