@@ -200,7 +200,8 @@ const Parser = struct {
             .kw_declare => self.parseDeclare(),
             .kw_global => self.parseGlobalStmt(),
             .kw_static => self.parseStaticVarStmt(),
-            .kw_namespace => self.parseNamespaceDecl(),
+            // `namespace\foo();` is an expression
+            .kw_namespace => if (self.peekAt(1) == .backslash) self.parseExpressionStmt() else self.parseNamespaceDecl(),
             .kw_use => self.parseUseStmt(),
             .kw_goto => self.parseGotoStmt(),
             .kw_require, .kw_require_once, .kw_include, .kw_include_once => self.parseRequireStmt(),
@@ -2858,7 +2859,8 @@ const Parser = struct {
             const prec = infixPrec(self.peek());
             if (prec == 0 or prec <= min_prec) {
                 // php allows assignment as rhs of any operator: false === $x = expr
-                if (prec == 4 and isAssignTarget(self.nodes.items[left].tag)) {
+                const left_tag = self.nodes.items[left].tag;
+                if (prec == 4 and (isAssignTarget(left_tag) or ((left_tag == .array_literal or left_tag == .list_destructure or left_tag == .array_push_target) and self.peek() == .equal))) {
                     // fall through to parse the assignment
                 } else break;
             }
