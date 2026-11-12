@@ -5,6 +5,7 @@ const platform = @import("../platform.zig");
 extern "c" fn snprintf(buf: [*c]u8, size: usize, fmt: [*c]const u8, ...) c_int;
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
+const PhpObject = @import("../runtime/value.zig").PhpObject;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 const phpTypeName = @import("types.zig").phpTypeName;
@@ -2758,100 +2759,130 @@ fn toLowerAscii(c: u8) u8 {
     return if (c >= 'A' and c <= 'Z') c + 32 else c;
 }
 
+// http_build_query: php_url_encode_hash_ex over the array, or over the
+// properties of an object the calling scope can see
 fn native_http_build_query(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .array) return NativeResult.literal("");
-    const arr = args[0].array;
-    const prefix_str: []const u8 = if (args.len >= 2 and args[1] == .string) args[1].string.bytes() else "";
-    // arg_separator default "&"
-    const arg_sep: []const u8 = if (args.len >= 3 and args[2] == .string and args[2].string.bytes().len > 0) args[2].string.bytes() else "&";
-    // encoding: PHP_QUERY_RFC1738 = 1 (default, space → +), PHP_QUERY_RFC3986 = 2 (space → %20)
-    const enc_type: i64 = if (args.len >= 4) Value.toInt(args[3]) else 1;
-    const rfc3986 = enc_type == 2;
-
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(ctx.allocator);
-    var first = true;
-    for (arr.entries.items) |entry| {
-        var key_buf: [32]u8 = undefined;
-        const key_str: []const u8 = switch (entry.key) {
-            .string => |s| s.bytes(),
-            .int => |n| blk: {
-                // top-level integer key: prepend numeric prefix
-                if (prefix_str.len > 0) {
-                    const composed = std.fmt.bufPrint(&key_buf, "{s}{d}", .{ prefix_str, n }) catch "";
-                    break :blk composed;
-                }
-                break :blk std.fmt.bufPrint(&key_buf, "{d}", .{n}) catch "";
-            },
-        };
-        try buildQueryPairs(&buf, ctx.allocator, key_str, entry.value, &first, arg_sep, rfc3986);
+    const p = html.Params{ .ctx = ctx, .func = "http_build_query", .args = args };
+    const data: Value = if (args.len > 0) args[0] else .null;
+    if (data != .array and data != .object) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "http_build_query(): Argument #1 ($data) must be of type array, {s} given", .{data.valueName()});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.setPendingException("TypeError", msg);
+        return error.RuntimeError;
     }
-    const result = try buf.toOwnedSlice(ctx.allocator);
+    const prefix = try p.string(1, "numeric_prefix", "");
+    const sep_arg: ?[]const u8 = if (args.len > 2 and args[2] != .null) try p.string(2, "arg_separator", "") else null;
+    const enc_type = try p.int(3, "encoding_type", 1);
+    if (data == .object) if (ctx.vm.classes.get(data.object.class_name)) |cd| if (cd.is_enum) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "http_build_query(): Argument #1 ($data) must not be an enum, {s} given", .{ctx.vm.declaredClassName(data.object.class_name)});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.setPendingException("TypeError", msg);
+        return error.RuntimeError;
+    };
+    var sep: []const u8 = sep_arg orelse (ctx.vm.ini_settings.get("arg_separator.output") orelse "&");
+    if (sep.len == 0) sep = "&";
+    var q = QueryBuilder{ .ctx = ctx, .sep = sep, .rfc3986 = enc_type == 2 };
+    defer q.buf.deinit(ctx.allocator);
+    defer q.visited.deinit(ctx.allocator);
+    try q.encode(data, if (prefix.len > 0) prefix else null, null);
+    const result = try q.buf.toOwnedSlice(ctx.allocator);
     return NativeResult.takeString(try Value.String.adopt(ctx.allocator, result));
 }
 
-fn buildQueryPairs(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, prefix: []const u8, value: Value, first: *bool, sep: []const u8, rfc3986: bool) !void {
-    // PHP omits keys with null values
-    if (value == .null) return;
-    if (value == .array) {
-        for (value.array.entries.items) |entry| {
-            var key_buf: [32]u8 = undefined;
-            const sub_key = switch (entry.key) {
-                .string => |s| s.bytes(),
-                .int => |n| std.fmt.bufPrint(&key_buf, "{d}", .{n}) catch "",
+const QueryBuilder = struct {
+    ctx: *NativeContext,
+    sep: []const u8,
+    rfc3986: bool,
+    buf: std.ArrayListUnmanaged(u8) = .empty,
+    visited: std.ArrayListUnmanaged(usize) = .empty,
+
+    fn encode(self: *QueryBuilder, container: Value, num_prefix: ?[]const u8, key_prefix: ?[]const u8) RuntimeError!void {
+        const a = self.ctx.allocator;
+        const id: usize = switch (container) {
+            .array => |arr| @intFromPtr(arr),
+            .object => |o| @intFromPtr(o),
+            else => return,
+        };
+        // a container already being encoded is skipped, as php's recursion guard does
+        for (self.visited.items) |v| if (v == id) return;
+        try self.visited.append(a, id);
+        defer _ = self.visited.pop();
+        var owned: ?*PhpArray = null;
+        const arr: *PhpArray = switch (container) {
+            .array => |x| x,
+            .object => |o| blk: {
+                const r = try native_get_object_vars_for(self.ctx, o);
+                owned = r;
+                break :blk r;
+            },
+            else => unreachable,
+        };
+        defer if (owned) |o| self.ctx.vm.releaseUnheldArray(o);
+        for (arr.entries.items) |entry| {
+            const v = if (entry.ref) |r| r.* else entry.value;
+            var idx_buf: [32]u8 = undefined;
+            const is_str = entry.key == .string;
+            const name: []const u8 = switch (entry.key) {
+                .string => |k| k.bytes(),
+                .int => |n| std.fmt.bufPrint(&idx_buf, "{d}", .{n}) catch unreachable,
             };
-            var nested_key = std.ArrayListUnmanaged(u8).empty;
-            defer nested_key.deinit(a);
-            try nested_key.appendSlice(a, prefix);
-            try nested_key.appendSlice(a, "[");
-            try nested_key.appendSlice(a, sub_key);
-            try nested_key.appendSlice(a, "]");
-            try buildQueryPairs(buf, a, nested_key.items, entry.value, first, sep, rfc3986);
-        }
-    } else if (value == .object) {
-        const obj = value.object;
-        if (obj.slot_layout) |layout| {
-            if (obj.slots) |slots| {
-                for (layout.names, 0..) |name, i| {
-                    var nested_key = std.ArrayListUnmanaged(u8).empty;
-                    defer nested_key.deinit(a);
-                    try nested_key.appendSlice(a, prefix);
-                    try nested_key.appendSlice(a, "[");
-                    try nested_key.appendSlice(a, name);
-                    try nested_key.appendSlice(a, "]");
-                    try buildQueryPairs(buf, a, nested_key.items, slots[i], first, sep, rfc3986);
+            const is_enum = v == .object and if (self.ctx.vm.classes.get(v.object.class_name)) |cd| cd.is_enum else false;
+            if (v == .array or (v == .object and !is_enum)) {
+                var new_prefix: std.ArrayListUnmanaged(u8) = .empty;
+                defer new_prefix.deinit(a);
+                if (is_str) {
+                    if (key_prefix) |kp| try new_prefix.appendSlice(a, kp);
+                    try appendUrlEncodedMode(&new_prefix, a, name, self.rfc3986);
+                    try new_prefix.appendSlice(a, if (key_prefix != null) "%5D%5B" else "%5B");
+                } else {
+                    if (key_prefix) |kp| try new_prefix.appendSlice(a, kp);
+                    if (num_prefix) |np| try new_prefix.appendSlice(a, np);
+                    try new_prefix.appendSlice(a, name);
+                    try new_prefix.appendSlice(a, if (key_prefix != null) "%5D%5B" else "%5B");
                 }
+                try self.encode(v, null, new_prefix.items);
+                continue;
+            }
+            if (v == .null or v == .resource) continue;
+            if (self.buf.items.len > 0) try self.buf.appendSlice(a, self.sep);
+            if (key_prefix) |kp| try self.buf.appendSlice(a, kp);
+            if (is_str) {
+                try appendUrlEncodedMode(&self.buf, a, name, self.rfc3986);
+            } else {
+                if (num_prefix) |np| try self.buf.appendSlice(a, np);
+                try self.buf.appendSlice(a, name);
+            }
+            if (key_prefix != null) try self.buf.appendSlice(a, "%5D");
+            try self.buf.append(a, '=');
+            var scalar = v;
+            if (is_enum) {
+                const cd = self.ctx.vm.classes.get(v.object.class_name).?;
+                if (cd.backed_type == .none) {
+                    const msg = try std.fmt.allocPrint(a, "Unbacked enum {s} cannot be converted to a string", .{self.ctx.vm.declaredClassName(v.object.class_name)});
+                    defer a.free(msg);
+                    try self.ctx.vm.setPendingException("ValueError", msg);
+                    return error.RuntimeError;
+                }
+                scalar = v.object.get("value");
+            }
+            switch (scalar) {
+                .string => |str| try appendUrlEncodedMode(&self.buf, a, str.bytes(), self.rfc3986),
+                .bool => |b| try self.buf.append(a, if (b) '1' else '0'),
+                else => {
+                    var tmp = std.ArrayListUnmanaged(u8).empty;
+                    defer tmp.deinit(a);
+                    try scalar.format(&tmp, a);
+                    try appendUrlEncodedMode(&self.buf, a, tmp.items, self.rfc3986);
+                },
             }
         }
-        var it = obj.properties.iterator();
-        while (it.next()) |kv| {
-            const name = kv.key_ptr.*;
-            if (name.len > 0 and name[0] == '_' and name.len > 1 and name[1] == '_') continue;
-            var nested_key = std.ArrayListUnmanaged(u8).empty;
-            defer nested_key.deinit(a);
-            try nested_key.appendSlice(a, prefix);
-            try nested_key.appendSlice(a, "[");
-            try nested_key.appendSlice(a, name);
-            try nested_key.appendSlice(a, "]");
-            try buildQueryPairs(buf, a, nested_key.items, kv.value_ptr.*, first, sep, rfc3986);
-        }
-    } else {
-        if (!first.*) try buf.appendSlice(a, sep);
-        first.* = false;
-        try appendUrlEncodedMode(buf, a, prefix, rfc3986);
-        try buf.append(a, '=');
-        switch (value) {
-            .string => |s| try appendUrlEncodedMode(buf, a, s.bytes(), rfc3986),
-            .bool => |b| try buf.append(a, if (b) '1' else '0'),
-            else => {
-                var tmp = std.ArrayListUnmanaged(u8).empty;
-                try value.format(&tmp, a);
-                const s = try tmp.toOwnedSlice(a);
-                defer a.free(s);
-                try appendUrlEncodedMode(buf, a, s, rfc3986);
-            },
-        }
     }
+};
+
+// the properties of o the calling scope can see, as get_object_vars lists them
+fn native_get_object_vars_for(ctx: *NativeContext, o: *PhpObject) RuntimeError!*PhpArray {
+    const r = try @import("types.zig").getObjectVars(ctx, o);
+    return r;
 }
 
 fn appendUrlEncoded(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, s: []const u8) !void {

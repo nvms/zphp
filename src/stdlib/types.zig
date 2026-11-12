@@ -966,8 +966,13 @@ fn native_function_exists(ctx: *NativeContext, args: []const Value) RuntimeError
 
 fn native_get_object_vars(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .object) return NativeResult.scalar(Value{ .bool = false });
-    try ctx.vm.triggerLazyInit(args[0].object);
-    const obj = args[0].object.storage();
+    return NativeResult.borrowed(.{ .array = try getObjectVars(ctx, args[0].object) });
+}
+
+// the properties of an object the running code's class can see
+pub fn getObjectVars(ctx: *NativeContext, object: *PhpObject) RuntimeError!*PhpArray {
+    try ctx.vm.triggerLazyInit(object);
+    const obj = object.storage();
     var arr = try ctx.createArray();
 
     // the caller's class scope, bound closures included; natives run inline,
@@ -991,7 +996,7 @@ fn native_get_object_vars(ctx: *NativeContext, args: []const Value) RuntimeError
             try arr.setCopiedKey(ctx.allocator, prop.key.name, prop.value);
         }
     }
-    return NativeResult.borrowed(.{ .array = arr });
+    return arr;
 }
 
 // the object's own property table with (array)'s mangled keys, whatever the
@@ -3009,3 +3014,4 @@ pub fn countAs(ctx: *NativeContext, func: []const u8, args: []const Value) Runti
 fn count(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return countAs(ctx, "count", args);
 }
+
