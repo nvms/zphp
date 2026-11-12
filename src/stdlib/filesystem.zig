@@ -128,6 +128,7 @@ const common_entries = .{
     .{ "fgetcsv", csv.fgetcsv },
     .{ "fputcsv", csv.fputcsv },
     .{ "stream_get_meta_data", stream_get_meta_data },
+    .{ "socket_get_status", stream_get_meta_data },
     .{ "stream_get_wrappers", stream_get_wrappers },
     .{ "stream_wrapper_register", stream_wrapper_register },
     .{ "stream_register_wrapper", stream_wrapper_register },

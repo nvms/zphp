@@ -65,6 +65,12 @@ pub fn isByRef(name: []const u8, index: usize) bool {
         .{ .name = "pfsockopen", .index = 3 },
         .{ .name = "flock", .index = 2 },
         .{ .name = "SplFileObject::flock", .index = 1 },
+        .{ .name = "getmxrr", .index = 1 },
+        .{ .name = "getmxrr", .index = 2 },
+        .{ .name = "dns_get_mx", .index = 1 },
+        .{ .name = "dns_get_mx", .index = 2 },
+        .{ .name = "dns_get_record", .index = 2 },
+        .{ .name = "dns_get_record", .index = 3 },
     };
     for (outputs) |output| {
         if (index == output.index and std.ascii.eqlIgnoreCase(base, output.name)) return true;
@@ -92,7 +98,7 @@ const by_ref_names = std.StaticStringMap(void).initComptime(.{
     .{"preg_replace"},          .{"preg_filter"},          .{"preg_replace_callback"}, .{"openssl_encrypt"},             .{"stream_select"},
     .{"sscanf"},                .{"fscanf"},               .{"mb_convert_variables"},  .{"mb_parse_str"},                .{"stream_socket_client"},
     .{"stream_socket_server"},  .{"stream_socket_accept"}, .{"fsockopen"},             .{"pfsockopen"},                  .{"flock"},
-    .{"splfileobject::fscanf"}, .{"splfileobject::flock"},
+    .{"splfileobject::fscanf"}, .{"splfileobject::flock"},  .{"getmxrr"},               .{"dns_get_mx"},                  .{"dns_get_record"},
 });
 
 pub fn hasByRefParams(name: []const u8) bool {

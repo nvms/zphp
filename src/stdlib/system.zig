@@ -375,9 +375,9 @@ extern fn getprotobynumber(proto: c_int) ?*Protoent;
 
 fn native_getservbyname(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const p = @import("string_ports.zig").Args.init(ctx, "getservbyname", args);
-    const service = try ctx.allocator.dupeSentinel(u8, try p.str(0, "service"), 0);
+    const service = try ctx.allocator.dupeSentinel(u8, try p.path(0, "service"), 0);
     defer ctx.allocator.free(service);
-    const protocol = try ctx.allocator.dupeSentinel(u8, try p.str(1, "protocol"), 0);
+    const protocol = try ctx.allocator.dupeSentinel(u8, try p.path(1, "protocol"), 0);
     defer ctx.allocator.free(protocol);
     if (platform.is_windows) return NativeResult.scalar(.{ .bool = false });
     const serv = getservbyname(service.ptr, protocol.ptr) orelse return NativeResult.scalar(.{ .bool = false });
@@ -387,7 +387,7 @@ fn native_getservbyname(ctx: *NativeContext, args: []const Value) RuntimeError!N
 fn native_getservbyport(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const p = @import("string_ports.zig").Args.init(ctx, "getservbyport", args);
     const port = try p.long(0, "port");
-    const protocol = try ctx.allocator.dupeSentinel(u8, try p.str(1, "protocol"), 0);
+    const protocol = try ctx.allocator.dupeSentinel(u8, try p.path(1, "protocol"), 0);
     defer ctx.allocator.free(protocol);
     if (platform.is_windows) return NativeResult.scalar(.{ .bool = false });
     const net_port: u16 = std.mem.nativeToBig(u16, @truncate(@as(u64, @bitCast(port))));
@@ -396,7 +396,7 @@ fn native_getservbyport(ctx: *NativeContext, args: []const Value) RuntimeError!N
 }
 
 fn native_getprotobyname(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const name = try ctx.allocator.dupeSentinel(u8, try @import("string_ports.zig").Args.init(ctx, "getprotobyname", args).str(0, "protocol"), 0);
+    const name = try ctx.allocator.dupeSentinel(u8, try @import("string_ports.zig").Args.init(ctx, "getprotobyname", args).path(0, "protocol"), 0);
     defer ctx.allocator.free(name);
     if (platform.is_windows) return NativeResult.scalar(.{ .bool = false });
     const ent = getprotobyname(name.ptr) orelse return NativeResult.scalar(.{ .bool = false });
@@ -662,24 +662,40 @@ fn native_usleep(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     return NativeResult.scalar(.null);
 }
 
-fn native_time_nanosleep(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2) return NativeResult.scalar(.{ .bool = false });
-    const secs = Value.toInt(args[0]);
-    const nsecs = Value.toInt(args[1]);
-    if (secs < 0 or nsecs < 0) return NativeResult.scalar(.{ .bool = false });
-    const total_ns: u64 = @intCast(secs * 1_000_000_000 + nsecs);
-    platform.sleep(total_ns);
+fn native_time_nanosleep(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = @import("string_ports.zig").Args.init(ctx, "time_nanosleep", args);
+    const secs = try p.long(0, "seconds");
+    const nsecs = try p.long(1, "nanoseconds");
+    if (secs < 0) return p.valueError(0, "seconds", "must be greater than or equal to 0");
+    if (nsecs < 0) return p.valueError(1, "nanoseconds", "must be greater than or equal to 0");
+    // nanosleep's EINVAL
+    if (nsecs > 999_999_999) {
+        try ctx.vm.setPendingException("ValueError", "Nanoseconds was not in the range 0 to 999 999 999 or seconds was negative");
+        return error.RuntimeError;
+    }
+    const total = std.math.mul(u64, @intCast(secs), 1_000_000_000) catch std.math.maxInt(u64);
+    platform.sleep(total +| @as(u64, @intCast(nsecs)));
     return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_time_sleep_until(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
-    const target = Value.toFloat(args[0]);
-    const now: f64 = @floatFromInt(platform.timestamp());
-    if (target <= now) return NativeResult.scalar(.{ .bool = true });
-    const delta: f64 = (target - now) * 1e9;
-    const delta_ns: u64 = if (!(delta < 18446744073709549568.0)) std.math.maxInt(u64) else @intFromFloat(delta);
-    platform.sleep(delta_ns);
+fn native_time_sleep_until(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = @import("string_ports.zig").Args.init(ctx, "time_sleep_until", args);
+    const target = try p.double(0, "timestamp");
+    const ns_per_sec: u64 = 1_000_000_000;
+    const top: u64 = std.math.maxInt(u64) / ns_per_sec;
+    if (!(target >= 0 and target <= @as(f64, @floatFromInt(top)))) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "time_sleep_until(): Argument #1 ($timestamp) must be between 0 and {d}", .{top});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.setPendingException("ValueError", msg);
+        return error.RuntimeError;
+    }
+    const target_ns: u64 = @intFromFloat(target * 1e9);
+    const now_ns: u64 = @intCast(@divTrunc(platform.nanoTimestamp(), 1000) * 1000);
+    if (target_ns < now_ns) {
+        try @import("filesystem.zig").warnDocref(ctx, "Argument #1 ($timestamp) must be greater than or equal to the current time", .{});
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    platform.sleep(target_ns - now_ns);
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -1426,6 +1442,10 @@ fn runShell(allocator: std.mem.Allocator, command: []const u8) !ShellResult {
 }
 
 fn requireCommand(ctx: *NativeContext, comptime func: []const u8, command: Value) RuntimeError!void {
+    if (std.mem.indexOfScalar(u8, command.string.bytes(), 0) != null) {
+        try ctx.vm.setPendingException("ValueError", func ++ "(): Argument #1 ($command) must not contain any null bytes");
+        return error.RuntimeError;
+    }
     if (command.string.bytes().len > 0) return;
     try ctx.vm.setPendingException("ValueError", func ++ "(): Argument #1 ($command) must not be empty");
     return error.RuntimeError;

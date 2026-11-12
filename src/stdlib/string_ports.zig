@@ -153,6 +153,13 @@ pub const Args = struct {
         return self.strAs(index, name, "string");
     }
 
+    // Z_PARAM_PATH: a string without nul bytes
+    pub fn path(self: Args, index: usize, name: []const u8) RuntimeError![]const u8 {
+        const s = try self.str(index, name);
+        if (std.mem.indexOfScalar(u8, s, 0) != null) return self.valueError(index, name, "must not contain any null bytes");
+        return s;
+    }
+
     pub fn optStr(self: Args, index: usize, name: []const u8, default: []const u8) RuntimeError![]const u8 {
         if (index >= self.args.len) return default;
         return self.str(index, name);

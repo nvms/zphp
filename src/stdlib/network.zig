@@ -12,6 +12,7 @@ const filesystem = @import("filesystem.zig");
 const streams = @import("streams.zig");
 const user_streams = @import("user_streams.zig");
 const value_mod = @import("../runtime/value.zig");
+const Args = @import("string_ports.zig").Args;
 
 pub const entries = .{
     .{ "gethostbyname", native_gethostbyname },
@@ -34,6 +35,7 @@ pub const entries = .{
     .{ "stream_context_get_default", native_stream_context_get_default },
     .{ "stream_context_set_default", native_stream_context_set_default },
     .{ "checkdnsrr", native_checkdnsrr },
+    .{ "dns_check_record", native_checkdnsrr },
     .{ "dns_get_record", native_dns_get_record },
     .{ "stream_select", native_stream_select },
     .{ "stream_socket_pair", native_stream_socket_pair },
@@ -518,8 +520,11 @@ fn applyContextParams(ctx: *NativeContext, context: *PhpObject, params: *PhpArra
 }
 
 fn native_gethostbyname(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const host = args[0].string.bytes();
+    const host = try Args.init(ctx, "gethostbyname", args).path(0, "hostname");
+    if (host.len > max_fqdn_len) {
+        try filesystem.warnDocref(ctx, "Host name cannot be longer than {d} characters", .{max_fqdn_len});
+        return NativeResult.share(args[0]);
+    }
     var list = net.getAddressList(ctx.allocator, host, 0) catch return NativeResult.share(args[0]);
     defer list.deinit();
     if (list.addrs.len == 0) return NativeResult.share(args[0]);
@@ -538,8 +543,11 @@ fn native_gethostbyname(ctx: *NativeContext, args: []const Value) RuntimeError!N
 // gethostbynamel: like gethostbyname but returns all resolved IPv4 addresses
 // as a numerically-indexed array, or false on failure
 fn native_gethostbynamel(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const host = args[0].string.bytes();
+    const host = try Args.init(ctx, "gethostbynamel", args).path(0, "hostname");
+    if (host.len > max_fqdn_len) {
+        try filesystem.warnDocref(ctx, "Host name cannot be longer than {d} characters", .{max_fqdn_len});
+        return NativeResult.scalar(.{ .bool = false });
+    }
     var list = net.getAddressList(ctx.allocator, host, 0) catch return NativeResult.scalar(.{ .bool = false });
     defer list.deinit();
     if (list.addrs.len == 0) return NativeResult.scalar(.{ .bool = false });
@@ -563,11 +571,28 @@ fn native_gethostbynamel(ctx: *NativeContext, args: []const Value) RuntimeError!
     return NativeResult.borrowed(.{ .array = arr });
 }
 
+extern "c" fn getnameinfo(sa: *const anyopaque, salen: u32, host: [*]u8, hostlen: u32, serv: ?[*]u8, servlen: u32, flags: c_int) c_int;
+
+// php_gethostbyaddr: an address inet_pton doesn't take is a warning, one
+// without a name comes back as given
 fn native_gethostbyaddr(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    // best-effort: just echo back the IP if we can't reverse-resolve
-    return NativeResult.copyString(ctx.allocator, args[0].string.bytes());
+    const ip = try Args.init(ctx, "gethostbyaddr", args).path(0, "ip");
+    const addr = net.Address.parseIp6(ip, 0) catch net.Address.parseIp4(ip, 0) catch {
+        try filesystem.warnDocref(ctx, "Address is not a valid IPv4 or IPv6 address", .{});
+        return NativeResult.scalar(.{ .bool = false });
+    };
+    if (!platform.is_windows) {
+        var host: [1025]u8 = undefined;
+        // NI_NAMEREQD
+        if (getnameinfo(&addr.any, addr.getOsSockLen(), &host, host.len, null, 0, 8) == 0) {
+            return NativeResult.copyString(ctx.allocator, std.mem.sliceTo(&host, 0));
+        }
+    }
+    return NativeResult.copyString(ctx.allocator, ip);
 }
+
+// MAXFQDNLEN: longer names never reach the resolver (CVE-2015-0235)
+const max_fqdn_len = 255;
 
 fn native_gethostname(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     var buf: [256]u8 = undefined;
@@ -576,8 +601,7 @@ fn native_gethostname(ctx: *NativeContext, _: []const Value) RuntimeError!Native
 }
 
 fn native_inet_pton(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const s = args[0].string.bytes();
+    const s = try Args.init(ctx, "inet_pton", args).path(0, "ip");
     // try IPv4
     if (net.Address.parseIp4(s, 0)) |addr| {
         const bytes = std.mem.toBytes(addr.in.sa.addr);
@@ -615,19 +639,33 @@ fn native_inet_ntop(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_ip2long(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    var parts: [4]u32 = undefined;
-    var idx: usize = 0;
-    var it = std.mem.splitScalar(u8, args[0].string.bytes(), '.');
-    while (it.next()) |part| {
-        if (idx >= 4) return NativeResult.scalar(.{ .bool = false });
-        parts[idx] = std.fmt.parseUnsigned(u8, part, 10) catch return NativeResult.scalar(.{ .bool = false });
-        idx += 1;
+// inet_pton(AF_INET): four decimal parts of at most 255, no leading zeros
+fn inetPton4(s: []const u8) ?u32 {
+    var value: u32 = 0;
+    var parts: usize = 0;
+    var i: usize = 0;
+    while (true) {
+        const start = i;
+        var part: u32 = 0;
+        while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1) {
+            part = part * 10 + (s[i] - '0');
+            if (part > 255 or i - start > 2) return null;
+        }
+        if (i == start) return null;
+        if (s[start] == '0' and i - start > 1) return null;
+        value = (value << 8) | part;
+        parts += 1;
+        if (i == s.len) break;
+        if (s[i] != '.' or parts == 4) return null;
+        i += 1;
     }
-    if (idx != 4) return NativeResult.scalar(.{ .bool = false });
-    const long: i64 = @intCast((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]);
-    return NativeResult.scalar(.{ .int = long });
+    return if (parts == 4) value else null;
+}
+
+fn native_ip2long(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const ip = try Args.init(ctx, "ip2long", args).path(0, "ip");
+    const value = inetPton4(ip) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .int = value });
 }
 
 fn native_long2ip(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -802,6 +840,7 @@ fn failConnect(ctx: *NativeContext, args: []const Value, code_index: usize, comp
         error.ParseAddress => owned = try std.fmt.allocPrint(ctx.allocator, "Failed to parse address \"{s}\"", .{rest}),
         error.ParseIpv6Address => owned = try std.fmt.allocPrint(ctx.allocator, "Failed to parse IPv6 address \"{s}\"", .{rest}),
         error.NulInHostname => owned = try ctx.allocator.dupe(u8, "The hostname must not contain null bytes"),
+        error.UnsupportedTransport => owned = try std.fmt.allocPrint(ctx.allocator, "Unable to find the socket transport \"{s}\" - did you forget to enable it when you configured PHP?", .{target[0 .. std.mem.indexOf(u8, target, "://") orelse 0]}),
         else => {},
     }
     if (owned) |o| e = .{ .code = 0, .message = o };
@@ -817,8 +856,14 @@ fn failConnect(ctx: *NativeContext, args: []const Value, code_index: usize, comp
             '\'', '"', '\\' => try quoted.appendSlice(ctx.allocator, &.{ '\\', c }),
             else => try quoted.append(ctx.allocator, c),
         };
+    } else if (comptime std.mem.eql(u8, func, "fsockopen")) {
+        // php_fsockopen_stream names the host as a c string and the port
+        const host = if (args[0] == .string) args[0].string.bytes() else "";
+        const port: i64 = if (args.len >= 2 and args[1] != .null) Value.toInt(args[1]) else -1;
+        try quoted.print(ctx.allocator, "{s}:{d}", .{ host[0 .. std.mem.indexOfScalar(u8, host, 0) orelse host.len], port });
     } else try quoted.appendSlice(ctx.allocator, target);
-    const msg = try std.fmt.allocPrint(ctx.allocator, func ++ "(): Unable to connect to {s} ({s})", .{ quoted.items, e.message });
+    const name = if (comptime std.mem.eql(u8, func, "fsockopen")) ctx.call_name orelse func else func;
+    const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Unable to connect to {s} ({s})", .{ name, quoted.items, e.message });
     defer ctx.allocator.free(msg);
     try ctx.vm.emitWarning(msg);
     return NativeResult.scalar(.{ .bool = false });
@@ -836,7 +881,18 @@ fn native_fsockopen(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const host = args[0].string.bytes();
     const port: i64 = if (args.len >= 2 and args[1] != .null) Value.toInt(args[1]) else -1;
-    const target = if (port >= 0)
+    if (args.len > 4 and args[4] != .null) {
+        const timeout = Value.toFloat(args[4]);
+        const top: f64 = @as(f64, @floatFromInt(std.math.maxInt(u64))) / 1000000.0;
+        if (timeout != -1.0 and !(timeout >= 0.0 and timeout <= top)) {
+            const name = ctx.call_name orelse "fsockopen";
+            const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Argument #5 ($timeout) must be -1 or between 0 and {d}", .{ name, @as(u64, @intFromFloat(top)) });
+            defer ctx.allocator.free(msg);
+            try ctx.vm.setPendingException("ValueError", msg);
+            return error.RuntimeError;
+        }
+    }
+    const target = if (port > 0)
         try std.fmt.allocPrint(ctx.allocator, "{s}:{d}", .{ host, port })
     else
         try ctx.allocator.dupe(u8, host);
@@ -972,14 +1028,35 @@ fn native_stream_socket_shutdown(ctx: *NativeContext, args: []const Value) Runti
 }
 
 fn native_checkdnsrr(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    var list = net.getAddressList(ctx.allocator, args[0].string.bytes(), 0) catch return NativeResult.scalar(.{ .bool = false });
+    const name = ctx.call_name orelse "checkdnsrr";
+    const p = Args.init(ctx, name, args);
+    const host = try p.path(0, "hostname");
+    if (host.len == 0) return p.valueError(0, "hostname", "must not be empty");
+    if (args.len > 1) {
+        const t = try p.str(1, "type");
+        const types = [_][]const u8{ "A", "NS", "MX", "PTR", "ANY", "SOA", "CAA", "TXT", "CNAME", "AAAA", "SRV", "NAPTR", "A6" };
+        var known = false;
+        for (types) |k| if (std.ascii.eqlIgnoreCase(t, k)) {
+            known = true;
+        };
+        if (!known) return p.valueError(1, "type", "must be a valid DNS record type");
+    }
+    var list = net.getAddressList(ctx.allocator, host, 0) catch return NativeResult.scalar(.{ .bool = false });
     defer list.deinit();
     return NativeResult.scalar(.{ .bool = list.addrs.len > 0 });
 }
 
 fn native_dns_get_record(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const p = Args.init(ctx, "dns_get_record", args);
+    _ = try p.path(0, "hostname");
+    const dns_type: i64 = if (args.len > 1) try p.long(1, "type") else 268435456;
+    const raw_mode = args.len > 4 and try p.boolean(4, "raw", false);
+    if (!raw_mode) {
+        // PHP_DNS_ALL, and PHP_DNS_ANY on its own
+        if ((dns_type & ~@as(i64, 251721779)) != 0 and dns_type != 268435456) return p.valueError(1, "type", "must be a DNS_* constant");
+    } else if (dns_type < 1 or dns_type > 65535) {
+        return p.valueError(1, "type", "must be between 1 and 65535 when argument #5 ($raw) is true");
+    }
     const result = try ctx.createArray();
     var list = net.getAddressList(ctx.allocator, args[0].string.bytes(), 0) catch return NativeResult.borrowed(.{ .array = result });
     defer list.deinit();

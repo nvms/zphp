@@ -95,6 +95,7 @@ pub const entries = .{
     .{ "opcache_reset", native_noop_true },
     .{ "ignore_user_abort", native_ignore_user_abort },
     .{ "getmxrr", native_getmxrr },
+    .{ "dns_get_mx", native_getmxrr },
     .{ "header_register_callback", native_noop_true },
     .{ "spl_classes", native_spl_classes },
     .{ "iconv_mime_decode", native_iconv_mime_decode },
@@ -2028,10 +2029,10 @@ fn native_highlight_file(_: *NativeContext, _: []const Value) RuntimeError!Nativ
     return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_getmxrr(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+fn native_getmxrr(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     // empty MX array, return false (no records found) - matches PHP behavior
     // when MX query fails. tools that branch on this still work.
-    _ = ctx;
+    _ = try @import("string_ports.zig").Args.init(ctx, ctx.call_name orelse "getmxrr", args).path(0, "hostname");
     return NativeResult.scalar(.{ .bool = false });
 }
 
