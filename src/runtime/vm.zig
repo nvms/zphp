@@ -9281,6 +9281,27 @@ pub const VM = struct {
                         idef.deinit(self.allocator);
                         return err;
                     };
+                    // an interface method marked #[\Override] needs a parent
+                    // interface declaring it
+                    var iface_ma = def.method_attributes.iterator();
+                    while (iface_ma.next()) |entry| {
+                        if (!hasOverrideAttribute(entry.value_ptr.*)) continue;
+                        var seen_ifaces: std.ArrayListUnmanaged([]const u8) = .empty;
+                        defer seen_ifaces.deinit(self.allocator);
+                        for (idef.parents.items) |parent| try self.collectInterface(&seen_ifaces, parent);
+                        const met = for (seen_ifaces.items) |parent| {
+                            const pdef = self.interfaces.get(parent) orelse break true;
+                            if (for (pdef.methods.items) |m| {
+                                if (std.ascii.eqlIgnoreCase(m, entry.key_ptr.*)) break true;
+                            } else false) break true;
+                        } else false;
+                        if (met) continue;
+                        const msg = try std.fmt.allocPrint(self.allocator, "{s}::{s}() has #[\\Override] attribute, but no matching parent method exists", .{ iface_name, entry.key_ptr.* });
+                        defer self.allocator.free(msg);
+                        def.deinit(self.allocator);
+                        idef.deinit(self.allocator);
+                        return self.raiseCompileFatal(msg, .{ .file = iface_site.file, .line = iface_site.start_line });
+                    }
                     try self.classes.put(self.allocator, iface_name, def);
                     try self.interfaces.put(self.allocator, iface_name, idef);
                 },
@@ -16826,26 +16847,7 @@ pub const VM = struct {
             if (self.classes.getPtr(class_name)) |own| self.markLazyConstants(own);
         };
 
-        // #[Override] enforcement - runs after class is registered so class
-        // loading state stays consistent even if the error is caught
-        var override_err: ?[]const u8 = null;
-        var oa_it = def.method_attributes.iterator();
-        while (oa_it.next()) |entry| {
-            const method_name = entry.key_ptr.*;
-            for (entry.value_ptr.*) |attr| {
-                if (!std.mem.eql(u8, attr.name, "Override")) continue;
-                if (self.methodExistsInAncestors(class_name, method_name, &def)) break;
-                override_err = method_name;
-                break;
-            }
-            if (override_err != null) break;
-        }
-        if (override_err) |method_name| {
-            var buf2: [512]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf2, "{s}::{s}() has #[\\Override] attribute, but no matching parent method exists", .{ class_names.display(class_name), method_name }) catch "";
-            if (try self.throwBuiltinException("Error", msg)) return;
-            return error.RuntimeError;
-        }
+        try self.checkOverrides(class_name, &def);
 
         // zend_implement_serializable: every class that implements Serializable,
         // itself or through a parent, unless explicitly abstract or serializing
@@ -16860,47 +16862,109 @@ pub const VM = struct {
         }
     }
 
-    fn methodExistsInAncestors(self: *VM, class_name: []const u8, method_name: []const u8, def: *const ClassDef) bool {
-        var buf: [256]u8 = undefined;
-
-        // check parent class chain (functions, native_fns, and method declarations).
-        // an UNREGISTERED ancestor (parent class or interface) means the hierarchy
-        // isn't fully loaded yet - PHP resolves the whole chain before checking
-        // #[Override], but zphp can register a class before an implemented
-        // interface (e.g. Collection before Enumerable during autoload). in that
-        // window we cannot prove the method is absent, so we must be conservative
-        // and treat it as present - a missed real violation is far better than a
-        // false positive that aborts class loading
-        var current: ?[]const u8 = def.parent;
-        while (current) |parent| {
-            const full = class_names.memberKey(&buf, parent, method_name);
-            if (self.functions.contains(full) or self.native_fns.contains(full)) return true;
-            const pcls = self.classes.get(parent) orelse return true;
-            if (pcls.methods.contains(method_name)) return true;
-            for (pcls.interfaces.items) |iface_name| {
-                if (self.interfaceDeclaresMethod(iface_name, method_name)) return true;
-            }
-            current = pcls.parent;
+    fn hasOverrideAttribute(attrs: []const AttributeDef) bool {
+        for (attrs) |attr| {
+            const name = if (attr.name.len > 0 and attr.name[0] == '\\') attr.name[1..] else attr.name;
+            if (std.ascii.eqlIgnoreCase(name, "Override")) return true;
         }
-
-        // check directly-implemented interfaces (and their parent interfaces)
-        for (def.interfaces.items) |iface_name| {
-            if (self.interfaceDeclaresMethod(iface_name, method_name)) return true;
-        }
-
-        _ = class_name;
         return false;
     }
 
-    fn interfaceDeclaresMethod(self: *VM, iface_name: []const u8, method_name: []const u8) bool {
-        // unresolved interface: can't disprove the method exists - be conservative
-        // (see methodExistsInAncestors) so a load-order gap never false-positives
-        const idef = self.interfaces.get(iface_name) orelse return true;
-        for (idef.methods.items) |m| {
-            if (std.mem.eql(u8, m, method_name)) return true;
+    // the attributes of a method a class has, its own or a trait's
+    fn ownMethodAttributes(self: *VM, class_name: []const u8, def: *const ClassDef, method: []const u8) ?[]const AttributeDef {
+        if (def.method_attributes.get(method)) |attrs| return attrs;
+        var key_buf: [512]u8 = undefined;
+        const func = self.functions.get(class_names.memberKey(&key_buf, class_name, method)) orelse return null;
+        const sep = std.mem.indexOf(u8, func.trait_origin, "::") orelse return null;
+        const trait = self.classes.get(func.trait_origin[0..sep]) orelse return null;
+        return trait.method_attributes.get(func.trait_origin[sep + 2 ..]);
+    }
+
+    // zend_inheritance_check_override: a method or property marked
+    // #[\Override] that nothing it inherits declares is a compile error at
+    // the method's line. an ancestor or interface zphp hasn't loaded yet
+    // counts as declaring it, since it can't be ruled out
+    fn checkOverrides(self: *VM, class_name: []const u8, def: *const ClassDef) RuntimeError!void {
+        var mit = def.methods.iterator();
+        while (mit.next()) |entry| {
+            const method = entry.key_ptr.*;
+            if (std.mem.indexOf(u8, method, "$hook_") != null) continue;
+            const attrs = self.ownMethodAttributes(class_name, def, method) orelse continue;
+            if (!hasOverrideAttribute(attrs)) continue;
+            if (try self.overridesInherited(def, method)) continue;
+            var key_buf: [512]u8 = undefined;
+            const func = self.functions.get(class_names.memberKey(&key_buf, class_name, method));
+            const msg = try std.fmt.allocPrint(self.allocator, "{s}::{s}() has #[\\Override] attribute, but no matching parent method exists", .{ class_names.display(class_name), method });
+            defer self.allocator.free(msg);
+            const at: SourcePosition = if (func) |f| .{ .file = if (f.file_path.len > 0) f.file_path else def.file_path, .line = f.start_line } else .{ .file = def.file_path, .line = def.start_line };
+            return self.raiseCompileFatal(msg, at);
         }
-        if (idef.parent) |parent| {
-            return self.interfaceDeclaresMethod(parent, method_name);
+        var pit = def.property_attributes.iterator();
+        while (pit.next()) |entry| {
+            if (!hasOverrideAttribute(entry.value_ptr.*)) continue;
+            if (self.inheritsProperty(def, entry.key_ptr.*)) continue;
+            const msg = try std.fmt.allocPrint(self.allocator, "{s}::${s} has #[\\Override] attribute, but no matching parent property exists", .{ class_names.display(class_name), entry.key_ptr.* });
+            defer self.allocator.free(msg);
+            return self.raiseCompileFatal(msg, .{ .file = def.file_path, .line = def.start_line });
+        }
+    }
+
+    // whether a method the class declares meets one it inherits, as
+    // do_inheritance_check_on_method resets ZEND_ACC_OVERRIDE: a parent's
+    // method unless it is private (and not abstract), a constructor only when
+    // it is abstract or an interface's, any interface's, and a trait's
+    // abstract one
+    fn overridesInherited(self: *VM, def: *const ClassDef, method: []const u8) RuntimeError!bool {
+        const ctor = std.ascii.eqlIgnoreCase(method, "__construct");
+        var key_buf: [512]u8 = undefined;
+        var current = def.parent;
+        parents: while (current) |pn| {
+            const cls = self.classes.get(pn) orelse return true;
+            if (cls.methods.get(method)) |info| {
+                if (ctor) {
+                    if (info.is_abstract) return true;
+                    break :parents;
+                }
+                if (info.visibility == .private and !info.is_abstract) break :parents;
+                return true;
+            }
+            if (!ctor and self.native_fns.contains(class_names.memberKey(&key_buf, pn, method))) return true;
+            current = cls.parent;
+        }
+        var seen: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer seen.deinit(self.allocator);
+        var owner: ?*const ClassDef = def;
+        while (owner) |cls| {
+            for (cls.interfaces.items) |iface| try self.collectInterface(&seen, iface);
+            owner = if (cls.parent) |p| self.classes.getPtr(p) else null;
+        }
+        for (seen.items) |iface| {
+            const idef = self.interfaces.get(iface) orelse return true;
+            for (idef.methods.items) |m| if (std.ascii.eqlIgnoreCase(m, method)) return true;
+        }
+        for (def.used_traits.items) |trait| {
+            for (try self.traitTable(trait)) |tm| if (tm.is_abstract and std.ascii.eqlIgnoreCase(tm.name, method)) return true;
+        }
+        return false;
+    }
+
+    // a property redeclared over a parent's that isn't private, or one an
+    // interface declares
+    fn inheritsProperty(self: *VM, def: *const ClassDef, name: []const u8) bool {
+        var current = def.parent;
+        while (current) |pn| {
+            const cls = self.classes.get(pn) orelse return true;
+            for (cls.properties.items) |prop| if (std.mem.eql(u8, prop.name, name) and prop.visibility != .private) return true;
+            if (cls.static_props.contains(name) and (cls.static_prop_visibility.get(name) orelse .public) != .private) return true;
+            current = cls.parent;
+        }
+        var owner: ?*const ClassDef = def;
+        while (owner) |cls| {
+            for (cls.interfaces.items) |iface| {
+                const idef = self.classes.get(iface) orelse return true;
+                for (idef.properties.items) |prop| if (std.mem.eql(u8, prop.name, name)) return true;
+            }
+            owner = if (cls.parent) |p| self.classes.getPtr(p) else null;
         }
         return false;
     }
@@ -17070,6 +17134,7 @@ pub const VM = struct {
             defer self.allocator.free(msg);
             return self.raiseCompileFatal(msg, .{ .file = site.file, .line = site.start_line });
         }
+        try self.checkOverrides(enum_name, &def);
         try self.classes.put(self.allocator, enum_name, def);
         if (backed_type_byte != 0) if (self.classes.getPtr(enum_name)) |registered| {
             registered.enum_table_pending = true;
