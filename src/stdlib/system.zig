@@ -35,7 +35,6 @@ pub const entries = .{
     .{ "dl", native_dl },
     .{ "phpinfo", native_phpinfo },
     .{ "phpcredits", native_phpcredits },
-    .{ "php_strip_whitespace", native_php_strip_whitespace },
     .{ "getlastmod", native_getlastmod },
     .{ "cli_get_process_title", native_cli_get_process_title },
     .{ "cli_set_process_title", native_cli_set_process_title },
@@ -881,15 +880,6 @@ fn native_cli_set_process_title(_: *NativeContext, _: []const Value) RuntimeErro
     // best-effort no-op; the real prctl(PR_SET_NAME) syscall is linux-only and
     // the cosmetic effect rarely matters for scripts that defensively set it
     return NativeResult.scalar(.{ .bool = true });
-}
-
-fn native_php_strip_whitespace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    // PHP's php_strip_whitespace runs the source through the tokenizer and
-    // emits only the non-whitespace tokens; without a real tokenizer we return
-    // the original source so callers that use the result still see valid PHP
-    if (args.len == 0 or args[0] != .string) return NativeResult.literal("");
-    const content = bundle.readFileAlloc(ctx.allocator, args[0].string.bytes(), 1024 * 1024 * 64) catch return NativeResult.literal("");
-    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, content));
 }
 
 fn native_php_uname(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

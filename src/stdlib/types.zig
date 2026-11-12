@@ -103,8 +103,6 @@ pub const entries = .{
     .{ "iconv_mime_encode", native_iconv_mime_encode },
     .{ "gc_status", native_gc_status },
     .{ "gc_mem_caches", native_noop_zero },
-    .{ "highlight_string", native_highlight_string },
-    .{ "highlight_file", native_highlight_file },
     .{ "extension_loaded", native_extension_loaded },
     .{ "get_loaded_extensions", native_get_loaded_extensions },
     .{ "get_extension_funcs", native_get_extension_funcs },
@@ -2034,20 +2032,6 @@ fn native_gc_status(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRe
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("destructor_time") }, .{ .float = 0 });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("free_time") }, .{ .float = 0 });
     return NativeResult.borrowed(.{ .array = arr });
-}
-
-fn native_highlight_string(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    // PHP returns syntax-highlighted HTML; we return false (PHP errors on bad input
-    // also return false, so this is safe as a "no-op" while still being callable)
-    if (args.len >= 2 and args[1] == .bool and args[1].bool) {
-        if (args.len >= 1 and args[0] == .string) return NativeResult.share(args[0]);
-        return NativeResult.literal("");
-    }
-    return NativeResult.scalar(.{ .bool = true });
-}
-
-fn native_highlight_file(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return NativeResult.scalar(.{ .bool = true });
 }
 
 fn native_getmxrr(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

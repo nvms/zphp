@@ -56,6 +56,7 @@ pub fn register(map: *@import("../runtime/vm.zig").NativeTable, allocator: std.m
         @import("mysqli.zig").entries,
         @import("mail.zig").entries,
         @import("syslog.zig").entries,
+        @import("highlight.zig").entries,
     };
     @setEvalBranchQuota(10000);
     inline for (modules) |entries| {
