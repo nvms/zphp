@@ -1985,7 +1985,14 @@ pub fn compileArrayLiteral(self: *Compiler, node: Ast.Node) Error!void {
         }
         const value = self.ast.nodes[elem.data.lhs];
         if (elem.data.rhs != 0) try self.compileNode(elem.data.rhs);
-        if (value.tag == .ref_target) {
+        // `&$this` can't bind $this: php wraps a copy in a reference only the
+        // array holds, which behaves as the plain value
+        const this_ref = value.tag == .ref_target and self.ast.nodes[value.data.lhs].tag == .variable and
+            std.mem.eql(u8, self.ast.tokenSlice(self.ast.nodes[value.data.lhs].main_token), "$this");
+        if (this_ref) {
+            try self.compileNode(value.data.lhs);
+            try self.emitOp(if (elem.data.rhs != 0) .array_set_elem else .array_push);
+        } else if (value.tag == .ref_target) {
             try compileReferenceSource(self, value.data.lhs);
             try self.emitOp(if (elem.data.rhs != 0) .array_set_elem_ref else .array_push_ref);
         } else {
