@@ -4841,8 +4841,10 @@ pub const VM = struct {
 
                 .get_var_var, .get_var_var_quiet => {
                     const name_val = self.pop();
-                    const raw_name = if (name_val == .string) name_val.string.bytes() else "";
+                    var text_buf: [32]u8 = undefined;
+                    const raw_name = varVarText(name_val, &text_buf);
                     if (raw_name.len == 0) {
+                        if (op == .get_var_var) self.undefinedVariableRead("$") catch if (try self.resumeRaised()) continue;
                         self.push(.null);
                     } else {
                         var buf: [256]u8 = undefined;
@@ -4895,7 +4897,8 @@ pub const VM = struct {
                 },
                 .set_var_var => {
                     const name_val = self.pop();
-                    const raw_name = if (name_val == .string) name_val.string.bytes() else "";
+                    var text_buf: [32]u8 = undefined;
+                    const raw_name = varVarText(name_val, &text_buf);
                     if (raw_name.len > 0) {
                         var check_buf: [256]u8 = undefined;
                         try self.checkTypedNameWrite(self.currentFrame(), varVarName(raw_name, &check_buf));
@@ -24036,6 +24039,17 @@ pub const VM = struct {
         self.handler_count = base_handler;
         self.handler_floor = prev_floor;
         return self.pop();
+    }
+
+    // the name a variable variable's scalar value gives: ${10} is $10,
+    // ${true} is $1
+    fn varVarText(v: Value, buf: *[32]u8) []const u8 {
+        return switch (v) {
+            .string => |str| str.bytes(),
+            .int => |i| std.fmt.bufPrint(buf, "{d}", .{i}) catch "",
+            .bool => |b| if (b) "1" else "",
+            else => "",
+        };
     }
 
     fn varVarName(raw_name: []const u8, buf: *[256]u8) []const u8 {
