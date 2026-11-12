@@ -8,6 +8,7 @@ const NativeContext = vm_mod.NativeContext;
 const ClassDef = vm_mod.ClassDef;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const class_names = @import("../runtime/class_names.zig");
+const Args = @import("string_ports.zig").Args;
 
 const Allocator = std.mem.Allocator;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
@@ -173,13 +174,28 @@ fn errorExceptionConstruct(ctx: *NativeContext, args: []const Value) RuntimeErro
     const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.scalar(.null);
     if (this_val != .object) return NativeResult.scalar(.null);
     const obj = this_val.object;
-    if (args.len >= 1) try obj.set(ctx.allocator, "message", args[0]);
-    if (args.len >= 2) try obj.set(ctx.allocator, "code", args[1]);
-    if (args.len >= 3) try obj.set(ctx.allocator, "severity", args[2]);
-    if (args.len >= 4) try obj.set(ctx.allocator, "file", args[3]);
-    if (args.len >= 5) try obj.set(ctx.allocator, "line", args[4]);
-    if (args.len >= 6) try obj.set(ctx.allocator, "previous", args[5]);
+    // zend_parse_parameters "|SllS!l!O!": every argument is parsed before
+    // any property is set
+    const a = Args.init(ctx, "ErrorException::__construct", args);
+    const message = if (args.len >= 1) try a.str(0, "message") else null;
+    const code = if (args.len >= 2) try a.long(1, "code") else null;
+    const severity = if (args.len >= 3) try a.long(2, "severity") else null;
+    const file = if (args.len >= 4) try a.strOrNull(3, "filename") else null;
+    const line = if (args.len >= 5) try a.longOrNull(4, "line") else null;
+    const previous = if (args.len >= 6) try a.objectOrNull(5, "previous", "Throwable") else null;
+    if (message) |m| try setMessage(ctx, obj, args[0], m);
+    if (code) |c| try obj.set(ctx.allocator, "code", .{ .int = c });
+    if (severity) |sv| try obj.set(ctx.allocator, "severity", .{ .int = sv });
+    if (file) |f| try obj.setCopiedString(ctx.allocator, "file", f);
+    if (line) |l| try obj.set(ctx.allocator, "line", .{ .int = l });
+    if (previous) |p| try obj.set(ctx.allocator, "previous", .{ .object = p });
     return NativeResult.scalar(.null);
+}
+
+// the message argument, shared when it already is a string
+fn setMessage(ctx: *NativeContext, obj: *PhpObject, arg: Value, text: []const u8) RuntimeError!void {
+    if (arg == .string) return obj.set(ctx.allocator, "message", arg);
+    try obj.setCopiedString(ctx.allocator, "message", text);
 }
 
 fn errorExceptionGetSeverity(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -193,9 +209,14 @@ fn exceptionConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.scalar(.null);
     if (this_val != .object) return NativeResult.scalar(.null);
     const obj = this_val.object;
-    if (args.len >= 1) try obj.set(ctx.allocator, "message", args[0]);
-    if (args.len >= 2) try obj.set(ctx.allocator, "code", args[1]);
-    if (args.len >= 3) try obj.set(ctx.allocator, "previous", args[2]);
+    // zend_parse_parameters "|SlO!" in the name of the base class
+    const a = Args.init(ctx, if (ctx.vm.isInstanceOf(obj.class_name, "Error")) "Error::__construct" else "Exception::__construct", args);
+    const message = if (args.len >= 1) try a.str(0, "message") else null;
+    const code = if (args.len >= 2) try a.long(1, "code") else null;
+    const previous = if (args.len >= 3) try a.objectOrNull(2, "previous", "Throwable") else null;
+    if (message) |m| try setMessage(ctx, obj, args[0], m);
+    if (code) |c| try obj.set(ctx.allocator, "code", .{ .int = c });
+    if (previous) |p| try obj.set(ctx.allocator, "previous", .{ .object = p });
     return NativeResult.scalar(.null);
 }
 
