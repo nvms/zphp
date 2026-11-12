@@ -280,7 +280,7 @@ fn convFp(format: u8, num: f64, precision: usize, is_negative: *bool, buf: []u8)
 }
 
 const Dtoa = struct {
-    buf: [128]u8 = undefined,
+    buf: [832]u8 = undefined,
     len: usize = 0,
     decpt: i32 = 0,
     sign: bool = false,
@@ -320,12 +320,12 @@ fn dtoa(value: f64, ndigit: i32, d: *Dtoa) void {
             }
         }
     }
-    var tmp: [128]u8 = undefined;
+    var tmp: [832]u8 = undefined;
     if (ndigit > 0 and roundShortest(v, @intCast(ndigit), d)) return;
     const sci: []const u8 = if (ndigit < 0)
         std.fmt.float.render(&tmp, v, .{ .mode = .scientific }) catch unreachable
     else
-        tmp[0..@intCast(snprintf(&tmp, tmp.len, "%.*e", @as(c_int, ndigit - 1), v))];
+        tmp[0..@intCast(snprintf(&tmp, tmp.len, "%.*e", @as(c_int, @min(ndigit, 800) - 1), v))];
     const e_at = std.mem.lastIndexOfScalar(u8, sci, 'e').?;
     d.len = 0;
     for (sci[0..e_at]) |c| if (c != '.') {
@@ -413,7 +413,9 @@ pub fn gcvt(value: f64, ndigit_in: i32, dec_point: u8, exponent: u8, buf: []u8) 
         return buf[0..n];
     }
     var d: Dtoa = .{};
-    dtoa(value, if (mode0) -1 else ndigit, &d);
+    // zend_dtoa takes 0 digits in mode 2 as 1; the format below still
+    // compares against 0
+    dtoa(value, if (mode0) -1 else @max(ndigit, 1), &d);
     const digits = d.digits();
     var decpt = d.decpt;
     var dst: usize = 0;
@@ -764,7 +766,7 @@ fn formattedPrint(st: *State, out: *Out, format: []const u8, args: []const Value
         const ctx = st.ctx;
         switch (spec) {
             's' => {
-                var scratch: [64]u8 = undefined;
+                var scratch: [1100]u8 = undefined;
                 const str = try getString(st, arg, &scratch);
                 if (width == 0 and !expprec) {
                     try out.appendSlice(a, str);
@@ -832,7 +834,7 @@ const Dest = enum { string, output, stream };
 fn formattedCall(ctx: *NativeContext, args: []const Value, comptime func: []const u8, comptime dest: Dest, comptime from_array: bool) RuntimeError!NativeResult {
     const format_index: usize = if (dest == .stream) 1 else 0;
     if (dest == .stream) _ = try @import("filesystem.zig").streamArg(ctx, args, .{ .func = func });
-    var scratch: [64]u8 = undefined;
+    var scratch: [1100]u8 = undefined;
     const format = try formatArg(ctx, func, args, format_index, &scratch);
 
     var vbuf: [16]Value = undefined;

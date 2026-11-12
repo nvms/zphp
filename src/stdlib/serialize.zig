@@ -343,7 +343,7 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
         .float => |f| {
             const sp = value_mod.hooks().serialize_precision;
             var tmp: [1100]u8 = undefined;
-            const text = @import("formatted_print.zig").gcvt(f, if (sp == 0) 1 else sp, '.', 'E', &tmp);
+            const text = @import("formatted_print.zig").gcvt(f, sp, '.', 'E', &tmp);
             try buf.print(a, "d:{s};", .{text});
         },
         .string => |s| try writeString(buf, a, s.bytes()),

@@ -2154,7 +2154,7 @@ pub const Value = union(enum) {
                     try buf.appendSlice(allocator, s);
                 } else {
                     // php's zend_double_to_str: %.*G with the precision ini
-                    var tmp: [64]u8 = undefined;
+                    var tmp: [1100]u8 = undefined;
                     const digits: i32 = if (precision == 0) 1 else precision;
                     try buf.appendSlice(allocator, @import("../stdlib/formatted_print.zig").gcvt(f, digits, '.', 'E', &tmp));
                 }

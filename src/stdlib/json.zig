@@ -104,10 +104,12 @@ fn encodeValue(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, val: Valu
                 last_error_msg = "Inf and NaN cannot be JSON encoded";
                 return error.RuntimeError;
             }
-            // smart_str_append_double: the shortest round-trip digits with a
-            // lowercase exponent, ".0" only under JSON_PRESERVE_ZERO_FRACTION
-            var tmp: [64]u8 = undefined;
-            const text = @import("formatted_print.zig").gcvt(f, -1, '.', 'e', &tmp);
+            // php_json_encode_double: php_gcvt with serialize_precision (-1,
+            // the shortest round-trip digits) and a lowercase exponent, ".0"
+            // only under JSON_PRESERVE_ZERO_FRACTION
+            var tmp: [1100]u8 = undefined;
+            const sp = @import("../runtime/value.zig").hooks().serialize_precision;
+            const text = @import("formatted_print.zig").gcvt(f, sp, '.', 'e', &tmp);
             try buf.appendSlice(a, text);
             if ((flags & JSON_PRESERVE_ZERO_FRACTION) != 0 and std.mem.indexOfAny(u8, text, ".eE") == null) try buf.appendSlice(a, ".0");
         },

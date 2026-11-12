@@ -737,8 +737,14 @@ fn emitDumpKey(out: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, name: []c
 pub fn formatSerializedFloat(tmp: *[64]u8, f: f64) []const u8 {
     const sp = @import("../runtime/value.zig").hooks().serialize_precision;
     if (sp == -1 or std.math.isNan(f) or std.math.isInf(f)) return formatFloat(tmp, f);
+    // php prints as many digits as the ini asks for (zend_gcvt has room for
+    // a double's full expansion); past what tmp holds they go to a buffer of
+    // that size, which the caller uses before formatting another
+    if (sp > 40) return @import("formatted_print.zig").gcvt(f, sp, '.', 'E', &wide_float_buf);
     return @import("formatted_print.zig").gcvt(f, if (sp == 0) 1 else sp, '.', 'E', tmp);
 }
+
+threadlocal var wide_float_buf: [1100]u8 = undefined;
 
 pub fn formatFloat(tmp: *[64]u8, f: f64) []const u8 {
     if (std.math.isNan(f)) return "NAN";
