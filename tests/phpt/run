@@ -74,14 +74,15 @@ SKIP_SLOW_TESTS=1 SKIP_ONLINE_TESTS=1 NO_INTERACTION=1 \
 rm -rf "$SCRIPT_DIR"/php-src?*
 grep -q "^Number of tests :" "$SCRIPT_DIR/last.log" || { tail -20 "$SCRIPT_DIR/last.log"; echo "run-tests.php did not finish"; exit 1; }
 
-python3 - "$SCRIPT_DIR/last.log" "$SCRIPT_DIR/passing" "$update" "${dirs[@]}" <<'PY'
+python3 - "$SCRIPT_DIR/last.log" "$SCRIPT_DIR/passing" "$update" "$SRC" "${dirs[@]}" <<'PY'
+import os
 import re
 import sys
 from collections import defaultdict
 
 # run-tests.php prints one line per test: a status, the title, and the file
 # in brackets
-log, baseline_path, update, dirs = sys.argv[1], sys.argv[2], sys.argv[3] == "1", sys.argv[4:]
+log, baseline_path, update, src, dirs = sys.argv[1], sys.argv[2], sys.argv[3] == "1", sys.argv[4], sys.argv[5:]
 ansi = re.compile(r"\x1b\[[0-9;]*m")
 line_re = re.compile(r"^(PASS|FAIL|SKIP|BORK|XFAIL|LEAK|WARN|XLEAK)\b.*\[([^\[\]]+\.phpt)\]")
 outcome = {}
@@ -143,5 +144,18 @@ if regressed:
     print(f"\n{len(regressed)} tests in the passing list no longer pass:")
     for t in regressed[:50]:
         print(f"  {t}")
+    # what a regression printed, for runs whose files aren't at hand (ci)
+    for t in regressed[:10]:
+        base = os.path.join(src, t[:-len(".phpt")])
+        for ext in (".diff", ".out"):
+            try:
+                with open(base + ext, errors="replace") as f:
+                    lines = f.read().splitlines()[:25]
+            except OSError:
+                continue
+            print(f"\n--- {t} ({ext[1:]})")
+            for line in lines:
+                print(f"  {line}")
+            break
     sys.exit(1)
 PY
