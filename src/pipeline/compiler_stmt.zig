@@ -213,11 +213,26 @@ pub fn compileFor(self: *Compiler, node: Ast.Node) Error!void {
     self.loop_start = prev_start;
 }
 
+// zend_compile_foreach: $this can't be a loop variable, in a list either
+fn refuseThisTarget(self: *Compiler, idx: u32) Error!void {
+    if (idx == 0) return;
+    const node = self.ast.nodes[idx];
+    switch (node.tag) {
+        .variable => if (std.mem.eql(u8, self.ast.tokenSlice(node.main_token), "$this")) return self.fail(node.main_token, "Cannot re-assign $this"),
+        .ref_target => try refuseThisTarget(self, node.data.lhs),
+        .list_destructure, .array_literal => for (self.ast.extraSlice(node.data.lhs)) |slot| try refuseThisTarget(self, slot),
+        .array_element => try refuseThisTarget(self, node.data.lhs),
+        else => {},
+    }
+}
+
 pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     const iter_n = self.ast.extra_data[node.data.lhs];
     const val_n = self.ast.extra_data[node.data.lhs + 1];
     const key_n = self.ast.extra_data[node.data.lhs + 2];
     const val_by_ref = self.ast.extra_data[node.data.lhs + 3] != 0;
+    try refuseThisTarget(self, val_n);
+    if (key_n != 0) try refuseThisTarget(self, key_n);
 
     const prev_start = self.loop_start;
     var prev_breaks = self.break_jumps;
