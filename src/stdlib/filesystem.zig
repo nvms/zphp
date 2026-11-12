@@ -419,6 +419,47 @@ fn dataUriErrorText(err: DataUriError) []const u8 {
 
 // the decoded payload of "data:[//][mediatype][;param=value]*[;base64],<data>",
 // validated as php's rfc2397 wrapper does
+// the meta data php_stream_url_wrap_rfc2397 keeps for a data: url that
+// parsed: the media type, each parameter, and whether it was base64
+fn dataUriMeta(ctx: *NativeContext, url: []const u8) RuntimeError!*PhpArray {
+    const meta = try ctx.createArray();
+    var path = url[5..];
+    if (std.mem.startsWith(u8, path, "//")) path = path[2..];
+    const comma = std.mem.indexOfScalar(u8, path, ',') orelse return meta;
+    var head = path[0..comma];
+    var base64 = false;
+    if (head.len > 0) {
+        const semi = std.mem.indexOfScalar(u8, head, ';');
+        const sep = std.mem.indexOfScalar(u8, head, '/');
+        if (semi == null) {
+            try meta.setCopiedString(ctx.allocator, .{ .string = Value.String.borrowed("mediatype") }, head);
+            head = head[head.len..];
+        } else if (sep != null and sep.? < semi.?) {
+            try meta.setCopiedString(ctx.allocator, .{ .string = Value.String.borrowed("mediatype") }, head[0..semi.?]);
+            head = head[semi.?..];
+        }
+        while (head.len > 0 and head[0] == ';') {
+            head = head[1..];
+            const eq = std.mem.indexOfScalar(u8, head, '=');
+            const next = std.mem.indexOfScalar(u8, head, ';');
+            if (eq == null or (next != null and next.? < eq.?)) {
+                base64 = true;
+                break;
+            }
+            const name = head[0..eq.?];
+            const vend = next orelse head.len;
+            if (!std.mem.eql(u8, name, "mediatype")) {
+                const v = try Value.String.create(ctx.allocator, head[eq.? + 1 .. vend]);
+                defer v.release();
+                try meta.setCopiedKey(ctx.allocator, name, .{ .string = v });
+            }
+            head = head[vend..];
+        }
+    }
+    try meta.set(ctx.allocator, .{ .string = Value.String.borrowed("base64") }, .{ .bool = base64 });
+    return meta;
+}
+
 fn parseDataUri(a: Allocator, path: []const u8) DataUriError![]u8 {
     var rest = path["data:".len..];
     if (std.mem.startsWith(u8, rest, "//")) rest = rest[2..];
@@ -879,6 +920,10 @@ pub fn readPathAs(ctx: *NativeContext, raw_path: []const u8, comptime func: ?[]c
         _ = try closeStream(ctx, fh);
         return try Value.String.adopt(ctx.allocator, data orelse try ctx.allocator.alloc(u8, 0));
     }
+    var fold_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (func != null) if (try unknownWrapperPath(ctx, path, &fold_buf)) |plain| {
+        path = plain;
+    };
     if (userWrapperFor(ctx.vm, path)) |class_name| {
         const opened = (try dispatchUserOpen(ctx, class_name, path, "rb")) orelse return null;
         const fh = opened.resource;
@@ -1037,7 +1082,7 @@ fn putContentsData(ctx: *NativeContext, data: Value, out: *std.ArrayListUnmanage
 }
 
 fn putContents(ctx: *NativeContext, spelled_path: []const u8, maybe_data: ?[]const u8, flags: i64) RuntimeError!NativeResult {
-    if (std.ascii.startsWithIgnoreCase(spelled_path, "php://filter/")) {
+    if (std.ascii.startsWithIgnoreCase(spelled_path, "php://filter/") or (std.ascii.startsWithIgnoreCase(spelled_path, "data:") and !isWrapperUnregistered(ctx.vm, "data"))) {
         const data = maybe_data orelse return NativeResult.scalar(.{ .bool = false });
         const opened = (try openStreamValue(ctx, spelled_path, if (flags & FILE_APPEND != 0) "ab" else "wb", null)) orelse return NativeResult.scalar(.{ .bool = false });
         const fh = opened.resource;
@@ -1144,6 +1189,11 @@ fn native_file_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     const path = bundle.osPath(&os_buf, spelled);
     if (userWrapperFor(ctx.vm, path)) |class_name| {
         return NativeResult.scalar(.{ .bool = try userStatCached(ctx, class_name, path, 2) != null });
+    }
+    var fold_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (try unknownWrapperPath(ctx, path, &fold_buf)) |plain| {
+        std.Io.Dir.cwd().access(platform.io, plain, .{}) catch return NativeResult.scalar(Value{ .bool = false });
+        return NativeResult.scalar(.{ .bool = true });
     }
     if (extractScheme(path)) |s| {
         if (isBuiltinWrapper(s) and isWrapperUnregistered(ctx.vm, s)) return NativeResult.scalar(.{ .bool = false });
@@ -1508,6 +1558,62 @@ fn packedFileAt(path: []const u8) bool {
     return hit == .file;
 }
 
+// php_copy_file_ctx where a user wrapper is involved: the wrappers' stats
+// say whether either side is a directory, then the source is copied into
+// the destination stream by stream
+fn copyThroughStreams(ctx: *NativeContext, source: []const u8, dest: []const u8, context: ?Value) RuntimeError!NativeResult {
+    const stat_of = struct {
+        fn get(c: *NativeContext, path: []const u8, flags: i64) RuntimeError!?WrapperStat {
+            if (userWrapperFor(c.vm, path)) |class| {
+                const arr = (try user_streams.urlStat(c, class, path, flags)) orelse return null;
+                return userStat(arr);
+            }
+            return plainStat(path, false);
+        }
+    }.get;
+    if (try stat_of(ctx, source, 0)) |st| if (st.mode & 0o170000 == 0o040000) {
+        try warn(ctx, "copy(): The first argument to copy() function cannot be a directory", .{});
+        return NativeResult.scalar(.{ .bool = false });
+    };
+    if (try stat_of(ctx, dest, 2)) |st| if (st.mode & 0o170000 == 0o040000) {
+        try warn(ctx, "copy(): The second argument to copy() function cannot be a directory", .{});
+        return NativeResult.scalar(.{ .bool = false });
+    };
+    const src_v = (try openStreamValue(ctx, source, "rb", context)) orelse return NativeResult.scalar(.{ .bool = false });
+    const src = src_v.resource;
+    src.retain();
+    defer ctx.vm.releaseValue(src_v);
+    const dst_v = (try openStreamValue(ctx, dest, "wb", context)) orelse {
+        _ = try closeStream(ctx, src);
+        return NativeResult.scalar(.{ .bool = false });
+    };
+    const dst = dst_v.resource;
+    dst.retain();
+    defer ctx.vm.releaseValue(dst_v);
+    var ok = true;
+    var buf: [read_chunk]u8 = undefined;
+    while (true) {
+        const n = try streams.read(ctx, src, &buf);
+        if (n <= 0) {
+            if (n < 0) ok = false;
+            break;
+        }
+        var rest = buf[0..@intCast(n)];
+        while (rest.len > 0) {
+            const w = try streams.write(ctx, dst, rest);
+            if (w <= 0) {
+                ok = false;
+                break;
+            }
+            rest = rest[@intCast(w)..];
+        }
+        if (!ok) break;
+    }
+    _ = try closeStream(ctx, src);
+    _ = try closeStream(ctx, dst);
+    return NativeResult.scalar(.{ .bool = ok });
+}
+
 fn native_copy(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const spelled_source = try strArg(ctx, args, "copy", 0, "from", true);
     const spelled_dest = try strArg(ctx, args, "copy", 1, "to", true);
@@ -1516,6 +1622,7 @@ fn native_copy(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
     var source = paths.streamPath(&source_buf, spelled_source);
     var dest = paths.streamPath(&dest_buf, spelled_dest);
+    if (userWrapperFor(ctx.vm, source) != null or userWrapperFor(ctx.vm, dest) != null) return copyThroughStreams(ctx, source, dest, if (args.len > 2) args[2] else null);
     if (std.ascii.startsWithIgnoreCase(source, "file://")) source = source[7..];
     if (std.ascii.startsWithIgnoreCase(dest, "file://")) dest = dest[7..];
 
@@ -2561,9 +2668,16 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         };
         const obj = try ctx.createResource("FileHandle");
         try setAdoptedBuffer(ctx, obj, payload);
-        streams.get(obj).?.no_write_op = true;
+        const ds = streams.get(obj).?;
+        ds.no_write_op = true;
+        // a data: url is a php://temp stream underneath
+        ds.mem.?.temp = true;
+        try obj.setCopiedString(ctx.allocator, "__path", path);
+        const meta = try dataUriMeta(ctx, path);
+        meta.retain();
+        ds.meta = .{ .array = meta };
         try obj.set(ctx.allocator, "__open", .{ .bool = true });
-        try obj.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed("r") });
+        try obj.setCopiedString(ctx.allocator, "__mode", mode);
         return NativeResult.borrowed(.{ .resource = obj });
     }
     if (std.mem.startsWith(u8, path, "phar://")) {
@@ -3148,6 +3262,12 @@ fn native_fseek(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     // SEEK_SET, SEEK_CUR, SEEK_END; lseek(2) refuses any other whence
     const whence_arg = try intArg(ctx, args, "fseek", 2, "whence", 0);
     if (whence_arg < 0 or whence_arg > 2) return NativeResult.scalar(.{ .int = -1 });
+    if (std.mem.eql(u8, obj.class_name, "DirectoryHandle")) {
+        // a directory stream's seek is a rewind, whatever it is asked
+        if (whence_arg == 0 and offset < 0) return NativeResult.scalar(.{ .int = -1 });
+        _ = try native_rewinddir(ctx, args[0..1]);
+        return NativeResult.scalar(.{ .int = 0 });
+    }
     return NativeResult.scalar(.{ .int = try streams.seek(ctx, obj, offset, @intCast(whence_arg)) });
 }
 
@@ -3380,9 +3500,15 @@ fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!N
             return .{ .string = Value.String.borrowed(name) };
         }
     }.k;
-    try result.set(ctx.allocator, key("timed_out"), .{ .bool = false });
-    try result.set(ctx.allocator, key("blocked"), .{ .bool = !(blocking == .bool and !blocking.bool) });
-    try result.set(ctx.allocator, key("eof"), .{ .bool = try streams.eof(ctx, obj) });
+    if (s.meta == .array) {
+        // php_stream_populate_meta_data: the stream's own entries, and then
+        // none of the generic ones
+        for (s.meta.array.entries.items) |e| try result.set(ctx.allocator, e.key, e.value);
+    } else {
+        try result.set(ctx.allocator, key("timed_out"), .{ .bool = false });
+        try result.set(ctx.allocator, key("blocked"), .{ .bool = !(blocking == .bool and !blocking.bool) });
+        try result.set(ctx.allocator, key("eof"), .{ .bool = try streams.eof(ctx, obj) });
+    }
     if (user) |w| {
         try result.set(ctx.allocator, key("wrapper_data"), .{ .object = w });
     } else if (s.wrapperdata != .null) {
@@ -3662,6 +3788,27 @@ pub fn userWrapperEntry(vm: *VM, path: []const u8) ?vm_mod.StreamWrapperEntry {
     return null;
 }
 
+// php_stream_locate_url_wrapper on a url whose scheme nothing registered:
+// php's warning, and the path goes to the plain files wrapper, which folds
+// its dots against the working directory ("x://a/../../f" is "./f"). null
+// when the path names a known wrapper or none at all
+fn unknownWrapperPath(ctx: *NativeContext, path: []const u8, buf: []u8) RuntimeError!?[]const u8 {
+    var n: usize = 0;
+    while (n < path.len and (std.ascii.isAlphanumeric(path[n]) or path[n] == '+' or path[n] == '-' or path[n] == '.')) n += 1;
+    if (n < 2 or !std.mem.startsWith(u8, path[n..], "://")) return null;
+    const scheme = path[0..n];
+    if (std.ascii.eqlIgnoreCase(scheme, "file")) return null;
+    if (userWrapperFor(ctx.vm, path) != null) return null;
+    var lower_buf: [64]u8 = undefined;
+    if (n <= lower_buf.len) {
+        const lower = std.ascii.lowerString(&lower_buf, scheme);
+        if (isBuiltinWrapper(lower)) return null;
+    }
+    const shown = scheme[0..@min(scheme.len, 31)];
+    try warnDocref(ctx, "Unable to find the wrapper \"{s}\" - did you forget to enable it when you configured PHP?", .{shown});
+    return paths.expand(buf, path) orelse path;
+}
+
 // the user wrapper class php_stream_locate_url_wrapper finds for the path's
 // scheme (as written, then lowercased), or null
 pub fn userWrapperFor(vm: *VM, path: []const u8) ?[]const u8 {
@@ -3740,8 +3887,13 @@ fn stream_wrapper_register(ctx: *NativeContext, args: []const Value) RuntimeErro
     const protocol = try p.string(0, "protocol", "");
     const class_arg = try p.string(1, "class", "");
     const flags = try p.int(2, "flags", 0);
-    if (!ctx.vm.classes.contains(class_arg)) try ctx.vm.tryAutoload(class_arg);
-    if (!ctx.vm.classes.contains(class_arg)) {
+    const class_like = struct {
+        fn known(vm: *VM, name: []const u8) bool {
+            return vm.classes.contains(name) or vm.traits.contains(name) or vm.interfaces.contains(name);
+        }
+    }.known;
+    if (!class_like(ctx.vm, class_arg)) try ctx.vm.tryAutoload(class_arg);
+    if (!class_like(ctx.vm, class_arg)) {
         if (ctx.vm.pending_exception != null) return error.RuntimeError;
         return throwStreamArg(ctx, "stream_wrapper_register(): Argument #2 ($class) must be a valid class name, {s} given", .{class_arg});
     }

@@ -70,6 +70,9 @@ pub const Stream = struct {
     // the wrapper's data for stream_get_meta_data (the http response
     // headers), owned
     wrapperdata: Value = .null,
+    // what the stream itself reports first in stream_get_meta_data (a data:
+    // url's media type and parameters), owned
+    meta: Value = .null,
     backend_cache: ?Backend = null,
     // a read may wait (a pipe, a socket, a terminal): php's cli has written
     // every echo by then, so zphp flushes its output first
@@ -108,7 +111,11 @@ pub fn of(ctx: *NativeContext, obj: *PhpObject) RuntimeError!*Stream {
 }
 
 pub fn attach(ctx: *NativeContext, obj: *PhpObject, opts: Options) RuntimeError!*Stream {
-    return attachWith(ctx.allocator, obj, opts);
+    const fresh = get(obj) == null;
+    const s = try attachWith(ctx.allocator, obj, opts);
+    // _php_stream_alloc: auto_detect_line_endings marks every new stream
+    if (fresh and ctx.vm.iniFlagOn("auto_detect_line_endings", "0")) s.detect_eol = true;
+    return s;
 }
 
 pub fn attachWith(allocator: Allocator, obj: *PhpObject, opts: Options) RuntimeError!*Stream {
@@ -300,6 +307,9 @@ pub fn rawSeek(ctx: *NativeContext, obj: *PhpObject, s: *Stream, offset: i64, wh
                 else => offset,
             };
             if (target < 0) {
+                // php://temp and data: seek their inner memory stream, which
+                // refuses a negative absolute offset before moving
+                if (m.temp and whence == 0) return null;
                 // php leaves the memory stream at 0 with its position unknown
                 m.fpos = 0;
                 return -1;
@@ -826,6 +836,9 @@ pub fn removeFilters(ctx: *NativeContext, obj: *PhpObject) RuntimeError!void {
     const data = s.wrapperdata;
     s.wrapperdata = .null;
     ctx.vm.releaseValue(data);
+    const meta = s.meta;
+    s.meta = .null;
+    ctx.vm.releaseValue(meta);
     try filters.removeAll(ctx, &s.readfilters);
     try filters.removeAll(ctx, &s.writefilters);
 }

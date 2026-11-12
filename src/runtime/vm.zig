@@ -2122,6 +2122,11 @@ pub const VM = struct {
         while (ii.next()) |k| try vm.builtin_interfaces.put(allocator, k.*, {});
         vm.builtins_recorded = true;
         vm.applyConfiguredMemoryLimit(true);
+        // OnUpdateAutoDetectLineEndings at startup
+        if (@import("../ini_config.zig").get("auto_detect_line_endings")) |v| {
+            if (std.ascii.eqlIgnoreCase(v, "on") or std.ascii.eqlIgnoreCase(v, "true") or std.ascii.eqlIgnoreCase(v, "yes") or (std.fmt.parseInt(i64, v, 10) catch 0) != 0)
+                vm.raiseErrorAt(E_DEPRECATED, "auto_detect_line_endings is deprecated", .{ .file = "Unknown", .line = 0 }) catch {};
+        }
         // php_module_startup's check of the configured directives
         if (@import("../ini_config.zig").get("allow_url_include")) |v| {
             if (!(v.len == 0 or std.mem.eql(u8, v, "0") or std.ascii.eqlIgnoreCase(v, "off") or std.ascii.eqlIgnoreCase(v, "false") or std.ascii.eqlIgnoreCase(v, "no")))

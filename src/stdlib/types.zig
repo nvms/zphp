@@ -1500,6 +1500,8 @@ fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "docref_root")) return "";
     if (std.mem.eql(u8, name, "docref_ext")) return "";
     if (std.mem.eql(u8, name, "user_agent")) return "";
+    if (std.mem.eql(u8, name, "auto_detect_line_endings")) return "0";
+    if (std.mem.eql(u8, name, "from")) return "";
     if (std.mem.eql(u8, name, "open_basedir")) return "";
     if (std.mem.eql(u8, name, "include_path")) return includes.default_include_path;
     if (std.mem.eql(u8, name, "log_errors")) return "1";
@@ -1530,6 +1532,12 @@ fn native_ini_get(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     return NativeResult.scalar(Value{ .bool = false });
 }
 
+// zend_ini_parse_bool
+fn iniBoolText(v: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(v, "true") or std.ascii.eqlIgnoreCase(v, "yes") or std.ascii.eqlIgnoreCase(v, "on")) return true;
+    return (std.fmt.parseInt(i64, std.mem.trim(u8, v, " "), 10) catch 0) != 0;
+}
+
 fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2 or args[0] != .string) return NativeResult.scalar(Value{ .bool = false });
     const name = args[0].string.bytes();
@@ -1547,6 +1555,10 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     try args[1].format(&buf, ctx.allocator);
+    // php's OnUpdateAutoDetectLineEndings
+    if (std.mem.eql(u8, name, "auto_detect_line_endings") and iniBoolText(buf.items)) {
+        try ctx.vm.raiseError(8192, "auto_detect_line_endings is deprecated");
+    }
     // php's OnUpdateFiberStackSize
     if (std.mem.eql(u8, name, "fiber.stack_size") and @import("../runtime/memory.zig").parseQuantity(buf.items).value < 0) {
         try ctx.vm.emitWarning("fiber.stack_size must be a positive number");
