@@ -1617,16 +1617,22 @@ fn native_get_loaded_extensions(ctx: *NativeContext, _: []const Value) RuntimeEr
 fn native_get_extension_funcs(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const name = args[0].string.bytes();
-    // not granular about which fn belongs to which extension - PHP code that
-    // calls this typically just checks for non-false. return false for unknown
-    // extensions and an empty array for known ones to mirror "exists but no
-    // functions enumerable" behavior
-    for (SUPPORTED_EXTENSIONS) |s| {
-        if (std.ascii.eqlIgnoreCase(name, s)) {
-            return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-        }
+    // the functions zphp has of the extension, by php's map of which
+    // extension declares each; false for an extension that isn't loaded or
+    // declares none
+    const loaded = for (SUPPORTED_EXTENSIONS) |s| {
+        if (std.ascii.eqlIgnoreCase(name, s)) break true;
+    } else false;
+    if (!loaded) return NativeResult.scalar(.{ .bool = false });
+    const arr = try ctx.createArray();
+    const extensions = @import("extensions_generated.zig");
+    for (extensions.functions.keys(), extensions.functions.values()) |fname, owner| {
+        if (!std.ascii.eqlIgnoreCase(owner, name)) continue;
+        const canonical = ctx.vm.canonicalFunctionName(fname) orelse continue;
+        try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(canonical) });
     }
-    return NativeResult.scalar(.{ .bool = false });
+    if (arr.entries.items.len == 0) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.borrowed(.{ .array = arr });
 }
 
 fn native_get_included_files(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
