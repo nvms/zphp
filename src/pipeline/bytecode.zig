@@ -495,6 +495,9 @@ pub const OpCode = enum(u8) {
     // php's ZEND_ASSERT_CHECK, before an assert() call: u16 jump past the
     // call, pushing true, unless zend.assertions is 1
     assert_check,
+    // new_reserve for `new C`: u16 class name. ZEND_NEW looks the class up,
+    // autoloading it, before it takes the object's handle
+    new_reserve_class,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -516,6 +519,7 @@ pub const OpCode = enum(u8) {
             .jump_if_true,
             .jump_if_not_null,
             .assert_check,
+            .new_reserve_class,
             .push_handler,
             .get_prop,
             .get_prop_coalesce,

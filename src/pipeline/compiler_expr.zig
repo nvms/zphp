@@ -2539,7 +2539,8 @@ pub fn compileNewExpr(self: *Compiler, node: Ast.Node) Error!void {
     } else self.resolveClassName(raw_name);
     const args = self.ast.extraSlice(node.data.lhs);
     const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(class_name) });
-    try self.emitOp(.new_reserve);
+    try self.emitOp(.new_reserve_class);
+    try self.emitU16(name_idx);
     if (hasSplatOrNamed(self.ast, args)) {
         var guards = try emitSpreadArgs(self, args);
         try emitCallOp(self, &guards, .new_obj, .{ .a = name_idx, .argc = 0xFF });

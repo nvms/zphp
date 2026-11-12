@@ -5748,6 +5748,26 @@ pub const VM = struct {
                     const placeholder = try self.allocObject(.{ .class_name = new_reservation });
                     self.push(.{ .object = placeholder });
                 },
+                .new_reserve_class => {
+                    const name = self.currentChunk().constants.items[self.readU16()].string.bytes();
+                    const relative = std.ascii.eqlIgnoreCase(name, "self") or std.ascii.eqlIgnoreCase(name, "static") or std.ascii.eqlIgnoreCase(name, "parent");
+                    if (!relative and !self.classes.contains(name) and !self.interfaces.contains(name) and !self.traits.contains(name)) {
+                        self.tryAutoload(name) catch |err| {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return err;
+                        };
+                        // ZEND_NEW fails here, before the arguments run, and
+                        // without asking the autoloaders again
+                        if (!self.classes.contains(name) and !self.interfaces.contains(name) and !self.traits.contains(name)) {
+                            const msg = try self.classNotFoundMessage(name);
+                            defer self.allocator.free(msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        }
+                    }
+                    const placeholder = try self.allocObject(.{ .class_name = new_reservation });
+                    self.push(.{ .object = placeholder });
+                },
                 .new_end => {
                     const result = self.stack[self.sp - 1];
                     const placeholder = self.stack[self.sp - 2];
