@@ -13126,6 +13126,14 @@ pub const VM = struct {
                 // it and the frame that resumed them
                 const delegator = if (self.frames[i].generator) |g| g.delegator else null;
                 const entry = try self.newTraceEntry(f, if (delegator) |d| self.generatorPosition(d) else call_site);
+                // a closure's frame names the class of its scope, with the
+                // object it is bound to or statically
+                if (std.mem.startsWith(u8, f.name, "__closure_")) if (self.frames[i].call_name) |cn| {
+                    if (self.closureScopeByName(cn) orelse self.closureDefClassByName(cn)) |scope| {
+                        try entry.set(self.allocator, .{ .string = Value.String.borrowed("class") }, .{ .string = Value.String.borrowed(scope) });
+                        try entry.set(self.allocator, .{ .string = Value.String.borrowed("type") }, .{ .string = Value.String.borrowed(if (self.closureThisByName(cn) == .object) "->" else "::") });
+                    }
+                };
                 const entry_args = try self.traceArgs(entry);
                 if (self.frames[i].generator != null) {
                     // a resumed generator's frame has no saved arguments: its
