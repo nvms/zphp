@@ -4209,10 +4209,37 @@ fn native_chdir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_stream_is_local(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const scheme = extractScheme(args[0].string.bytes()) orelse return NativeResult.scalar(.{ .bool = true });
-    return NativeResult.scalar(.{ .bool = std.mem.eql(u8, scheme, "file") or std.mem.eql(u8, scheme, "phar") });
+// php's answer is the wrapper's is_url flag: a stream asks the wrapper that
+// opened it (sockets, pipes and tmpfile() have none), anything else is
+// taken as a path and its wrapper located
+fn native_stream_is_local(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
+    if (args[0] == .resource) {
+        const obj = try streamArg(ctx, args, .{ .func = "stream_is_local" });
+        if (isNetStream(obj) or obj.get("__proc_ref") != .null or obj.get("__popen_cmd") != .null or obj.get("__popen_exit") != .null) return NativeResult.scalar(.{ .bool = false });
+        // the standard streams and tmpfile() are plain files to php
+        const path_val = obj.get("__path");
+        if (path_val != .string) return NativeResult.scalar(.{ .bool = true });
+        return NativeResult.scalar(.{ .bool = wrapperIsLocal(ctx.vm, path_val.string.bytes()) });
+    }
+    const path = try @import("strings.zig").coerceToString(ctx, args[0]);
+    if (ctx.vm.pending_exception != null) return error.RuntimeError;
+    // locating the wrapper warns about a scheme nothing registered (php's
+    // glob:// and ftp:// wrappers aside, which zphp has no stream for)
+    const scheme = extractScheme(path) orelse "";
+    if (!(std.ascii.eqlIgnoreCase(scheme, "glob") or std.ascii.eqlIgnoreCase(scheme, "ftp") or std.ascii.eqlIgnoreCase(scheme, "ftps"))) {
+        var buf: [4096]u8 = undefined;
+        _ = try unknownWrapperPath(ctx, path, &buf);
+    }
+    return NativeResult.scalar(.{ .bool = wrapperIsLocal(ctx.vm, path) });
+}
+
+fn wrapperIsLocal(vm: *VM, path: []const u8) bool {
+    if (userWrapperEntry(vm, path)) |e| return !e.is_url;
+    const scheme = extractScheme(path) orelse return true;
+    const remote = [_][]const u8{ "http", "https", "ftp", "ftps", "data" };
+    for (remote) |r_| if (std.ascii.eqlIgnoreCase(scheme, r_)) return false;
+    return true;
 }
 
 fn native_stream_resolve_include_path(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
