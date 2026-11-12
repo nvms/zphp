@@ -79,7 +79,7 @@ fn createObject(ctx: *NativeContext, class: []const u8, context: ?*PhpObject) Ru
     const obj = try ctx.createObject(class);
     obj.retain();
     errdefer ctx.vm.releaseValue(.{ .object = obj });
-    try obj.set(ctx.allocator, "context", if (context) |c| .{ .resource = c } else .null);
+    if (!try filters.assignTypedProperty(ctx, obj, "context", if (context) |c| .{ .resource = c } else .null)) return error.RuntimeError;
     if (ctx.vm.hasMethod(class, "__construct")) _ = try ctx.vm.callMethod(obj, "__construct", &.{});
     return obj;
 }

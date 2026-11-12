@@ -28,7 +28,7 @@ pub const entries = .{
     .{ "stream_context_create", native_stream_context_create },
     .{ "stream_context_get_options", native_stream_context_get_options },
     .{ "stream_context_get_params", native_stream_context_get_params },
-    .{ "stream_context_set_options", native_stream_context_set_options },
+    .{ "stream_context_set_options", native_stream_context_set_options_array },
     .{ "stream_context_set_option", native_stream_context_set_options },
     .{ "stream_context_set_params", native_stream_context_set_params },
     .{ "stream_context_get_default", native_stream_context_get_default },
@@ -307,63 +307,104 @@ pub fn socketStream(ctx: *NativeContext, sock: std.posix.socket_t) !*PhpObject {
 // read them through stream_context_get_options
 
 fn native_stream_context_create(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const options = try optionalArray(ctx, args, 0, "stream_context_create", "options");
+    const params = try optionalArray(ctx, args, 1, "stream_context_create", "params");
     const context = try ctx.createResource("StreamContext");
-    if (args.len >= 1 and args[0] == .array) try mergeContextOptions(ctx, context, args[0].array);
-    if (args.len >= 2 and args[1] == .array) try applyContextParams(ctx, context, args[1].array);
+    if (options) |o| try mergeContextOptions(ctx, context, o);
+    if (params) |p| try applyContextParams(ctx, context, p, "stream_context_create(): Argument #1 ($options)");
     return NativeResult.borrowed(.{ .resource = context });
 }
 
+// a ?array parameter: null when absent or null, php's TypeError otherwise
+fn optionalArray(ctx: *NativeContext, args: []const Value, index: usize, comptime func: []const u8, comptime name: []const u8) RuntimeError!?*PhpArray {
+    if (index >= args.len or args[index] == .null) return null;
+    if (args[index] == .array) return args[index].array;
+    return throwContext(ctx, func ++ "(): Argument #{d} ($" ++ name ++ ") must be of type ?array, {s} given", .{ index + 1, args[index].valueName() });
+}
+
 fn native_stream_context_get_options(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const context = (try contextArg(ctx, args, "stream_context_get_options", .existing)) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+    const context = (try contextArg(ctx, args, "stream_context_get_options", .create)).?;
     return NativeResult.borrowed(.{ .array = try contextOptions(ctx, context) });
 }
 
 fn native_stream_context_get_params(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const result = try ctx.createArray();
-    const context = try contextArg(ctx, args, "stream_context_get_params", .existing);
-    if (context) |c| {
-        const notification = c.get("notification");
-        if (notification != .null) try ctx.vm.arraySetOwned(result, .{ .string = Value.String.borrowed("notification") }, notification);
-    }
-    const options = if (context) |c| try contextOptions(ctx, c) else try ctx.createArray();
+    const context = (try contextArg(ctx, args, "stream_context_get_params", .create)).?;
+    const notification = context.get("notification");
+    if (notification != .null) try ctx.vm.arraySetOwned(result, .{ .string = Value.String.borrowed("notification") }, notification);
+    const options = try contextOptions(ctx, context);
     try ctx.vm.arraySetOwned(result, .{ .string = Value.String.borrowed("options") }, .{ .array = options });
     return NativeResult.borrowed(.{ .array = result });
 }
 
 // stream_context_set_option($context, $wrapper, $option, $value), or the
-// array form that stream_context_set_options also takes
+// deprecated array form; stream_context_set_options($context, $options)
 fn native_stream_context_set_options(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 2) {
+        try ctx.vm.raiseError(8192, "Calling stream_context_set_option() with 2 arguments is deprecated, use stream_context_set_options() instead");
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+    }
+    const v1: Value = if (args.len > 1) args[1] else .null;
+    if (v1 != .array and v1 != .string) return throwContext(ctx, "stream_context_set_option(): Argument #2 ($wrapper_or_options) must be of type array|string, {s} given", .{v1.valueName()});
     const context = (try contextArg(ctx, args, "stream_context_set_option", .create)).?;
-    if (args.len >= 2 and args[1] == .array) {
-        try mergeContextOptions(ctx, context, args[1].array);
+    const option_name: Value = if (args.len > 2) args[2] else .null;
+    if (v1 == .array) {
+        if (option_name != .null) return throwValue(ctx, "stream_context_set_option(): Argument #3 ($option_name) must be null when argument #2 ($wrapper_or_options) is an array");
+        if (args.len > 3) return throwValue(ctx, "stream_context_set_option(): Argument #4 ($value) cannot be provided when argument #2 ($wrapper_or_options) is an array");
+        try mergeContextOptions(ctx, context, v1.array);
         return NativeResult.scalar(.{ .bool = true });
     }
-    if (args.len < 4 or args[1] != .string or args[2] != .string) return NativeResult.scalar(.{ .bool = false });
+    if (option_name == .null) return throwValue(ctx, "stream_context_set_option(): Argument #3 ($option_name) cannot be null when argument #2 ($wrapper_or_options) is a string");
+    if (args.len < 4) return throwValue(ctx, "stream_context_set_option(): Argument #4 ($value) must be provided when argument #2 ($wrapper_or_options) is a string");
+    const name = try (@import("html.zig").Params{ .ctx = ctx, .func = "stream_context_set_option", .args = args }).string(2, "option_name", "");
+    try setContextOption(ctx, context, v1.string.bytes(), name, args[3]);
+    return NativeResult.scalar(.{ .bool = true });
+}
+
+fn native_stream_context_set_options_array(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const context = (try contextArg(ctx, args, "stream_context_set_options", .create)).?;
+    if (args.len < 2 or args[1] != .array) return throwContext(ctx, "stream_context_set_options(): Argument #2 ($options) must be of type array, {s} given", .{if (args.len > 1) args[1].valueName() else "null"});
+    try mergeContextOptions(ctx, context, args[1].array);
+    return NativeResult.scalar(.{ .bool = true });
+}
+
+fn throwValue(ctx: *NativeContext, msg: []const u8) RuntimeError {
+    try ctx.vm.setPendingException("ValueError", msg);
+    return error.RuntimeError;
+}
+
+// php_stream_context_set_option: options[wrapper][option] = value
+fn setContextOption(ctx: *NativeContext, context: *PhpObject, wrapper_name: []const u8, option: []const u8, value: Value) RuntimeError!void {
     const merged = try freshArray(ctx, context.get("options"));
-    const wrapper_key = PhpArray.Key{ .string = args[1].string };
+    const wkey = try Value.String.adopt(ctx.allocator, try ctx.allocator.dupe(u8, wrapper_name));
+    defer wkey.release();
+    const wrapper_key = PhpArray.Key{ .string = wkey };
     const wrapper = try freshArray(ctx, merged.get(wrapper_key));
-    try ctx.vm.arraySetOwned(wrapper, .{ .string = args[2].string }, args[3]);
+    const okey = try Value.String.adopt(ctx.allocator, try ctx.allocator.dupe(u8, option));
+    defer okey.release();
+    try ctx.vm.arraySetOwned(wrapper, .{ .string = okey }, value);
     try ctx.vm.arraySetOwned(merged, wrapper_key, .{ .array = wrapper });
     try context.set(ctx.allocator, "options", .{ .array = merged });
-    return NativeResult.scalar(.{ .bool = true });
 }
 
 fn native_stream_context_set_params(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const context = (try contextArg(ctx, args, "stream_context_set_params", .create)).?;
-    if (args.len < 2 or args[1] != .array) return NativeResult.scalar(.{ .bool = false });
-    try applyContextParams(ctx, context, args[1].array);
+    if (args.len < 2 or args[1] != .array) return throwContext(ctx, "stream_context_set_params(): Argument #2 ($params) must be of type array, {s} given", .{if (args.len > 1) args[1].valueName() else "null"});
+    try applyContextParams(ctx, context, args[1].array, "stream_context_set_params(): Argument #1 ($context)");
     return NativeResult.scalar(.{ .bool = true });
 }
 
 fn native_stream_context_get_default(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const options = try optionalArray(ctx, args, 0, "stream_context_get_default", "options");
     const context = try defaultContext(ctx);
-    if (args.len >= 1 and args[0] == .array) try mergeContextOptions(ctx, context, args[0].array);
+    if (options) |o| try mergeContextOptions(ctx, context, o);
     return NativeResult.borrowed(.{ .resource = context });
 }
 
 fn native_stream_context_set_default(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 1 or args[0] != .array) return throwContext(ctx, "stream_context_set_default(): Argument #1 ($options) must be of type array, {s} given", .{if (args.len > 0) args[0].valueName() else "null"});
     const context = try defaultContext(ctx);
-    if (args.len >= 1 and args[0] == .array) try mergeContextOptions(ctx, context, args[0].array);
+    try mergeContextOptions(ctx, context, args[0].array);
     return NativeResult.borrowed(.{ .resource = context });
 }
 
@@ -386,16 +427,15 @@ pub fn streamContext(ctx: *NativeContext, arg: ?Value) RuntimeError!*PhpObject {
 
 const ContextLookup = enum { existing, create };
 
-// a context argument, or the context of a stream argument (made on demand
-// when .create); null for a stream that has none yet
+// decode_context_param: a context, or the context of a stream (made on
+// demand when .create); php's TypeError for anything else
 fn contextArg(ctx: *NativeContext, args: []const Value, comptime func: []const u8, lookup: ContextLookup) RuntimeError!?*PhpObject {
     const v: Value = if (args.len > 0) args[0] else .null;
-    const param = comptime if (std.mem.eql(u8, func, "stream_context_set_params")) "context" else "stream_or_context";
-    const prefix = func ++ "(): Argument #1 ($" ++ param ++ ") must be ";
-    if (v != .resource) return throwContext(ctx, prefix ++ "of type resource, {s} given", .{v.typeName()});
+    const param = comptime if (std.mem.eql(u8, func, "stream_context_set_params") or std.mem.eql(u8, func, "stream_context_set_options") or std.mem.eql(u8, func, "stream_context_get_params")) "context" else "stream_or_context";
+    if (v != .resource) return throwContext(ctx, func ++ "(): Argument #1 ($" ++ param ++ ") must be of type resource, {s} given", .{v.valueName()});
     const r = v.resource;
-    if (std.mem.eql(u8, r.class_name, "StreamContext")) return r;
-    if (!std.mem.eql(u8, r.class_name, "FileHandle") or @import("../runtime/value.zig").resourceClosed(r)) return throwContext(ctx, prefix ++ "a valid stream/context", .{});
+    if (std.mem.eql(u8, r.class_name, "StreamContext") and !@import("../runtime/value.zig").resourceClosed(r)) return r;
+    if (!std.mem.eql(u8, r.class_name, "FileHandle") or @import("../runtime/value.zig").resourceClosed(r)) return throwContext(ctx, func ++ "(): Argument #1 ($" ++ param ++ ") must be a valid stream/context", .{});
     const own = r.get("__context");
     if (own == .resource) return own.resource;
     if (lookup == .existing) return null;
@@ -420,28 +460,61 @@ fn freshArray(ctx: *NativeContext, existing: Value) RuntimeError!*PhpArray {
     return if (existing == .array) ctx.vm.cloneArray(existing.array) else ctx.createArray();
 }
 
+// parse_context_options: each wrapper's options (a list is skipped), or
+// php's ValueError for an entry that isn't a named array
 fn mergeContextOptions(ctx: *NativeContext, context: *PhpObject, options: *PhpArray) RuntimeError!void {
-    const merged = try freshArray(ctx, context.get("options"));
     for (options.entries.items) |entry| {
         const wrapper_options = if (entry.ref) |cell| cell.* else entry.value;
-        if (wrapper_options != .array) {
+        if (entry.key != .string or wrapper_options != .array) {
             try ctx.vm.setPendingException("ValueError", "Options should have the form [\"wrappername\"][\"optionname\"] = $value");
             return error.RuntimeError;
         }
-        const wrapper = try freshArray(ctx, merged.get(entry.key));
+        if (isPacked(wrapper_options.array)) continue;
         for (wrapper_options.array.entries.items) |option| {
-            try ctx.vm.arraySetOwned(wrapper, option.key, if (option.ref) |cell| cell.* else option.value);
+            if (option.key != .string) continue;
+            try setContextOption(ctx, context, entry.key.string.bytes(), option.key.string.bytes(), if (option.ref) |cell| cell.* else option.value);
         }
-        try ctx.vm.arraySetOwned(merged, entry.key, .{ .array = wrapper });
     }
-    try context.set(ctx.allocator, "options", .{ .array = merged });
 }
 
-fn applyContextParams(ctx: *NativeContext, context: *PhpObject, params: *PhpArray) RuntimeError!void {
-    const notification = params.get(.{ .string = Value.String.borrowed("notification") });
-    if (notification != .null) try context.set(ctx.allocator, "notification", notification);
-    const options = params.get(.{ .string = Value.String.borrowed("options") });
-    if (options == .array) try mergeContextOptions(ctx, context, options.array);
+// HT_IS_PACKED: the keys are 0, 1, 2... (an empty array included)
+fn isPacked(arr: *PhpArray) bool {
+    for (arr.entries.items, 0..) |e, i| {
+        if (e.key != .int or e.key.int != @as(i64, @intCast(i))) return false;
+    }
+    return true;
+}
+
+// parse_context_params: a notification callback, checked; options merged.
+// a bad callback is blamed on the calling function's first argument, as
+// zend_argument_type_error(1, ...) does
+fn applyContextParams(ctx: *NativeContext, context: *PhpObject, params: *PhpArray, comptime arg1: []const u8) RuntimeError!void {
+    const nkey: PhpArray.Key = .{ .string = Value.String.borrowed("notification") };
+    if (params.contains(nkey)) {
+        const notification = params.get(nkey);
+        const callables = @import("../runtime/callables.zig");
+        switch (try callables.resolveCallback(ctx.vm, notification, .{})) {
+            .failure => |f| {
+                var buf: std.ArrayListUnmanaged(u8) = .empty;
+                defer buf.deinit(ctx.allocator);
+                try buf.appendSlice(ctx.allocator, arg1 ++ " must be an array with valid callbacks as values, ");
+                try callables.writeReason(f, &buf, ctx.allocator);
+                try ctx.vm.setPendingException("TypeError", buf.items);
+                return error.RuntimeError;
+            },
+            .callee => {},
+        }
+        try context.set(ctx.allocator, "notification", notification);
+    }
+    const okey: PhpArray.Key = .{ .string = Value.String.borrowed("options") };
+    if (params.contains(okey)) {
+        const options = params.get(okey);
+        if (options != .array) {
+            try ctx.vm.setPendingException("TypeError", "Invalid stream/context parameter");
+            return error.RuntimeError;
+        }
+        try mergeContextOptions(ctx, context, options.array);
+    }
 }
 
 fn native_gethostbyname(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -591,7 +664,8 @@ fn socketError(err: anyerror) SocketError {
     };
 }
 
-// tcp://host:port (the default transport), [v6]:port, unix:///path
+// the host and port of a tcp target as php's parse_ip_address_ex reads
+// them: "[v6]:port" or "host:port", the port as atoi takes it
 fn parseEndpoint(allocator: std.mem.Allocator, target: []const u8) !Endpoint {
     var scheme: []const u8 = "tcp";
     var rest = target;
@@ -601,15 +675,40 @@ fn parseEndpoint(allocator: std.mem.Allocator, target: []const u8) !Endpoint {
     }
     if (std.ascii.eqlIgnoreCase(scheme, "unix")) return .{ .unix = rest };
     if (!std.ascii.eqlIgnoreCase(scheme, "tcp")) return error.UnsupportedTransport;
-    const colon = std.mem.lastIndexOfScalar(u8, rest, ':') orelse return error.MissingPort;
-    var host = rest[0..colon];
-    const port = std.fmt.parseUnsigned(u16, rest[colon + 1 ..], 10) catch return error.MissingPort;
-    if (host.len >= 2 and host[0] == '[' and host[host.len - 1] == ']') host = host[1 .. host.len - 1];
+    if (std.mem.indexOfScalar(u8, rest, 0) != null) return error.NulInHostname;
+    var host: []const u8 = undefined;
+    var port_text: []const u8 = undefined;
+    if (rest.len > 1 and rest[0] == '[') {
+        const close = std.mem.indexOfScalar(u8, rest[1 .. rest.len - 1], ']') orelse return error.ParseIpv6Address;
+        const p = close + 1;
+        if (p + 1 >= rest.len or rest[p + 1] != ':') return error.ParseIpv6Address;
+        host = rest[1..p];
+        port_text = rest[p + 2 ..];
+    } else {
+        const colon = if (rest.len > 0) std.mem.indexOfScalar(u8, rest[0 .. rest.len - 1], ':') else null;
+        const c = colon orelse return error.ParseAddress;
+        host = rest[0..c];
+        port_text = rest[c + 1 ..];
+    }
+    const port: u16 = @truncate(@as(u64, @bitCast(atoi(port_text))));
     if (net.Address.parseIp(host, port)) |addr| return .{ .tcp = addr } else |_| {}
     const list = try net.getAddressList(allocator, host, port);
     defer list.deinit();
     if (list.addrs.len == 0) return error.UnknownHostName;
     return .{ .tcp = list.addrs[0] };
+}
+
+fn atoi(s: []const u8) i64 {
+    var i: usize = 0;
+    while (i < s.len and std.ascii.isWhitespace(s[i])) i += 1;
+    var neg = false;
+    if (i < s.len and (s[i] == '-' or s[i] == '+')) {
+        neg = s[i] == '-';
+        i += 1;
+    }
+    var n: i64 = 0;
+    while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1) n = n *% 10 +% (s[i] - '0');
+    return if (neg) -n else n;
 }
 
 fn endpointAddress(endpoint: Endpoint) !net.Address {
@@ -694,11 +793,32 @@ fn reportSocketError(ctx: *NativeContext, args: []const Value, code_index: usize
 }
 
 fn failConnect(ctx: *NativeContext, args: []const Value, code_index: usize, comptime func: []const u8, target: []const u8, err: anyerror) RuntimeError!NativeResult {
-    const e = socketError(err);
+    var e = socketError(err);
+    var owned: ?[]u8 = null;
+    defer if (owned) |o| ctx.allocator.free(o);
+    // php's parse failures name the address they couldn't read
+    const rest = if (std.mem.indexOf(u8, target, "://")) |i| target[i + 3 ..] else target;
+    switch (err) {
+        error.ParseAddress => owned = try std.fmt.allocPrint(ctx.allocator, "Failed to parse address \"{s}\"", .{rest}),
+        error.ParseIpv6Address => owned = try std.fmt.allocPrint(ctx.allocator, "Failed to parse IPv6 address \"{s}\"", .{rest}),
+        error.NulInHostname => owned = try ctx.allocator.dupe(u8, "The hostname must not contain null bytes"),
+        else => {},
+    }
+    if (owned) |o| e = .{ .code = 0, .message = o };
     try reportSocketError(ctx, args, code_index, e);
     // php had already made the stream when the connect failed, so its id is gone
     ctx.vm.skipResourceId();
-    const msg = try std.fmt.allocPrint(ctx.allocator, func ++ "(): Unable to connect to {s} ({s})", .{ target, e.message });
+    // stream_socket_client quotes the target with php_addslashes
+    var quoted: std.ArrayListUnmanaged(u8) = .empty;
+    defer quoted.deinit(ctx.allocator);
+    if (comptime std.mem.eql(u8, func, "stream_socket_client")) {
+        for (target) |c| switch (c) {
+            0 => try quoted.appendSlice(ctx.allocator, "\\0"),
+            '\'', '"', '\\' => try quoted.appendSlice(ctx.allocator, &.{ '\\', c }),
+            else => try quoted.append(ctx.allocator, c),
+        };
+    } else try quoted.appendSlice(ctx.allocator, target);
+    const msg = try std.fmt.allocPrint(ctx.allocator, func ++ "(): Unable to connect to {s} ({s})", .{ quoted.items, e.message });
     defer ctx.allocator.free(msg);
     try ctx.vm.emitWarning(msg);
     return NativeResult.scalar(.{ .bool = false });
@@ -824,7 +944,10 @@ fn native_stream_socket_get_name(ctx: *NativeContext, args: []const Value) Runti
     const rc = if (remote) std.c.getpeername(sock, &addr.any, &len) else std.c.getsockname(sock, &addr.any, &len);
     if (rc != 0) return NativeResult.scalar(.{ .bool = false });
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    return NativeResult.copyString(ctx.allocator, addressName(&buf, addr, len));
+    // an unnamed socket (a unix client, an abstract name) has no name to give
+    const name = addressName(&buf, addr, len);
+    if (name.len == 0 or name[0] == 0) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.copyString(ctx.allocator, name);
 }
 
 fn addressName(buf: []u8, addr: net.Address, len: std.posix.socklen_t) []const u8 {

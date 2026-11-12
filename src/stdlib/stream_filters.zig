@@ -1582,17 +1582,24 @@ fn userFilter(ctx: *NativeContext, stream_obj: *PhpObject, f: *Filter, obj: *Php
 // the filter's $stream: written as the filter's own class would, so a
 // typed property refuses a resource with php's TypeError
 fn assignStreamProperty(ctx: *NativeContext, obj: *PhpObject, v: Value) RuntimeError!bool {
-    const vr = ctx.vm.findPropertyVisibility(obj.class_name, "stream");
+    return assignTypedProperty(ctx, obj, "stream", v);
+}
+
+// a property php's engine writes for an object (add_property_*): the
+// declared type is checked as php's write does, false with the TypeError
+// pending when it refuses the value
+pub fn assignTypedProperty(ctx: *NativeContext, obj: *PhpObject, comptime name: []const u8, v: Value) RuntimeError!bool {
+    const vr = ctx.vm.findPropertyVisibility(obj.class_name, name);
     if (vr.declared and vr.type_str.len > 0 and v != .null) {
         if (try ctx.vm.propertyTypeAccepts(v, vr.type_str, vr.defining_class, false) == null) {
             const shown = try ctx.vm.propertyTypeText(vr.type_str, vr.defining_class);
-            const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot assign {s} to property {s}::$stream of type {s}", .{ v.typeName(), ctx.vm.declaredClassName(vr.defining_class), shown });
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot assign {s} to property {s}::$" ++ name ++ " of type {s}", .{ v.typeName(), ctx.vm.declaredClassName(vr.defining_class), shown });
             defer ctx.allocator.free(msg);
             try ctx.vm.setPendingException("TypeError", msg);
             return false;
         }
     }
-    try obj.setForScope(ctx.allocator, "stream", v, if (vr.declared) vr.defining_class else null);
+    try obj.setForScope(ctx.allocator, name, v, if (vr.declared) vr.defining_class else null);
     return true;
 }
 
