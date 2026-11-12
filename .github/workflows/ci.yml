@@ -550,6 +550,9 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+          # the runner's own mysql server would be upgraded with the client
+          # library and fail to start beside the mysql service container
+          sudo apt-get purge -y 'mysql-server*' || true
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
           sudo apt-get install -y libpcre2-dev libsqlite3-dev zlib1g-dev libmysqlclient-dev libpq-dev libssl-dev libnghttp2-dev libcurl4-openssl-dev libxml2-dev libicu-dev libgmp-dev libgd-dev libsodium-dev libldap2-dev libjitterentropy3-dev libzstd-dev tzdata-legacy
       - run: zig build
