@@ -113,12 +113,25 @@ fn stripComment(line: []const u8) []const u8 {
 // Off/No/None/False become "", ${VAR} expands from the environment, and an
 // expression over E_* constants (E_ALL & ~E_DEPRECATED) is evaluated
 fn cook(raw: []const u8) []const u8 {
-    if (raw.len >= 2 and raw[0] == '"' and raw[raw.len - 1] == '"') return expandEnv(raw[1 .. raw.len - 1]);
+    if (raw.len >= 2 and raw[0] == '"' and raw[raw.len - 1] == '"') return unescapeQuoted(expandEnv(raw[1 .. raw.len - 1]));
     if (raw.len == 0) return "";
     inline for (.{ "on", "yes", "true" }) |word| if (std.ascii.eqlIgnoreCase(raw, word)) return "1";
     inline for (.{ "off", "no", "none", "false", "null" }) |word| if (std.ascii.eqlIgnoreCase(raw, word)) return "";
     if (errorLevelExpression(raw)) |level| return std.fmt.allocPrint(persistent(), "{d}", .{level}) catch fail("out of memory", .{});
     return expandEnv(raw);
+}
+
+// zend_ini_escape_string for a double-quoted value: \" \\ and \$ lose their
+// backslash, any other one stays
+fn unescapeQuoted(value: []const u8) []const u8 {
+    if (std.mem.indexOfScalar(u8, value, '\\') == null) return value;
+    var out = std.ArrayListUnmanaged(u8).empty;
+    var i: usize = 0;
+    while (i < value.len) : (i += 1) {
+        if (value[i] == '\\' and i + 1 < value.len and (value[i + 1] == '"' or value[i + 1] == '\\' or value[i + 1] == '$')) i += 1;
+        out.append(persistent(), value[i]) catch fail("out of memory", .{});
+    }
+    return out.items;
 }
 
 fn expandEnv(value: []const u8) []const u8 {
