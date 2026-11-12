@@ -1230,9 +1230,25 @@ const Parser = struct {
         if (self.peek() == .kw_class) {
             return self.parseAnonymousClass(new_tok);
         }
-        if ((self.peek() == .kw_readonly or self.peek() == .kw_abstract or self.peek() == .kw_final) and self.peekAt(1) == .kw_class) {
-            _ = self.advance(); // readonly/abstract/final modifier
-            return self.parseAnonymousClass(new_tok);
+        if (self.peek() == .kw_readonly or self.peek() == .kw_abstract or self.peek() == .kw_final) {
+            var at = self.pos;
+            while (self.tokens[at].tag == .kw_readonly or self.tokens[at].tag == .kw_abstract or self.tokens[at].tag == .kw_final) at += 1;
+            if (self.tokens[at].tag == .kw_class) {
+                // zend_add_anonymous_class_modifier
+                var readonly = false;
+                while (self.peek() != .kw_class) {
+                    switch (self.peek()) {
+                        .kw_abstract => self.deferModifierError(self.pos, "Cannot use the abstract modifier on an anonymous class", .{}),
+                        .kw_final => self.deferModifierError(self.pos, "Cannot use the final modifier on an anonymous class", .{}),
+                        else => {
+                            if (readonly) self.deferModifierError(self.pos, "Multiple readonly modifiers are not allowed", .{});
+                            readonly = true;
+                        },
+                    }
+                    _ = self.advance();
+                }
+                return self.parseAnonymousClass(new_tok);
+            }
         }
 
         // dynamic class name: new $var(...), new $var['key'](...), or php 8's
@@ -1520,66 +1536,56 @@ const Parser = struct {
                 try self.addError(.unexpected_token);
                 return error.ParseError;
             }
+            // the modifiers as written, which php checks once it knows what
+            // they apply to (zend_modifier_list_to_flags)
+            var mods: [16]MemberModifier = undefined;
+            var mod_count: usize = 0;
+            const mods_at = self.pos;
             while (!is_var and (self.peek() == .kw_public or self.peek() == .kw_protected or
                 self.peek() == .kw_private or self.peek() == .kw_static or
                 self.peek() == .kw_abstract or self.peek() == .kw_final or self.peek() == .kw_readonly))
             {
-                if (self.peek() == .kw_static) {
-                    is_static = true;
-                    _ = self.advance();
-                    continue;
-                }
-                if (self.peek() == .kw_abstract) {
-                    is_abstract = true;
-                    _ = self.advance();
-                    continue;
-                }
-                if (self.peek() == .kw_final) {
-                    is_final = true;
-                    _ = self.advance();
-                    continue;
-                }
-                if (self.peek() == .kw_readonly) {
-                    is_readonly = true;
-                    _ = self.advance();
-                    continue;
-                }
-                const vis_val: u32 = if (self.peek() == .kw_protected) 1 else if (self.peek() == .kw_private) 2 else 0;
+                const kind: MemberModifier = switch (self.peek()) {
+                    .kw_static => .static,
+                    .kw_abstract => .abstract,
+                    .kw_final => .final,
+                    .kw_readonly => .readonly,
+                    .kw_protected => .protected,
+                    .kw_private => .private,
+                    else => .public,
+                };
+                if (kind == .static) is_static = true;
+                if (kind == .abstract) is_abstract = true;
+                if (kind == .final) is_final = true;
+                if (kind == .readonly) is_readonly = true;
                 _ = self.advance();
-                if (self.peek() == .l_paren and self.peekAt(1) == .identifier and std.mem.eql(u8, self.lexemeAt(1), "set") and self.peekAt(2) == .r_paren) {
-                    _ = self.advance();
-                    _ = self.advance();
-                    _ = self.advance();
-                    if (has_set_vis) {
-                        try self.addError(.unexpected_token);
-                        return error.ParseError;
+                var recorded = kind;
+                if (kind.isVisibility()) {
+                    const vis_val: u32 = @intFromEnum(kind) - @intFromEnum(MemberModifier.public);
+                    if (self.peek() == .l_paren and self.peekAt(1) == .identifier and std.mem.eql(u8, self.lexemeAt(1), "set") and self.peekAt(2) == .r_paren) {
+                        _ = self.advance();
+                        _ = self.advance();
+                        _ = self.advance();
+                        recorded = @enumFromInt(@intFromEnum(kind) + 3);
+                        if (!has_set_vis) set_visibility = vis_val;
+                        has_set_vis = true;
+                    } else {
+                        if (!has_read_vis) visibility = vis_val;
+                        has_read_vis = true;
                     }
-                    set_visibility = vis_val;
-                    has_set_vis = true;
-                } else {
-                    if (has_read_vis) {
-                        try self.addError(.unexpected_token);
-                        return error.ParseError;
-                    }
-                    has_read_vis = true;
-                    visibility = vis_val;
+                }
+                if (mod_count < mods.len) {
+                    mods[mod_count] = recorded;
+                    mod_count += 1;
                 }
             }
             if (!has_set_vis) set_visibility = visibility;
-
-            // asymmetric visibility needs a property (static ones too, since
-            // php 8.5), and set visibility may not be wider than read visibility
-            const starts_property = self.peek() == .variable or self.isTypeName() or
-                self.peek() == .question or self.peek() == .l_paren;
-            if (has_set_vis and (!starts_property or set_visibility < visibility)) {
-                try self.addError(.unexpected_token);
-                return error.ParseError;
-            }
+            const mod_list = mods[0..mod_count];
 
             if (self.peek() == .kw_use) {
                 try members.append(self.allocator, try self.parseTraitUse());
             } else if (self.peek() == .kw_function) {
-                if (is_abstract and is_final) self.deferModifierError(self.pos, "Cannot use the final modifier on an abstract method", .{});
+                self.checkMemberModifiers(mods_at, mod_list, .method);
                 if (is_abstract) {
                     const method = try self.parseInterfaceMethod(is_static);
                     if (visibility == 2) self.deferCompileError(self.nodes.items[method].main_token, "Abstract function {s}::{s}() cannot be declared private", .{ self.current_class_name, self.tokenText(self.nodes.items[method].main_token) });
@@ -1597,12 +1603,9 @@ const Parser = struct {
                     try members.append(self.allocator, method);
                 }
             } else if (self.peek() == .variable) {
-                // Asymmetric set visibility requires an explicit property type.
-                if (has_set_vis) {
-                    try self.addError(.unexpected_token);
-                    return error.ParseError;
-                }
+                self.checkMemberModifiers(mods_at, mod_list, .property);
                 const prop = try self.parseClassProperty();
+                self.checkPropertyDecl(prop, false, is_readonly, is_static, has_set_vis, visibility, set_visibility);
                 const hooked = self.nodes.items[prop].tag == .class_property_hooks;
                 if (is_static and !hooked) {
                     self.nodes.items[prop].tag = .static_class_property;
@@ -1613,14 +1616,14 @@ const Parser = struct {
                 try members.append(self.allocator, prop);
                 try self.continuePropertyList(members, prop);
             } else if (self.peek() == .kw_const) {
-                if (is_static) self.deferModifierError(self.pos, "Cannot use the static modifier on a class constant", .{});
-                if (is_abstract) self.deferModifierError(self.pos, "Cannot use the abstract modifier on a class constant", .{});
-                if (is_readonly) self.deferModifierError(self.pos, "Cannot use the readonly modifier on a class constant", .{});
+                self.checkMemberModifiers(mods_at, mod_list, .constant);
                 try self.parseConstMembers(members, visibility | (if (is_final) @as(u32, 1) << 4 else 0));
             } else if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
                 const tr = self.collectTypeHint();
                 if (self.peek() == .variable) {
+                    self.checkMemberModifiers(mods_at, mod_list, .property);
                     const prop = try self.parseClassProperty();
+                    self.checkPropertyDecl(prop, true, is_readonly, is_static, has_set_vis, visibility, set_visibility);
                     const hooked = self.nodes.items[prop].tag == .class_property_hooks;
                     if (is_static and !hooked) {
                         self.nodes.items[prop].tag = .static_class_property;
@@ -1648,9 +1651,15 @@ const Parser = struct {
     fn parseClassDecl(self: *Parser) Error!u32 {
         var class_modifiers: u32 = 0;
         while (self.peek() == .kw_abstract or self.peek() == .kw_final or self.peek() == .kw_readonly) {
-            if (self.peek() == .kw_abstract) class_modifiers |= 1;
-            if (self.peek() == .kw_final) class_modifiers |= 2;
-            if (self.peek() == .kw_readonly) class_modifiers |= 4;
+            // zend_add_class_modifier
+            const bit: u32 = switch (self.peek()) {
+                .kw_abstract => 1,
+                .kw_final => 2,
+                else => 4,
+            };
+            if (class_modifiers & bit != 0) self.deferModifierError(self.pos, "Multiple {s} modifiers are not allowed", .{@as([]const u8, if (bit == 1) "abstract" else if (bit == 2) "final" else "readonly")});
+            class_modifiers |= bit;
+            if (class_modifiers & 3 == 3) self.deferModifierError(self.pos, "Cannot use the final modifier on an abstract class", .{});
             _ = self.advance();
         }
         _ = self.advance(); // class
@@ -3669,6 +3678,94 @@ const Parser = struct {
         var note: Ast.CompileErrorNote = .{ .token = @min(token, @as(u32, @intCast(self.tokens.len - 1))) };
         note.len = if (std.fmt.bufPrint(&note.text, fmt, args)) |written| written.len else |_| note.text.len;
         self.compile_error = note;
+    }
+
+    const MemberModifier = enum(u8) {
+        static,
+        abstract,
+        final,
+        readonly,
+        public,
+        protected,
+        private,
+        public_set,
+        protected_set,
+        private_set,
+
+        fn isVisibility(m: MemberModifier) bool {
+            return m == .public or m == .protected or m == .private;
+        }
+
+        fn isSetVisibility(m: MemberModifier) bool {
+            return m == .public_set or m == .protected_set or m == .private_set;
+        }
+
+        fn text(m: MemberModifier) []const u8 {
+            return switch (m) {
+                .public_set => "public(set)",
+                .protected_set => "protected(set)",
+                .private_set => "private(set)",
+                else => @tagName(m),
+            };
+        }
+    };
+
+    const ModifierTarget = enum { method, property, constant };
+
+    // zend_modifier_list_to_flags, zend_modifier_token_to_flag and
+    // zend_add_member_modifier over the modifiers of one member
+    fn checkMemberModifiers(self: *Parser, at: u32, mods: []const MemberModifier, target: ModifierTarget) void {
+        var seen: u16 = 0;
+        var visibility = false;
+        var set_visibility = false;
+        for (mods) |m| {
+            const allowed = switch (m) {
+                .readonly, .public_set, .protected_set, .private_set => target == .property,
+                .abstract, .static => target != .constant,
+                else => true,
+            };
+            if (!allowed) return self.deferModifierError(at, "Cannot use the {s} modifier on a {s}", .{ m.text(), switch (target) {
+                .method => "method",
+                .property => "property",
+                .constant => "class constant",
+            } });
+            const bit = @as(u16, 1) << @intCast(@intFromEnum(m));
+            const duplicate = seen & bit != 0;
+            if (m.isVisibility()) {
+                if (visibility) return self.deferModifierError(at, "Multiple access type modifiers are not allowed", .{});
+                visibility = true;
+            }
+            seen |= bit;
+            const abstract_bit = @as(u16, 1) << @intFromEnum(MemberModifier.abstract);
+            const final_bit = @as(u16, 1) << @intFromEnum(MemberModifier.final);
+            if (seen & abstract_bit != 0 and seen & final_bit != 0) {
+                if (target == .method) return self.deferModifierError(at, "Cannot use the final modifier on an abstract method", .{});
+                if (target == .property) return self.deferModifierError(at, "Cannot use the final modifier on an abstract property", .{});
+            }
+            if (m.isSetVisibility()) {
+                if (set_visibility) return self.deferModifierError(at, "Multiple access type modifiers are not allowed", .{});
+                set_visibility = true;
+            }
+            if (duplicate) return self.deferModifierError(at, "Multiple {s} modifiers are not allowed", .{m.text()});
+        }
+    }
+
+    // zend_compile_prop_decl's and zend_declare_typed_property's checks of a
+    // property against its modifiers
+    fn checkPropertyDecl(self: *Parser, prop: u32, typed: bool, readonly: bool, static: bool, asymmetric: bool, visibility: u32, set_visibility: u32) void {
+        const node = self.nodes.items[prop];
+        var name = self.tokenText(node.main_token);
+        if (name.len > 0 and name[0] == '$') name = name[1..];
+        const class = self.current_class_name;
+        if (readonly) {
+            if (!typed) return self.deferCompileError(node.main_token, "Readonly property {s}::${s} must have type", .{ class, name });
+            if (node.tag == .class_property and node.data.lhs != 0) return self.deferCompileError(node.main_token, "Readonly property {s}::${s} cannot have default value", .{ class, name });
+            if (static) return self.deferCompileError(node.main_token, "Static property {s}::${s} cannot be readonly", .{ class, name });
+        }
+        if (asymmetric) {
+            if (!typed) return self.deferCompileError(node.main_token, "Property with asymmetric visibility {s}::${s} must have type", .{ class, name });
+            if (set_visibility < visibility) return self.deferCompileError(node.main_token, "Visibility of property {s}::${s} must not be weaker than set visibility", .{ class, name });
+        }
     }
 
     // a compile error php's parser throws while it reads modifiers

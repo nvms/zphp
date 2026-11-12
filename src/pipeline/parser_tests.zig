@@ -48,6 +48,13 @@ fn expectError(source: []const u8) !void {
     try std.testing.expect(ast.errors.len > 0);
 }
 
+// an error php's compiler raises, which the parser notes for it
+fn expectCompileError(source: []const u8) !void {
+    var ast = try parse(std.testing.allocator, source);
+    defer ast.deinit();
+    try std.testing.expect(ast.errors.len > 0 or ast.compile_error != null);
+}
+
 fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
     const node = ast.nodes[idx];
     switch (node.tag) {
@@ -769,19 +776,19 @@ test "type hint: multiple typed params" {
 
 // PHP 8.4 asymmetric visibility validation.
 test "php84 asymmetric visibility rejects wider set visibility" {
-    try expectError("<?php class T { protected public(set) string $x; }");
+    try expectCompileError("<?php class T { protected public(set) string $x; }");
 }
 
 test "php84 asymmetric visibility requires typed property" {
-    try expectError("<?php class T { public private(set) $x; }");
+    try expectCompileError("<?php class T { public private(set) $x; }");
 }
 
 test "php85 asymmetric visibility on static properties" {
     try expectNoErrors("<?php class T { public private(set) static string $x; protected(set) static ?int $y = null; }");
     try expectNoErrors("<?php trait T { public private(set) static string $x; }");
     // still needs a type, and set visibility no wider than read visibility
-    try expectError("<?php class T { public private(set) static $x; }");
-    try expectError("<?php class T { protected public(set) static int $x; }");
+    try expectCompileError("<?php class T { public private(set) static $x; }");
+    try expectCompileError("<?php class T { protected public(set) static int $x; }");
 }
 
 test "php84 trait asymmetric visibility validation" {
@@ -865,11 +872,11 @@ test "property hook abstract final reference and setter type metadata" {
 }
 
 test "duplicate read and set visibility modifiers are rejected in all property contexts" {
-    try expectError("<?php class T { private(set) protected(set) int $x; }");
-    try expectError("<?php trait T { private(set) private(set) int $x; }");
-    try expectError("<?php $x = new class { public public int $x; };");
-    try expectError("<?php class T { function __construct(public private(set) protected(set) int $x) {} }");
-    try expectError("<?php class T { function __construct(public public int $x) {} }");
+    try expectCompileError("<?php class T { private(set) protected(set) int $x; }");
+    try expectCompileError("<?php trait T { private(set) private(set) int $x; }");
+    try expectCompileError("<?php $x = new class { public public int $x; };");
+    try expectCompileError("<?php class T { function __construct(public private(set) protected(set) int $x) {} }");
+    try expectCompileError("<?php class T { function __construct(public public int $x) {} }");
 }
 
 fn expectErrorTag(source: []const u8, tag: Ast.Error.Tag) !void {
