@@ -361,7 +361,10 @@ pub fn writeTraceArg(buf: *Writer, alloc: std.mem.Allocator, v: Value) void {
             write(buf, alloc, if (bytes.len > 15) "...'" else "'");
         },
         .array => write(buf, alloc, "Array"),
-        .object => |o| writeFmt(buf, alloc, "Object({s})", .{class_names.display(o.class_name)}),
+        .object => |o| if (o.enum_case) {
+            const name = o.get("name");
+            writeFmt(buf, alloc, "{s}::{s}", .{ class_names.display(o.class_name), if (name == .string) name.string.bytes() else "" });
+        } else writeFmt(buf, alloc, "Object({s})", .{class_names.display(o.class_name)}),
         .generator => write(buf, alloc, "Object(Generator)"),
         .fiber => write(buf, alloc, "Object(Fiber)"),
         .resource => |r| writeFmt(buf, alloc, "Resource id #{d}", .{r.id}),

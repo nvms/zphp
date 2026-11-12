@@ -711,7 +711,7 @@ fn linkInterfaceConstants(p: *Pending, arena: std.mem.Allocator, iface: []const 
         if (owner.ptr == p.name.ptr) {
             try checkConstant(p, name, idef);
         } else if (!std.mem.eql(u8, owner, idef.name)) {
-            const kind: []const u8 = if (p.is_interface) "Interface" else "Class";
+            const kind: []const u8 = if (p.is_interface) "Interface" else if (p.def.is_enum) "Enum" else "Class";
             return constantFatal(p, "{s} {s} inherits both {s}::{s} and {s}::{s}, which is ambiguous", .{ kind, p.name, owner, name, idef.name, name });
         }
     }

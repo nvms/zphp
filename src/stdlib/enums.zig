@@ -102,8 +102,10 @@ fn checkEnumArgType(ctx: *NativeContext, backed: anytype, enum_name: []const u8,
 pub fn enumFrom(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return error.RuntimeError;
     const enum_name = enumClassFromCallName(ctx) orelse return error.RuntimeError;
+    const declared = ctx.vm.classes.get(enum_name) orelse return error.RuntimeError;
+    if (try checkEnumArgType(ctx, declared.backed_type, enum_name, "from", args[0])) |err_val| return NativeResult.borrowed(err_val);
+    try ctx.vm.updateClassConstants(enum_name);
     const def = ctx.vm.classes.get(enum_name) orelse return error.RuntimeError;
-    if (try checkEnumArgType(ctx, def.backed_type, enum_name, "from", args[0])) |err_val| return NativeResult.borrowed(err_val);
     const lookup = try coerceForLookup(ctx, def.backed_type, args[0]);
     var iter = def.constants.iterator();
     while (iter.next()) |entry| {
@@ -122,8 +124,10 @@ pub fn enumFrom(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
 pub fn enumTryFrom(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(.null);
     const enum_name = enumClassFromCallName(ctx) orelse return NativeResult.scalar(.null);
+    const declared = ctx.vm.classes.get(enum_name) orelse return NativeResult.scalar(.null);
+    if (try checkEnumArgType(ctx, declared.backed_type, enum_name, "tryFrom", args[0])) |err_val| return NativeResult.borrowed(err_val);
+    try ctx.vm.updateClassConstants(enum_name);
     const def = ctx.vm.classes.get(enum_name) orelse return NativeResult.scalar(.null);
-    if (try checkEnumArgType(ctx, def.backed_type, enum_name, "tryFrom", args[0])) |err_val| return NativeResult.borrowed(err_val);
     const lookup = try coerceForLookup(ctx, def.backed_type, args[0]);
     var iter = def.constants.iterator();
     while (iter.next()) |entry| {

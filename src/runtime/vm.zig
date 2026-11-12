@@ -383,6 +383,10 @@ pub const ClassDef = struct {
     defaults_pending: bool = false,
     // constants whose expression waits for first access hold `.undef`
     lazy_constants: bool = false,
+    // a user backed enum whose case values are checked (backing type,
+    // duplicates) when its constants are first updated, as php builds its
+    // backed enum table
+    enum_table_pending: bool = false,
     // this class or an ancestor declares a private method, so a subclass
     // redeclaring one has to look for it
     hides_methods: bool = false,
@@ -2203,7 +2207,7 @@ pub const VM = struct {
         };
         for (rm_cases) |name| {
             const case_obj = try allocator.create(PhpObject);
-            case_obj.* = .{ .class_name = "RoundingMode" };
+            case_obj.* = .{ .class_name = "RoundingMode", .enum_case = true };
             try vm.objects.append(allocator, case_obj);
             try case_obj.set(allocator, "name", .{ .string = Value.String.borrowed(name) });
             objRetain(case_obj);
@@ -9588,6 +9592,13 @@ pub const VM = struct {
                             if (try self.throwBuiltinException("Error", msg)) continue;
                             return error.RuntimeError;
                         }
+                        if (cls_ref.is_enum) {
+                            self.dropN(arg_count);
+                            const msg = try std.fmt.allocPrint(self.allocator, "Cannot instantiate enum {s}", .{cls_ref.name});
+                            defer self.allocator.free(msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        }
                     }
                     // closures come from closure expressions and Closure's
                     // factories only
@@ -12676,7 +12687,13 @@ pub const VM = struct {
         var n: usize = 0;
         var parent: ?[]const u8 = null;
         {
-            const cls = self.classes.getPtr(cn) orelse return null;
+            var cls = self.classes.getPtr(cn) orelse return null;
+            // as php's FETCH_CLASS_CONSTANT does; a constant expression
+            // reads the case without it (zend_get_class_constant_ex)
+            if (cls.enum_table_pending and !self.resolving_quietly and self.constant_eval_depth == 0) {
+                self.updateClassConstants(cn) catch return .{ .found = null, .parent = null };
+                cls = self.classes.getPtr(cn) orelse return null;
+            }
             if (cls.constants.get(const_name)) |val| {
                 if (val == .undef) {
                     if (self.resolving_quietly) return .{ .found = null, .parent = null };
@@ -14471,10 +14488,40 @@ pub const VM = struct {
                 _ = try self.evaluateClassConstant(class_name, name);
             };
         }
+        if (self.classes.getPtr(class_name)) |def| if (def.enum_table_pending) try self.buildBackedEnumTable(def);
         if (self.classes.getPtr(class_name)) |def| if (def.lazy_constants) {
             def.lazy_constants = false;
             self.lazy_constant_classes -= 1;
         };
+    }
+
+    // zend_enum_build_backed_enum_table: every case's value has the backing
+    // type and no two share one. a failure leaves the enum waiting, so the
+    // next use raises it again
+    fn buildBackedEnumTable(self: *VM, def: *ClassDef) RuntimeError!void {
+        const want: []const u8 = if (def.backed_type == .int_type) "int" else "string";
+        for (def.case_order.items, 0..) |name, i| {
+            const case_obj = def.constants.get(name) orelse continue;
+            if (case_obj != .object) continue;
+            const value = case_obj.object.get("value");
+            const fits = if (def.backed_type == .int_type) value == .int else value == .string;
+            if (!fits) {
+                const msg = try std.fmt.allocPrint(self.allocator, "Enum case type {s} does not match enum backing type {s}", .{ value.typeName(), want });
+                defer self.allocator.free(msg);
+                try self.setPendingException("TypeError", msg);
+                return error.RuntimeError;
+            }
+            for (def.case_order.items[0..i]) |earlier| {
+                const other = def.constants.get(earlier) orelse continue;
+                if (other != .object) continue;
+                if (!Value.identical(other.object.get("value"), value)) continue;
+                const msg = try std.fmt.allocPrint(self.allocator, "Duplicate value in enum {s} for cases {s} and {s}", .{ def.name, earlier, name });
+                defer self.allocator.free(msg);
+                try self.setPendingException("Error", msg);
+                return error.RuntimeError;
+            }
+        }
+        def.enum_table_pending = false;
     }
 
     // what php reported while compiling a file, raised before the file runs
@@ -14746,7 +14793,7 @@ pub const VM = struct {
         while (current) |name| : (depth += 1) {
             if (depth > 64) return false;
             const cls = self.classes.getPtr(name) orelse return false;
-            if (cls.uncloneable) return true;
+            if (cls.uncloneable or cls.is_enum) return true;
             current = cls.parent;
         }
         return false;
@@ -16489,6 +16536,7 @@ pub const VM = struct {
                 return self.traitRuleFatal("Class {s} cannot extend {s} {s}", .{ class_name, if (self.traits.contains(parent_name)) "trait" else "interface", parent_name });
             }
             if (self.classes.get(parent_name)) |parent_cls| {
+                if (parent_cls.is_enum) return self.traitRuleFatal("Class {s} cannot extend enum {s}", .{ class_name, parent_cls.name });
                 if (parent_cls.is_final) {
                     const msg = try std.fmt.allocPrint(self.allocator, "Class {s} cannot extend final class {s}", .{ class_name, parent_name });
                     try self.strings.append(self.allocator, msg);
@@ -16521,6 +16569,7 @@ pub const VM = struct {
             }
             try def.interfaces.append(self.allocator, iface);
         }
+        try self.checkDeclaredInterfaces(&def, class_name);
         try self.checkInterfacesImplemented(&def, class_name);
 
         const trait_count = self.readByte();
@@ -16889,7 +16938,7 @@ pub const VM = struct {
         for (0..case_count) |ci| {
             // the case takes its handle on first access (enumCase)
             const case_obj = try self.allocObjectShell();
-            case_obj.* = .{ .class_name = enum_name };
+            case_obj.* = .{ .class_name = enum_name, .enum_case = true };
             try case_obj.set(self.allocator, "name", .{ .string = Value.String.borrowed(case_names[ci]) });
             if (case_has_value[ci] == 1) {
                 try case_obj.set(self.allocator, "value", case_values[vj]);
@@ -16906,13 +16955,6 @@ pub const VM = struct {
             const mi = self.readMethodInfo();
             try def.addMethod(self.allocator, mi[1]);
         }
-        // zend_verify_enum_magic_methods, in its order, as the enum links
-        for ([_][]const u8{ "__construct", "__destruct", "__clone", "__get", "__set", "__unset", "__isset", "__toString", "__debugInfo", "__serialize", "__unserialize", "__sleep", "__wakeup", "__set_state" }) |magic| {
-            if (!def.methods.contains(magic)) continue;
-            const msg = try std.fmt.allocPrint(self.allocator, "Enum {s} cannot include magic method {s}", .{ enum_name, magic });
-            defer self.allocator.free(msg);
-            return self.raiseCompileFatal(msg, .{ .file = site.file, .line = site.start_line });
-        }
         // php adds an enum's own methods as it links the enum, refusing one
         // the enum declared itself
         const builtins: []const []const u8 = if (def.backed_type != .none) &.{ "cases", "from", "tryfrom" } else &.{"cases"};
@@ -16926,7 +16968,8 @@ pub const VM = struct {
         for (0..iface_count) |_| {
             try def.interfaces.append(self.allocator, self.declaredClassName(self.currentChunk().constants.items[self.readU16()].string.bytes()));
         }
-        // every enum implements UnitEnum; backed enums also implement BackedEnum
+        // every enum implements UnitEnum; backed enums also implement
+        // BackedEnum, after the ones it lists (zend_enum_add_interfaces)
         try def.interfaces.append(self.allocator, "UnitEnum");
         if (backed_type_byte != 0) try def.interfaces.append(self.allocator, "BackedEnum");
 
@@ -16938,6 +16981,8 @@ pub const VM = struct {
         self.trait_constant_sources.clearRetainingCapacity();
         for (enum_trait_names[0..enum_trait_count]) |trait_name| try self.warnDeprecatedTraitUse(trait_name, enum_name);
         try self.bindClassTraits(&def, enum_name, enum_trait_names[0..enum_trait_count], .{});
+        try self.checkDeclaredInterfaces(&def, enum_name);
+        try self.checkInterfacesImplemented(&def, enum_name);
 
         const enum_attrs = try self.readAttributeDefs();
         for (enum_attrs) |a| try def.attributes.append(self.allocator, a);
@@ -16985,7 +17030,39 @@ pub const VM = struct {
         }
 
         try self.registerEnumMethods(enum_name, backed_type_byte);
+        try inheritance.checkClass(self, enum_name, &def);
+        try self.verifyAbstractClass(enum_name, &def);
+        // zend_verify_enum: a trait may have brought what an enum can't have
+        for (def.properties.items) |prop| {
+            if (std.mem.eql(u8, prop.name, "name") or (def.backed_type != .none and std.mem.eql(u8, prop.name, "value"))) continue;
+            const msg = try std.fmt.allocPrint(self.allocator, "Enum {s} cannot include properties", .{enum_name});
+            defer self.allocator.free(msg);
+            return self.raiseCompileFatal(msg, .{ .file = site.file, .line = site.start_line });
+        }
+        if (def.static_props.count() > 0) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Enum {s} cannot include properties", .{enum_name});
+            defer self.allocator.free(msg);
+            return self.raiseCompileFatal(msg, .{ .file = site.file, .line = site.start_line });
+        }
+        for ([_][]const u8{ "__construct", "__destruct", "__clone", "__get", "__set", "__unset", "__isset", "__toString", "__debugInfo", "__serialize", "__unserialize", "__sleep", "__wakeup", "__set_state" }) |magic| {
+            if (!def.methods.contains(magic)) continue;
+            const msg = try std.fmt.allocPrint(self.allocator, "Enum {s} cannot include magic method {s}", .{ enum_name, magic });
+            defer self.allocator.free(msg);
+            return self.raiseCompileFatal(msg, .{ .file = site.file, .line = site.start_line });
+        }
+        if (self.classImplements(&def, "Serializable")) {
+            const deprecation = try std.fmt.allocPrint(self.allocator, "{s} implements the Serializable interface, which is deprecated. Implement __serialize() and __unserialize() instead (or in addition, if support for old PHP versions is necessary)", .{enum_name});
+            defer self.allocator.free(deprecation);
+            try self.raiseErrorAt(E_DEPRECATED, deprecation, .{ .file = site.file, .line = site.start_line });
+            const msg = try std.fmt.allocPrint(self.allocator, "Enum {s} cannot implement the Serializable interface", .{enum_name});
+            defer self.allocator.free(msg);
+            return self.raiseCompileFatal(msg, .{ .file = site.file, .line = site.start_line });
+        }
         try self.classes.put(self.allocator, enum_name, def);
+        if (backed_type_byte != 0) if (self.classes.getPtr(enum_name)) |registered| {
+            registered.enum_table_pending = true;
+            self.markLazyConstants(registered);
+        };
     }
 
     fn readAttrValue(self: *VM) Value {
@@ -17350,6 +17427,21 @@ pub const VM = struct {
 
     // the interface_gets_implemented handlers of php's internal interfaces,
     // run for every interface a class gets, its parents' included
+    // zend_do_implement_interfaces: what a class or enum lists must be
+    // interfaces, each named once
+    fn checkDeclaredInterfaces(self: *VM, def: *const ClassDef, class_name: []const u8) RuntimeError!void {
+        const kind = if (def.is_enum) "Enum" else "Class";
+        for (def.interfaces.items, 0..) |iface, i| {
+            if (!self.interfaces.contains(iface) and (self.traits.contains(iface) or self.classes.contains(iface)))
+                return self.traitRuleFatal("{s} cannot implement {s} - it is not an interface", .{ class_name, iface });
+            for (def.interfaces.items[0..i]) |earlier| if (std.ascii.eqlIgnoreCase(earlier, iface)) {
+                const msg = try std.fmt.allocPrint(self.allocator, "{s} {s} cannot implement previously implemented interface {s}", .{ kind, class_name, self.declaredClassName(iface) });
+                defer self.allocator.free(msg);
+                return self.raiseCompileFatal(msg, .{ .file = def.file_path, .line = def.start_line });
+            };
+        }
+    }
+
     fn checkInterfacesImplemented(self: *VM, def: *const ClassDef, class_name: []const u8) RuntimeError!void {
         var all: std.ArrayListUnmanaged([]const u8) = .empty;
         defer all.deinit(self.allocator);
@@ -17376,8 +17468,15 @@ pub const VM = struct {
             if ((std.ascii.eqlIgnoreCase(iface, "Iterator") and has(all.items, "IteratorAggregate")) or
                 (std.ascii.eqlIgnoreCase(iface, "IteratorAggregate") and has(all.items, "Iterator")))
                 return self.traitRuleFatal("Class {s} cannot implement both Iterator and IteratorAggregate at the same time", .{class_name});
-            if (std.ascii.eqlIgnoreCase(iface, "Throwable") and !self.extendsClass(def, "Exception") and !self.extendsClass(def, "Error"))
+            if (std.ascii.eqlIgnoreCase(iface, "Throwable") and !self.extendsClass(def, "Exception") and !self.extendsClass(def, "Error")) {
+                if (def.is_enum) return self.traitRuleFatal("Enum {s} cannot implement interface Throwable", .{class_name});
                 return self.traitRuleFatal("{s} {s} cannot implement interface Throwable, extend Exception or Error instead", .{ kind, class_name });
+            }
+            // zend_implement_unit_enum and zend_implement_backed_enum
+            if (std.ascii.eqlIgnoreCase(iface, "UnitEnum") or std.ascii.eqlIgnoreCase(iface, "BackedEnum")) {
+                if (!def.is_enum) return self.traitRuleFatal("Non-enum class {s} cannot implement interface {s}", .{ class_name, self.declaredClassName(iface) });
+                if (def.backed_type == .none and std.ascii.eqlIgnoreCase(iface, "BackedEnum")) return self.traitRuleFatal("Non-backed enum {s} cannot implement interface BackedEnum", .{class_name});
+            }
             if (std.ascii.eqlIgnoreCase(iface, "DateTimeInterface") and !self.extendsClass(def, "DateTime") and !self.extendsClass(def, "DateTimeImmutable"))
                 return self.traitRuleFatal("DateTimeInterface can't be implemented by user classes", .{});
         }
@@ -17773,6 +17872,12 @@ pub const VM = struct {
     // value. the class's own value is set after its declaration, so that
     // comparison waits for it (`trait_constant_checks`)
     fn checkTraitConstant(self: *VM, def: *ClassDef, class_name: []const u8, trait_name: []const u8, c: TraitStaticProp) RuntimeError!void {
+        if (def.is_enum) for (def.case_order.items) |case_name| if (std.mem.eql(u8, case_name, c.name)) {
+            const trait = self.declaredClassName(trait_name);
+            const msg = try std.fmt.allocPrint(self.allocator, "Cannot use trait {s}, because {s}::{s} conflicts with enum case {s}::{s}", .{ trait, trait, c.name, class_name, c.name });
+            defer self.allocator.free(msg);
+            return self.raiseCompileFatal(msg, .{ .file = def.file_path, .line = def.start_line });
+        };
         const first = self.trait_constant_sources.get(c.name) orelse class_name;
         const vis_mismatch = (c.flags & 0x03) != @intFromEnum(def.const_visibility.get(c.name) orelse .public);
         const final_mismatch = (c.flags & 0x10 != 0) != def.const_final.contains(c.name);
@@ -20705,8 +20810,48 @@ pub const VM = struct {
         return order;
     }
 
+    // zend_compare's object cases zphp's Value.compare can't decide: an
+    // enum case is comparable only with itself, and an object against a
+    // scalar is cast (zend_std_compare_objects), where a failed cast to a
+    // number is a notice and 1
+    fn compareObjectOperands(self: *VM, a: Value, b: Value) RuntimeError!?i64 {
+        if (a == .object and b == .object) {
+            if (a.object == b.object) return 0;
+            if (self.isEnumObject(a.object) or self.isEnumObject(b.object)) return 1;
+            return null;
+        }
+        const object_lhs = a == .object;
+        if (!object_lhs and b != .object) return null;
+        const obj = if (object_lhs) a.object else b.object;
+        const other = if (object_lhs) b else a;
+        const sign: i64 = if (object_lhs) 1 else -1;
+        switch (other) {
+            .null, .undef => return sign,
+            .bool => {
+                const casted: Value = .{ .bool = (Value{ .object = obj }).isTruthy() };
+                return if (object_lhs) Value.compare(casted, other) else Value.compare(other, casted);
+            },
+            .int, .float => {
+                if (obj.native.kind != .none) return null;
+                const msg = try std.fmt.allocPrint(self.allocator, "Object of class {s} could not be converted to {s}", .{ obj.class_name, if (other == .int) "int" else "float" });
+                defer self.allocator.free(msg);
+                try self.raiseError(8, msg);
+                const casted: Value = if (other == .int) .{ .int = 1 } else .{ .float = 1.0 };
+                return if (object_lhs) Value.compare(casted, other) else Value.compare(other, casted);
+            },
+            .array => return if (obj.native.kind != .none) null else sign,
+            .string => return if (obj.native.kind != .none or self.hasMethod(obj.class_name, "__toString")) null else sign,
+            else => return null,
+        }
+    }
+
+    fn isEnumObject(_: *VM, obj: *PhpObject) bool {
+        return obj.enum_case;
+    }
+
     fn compareWithStringableInner(self: *VM, a: Value, b: Value) RuntimeError!i64 {
         if (try self.objectBinop(.compare, a, b)) |r| return r.int;
+        if (try self.compareObjectOperands(a, b)) |order| return order;
         if (a == .object and b == .string) {
             if (self.hasMethod(a.object.class_name, "__toString")) {
                 const s = try self.callMethod(a.object, "__toString", &.{});
@@ -20733,6 +20878,7 @@ pub const VM = struct {
 
     fn looseEqualWithStringableInner(self: *VM, a: Value, b: Value) RuntimeError!bool {
         if (try self.objectBinop(.compare, a, b)) |r| return r.int == 0;
+        if (try self.compareObjectOperands(a, b)) |order| return order == 0;
         if (a == .object and b == .string) {
             if (self.hasMethod(a.object.class_name, "__toString")) {
                 const s = try self.callMethod(a.object, "__toString", &.{});

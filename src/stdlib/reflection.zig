@@ -41,7 +41,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     var hook_type = ClassDef{ .name = "PropertyHookType", .is_enum = true, .is_final = true };
     for ([_][]const u8{ "Get", "Set" }) |name| {
         const obj = try a.create(PhpObject);
-        obj.* = .{ .class_name = "PropertyHookType" };
+        obj.* = .{ .class_name = "PropertyHookType", .enum_case = true };
         try vm.objects.append(a, obj);
         try obj.set(a, "name", .{ .string = Value.String.borrowed(name) });
         VM.objRetain(obj);

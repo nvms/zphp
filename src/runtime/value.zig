@@ -1099,6 +1099,8 @@ pub const PhpObject = struct {
     ref_mirrored: bool = false,
     // a WeakReference names this object (vm.weak_references)
     weakly_referenced: bool = false,
+    // an enum case's object
+    enum_case: bool = false,
     // Recursion flags
     recursion: u8 = 0,
     // native pointers behind a builtin or extension class live here, never
@@ -1693,6 +1695,8 @@ pub const Value = union(enum) {
         }
         if (a == .object or b == .object or a == .fiber or b == .fiber) {
             if (nativeCompare(a, b)) |order| return order == 0;
+            // zend_compare casts an object to bool against a bool
+            if (a == .bool or b == .bool) return a.isTruthy() == b.isTruthy();
             return false;
         }
         if (a == .array and b == .array) return arrayEqual(a.array, b.array, false);
@@ -1798,6 +1802,11 @@ pub const Value = union(enum) {
         }
         if (a == .object or b == .object or a == .generator or b == .generator or a == .fiber or b == .fiber) {
             if (nativeCompare(a, b)) |order| return order;
+            // zend_compare: an object is greater than null, and is cast to
+            // bool against a bool
+            if (a == .bool or b == .bool) return @as(i64, @intFromBool(a.isTruthy())) - @intFromBool(b.isTruthy());
+            if (a == .null) return -1;
+            if (b == .null) return 1;
             return 0;
         }
         if (a == .array and b == .array) {

@@ -3623,6 +3623,8 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
 // php's compile-time checks of an enum (zend_compile_enum_type and its
 // member compilation): the backing type, then each member in order
 fn checkEnumDecl(self: *Compiler, enum_name: []const u8, enum_tok: u32, backed_type_token: u32, members: []const u32) Error!void {
+    const unqualified = self.ast.tokenSlice(enum_tok);
+    if (isReservedClassName(unqualified)) return self.failFmt(enum_tok, "Cannot use \"{s}\" as an enum name as it is reserved", .{unqualified});
     if (backed_type_token != 0) {
         var end = backed_type_token;
         while (end < self.ast.tokens.len and self.ast.tokens[end].tag != .l_brace and self.ast.tokens[end].tag != .kw_implements) end += 1;
