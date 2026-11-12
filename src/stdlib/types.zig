@@ -902,6 +902,13 @@ fn native_settype(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
             try warnObjectToNumber(ctx, val, "int");
             return NativeResult.scalar(.{ .int = 1 });
         }
+        // zend_dval_to_lval warns for nan, infinities and floats past the int range
+        if (val == .float and !(val.float >= -9.2233720368547758e18 and val.float < 9.2233720368547758e18)) {
+            var tmp: [64]u8 = undefined;
+            const m = try std.fmt.allocPrint(ctx.allocator, "The float {s} is not representable as an int, cast occurred", .{@import("output.zig").formatFloat(&tmp, val.float)});
+            defer ctx.allocator.free(m);
+            try ctx.vm.emitWarning(m);
+        }
         return NativeResult.scalar(.{ .int = Value.toInt(val) });
     }
     if (is(type_name, "float") or is(type_name, "double")) {
@@ -921,16 +928,21 @@ fn native_settype(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
             const text = try ctx.vm.objectString(val.object);
             return if (text.owner != null) NativeResult.takeString(text) else NativeResult.shareString(text);
         }
+        if (val == .float and std.math.isNan(val.float)) try ctx.vm.emitWarning("unexpected NAN value was coerced to string");
         var buf = std.ArrayListUnmanaged(u8).empty;
         defer buf.deinit(ctx.allocator);
         try val.format(&buf, ctx.allocator);
         const s = try buf.toOwnedSlice(ctx.allocator);
         return NativeResult.takeString(try Value.String.adopt(ctx.allocator, s));
     }
-    if (is(type_name, "bool") or is(type_name, "boolean"))
+    if (is(type_name, "bool") or is(type_name, "boolean")) {
+        try ctx.vm.warnNanToBool(val);
         return NativeResult.scalar(.{ .bool = val.isTruthy() });
-    if (is(type_name, "null"))
+    }
+    if (is(type_name, "null")) {
+        if (val == .float and std.math.isNan(val.float)) try ctx.vm.emitWarning("unexpected NAN value was coerced to null");
         return NativeResult.scalar(.null);
+    }
     if (is(type_name, "array")) {
         if (val == .array) return NativeResult.share(val);
         return NativeResult.borrowed(try ctx.vm.castToArray(val));

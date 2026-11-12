@@ -394,6 +394,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .not => {
+                    // a NAN warns as it becomes a bool, in runLoop
+                    if (isNanAt(&stack[sp - 1])) return bailOut(self, frame, ip, sp);
                     // read before writing: the result location's tag may be
                     // set before its payload is evaluated
                     const not_operand = stack[sp - 1];
@@ -429,6 +431,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .jump_if_false => {
+                    if (isNanAt(&stack[sp - 1])) return bailOut(self, frame, ip, sp);
                     const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     ip += 2;
                     if (!isTruthyAt(&stack[sp - 1])) {
@@ -451,6 +454,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     continue :dispatch @as(OpCode, @enumFromInt(_next));
                 },
                 .jump_if_true => {
+                    if (isNanAt(&stack[sp - 1])) return bailOut(self, frame, ip, sp);
                     const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     ip += 2;
                     if (isTruthyAt(&stack[sp - 1])) {
@@ -641,6 +645,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     return;
                 },
                 .cast_bool => {
+                    if (isNanAt(&stack[sp - 1])) return bailOut(self, frame, ip, sp);
                     const v = stack[sp - 1];
                     const truthy = v.isTruthy();
                     self.stackRelease(v);
@@ -1951,6 +1956,17 @@ inline fn copyScalar(dst: *Value, src: *const Value) bool {
         else => return false,
     }
     return true;
+}
+
+inline fn isNanAt(v: *const Value) bool {
+    return v.* == .float and std.math.isNan(v.float);
+}
+
+// hand the instruction that was just dispatched (ip is past its opcode) to
+// runLoop
+inline fn bailOut(self: anytype, frame: anytype, ip: usize, sp: usize) void {
+    frame.ip = ip - 1;
+    self.sp = sp;
 }
 
 inline fn isTruthyAt(v: *const Value) bool {

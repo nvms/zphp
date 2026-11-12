@@ -5073,6 +5073,8 @@ pub const VM = struct {
                     // the `xor` keyword operator: boolify both sides, yield a bool
                     const b = self.pop();
                     const a = self.pop();
+                    self.warnNanToBool(a) catch if (try self.resumeRaised()) continue;
+                    self.warnNanToBool(b) catch if (try self.resumeRaised()) continue;
                     self.push(.{ .bool = a.isTruthy() != b.isTruthy() });
                 },
                 .bit_not => {
@@ -5258,6 +5260,7 @@ pub const VM = struct {
 
                 .not => {
                     const v = self.pop();
+                    self.warnNanToBool(v) catch if (try self.resumeRaised()) continue;
                     self.push(.{ .bool = !v.isTruthy() });
                 },
 
@@ -5282,6 +5285,7 @@ pub const VM = struct {
                 },
                 .jump_if_false => {
                     const offset = self.readU16();
+                    self.warnNanToBool(self.peek()) catch if (try self.resumeRaised()) continue;
                     if (!self.peek().isTruthy()) self.currentFrame().ip += offset;
                 },
                 .jump_if_class_declared => {
@@ -5291,6 +5295,7 @@ pub const VM = struct {
                 },
                 .jump_if_true => {
                     const offset = self.readU16();
+                    self.warnNanToBool(self.peek()) catch if (try self.resumeRaised()) continue;
                     if (self.peek().isTruthy()) self.currentFrame().ip += offset;
                 },
                 .jump_if_not_null => {
@@ -8584,6 +8589,7 @@ pub const VM = struct {
                 },
                 .cast_bool => {
                     const v = self.pop();
+                    self.warnNanToBool(v) catch if (try self.resumeRaised()) continue;
                     self.push(.{ .bool = v.isTruthy() });
                 },
                 .cast_array => self.push(try self.castToArray(self.pop())),
@@ -18139,8 +18145,14 @@ pub const VM = struct {
         };
     }
 
+    // zend_nan_coerced_to_type_warning, for a NAN made a bool
+    pub inline fn warnNanToBool(self: *VM, v: Value) RuntimeError!void {
+        if (v == .float and std.math.isNan(v.float)) try self.emitWarning("unexpected NAN value was coerced to bool");
+    }
+
     pub fn castToObject(self: *VM, v: Value) !Value {
         if (v == .object) return v;
+        if (v == .float and std.math.isNan(v.float)) try self.emitWarning("unexpected NAN value was coerced to object");
         const obj = try self.allocUserObject("stdClass");
         switch (v) {
             .array => |arr| for (arr.entries.items) |entry| {
@@ -18154,6 +18166,7 @@ pub const VM = struct {
 
     pub fn castToArray(self: *VM, v: Value) !Value {
         if (v == .array) return v;
+        if (v == .float and std.math.isNan(v.float)) try self.emitWarning("unexpected NAN value was coerced to array");
         const arr = try self.allocArray();
         switch (v) {
             // php converts a closure as it does a scalar: an array holding it
