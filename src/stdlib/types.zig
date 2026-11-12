@@ -1273,153 +1273,135 @@ fn native_exit(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     return error.RuntimeError;
 }
 
-const VersionToken = struct {
-    is_num: bool,
-    num: i64 = 0,
-    tag_weight: i64 = 0, // dev=-4 alpha=-3 beta=-2 rc=-1 none=0 pl=1
-};
-
-fn tagWeight(s: []const u8) i64 {
-    if (s.len == 0) return 0;
-    var buf: [10]u8 = undefined;
-    const len = @min(s.len, 10);
-    for (0..len) |i| buf[i] = std.ascii.toLower(s[i]);
-    const lower = buf[0..len];
-    if (std.mem.eql(u8, lower, "dev")) return -4;
-    if (std.mem.eql(u8, lower, "alpha") or std.mem.eql(u8, lower, "a")) return -3;
-    if (std.mem.eql(u8, lower, "beta") or std.mem.eql(u8, lower, "b")) return -2;
-    if (std.mem.startsWith(u8, lower, "rc")) return -1;
-    if (std.mem.eql(u8, lower, "pl") or std.mem.eql(u8, lower, "p")) return 1;
-    return -3; // unknown tags treated as alpha
+// php's versioning.c: php_canonicalize_version and php_version_compare
+fn canonicalizeVersion(a: std.mem.Allocator, version: []const u8) ![]u8 {
+    var buf = try std.ArrayListUnmanaged(u8).initCapacity(a, version.len * 2 + 1);
+    errdefer buf.deinit(a);
+    if (version.len == 0) return buf.toOwnedSlice(a);
+    buf.appendAssumeCapacity(version[0]);
+    var lp = version[0];
+    for (version[1..]) |c| {
+        const lq = buf.items[buf.items.len - 1];
+        if (c == '-' or c == '_' or c == '+') {
+            if (lq != '.') buf.appendAssumeCapacity('.');
+        } else if ((versionNonDigit(lp) and versionDigit(c)) or (versionDigit(lp) and versionNonDigit(c))) {
+            if (lq != '.') buf.appendAssumeCapacity('.');
+            buf.appendAssumeCapacity(c);
+        } else if (!std.ascii.isAlphanumeric(c)) {
+            if (lq != '.') buf.appendAssumeCapacity('.');
+        } else {
+            buf.appendAssumeCapacity(c);
+        }
+        lp = c;
+    }
+    if (buf.items[buf.items.len - 1] == '.') buf.items.len -= 1;
+    return buf.toOwnedSlice(a);
 }
 
-fn tokenizeVersion(s: []const u8, out: *[16]VersionToken) usize {
-    var tok_count: usize = 0;
-    var i: usize = 0;
-    while (i < s.len and tok_count < 16) {
-        if (s[i] == '.' or s[i] == '-' or s[i] == '_') {
-            i += 1;
-            continue;
-        }
-        if (std.ascii.isDigit(s[i])) {
-            var end = i + 1;
-            while (end < s.len and std.ascii.isDigit(s[end])) end += 1;
-            out[tok_count] = .{ .is_num = true, .num = std.fmt.parseInt(i64, s[i..end], 10) catch 0 };
-            tok_count += 1;
-            i = end;
-        } else {
-            var end = i + 1;
-            while (end < s.len and std.ascii.isAlphabetic(s[end])) end += 1;
-            out[tok_count] = .{ .is_num = false, .tag_weight = tagWeight(s[i..end]) };
-            tok_count += 1;
-            i = end;
+fn versionDigit(x: u8) bool {
+    return std.ascii.isDigit(x) and x != '.';
+}
+
+fn versionNonDigit(x: u8) bool {
+    return !std.ascii.isDigit(x) and x != '.';
+}
+
+fn compareSpecialVersionForms(form1: []const u8, form2: []const u8) i64 {
+    const names = [_][]const u8{ "dev", "alpha", "a", "beta", "b", "RC", "rc", "#", "pl", "p" };
+    const orders = [_]i64{ 0, 1, 1, 2, 2, 3, 3, 4, 5, 5 };
+    var found1: i64 = -1;
+    var found2: i64 = -1;
+    for (names, orders) |name, order| {
+        if (std.mem.startsWith(u8, form1, name)) {
+            found1 = order;
+            break;
         }
     }
-    return tok_count;
+    for (names, orders) |name, order| {
+        if (std.mem.startsWith(u8, form2, name)) {
+            found2 = order;
+            break;
+        }
+    }
+    return std.math.sign(found1 - found2);
+}
+
+// strtol on a segment that starts with a digit
+fn versionNumber(s: []const u8) i64 {
+    var n: i64 = 0;
+    for (s) |c| {
+        if (!std.ascii.isDigit(c)) break;
+        n = std.math.mul(i64, n, 10) catch return std.math.maxInt(i64);
+        n = std.math.add(i64, n, c - '0') catch return std.math.maxInt(i64);
+    }
+    return n;
+}
+
+pub fn phpVersionCompare(a: std.mem.Allocator, orig1_full: []const u8, orig2_full: []const u8) std.mem.Allocator.Error!i64 {
+    // the c strings end at a nul byte
+    const orig1 = orig1_full[0 .. std.mem.indexOfScalar(u8, orig1_full, 0) orelse orig1_full.len];
+    const orig2 = orig2_full[0 .. std.mem.indexOfScalar(u8, orig2_full, 0) orelse orig2_full.len];
+    if (orig1.len == 0 or orig2.len == 0) {
+        if (orig1.len == 0 and orig2.len == 0) return 0;
+        return if (orig1.len != 0) 1 else -1;
+    }
+    const ver1 = if (orig1[0] == '#') try a.dupe(u8, orig1) else try canonicalizeVersion(a, orig1);
+    defer a.free(ver1);
+    const ver2 = if (orig2[0] == '#') try a.dupe(u8, orig2) else try canonicalizeVersion(a, orig2);
+    defer a.free(ver2);
+
+    var p1: usize = 0;
+    var p2: usize = 0;
+    var n1: ?usize = 0;
+    var n2: ?usize = 0;
+    var compare: i64 = 0;
+    while (p1 < ver1.len and p2 < ver2.len and n1 != null and n2 != null) {
+        n1 = if (std.mem.indexOfScalar(u8, ver1[p1..], '.')) |i| p1 + i else null;
+        n2 = if (std.mem.indexOfScalar(u8, ver2[p2..], '.')) |i| p2 + i else null;
+        const seg1 = ver1[p1 .. n1 orelse ver1.len];
+        const seg2 = ver2[p2 .. n2 orelse ver2.len];
+        const d1 = seg1.len > 0 and std.ascii.isDigit(seg1[0]);
+        const d2 = seg2.len > 0 and std.ascii.isDigit(seg2[0]);
+        if (d1 and d2) {
+            compare = std.math.sign(versionNumber(seg1) - versionNumber(seg2));
+        } else if (!d1 and !d2) {
+            compare = compareSpecialVersionForms(seg1, seg2);
+        } else if (d1) {
+            compare = compareSpecialVersionForms("#N#", seg2);
+        } else {
+            compare = compareSpecialVersionForms(seg1, "#N#");
+        }
+        if (compare != 0) break;
+        if (n1) |n| p1 = n + 1;
+        if (n2) |n| p2 = n + 1;
+    }
+    if (compare == 0) {
+        if (n1 != null) {
+            const rest = ver1[@min(p1, ver1.len)..];
+            compare = if (rest.len > 0 and std.ascii.isDigit(rest[0])) 1 else try phpVersionCompare(a, rest, "#N#");
+        } else if (n2 != null) {
+            const rest = ver2[@min(p2, ver2.len)..];
+            compare = if (rest.len > 0 and std.ascii.isDigit(rest[0])) -1 else try phpVersionCompare(a, "#N#", rest);
+        }
+    }
+    return compare;
 }
 
 fn native_version_compare(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.null);
-    const v1 = args[0].string.bytes();
-    const v2 = args[1].string.bytes();
-
-    var toks1: [16]VersionToken = undefined;
-    var toks2: [16]VersionToken = undefined;
-    const count1 = tokenizeVersion(v1, &toks1);
-    const count2 = tokenizeVersion(v2, &toks2);
-
-    const max_parts = @max(count1, count2);
-    var cmp: i64 = 0;
-    for (0..max_parts) |j| {
-        const has_a = j < count1;
-        const has_b = j < count2;
-        if (!has_a and !has_b) break;
-
-        if (has_a and !has_b) {
-            if (toks1[j].is_num) {
-                cmp = 1;
-                break;
-            } else {
-                // tag vs implicit release: tag < release
-                if (toks1[j].tag_weight < 0) {
-                    cmp = -1;
-                    break;
-                }
-                if (toks1[j].tag_weight > 0) {
-                    cmp = 1;
-                    break;
-                }
-            }
-        }
-        if (!has_a and has_b) {
-            if (toks2[j].is_num) {
-                cmp = -1;
-                break;
-            } else {
-                if (toks2[j].tag_weight < 0) {
-                    cmp = 1;
-                    break;
-                }
-                if (toks2[j].tag_weight > 0) {
-                    cmp = -1;
-                    break;
-                }
-            }
-        }
-        if (has_a and has_b) {
-            const a = toks1[j];
-            const b = toks2[j];
-            if (a.is_num and b.is_num) {
-                if (a.num < b.num) {
-                    cmp = -1;
-                    break;
-                }
-                if (a.num > b.num) {
-                    cmp = 1;
-                    break;
-                }
-            } else if (!a.is_num and !b.is_num) {
-                if (a.tag_weight < b.tag_weight) {
-                    cmp = -1;
-                    break;
-                }
-                if (a.tag_weight > b.tag_weight) {
-                    cmp = 1;
-                    break;
-                }
-            } else {
-                // num vs tag: in PHP context, a number part > a tag part
-                if (a.is_num) {
-                    cmp = 1;
-                    break;
-                } else {
-                    cmp = -1;
-                    break;
-                }
-            }
-        }
-    }
-
+    const cmp = try phpVersionCompare(ctx.allocator, args[0].string.bytes(), args[1].string.bytes());
     if (args.len >= 3 and args[2] == .string) {
         const op = args[2].string.bytes();
-        const result = if (std.mem.eql(u8, op, "<") or std.mem.eql(u8, op, "lt"))
-            cmp < 0
-        else if (std.mem.eql(u8, op, "<=") or std.mem.eql(u8, op, "le"))
-            cmp <= 0
-        else if (std.mem.eql(u8, op, ">") or std.mem.eql(u8, op, "gt"))
-            cmp > 0
-        else if (std.mem.eql(u8, op, ">=") or std.mem.eql(u8, op, "ge"))
-            cmp >= 0
-        else if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "=") or std.mem.eql(u8, op, "eq"))
-            cmp == 0
-        else if (std.mem.eql(u8, op, "!=") or std.mem.eql(u8, op, "ne") or std.mem.eql(u8, op, "<>"))
-            cmp != 0
-        else
-            false;
-        return NativeResult.scalar(.{ .bool = result });
+        const eq = std.mem.eql;
+        if (eq(u8, op, "<") or eq(u8, op, "lt")) return NativeResult.scalar(.{ .bool = cmp == -1 });
+        if (eq(u8, op, "<=") or eq(u8, op, "le")) return NativeResult.scalar(.{ .bool = cmp != 1 });
+        if (eq(u8, op, ">") or eq(u8, op, "gt")) return NativeResult.scalar(.{ .bool = cmp == 1 });
+        if (eq(u8, op, ">=") or eq(u8, op, "ge")) return NativeResult.scalar(.{ .bool = cmp != -1 });
+        if (eq(u8, op, "==") or eq(u8, op, "=") or eq(u8, op, "eq")) return NativeResult.scalar(.{ .bool = cmp == 0 });
+        if (eq(u8, op, "!=") or eq(u8, op, "<>") or eq(u8, op, "ne")) return NativeResult.scalar(.{ .bool = cmp != 0 });
+        try ctx.vm.setPendingException("ValueError", "version_compare(): Argument #3 ($operator) must be a valid comparison operator");
+        return error.RuntimeError;
     }
-
-    _ = ctx;
     return NativeResult.scalar(.{ .int = cmp });
 }
 
