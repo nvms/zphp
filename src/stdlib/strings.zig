@@ -1889,54 +1889,71 @@ fn native_base64_encode(ctx: *NativeContext, args: []const Value) RuntimeError!N
     return NativeResult.takeString(try Value.String.adopt(ctx.allocator, buf));
 }
 
-fn base64Decode(c: u8) ?u6 {
-    if (c >= 'A' and c <= 'Z') return @intCast(c - 'A');
-    if (c >= 'a' and c <= 'z') return @intCast(c - 'a' + 26);
-    if (c >= '0' and c <= '9') return @intCast(c - '0' + 52);
-    if (c == '+') return 62;
-    if (c == '/') return 63;
-    return null;
-}
-
+// php_base64_decode_impl: whitespace (tab, lf, cr, space) is always
+// skipped; non-strict skips any other unknown byte, strict fails on it, on
+// data after padding, on a truncated last group, and on wrong padding
 fn native_base64_decode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     const s = if (args[0] == .string) args[0].string.bytes() else return NativeResult.scalar(Value{ .bool = false });
-    if (s.len == 0) return NativeResult.literal("");
-
     const strict = args.len >= 2 and args[1] == .bool and args[1].bool;
 
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(ctx.allocator);
-    var accum: u24 = 0;
-    var bits: u5 = 0;
-    var pad_count: usize = 0;
+    var buf = try ctx.allocator.alloc(u8, (s.len / 4) * 3 + 3);
+    var j: usize = 0;
+    var i: usize = 0;
+    var padding: usize = 0;
     for (s) |c| {
         if (c == '=') {
-            pad_count += 1;
+            padding += 1;
             continue;
         }
-        if (pad_count > 0 and strict) {
-            return NativeResult.scalar(.{ .bool = false });
-        }
-        if (c == ' ' or c == '\n' or c == '\r' or c == '\t') {
-            // PHP allows whitespace in both strict and non-strict modes
-            continue;
-        }
-        const val = base64Decode(c) orelse {
-            if (strict) {
+        const ch: i32 = switch (c) {
+            'A'...'Z' => c - 'A',
+            'a'...'z' => c - 'a' + 26,
+            '0'...'9' => c - '0' + 52,
+            '+' => 62,
+            '/' => 63,
+            '\t', '\n', '\r', ' ' => -1,
+            else => -2,
+        };
+        if (!strict) {
+            if (ch < 0) continue;
+        } else {
+            if (ch == -1) continue;
+            if (ch == -2 or padding != 0) {
+                ctx.allocator.free(buf);
                 return NativeResult.scalar(.{ .bool = false });
             }
-            continue;
-        };
-        accum = (accum << 6) | val;
-        bits += 6;
-        if (bits >= 8) {
-            bits -= 8;
-            try buf.append(ctx.allocator, @truncate(accum >> bits));
         }
+        const v: u8 = @intCast(ch);
+        switch (i % 4) {
+            0 => buf[j] = v << 2,
+            1 => {
+                buf[j] |= v >> 4;
+                j += 1;
+                buf[j] = (v & 0x0f) << 4;
+            },
+            2 => {
+                buf[j] |= v >> 2;
+                j += 1;
+                buf[j] = (v & 0x03) << 6;
+            },
+            else => {
+                buf[j] |= v;
+                j += 1;
+            },
+        }
+        i += 1;
     }
-    const result = try buf.toOwnedSlice(ctx.allocator);
-    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, result));
+    if (strict and (i % 4 == 1 or (padding != 0 and (padding > 2 or (i + padding) % 4 != 0)))) {
+        ctx.allocator.free(buf);
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    if (j == 0) {
+        ctx.allocator.free(buf);
+        return NativeResult.literal("");
+    }
+    buf = try ctx.allocator.realloc(buf, j);
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, buf));
 }
 
 fn decodeUuChar(c: u8) u8 {
