@@ -916,19 +916,30 @@ fn replaceImpl(ctx: *NativeContext, entry: *Entry, subject: []const u8, holder: 
                 switch (replacer) {
                     .string => |r| try appendReplacement(&out, a, r, subject, ov, count),
                     .callback => |cb| {
+                        // a callback that threw fails this subject; the
+                        // caller raises the exception once it has gone
+                        // through the rest (preg_do_repl_func)
+                        if (ctx.vm.pending_exception != null) {
+                            preg_error = INTERNAL_ERROR;
+                            return null;
+                        }
                         const arg = try ctx.createArray();
                         try populateSubpats(ctx, arg, subject, ov, names, num_subpats, count, md, cb.flags);
-                        const result = ctx.invokeCallable(cb.callable, &.{.{ .array = arg }}) catch {
+                        const result = ctx.invokeCallable(cb.callable, &.{.{ .array = arg }}) catch |err| {
+                            // anything but a thrown exception (exit, a fiber
+                            // switching away) unwinds through the call
+                            if (err == error.OutOfMemory or ctx.vm.pending_exception == null) return err;
                             preg_error = INTERNAL_ERROR;
-                            return error.RuntimeError;
+                            return null;
                         };
                         if (result == .string) {
                             try out.appendSlice(a, result.string.bytes());
                         } else {
                             var buf: [128]u8 = undefined;
                             const s = array_diff.tmpString(ctx, result, &buf) catch |err| {
+                                if (err == error.OutOfMemory) return err;
                                 preg_error = INTERNAL_ERROR;
-                                return err;
+                                return null;
                             };
                             defer s.release(ctx);
                             try out.appendSlice(a, s.bytes);
@@ -981,11 +992,11 @@ fn tmpBytes(ctx: *NativeContext, v_in: Value) RuntimeError![]const u8 {
     const v = v_in;
     if (v == .string) return v.string.bytes();
     var buf: [128]u8 = undefined;
-    const had_exception = ctx.vm.pending_exception != null;
     const s = try array_diff.tmpString(ctx, v, &buf);
     defer s.release(ctx);
-    // an object without __toString, or one whose __toString threw
-    if (!had_exception and ctx.vm.pending_exception != null) return error.RuntimeError;
+    // zval_try_get_string: an object without __toString, one whose
+    // __toString threw, or any conversion while an exception is pending
+    if (ctx.vm.pending_exception != null) return error.RuntimeError;
     return (try ctx.vm.transientBytes(s.bytes)).bytes();
 }
 
@@ -1163,8 +1174,8 @@ fn preg_replace_callback_array(ctx: *NativeContext, args: []const Value) Runtime
         if (owned) dropResult(ctx, current);
         current = next;
         owned = true;
-        if (next == .null) return NativeResult.scalar(.null);
         if (ctx.vm.pending_exception != null) return error.RuntimeError;
+        if (next == .null) return NativeResult.scalar(.null);
     }
     if (args.len > 3) ctx.setCallerVar(3, args.len, .{ .int = replace_count });
     if (!owned) return NativeResult.share(current);

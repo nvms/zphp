@@ -5141,6 +5141,7 @@ ext/pcre/tests/preg_replace_callback_basic.phpt
 ext/pcre/tests/preg_replace_callback_error1.phpt
 ext/pcre/tests/preg_replace_callback_fatal_error_leak.phpt
 ext/pcre/tests/preg_replace_callback_flags.phpt
+ext/pcre/tests/preg_replace_callback_trampoline.phpt
 ext/pcre/tests/preg_replace_edit_basic.phpt
 ext/pcre/tests/preg_replace_error1.phpt
 ext/pcre/tests/preg_replace_error2.phpt
