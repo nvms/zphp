@@ -8147,7 +8147,10 @@ pub const VM = struct {
                     const frame = self.currentFrame();
                     const append_val = self.pop();
                     if (append_val == .array) self.emitWarning("Array to string conversion") catch if (try self.resumeRaised()) continue;
-                    try self.concatAssignLocal(frame, slot, append_val);
+                    self.concatAssignLocal(frame, slot, append_val) catch |err| {
+                        if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                        return err;
+                    };
                 },
                 .concat_assign => {
                     if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
@@ -8158,7 +8161,15 @@ pub const VM = struct {
                     const is_ref = self.currentFrame().ref_slots.get(name);
 
                     const frame = self.currentFrame();
-                    const current = if (is_ref) |cell| cell.* else (frame.vars.get(name) orelse .null);
+                    var current = if (is_ref) |cell| cell.* else (frame.vars.get(name) orelse .null);
+                    // concat_function: an object operand is converted, the
+                    // variable first
+                    const current_text = self.objectConcatOperand(current) catch |err| {
+                        if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                        return err;
+                    };
+                    defer if (current_text) |t| t.release();
+                    if (current_text) |t| current = .{ .string = t };
                     var suffix_buf: [128]u8 = undefined;
                     var suffix_allocator: std.heap.BufferFirstAllocator = .init(&suffix_buf, self.allocator);
                     const temporary_allocator = suffix_allocator.allocator();
@@ -8166,8 +8177,14 @@ pub const VM = struct {
                     defer suffix.deinit(temporary_allocator);
                     if (append_val == .string) {
                         try suffix.appendSlice(temporary_allocator, append_val.string.bytes());
+                    } else if (append_val == .object) {
+                        const text = self.objectToString(append_val.object) catch |err| {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return err;
+                        };
+                        try suffix.appendSlice(temporary_allocator, text);
                     } else try append_val.format(&suffix, temporary_allocator);
-                    if (is_ref == null and current == .string) {
+                    if (is_ref == null and current == .string and current_text == null) {
                         if (current.string.owner) |owner| {
                             if (owner.refcount == 1 and current.string.ptr == owner.bytes.ptr) {
                                 const length = std.math.add(usize, current.string.len, suffix.items.len) catch return error.OutOfMemory;
@@ -15878,8 +15895,18 @@ pub const VM = struct {
     // `$local .= value`: grows the string in place when the variable is its
     // only holder, otherwise builds a new one; either way the result is
     // assigned the way set_local assigns and left on the stack
+    // an object operand of `.=` as its string, a new reference the caller
+    // releases; null for anything else
+    fn objectConcatOperand(self: *VM, v: Value) RuntimeError!?Value.String {
+        if (v != .object) return null;
+        return try Value.String.create(self.stringAllocator(), try self.objectToString(v.object));
+    }
+
     fn concatAssignLocal(self: *VM, frame: *CallFrame, slot: u16, append_val: Value) RuntimeError!void {
-        const current = try self.fusedRead(frame, slot);
+        var current = try self.fusedRead(frame, slot);
+        const current_text = try self.objectConcatOperand(current);
+        defer if (current_text) |t| t.release();
+        if (current_text) |t| current = .{ .string = t };
         var suffix_buf: [128]u8 = undefined;
         var suffix_allocator: std.heap.BufferFirstAllocator = .init(&suffix_buf, self.allocator);
         const temporary_allocator = suffix_allocator.allocator();
@@ -15887,8 +15914,10 @@ pub const VM = struct {
         defer suffix.deinit(temporary_allocator);
         if (append_val == .string) {
             try suffix.appendSlice(temporary_allocator, append_val.string.bytes());
+        } else if (append_val == .object) {
+            try suffix.appendSlice(temporary_allocator, try self.objectToString(append_val.object));
         } else try append_val.format(&suffix, temporary_allocator);
-        if (current == .string and self.localCell(frame, slot) == null) {
+        if (current == .string and current_text == null and self.localCell(frame, slot) == null) {
             if (current.string.owner) |owner| {
                 if (owner.refcount == 1 and current.string.ptr == owner.bytes.ptr) {
                     const length = std.math.add(usize, current.string.len, suffix.items.len) catch return error.OutOfMemory;
