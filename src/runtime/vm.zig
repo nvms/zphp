@@ -10375,6 +10375,7 @@ pub const VM = struct {
                                 if (try self.throwBuiltinException("Error", msg)) continue;
                                 return error.RuntimeError;
                             }
+                            self.warnStaticAsInstance(obj, prop_name) catch if (try self.resumeRaised()) continue;
                             // a by-reference argument creates the property
                             if (!capturing) {
                                 const msg = try std.fmt.allocPrint(self.allocator, "Undefined property: {s}::${s}", .{ obj.class_name, prop_name });
@@ -21485,6 +21486,32 @@ pub const VM = struct {
     // chain declares: a readonly class (or one that forbids it) refuses,
     // stdClass or #[\AllowDynamicProperties] in the chain allows it, and
     // anything else is deprecated (php 8.2)
+    // zend_get_property_offset: a static property the scope can see, named
+    // through an object, is no instance property; php notices and goes on
+    // with a dynamic one
+    fn warnStaticAsInstance(self: *VM, obj: *const PhpObject, name: []const u8) RuntimeError!void {
+        var current: ?[]const u8 = obj.class_name;
+        const scope = self.currentDefiningClass();
+        while (current) |cn| {
+            const cls = self.classes.getPtr(cn) orelse return;
+            current = cls.parent;
+            if (!cls.static_props.contains(name)) continue;
+            const vis = cls.static_prop_visibility.get(name) orelse .public;
+            if (vis == .public) break;
+            const sc = scope orelse return;
+            if (vis == .private) {
+                // a private one the scope can't see may hide the scope's own
+                if (std.ascii.eqlIgnoreCase(sc, cls.name)) break;
+                continue;
+            }
+            if (self.isInstanceOf(sc, cls.name) or self.isInstanceOf(cls.name, sc)) break;
+            return;
+        } else return;
+        const msg = try std.fmt.allocPrint(self.allocator, "Accessing static property {s}::${s} as non static", .{ obj.class_name, name });
+        defer self.allocator.free(msg);
+        try self.raiseError(8, msg);
+    }
+
     pub fn dynamicPropertyRule(self: *VM, obj: *const PhpObject) DynamicPropertyRule {
         var current: ?[]const u8 = obj.class_name;
         while (current) |cn| {
@@ -21503,6 +21530,10 @@ pub const VM = struct {
     // raises what dynamicPropertyRule asks for, from the run loop. returns
     // true when an exception was raised and dispatched
     fn checkDynamicProperty(self: *VM, obj: *PhpObject, name: []const u8) RuntimeError!bool {
+        self.warnStaticAsInstance(obj, name) catch {
+            _ = try self.resumeRaised();
+            return true;
+        };
         switch (self.dynamicPropertyRule(obj)) {
             .allowed => return false,
             .forbidden => {
