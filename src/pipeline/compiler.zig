@@ -678,6 +678,13 @@ pub const Compiler = struct {
                 }
             },
             .return_stmt => {
+                // an arrow function declared never has its expression as a
+                // statement, so reaching the end is the run-time error
+                if (self.ast.tokens[node.main_token].tag == .kw_fn and node.data.lhs != 0 and std.ascii.eqlIgnoreCase(self.declared_return, "never")) {
+                    try self.compileNode(node.data.lhs);
+                    try self.emitOp(.pop);
+                    return;
+                }
                 try self.checkReturn(node);
                 if (self.returns_ref and node.data.lhs != 0) try compiler_expr.assertNotShortCircuited(self, node.data.lhs, node.main_token);
                 if (self.is_generator) {
