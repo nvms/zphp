@@ -2378,7 +2378,20 @@ pub fn resolveNodeClassName(self: *Compiler, class_node: Ast.Node) ![]const u8 {
         self.string_allocs.append(self.allocator, qualified) catch return name;
         return qualified;
     }
+    try ensureValidClassFetch(self, class_node.main_token);
     return self.resolveClassName(self.ast.tokenSlice(class_node.main_token));
+}
+
+// zend_ensure_valid_class_fetch_type: self, parent and static need a class,
+// which the compiler can tell inside a named function or a class (not in a
+// closure, a trait, or a file's own code, which runs where it is included)
+fn ensureValidClassFetch(self: *Compiler, token: u32) Error!void {
+    const written = self.ast.tokenSlice(token);
+    const which: []const u8 = if (std.ascii.eqlIgnoreCase(written, "self")) "self" else if (std.ascii.eqlIgnoreCase(written, "parent")) "parent" else if (std.ascii.eqlIgnoreCase(written, "static")) "static" else return;
+    if (self.closure_signature or std.mem.startsWith(u8, self.current_function, "{closure:")) return;
+    const known = if (self.current_class.len == 0) self.current_function.len > 0 else !self.in_trait;
+    if (!known) return;
+    if (self.current_class.len == 0) return self.failFmt(token, "Cannot use \"{s}\" when no class scope is active", .{which});
 }
 
 pub fn resolveQualifiedNewName(self: *Compiler, node: Ast.Node) !struct { name: []const u8, is_absolute: bool, ns_relative: bool } {
