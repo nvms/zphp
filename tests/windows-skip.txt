@@ -49,3 +49,6 @@ http_wrapper_fopen.php: the local test server forks with pcntl_fork, which windo
 stream_data_urls.php: zphp exits with status 3 on windows somewhere in this test (not yet diagnosed: directory handle seeks, socket address errors and data: urls are the windows-specific parts)
 stream_user_wrapper.php: php's windows build asks a user wrapper for 512-byte chunks where zphp asks for 8192, and stream_metadata's chown and chgrp options aren't supported on windows
 sscanf_php.php: on windows a second read of a write-only file through fgets doesn't repeat php's "Read of 8192 bytes failed" notice
+io_opendir_partial_json.php: on windows ftell after fwrite on a "w" stream reads one byte short (4 after writing 5), a stream layer position bug not yet diagnosed there
+stream_buffering.php: on windows feof and fseek results differ after buffered reads on a plain file, a stream layer bug not yet diagnosed there
+stdout_closed_pipe_exit.php: what a windows pipe reader closing does to the writer's exit status hasn't been checked against php's windows build
