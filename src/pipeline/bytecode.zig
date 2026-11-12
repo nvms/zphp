@@ -488,6 +488,10 @@ pub const OpCode = enum(u8) {
     // "Attempt to modify property", a property nothing has is created null.
     // the get_prop after it reads it
     prepare_prop_w,
+    // u16 variable name: array_set on a by-name variable ($x[k] = v in a
+    // function, after ensure_array_var); a string there gets the offset
+    // written and the variable the new string
+    array_set_var,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -536,6 +540,7 @@ pub const OpCode = enum(u8) {
             .ensure_array_local,
             .ensure_array_prop,
             .prepare_prop_w,
+            .array_set_var,
             .cow_separate_local,
             .make_var_array_elem_ref,
             .break_var_ref,

@@ -213,6 +213,16 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
             try compileVivifyChain(self, target.data.lhs);
             try self.compileNode(target.data.rhs);
             try self.compileNode(node.data.rhs);
+            // a by-name variable may hold a string, whose offset write makes
+            // a new string the variable must get
+            if (!rhs_is_ref and target_lhs.tag == .variable) {
+                const var_name = self.ast.tokenSlice(target_lhs.main_token);
+                if (!Compiler.isSuperglobal(var_name) and !std.mem.eql(u8, var_name, "$GLOBALS") and !std.mem.eql(u8, var_name, "$this")) {
+                    try self.emitOp(.array_set_var);
+                    try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(var_name) }));
+                    return;
+                }
+            }
             try self.emitOp(if (rhs_is_ref) .array_set_ref else .array_set);
         }
         return;

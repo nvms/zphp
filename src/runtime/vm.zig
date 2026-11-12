@@ -5750,7 +5750,7 @@ pub const VM = struct {
                     const val = self.pop();
                     const arr_val = self.pop();
                     if (arr_val == .array) {
-                        if (!try arr_val.array.appendNew(self.allocator, val)) {
+                        if (!try arr_val.array.appendNew(self.allocator, try self.selfStoreCopy(arr_val.array, val))) {
                             if (try self.throwNextElementOccupied()) continue;
                             return error.RuntimeError;
                         }
@@ -5811,7 +5811,7 @@ pub const VM = struct {
                     const val = self.popTransfer();
                     const arr_val = self.peek();
                     if (arr_val == .array) {
-                        if (!try arr_val.array.appendNew(self.allocator, val)) {
+                        if (!try arr_val.array.appendNew(self.allocator, try self.selfStoreCopy(arr_val.array, val))) {
                             self.stackRelease(val);
                             if (try self.throwNextElementOccupied()) continue;
                             return error.RuntimeError;
@@ -6492,11 +6492,29 @@ pub const VM = struct {
                     self.push(v);
                 },
 
-                .array_set, .array_set_ref => {
+                .array_set, .array_set_ref, .array_set_var => {
                     const is_ref = op == .array_set_ref;
+                    const var_name_idx: ?u16 = if (op == .array_set_var) self.readU16() else null;
                     const raw_val = self.pop();
                     const key = self.pop();
                     const arr_val = self.pop();
+                    if (var_name_idx) |name_idx| if (arr_val == .string) {
+                        const assigned = (self.assignStringOffset(arr_val.string.bytes(), key, raw_val) catch |err| {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return err;
+                        }) orelse {
+                            if (self.pending_exception != null) {
+                                if (self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            }
+                            self.push(.null);
+                            continue;
+                        };
+                        const name = self.currentChunk().constants.items[name_idx].string.bytes();
+                        try self.setVariableByName(self.currentFrame(), name, assigned.string);
+                        self.pushTransfer(assigned.result);
+                        continue;
+                    };
                     // PhpArray.set retains the stored value once (store choke).
                     // copyValue'ing an array first would DOUBLE-retain (share+retain
                     // then set's retain), inflating rc -> spurious cowSeparate. under
@@ -6517,8 +6535,9 @@ pub const VM = struct {
                         // then release after the set retains the new one. a plain
                         // (non =&) write to a referenced element routes through
                         // the cell so every name for that storage sees it
-                        if (is_ref or !(self.array_ref_active and try self.writeArrayElemRef(arr_val.array, norm_key, val))) {
-                            try self.arraySetOwned(arr_val.array, norm_key, val);
+                        const stored = try self.selfStoreCopy(arr_val.array, val);
+                        if (is_ref or !(self.array_ref_active and try self.writeArrayElemRef(arr_val.array, norm_key, stored))) {
+                            try self.arraySetOwned(arr_val.array, norm_key, stored);
                         }
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetSet")) {
                         _ = self.callMethod(arr_val.object, "offsetSet", &.{ key, val }) catch {
@@ -6584,31 +6603,19 @@ pub const VM = struct {
                         self.loadLocalSlot(frame, slot, ref_cell);
 
                     if (cur == .string) {
-                        const s = cur.string.bytes();
-                        var idx: i64 = Value.toInt(key);
-                        if (idx < 0) idx = @as(i64, @intCast(s.len)) + idx;
-                        if (idx < 0) {
-                            self.push(val);
+                        const assigned = (self.assignStringOffset(cur.string.bytes(), key, val) catch |err| {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return err;
+                        }) orelse {
+                            if (self.pending_exception != null) {
+                                if (self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            }
+                            self.push(.null);
                             continue;
-                        }
-                        var write_byte: u8 = 0;
-                        if (val == .string) {
-                            if (val.string.len > 0) write_byte = val.string.bytes()[0];
-                        } else {
-                            var tmp: std.ArrayListUnmanaged(u8) = .empty;
-                            defer tmp.deinit(self.allocator);
-                            try val.format(&tmp, self.allocator);
-                            if (tmp.items.len > 0) write_byte = tmp.items[0];
-                        }
-                        const target_idx: usize = @intCast(idx);
-                        const new_len: usize = @max(s.len, target_idx + 1);
-                        const buf = try self.allocator.alloc(u8, new_len);
-                        @memcpy(buf[0..s.len], s);
-                        if (new_len > s.len) @memset(buf[s.len..], ' ');
-                        buf[target_idx] = write_byte;
-                        const new_str = Value{ .string = try Value.String.adopt(self.allocator, buf) };
-                        try self.setVariableByName(frame, self.slotName(frame, slot), new_str);
-                        self.push(val);
+                        };
+                        try self.setVariableByName(frame, self.slotName(frame, slot), assigned.string);
+                        self.pushTransfer(assigned.result);
                         continue;
                     }
 
@@ -6654,8 +6661,9 @@ pub const VM = struct {
                         // a plain write to a referenced element routes through the
                         // shared cell. array_set_local_ref ($arr[k] = &$v) is
                         // handled separately below (it BINDS, not writes)
-                        if (op == .array_set_local_ref or !(self.array_ref_active and try self.writeArrayElemRef(cur.array, norm_key, val))) {
-                            try self.arraySetOwned(cur.array, norm_key, val);
+                        const stored = try self.selfStoreCopy(cur.array, val);
+                        if (op == .array_set_local_ref or !(self.array_ref_active and try self.writeArrayElemRef(cur.array, norm_key, stored))) {
+                            try self.arraySetOwned(cur.array, norm_key, stored);
                         }
                         self.push(val);
                         continue;
@@ -13671,6 +13679,86 @@ pub const VM = struct {
         const msg = std.fmt.allocPrint(self.allocator, "Cannot use {s} as array", .{type_name}) catch return error.OutOfMemory;
         defer self.allocator.free(msg);
         try self.emitWarning(msg);
+    }
+
+    // `$a[k] = $a`: php reads the right side into a temporary before it
+    // fetches the container for writing, so the element gets the array as it
+    // was rather than the array being written
+    fn selfStoreCopy(self: *VM, target: *PhpArray, val: Value) RuntimeError!Value {
+        if (val == .array and val.array == target) return .{ .array = try self.cloneArray(target) };
+        return val;
+    }
+
+    pub const StringAssign = struct { string: Value, result: Value };
+
+    // zend_assign_to_string_offset: the string with the byte at key replaced
+    // by the first byte of val (padding with spaces past the end) and the
+    // one-byte string the assignment yields; null when it failed (an
+    // exception is pending or the warning left the result null)
+    pub fn assignStringOffset(self: *VM, s: []const u8, key: Value, val: Value) RuntimeError!?StringAssign {
+        const offset: i64 = switch (key) {
+            .int => |i| i,
+            .string => |str| blk: {
+                const parsed = offsetStringKey(str.bytes());
+                switch (parsed.kind) {
+                    .integer => break :blk parsed.value,
+                    .trailing => {
+                        const msg = try std.fmt.allocPrint(self.allocator, "Illegal string offset \"{s}\"", .{str.bytes()});
+                        defer self.allocator.free(msg);
+                        try self.emitWarning(msg);
+                        break :blk parsed.value;
+                    },
+                    .other => {
+                        try self.setPendingException("TypeError", "Cannot access offset of type string on string");
+                        return null;
+                    },
+                }
+            },
+            .null, .undef, .bool, .float => blk: {
+                try self.emitWarning("String offset cast occurred");
+                break :blk Value.toInt(key);
+            },
+            else => {
+                const msg = try std.fmt.allocPrint(self.allocator, "Cannot access offset of type {s} on string", .{if (key == .object) key.object.class_name else key.valueName()});
+                defer self.allocator.free(msg);
+                try self.setPendingException("TypeError", msg);
+                return null;
+            },
+        };
+        const len: i64 = @intCast(s.len);
+        if (offset < -len) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Illegal string offset {d}", .{offset});
+            defer self.allocator.free(msg);
+            try self.emitWarning(msg);
+            return null;
+        }
+        const at: usize = @intCast(if (offset < 0) offset + len else offset);
+        var tmp: std.ArrayListUnmanaged(u8) = .empty;
+        defer tmp.deinit(self.allocator);
+        const text: []const u8 = if (val == .string) val.string.bytes() else blk: {
+            if (val == .object) {
+                try tmp.appendSlice(self.allocator, try self.objectToString(val.object));
+            } else {
+                if (val == .array) try self.emitWarning("Array to string conversion");
+                try val.format(&tmp, self.allocator);
+            }
+            break :blk tmp.items;
+        };
+        if (text.len != 1) {
+            if (text.len == 0) {
+                try self.setPendingException("Error", "Cannot assign an empty string to a string offset");
+                return null;
+            }
+            try self.emitWarning("Only the first byte will be assigned to the string offset");
+        }
+        const byte = text[0];
+        const buf = try self.allocator.alloc(u8, @max(s.len, at + 1));
+        @memcpy(buf[0..s.len], s);
+        if (at >= s.len) @memset(buf[s.len..at], ' ');
+        buf[at] = byte;
+        const new_str = Value{ .string = try Value.String.adopt(self.allocator, buf) };
+        const one = try self.allocator.dupe(u8, &.{byte});
+        return .{ .string = new_str, .result = .{ .string = try Value.String.adopt(self.allocator, one) } };
     }
 
     pub const StringOffsetMode = enum { read, coalesce, isset };
