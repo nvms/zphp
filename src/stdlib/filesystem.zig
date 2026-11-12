@@ -295,6 +295,10 @@ fn percentDecode(a: Allocator, s: []const u8) ![]u8 {
     return try buf.toOwnedSlice(a);
 }
 
+pub fn urlDecode(a: Allocator, s: []const u8) ![]u8 {
+    return phpUrlDecode(a, s);
+}
+
 // php_url_decode: "+" is a space, "%xx" a byte
 fn phpUrlDecode(a: Allocator, s: []const u8) ![]u8 {
     var buf = try a.alloc(u8, s.len);
@@ -819,6 +823,8 @@ fn native_file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
     if (length < 0) return throwValueError(ctx, "file_get_contents(): Argument #5 ($length) must be greater than or equal to 0", .{});
     try useContext(ctx, args, 2);
     const path = try includePathLookup(ctx, filename, use_include_path);
+    read_context = if (args.len > 2) args[2] else null;
+    defer read_context = null;
     const content = (try readPathAs(ctx, path, "file_get_contents")) orelse return NativeResult.scalar(.{ .bool = false });
     transientStreams(ctx, 1);
     if (offset == 0 and !have_len) return NativeResult.takeString(content);
@@ -837,6 +843,9 @@ fn native_file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
     const finish = if (have_len) @min(bytes.len, ustart +| @as(usize, @intCast(length))) else bytes.len;
     return try NativeResult.copyString(ctx.allocator, bytes[ustart..finish]);
 }
+
+// the context file_get_contents was given, for the stream it opens
+threadlocal var read_context: ?Value = null;
 
 // the whole contents behind a path, through whichever wrapper serves it (user
 // wrappers, php://, data:, phar://, compress.zlib://, http(s)://, plain files);
@@ -913,6 +922,16 @@ pub fn readPathAs(ctx: *NativeContext, raw_path: []const u8, comptime func: ?[]c
     if (std.mem.startsWith(u8, path, ZLIB_PREFIX)) {
         const decoded = readZlibFile(ctx.allocator, path) catch return null;
         return try Value.String.adopt(ctx.allocator, decoded);
+    }
+    if (std.ascii.startsWithIgnoreCase(path, "http://")) {
+        // the http wrapper's stream, read to its end
+        const opened = (try openStreamValue(ctx, path, "rb", if (func != null) read_context else null)) orelse return null;
+        const fh = opened.resource;
+        fh.retain();
+        defer ctx.vm.releaseValue(opened);
+        const data = try streams.copyToMem(ctx, fh, null);
+        _ = try closeStream(ctx, fh);
+        return try Value.String.adopt(ctx.allocator, data orelse try ctx.allocator.alloc(u8, 0));
     }
     if (path.len > 7 and (std.mem.startsWith(u8, path, "http://") or std.mem.startsWith(u8, path, "https://"))) {
         const fetched = try fetchUrl(ctx, path);
@@ -2576,6 +2595,7 @@ fn native_fopen(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         return NativeResult.borrowed(.{ .resource = obj });
     }
 
+    if (std.ascii.startsWithIgnoreCase(path, "http://") and !isWrapperUnregistered(ctx.vm, "http")) return openHttpStream(ctx, path, mode, if (args.len > 3) args[3] else null);
     if (std.ascii.startsWithIgnoreCase(path, "php://fd/")) return openFdStream(ctx, path, mode);
     if (std.ascii.startsWithIgnoreCase(path, "php://filter/")) return openFilterStream(ctx, path, mode, if (args.len > 3) args[3] else null);
     if (std.ascii.startsWithIgnoreCase(path, "php://") and !knownPhpStream(path[6..])) {
@@ -2643,6 +2663,29 @@ fn openFilterStream(ctx: *NativeContext, path: []const u8, mode: []const u8, con
     try obj.setCopiedString(ctx.allocator, "__path", path);
     try obj.set(ctx.allocator, "__filter_wrapped", .{ .bool = true });
     return NativeResult.borrowed(opened);
+}
+
+// http://: the wrapper's stream (allow_url_fopen permitting)
+fn openHttpStream(ctx: *NativeContext, path: []const u8, mode: []const u8, context_arg: ?Value) RuntimeError!NativeResult {
+    if (!ctx.vm.iniFlagOn("allow_url_fopen", "1")) {
+        try warnDocref(ctx, "http:// wrapper is disabled in the server configuration by allow_url_fopen=0", .{});
+        try warnDocrefParam(ctx, path, "Failed to open stream: no suitable wrapper could be found", .{});
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    if (current_include != null and !ctx.vm.iniFlagOn("allow_url_include", "0")) {
+        try warnDocref(ctx, "http:// wrapper is disabled in the server configuration by allow_url_include=0", .{});
+        try warnDocrefParam(ctx, path, "Failed to open stream: no suitable wrapper could be found", .{});
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    const context = try network.streamContext(ctx, context_arg);
+    const stream = (try @import("http_wrapper.zig").open(ctx, path, mode, 0, context)) orelse {
+        try user_streams.displayErrors(ctx, path, "Failed to open stream", "operation failed");
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+        return NativeResult.scalar(.{ .bool = false });
+    };
+    user_streams.tidyErrors();
+    try stream.setCopiedString(ctx.allocator, "__path", path);
+    return NativeResult.borrowed(.{ .resource = stream });
 }
 
 // opens url as fopen does, warnings and all: the stream, or null

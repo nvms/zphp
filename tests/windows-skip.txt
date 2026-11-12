@@ -45,3 +45,4 @@ spl_directory_port.php: on windows SplFileInfo::getOwner/getGroup of a missing f
 getopt_port.php: the test runs commands with posix shell syntax (VAR=value prefixes) that cmd.exe rejects
 math_argument_parsing.php: msvc's libm, which php's windows build uses, rounds exp(1) to a different last bit than mingw's
 system_functions_checks.php: getservbyname, getservbyport and getprotobynumber are not implemented on windows yet
+http_wrapper_fopen.php: the local test server forks with pcntl_fork, which windows lacks

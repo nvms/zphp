@@ -150,7 +150,8 @@ $fail_port = getenv('CURL_FAIL_PORT');
 if ($fail_port) {
     http_clear_last_response_headers();
     $fgc_fail = @file_get_contents("http://127.0.0.1:$fail_port");
-    test("fgc on transfer failure returns false", false, $fgc_fail);
+    // php's http wrapper doesn't hold the body to Content-Length: what arrived is the result
+    test("fgc on a short body returns what arrived", "partial", $fgc_fail);
     $hdrs_fail = http_get_last_response_headers();
     test("http_get_last_response_headers preserved on failed transfer", true, is_array($hdrs_fail));
     test("http_get_last_response_headers contains header from failed transfer", true, in_array("X-Transfer-Fail: true", $hdrs_fail ?: [], true));

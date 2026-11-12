@@ -652,6 +652,32 @@ fn timeoutMs(ctx: *NativeContext, v: ?Value) ?i32 {
     return @intFromFloat(@min(seconds * 1000.0, @as(f64, std.math.maxInt(i32))));
 }
 
+pub fn defaultSocketTimeoutSeconds(ctx: *NativeContext) f64 {
+    return defaultSocketTimeout(ctx);
+}
+
+// php_stream_xport_create for a client: the connected socket stream for a
+// transport url ("tcp://host:port"), or null with why in the wrapper's
+// error log
+pub fn connectTransport(ctx: *NativeContext, target: []const u8, timeout_s: f64, options: i64) RuntimeError!?*PhpObject {
+    const timeout_ms: ?i32 = if (timeout_s >= 0) @intFromFloat(@min(timeout_s * 1000.0, @as(f64, std.math.maxInt(i32)))) else null;
+    const endpoint = parseEndpoint(ctx.allocator, target) catch |err| {
+        try user_streams.logError(ctx, options, "{s}", .{socketError(err).message});
+        return null;
+    };
+    const addr = endpointAddress(endpoint) catch |err| {
+        try user_streams.logError(ctx, options, "{s}", .{socketError(err).message});
+        return null;
+    };
+    const sock = connectSocket(addr, timeout_ms, false) catch |err| {
+        // php made the stream before the connect failed
+        ctx.vm.skipResourceId();
+        try user_streams.logError(ctx, options, "{s}", .{socketError(err).message});
+        return null;
+    };
+    return try endpointStream(ctx, sock, endpoint, true, null);
+}
+
 fn defaultSocketTimeout(ctx: *NativeContext) f64 {
     const v = ctx.vm.ini_settings.get("default_socket_timeout") orelse return 60;
     return std.fmt.parseFloat(f64, v) catch 60;

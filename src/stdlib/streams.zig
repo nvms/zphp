@@ -16,6 +16,7 @@ const NativeContext = vm_mod.NativeContext;
 const fs = @import("filesystem.zig");
 const filters = @import("stream_filters.zig");
 const user_streams = @import("user_streams.zig");
+const http = @import("http_wrapper.zig");
 
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
@@ -167,6 +168,38 @@ pub fn release(obj: *PhpObject) void {
     obj.native = .{};
 }
 
+// --- notifications (php_stream_notify_*) --------------------------------------
+
+fn contextOf(obj: *PhpObject) ?*PhpObject {
+    const c = obj.get("__context");
+    return if (c == .resource) c.resource else null;
+}
+
+// php_stream_notify_progress_init: the notifier starts counting
+pub fn progressInit(ctx: *NativeContext, context: ?*PhpObject, max: i64) RuntimeError!void {
+    const c = context orelse return;
+    if (c.get("notification") == .null) return;
+    try c.set(ctx.allocator, "__progress", .{ .int = 0 });
+    try c.set(ctx.allocator, "__progress_max", .{ .int = max });
+    try http.notify(ctx, c, http.NOTIFY_PROGRESS, 0, null, 0, 0, max);
+}
+
+// php_stream_notify_progress_increment, for a counting notifier
+pub fn progressIncrement(ctx: *NativeContext, context: ?*PhpObject, n: i64) RuntimeError!void {
+    const c = context orelse return;
+    const sofar = c.get("__progress");
+    if (sofar != .int) return;
+    const now = sofar.int + n;
+    try c.set(ctx.allocator, "__progress", .{ .int = now });
+    try http.notify(ctx, c, http.NOTIFY_PROGRESS, 0, null, 0, now, Value.toInt(c.get("__progress_max")));
+}
+
+fn notifyCompleted(ctx: *NativeContext, obj: *PhpObject) RuntimeError!void {
+    const c = contextOf(obj) orelse return;
+    if (c.get("notification") == .null) return;
+    try http.notify(ctx, c, http.NOTIFY_COMPLETED, 0, null, 0, Value.toInt(c.get("__progress")), Value.toInt(c.get("__progress_max")));
+}
+
 // --- raw operations ---------------------------------------------------------
 
 pub const Backend = union(enum) {
@@ -224,6 +257,7 @@ pub fn rawRead(ctx: *NativeContext, obj: *PhpObject, s: *Stream, dest: []u8) Run
                 return -1;
             };
             if (n == 0) s.eof = true;
+            if (io.socket and n > 0) try progressIncrement(ctx, contextOf(obj), @intCast(n));
             return @intCast(n);
         },
         .accumulate, .none => return -1,
@@ -339,7 +373,10 @@ fn appendToReadBuffer(s: *Stream, bytes: []const u8) RuntimeError!void {
 
 // _php_stream_fill_read_buffer: false on failure
 pub fn fillReadBuffer(ctx: *NativeContext, obj: *PhpObject, s: *Stream, size: usize) RuntimeError!bool {
-    return fillReadBufferInner(ctx, obj, s, size);
+    const old_eof = s.eof;
+    const ok = try fillReadBufferInner(ctx, obj, s, size);
+    if (old_eof != s.eof) try notifyCompleted(ctx, obj);
+    return ok;
 }
 
 fn fillReadBufferInner(ctx: *NativeContext, obj: *PhpObject, s: *Stream, size: usize) RuntimeError!bool {
