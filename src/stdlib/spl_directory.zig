@@ -287,6 +287,10 @@ fn this(ctx: *NativeContext) RuntimeError!*PhpObject {
 fn internalCall(ctx: *NativeContext, comptime func: []const u8, args: []const Value) RuntimeError!Value {
     if (sic.pending(ctx)) return .undef;
     const native = ctx.vm.native_fns.get(func) orelse unreachable;
+    // the function names itself in its warnings, as when php code calls it
+    const saved_name = ctx.call_name;
+    ctx.call_name = func;
+    defer ctx.call_name = saved_name;
     const r = native.call(ctx, args) catch |err| {
         if (sic.pending(ctx)) return .undef;
         return err;
@@ -1740,6 +1744,7 @@ fn sfoFtruncate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
 
 // php_stream_truncate_supported: plain files and memory streams
 fn truncatable(stream: *PhpObject) bool {
+    if (@import("streams.zig").memoryOf(stream) != null) return true;
     const fd = stream.get("__fd");
     if (fd != .int) return false;
     if (fd.int <= 2 and stream.get("__path") != .string) return false;

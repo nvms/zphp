@@ -25,6 +25,7 @@ pub fn register(map: *@import("../runtime/vm.zig").NativeTable, allocator: std.m
         @import("array_sort.zig").entries,
         @import("json.zig").entries,
         @import("filesystem.zig").entries,
+        @import("stream_filters.zig").entries,
         @import("http.zig").entries,
         @import("output_control.zig").entries,
         @import("system.zig").entries,
@@ -79,6 +80,9 @@ test {
     _ = @import("array_sort.zig");
     _ = @import("json.zig");
     _ = @import("filesystem.zig");
+    _ = @import("streams.zig");
+    _ = @import("stream_filters.zig");
+    _ = @import("user_streams.zig");
     _ = @import("http.zig");
     _ = @import("system.zig");
     _ = @import("pcre.zig");

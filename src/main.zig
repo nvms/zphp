@@ -438,6 +438,13 @@ fn loadFile(path: []const u8, allocator: std.mem.Allocator, vm: *@import("runtim
             allocator.free(payload);
             return null;
         };
+    } else if (@import("stdlib/filesystem.zig").includeThroughStream(vm, path)) {
+        // php://filter and user wrappers: the source is what the stream reads
+        source = @import("stdlib/filesystem.zig").readIncludeSource(vm, path) orelse return null;
+        abs_path = allocator.dupe(u8, path) catch {
+            allocator.free(source);
+            return null;
+        };
     } else if (bundledEntry(path)) |entry| {
         if (entry.bytecode.len > 0) return loadBundledBytecode(allocator, entry);
         source = allocator.dupe(u8, entry.source) catch return null;
@@ -748,6 +755,8 @@ fn runShutdown(allocator: std.mem.Allocator, vm: *VM) !bool {
             failed = true;
         }
     };
+    // and the streams still open are closed, flushing their write filters
+    @import("stdlib/streams.zig").closeAllAtShutdown(vm);
     return failed;
 }
 

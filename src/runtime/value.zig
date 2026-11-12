@@ -1014,6 +1014,12 @@ pub const NativeHandle = struct {
         // a Closure: ptr and aux are the instance name the vm keys the
         // closure's function, captures and statics by
         closure,
+        // a stream resource's php_stream state (streams.zig)
+        stream,
+        // a stream filter resource, a user filter's brigade and bucket
+        stream_filter,
+        stream_brigade,
+        stream_bucket,
         _,
     };
 
@@ -1417,6 +1423,9 @@ const resource_kinds = .{
     .{ "DirectoryHandle", "stream" },
     .{ "StreamContext", "stream-context" },
     .{ "ProcessResource", "process" },
+    .{ "StreamFilter", "stream filter" },
+    .{ "StreamBrigade", "userfilter.bucket brigade" },
+    .{ "StreamBucketResource", "userfilter.bucket" },
 };
 
 // a closed resource reports "Unknown", as php does once it is freed

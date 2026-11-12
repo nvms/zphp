@@ -9,6 +9,9 @@ const PhpObject = @import("../runtime/value.zig").PhpObject;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 const filesystem = @import("filesystem.zig");
+const streams = @import("streams.zig");
+const user_streams = @import("user_streams.zig");
+const value_mod = @import("../runtime/value.zig");
 
 pub const entries = .{
     .{ "gethostbyname", native_gethostbyname },
@@ -63,6 +66,7 @@ const poll_events = [_]i16{ sys.POLL.IN, sys.POLL.OUT, sys.POLL.PRI };
 // cannot wait on, so it is checked by hand
 const Watched = struct {
     slot: u8,
+    key: PhpArray.Key,
     val: Value,
     fd: i64,
     poll_index: ?usize,
@@ -72,63 +76,135 @@ const Watched = struct {
 const WatchList = std.ArrayListUnmanaged(Watched);
 const PollList = std.ArrayListUnmanaged(sys.pollfd);
 
-// stream_select(&$read, &$write, &$except, ?int $seconds, int $microseconds = 0): int|false
+// stream_select(&$read, &$write, &$except, ?int $seconds, ?int $microseconds = null): int|false
 // waits on the streams in each (by-ref) array and rewrites each array to the
-// ready subset, returning the number ready (false on error). null $seconds blocks
+// ready subset, keys kept, returning the number ready (false on error). null
+// $seconds blocks. a read stream with data in its buffer is ready at once
 fn native_stream_select(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     var watched: WatchList = .empty;
     defer watched.deinit(ctx.allocator);
     var pollfds: PollList = .empty;
     defer pollfds.deinit(ctx.allocator);
 
-    const total_streams = try watchStreams(ctx, args, &watched, &pollfds);
-    if (total_streams == 0) {
+    const sets = try watchStreams(ctx, args, &watched, &pollfds);
+    if (sets == 0) {
         try ctx.vm.setPendingException("ValueError", "No stream arrays were passed");
         return error.RuntimeError;
     }
 
-    const block = args.len < 4 or args[3] == .null;
-    const sec: i64 = if (!block) Value.toInt(args[3]) else 0;
-    const usec: i64 = if (args.len > 4) Value.toInt(args[4]) else 0;
-    const timeout_ms: i32 = if (block) -1 else @intCast(@max(0, sec * 1000 + @divTrunc(usec, 1000)));
+    const sec_null = args.len < 4 or args[3] == .null;
+    const usec_null = args.len < 5 or args[4] == .null;
+    const sec: i64 = if (!sec_null) Value.toInt(args[3]) else 0;
+    const usec: i64 = if (!usec_null) Value.toInt(args[4]) else 0;
+    if (sec_null and !usec_null and usec != 0) {
+        try ctx.vm.setPendingException("ValueError", "stream_select(): Argument #5 ($microseconds) must be null when argument #4 ($seconds) is null");
+        return error.RuntimeError;
+    }
+    if (!sec_null) {
+        if (sec < 0) {
+            try ctx.vm.setPendingException("ValueError", "stream_select(): Argument #4 ($seconds) must be greater than or equal to 0");
+            return error.RuntimeError;
+        } else if (usec < 0) {
+            try ctx.vm.setPendingException("ValueError", "stream_select(): Argument #5 ($microseconds) must be greater than or equal to 0");
+            return error.RuntimeError;
+        }
+    }
 
+    // read streams with buffered data are ready without waiting
+    if (args.len > 0 and args[0] == .array) {
+        const ready = try ctx.createArray();
+        var count: i64 = 0;
+        for (args[0].array.entries.items) |entry| {
+            const v = if (entry.ref) |r| r.* else entry.value;
+            if (v != .resource or !std.mem.eql(u8, v.resource.class_name, "FileHandle")) continue;
+            const st = streams.get(v.resource) orelse continue;
+            if (st.buffered() == 0) continue;
+            try ready.set(ctx.allocator, entry.key, v);
+            count += 1;
+        }
+        if (count > 0) {
+            ctx.setCallerVar(0, args.len, .{ .array = ready });
+            var slot: usize = 1;
+            while (slot < 3) : (slot += 1) {
+                if (slot < args.len and args[slot] == .array) ctx.setCallerVar(slot, args.len, .{ .array = try ctx.createArray() });
+            }
+            return NativeResult.scalar(.{ .int = count });
+        }
+    }
+
+    const timeout_ms: i32 = if (sec_null) -1 else @intCast(@min(std.math.maxInt(i32), @max(0, sec *| 1000 +| @divTrunc(usec, 1000))));
+    // what the script printed is out before it waits, as php's cli has it
+    if (timeout_ms != 0) ctx.vm.flushOutputToStdout();
     awaitReady(watched.items, pollfds.items, timeout_ms) catch return NativeResult.scalar(.{ .bool = false });
 
-    var out = [_]?*PhpArray{ null, null, null };
     var count: i64 = 0;
-    for (watched.items) |w| {
-        if (!w.ready) continue;
-        if (out[w.slot] == null) out[w.slot] = try ctx.createArray();
-        try out[w.slot].?.append(ctx.allocator, w.val);
-        count += 1;
-    }
     var slot: usize = 0;
     while (slot < 3) : (slot += 1) {
         if (slot >= args.len or args[slot] != .array) continue;
-        const arr = out[slot] orelse try ctx.createArray();
+        const arr = try ctx.createArray();
+        for (watched.items) |w| {
+            if (w.slot != slot) continue;
+            // php casts each stream again as it builds the result
+            if (try selectDescriptor(ctx, w.val.resource, false) == null) continue;
+            if (!w.ready) continue;
+            try arr.set(ctx.allocator, w.key, w.val);
+            count += 1;
+        }
         ctx.setCallerVar(slot, args.len, .{ .array = arr });
     }
     return NativeResult.scalar(.{ .int = count });
 }
 
+// php_stream_cast(PHP_STREAM_AS_FD_FOR_SELECT): the descriptor select waits
+// on, through a user stream's stream_cast; php's warning for a stream that
+// has none
+pub fn selectDescriptor(ctx: *NativeContext, obj: *PhpObject, report: bool) RuntimeError!?i64 {
+    if (!std.mem.eql(u8, obj.class_name, "FileHandle") or value_mod.resourceClosed(obj)) return null;
+    const st = streams.get(obj);
+    if (st) |s_| if (s_.readfilters.head != null or s_.writefilters.head != null) {
+        try filesystem.warnDocref(ctx, "Cannot cast a filtered stream on this system", .{});
+        return null;
+    };
+    if (filesystem.fileHandleWrapper(obj)) |w| {
+        if (try user_streams.cast(ctx, obj, w, user_streams.CAST_FOR_SELECT, true)) |inner| {
+            if (try selectDescriptor(ctx, inner, report)) |fd| return fd;
+        }
+        try filesystem.warnDocref(ctx, "Cannot represent a stream of type user-space as a select()able descriptor", .{});
+        return null;
+    }
+    if (streams.memoryOf(obj) != null) {
+        const path = obj.get("__path");
+        const label: []const u8 = if (path == .string and std.ascii.startsWithIgnoreCase(path.string.bytes(), "php://temp")) "TEMP" else if (path == .string and std.ascii.startsWithIgnoreCase(path.string.bytes(), "php://memory")) "MEMORY" else "RFC2397";
+        try filesystem.warnDocref(ctx, "Cannot represent a stream of type {s} as a select()able descriptor", .{label});
+        return null;
+    }
+    return objectFd(obj);
+}
+
+// the streams of each set with their descriptors; the count of sets that
+// had at least one
 fn watchStreams(ctx: *NativeContext, args: []const Value, watched: *WatchList, pollfds: *PollList) !usize {
-    var total: usize = 0;
+    var sets: usize = 0;
     var slot: usize = 0;
     while (slot < 3) : (slot += 1) {
         if (slot >= args.len or args[slot] != .array) continue;
+        var any = false;
         for (args[slot].array.entries.items) |entry| {
-            total += 1;
-            const fd = streamFd(entry.value) orelse continue;
+            const v = if (entry.ref) |r| r.* else entry.value;
+            if (v != .resource) continue;
+            const fd = (try selectDescriptor(ctx, v.resource, true)) orelse continue;
+            any = true;
             var poll_index: ?usize = null;
-            if (!platform.is_windows or isNetStream(entry.value)) {
+            if (!platform.is_windows or isNetStream(v)) {
                 const sock = platform.socketFromInt(fd) orelse continue;
                 poll_index = pollfds.items.len;
                 try pollfds.append(ctx.allocator, .{ .fd = sock, .events = poll_events[slot], .revents = 0 });
             }
-            try watched.append(ctx.allocator, .{ .slot = @intCast(slot), .val = entry.value, .fd = fd, .poll_index = poll_index });
+            try watched.append(ctx.allocator, .{ .slot = @intCast(slot), .key = entry.key, .val = v, .fd = fd, .poll_index = poll_index });
         }
+        if (any) sets += 1;
     }
-    return total;
+    return sets;
 }
 
 fn hasHandles(watched: []const Watched) bool {
@@ -681,6 +757,7 @@ fn native_stream_socket_accept(ctx: *NativeContext, args: []const Value) Runtime
     const listener = try filesystem.streamArg(ctx, args, .{ .func = "stream_socket_accept", .param = "socket" });
     const server = platform.socketFromInt(objectFd(listener) orelse return NativeResult.scalar(.{ .bool = false })) orelse return NativeResult.scalar(.{ .bool = false });
     var fds = [_]sys.pollfd{.{ .fd = server, .events = sys.POLL.IN, .revents = 0 }};
+    ctx.vm.flushOutputToStdout();
     const ready = sys.poll(&fds, timeoutMs(ctx, if (args.len > 1) args[1] else null) orelse -1) catch 0;
     if (ready == 0) {
         try ctx.vm.emitWarning("stream_socket_accept(): Accept failed: " ++ comptime socketError(error.Timeout).message);

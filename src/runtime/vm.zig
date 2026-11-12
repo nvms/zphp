@@ -355,6 +355,12 @@ pub const AttributeDef = struct {
     arg_names: []const ?[]const u8 = &.{},
 };
 
+pub const StreamWrapperEntry = struct {
+    // the user class, null for a builtin wrapper
+    class: ?[]const u8 = null,
+    is_url: bool = false,
+};
+
 pub const ClassDef = struct {
     name: []const u8,
     methods: class_names.MethodMap(MethodInfo) = .{},
@@ -924,10 +930,13 @@ pub const VM = struct {
     // canonical directory paths keyed by the spelling a require used, so a
     // file load costs one lstat instead of a realpath per file
     realdir_cache: std.StringHashMapUnmanaged([]const u8) = .{},
-    // protocols whose builtin stream wrapper has been disabled via stream_wrapper_unregister
-    stream_wrappers_unregistered: std.StringHashMapUnmanaged(void) = .{},
-    // protocol -> user class name registered via stream_wrapper_register
-    stream_wrappers_user: std.StringHashMapUnmanaged([]const u8) = .{},
+    // the url wrappers in php's registration order: builtins (class null)
+    // and user classes from stream_wrapper_register; filled on first use
+    stream_wrappers: std.StringArrayHashMapUnmanaged(StreamWrapperEntry) = .{},
+    stream_wrappers_ready: bool = false,
+    // filter name -> user filter class registered via stream_filter_register,
+    // in registration order (stream_get_filters lists them)
+    stream_filters_user: std.StringArrayHashMapUnmanaged([]const u8) = .{},
     compile_results: std.ArrayListUnmanaged(*CompileResult) = .empty,
     error_msg: ?[]const u8 = null,
     exit_requested: bool = false,
@@ -2113,6 +2122,11 @@ pub const VM = struct {
         while (ii.next()) |k| try vm.builtin_interfaces.put(allocator, k.*, {});
         vm.builtins_recorded = true;
         vm.applyConfiguredMemoryLimit(true);
+        // php_module_startup's check of the configured directives
+        if (@import("../ini_config.zig").get("allow_url_include")) |v| {
+            if (!(v.len == 0 or std.mem.eql(u8, v, "0") or std.ascii.eqlIgnoreCase(v, "off") or std.ascii.eqlIgnoreCase(v, "false") or std.ascii.eqlIgnoreCase(v, "no")))
+                vm.raiseErrorAt(E_DEPRECATED, "Directive 'allow_url_include' is deprecated", .{ .file = "Unknown", .line = 0 }) catch {};
+        }
         account.rebase();
     }
 
@@ -2133,6 +2147,7 @@ pub const VM = struct {
         try @import("../stdlib/pdo.zig").register(vm, allocator);
         try @import("../stdlib/websocket.zig").register(vm, allocator);
         try @import("../stdlib/filesystem.zig").register(vm, allocator);
+        try @import("../stdlib/stream_filters.zig").register(vm, allocator);
         try @import("../stdlib/reflection.zig").register(vm, allocator);
         try @import("../stdlib/curl.zig").register(vm, allocator);
         try @import("../stdlib/phar_class.zig").register(vm, allocator);
@@ -2743,6 +2758,24 @@ pub const VM = struct {
         try c.put(a, "SOCK_RAW", .{ .int = 3 });
         try c.put(a, "SOL_SOCKET", .{ .int = if (@import("builtin").os.tag == .macos) @as(i64, 0xffff) else 1 });
         try c.put(a, "STREAM_CLIENT_CONNECT", .{ .int = 4 });
+        inline for (.{
+            .{ "STREAM_FILTER_READ", 1 },          .{ "STREAM_FILTER_WRITE", 2 },        .{ "STREAM_FILTER_ALL", 3 },
+            .{ "PSFS_PASS_ON", 2 },                .{ "PSFS_FEED_ME", 1 },               .{ "PSFS_ERR_FATAL", 0 },
+            .{ "PSFS_FLAG_NORMAL", 0 },            .{ "PSFS_FLAG_FLUSH_INC", 1 },        .{ "PSFS_FLAG_FLUSH_CLOSE", 2 },
+            .{ "STREAM_USE_PATH", 1 },             .{ "STREAM_IGNORE_URL", 2 },          .{ "STREAM_REPORT_ERRORS", 8 },
+            .{ "STREAM_MUST_SEEK", 16 },           .{ "STREAM_URL_STAT_LINK", 1 },       .{ "STREAM_URL_STAT_QUIET", 2 },
+            .{ "STREAM_MKDIR_RECURSIVE", 1 },      .{ "STREAM_IS_URL", 1 },              .{ "STREAM_OPTION_BLOCKING", 1 },
+            .{ "STREAM_OPTION_READ_TIMEOUT", 4 },  .{ "STREAM_OPTION_READ_BUFFER", 2 },  .{ "STREAM_OPTION_WRITE_BUFFER", 3 },
+            .{ "STREAM_BUFFER_NONE", 0 },          .{ "STREAM_BUFFER_LINE", 1 },         .{ "STREAM_BUFFER_FULL", 2 },
+            .{ "STREAM_CAST_AS_STREAM", 0 },       .{ "STREAM_CAST_FOR_SELECT", 3 },     .{ "STREAM_META_TOUCH", 1 },
+            .{ "STREAM_META_OWNER", 3 },           .{ "STREAM_META_OWNER_NAME", 2 },     .{ "STREAM_META_GROUP", 5 },
+            .{ "STREAM_META_GROUP_NAME", 4 },      .{ "STREAM_META_ACCESS", 6 },
+            .{ "STREAM_NOTIFY_CONNECT", 2 },       .{ "STREAM_NOTIFY_AUTH_REQUIRED", 3 }, .{ "STREAM_NOTIFY_AUTH_RESULT", 10 },
+            .{ "STREAM_NOTIFY_MIME_TYPE_IS", 4 },  .{ "STREAM_NOTIFY_FILE_SIZE_IS", 5 }, .{ "STREAM_NOTIFY_REDIRECTED", 6 },
+            .{ "STREAM_NOTIFY_PROGRESS", 7 },      .{ "STREAM_NOTIFY_FAILURE", 9 },      .{ "STREAM_NOTIFY_COMPLETED", 8 },
+            .{ "STREAM_NOTIFY_RESOLVE", 1 },       .{ "STREAM_NOTIFY_SEVERITY_INFO", 0 }, .{ "STREAM_NOTIFY_SEVERITY_WARN", 1 },
+            .{ "STREAM_NOTIFY_SEVERITY_ERR", 2 },
+        }) |k| if (!c.contains(k[0])) try c.put(a, k[0], .{ .int = k[1] });
         try c.put(a, "STREAM_CLIENT_PERSISTENT", .{ .int = 1 });
         try c.put(a, "STREAM_CLIENT_ASYNC_CONNECT", .{ .int = 2 });
         try c.put(a, "STREAM_SERVER_BIND", .{ .int = 4 });
@@ -3334,8 +3367,8 @@ pub const VM = struct {
         self.clearRealDirCache();
         self.realdir_cache.deinit(self.allocator);
         self.clearStreamWrappers();
-        self.stream_wrappers_unregistered.deinit(self.allocator);
-        self.stream_wrappers_user.deinit(self.allocator);
+        self.stream_wrappers.deinit(self.allocator);
+        self.stream_filters_user.deinit(self.allocator);
         if (self.serve_mode) {
             for (self.compile_results.items) |r| {
                 var result = r;
@@ -8809,10 +8842,12 @@ pub const VM = struct {
                             const from_cache = self.serve_mode and self.serve_compile_cache.contains(path);
                             const result: ?*CompileResult = if (from_cache)
                                 self.serve_compile_cache.get(path).?
-                            else if (self.file_loader) |loader|
-                                loader(path, self.allocator, self)
-                            else
-                                null;
+                            else if (self.file_loader) |loader| blk: {
+                                const fs_mod = @import("../stdlib/filesystem.zig");
+                                fs_mod.current_include = @tagName(kind);
+                                defer fs_mod.current_include = null;
+                                break :blk loader(path, self.allocator, self);
+                            } else null;
 
                             if (result) |r| {
                                 if (self.serve_mode and !from_cache) {
@@ -8947,6 +8982,14 @@ pub const VM = struct {
                                 const raised = self.raiseCompileFatal(compile_error.message, compile_error.at);
                                 if (!compile_error.trace) if (self.pending_exception) |exc| if (exc == .object) try exc.object.set(self.allocator, "__no_trace", .{ .bool = true });
                                 return raised;
+                            } else if (self.pending_exception != null) {
+                                // the stream that was to supply the source threw
+                                if (try self.resumeRaised()) continue;
+                                return error.RuntimeError;
+                            } else if (@import("../stdlib/filesystem.zig").includeThroughStream(self, path)) {
+                                // the stream's own warnings said why
+                                self.includeFailedOpening(kind, path) catch if (try self.resumeRaised()) continue;
+                                self.push(.{ .bool = false });
                             } else {
                                 self.includeNotOpened(kind, path, "Permission denied") catch if (try self.resumeRaised()) continue;
                                 self.push(.{ .bool = false });
@@ -13785,6 +13828,19 @@ pub const VM = struct {
         return self.includeNotOpenedAs(kind, path, path, reason);
     }
 
+    // the include's own failure after the stream reported why it failed
+    fn includeFailedOpening(self: *VM, kind: IncludeKind, path: []const u8) RuntimeError!void {
+        if (kind.required()) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Failed opening required '{s}' (include_path='{s}')", .{ path, includes.includePath(self) });
+            defer self.allocator.free(msg);
+            try self.setPendingException("Error", msg);
+            return error.RuntimeError;
+        }
+        const msg = try std.fmt.allocPrint(self.allocator, "{s}(): Failed opening '{s}' for inclusion (include_path='{s}')", .{ @tagName(kind), path, includes.includePath(self) });
+        defer self.allocator.free(msg);
+        try self.emitWarning(msg);
+    }
+
     // `opened` is the path the open failed on, which the stream warning names
     fn includeNotOpenedAs(self: *VM, kind: IncludeKind, path: []const u8, opened: []const u8, reason: []const u8) RuntimeError!void {
         const nul = std.mem.indexOfScalar(u8, path, 0);
@@ -14550,7 +14606,7 @@ pub const VM = struct {
         };
     }
 
-    fn iniFlagOn(self: *const VM, name: []const u8, default: []const u8) bool {
+    pub fn iniFlagOn(self: *const VM, name: []const u8, default: []const u8) bool {
         const val = self.ini_settings.get(name) orelse @import("../ini_config.zig").get(name) orelse default;
         if (val.len == 0) return false;
         if (std.mem.eql(u8, val, "0")) return false;
@@ -16141,15 +16197,18 @@ pub const VM = struct {
     }
 
     fn clearStreamWrappers(self: *VM) void {
-        var user = self.stream_wrappers_user.iterator();
-        while (user.next()) |e| {
-            self.allocator.free(e.key_ptr.*);
-            self.allocator.free(e.value_ptr.*);
+        @import("../stdlib/filesystem.zig").resetStreamState();
+        for (self.stream_wrappers.keys(), self.stream_wrappers.values()) |k, v| {
+            self.allocator.free(k);
+            if (v.class) |c| self.allocator.free(c);
         }
-        self.stream_wrappers_user.clearRetainingCapacity();
-        var unregistered = self.stream_wrappers_unregistered.keyIterator();
-        while (unregistered.next()) |k| self.allocator.free(k.*);
-        self.stream_wrappers_unregistered.clearRetainingCapacity();
+        self.stream_wrappers.clearRetainingCapacity();
+        self.stream_wrappers_ready = false;
+        for (self.stream_filters_user.keys(), self.stream_filters_user.values()) |k, v| {
+            self.allocator.free(k);
+            self.allocator.free(v);
+        }
+        self.stream_filters_user.clearRetainingCapacity();
     }
 
     fn clearPharAliases(self: *VM) void {
@@ -24029,7 +24088,7 @@ pub const VM = struct {
 
     // i_zend_check_property_type: the value as the property would store it,
     // or null when the type refuses it
-    fn propertyTypeAccepts(self: *VM, val: Value, type_str: []const u8, decl_class: []const u8, strict: bool) RuntimeError!?Value {
+    pub fn propertyTypeAccepts(self: *VM, val: Value, type_str: []const u8, decl_class: []const u8, strict: bool) RuntimeError!?Value {
         const shape = php_types.shape(type_str);
         if (self.typeHoldsExactly(val, type_str, shape, decl_class)) return val;
         if (self.representationHolds(val, type_str, shape, decl_class)) return val;
@@ -26566,6 +26625,7 @@ pub const VM = struct {
         // collapse the object tree: release the objects this object's
         // property slots held. runs after __destruct (PHP tears
         // properties down after)
+        if (obj.resource and obj.native.kind == .stream) @import("../stdlib/streams.zig").destroyed(self, obj);
         const reusable = self.releaseNativeState(obj);
         self.releaseObjectProperties(obj);
         self.release_log = outer_log;

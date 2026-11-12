@@ -8,6 +8,29 @@ const bundle = @import("../bundle.zig");
 pub const default_include_path = if (platform.is_windows) ".;C:\\php\\pear" else ".:/usr/local/lib/php";
 const list_separator: u8 = if (platform.is_windows) ';' else ':';
 
+// the entries of an include_path as php_resolve_path walks them: a stream
+// wrapper's url ("test://x") keeps the colon after its scheme
+const PathEntries = struct {
+    rest: ?[]const u8,
+
+    fn next(self: *PathEntries) ?[]const u8 {
+        const all = self.rest orelse return null;
+        var p: usize = 0;
+        while (p < all.len and (std.ascii.isAlphanumeric(all[p]) or all[p] == '+' or all[p] == '-' or all[p] == '.')) p += 1;
+        var from: usize = 0;
+        if (p > 1 and p + 2 < all.len and all[p] == ':' and all[p + 1] == '/' and all[p + 2] == '/') {
+            // .:// or ..:// is not a stream wrapper
+            if (!(p == 2 and all[0] == '.' and all[1] == '.')) from = p + 3;
+        }
+        if (std.mem.indexOfScalarPos(u8, all, from, list_separator)) |end| {
+            self.rest = all[end + 1 ..];
+            return all[0..end];
+        }
+        self.rest = null;
+        return all;
+    }
+};
+
 pub fn includePath(vm: *const VM) []const u8 {
     return vm.ini_settings.get("include_path") orelse default_include_path;
 }
@@ -21,9 +44,17 @@ pub fn resolve(vm: *VM, path: []const u8) error{OutOfMemory}!?[]const u8 {
     if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null) return null;
     if (hasScheme(path)) return try intern(vm, path);
     if (namesOwnLocation(path)) return canonical(vm, path);
-    var entries = std.mem.splitScalar(u8, includePath(vm), list_separator);
+    var entries = PathEntries{ .rest = includePath(vm) };
     while (entries.next()) |entry| {
-        if (entry.len == 0 or hasScheme(entry)) continue;
+        if (entry.len == 0) continue;
+        if (hasScheme(entry)) {
+            // a stream wrapper's entry: the wrapper's url_stat says whether
+            // the file is there
+            const trypath = try std.fmt.allocPrint(vm.allocator, "{s}/{s}", .{ entry, path });
+            defer vm.allocator.free(trypath);
+            if (@import("../stdlib/filesystem.zig").wrapperUrlExists(vm, trypath)) return try intern(vm, trypath);
+            continue;
+        }
         if (try joined(vm, entry, path)) |found| return found;
     }
     const running = std.fs.path.dirname(vm.frameFile(vm.frame_count -| 1)) orelse return null;

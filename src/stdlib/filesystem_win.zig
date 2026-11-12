@@ -49,6 +49,7 @@ fn native_is_link(_: *NativeContext, args: []const Value) RuntimeError!NativeRes
 fn native_flock(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = try filesystem.streamArg(ctx, args, .{ .func = "flock" });
     const operation = try filesystem.flockOperation(ctx, args);
+    if (try filesystem.userLock(ctx, obj, operation.kind, operation.non_block)) |r| return r;
     const fd = obj.get("__fd");
     if (fd != .int) return NativeResult.scalar(.{ .bool = false });
     const file = @import("../platform.zig").fileFromFd(fd.int) orelse return NativeResult.scalar(.{ .bool = false });
@@ -76,6 +77,7 @@ fn native_flock(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
 fn native_stream_set_blocking(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = try filesystem.streamArg(ctx, args, .{ .func = "stream_set_blocking" });
     if (args.len < 2) return NativeResult.scalar(.{ .bool = false });
+    if (try filesystem.userSetBlocking(ctx, obj, args[1].isTruthy())) |r| return r;
     const net = obj.get("__net");
     if (net == .bool and net.bool) {
         const fd = obj.get("__fd");
