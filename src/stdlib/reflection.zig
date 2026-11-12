@@ -151,10 +151,15 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     // SensitiveParameterValue (PHP 8.2) - returned by debug_backtrace for
     // redacted sensitive params. simple value wrapper
-    var spv_def = ClassDef{ .name = "SensitiveParameterValue" };
+    // the value is internal state, so listings show none
+    var spv_def = ClassDef{ .name = "SensitiveParameterValue", .is_final = true, .no_dynamic_properties = true };
     try spv_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
     try spv_def.methods.put(a, "getValue", .{ .name = "getValue", .arity = 0 });
+    try spv_def.methods.put(a, "__debugInfo", .{ .name = "__debugInfo", .arity = 0 });
     try vm.classes.put(a, "SensitiveParameterValue", spv_def);
+    try vm.native_fns.put(a, "SensitiveParameterValue::__construct", spvConstruct);
+    try vm.native_fns.put(a, "SensitiveParameterValue::getValue", spvGetValue);
+    try vm.native_fns.put(a, "SensitiveParameterValue::__debugInfo", spvDebugInfo);
 
     var exc_def = ClassDef{ .name = "ReflectionException" };
     exc_def.parent = "Exception";
@@ -3596,6 +3601,25 @@ fn rpGetDefaultValueConstantName(ctx: *NativeContext, _: []const Value) RuntimeE
     const name = this.get("__default_const_name");
     if (name == .string and name.string.bytes().len > 0) return NativeResult.share(name);
     return NativeResult.scalar(.null);
+}
+
+fn spvConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (args.len == 0) {
+        try ctx.vm.setPendingException("ArgumentCountError", "SensitiveParameterValue::__construct() expects exactly 1 argument, 0 given");
+        return error.RuntimeError;
+    }
+    try this.set(ctx.allocator, "__value", args[0]);
+    return NativeResult.scalar(.null);
+}
+
+fn spvGetValue(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    return NativeResult.share(this.get("__value"));
+}
+
+fn spvDebugInfo(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.borrowed(.{ .array = try ctx.createArray() });
 }
 
 fn rpGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

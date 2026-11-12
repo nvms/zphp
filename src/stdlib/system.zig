@@ -1093,15 +1093,19 @@ fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bool, 
             if (frame.generator != null and frame.func != null) {
                 const func = frame.func.?;
                 const declared = if (func.is_variadic) func.params.len - 1 else func.params.len;
-                for (func.params[0..declared]) |pname| try args_arr.append(alloc, @TypeOf(vm.*).frameParamValue(frame, func, pname));
+                const sensitive = try vm.sensitiveParamMask(func);
+                for (func.params[0..declared], 0..) |pname, a| try args_arr.append(alloc, try vm.traceArgValue(@TypeOf(vm.*).frameParamValue(frame, func, pname), sensitive, a));
             } else if (vm.ic) |ic| {
                 const ac = ic.arg_counts[i];
                 if (ac != 0xFF) {
                     const offset: usize = ic.fga_offsets[i];
                     const arg_count: usize = ac;
+                    // #[\SensitiveParameter] arguments show redacted
+                    const sensitive: u64 = if (frame.func) |func| try vm.sensitiveParamMask(func) else 0;
+                    const variadic_at: usize = if (frame.func) |func| (if (func.is_variadic and func.params.len > 0) func.params.len - 1 else std.math.maxInt(usize)) else std.math.maxInt(usize);
                     if (offset + arg_count <= ic.fga_room.committed) {
                         for (0..arg_count) |a| {
-                            try args_arr.append(alloc, ic.fga_buf[offset + a]);
+                            try args_arr.append(alloc, try vm.traceArgValue(ic.fga_buf[offset + a], sensitive, @min(a, variadic_at)));
                         }
                     }
                 }

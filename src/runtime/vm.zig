@@ -682,6 +682,9 @@ pub const VM = struct {
     sp: usize = 0,
     functions: std.StringHashMapUnmanaged(*const ObjFunction) = .{},
     function_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
+    // per function, the parameters marked #[\SensitiveParameter] (bit i for
+    // parameter i), worked out when a trace first shows the function
+    sensitive_params: std.AutoHashMapUnmanaged(usize, u64) = .{},
     native_fns: NativeTable = .{},
     output: std.ArrayListUnmanaged(u8) = .empty,
     strings: std.ArrayListUnmanaged([]const u8) = .empty,
@@ -3194,6 +3197,7 @@ pub const VM = struct {
     }
 
     pub fn deinit(self: *VM) void {
+        self.sensitive_params.deinit(self.allocator);
         if (self.unwind_marker) |marker| {
             self.allocator.destroy(marker);
             self.unwind_marker = null;
@@ -3425,6 +3429,7 @@ pub const VM = struct {
     }
 
     pub fn reset(self: *VM) void {
+        self.sensitive_params.clearRetainingCapacity();
         @import("../stdlib/locale.zig").resetAfterRequest();
         if (self.ic) |ic| {
             for (ic.arg_stack[0..ic.arg_stack_room.committed]) |*source| self.releaseArgSource(source);
@@ -13210,16 +13215,55 @@ pub const VM = struct {
         const frame = &self.frames[frame_idx];
         const declared = if (f.is_variadic) f.params.len - 1 else f.params.len;
         const passed: ?usize = if (self.ic) |ic| (if (ic.arg_counts[frame_idx] == unknown_arg_count) null else ic.arg_counts[frame_idx]) else null;
-        for (f.params[0..@min(passed orelse declared, declared)]) |pname| try args.append(self.allocator, frameParamValue(frame, f, pname));
+        const sensitive = try self.sensitiveParamMask(f);
+        for (f.params[0..@min(passed orelse declared, declared)], 0..) |pname, i| try args.append(self.allocator, try self.traceArgValue(frameParamValue(frame, f, pname), sensitive, i));
         if (f.is_variadic) {
             const rest = frameParamValue(frame, f, f.params[declared]);
-            if (rest == .array) for (rest.array.entries.items) |e| try args.append(self.allocator, e.value);
+            if (rest == .array) for (rest.array.entries.items) |e| try args.append(self.allocator, try self.traceArgValue(e.value, sensitive, declared));
             return;
         }
         const count = passed orelse return;
         if (count <= declared) return;
         const saved = self.passedArgs(frame_idx, count) orelse return;
         for (saved[declared..]) |v| try args.append(self.allocator, v);
+    }
+
+    // zend_fetch_debug_backtrace: an argument of a #[\SensitiveParameter]
+    // parameter shows as a SensitiveParameterValue holding it
+    pub fn traceArgValue(self: *VM, v: Value, sensitive: u64, index: usize) !Value {
+        if (sensitive == 0 or index >= 64 or sensitive & (@as(u64, 1) << @intCast(index)) == 0) return v;
+        const obj = try self.allocUserObject("SensitiveParameterValue");
+        try self.initObjectProperties(obj, "SensitiveParameterValue");
+        try obj.set(self.allocator, "__value", v);
+        return .{ .object = obj };
+    }
+
+    pub fn sensitiveParamMask(self: *VM, f: *const ObjFunction) !u64 {
+        if (f.params.len == 0) return 0;
+        if (self.sensitive_params.get(@intFromPtr(f))) |mask| return mask;
+        var mask: u64 = 0;
+        const sep = std.mem.indexOf(u8, f.name, "::");
+        for (f.params, 0..) |raw, i| {
+            if (i >= 64) break;
+            const pname = if (raw.len > 0 and raw[0] == '$') raw[1..] else raw;
+            const attrs: ?[]const AttributeDef = blk: {
+                if (sep) |at| {
+                    var key_buf: [256]u8 = undefined;
+                    const key = std.fmt.bufPrint(&key_buf, "{s}:{s}", .{ f.name[at + 2 ..], pname }) catch break :blk null;
+                    if (self.classes.get(f.name[0..at])) |cls| if (cls.param_attributes.get(key)) |found| break :blk found;
+                }
+                const owner = if (f.trait_origin.len > 0) f.trait_origin else f.name;
+                const key = try bytecode.paramAttributesName(self.allocator, owner, pname);
+                defer self.allocator.free(key);
+                break :blk self.function_attributes.get(key);
+            };
+            for (attrs orelse continue) |attr| {
+                const name = if (attr.name.len > 0 and attr.name[0] == '\\') attr.name[1..] else attr.name;
+                if (std.ascii.eqlIgnoreCase(name, "SensitiveParameter")) mask |= @as(u64, 1) << @intCast(i);
+            }
+        }
+        try self.sensitive_params.put(self.allocator, @intFromPtr(f), mask);
+        return mask;
     }
 
     // the arguments saved for a frame's func_get_args, when they were
@@ -13407,7 +13451,8 @@ pub const VM = struct {
         const trace = try self.allocArray();
         const entry = try self.newTraceEntry(f, if (self.frame_count > 0 and !self.calledFromNative()) self.framePosition(self.frame_count - 1) else null);
         const entry_args = try self.traceArgs(entry);
-        for (args) |a| try entry_args.append(self.allocator, a);
+        const sensitive = try self.sensitiveParamMask(f);
+        for (args, 0..) |a, i| try entry_args.append(self.allocator, try self.traceArgValue(a, sensitive, @min(i, if (f.is_variadic and f.params.len > 0) f.params.len - 1 else i)));
         try trace.append(self.allocator, .{ .array = entry });
         if (old == .array) for (old.array.entries.items) |e| try trace.append(self.allocator, e.value);
         // an include the call is made from now has an entry from inside the

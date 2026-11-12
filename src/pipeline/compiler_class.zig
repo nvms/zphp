@@ -77,7 +77,8 @@ fn findAttrRangeForToken(attr_ranges: []const ast_mod.AttrRange, tokens: []const
         while (pos <= main_token) {
             if (pos == main_token) return ar;
             const tag = tokens[pos].tag;
-            if (isModifierToken(tag) or isTypeToken(tag)) {
+            // a by-reference or variadic parameter's `&` and `...`
+            if (isModifierToken(tag) or isTypeToken(tag) or tag == .amp or tag == .ellipsis) {
                 pos += 1;
                 continue;
             }
