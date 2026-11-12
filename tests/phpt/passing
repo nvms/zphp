@@ -6833,6 +6833,8 @@ ext/standard/tests/file/007_variation6.phpt
 ext/standard/tests/file/007_variation7.phpt
 ext/standard/tests/file/007_variation8.phpt
 ext/standard/tests/file/007_variation9.phpt
+ext/standard/tests/file/auto_detect_line_endings_1.phpt
+ext/standard/tests/file/auto_detect_line_endings_2.phpt
 ext/standard/tests/file/basename.phpt
 ext/standard/tests/file/basename_basic.phpt
 ext/standard/tests/file/basename_variation1.phpt
@@ -7163,6 +7165,7 @@ ext/standard/tests/file/fscanf_variation54.phpt
 ext/standard/tests/file/fscanf_variation6.phpt
 ext/standard/tests/file/fscanf_variation7.phpt
 ext/standard/tests/file/fscanf_variation8.phpt
+ext/standard/tests/file/fseek_dir_basic.phpt
 ext/standard/tests/file/fseek_ftell_rewind_basic1.phpt
 ext/standard/tests/file/fseek_ftell_rewind_basic2.phpt
 ext/standard/tests/file/fseek_ftell_rewind_error1.phpt
@@ -7200,6 +7203,7 @@ ext/standard/tests/file/fwrite_variation2.phpt
 ext/standard/tests/file/fwrite_variation3.phpt
 ext/standard/tests/file/fwrite_variation4.phpt
 ext/standard/tests/file/get_current_user.phpt
+ext/standard/tests/file/gh13136.phpt
 ext/standard/tests/file/gh15653.phpt
 ext/standard/tests/file/gh18212.phpt
 ext/standard/tests/file/gh9779.phpt
@@ -7316,15 +7320,18 @@ ext/standard/tests/file/rmdir_variation3.phpt
 ext/standard/tests/file/statcache-corruption.phpt
 ext/standard/tests/file/statpage.phpt
 ext/standard/tests/file/stream_001.phpt
+ext/standard/tests/file/stream_002.phpt
 ext/standard/tests/file/stream_copy_to_stream.phpt
 ext/standard/tests/file/stream_copy_to_stream_empty.phpt
 ext/standard/tests/file/stream_copy_to_stream_interleaved.phpt
 ext/standard/tests/file/stream_get_line.phpt
 ext/standard/tests/file/stream_rfc2397_001.phpt
+ext/standard/tests/file/stream_rfc2397_002.phpt
 ext/standard/tests/file/stream_rfc2397_003.phpt
 ext/standard/tests/file/stream_rfc2397_004.phpt
 ext/standard/tests/file/stream_rfc2397_005.phpt
 ext/standard/tests/file/stream_rfc2397_006.phpt
+ext/standard/tests/file/stream_rfc2397_007.phpt
 ext/standard/tests/file/stream_supports_lock.phpt
 ext/standard/tests/file/symlink.phpt
 ext/standard/tests/file/symlink_link_linkinfo_is_link_basic1.phpt
@@ -7904,6 +7911,7 @@ ext/standard/tests/network/inet_ipv6.phpt
 ext/standard/tests/network/ip_x86_64.phpt
 ext/standard/tests/network/setcookie_option_case_variant_leak.phpt
 ext/standard/tests/network/shutdown.phpt
+ext/standard/tests/network/socket_bug74429.phpt
 ext/standard/tests/network/tcp4loop.phpt
 ext/standard/tests/network/tcp6loop.phpt
 ext/standard/tests/network/unixloop.phpt
@@ -8068,6 +8076,7 @@ ext/standard/tests/serialize/unserialize_ref_to_overwritten_declared_prop.phpt
 ext/standard/tests/serialize/unserialize_subclasses.phpt
 ext/standard/tests/serialize/unserialize_uppercase_s.phpt
 ext/standard/tests/streams/bug40459.phpt
+ext/standard/tests/streams/bug44712.phpt
 ext/standard/tests/streams/bug44818.phpt
 ext/standard/tests/streams/bug46147.phpt
 ext/standard/tests/streams/bug46426.phpt
@@ -8091,13 +8100,20 @@ ext/standard/tests/streams/bug64770.phpt
 ext/standard/tests/streams/bug65483.phpt
 ext/standard/tests/streams/bug67626.phpt
 ext/standard/tests/streams/bug68948.phpt
+ext/standard/tests/streams/bug69521.phpt
 ext/standard/tests/streams/bug70362.phpt
 ext/standard/tests/streams/bug71245.phpt
+ext/standard/tests/streams/bug71323.phpt
+ext/standard/tests/streams/bug71884.phpt
 ext/standard/tests/streams/bug72075.phpt
 ext/standard/tests/streams/bug72221.phpt
 ext/standard/tests/streams/bug72534.phpt
 ext/standard/tests/streams/bug72853.phpt
+ext/standard/tests/streams/bug74556.phpt
+ext/standard/tests/streams/bug74951.phpt
 ext/standard/tests/streams/bug75031.phpt
+ext/standard/tests/streams/bug76136.phpt
+ext/standard/tests/streams/bug76857.phpt
 ext/standard/tests/streams/bug76859.phpt
 ext/standard/tests/streams/bug76943.phpt
 ext/standard/tests/streams/bug77069.phpt
@@ -8108,6 +8124,7 @@ ext/standard/tests/streams/bug78506.phpt
 ext/standard/tests/streams/bug78662.phpt
 ext/standard/tests/streams/bug78902.phpt
 ext/standard/tests/streams/bug79000.phpt
+ext/standard/tests/streams/bug79467.phpt
 ext/standard/tests/streams/bug79984.phpt
 ext/standard/tests/streams/bug81659.phpt
 ext/standard/tests/streams/eagain_is_not_an_error.phpt
@@ -8122,6 +8139,7 @@ ext/standard/tests/streams/gh17650.phpt
 ext/standard/tests/streams/gh19570.phpt
 ext/standard/tests/streams/gh19705.phpt
 ext/standard/tests/streams/gh8472.phpt
+ext/standard/tests/streams/ghsa-3cr5-j632-f35r.phpt
 ext/standard/tests/streams/nonblocking_stdin.phpt
 ext/standard/tests/streams/oom_stream_copy_to_stream_memory.phpt
 ext/standard/tests/streams/oom_stream_get_contents.phpt
@@ -8131,8 +8149,14 @@ ext/standard/tests/streams/proc_open_bug60120.phpt
 ext/standard/tests/streams/proc_open_bug64438.phpt
 ext/standard/tests/streams/proc_open_bug69900.phpt
 ext/standard/tests/streams/set_file_buffer.phpt
+ext/standard/tests/streams/stream_context_create_error.phpt
 ext/standard/tests/streams/stream_context_get_params_001.phpt
+ext/standard/tests/streams/stream_context_set_option_basic.phpt
+ext/standard/tests/streams/stream_context_set_option_error.phpt
 ext/standard/tests/streams/stream_context_set_options_basic.phpt
+ext/standard/tests/streams/stream_context_set_options_error.phpt
+ext/standard/tests/streams/stream_context_set_params_notification_error.phpt
+ext/standard/tests/streams/stream_context_set_params_notification_valid_then_invalid.phpt
 ext/standard/tests/streams/stream_copy_to_stream_socket.phpt
 ext/standard/tests/streams/stream_filter_register.phpt
 ext/standard/tests/streams/stream_get_contents_001.phpt
@@ -8153,6 +8177,7 @@ ext/standard/tests/streams/stream_get_meta_data_socket_variation3.phpt
 ext/standard/tests/streams/stream_get_meta_data_socket_variation4.phpt
 ext/standard/tests/streams/stream_get_transports.phpt
 ext/standard/tests/streams/stream_get_wrappers.phpt
+ext/standard/tests/streams/stream_is_local.phpt
 ext/standard/tests/streams/stream_multi_filters_close.phpt
 ext/standard/tests/streams/stream_read_object_return.phpt
 ext/standard/tests/streams/stream_resolve_include_path.phpt
@@ -8164,6 +8189,7 @@ ext/standard/tests/streams/stream_socket_get_name.phpt
 ext/standard/tests/streams/stream_socket_pair.phpt
 ext/standard/tests/streams/temp_stream_seek.phpt
 ext/standard/tests/streams/user_streams_consumed_bug.phpt
+ext/standard/tests/streams/user_streams_context_001.phpt
 ext/standard/tests/strings/004.phpt
 ext/standard/tests/strings/005.phpt
 ext/standard/tests/strings/add-and-stripcslashes.phpt
