@@ -294,6 +294,10 @@ pub const Compiler = struct {
     // set while compiling the variable of an isset, ??, or empty(): its read
     // doesn't warn when the variable holds nothing
     quiet_reads: bool = false,
+    // php deprecates reading $http_response_header in a function (or file)
+    // until something assigns it there; a parameter of that name counts
+    http_response_header_assigned: bool = false,
+    http_response_header_read: bool = false,
     loop_depth: u32 = 0,
     foreach_depth: u32 = 0,
     loop_is_foreach: [32]bool = @as([32]bool, @splat(false)),
@@ -1099,6 +1103,15 @@ pub const Compiler = struct {
             }
         }
 
+        if (std.mem.eql(u8, name, "$http_response_header") and !self.quiet_reads and !self.http_response_header_assigned) {
+            // a slot made before anything read or wrote it is a parameter
+            if (self.local_slots.contains(name) and !self.http_response_header_read) {
+                self.http_response_header_assigned = true;
+            } else {
+                try self.warn(node.main_token, 8192, "The predefined locally scoped $http_response_header variable is deprecated, call http_get_last_response_headers() instead", .{});
+            }
+        }
+        if (std.mem.eql(u8, name, "$http_response_header")) self.http_response_header_read = true;
         try self.emitGetVar(name);
     }
 
@@ -2009,6 +2022,10 @@ pub const Compiler = struct {
     }
 
     pub fn emitSetVar(self: *Compiler, name: []const u8) Error!void {
+        if (std.mem.eql(u8, name, "$http_response_header")) {
+            self.http_response_header_assigned = true;
+            self.http_response_header_read = true;
+        }
         if (isSuperglobal(name)) {
             try self.emitOp(.set_var);
             try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(name) }));
