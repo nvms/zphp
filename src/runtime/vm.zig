@@ -772,6 +772,8 @@ pub const VM = struct {
     // natives disable_functions removed: php code no longer sees them, but
     // internal code that calls one directly in php still can
     disabled_natives: std.StringHashMapUnmanaged(NativeTable.Native) = .{},
+    // a default stored as a bare global constant failed to resolve
+    bare_default_failed: bool = false,
     output: std.ArrayListUnmanaged(u8) = .empty,
     strings: std.ArrayListUnmanaged([]const u8) = .empty,
     // persistent_strings are heap-allocated keys whose lifetime must outlive
@@ -4793,6 +4795,7 @@ pub const VM = struct {
                         // not a silent null
                         const msg = try std.fmt.allocPrint(self.allocator, "Undefined constant \"{s}\"", .{name});
                         defer self.allocator.free(msg);
+                        if (bareDefaultRunning(self.currentFrame())) self.bare_default_failed = true;
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
                     } else if (name.len > 2 and name[0] == '$' and name[1] == '_') {
@@ -4804,6 +4807,7 @@ pub const VM = struct {
                         // nor a constant - undefined constant, fatal in PHP 8
                         const msg = try std.fmt.allocPrint(self.allocator, "Undefined constant \"{s}\"", .{name});
                         defer self.allocator.free(msg);
+                        if (bareDefaultRunning(self.currentFrame())) self.bare_default_failed = true;
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
                     } else {
@@ -14869,7 +14873,10 @@ pub const VM = struct {
         const evaluating = self.frame_count;
         var value = self.callByName(name, &.{}) catch |err| {
             // the expression belongs to the access, not a frame of its own
-            if (self.pending_exception) |exc| if (exc == .object) try self.stampThrowableBelow(exc.object, evaluating);
+            if (self.pending_exception) |exc| if (exc == .object) {
+                const bare = if (self.functions.get(name)) |f| isBareConstantInitializer(f) else false;
+                try (if (bare) self.stampThrowableBelow(exc.object, evaluating) else self.stampConstExprThrowable(exc.object, evaluating));
+            };
             return err;
         };
         const cls = self.classes.getPtr(declared) orelse return value;
@@ -15309,6 +15316,10 @@ pub const VM = struct {
         while (fi > 0) : (fi -= 1) {
             const func = self.frames[fi].func orelse break;
             if (func.name.len == 0 or func.name[0] != 0) break;
+            // a class constant or property default runs as php's constant
+            // expression with a scope, whose own file and line php reports
+            // (EG(filename_override))
+            if (isScopedConstExpr(func.name) and !isBareConstantInitializer(func)) break;
         }
         const frame = &self.frames[fi];
         const ip = frame.ip;
@@ -23014,9 +23025,12 @@ pub const VM = struct {
         self.handler_floor = self.handler_count;
         defer self.handler_floor = floor;
         const instantiating = self.frame_count;
+        self.bare_default_failed = false;
         _ = self.callByName(name, &.{}) catch |err| {
-            // the defaults belong to the instantiation, not a frame of their own
-            if (self.pending_exception) |exc| if (exc == .object) try self.stampThrowableBelow(exc.object, instantiating);
+            // a default that only names a global constant is resolved at the
+            // instantiation (zval_update_constant_ex); any other expression
+            // is php's constant expression
+            if (self.pending_exception) |exc| if (exc == .object) try (if (self.bare_default_failed) self.stampThrowableBelow(exc.object, instantiating) else self.stampConstExprThrowable(exc.object, instantiating));
             // php evaluates the defaults again on the next attempt
             if (self.classes.getPtr(class_name)) |retry| if (!retry.defaults_pending) {
                 retry.defaults_pending = true;
@@ -23180,6 +23194,65 @@ pub const VM = struct {
     // constructor runs
     fn stampThrowable(self: *VM, obj: *PhpObject) RuntimeError!void {
         return self.stampThrowableBelow(obj, self.frame_count);
+    }
+
+    // an initializer that only reads a global constant: php resolves that
+    // one without zend_ast_evaluate (zval_update_constant_ex), so with no
+    // file or line of its own
+    fn isBareConstantInitializer(f: *const ObjFunction) bool {
+        const code = f.chunk.code.items;
+        var i: usize = 0;
+        if (code.len > 3 and code[0] == @intFromEnum(OpCode.enter_class_scope)) i = 3;
+        if (i + 3 >= code.len or code[i] != @intFromEnum(OpCode.get_var)) return false;
+        const next = code[i + 3];
+        return next == @intFromEnum(OpCode.leave_class_scope) or next == @intFromEnum(OpCode.return_val);
+    }
+
+    // a property defaults initializer reading a default that is only a
+    // global constant: [get_var][set_prop_default], right after the class
+    // scope opened or the previous default was stored
+    fn bareDefaultRunning(frame: *const CallFrame) bool {
+        const func = frame.func orelse return false;
+        if (!std.mem.startsWith(u8, func.name, "\x00propdefaults\x00")) return false;
+        const code = frame.chunk.code.items;
+        const ip = frame.ip;
+        if (ip < 3 or ip >= code.len) return false;
+        const next = code[ip];
+        if (next != @intFromEnum(OpCode.set_prop_default) and next != @intFromEnum(OpCode.set_static_prop_default)) return false;
+        if (code[ip - 3] != @intFromEnum(OpCode.get_var)) return false;
+        if (ip - 3 == 3 and code[0] == @intFromEnum(OpCode.enter_class_scope)) return true;
+        return ip >= 4 and code[ip - 4] == @intFromEnum(OpCode.pop);
+    }
+
+    fn isScopedConstExpr(name: []const u8) bool {
+        return std.mem.startsWith(u8, name, "\x00const\x00") or std.mem.startsWith(u8, name, "\x00propdefaults\x00");
+    }
+
+    // an exception thrown while a class constant or property default was
+    // evaluated keeps the expression's file and line; its trace starts
+    // with php's "[constant expression]" frame at the code that needed the
+    // value (zend_fetch_debug_backtrace under EG(filename_override)), unless
+    // that is the same place
+    fn stampConstExprThrowable(self: *VM, obj: *PhpObject, top: usize) RuntimeError!void {
+        const trace = try self.traceBelow(top);
+        if (top > 0) if (self.framePosition(top - 1)) |site| {
+            const file = obj.get("file");
+            const line = obj.get("line");
+            const same = file == .string and std.mem.eql(u8, file.string.bytes(), site.file) and line == .int and line.int == site.line;
+            if (!same) {
+                const entry = try self.allocArray();
+                try entry.set(self.allocator, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(site.file) });
+                try entry.set(self.allocator, .{ .string = Value.String.borrowed("line") }, .{ .int = site.line });
+                try entry.set(self.allocator, .{ .string = Value.String.borrowed("function") }, .{ .string = Value.String.borrowed("[constant expression]") });
+                const full = try self.allocArray();
+                try full.append(self.allocator, .{ .array = entry });
+                for (trace.entries.items) |e| try full.append(self.allocator, e.value);
+                self.releaseUnheldArray(trace);
+                try obj.setForScope(self.allocator, "trace", .{ .array = full }, self.exceptionTraceScope(obj));
+                return;
+            }
+        };
+        try obj.setForScope(self.allocator, "trace", .{ .array = trace }, self.exceptionTraceScope(obj));
     }
 
     fn stampThrowableBelow(self: *VM, obj: *PhpObject, top: usize) RuntimeError!void {
@@ -23843,6 +23916,7 @@ pub const VM = struct {
 
     fn unresolvedDefault(self: *VM, comptime fmt: []const u8, args: anytype) RuntimeError!Value {
         if (self.resolving_quietly) return error.RuntimeError;
+        self.bare_default_failed = true;
         const msg = try std.fmt.allocPrint(self.allocator, fmt, args);
         defer self.allocator.free(msg);
         const site = self.ic.?.default_site;
