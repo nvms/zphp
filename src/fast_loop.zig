@@ -1176,6 +1176,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                                     .vars = .{},
                                     .locals = mc_locals,
                                     .func = mc_func,
+                                    // a static method called through an object
+                                    // has the object's class as its called scope
+                                    .called_class = if (mc_func.is_static) mc_obj.class_name else null,
                                 };
                                 ic.arg_counts[self.frame_count] = mc_arg_count;
                                 self.frame_count += 1;

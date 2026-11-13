@@ -11228,7 +11228,7 @@ pub const VM = struct {
                             continue;
                         }
                         var new_vars = self.acquireFrameVars();
-                        try new_vars.put(self.allocator, "$this", .{ .object = obj });
+                        if (!func.is_static) try new_vars.put(self.allocator, "$this", .{ .object = obj });
 
                         try self.bindClosures(&new_vars, null, full_name);
 
@@ -11286,7 +11286,7 @@ pub const VM = struct {
                             self.push(.{ .generator = gen });
                         } else {
                             try self.ensureCallRoom();
-                            self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = method_refs, .ref_owner = method_owner };
+                            self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = method_refs, .ref_owner = method_owner, .called_class = if (func.is_static) obj.class_name else null };
                             self.setFrameArgCount(arg_count);
                             self.frames[self.frame_count].entry_sp = self.sp;
                             self.frame_count += 1;
@@ -11489,7 +11489,7 @@ pub const VM = struct {
                             if (try self.checkParamTypes(full_name, @intCast(ac))) continue;
                         }
                         var new_vars = self.acquireFrameVars();
-                        try new_vars.put(self.allocator, "$this", .{ .object = obj });
+                        if (!func.is_static) try new_vars.put(self.allocator, "$this", .{ .object = obj });
                         try self.bindClosures(&new_vars, null, full_name);
                         if (func.is_variadic) {
                             const fixed: usize = func.arity - 1;
@@ -11528,7 +11528,7 @@ pub const VM = struct {
                         self.dropN(ac);
                         self.dropN(1);
                         try self.ensureCallRoom();
-                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = method_refs, .ref_owner = method_owner };
+                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = method_refs, .ref_owner = method_owner, .called_class = if (func.is_static) obj.class_name else null };
                         self.setFrameArgCount(mcs_ac);
                         self.frames[self.frame_count].entry_sp = self.sp;
                         self.frame_count += 1;
@@ -11645,7 +11645,7 @@ pub const VM = struct {
                             if (try self.checkParamTypes(full_name, arg_count)) continue;
                         }
                         var new_vars = self.acquireFrameVars();
-                        try new_vars.put(self.allocator, "$this", .{ .object = obj });
+                        if (!func.is_static) try new_vars.put(self.allocator, "$this", .{ .object = obj });
                         try self.bindClosures(&new_vars, null, full_name);
                         if (func.is_variadic) {
                             const fixed: usize = func.arity - 1;
@@ -11682,7 +11682,7 @@ pub const VM = struct {
                         self.dropN(ac);
                         self.dropN(1);
                         try self.ensureCallRoom();
-                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = method_refs, .ref_owner = method_owner };
+                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = method_refs, .ref_owner = method_owner, .called_class = if (func.is_static) obj.class_name else null };
                         self.setFrameArgCount(arg_count);
                         self.frames[self.frame_count].entry_sp = self.sp;
                         self.frame_count += 1;
@@ -11833,7 +11833,7 @@ pub const VM = struct {
                             if (try self.checkParamTypes(full_name, @intCast(ac))) continue;
                         }
                         var new_vars = self.acquireFrameVars();
-                        try new_vars.put(self.allocator, "$this", .{ .object = obj });
+                        if (!func.is_static) try new_vars.put(self.allocator, "$this", .{ .object = obj });
                         try self.bindClosures(&new_vars, null, full_name);
                         if (func.is_variadic) {
                             const fixed: usize = func.arity - 1;
@@ -11870,7 +11870,7 @@ pub const VM = struct {
                         self.dropN(ac);
                         self.dropN(1);
                         try self.ensureCallRoom();
-                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = method_refs, .ref_owner = method_owner };
+                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .ref_slots = method_refs, .ref_owner = method_owner, .called_class = if (func.is_static) obj.class_name else null };
                         self.setFrameArgCount(mcds_ac);
                         self.frames[self.frame_count].entry_sp = self.sp;
                         self.frame_count += 1;
@@ -19983,7 +19983,7 @@ pub const VM = struct {
         self.saveFrameArgs(arg_count);
         self.dropN(ac + 1);
         try self.ensureCallRoom();
-        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func };
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = if (func.is_static) obj.class_name else null };
         self.setFrameArgCount(arg_count);
         self.frames[self.frame_count].entry_sp = self.sp;
         self.frame_count += 1;
