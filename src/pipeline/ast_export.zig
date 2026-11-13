@@ -10,6 +10,7 @@ const parser = @import("parser.zig");
 const strings = @import("compiler_strings.zig");
 const Compiler = @import("compiler.zig").Compiler;
 const gcvt = @import("../stdlib/formatted_print.zig").gcvt;
+const Value = @import("../runtime/value.zig").Value;
 
 const Allocator = std.mem.Allocator;
 const Error = Allocator.Error;
@@ -27,10 +28,25 @@ pub fn assertMessage(allocator: Allocator, ast: *const Ast, node: u32) Error![]u
     return out.toOwnedSlice(allocator);
 }
 
+// zend_ast_export of a constant expression as php keeps it once compiled
+// (zend_compile_const_expr): names resolved, magic constants and literal
+// subexpressions folded. what reflection prints for a default php could not
+// evaluate while compiling. the compiler is the one compiling the
+// declaration, for its namespace, imports and class
+pub fn constExprText(allocator: Allocator, cc: *Compiler, node: u32) Error![]u8 {
+    var out = std.ArrayListUnmanaged(u8).empty;
+    errdefer out.deinit(allocator);
+    var e = Exporter{ .ast = cc.ast, .out = &out, .allocator = allocator, .cc = cc };
+    try e.expr(node, 0, 0);
+    return out.toOwnedSlice(allocator);
+}
+
 const Exporter = struct {
     ast: *const Ast,
     out: *std.ArrayListUnmanaged(u8),
     allocator: Allocator,
+    // set for a compiled constant expression (constExprText)
+    cc: ?*Compiler = null,
 
     fn str(e: *Exporter, s: []const u8) Error!void {
         try e.out.appendSlice(e.allocator, s);
@@ -355,6 +371,7 @@ const Exporter = struct {
     fn expr(e: *Exporter, i: u32, priority: u32, indent: u32) Error!void {
         if (i == 0) return;
         const n = e.node(i);
+        if (e.cc) |cc| if (e.constNode(cc, i, n, indent) catch |err| if (err == error.OutOfMemory) return error.OutOfMemory else false) return;
         switch (n.tag) {
             .integer_literal => {
                 const v = Compiler.parsePhpIntLiteral(e.tok(n.main_token));
@@ -633,6 +650,264 @@ const Exporter = struct {
                 try e.char(')');
             },
             .expr_list => try e.list(e.ast.extraSlice(n.data.lhs), 0, indent),
+            else => {},
+        }
+    }
+
+    // ---- compiled constant expressions
+
+    // the nodes zend_compile_const_expr changes; false for the rest
+    fn constNode(e: *Exporter, cc: *Compiler, i: u32, n: Node, indent: u32) (Error || error{CompileError})!bool {
+        switch (n.tag) {
+            .true_literal, .false_literal, .null_literal => try e.str(switch (n.tag) {
+                .true_literal => "true",
+                .false_literal => "false",
+                else => "null",
+            }),
+            .identifier => {
+                const cname = e.tok(n.main_token);
+                if (Compiler.magicConstantName(cname)) |magic| return e.magicConstant(cc, magic, n);
+                inline for (.{ "true", "false", "null" }) |special| {
+                    if (std.ascii.eqlIgnoreCase(cname, special)) {
+                        try e.str(special);
+                        return true;
+                    }
+                }
+                if (cc.use_const_aliases.get(cname)) |fqn| {
+                    try e.str(fqn);
+                } else if (cc.namespace.len > 0) {
+                    try e.str(cc.namespace);
+                    try e.char('\\');
+                    try e.str(cname);
+                } else try e.str(cname);
+            },
+            .qualified_name => {
+                const parts = e.ast.extraSlice(n.data.lhs);
+                if (n.data.rhs == 1 and parts.len == 1) {
+                    inline for (.{ "true", "false", "null" }) |special| {
+                        if (std.ascii.eqlIgnoreCase(e.tok(parts[0]), special)) {
+                            try e.str(special);
+                            return true;
+                        }
+                    }
+                }
+                try e.str(try cc.resolveQualifiedNonClassName(try cc.buildQualifiedString(parts), n.data.rhs));
+            },
+            .static_prop_access => {
+                if (n.main_token == 0) return false;
+                const member_name = e.tok(n.main_token);
+                if (std.mem.startsWith(u8, member_name, "$")) return false;
+                const class_node = e.node(n.data.lhs);
+                if (class_node.tag != .identifier and class_node.tag != .qualified_name) return false;
+                const written = if (class_node.tag == .identifier) e.tok(class_node.main_token) else try cc.buildQualifiedString(e.ast.extraSlice(class_node.data.lhs));
+                const relative = class_node.tag == .identifier and (std.ascii.eqlIgnoreCase(written, "self") or std.ascii.eqlIgnoreCase(written, "parent") or std.ascii.eqlIgnoreCase(written, "static"));
+                const scope_known = !cc.in_trait and !cc.closure_signature;
+                if (std.ascii.eqlIgnoreCase(member_name, "class")) {
+                    if (!relative) {
+                        try e.quotedString(try resolvedClass(cc, class_node, written));
+                        return true;
+                    }
+                    if (std.ascii.eqlIgnoreCase(written, "self") and scope_known and cc.current_class.len > 0) {
+                        try e.quotedString(cc.current_class);
+                        return true;
+                    }
+                    if (std.ascii.eqlIgnoreCase(written, "parent") and scope_known and cc.current_parent.len > 0) {
+                        try e.quotedString(cc.current_parent);
+                        return true;
+                    }
+                    try e.str(written);
+                    try e.str("::class");
+                    return true;
+                }
+                if (relative) {
+                    try e.str(written);
+                } else {
+                    const resolved = try resolvedClass(cc, class_node, written);
+                    if ((class_node.tag == .qualified_name and class_node.data.rhs == 1) or !std.mem.eql(u8, resolved, written)) try e.char('\\');
+                    try e.str(resolved);
+                }
+                try e.str("::");
+                try e.str(member_name);
+            },
+            .new_expr => {
+                const resolved = @import("compiler_expr.zig").resolveQualifiedNewName(cc, n) catch return false;
+                try e.str("new ");
+                const raw = resolved.name;
+                if (!resolved.is_absolute and !resolved.ns_relative and (std.ascii.eqlIgnoreCase(raw, "self") or std.ascii.eqlIgnoreCase(raw, "parent"))) {
+                    try e.str(raw);
+                } else {
+                    try e.char('\\');
+                    if (resolved.is_absolute) {
+                        try e.str(raw);
+                    } else if (resolved.ns_relative) {
+                        try e.str(try cc.resolveQualifiedNonClassName(raw, 2));
+                    } else try e.str(cc.resolveClassName(raw));
+                }
+                try e.char('(');
+                try e.args(n.data.lhs, indent);
+                try e.char(')');
+            },
+            .callable_ref => {
+                const callee = e.node(n.data.lhs);
+                switch (callee.tag) {
+                    .identifier => {
+                        const fname = e.tok(callee.main_token);
+                        if (cc.use_fn_aliases.get(fname)) |fqn| {
+                            try e.char('\\');
+                            try e.str(fqn);
+                        } else try e.str(cc.resolveFunctionName(fname));
+                    },
+                    .qualified_name => {
+                        try e.char('\\');
+                        try e.str(try cc.resolveQualifiedNonClassName(try cc.buildQualifiedString(e.ast.extraSlice(callee.data.lhs)), callee.data.rhs));
+                    },
+                    .static_call => {
+                        const class_node = e.node(callee.data.lhs);
+                        const written = if (class_node.tag == .identifier) e.tok(class_node.main_token) else if (class_node.tag == .qualified_name) try cc.buildQualifiedString(e.ast.extraSlice(class_node.data.lhs)) else return false;
+                        if (class_node.tag == .identifier and (std.ascii.eqlIgnoreCase(written, "self") or std.ascii.eqlIgnoreCase(written, "parent"))) {
+                            try e.str(written);
+                        } else {
+                            try e.char('\\');
+                            try e.str(try resolvedClass(cc, class_node, written));
+                        }
+                        try e.str("::");
+                        try e.str(e.tok(callee.main_token));
+                    },
+                    else => return false,
+                }
+                try e.str("(...)");
+            },
+            .binary_op, .prefix_op, .grouped_expr, .array_literal => {
+                if (!literalOnly(e.ast, i)) return false;
+                const v = cc.evalConstExpr(i);
+                defer @import("compiler.zig").freeDefaultValue(cc.allocator, v);
+                if (!foldedValue(v)) return false;
+                try e.zval(v);
+            },
+            // ZEND_AST_OP_ARRAY: the compiled closure, by name
+            .closure_expr => {
+                var line_no: u32 = 1;
+                for (e.ast.source[0..e.ast.tokens[n.main_token].start]) |c| {
+                    if (c == '\n') line_no += 1;
+                }
+                try e.str("Closure(");
+                try e.str(try @import("compiler_class.zig").closureDisplayName(cc, line_no));
+                try e.char(')');
+            },
+            else => return false,
+        }
+        return true;
+    }
+
+    fn resolvedClass(cc: *Compiler, class_node: Node, written: []const u8) (Error || error{CompileError})![]const u8 {
+        if (class_node.tag == .qualified_name) {
+            if (class_node.data.rhs == 1) return written;
+            if (class_node.data.rhs == 2) return cc.resolveQualifiedNonClassName(written, 2);
+        }
+        return cc.resolveClassName(written);
+    }
+
+    // zend_try_ct_eval_magic_const, and __CLASS__ in a trait left as written
+    fn magicConstant(e: *Exporter, cc: *Compiler, magic: []const u8, n: Node) Error!bool {
+        if (std.mem.eql(u8, magic, "__LINE__")) {
+            var line_no: u32 = 1;
+            for (e.ast.source[0..e.ast.tokens[n.main_token].start]) |c| {
+                if (c == '\n') line_no += 1;
+            }
+            var buf: [16]u8 = undefined;
+            try e.str(std.fmt.bufPrint(&buf, "{d}", .{line_no}) catch unreachable);
+        } else if (std.mem.eql(u8, magic, "__CLASS__")) {
+            if (cc.in_trait) return false;
+            try e.quotedString(cc.current_class);
+        } else if (std.mem.eql(u8, magic, "__FILE__")) {
+            try e.quotedString(cc.file_path);
+        } else if (std.mem.eql(u8, magic, "__NAMESPACE__")) {
+            try e.quotedString(cc.namespace);
+        } else if (std.mem.eql(u8, magic, "__TRAIT__")) {
+            try e.quotedString(if (cc.in_trait) cc.current_class else "");
+        } else if (std.mem.eql(u8, magic, "__FUNCTION__")) {
+            try e.quotedString(cc.current_function);
+        } else if (std.mem.eql(u8, magic, "__METHOD__")) {
+            if (cc.current_class.len > 0 and cc.current_function.len > 0) {
+                try e.char('\'');
+                try e.singleQuoted(cc.current_class);
+                try e.str("::");
+                try e.singleQuoted(cc.current_function);
+                try e.char('\'');
+            } else try e.quotedString(cc.current_function);
+        } else return false;
+        return true;
+    }
+
+    // literals and operators over them: what zend_eval_const_expr folds
+    fn literalOnly(ast: *const Ast, i: u32) bool {
+        if (i == 0) return true;
+        const n = ast.nodes[i];
+        return switch (n.tag) {
+            .integer_literal, .float_literal, .true_literal, .false_literal, .null_literal => true,
+            .string_literal => switch (ast.tokens[n.main_token].tag) {
+                .nowdoc => true,
+                .string => ast.tokenSlice(n.main_token)[0] == '\'' or !hasInterpolation(ast.tokenSlice(n.main_token)),
+                else => !hasInterpolation(ast.tokenSlice(n.main_token)),
+            },
+            .grouped_expr => literalOnly(ast, n.data.lhs),
+            .prefix_op => switch (ast.tokens[n.main_token].tag) {
+                .plus, .minus, .tilde, .bang => literalOnly(ast, n.data.lhs),
+                else => false,
+            },
+            .binary_op => switch (ast.tokens[n.main_token].tag) {
+                .pipe, .amp, .caret, .plus, .minus, .star, .percent, .lt_lt, .gt_gt, .dot => literalOnly(ast, n.data.lhs) and literalOnly(ast, n.data.rhs),
+                else => false,
+            },
+            .array_literal => for (ast.extraSlice(n.data.lhs)) |el_idx| {
+                if (el_idx == 0) break false;
+                const el = ast.nodes[el_idx];
+                if (el.tag != .array_element or !literalOnly(ast, el.data.lhs) or !literalOnly(ast, el.data.rhs)) break false;
+            } else true,
+            else => false,
+        };
+    }
+
+    fn foldedValue(v: Value) bool {
+        return switch (v) {
+            .null, .bool, .int, .float => true,
+            .string => |s| s.bytes().len == 0 or s.bytes()[0] != 0,
+            .array => |arr| for (arr.entries.items) |entry| {
+                if (entry.key == .string and entry.key.string.bytes().len > 0 and entry.key.string.bytes()[0] == 0) break false;
+                if (!foldedValue(entry.value)) break false;
+            } else true,
+            else => false,
+        };
+    }
+
+    // zend_ast_export_zval
+    fn zval(e: *Exporter, v: Value) Error!void {
+        if (v.isEmptyArrayDefault()) return e.str("[]");
+        switch (v) {
+            .null => try e.str("null"),
+            .bool => |b| try e.str(if (b) "true" else "false"),
+            .int => |x| {
+                var buf: [32]u8 = undefined;
+                try e.str(std.fmt.bufPrint(&buf, "{d}", .{x}) catch unreachable);
+            },
+            .float => |x| try e.double(x),
+            .string => |s| try e.quotedString(s.bytes()),
+            .array => |arr| {
+                try e.char('[');
+                for (arr.entries.items, 0..) |entry, k| {
+                    if (k > 0) try e.str(", ");
+                    switch (entry.key) {
+                        .int => |x| {
+                            var buf: [32]u8 = undefined;
+                            try e.str(std.fmt.bufPrint(&buf, "{d}", .{x}) catch unreachable);
+                        },
+                        .string => |ks| try e.quotedString(ks.bytes()),
+                    }
+                    try e.str(" => ");
+                    try e.zval(entry.value);
+                }
+                try e.char(']');
+            },
             else => {},
         }
     }

@@ -2246,6 +2246,7 @@ fn compilePropertyFetch(self: *Compiler, node: Ast.Node, guard: ?ArgGuard) Error
     };
 
     try self.compileNode(node.data.lhs);
+    if (self.const_expr) return constExprPropFetch(self, node);
     if (self.isDynamicProp(node)) {
         if (node.main_token == 0) {
             // $obj->{expr}: compile the expression as property name
@@ -2264,6 +2265,21 @@ fn compilePropertyFetch(self: *Compiler, node: Ast.Node, guard: ?ArgGuard) Error
         try self.emitOp(.get_prop);
         try self.emitU16(name_idx);
     }
+}
+
+// zend_ast_evaluate's ZEND_AST_PROP, with the object already pushed: the
+// name is evaluated and made a string, then only an enum's properties may
+// be read
+fn constExprPropFetch(self: *Compiler, node: Ast.Node) Error!void {
+    if (!self.isDynamicProp(node)) {
+        try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(self.propName(node)) }));
+    } else if (node.main_token != 0) {
+        try self.emitGetVar(self.ast.tokenSlice(self.ast.nodes[node.data.rhs].main_token));
+    } else {
+        try self.compileNode(node.data.rhs);
+    }
+    try self.emitOp(.const_expr_prop_check);
+    try self.emitOp(.get_prop_dynamic);
 }
 
 fn lhsIsChainLink(ast: anytype, node: Ast.Node) bool {
@@ -2333,6 +2349,10 @@ fn compileNullsafePropertyFetch(self: *Compiler, node: Ast.Node, quiet: bool) Er
     const skip_jump = try self.emitJump(.jump_if_not_null);
     const end_jump = try self.emitJump(.jump);
     self.patchJump(skip_jump);
+    if (self.const_expr and !quiet) {
+        try constExprPropFetch(self, node);
+        return self.nullsafe_chain_jumps.?.append(self.allocator, end_jump);
+    }
     const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(self.propName(node)) });
     try self.emitOp(if (quiet) .get_prop_coalesce else .get_prop);
     try self.emitU16(name_idx);

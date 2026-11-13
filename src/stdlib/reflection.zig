@@ -3595,6 +3595,15 @@ fn rpHasType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
 fn decodeConstSentinel(ctx: *NativeContext, v: Value) !?[]const u8 {
     if (v != .string) return null;
     const s = v.string.bytes();
+    // a default compiled to an initializer is a constant when its text is a
+    // constant or class constant name (self::X keeps self)
+    if (bytecode.paramDefaultInitializerParts(s)) |pd| {
+        const text = std.mem.trimStart(u8, pd.text, "\\");
+        if (text.len == 0) return null;
+        for (text) |c| if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '\\' or c == ':' or c >= 0x80)) return null;
+        if (std.mem.indexOf(u8, text, "::")) |sep| if (std.ascii.eqlIgnoreCase(text[sep + 2 ..], "class")) return null;
+        return try ctx.vm.internName(text);
+    }
     if (s.len <= 4 or s[0] != 0 or s[1] != 'C' or s[2] != 'C' or s[3] != 0) return null;
     const rest = s[4..];
     const sep = std.mem.lastIndexOfScalar(u8, rest, 0) orelse return null;

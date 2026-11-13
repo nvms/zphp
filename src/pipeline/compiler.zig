@@ -138,7 +138,7 @@ pub fn freeDefaults(allocator: Allocator, defaults: []const Value) void {
     allocator.free(defaults);
 }
 
-fn freeDefaultValue(allocator: Allocator, v: Value) void {
+pub fn freeDefaultValue(allocator: Allocator, v: Value) void {
     if (v == .array and !Value.isEmptyArrayDefault(v)) {
         const arr = v.array;
         for (arr.entries.items) |entry| freeDefaultValue(allocator, entry.value);
@@ -418,6 +418,11 @@ pub const Compiler = struct {
     // a class constant's initializer: self and parent stay as written in
     // class constant fetches, resolved as it runs (its errors name them so)
     relative_const_classes: bool = false,
+    // compiling a constant expression (an initializer or a global constant's
+    // value): property reads follow zend_ast_evaluate's rules
+    const_expr: bool = false,
+    // the token constant expression errors are reported at (the declaration)
+    const_expr_at: u32 = 0,
     // compiling a trait's constant and property defaults, which php leaves
     // unevaluated until a class uses the trait: a relative ::class there
     // names itself
@@ -893,7 +898,11 @@ pub const Compiler = struct {
             .foreach_stmt => try compiler_stmt.compileForeach(self, node),
             .function_decl => try compiler_class.compileFunction(self, node),
             .const_decl => {
+                try compiler_class.checkConstExpr(self, node.data.lhs, true, node.main_token);
+                const outer_const_expr = self.const_expr;
+                self.const_expr = true;
                 try self.compileNode(node.data.lhs);
+                self.const_expr = outer_const_expr;
                 const raw = self.ast.tokenSlice(node.main_token);
                 const name = if (self.namespace.len > 0)
                     try std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, raw })
@@ -1097,25 +1106,27 @@ pub const Compiler = struct {
 
     pub fn compileGetVar(self: *Compiler, node: Ast.Node) Error!void {
         const name = self.ast.tokenSlice(node.main_token);
+        // magic constants are case-insensitive
+        const magic = magicConstantName(name) orelse "";
 
-        if (std.mem.eql(u8, name, "__DIR__")) {
+        if (std.mem.eql(u8, magic, "__DIR__")) {
             const dir = self.getFileDir();
             const idx = try self.addConstant(.{ .string = Value.String.borrowed(dir) });
             try self.emitConstant(idx);
             return;
         }
-        if (std.mem.eql(u8, name, "__FILE__")) {
+        if (std.mem.eql(u8, magic, "__FILE__")) {
             const path = if (self.file_path.len > 0) self.file_path else "";
             const idx = try self.addConstant(.{ .string = Value.String.borrowed(path) });
             try self.emitConstant(idx);
             return;
         }
-        if (std.mem.eql(u8, name, "__FUNCTION__")) {
+        if (std.mem.eql(u8, magic, "__FUNCTION__")) {
             const idx = try self.addConstant(.{ .string = Value.String.borrowed(self.current_function) });
             try self.emitConstant(idx);
             return;
         }
-        if (std.mem.eql(u8, name, "__CLASS__")) {
+        if (std.mem.eql(u8, magic, "__CLASS__")) {
             // inside a trait the compile-time class is the trait name, but PHP
             // resolves __CLASS__ to the using class - defer to runtime self::class
             if (self.in_trait) {
@@ -1130,7 +1141,7 @@ pub const Compiler = struct {
             try self.emitConstant(idx);
             return;
         }
-        if (std.mem.eql(u8, name, "__METHOD__")) {
+        if (std.mem.eql(u8, magic, "__METHOD__")) {
             const in_closure = std.mem.startsWith(u8, self.current_function, "{closure:");
             const val = if (self.current_class.len > 0 and self.current_function.len > 0 and !in_closure) blk: {
                 const full = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ self.current_class, self.current_function });
@@ -1144,7 +1155,7 @@ pub const Compiler = struct {
             try self.emitConstant(idx);
             return;
         }
-        if (std.mem.eql(u8, name, "__PROPERTY__")) {
+        if (std.mem.eql(u8, magic, "__PROPERTY__")) {
             // a property hook is named $prop::get / $prop::set
             const f = self.current_function;
             const val = if (f.len > 1 and f[0] == '$' and (std.mem.endsWith(u8, f, "::get") or std.mem.endsWith(u8, f, "::set"))) f[1 .. f.len - 5] else "";
@@ -1152,13 +1163,13 @@ pub const Compiler = struct {
             try self.emitConstant(idx);
             return;
         }
-        if (std.mem.eql(u8, name, "__NAMESPACE__")) {
+        if (std.mem.eql(u8, magic, "__NAMESPACE__")) {
             const ns = if (self.namespace.len > 0) self.namespace else "";
             const idx = try self.addConstant(.{ .string = Value.String.borrowed(ns) });
             try self.emitConstant(idx);
             return;
         }
-        if (std.mem.eql(u8, name, "__TRAIT__")) {
+        if (std.mem.eql(u8, magic, "__TRAIT__")) {
             const val = if (self.in_trait) self.current_class else "";
             const idx = try self.addConstant(.{ .string = Value.String.borrowed(val) });
             try self.emitConstant(idx);
@@ -1169,7 +1180,7 @@ pub const Compiler = struct {
             try self.emitConstant(idx);
             return;
         };
-        if (std.mem.eql(u8, name, "__LINE__")) {
+        if (std.mem.eql(u8, magic, "__LINE__")) {
             const line = self.getLineNumber();
             const idx = try self.addConstant(.{ .int = @intCast(line) });
             try self.emitConstant(idx);
@@ -1203,6 +1214,13 @@ pub const Compiler = struct {
         }
         if (std.mem.eql(u8, name, "$http_response_header")) self.http_response_header_read = true;
         try self.emitGetVar(name);
+    }
+
+    // the canonical spelling of a magic constant written in any case
+    pub fn magicConstantName(name: []const u8) ?[]const u8 {
+        const names = [_][]const u8{ "__LINE__", "__FILE__", "__DIR__", "__FUNCTION__", "__CLASS__", "__METHOD__", "__PROPERTY__", "__NAMESPACE__", "__TRAIT__" };
+        for (names) |m| if (std.ascii.eqlIgnoreCase(name, m)) return m;
+        return null;
     }
 
     pub fn compileVariableVariable(self: *Compiler, node: Ast.Node) Error!void {

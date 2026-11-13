@@ -524,6 +524,10 @@ pub const OpCode = enum(u8) {
     // array_bind_ref_source with the source fetched first, as php's delayed
     // compile of the target does: [source, array, key] -> [value]
     array_bind_ref_source_late,
+    // a property read in a constant expression, before get_prop_dynamic:
+    // [object, name] -> [object, name as a string]. a non-enum object is
+    // php's "Fetching properties on non-enums" Error
+    const_expr_prop_check,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -861,12 +865,42 @@ pub const deferred_deprecation = "\x00deferred deprecation";
 // value stored for the argument names the initializer that computes it
 const attr_argument_prefix = "\x00AI\x00";
 
-pub fn attrArgumentInitializer(allocator: std.mem.Allocator, file_path: []const u8, token: u32) ![]u8 {
-    return std.fmt.allocPrint(allocator, attr_argument_prefix ++ "{s}\x00{d}", .{ file_path, token });
+// "\x00AI\x00<file>\x00<token>\x00<text>": the initializer's name, then the
+// text reflection prints for the argument (zend_ast_export of it compiled)
+pub fn attrArgumentInitializer(allocator: std.mem.Allocator, file_path: []const u8, token: u32, text: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, attr_argument_prefix ++ "{s}\x00{d}\x00{s}", .{ file_path, token, text });
 }
 
 pub fn attrArgumentInitializerName(value: []const u8) ?[]const u8 {
-    return if (std.mem.startsWith(u8, value, attr_argument_prefix)) value else null;
+    if (!std.mem.startsWith(u8, value, attr_argument_prefix)) return null;
+    const file_end = std.mem.indexOfScalarPos(u8, value, attr_argument_prefix.len, 0) orelse return value;
+    const token_end = std.mem.indexOfScalarPos(u8, value, file_end + 1, 0) orelse return value;
+    return value[0..token_end];
+}
+
+pub fn attrArgumentText(value: []const u8) []const u8 {
+    const name = attrArgumentInitializerName(value) orelse return "";
+    return if (name.len < value.len) value[name.len + 1 ..] else "";
+}
+
+// a parameter default the sentinel defaults can't express (a property
+// read, a closure, a dim fetch...): the value stored for it names the
+// initializer that computes it, run in the function's scope class, followed
+// by the text reflection prints for it (php's zend_ast_export of the
+// compiled expression): "\x00PD\x00<token>\x00<file>\x00<text>"
+const param_default_prefix = "\x00PD\x00";
+
+pub fn paramDefaultInitializer(allocator: std.mem.Allocator, file_path: []const u8, token: u32, text: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, param_default_prefix ++ "{d}\x00{s}\x00{s}", .{ token, file_path, text });
+}
+
+pub const ParamDefaultInitializer = struct { name: []const u8, text: []const u8 };
+
+pub fn paramDefaultInitializerParts(value: []const u8) ?ParamDefaultInitializer {
+    if (!std.mem.startsWith(u8, value, param_default_prefix)) return null;
+    const token_end = std.mem.indexOfScalarPos(u8, value, param_default_prefix.len, 0) orelse return null;
+    const file_end = std.mem.indexOfScalarPos(u8, value, token_end + 1, 0) orelse return null;
+    return .{ .name = value[0..file_end], .text = value[file_end + 1 ..] };
 }
 
 pub fn propDefaultsInitializerName(allocator: std.mem.Allocator, class_name: []const u8) ![]u8 {

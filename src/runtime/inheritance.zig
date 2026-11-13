@@ -186,7 +186,7 @@ fn userDefaultText(arena: std.mem.Allocator, value: Value) ![]const u8 {
         },
         .string => |s| blk: {
             const bytes = s.bytes();
-            if (bytecode.deferredExprPtr(bytes) != null or bytecode.newDefaultPtr(bytes) != null) break :blk "<expression>";
+            if (bytecode.deferredExprPtr(bytes) != null or bytecode.newDefaultPtr(bytes) != null or bytecode.paramDefaultInitializerParts(bytes) != null) break :blk "<expression>";
             // a constant the compiler left to resolve: "\0CC\0<class>\0<name>"
             if (bytes.len > 4 and bytes[0] == 0 and bytes[1] == 'C' and bytes[2] == 'C' and bytes[3] == 0) {
                 const rest = bytes[4..];

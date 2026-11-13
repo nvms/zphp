@@ -870,6 +870,11 @@ pub const VM = struct {
     pending_destruct: std.ArrayListUnmanaged(*PhpObject) = .empty,
     destruct_cursor: usize = 0,
     draining_destructors: bool = false,
+    // parameter defaults an initializer computed, held until the call's
+    // frame takes them: the next default's initializer may drain releases,
+    // and a call result's release is pending until then (depth: frame_count
+    // when evaluated, so a nested call's loop leaves the outer ones alone)
+    default_holds: std.ArrayListUnmanaged(DefaultHold) = .empty,
     // refcounting Stage 2: arrays whose refcount reached 0, awaiting element
     // release. drained alongside pending_destruct at statement boundaries
     pending_array_release: std.ArrayListUnmanaged(*PhpArray) = .empty,
@@ -1826,7 +1831,10 @@ pub const VM = struct {
         // as a type check's does; `dispatched` tells the fast loop to return
         fn resolveDefaultEntry(vm: *VM, func: *const ObjFunction, index: usize, out: *Value, dispatched: *bool) u8 {
             vm.flushTopWrites();
-            out.* = vm.resolveParamDefault(func, index) catch |err| {
+            // the fast loop fills the defaults up to the last parameter
+            defer if (index + 1 >= func.arity) vm.releaseDefaultHolds();
+            out.* = vm.resolveParamDefaultHeld(func, index) catch |err| {
+                vm.releaseDefaultHolds();
                 const pending = vm.pending_exception orelse return statusOf(err);
                 if (pending != .object) return statusOf(err);
                 vm.pending_exception = null;
@@ -3514,6 +3522,7 @@ pub const VM = struct {
         self.free_handles.deinit(self.allocator);
         self.released_objects.deinit(self.allocator);
         self.pending_destruct.deinit(self.allocator);
+        self.default_holds.deinit(self.allocator);
         self.pending_array_release.deinit(self.allocator);
         self.pending_string_release.deinit(self.allocator);
         self.string_pool.deinit();
@@ -10809,6 +10818,23 @@ pub const VM = struct {
                     const operands: usize = if (op == .arg_guard_prop) 1 else 2;
                     self.arg_capture_pending = self.argNeedsCapture(self.currentChunk(), field, delta, pos, operands);
                 },
+                .const_expr_prop_check => {
+                    if (self.stack[self.sp - 1] != .string) {
+                        var name_hold: Value = .null;
+                        defer self.stackRelease(name_hold);
+                        const name = self.popHeldName(&name_hold) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        self.push(.{ .string = Value.String.borrowed(name) });
+                    }
+                    const target = self.stack[self.sp - 2];
+                    if (target == .object and !(if (self.classes.get(target.object.class_name)) |cls| cls.is_enum else false)) {
+                        if (try self.throwBuiltinException("Error", "Fetching properties on non-enums in constant expressions is not allowed")) continue;
+                        return error.RuntimeError;
+                    }
+                },
+
                 .get_prop, .get_prop_dynamic => {
                     const capturing = self.arg_capture_pending;
                     self.arg_capture_pending = false;
@@ -24976,11 +25002,59 @@ pub const VM = struct {
         ic.default_site = func;
         defer ic.default_site = saved;
         const raw = func.defaults[index];
+        if (raw == .string) if (bytecode.paramDefaultInitializerParts(raw.string.bytes())) |pd| {
+            const value = try self.evaluateParamDefault(func, pd.name);
+            return self.checkEvaluatedDefault(func, index, value);
+        };
         const value = try self.resolveDefault(raw);
         // a default php could not fold is checked against the parameter's
         // type once evaluated (RECV_INIT)
         if (raw == .string and raw.string.len > 0 and raw.string.bytes()[0] == 0) return self.checkEvaluatedDefault(func, index, value);
         return value;
+    }
+
+    pub const DefaultHold = struct { value: Value, depth: usize };
+
+    // resolveParamDefault for a call's own defaults: a value an initializer
+    // returned is held until releaseDefaultHolds, as the stack holds an
+    // argument until the frame has taken it
+    pub fn resolveParamDefaultHeld(self: *VM, func: *const ObjFunction, index: usize) !Value {
+        const value = try self.resolveParamDefault(func, index);
+        const raw = func.defaults[index];
+        if (raw == .string and bytecode.paramDefaultInitializerParts(raw.string.bytes()) != null) {
+            retainValue(value);
+            try self.default_holds.append(self.allocator, .{ .value = value, .depth = self.frame_count });
+        }
+        return value;
+    }
+
+    // the holds of the defaults evaluated at this depth go back to pending
+    // releases, as an argument's do when the call drops the stack slots
+    pub fn releaseDefaultHolds(self: *VM) void {
+        while (self.default_holds.items.len > 0) {
+            const hold = self.default_holds.items[self.default_holds.items.len - 1];
+            if (hold.depth != self.frame_count) break;
+            _ = self.default_holds.pop();
+            switch (hold.value) {
+                .array => |arr| {
+                    arr.refcount -|= 1;
+                    if (arr.refcount == 0) self.queueArrayRelease(arr);
+                },
+                else => self.stackRelease(hold.value),
+            }
+        }
+    }
+
+    // a default compiled to an initializer, run in the function's class scope
+    // (RECV_INIT evaluating its constant expression)
+    fn evaluateParamDefault(self: *VM, func: *const ObjFunction, name: []const u8) RuntimeError!Value {
+        if (self.resolving_quietly) return error.RuntimeError;
+        const floor = self.handler_floor;
+        self.handler_floor = self.handler_count;
+        defer self.handler_floor = floor;
+        const scope = self.functionScope(func.name) orelse "";
+        // the call's result is borrowed; the frame's local owns the default
+        return self.callByName(name, &.{.{ .string = Value.String.borrowed(scope) }});
     }
 
     fn checkEvaluatedDefault(self: *VM, func: *const ObjFunction, index: usize, value: Value) RuntimeError!Value {
@@ -25018,9 +25092,10 @@ pub const VM = struct {
         const saved_args = ic.default_args;
         ic.default_args = locals[offset..][0..bound];
         defer ic.default_args = saved_args;
+        defer self.releaseDefaultHolds();
         for (bound..func.arity) |i| {
             if (i >= func.defaults.len) continue;
-            locals[i + offset] = self.resolveParamDefault(func, i) catch |err| {
+            locals[i + offset] = self.resolveParamDefaultHeld(func, i) catch |err| {
                 self.freeLocals(locals);
                 const pending = self.pending_exception orelse return err;
                 if (pending != .object) return err;
@@ -25040,9 +25115,10 @@ pub const VM = struct {
         const saved_args = ic.default_args;
         ic.default_args = locals[offset..][0..bound];
         defer ic.default_args = saved_args;
+        defer self.releaseDefaultHolds();
         for (bound..func.arity) |i| {
             if (i >= func.defaults.len) continue;
-            locals[i + offset] = self.resolveParamDefault(func, i) catch |err| {
+            locals[i + offset] = self.resolveParamDefaultHeld(func, i) catch |err| {
                 self.freeLocals(locals);
                 return err;
             };
@@ -25235,9 +25311,10 @@ pub const VM = struct {
 
     fn fillDefaults(self: *VM, vars: *std.StringHashMapUnmanaged(Value), func: *const ObjFunction, arg_count: usize) !void {
         if (arg_count >= func.arity) return;
+        defer self.releaseDefaultHolds();
         for (arg_count..func.arity) |i| {
             if (i < func.defaults.len) {
-                try vars.put(self.allocator, func.params[i], try self.resolveParamDefault(func, i));
+                try vars.put(self.allocator, func.params[i], try self.resolveParamDefaultHeld(func, i));
             } else {
                 try vars.put(self.allocator, func.params[i], .null);
             }

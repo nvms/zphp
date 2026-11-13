@@ -140,6 +140,7 @@ fn appendDefault(w: *Writer, v: Value) RuntimeError!void {
         .float => |f| try appendDouble(w, f, true),
         .string => |s| {
             const bytes = s.bytes();
+            if (bytecode.paramDefaultInitializerParts(bytes)) |pd| return w.str(pd.text);
             if (constSentinel(bytes)) |c| {
                 // Foo::class is folded to the name when compiled
                 if (c.class.len > 0 and std.ascii.eqlIgnoreCase(c.name, "class")) {
@@ -159,6 +160,9 @@ fn appendDefault(w: *Writer, v: Value) RuntimeError!void {
                             written = "parent";
                         };
                     }
+                    // php marks a name its resolution changed as fully
+                    // qualified; a namespaced one was
+                    if (std.mem.indexOfScalar(u8, written, '\\') != null) try w.str("\\");
                     try w.fmt("{s}::", .{written});
                 }
                 return w.str(c.name);
@@ -616,9 +620,11 @@ fn appendParameter(w: *Writer, p: ParamView) !void {
             try appendNativeDefault(w, np);
         } else if (p.user_default) |d| {
             try w.str(" = ");
+            // a parameter default's self:: and parent:: are kept as written
+            // (compiled to initializers), so a named class prints as named
             const saved = w.self_class;
             defer w.self_class = saved;
-            w.self_class = p.self_class;
+            w.self_class = null;
             try appendDefault(w, d);
         }
     }
@@ -1343,10 +1349,9 @@ fn attributeToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeR
             try w.fmt("    Argument #{d} [ ", .{i});
             if (entry.key == .string) try w.fmt("{s} = ", .{entry.key.string.bytes()});
             const arg = if (entry.ref) |ref| ref.* else entry.value;
-            // an argument zphp evaluates with a hidden initializer keeps no
-            // source text to print, and evaluating it here could throw
+            // an argument evaluated by an initializer prints as php compiled it
             if (arg == .string and bytecode.attrArgumentInitializerName(arg.string.bytes()) != null) {
-                try w.str("NULL");
+                try w.str(bytecode.attrArgumentText(arg.string.bytes()));
             } else try appendDefault(&w, arg);
             try w.str(" ]\n");
         }

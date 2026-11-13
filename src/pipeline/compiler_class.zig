@@ -364,24 +364,34 @@ fn extractAttributes(self: *Compiler, main_token: u32, target: AttrTarget) Error
     return all_attrs.toOwnedSlice(self.allocator);
 }
 
+// a function's or method's attributes, read with it as the function being
+// compiled: a closure among the arguments is named after it
+fn extractAttributesOf(self: *Compiler, token: u32, target: AttrTarget, function: []const u8) Error![]const ParsedAttr {
+    const outer = self.current_function;
+    self.current_function = function;
+    defer self.current_function = outer;
+    return extractAttributes(self, token, target);
+}
+
 // an argument that folds is stored as its value; anything else becomes an
 // initializer the vm runs when reflection asks, in the scope of the class
 // the attribute is in
 fn attributeArgument(self: *Compiler, idx: u32, target: u32) Error!Value {
     if (hasEmptyArrayElement(self.ast, idx)) return self.fail(target, "Cannot use empty array elements in arrays");
-    if (hasDynamicClassConstant(self.ast, idx)) return self.fail(target, "Dynamic class names are not allowed in compile-time class constant references");
-    if (!allowedInConstExpr(self.ast, idx)) return self.fail(target, "Constant expression contains invalid operations");
-    if (findStaticClass(self.ast, idx) != null) return self.fail(target, "static::class cannot be used for compile-time class name resolution");
+    try checkConstExpr(self, idx, true, target);
     if (namedClassName(self, idx)) |name| return .{ .string = Value.String.borrowed(name) };
     if (attrArgFolds(self, idx)) return self.evalConstExpr(idx);
-    const name = try @import("bytecode.zig").attrArgumentInitializer(self.allocator, self.file_path, self.ast.nodes[idx].main_token);
-    try self.string_allocs.append(self.allocator, name);
+    const text = try @import("ast_export.zig").constExprText(self.allocator, self, idx);
+    defer self.allocator.free(text);
+    const stored = try @import("bytecode.zig").attrArgumentInitializer(self.allocator, self.file_path, self.ast.nodes[idx].main_token, text);
+    try self.string_allocs.append(self.allocator, stored);
+    const name = @import("bytecode.zig").attrArgumentInitializerName(stored).?;
     var compiled = false;
     for (self.functions.items) |f| {
         if (std.mem.eql(u8, f.name, name)) compiled = true;
     }
     if (!compiled) try compileInitializer(self, name, .argument, idx, self.ast.nodes[idx].main_token);
-    return .{ .string = Value.String.borrowed(name) };
+    return .{ .string = Value.String.borrowed(stored) };
 }
 
 // `[,]` anywhere in the expression, which php refuses before anything else
@@ -401,73 +411,172 @@ fn hasEmptyArrayElement(ast: *const Ast, idx: u32) bool {
     };
 }
 
-// `expr::CONST` with a class that isn't a name
-fn hasDynamicClassConstant(ast: *const Ast, idx: u32) bool {
-    if (idx == 0) return false;
-    const node = ast.nodes[idx];
-    return switch (node.tag) {
-        .static_prop_access => switch (ast.nodes[node.data.lhs].tag) {
-            .identifier, .qualified_name => false,
-            else => !std.mem.startsWith(u8, ast.tokenSlice(node.main_token), "$"),
-        },
-        .dynamic_class_const => true,
-        .array_literal => for (ast.extraSlice(node.data.lhs)) |el_idx| {
-            if (el_idx == 0) continue;
-            const el = ast.nodes[el_idx];
-            if (hasDynamicClassConstant(ast, el.data.lhs)) break true;
-            if (el.tag == .array_element and hasDynamicClassConstant(ast, el.data.rhs)) break true;
-        } else false,
-        .binary_op, .logical_and, .logical_or, .null_coalesce, .array_access => hasDynamicClassConstant(ast, node.data.lhs) or hasDynamicClassConstant(ast, node.data.rhs),
-        .grouped_expr, .cast_expr, .prefix_op, .property_access, .nullsafe_property_access => hasDynamicClassConstant(ast, node.data.lhs),
-        else => false,
-    };
+// php's zend_compile_const_expr: the walk that refuses what a constant
+// expression can't hold, with each of its errors, before anything compiles.
+// allow_dynamic is false for class constants, property defaults and enum
+// case values (no `new`, no object casts), true for parameter defaults,
+// global constants and attribute arguments
+pub fn checkConstExpr(self: *Compiler, idx: u32, allow_dynamic: bool, at: u32) Error!void {
+    const outer = self.const_expr_at;
+    self.const_expr_at = at;
+    defer self.const_expr_at = outer;
+    return constExprWalk(self, idx, allow_dynamic);
 }
 
-// php's zend_is_allowed_in_const_expr over the whole expression: literals,
-// constants, class constants, operators, arrays, `new`, property reads,
-// casts, closures and first-class callables
-fn allowedInConstExpr(ast: *const Ast, idx: u32) bool {
-    if (idx == 0) return true;
+fn constExprWalk(self: *Compiler, idx: u32, allow_dynamic: bool) Error!void {
+    if (idx == 0) return;
+    const ast = self.ast;
     const node = ast.nodes[idx];
-    return switch (node.tag) {
-        .integer_literal, .float_literal, .string_literal, .true_literal, .false_literal, .null_literal => true,
-        .identifier, .qualified_name, .closure_expr, .callable_ref => true,
-        .binary_op, .logical_and, .logical_or, .null_coalesce, .array_access => allowedInConstExpr(ast, node.data.lhs) and allowedInConstExpr(ast, node.data.rhs),
-        .grouped_expr, .cast_expr => allowedInConstExpr(ast, node.data.lhs),
-        .prefix_op => switch (ast.tokens[node.main_token].tag) {
-            .plus_plus, .minus_minus => false,
-            else => allowedInConstExpr(ast, node.data.lhs),
+    const invalid = "Constant expression contains invalid operations";
+    switch (node.tag) {
+        .integer_literal, .float_literal, .true_literal, .false_literal, .null_literal, .identifier, .qualified_name => {},
+        .string_literal => if (isEncapsString(ast, node)) return self.fail(self.const_expr_at, invalid),
+        .grouped_expr, .array_spread => try constExprWalk(self, node.data.lhs, allow_dynamic),
+        // zend_eval_const_expr refuses it first
+        .array_push_target => return self.fail(self.const_expr_at, "Cannot use [] for reading"),
+        .binary_op => {
+            if (ast.tokens[node.main_token].tag == .kw_instanceof) return self.fail(self.const_expr_at, invalid);
+            try constExprWalk(self, node.data.lhs, allow_dynamic);
+            try constExprWalk(self, node.data.rhs, allow_dynamic);
         },
-        .ternary => allowedInConstExpr(ast, node.data.lhs) and
-            node.data.rhs + 1 < ast.extra_data.len and
-            allowedInConstExpr(ast, ast.extra_data[node.data.rhs]) and
-            allowedInConstExpr(ast, ast.extra_data[node.data.rhs + 1]),
-        .property_access, .nullsafe_property_access => allowedInConstExpr(ast, node.data.lhs) and
-            (ast.nodes[node.data.rhs].tag == .identifier or allowedInConstExpr(ast, node.data.rhs)),
-        // Class::CONST and Class::class, not Class::$property
-        .static_prop_access => !std.mem.startsWith(u8, ast.tokenSlice(node.main_token), "$") and
-            allowedInConstExpr(ast, node.data.lhs),
-        .array_literal => {
-            for (ast.extraSlice(node.data.lhs)) |el_idx| {
-                const el = ast.nodes[el_idx];
-                switch (el.tag) {
-                    .array_element => if (!allowedInConstExpr(ast, el.data.lhs) or !allowedInConstExpr(ast, el.data.rhs)) return false,
-                    .array_spread => if (!allowedInConstExpr(ast, el.data.lhs)) return false,
-                    else => return false,
+        .logical_and, .logical_or, .null_coalesce, .array_access => {
+            try constExprWalk(self, node.data.lhs, allow_dynamic);
+            try constExprWalk(self, node.data.rhs, allow_dynamic);
+        },
+        .prefix_op => switch (ast.tokens[node.main_token].tag) {
+            .bang, .plus, .minus, .tilde => try constExprWalk(self, node.data.lhs, allow_dynamic),
+            else => return self.fail(self.const_expr_at, invalid),
+        },
+        .cast_expr => {
+            if (!allow_dynamic and std.ascii.eqlIgnoreCase(ast.tokenSlice(node.main_token), "object"))
+                return self.fail(self.const_expr_at, "Object casts are not supported in this context");
+            try constExprWalk(self, node.data.lhs, allow_dynamic);
+        },
+        .ternary => {
+            try constExprWalk(self, node.data.lhs, allow_dynamic);
+            if (node.data.rhs + 1 < ast.extra_data.len) {
+                try constExprWalk(self, ast.extra_data[node.data.rhs], allow_dynamic);
+                try constExprWalk(self, ast.extra_data[node.data.rhs + 1], allow_dynamic);
+            }
+        },
+        .property_access, .nullsafe_property_access => {
+            try constExprWalk(self, node.data.lhs, allow_dynamic);
+            const name = ast.nodes[node.data.rhs];
+            if (name.tag != .identifier) try constExprWalk(self, node.data.rhs, allow_dynamic);
+        },
+        .static_prop_access => {
+            const member = ast.tokenSlice(node.main_token);
+            if (std.mem.startsWith(u8, member, "$")) return self.fail(self.const_expr_at, invalid);
+            const class_node = ast.nodes[node.data.lhs];
+            const named = class_node.tag == .identifier or class_node.tag == .qualified_name;
+            const static = class_node.tag == .identifier and std.ascii.eqlIgnoreCase(ast.tokenSlice(class_node.main_token), "static");
+            if (std.ascii.eqlIgnoreCase(member, "class")) {
+                if (!named) return self.fail(self.const_expr_at, "(expression)::class cannot be used in constant expressions");
+                if (static) return self.fail(self.const_expr_at, "static::class cannot be used for compile-time class name resolution");
+            } else {
+                if (!named) return self.fail(self.const_expr_at, "Dynamic class names are not allowed in compile-time class constant references");
+                if (static) return self.fail(self.const_expr_at, "\"static::\" is not allowed in compile-time constants");
+            }
+        },
+        .dynamic_class_const => {
+            const class_node = ast.nodes[node.data.lhs];
+            if (class_node.tag != .identifier and class_node.tag != .qualified_name)
+                return self.fail(self.const_expr_at, "Dynamic class names are not allowed in compile-time class constant references");
+            if (class_node.tag == .identifier and std.ascii.eqlIgnoreCase(ast.tokenSlice(class_node.main_token), "static"))
+                return self.fail(self.const_expr_at, "\"static::\" is not allowed in compile-time constants");
+            try constExprWalk(self, node.data.rhs, allow_dynamic);
+        },
+        .array_literal => for (ast.extraSlice(node.data.lhs)) |el_idx| {
+            if (el_idx == 0) return self.fail(self.const_expr_at, "Cannot use empty array elements in arrays");
+            const el = ast.nodes[el_idx];
+            switch (el.tag) {
+                .array_element => {
+                    try constExprWalk(self, el.data.lhs, allow_dynamic);
+                    try constExprWalk(self, el.data.rhs, allow_dynamic);
+                },
+                .array_spread => try constExprWalk(self, el.data.lhs, allow_dynamic),
+                else => return self.fail(self.const_expr_at, invalid),
+            }
+        },
+        .new_expr, .new_expr_dynamic, .anonymous_class => {
+            if (!allow_dynamic) return self.fail(self.const_expr_at, "New expressions are not supported in this context");
+            if (node.tag == .anonymous_class) return self.fail(self.const_expr_at, "Cannot use anonymous class in constant expression");
+            if (node.tag == .new_expr_dynamic) return self.fail(self.const_expr_at, "Cannot use dynamic class name in constant expression");
+            if (std.ascii.eqlIgnoreCase(ast.tokenSlice(node.main_token), "static")) return self.fail(self.const_expr_at, "\"static\" is not allowed in compile-time constants");
+            const args = ast.extraSlice(node.data.lhs);
+            var named = false;
+            for (args) |arg_idx| {
+                const arg = ast.nodes[arg_idx];
+                switch (arg.tag) {
+                    .splat_expr => return self.fail(self.const_expr_at, "Argument unpacking in constant expressions is not supported"),
+                    .named_arg => named = true,
+                    else => if (named) return self.fail(self.const_expr_at, "Cannot use positional argument after named argument"),
                 }
             }
-            return true;
-        },
-        .new_expr => {
-            for (ast.extraSlice(node.data.lhs)) |arg_idx| {
+            for (args) |arg_idx| {
                 const arg = ast.nodes[arg_idx];
-                const value = if (arg.tag == .named_arg or arg.tag == .splat_expr) arg.data.lhs else arg_idx;
-                if (!allowedInConstExpr(ast, value)) return false;
+                try constExprWalk(self, if (arg.tag == .named_arg) arg.data.lhs else arg_idx, allow_dynamic);
             }
-            return true;
         },
-        else => false,
-    };
+        .closure_expr => {
+            if (ast.tokens[node.main_token].tag == .kw_fn) return self.fail(self.const_expr_at, invalid);
+            const info = ast.extra_data[node.data.rhs];
+            if (info & (1 << 30) == 0) return self.fail(self.const_expr_at, "Closures in constant expressions must be static");
+            if (ast.extra_data[node.data.rhs + 1] != 0) return self.fail(self.const_expr_at, "Cannot use(...) variables in constant expression");
+        },
+        .callable_ref => {
+            const callee = ast.nodes[node.data.lhs];
+            switch (callee.tag) {
+                .identifier, .qualified_name => {},
+                .grouped_expr => {
+                    var inner = ast.nodes[callee.data.lhs];
+                    while (inner.tag == .grouped_expr) inner = ast.nodes[inner.data.lhs];
+                    switch (inner.tag) {
+                        .string_literal => if (isEncapsString(ast, inner)) return self.fail(self.const_expr_at, "Cannot use dynamic function name in constant expression"),
+                        .integer_literal, .float_literal, .true_literal, .false_literal, .null_literal, .array_literal => return self.fail(self.const_expr_at, "Illegal function name"),
+                        else => return self.fail(self.const_expr_at, "Cannot use dynamic function name in constant expression"),
+                    }
+                },
+                .static_call, .dynamic_static_call => {
+                    const class_node = ast.nodes[callee.data.lhs];
+                    if (class_node.tag != .identifier and class_node.tag != .qualified_name) return self.fail(self.const_expr_at, "Cannot use dynamic class name in constant expression");
+                    if (class_node.tag == .identifier and std.ascii.eqlIgnoreCase(ast.tokenSlice(class_node.main_token), "static"))
+                        return self.fail(self.const_expr_at, "\"static\" is not allowed in compile-time constants");
+                    if (callee.tag == .dynamic_static_call or ast.tokens[callee.main_token].tag == .variable)
+                        return self.fail(self.const_expr_at, "Cannot use dynamic method name in constant expression");
+                },
+                .method_call, .nullsafe_method_call => return self.fail(self.const_expr_at, invalid),
+                else => return self.fail(self.const_expr_at, "Cannot use dynamic function name in constant expression"),
+            }
+        },
+        else => return self.fail(self.const_expr_at, invalid),
+    }
+}
+
+// a double-quoted string, heredoc or backtick string with variables in it
+// (php's ZEND_AST_ENCAPS_LIST and ZEND_AST_SHELL_EXEC)
+fn isEncapsString(ast: *const Ast, node: Ast.Node) bool {
+    const tok = ast.tokens[node.main_token];
+    const lexeme = ast.tokenSlice(node.main_token);
+    if (tok.tag == .heredoc) {
+        return hasInterpolation(lexeme);
+    }
+    if (tok.tag != .string or lexeme.len < 2) return false;
+    if (lexeme[0] == '`') return true;
+    return lexeme[0] == '"' and hasInterpolation(lexeme[1 .. lexeme.len - 1]);
+}
+
+fn hasInterpolation(s: []const u8) bool {
+    var k: usize = 0;
+    while (k < s.len) : (k += 1) {
+        if (s[k] == '\\') {
+            k += 1;
+            continue;
+        }
+        if (s[k] == '$' and k + 1 < s.len and (s[k + 1] == '{' or s[k + 1] == '_' or s[k + 1] >= 127 or std.ascii.isAlphabetic(s[k + 1]))) return true;
+        if (s[k] == '{' and k + 1 < s.len and s[k + 1] == '$') return true;
+    }
+    return false;
 }
 
 // a constant expression's static::class, and its parent:: in a class known
@@ -1095,6 +1204,7 @@ fn checkPropDecls(self: *Compiler, class_name: []const u8, members: []const u32)
     for (members) |m_idx| {
         const m = self.ast.nodes[m_idx];
         if (m.tag != .class_property and m.tag != .static_class_property and m.tag != .class_property_hooks) continue;
+        try checkConstExpr(self, if (m.tag == .class_property_hooks) self.ast.extra_data[m.data.lhs] else m.data.lhs, false, m.main_token);
         const type_extra = m.data.rhs >> 16;
         if (type_extra == 0) continue;
         const raw = self.ast.tokenSlice(m.main_token);
@@ -1142,7 +1252,7 @@ fn checkConstDecls(self: *Compiler, class_name: []const u8, members: []const u32
             if (prev.tag == .const_decl and std.mem.eql(u8, self.ast.tokenSlice(prev.main_token), name))
                 return self.failFmt(m.main_token, "Cannot redefine class constant {s}::{s}", .{ class_name, name });
         }
-        if (findStaticClass(self.ast, m.data.lhs)) |t| return self.fail(t, "static::class cannot be used for compile-time class name resolution");
+        try checkConstExpr(self, m.data.lhs, false, m.main_token);
         const type_extra = m.data.rhs >> 16;
         if (type_extra == 0) continue;
         const text = try buildTypeString(self, self.ast.extra_data[type_extra - 1], self.ast.extra_data[type_extra]);
@@ -1255,6 +1365,7 @@ fn checkParams(self: *Compiler, func_name: []const u8, at: u32, param_nodes: []c
             if (node.data.lhs != 0) return self.fail(node.main_token, "Variadic parameter cannot have a default value");
         }
         const promoted = ((node.data.rhs >> 2) & 3) != 0 or (node.data.rhs & 16) != 0 or ((node.data.rhs >> 5) & 3) != 0;
+        try checkConstExpr(self, node.data.lhs, true, node.main_token);
         try checkRelativeClassFetches(self, node.data.lhs);
         const default = foldedDefault(self, node.data.lhs);
         const force_nullable = default == .null and !promoted;
@@ -1484,6 +1595,23 @@ fn lastDocComment(trivia: []const u8) ?[]const u8 {
 fn endLineForBlockStartingAt(self: *Compiler, start_tok: u32) u32 {
     var depth: i32 = 0;
     var i: u32 = start_tok;
+    // past the parameter list first: a default may hold a closure's braces
+    var j = i;
+    var parens: i32 = 0;
+    while (j < self.ast.tokens.len) : (j += 1) {
+        switch (self.ast.tokens[j].tag) {
+            .l_paren => parens += 1,
+            .r_paren => {
+                parens -= 1;
+                if (parens == 0) {
+                    i = j;
+                    break;
+                }
+            },
+            .l_brace, .semicolon => if (parens == 0) break,
+            else => {},
+        }
+    }
     while (i < self.ast.tokens.len) : (i += 1) {
         const tag: Token.Tag = self.ast.tokens[i].tag;
         if (tag == .l_brace) {
@@ -1726,7 +1854,28 @@ fn extractParamTypes(self: *Compiler, param_nodes: []const u32) Error![]const []
 
 // a parameter's folded default; an int default of a float parameter is
 // stored as the float (zend_is_valid_default_value converts it)
-fn paramDefaultValue(self: *Compiler, pnode: Ast.Node) Error!Value {
+// a parameter's default: folded, a sentinel, or an initializer compiled
+// with `function` as the function being compiled (its __FUNCTION__ and the
+// names of closures in it)
+fn paramDefaultValue(self: *Compiler, pnode: Ast.Node, function: []const u8) Error!Value {
+    if (!sentinelDefault(self.ast, pnode.data.lhs)) {
+        const outer_function = self.current_function;
+        self.current_function = function;
+        defer self.current_function = outer_function;
+        const expr = pnode.data.lhs;
+        const at = self.ast.nodes[expr].main_token;
+        const text = try @import("ast_export.zig").constExprText(self.allocator, self, expr);
+        defer self.allocator.free(text);
+        const value = try @import("bytecode.zig").paramDefaultInitializer(self.allocator, self.file_path, at, text);
+        try self.string_allocs.append(self.allocator, value);
+        const name = @import("bytecode.zig").paramDefaultInitializerParts(value).?.name;
+        var compiled = false;
+        for (self.functions.items) |f| {
+            if (std.mem.eql(u8, f.name, name)) compiled = true;
+        }
+        if (!compiled) try compileInitializer(self, name, .argument, expr, at);
+        return .{ .string = Value.String.borrowed(value) };
+    }
     const value = self.evalConstExpr(pnode.data.lhs);
     if (value != .int) return value;
     const type_extra = pnode.data.rhs >> 8;
@@ -1735,6 +1884,46 @@ fn paramDefaultValue(self: *Compiler, pnode: Ast.Node) Error!Value {
     const mask = php_types.shape(text).mask;
     if (mask & php_types.DOUBLE != 0 and mask & php_types.LONG == 0) return .{ .float = @floatFromInt(value.int) };
     return value;
+}
+
+// whether a parameter default is one the folded and sentinel defaults
+// represent exactly (literals, constants, class constants, arithmetic over
+// them, arrays of them); anything else (`new` included) is
+// compiled to an initializer the call runs
+fn sentinelDefault(ast: *const Ast, idx: u32) bool {
+    if (idx == 0) return true;
+    const node = ast.nodes[idx];
+    return switch (node.tag) {
+        .integer_literal, .float_literal, .true_literal, .false_literal, .null_literal, .qualified_name => true,
+        // magic constants are the compiler's
+        .identifier => Compiler.magicConstantName(ast.tokenSlice(node.main_token)) == null,
+        .string_literal => !isEncapsString(ast, node),
+        // self:: and parent:: are kept as written (reflection prints them so)
+        .static_prop_access => !std.mem.startsWith(u8, ast.tokenSlice(node.main_token), "$") and switch (ast.nodes[node.data.lhs].tag) {
+            .identifier => !isRelativeClassName(ast.tokenSlice(ast.nodes[node.data.lhs].main_token)),
+            .qualified_name => true,
+            else => false,
+        },
+        .grouped_expr => sentinelDefault(ast, node.data.lhs),
+        .prefix_op => switch (ast.tokens[node.main_token].tag) {
+            .plus, .minus, .tilde, .bang => sentinelDefault(ast, node.data.lhs),
+            else => false,
+        },
+        .binary_op => switch (ast.tokens[node.main_token].tag) {
+            .pipe, .amp, .caret, .plus, .minus, .star, .slash, .percent, .lt_lt, .gt_gt, .star_star, .dot => sentinelDefault(ast, node.data.lhs) and sentinelDefault(ast, node.data.rhs),
+            else => false,
+        },
+        .array_literal => for (ast.extraSlice(node.data.lhs)) |el_idx| {
+            if (el_idx == 0) break false;
+            const el = ast.nodes[el_idx];
+            if (el.tag != .array_element or !sentinelDefault(ast, el.data.lhs) or !sentinelDefault(ast, el.data.rhs)) break false;
+        } else true,
+        else => false,
+    };
+}
+
+fn isRelativeClassName(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, "self") or std.ascii.eqlIgnoreCase(name, "parent") or std.ascii.eqlIgnoreCase(name, "static");
 }
 
 // zend_emit_final_return: falling off the end of a function whose return
@@ -1814,7 +2003,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
             is_variadic = true;
             try defaults.append(self.allocator, .null);
         } else if (pnode.data.lhs != 0) {
-            try defaults.append(self.allocator, try paramDefaultValue(self, pnode));
+            try defaults.append(self.allocator, try paramDefaultValue(self, pnode, name));
         } else {
             try defaults.append(self.allocator, .null);
         }
@@ -1930,7 +2119,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
 
     // function-level attributes
     if (!std.mem.startsWith(u8, name, "__closure_")) {
-        const func_attrs = try extractAttributes(self, node.main_token, AttrTarget.function);
+        const func_attrs = try extractAttributesOf(self, node.main_token, AttrTarget.function, name);
         if (func_attrs.len > 0) {
             const attr_defs = try self.allocator.alloc(AttributeDef, func_attrs.len);
             for (func_attrs, 0..) |pa, i| {
@@ -1980,7 +2169,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
             is_variadic = true;
             try defaults.append(self.allocator, .null);
         } else if (pnode.data.lhs != 0) {
-            try defaults.append(self.allocator, try paramDefaultValue(self, pnode));
+            try defaults.append(self.allocator, try paramDefaultValue(self, pnode, self.current_function));
         } else {
             try defaults.append(self.allocator, .null);
         }
@@ -3088,7 +3277,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_method or member.tag == .static_class_method or member.tag == .interface_method) {
-            const mattrs = try extractAttributes(self, member.main_token, AttrTarget.method);
+            const mattrs = try extractAttributesOf(self, member.main_token, AttrTarget.method, self.ast.tokenSlice(member.main_token));
             if (mattrs.len > 0) {
                 try methods_with_attrs.append(self.allocator, .{
                     .name = self.ast.tokenSlice(member.main_token),
@@ -3443,7 +3632,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (members) |m| {
         const member = self.ast.nodes[m];
         if (member.tag == .interface_method) {
-            const mattrs = try extractAttributes(self, member.main_token, AttrTarget.method);
+            const mattrs = try extractAttributesOf(self, member.main_token, AttrTarget.method, self.ast.tokenSlice(member.main_token));
             if (mattrs.len > 0) {
                 try methods_with_attrs.append(self.allocator, .{
                     .name = self.ast.tokenSlice(member.main_token),
@@ -3710,7 +3899,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
             const method_key = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ trait_name, self.ast.tokenSlice(member.main_token) });
             try self.string_allocs.append(self.allocator, method_key);
             try appendParamAttributes(self, method_key, self.ast.extraSlice(member.data.lhs));
-            const mattrs = try extractAttributes(self, member.main_token, AttrTarget.method);
+            const mattrs = try extractAttributesOf(self, member.main_token, AttrTarget.method, self.ast.tokenSlice(member.main_token));
             if (mattrs.len > 0) {
                 try methods_with_attrs.append(self.allocator, .{
                     .name = self.ast.tokenSlice(member.main_token),
@@ -3783,6 +3972,7 @@ fn checkEnumMembers(self: *Compiler, enum_name: []const u8, enum_tok: u32, backe
                 const case = self.ast.tokenSlice(member.main_token);
                 if (!backed and member.data.lhs != 0) return self.failFmt(member.main_token, "Case {s} of non-backed enum {s} must not have a value", .{ case, enum_name });
                 if (backed and member.data.lhs == 0) return self.failFmt(member.main_token, "Case {s} of backed enum {s} must have a value", .{ case, enum_name });
+                try checkConstExpr(self, member.data.lhs, false, member.main_token);
             },
             .class_property, .static_class_property, .class_property_hooks => return self.failFmt(member.main_token, "Enum {s} cannot include properties", .{enum_name}),
             .interface_method => return self.failFmt(member.main_token, "Enum method {s}::{s}() must not be abstract", .{ enum_name, self.ast.tokenSlice(member.main_token) }),
@@ -3913,7 +4103,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .class_method or member.tag == .static_class_method or member.tag == .interface_method) {
-            const mattrs = try extractAttributes(self, member.main_token, AttrTarget.method);
+            const mattrs = try extractAttributesOf(self, member.main_token, AttrTarget.method, self.ast.tokenSlice(member.main_token));
             if (mattrs.len > 0) {
                 try methods_with_attrs.append(self.allocator, .{
                     .name = self.ast.tokenSlice(member.main_token),
@@ -4019,7 +4209,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
             is_variadic = true;
             try defaults.append(self.allocator, .null);
         } else if (pnode.data.lhs != 0) {
-            try defaults.append(self.allocator, try paramDefaultValue(self, pnode));
+            try defaults.append(self.allocator, try paramDefaultValue(self, pnode, method_name));
         } else {
             try defaults.append(self.allocator, .null);
         }
@@ -4348,6 +4538,7 @@ fn compileInitializer(self: *Compiler, name: []const u8, scope: InitializerScope
         .current_function = self.current_function,
         .in_trait = self.in_trait,
         .relative_const_classes = true,
+        .const_expr = true,
     };
     defer sub.deinitScratch();
     errdefer sub.discardOutput();
@@ -4426,6 +4617,7 @@ fn compileDeferredPropDefaults(self: *Compiler, class_name: []const u8, members:
         .current_parent = self.current_parent,
         .current_function = name,
         .in_trait = self.in_trait,
+        .const_expr = true,
     };
     defer sub.deinitScratch();
     errdefer sub.discardOutput();
@@ -4645,7 +4837,7 @@ fn compileInterfaceMethodStub(self: *Compiler, owner_name: []const u8, member: A
             is_variadic = true;
             try defaults.append(self.allocator, .null);
         } else if (pnode.data.lhs != 0) {
-            try defaults.append(self.allocator, try paramDefaultValue(self, pnode));
+            try defaults.append(self.allocator, try paramDefaultValue(self, pnode, method_name));
         } else {
             try defaults.append(self.allocator, .null);
         }
@@ -4722,7 +4914,7 @@ fn opcodeWidth(b: u8) usize {
 // php names a closure after where it is written: `{closure:<scope>:<line>}`,
 // the scope being the enclosing closure's name, `Class::method()`, `func()`,
 // or the file at the top level
-fn closureDisplayName(self: *Compiler, line: u32) ![]const u8 {
+pub fn closureDisplayName(self: *Compiler, line: u32) ![]const u8 {
     const f = self.current_function;
     const name = if (std.mem.startsWith(u8, f, "{closure:"))
         try std.fmt.allocPrint(self.allocator, "{{closure:{s}:{d}}}", .{ f, line })
