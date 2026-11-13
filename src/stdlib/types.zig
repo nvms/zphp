@@ -1039,6 +1039,8 @@ fn native_call_user_func_array(ctx: *NativeContext, args: []const Value) Runtime
 
 fn native_function_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    // methods are no functions, though zphp registers them by "C::m"
+    if (std.mem.indexOf(u8, args[0].string.bytes(), "::") != null) return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = ctx.vm.functionExists(args[0].string.bytes()) });
 }
 

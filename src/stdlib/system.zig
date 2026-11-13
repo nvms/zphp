@@ -1254,13 +1254,25 @@ fn native_get_defined_functions(ctx: *NativeContext, _: []const Value) RuntimeEr
     var internal = try ctx.createArray();
     var iter_n = vm.native_fns.keyIterator();
     while (iter_n.next()) |name| {
+        // methods are registered by "C::m" beside the functions
+        if (std.mem.indexOf(u8, name.*, "::") != null) continue;
         try internal.append(alloc, .{ .string = Value.String.borrowed(name.*) });
     }
 
+    // php lists the function table's keys: lowercased names of the
+    // functions the script declared, no methods or closures
     var user = try ctx.createArray();
     var iter_u = vm.functions.iterator();
     while (iter_u.next()) |entry| {
-        try user.append(alloc, .{ .string = Value.String.borrowed(entry.key_ptr.*) });
+        const name = entry.key_ptr.*;
+        if (name.len == 0 or name[0] == 0 or std.mem.indexOf(u8, name, "::") != null or std.mem.indexOfScalar(u8, name, '$') != null) continue;
+        if (std.mem.startsWith(u8, name, "__closure_") or std.mem.startsWith(u8, name, "{closure")) continue;
+        if (vm.native_fns.contains(name)) continue;
+        const lower = try std.ascii.allocLowerString(alloc, name);
+        defer alloc.free(lower);
+        const owned = try Value.String.create(alloc, lower);
+        defer owned.release();
+        try user.append(alloc, .{ .string = owned });
     }
 
     try result.set(alloc, .{ .string = Value.String.borrowed("internal") }, .{ .array = internal });
