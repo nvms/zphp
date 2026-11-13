@@ -744,6 +744,9 @@ pub const NativeInvocation = struct {
     args: []const Value,
     // what natives and by-reference bindings key off; null skips them
     name: ?[]const u8 = null,
+    // php's ZEND_CALL_DYNAMIC: `$f()` or a callback, which the scope
+    // introspection functions refuse
+    dynamic: bool = false,
     // how a trace names the call when name is null
     label: ?[]const u8 = null,
     instance: bool = false,
@@ -1002,6 +1005,8 @@ pub const VM = struct {
     // named arguments a native that accepts them (call_user_func) gets past
     // its declared parameters; invokeNative hands them to the native's context
     native_named_args: ?*PhpArray = null,
+    // the next callNamedFunction is a dynamic call (`$f()`)
+    pending_dynamic_call: bool = false,
     // php's IS_PROP_REINITABLE: while __clone runs on a clone, and while
     // clone() assigns its properties, each initialized readonly property of
     // the clone may be written once more. a window per clone in progress,
@@ -5584,6 +5589,7 @@ pub const VM = struct {
                         self.sp -= 1;
                         // the callee value's slot is gone; it is released once
                         // the callee frame holds a closure by call_name
+                        self.pending_dynamic_call = true;
                         const called = self.callNamedFunction(name, arg_count);
                         self.stackRelease(name_val);
                         called catch {
@@ -24837,6 +24843,13 @@ pub const VM = struct {
         if (native.strings != 0) if (name) |n| for (native_args, 0..) |arg, i| {
             if (arg == .object and i < 31 and native.strings & (@as(u32, 1) << @intCast(i)) != 0) try self.refuseObjectForString(n, label, i, arg.object);
         };
+        // zend_forbid_dynamic_call, after the arguments are parsed
+        if (call.dynamic) if (name) |n| if (forbidsDynamicCall(n)) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Cannot call {s}() dynamically", .{n});
+            defer self.allocator.free(msg);
+            try self.setPendingException("Error", msg);
+            return error.RuntimeError;
+        };
         const outer_forwarding = self.forwarding_depth;
         defer self.forwarding_depth = outer_forwarding;
         // a native call_user_func makes is called by it; a user function it
@@ -26249,6 +26262,15 @@ pub const VM = struct {
         return false;
     }
 
+    // zend_forbid_dynamic_call's users: functions that read or write the
+    // calling scope
+    fn forbidsDynamicCall(name: []const u8) bool {
+        for ([_][]const u8{ "extract", "compact", "get_defined_vars", "func_get_args", "func_get_arg", "func_num_args" }) |f| {
+            if (std.ascii.eqlIgnoreCase(name, f)) return true;
+        }
+        return false;
+    }
+
     // natives PHP opcode-compiles (strlen, count, sizeof) - PHP never frames
     // these into an exception stack trace, so neither should zphp
     fn isFrameOutNative(name: []const u8) bool {
@@ -26361,6 +26383,8 @@ pub const VM = struct {
     // parameter fall into a variadic param keyed by their name. when set, its
     // entries are merged into the variadic rest array
     fn callNamedFunctionV(self: *VM, raw_name: []const u8, arg_count: u32, named_extras: ?*PhpArray) RuntimeError!void {
+        const dynamic = self.pending_dynamic_call;
+        self.pending_dynamic_call = false;
         self.captureArgSources(arg_count);
         // PHP normalizes leading-backslash on function callable strings
         const name = if (raw_name.len > 0 and raw_name[0] == '\\') raw_name[1..] else raw_name;
@@ -26380,7 +26404,7 @@ pub const VM = struct {
             self.dropN(ac);
             const pre_handler_count = self.handler_count;
             var ctx = self.makeContext(name);
-            const result = self.invokeNative(native, &ctx, .{ .args = args_s, .name = name }) catch {
+            const result = self.invokeNative(native, &ctx, .{ .args = args_s, .name = name, .dynamic = dynamic }) catch {
                 if (self.pending_exception) |exc| {
                     self.pending_exception = null;
                     if (self.handler_count > self.handler_floor and !self.uncatchable_fatal) {
@@ -26401,7 +26425,10 @@ pub const VM = struct {
         } else if (self.functions.get(name)) |func| {
             return self.enterUserFunction(func, name, arg_count, named_extras);
         } else {
-            if (self.resolveFunctionName(name)) |registered| return self.callNamedFunctionV(registered, arg_count, named_extras);
+            if (self.resolveFunctionName(name)) |registered| {
+                self.pending_dynamic_call = dynamic;
+                return self.callNamedFunctionV(registered, arg_count, named_extras);
+            }
             const msg = std.fmt.allocPrint(self.allocator, "Call to undefined function {s}()", .{name}) catch "Call to undefined function";
             defer self.allocator.free(msg);
             if (try self.throwBuiltinException("Error", msg)) return;
@@ -27321,7 +27348,7 @@ pub const VM = struct {
             // mt_rand distinguish by name) work when dispatched indirectly via
             // call_user_func / first-class-callable / array callable
             var ctx = self.makeContext(name);
-            const result = try self.invokeNative(native, &ctx, .{ .args = args, .name = name });
+            const result = try self.invokeNative(native, &ctx, .{ .args = args, .name = name, .dynamic = true });
             return self.borrowCallResult(result);
         } else if (self.functions.get(name)) |func| {
             if (args.len < func.required_params) return self.raiseTooFewArgs(name, args, func);
