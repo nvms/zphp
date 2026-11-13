@@ -2543,6 +2543,19 @@ fn rcMarkLazyObjectAsInitialized(ctx: *NativeContext, args: []const Value) Runti
     if (args.len < 1 or args[0] != .object) return NativeResult.scalar(.null);
     if (args[0].object.lazy) |state| {
         if (!state.running) {
+            // zend_lazy_object_mark_as_initialized: lazy slots take their
+            // defaults, over what a failed proxy factory wrote
+            const obj = args[0].object;
+            if (state.written) |written| if (obj.slots) |slots| if (obj.slot_layout) |layout| {
+                for (written, 0..) |was_written, i| {
+                    if (!was_written or i >= slots.len or i >= layout.defaults.len or !state.pending[i]) continue;
+                    const default = layout.defaults[i];
+                    VM.retainValue(default);
+                    ctx.vm.releaseValue(slots[i]);
+                    slots[i] = default;
+                    written[i] = false;
+                }
+            };
             const initializer = state.initializer;
             state.initializer = .null;
             ctx.vm.releaseValue(initializer);

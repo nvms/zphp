@@ -8215,7 +8215,8 @@ pub const VM = struct {
                         try self.bindRefSlot(&frame.ref_slots, dst_name, c);
                     } else {
                         var obj_ptr = obj_val.object;
-                        self.triggerLazyAccess(obj_ptr, prop_name) catch {
+                        // __get answers before a lazy object is initialized
+                        if (!self.lazyMagicFirst(obj_ptr, prop_name, .get)) self.triggerLazyAccess(obj_ptr, prop_name) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
@@ -22589,7 +22590,12 @@ pub const VM = struct {
     // dispatched: an exception was raised and dispatched, and the run loop
     // continues at its handler
     fn propertyWriteGate(self: *VM, obj_in: *PhpObject, prop_name: []const u8, val: Value, action: MutationAction, base_frame: usize) RuntimeError!PropWriteGate {
-        self.triggerLazyAccess(obj_in, prop_name) catch {
+        // zend_std_write_property runs a set hook or __set before a lazy
+        // object is initialized: only a write to its storage initializes it
+        const lazy_deferred = obj_in.lazy != null and
+            ((self.hasPropHook(obj_in.class_name, prop_name, .set) and !self.inPropHook(obj_in, prop_name)) or
+                self.lazyMagicFirst(obj_in, prop_name, .set));
+        if (!lazy_deferred) self.triggerLazyAccess(obj_in, prop_name) catch {
             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) return .{ .step = .dispatched };
             return error.RuntimeError;
         };
@@ -23315,7 +23321,19 @@ pub const VM = struct {
         state.running = true;
         defer state.running = false;
         var ctx = self.makeContext(null);
-        errdefer {
+        // a failed ghost initializer's changes are reverted
+        // (zend_lazy_object_revert_init); a proxy keeps what its factory did,
+        // its properties still lazy but listed with what it wrote
+        errdefer if (state.proxy) record: {
+            const written = state.written orelse (self.allocator.alloc(bool, state.pending.len) catch break :record);
+            if (state.written == null) {
+                @memset(written, false);
+                state.written = written;
+            }
+            for (slots, saved, 0..) |slot, v, i| {
+                if (i < written.len and !Value.identical(v, slot)) written[i] = true;
+            }
+        } else {
             for (slots, saved, 0..) |*slot, v, i| {
                 if (self.ref_index) |ri| {
                     if (obj.slot_layout) |layout| {
@@ -23334,7 +23352,7 @@ pub const VM = struct {
             }
             var restored = unset.keyIterator();
             while (restored.next()) |name| obj.markUnset(self.allocator, name.*) catch {};
-        }
+        };
         if (state.proxy) {
             const result = try ctx.invokeCallable(state.initializer, &.{.{ .object = obj }});
             if (result != .object) {
