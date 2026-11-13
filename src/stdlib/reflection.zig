@@ -1,5 +1,6 @@
 const std = @import("std");
 const class_names = @import("../runtime/class_names.zig");
+const callables = @import("../runtime/callables.zig");
 const php_types = @import("../pipeline/php_types.zig");
 const object_properties = @import("../runtime/object_properties.zig");
 const deprecations = @import("deprecations_generated.zig");
@@ -4562,13 +4563,9 @@ fn bindClosure(ctx: *NativeContext, comptime func: []const u8, comptime this_par
 
 // a Closure made from a callable, bound anew: a method's now runs on new_this
 fn bindFakeClosure(ctx: *NativeContext, closure: *PhpObject, new_this: Value) RuntimeError!NativeResult {
-    var callable = closure.fakeCallable();
-    if (new_this == .object and callable == .array and callable.array.entries.items.len == 2) {
-        const pair = try ctx.createArray();
-        try pair.append(ctx.allocator, new_this);
-        try pair.append(ctx.allocator, callable.array.entries.items[1].value);
-        callable = .{ .array = pair };
-    }
+    const callable = closure.fakeCallable();
+    if (new_this == .object and callable == .array and callable.array.entries.items.len == 2)
+        return NativeResult.borrowed(.{ .object = try ctx.vm.newFakeMethodClosure(new_this, callable.array.entries.items[1].value, null) });
     return wrapCallableClosure(ctx, callable);
 }
 
@@ -4738,45 +4735,61 @@ fn closureGetCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeR
     return NativeResult.share(.{ .object = closure.? });
 }
 
+// zend_create_closure_from_callable: the callable is resolved as a callback
+// from the calling scope (zend_is_callable_ex), and the closure calls what it
+// resolved to
 fn closureFromCallable(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const vm = ctx.vm;
     if (args.len < 1) return NativeResult.scalar(.null);
     const callable = args[0];
     if (callable == .object and std.mem.eql(u8, callable.object.class_name, "Closure")) return NativeResult.share(callable);
-    if (callable == .string) {
-        const raw = callable.string.bytes();
-        const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
-        if (ctx.vm.canonicalFunctionName(name) orelse ctx.vm.staticMethodNamed(name)) |registered| {
-            // the registered name, so later calls find the function whatever
-            // case or leading backslash the callable was written with
-            if (!std.mem.eql(u8, registered, raw)) return wrapCallableClosure(ctx, .{ .string = Value.String.borrowed(registered) });
-            return wrapCallableClosure(ctx, callable);
-        }
-        try ctx.vm.setPendingException("TypeError", "Failed to create closure from callable: function does not exist");
-        return error.RuntimeError;
-    }
-    if (callable == .object) {
-        if (ctx.vm.hasMethod(callable.object.class_name, "__invoke")) return wrapCallableClosure(ctx, callable);
-        try ctx.vm.setPendingException("TypeError", "Failed to create closure from callable");
-        return error.RuntimeError;
-    }
-    if (callable == .array) {
-        const entries = callable.array.entries.items;
-        if (entries.len == 2 and entries[1].value == .string) {
-            const method = entries[1].value.string.bytes();
-            if (entries[0].value == .string) {
-                if (ctx.vm.hasMethod(entries[0].value.string.bytes(), method)) {
-                    const full = try ctx.vm.transientAdopted(try std.fmt.allocPrint(ctx.allocator, "{s}::{s}", .{ entries[0].value.string.bytes(), method }));
-                    return wrapCallableClosure(ctx, .{ .string = full });
-                }
-            } else if (entries[0].value == .object) {
-                if (ctx.vm.hasMethod(entries[0].value.object.class_name, method)) return wrapCallableClosure(ctx, callable);
+    // resolved in the caller's scope, with the class static:: names there
+    // rather than the Closure this static call named
+    const frame = vm.currentFrame();
+    const caller_called = frame.called_class;
+    if (caller_called != null and std.ascii.eqlIgnoreCase(caller_called.?, "Closure")) frame.called_class = vm.static_native_outer_called;
+    defer frame.called_class = caller_called;
+    const callee = switch (try callables.resolveCallback(vm, callable, .{})) {
+        .callee => |c| c,
+        .failure => |failure| {
+            var buf: std.ArrayListUnmanaged(u8) = .empty;
+            defer buf.deinit(ctx.allocator);
+            try buf.appendSlice(ctx.allocator, "Failed to create closure from callable: ");
+            try callables.writeReason(failure, &buf, ctx.allocator);
+            try vm.setPendingException("TypeError", buf.items);
+            return error.RuntimeError;
+        },
+    };
+    switch (callee) {
+        .function => |name| return wrapCallableClosure(ctx, .{ .string = Value.String.borrowed(name) }),
+        .closure => |obj| return NativeResult.share(.{ .object = obj }),
+        .invoke => |obj| {
+            // [$closure, "__invoke"] is the closure itself
+            if (std.mem.eql(u8, obj.class_name, "Closure")) return NativeResult.share(.{ .object = obj });
+            return wrapCallableClosure(ctx, .{ .object = obj });
+        },
+        .method => |m| {
+            // a "parent::m" or "A::m" member names a method the object's
+            // class may override: the closure keeps the one found
+            const method = if (m.registered) |registered| registered[std.mem.indexOf(u8, registered, "::").? + 2 ..] else m.name;
+            var named: Value = .{ .string = try vm.transientBytes(method) };
+            if (m.registered) |registered| {
+                const declaring = registered[0..std.mem.indexOf(u8, registered, "::").?];
+                const own = vm.findMethodVisibility(m.object.class_name, method).defining_class;
+                if (own.len > 0 and !std.ascii.eqlIgnoreCase(own, declaring)) named = .{ .string = Value.String.borrowed(registered) };
             }
-        }
-        try ctx.vm.setPendingException("TypeError", "Failed to create closure from callable");
-        return error.RuntimeError;
+            return NativeResult.borrowed(.{ .object = try vm.newFakeMethodClosure(.{ .object = m.object }, named, null) });
+        },
+        .static_method => |m| {
+            const declaring = m.registered[0..std.mem.indexOf(u8, m.registered, "::").?];
+            const called: ?[]const u8 = if (std.ascii.eqlIgnoreCase(declaring, m.called_class)) null else m.called_class;
+            return NativeResult.borrowed(.{ .object = try vm.newFakeClosure(.{ .string = Value.String.borrowed(m.registered) }, called) });
+        },
+        .magic => |m| {
+            const target: Value = if (m.object) |obj| .{ .object = obj } else .{ .string = Value.String.borrowed(m.class) };
+            return NativeResult.borrowed(.{ .object = try vm.newFakeMethodClosure(target, .{ .string = try vm.transientBytes(m.name) }, null) });
+        },
     }
-    try ctx.vm.setPendingException("TypeError", "Failed to create closure from callable");
-    return error.RuntimeError;
 }
 
 fn reflectionNoop(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {

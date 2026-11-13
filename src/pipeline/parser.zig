@@ -1312,6 +1312,7 @@ const Parser = struct {
             defer args.deinit(self.allocator);
             if (self.peek() == .l_paren) {
                 _ = self.advance();
+                self.skipNewCallableConvert(new_tok);
                 if (self.peek() != .r_paren) {
                     try args.append(self.allocator, try self.parseCallArg());
                     while (self.peek() == .comma) {
@@ -1358,6 +1359,7 @@ const Parser = struct {
             defer dyn_args.deinit(self.allocator);
             if (self.peek() == .l_paren) {
                 _ = self.advance();
+                self.skipNewCallableConvert(new_tok);
                 if (self.peek() != .r_paren) {
                     try dyn_args.append(self.allocator, try self.parseCallArg());
                     while (self.peek() == .comma) {
@@ -1391,6 +1393,7 @@ const Parser = struct {
 
         if (self.peek() == .l_paren) {
             _ = self.advance();
+            self.skipNewCallableConvert(new_tok);
             if (self.peek() != .r_paren) {
                 try args.append(self.allocator, try self.parseCallArg());
                 while (self.peek() == .comma) {
@@ -1436,6 +1439,7 @@ const Parser = struct {
         defer ctor_args.deinit(self.allocator);
         if (self.peek() == .l_paren) {
             _ = self.advance();
+            self.skipNewCallableConvert(new_tok);
             if (self.peek() != .r_paren) {
                 try ctor_args.append(self.allocator, try self.parseCallArg());
                 while (self.peek() == .comma) {
@@ -2706,6 +2710,7 @@ const Parser = struct {
     fn parseAttributes(self: *Parser) Error!void {
         if (self.peek() != .hash_bracket) return;
         const start = self.pos;
+        var callable_convert = false;
         var items = std.ArrayListUnmanaged(u32).empty;
         defer items.deinit(self.allocator);
         while (self.peek() == .hash_bracket) {
@@ -2726,6 +2731,11 @@ const Parser = struct {
                     _ = self.advance();
                     var list = std.ArrayListUnmanaged(u32).empty;
                     defer list.deinit(self.allocator);
+                    // php refuses #[A(...)] when it compiles the declaration
+                    if (self.peek() == .ellipsis and self.peekAt(1) == .r_paren) {
+                        _ = self.advance();
+                        callable_convert = true;
+                    }
                     while (self.peek() != .r_paren) {
                         try list.append(self.allocator, try self.parseCallArg());
                         if (self.peek() != .comma) break;
@@ -2741,6 +2751,7 @@ const Parser = struct {
             }
             _ = try self.expect(.r_bracket);
         }
+        if (callable_convert) self.deferCompileError(self.pos, "Cannot create Closure as attribute argument", .{});
         try self.attr_ranges.append(self.allocator, .{
             .target_tok = self.pos,
             .start = start,
@@ -3402,7 +3413,8 @@ const Parser = struct {
             if (self.peek() == .ellipsis and self.peekAt(1) == .r_paren) {
                 _ = self.advance(); // ...
                 _ = self.advance(); // )
-                const method_node = try self.addNode(.{ .tag = .method_call, .main_token = name_tok, .data = .{ .lhs = object, .rhs = 0 } });
+                const method_tag: Ast.Node.Tag = if (nullsafe) .nullsafe_method_call else .method_call;
+                const method_node = try self.addNode(.{ .tag = method_tag, .main_token = name_tok, .data = .{ .lhs = object, .rhs = 0 } });
                 return self.addNode(.{ .tag = .callable_ref, .main_token = name_tok, .data = .{ .lhs = method_node } });
             }
 
@@ -3815,6 +3827,13 @@ const Parser = struct {
     }
 
     // a compile error php's parser throws while it reads modifiers
+    // `new C(...)` parses, and php refuses it while compiling
+    fn skipNewCallableConvert(self: *Parser, new_tok: u32) void {
+        if (self.peek() != .ellipsis or self.peekAt(1) != .r_paren) return;
+        _ = self.advance();
+        self.deferCompileError(new_tok, "Cannot create Closure for new expression", .{});
+    }
+
     fn deferModifierError(self: *Parser, token: u32, comptime fmt: []const u8, args: anytype) void {
         if (self.compile_error != null) return;
         self.deferCompileError(token, fmt, args);

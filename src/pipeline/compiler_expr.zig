@@ -1883,15 +1883,48 @@ pub fn compileCallableRef(self: *Compiler, node: Ast.Node) Error!void {
         const idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });
         try self.emitOp(.constant);
         try self.emitU16(idx);
-    } else if (callee.tag == .method_call) {
+    } else if (callee.tag == .method_call or callee.tag == .nullsafe_method_call) {
         // $obj->method(...) => [$obj, 'method']
+        if (callee.tag == .nullsafe_method_call or isShortCircuited(self, callee.data.lhs))
+            return self.fail(callee.main_token, "Cannot combine nullsafe operator with Closure creation");
         try self.emitOp(.array_new);
         try self.compileNode(callee.data.lhs);
         try self.emitOp(.array_push);
         const method_name = self.ast.tokenSlice(callee.main_token);
-        const method_idx = try self.addConstant(.{ .string = Value.String.borrowed(method_name) });
-        try self.emitOp(.constant);
-        try self.emitU16(method_idx);
+        if (self.ast.tokens[callee.main_token].tag == .variable) {
+            // $obj->$name(...)
+            try self.emitGetVar(method_name);
+        } else {
+            const method_idx = try self.addConstant(.{ .string = Value.String.borrowed(method_name) });
+            try self.emitOp(.constant);
+            try self.emitU16(method_idx);
+        }
+        try self.emitOp(.array_push);
+    } else if (callee.tag == .property_access and self.isDynamicProp(callee)) {
+        // $obj->{expr}(...) and $obj->$name(...) as the parser leaves them
+        if (isShortCircuited(self, callee.data.lhs))
+            return self.fail(node.main_token, "Cannot combine nullsafe operator with Closure creation");
+        try self.emitOp(.array_new);
+        try self.compileNode(callee.data.lhs);
+        try self.emitOp(.array_push);
+        if (callee.main_token == 0) {
+            try self.compileNode(callee.data.rhs);
+        } else {
+            try self.emitGetVar(self.ast.tokenSlice(self.ast.nodes[callee.data.rhs].main_token));
+        }
+        try self.emitOp(.array_push);
+    } else if (callee.tag == .static_prop_access and callee.main_token != 0 and self.ast.tokens[callee.main_token].tag == .variable) {
+        // A::$name(...) and $class::$name(...)
+        const class_node = self.ast.nodes[callee.data.lhs];
+        try self.emitOp(.array_new);
+        if (class_node.tag == .variable) {
+            try self.compileNode(callee.data.lhs);
+        } else {
+            const class_name = try resolveNodeClassName(self, class_node);
+            try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(class_name) }));
+        }
+        try self.emitOp(.array_push);
+        try self.emitGetVar(self.ast.tokenSlice(callee.main_token));
         try self.emitOp(.array_push);
     } else if (callee.tag == .static_call) {
         // ClassName::method(...) => ['ClassName', 'method']. in code that

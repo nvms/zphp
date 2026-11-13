@@ -414,9 +414,9 @@ pub fn invoke(vm: *VM, callee: Callee, args: []const Value) RuntimeError!Value {
         .magic => |m| {
             const packed_args = try vm.allocArray();
             for (args) |arg| try packed_args.append(vm.allocator, arg);
-            const name = try Value.String.create(vm.allocator, m.name);
-            defer name.release();
-            const magic_args = [_]Value{ .{ .string = name }, .{ .array = packed_args } };
+            // a transient copy: __call may return the name, which then
+            // outlives whatever callable it came from
+            const magic_args = [_]Value{ .{ .string = try vm.transientBytes(m.name) }, .{ .array = packed_args } };
             if (m.object) |obj| return vm.callMethod(obj, "__call", &magic_args);
             const registered = try vm.resolveMethod(m.class, "__callStatic");
             return vm.callByNameAs(registered, &magic_args, m.class);

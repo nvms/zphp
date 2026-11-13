@@ -956,6 +956,10 @@ pub const VM = struct {
     // set while freeHeapItems bulk-frees the heap: the deferred queues then
     // reference structures that are already gone, so drains must not run
     heap_teardown: bool = false,
+    // the caller frame's called class before a static call to a native
+    // replaced it with the class the call named: a native that resolves a
+    // callback in its caller's scope (Closure::fromCallable) reads this one
+    static_native_outer_called: ?[]const u8 = null,
     free_closure_names: std.ArrayListUnmanaged(struct { compile_name: []const u8, name: []const u8 }) = .empty,
     php_constants: std.StringHashMapUnmanaged(Value) = .{},
     user_constants: std.StringHashMapUnmanaged(void) = .{},
@@ -11364,7 +11368,7 @@ pub const VM = struct {
                             for (0..ac) |ai| try args_arr.append(self.allocator, self.stack[self.sp - ac + ai]);
                             self.dropN(ac);
                             self.dropN(1);
-                            const result = self.callMethod(obj, "__call", &.{ .{ .string = Value.String.borrowed(method_name) }, .{ .array = args_arr } }) catch {
+                            const result = self.callMethod(obj, "__call", &.{ .{ .string = try self.transientBytes(method_name) }, .{ .array = args_arr } }) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
@@ -11532,7 +11536,7 @@ pub const VM = struct {
                                 for (0..ac) |ai| try call_args_arr.append(self.allocator, self.stack[self.sp - ac + ai]);
                                 self.dropN(ac);
                                 self.dropN(1);
-                                const result = self.callMethod(obj, "__call", &.{ .{ .string = Value.String.borrowed(method_name) }, .{ .array = call_args_arr } }) catch |err| {
+                                const result = self.callMethod(obj, "__call", &.{ .{ .string = try self.transientBytes(method_name) }, .{ .array = call_args_arr } }) catch |err| {
                                     self.removeCallGuard(obj_id, method_name);
                                     if (err == error.RuntimeError and self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                     return err;
@@ -12664,7 +12668,7 @@ pub const VM = struct {
             break :blk null;
         };
         const sc_target = self.functions.get(full_name);
-        const sc_target_is_static = if (sc_target) |scf| scf.is_static else false;
+        const sc_target_is_static = if (sc_target) |scf| scf.is_static else if (found) |f| f.info.is_static else false;
         if (site) |st| {
             if (sc_target) |func| {
                 const public = if (found) |f| f.info.visibility == .public else true;
@@ -18559,14 +18563,9 @@ pub const VM = struct {
     pub fn newFakeClosure(self: *VM, callable: Value, called_class: ?[]const u8) !*PhpObject {
         // php's fake closure holds the object and the function, not an array:
         // a private pair, uncounted, so the cycle collector counts what php's does
-        var target = callable;
-        if (callable == .array and callable.array.entries.items.len == 2) {
-            const pair = try self.allocArray();
-            try pair.append(self.allocator, callable.array.entries.items[0].value);
-            try pair.append(self.allocator, callable.array.entries.items[1].value);
-            pair.uncounted = true;
-            target = .{ .array = pair };
-        }
+        if (callable == .array and callable.array.entries.items.len == 2)
+            return self.newFakeMethodClosure(callable.array.entries.items[0].value, callable.array.entries.items[1].value, called_class);
+        const target = callable;
         const state = try self.allocator.create(FakeClosure);
         errdefer self.allocator.destroy(state);
         state.* = .{ .callable = target, .called_class = called_class };
@@ -18575,6 +18574,23 @@ pub const VM = struct {
             .native = .{ .kind = .fake_closure, .ptr = @intFromPtr(state) },
         });
         retainValue(target);
+        return obj;
+    }
+
+    // a Closure of a method: on an object, or a class for a static one
+    pub fn newFakeMethodClosure(self: *VM, target: Value, method: Value, called_class: ?[]const u8) !*PhpObject {
+        const pair = try self.allocArray();
+        try pair.append(self.allocator, target);
+        try pair.append(self.allocator, method);
+        pair.uncounted = true;
+        const state = try self.allocator.create(FakeClosure);
+        errdefer self.allocator.destroy(state);
+        state.* = .{ .callable = .{ .array = pair }, .called_class = called_class };
+        const obj = try self.allocObject(.{
+            .class_name = "Closure",
+            .native = .{ .kind = .fake_closure, .ptr = @intFromPtr(state) },
+        });
+        pair.retain();
         return obj;
     }
 
@@ -25212,6 +25228,9 @@ pub const VM = struct {
         // by the post-call fixup below)
         self.currentFrame().called_class = class_name;
         defer self.frames[fc_before - 1].called_class = prev_cc;
+        const outer_called = self.static_native_outer_called;
+        self.static_native_outer_called = prev_cc;
+        defer self.static_native_outer_called = outer_called;
         try self.callNamedFunction(name, arg_count);
         // the callee's frame, not the top one: a callee that already ran in
         // the fast loop may have pushed frames of its own above it
@@ -26249,7 +26268,7 @@ pub const VM = struct {
     }
 
     fn refuseObjectForString(self: *VM, name: []const u8, label: []const u8, i: usize, obj: *PhpObject) RuntimeError!void {
-        if (obj.native.kind != .none and obj.native.kind != .closure) return;
+        if (obj.native.kind != .none and obj.native.kind != .closure and obj.native.kind != .fake_closure) return;
         if (self.hasMethod(obj.class_name, "__toString")) return;
         const signature = native_params.get(name) orelse return;
         if (i >= signature.params.len) return;
