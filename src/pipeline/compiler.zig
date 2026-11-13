@@ -2070,6 +2070,10 @@ pub const Compiler = struct {
         while (it.next()) |v| a.free(v.*);
         self.trait_properties.deinit(a);
         self.trait_property_owner.deinit(a);
+        // statics of top-level code (a script, an include, eval): only a
+        // function's are taken into its ObjFunction
+        for (self.static_vars.items) |sv| freeDefaultValue(a, sv.initial);
+        self.static_vars.deinit(a);
     }
 
     // hands everything a CompileResult owns to the caller and leaves this
