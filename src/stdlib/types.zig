@@ -58,6 +58,7 @@ pub const entries = .{
     .{ "is_callable", native_is_callable },
     .{ "settype", native_settype },
     .{ "call_user_func", native_call_user_func },
+    .{ "clone", native_clone },
     .{ "forward_static_call", native_call_user_func },
     .{ "forward_static_call_array", native_call_user_func_array },
     .{ "call_user_func_array", native_call_user_func_array },
@@ -958,6 +959,43 @@ fn native_settype(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     }
     try ctx.vm.setPendingException("ValueError", "settype(): Argument #2 ($type) must be a valid type");
     return error.RuntimeError;
+}
+
+// php 8.5's clone() as a function (ZEND_FUNCTION(clone)): what clone(...),
+// a spread, or named arguments reach. it runs in the caller's scope, as the
+// ZEND_CLONE opcode does
+fn native_clone(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const vm = ctx.vm;
+    if (args.len < 1 or args[0] != .object) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "clone(): Argument #1 ($object) must be of type object, {s} given", .{if (args.len > 0) phpTypeName(args[0]) else "null"});
+        defer ctx.allocator.free(msg);
+        try vm.setPendingException("TypeError", msg);
+        return error.RuntimeError;
+    }
+    const with: ?*value_mod.PhpArray = if (args.len > 1) switch (args[1]) {
+        .array => |a| a,
+        else => {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "clone(): Argument #2 ($withProperties) must be of type array, {s} given", .{phpTypeName(args[1])});
+            defer ctx.allocator.free(msg);
+            try vm.setPendingException("TypeError", msg);
+            return error.RuntimeError;
+        },
+    } else null;
+    // an exception stays pending for the native to report: it must not
+    // unwind to a catch while this call is on the stack
+    const floor = vm.handler_floor;
+    vm.handler_floor = vm.handler_count;
+    defer vm.handler_floor = floor;
+    const copy = try vm.cloneValue(args[0]);
+    if (with) |props| if (props.entries.items.len > 0 and copy == .object) {
+        _ = vm.applyCloneWith(copy.object, props, vm.frame_count) catch |err| {
+            vm.releaseValue(copy);
+            return err;
+        };
+    };
+    // the caller takes the reference
+    if (copy == .object) copy.object.refcount -= 1;
+    return NativeResult.borrowed(copy);
 }
 
 fn native_call_user_func(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

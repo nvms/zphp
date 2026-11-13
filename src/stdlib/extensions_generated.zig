@@ -113,6 +113,7 @@ pub const functions = Map.initComptime(.{
     .{ "chunk_split", "standard" },
     .{ "class_alias", "Core" },
     .{ "class_exists", "Core" },
+    .{ "clone", "Core" },
     .{ "class_implements", "SPL" },
     .{ "class_parents", "SPL" },
     .{ "class_uses", "SPL" },

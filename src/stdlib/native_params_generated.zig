@@ -1460,6 +1460,7 @@ pub const map = std.StaticStringMap(Signature).initComptime(.{
     .{ "chr", Signature{ .params = &[_]Param{ .{ .name = "codepoint", .type = "int" } }, .returns = "string" } },
     .{ "chunk_split", Signature{ .params = &[_]Param{ .{ .name = "string", .type = "string" }, .{ .name = "length", .default = .{ .int = 76 }, .type = "int" }, .{ .name = "separator", .default = .{ .string = "\x0d\x0a" }, .type = "string" } }, .returns = "string" } },
     .{ "class_alias", Signature{ .params = &[_]Param{ .{ .name = "class", .type = "string" }, .{ .name = "alias", .type = "string" }, .{ .name = "autoload", .default = .{ .bool = true }, .type = "bool" } }, .returns = "bool" } },
+    .{ "clone", Signature{ .params = &[_]Param{ .{ .name = "object", .type = "object" }, .{ .name = "withProperties", .default = .empty_array, .type = "array" } }, .returns = "object" } },
     .{ "class_exists", Signature{ .params = &[_]Param{ .{ .name = "class", .type = "string" }, .{ .name = "autoload", .default = .{ .bool = true }, .type = "bool" } }, .returns = "bool" } },
     .{ "class_implements", Signature{ .params = &[_]Param{ .{ .name = "object_or_class" }, .{ .name = "autoload", .default = .{ .bool = true }, .type = "bool" } }, .returns = "array|false" } },
     .{ "class_parents", Signature{ .params = &[_]Param{ .{ .name = "object_or_class" }, .{ .name = "autoload", .default = .{ .bool = true }, .type = "bool" } }, .returns = "array|false" } },

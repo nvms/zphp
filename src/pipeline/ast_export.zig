@@ -187,6 +187,7 @@ const Exporter = struct {
             .identifier => {
                 const t = e.tokTag(n.main_token);
                 if (t == .kw_exit or t == .kw_die) return e.str("\\exit");
+                if (t == .kw_clone) return e.str("\\clone");
                 return e.str(e.tok(n.main_token));
             },
             .qualified_name => return e.qualified(n),

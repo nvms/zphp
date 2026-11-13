@@ -8290,39 +8290,7 @@ pub const VM = struct {
                     }
                     const target = self.peek();
                     if (target != .object) continue;
-                    const props = with_val.array;
-                    arrayRetain(props);
-                    defer self.arrayRelease(props);
-                    const clone_obj = target.object;
-                    clone_obj.refcount +%= 1;
-                    defer self.objRelease(clone_obj);
-                    var dispatched = false;
-                    var i: usize = 0;
-                    while (i < props.entries.items.len) : (i += 1) {
-                        const entry = props.entries.items[i];
-                        const prop_name = switch (entry.key) {
-                            .string => |k| k.bytes(),
-                            .int => |n| (try self.transientFormatted(.{ .int = n })).bytes(),
-                        };
-                        var val = try self.preparePropertyStore(entry.value);
-                        const val_pin: ?*PhpObject = if (val == .object) val.object else null;
-                        if (val_pin) |pin| pin.refcount +%= 1;
-                        defer if (val_pin) |pin| self.objRelease(pin);
-                        const gate = try self.propertyWriteGate(clone_obj, prop_name, val, .reinit, base_frame);
-                        switch (gate.step) {
-                            .dispatched => {
-                                dispatched = true;
-                                break;
-                            },
-                            .stored => continue,
-                            .proceed => {},
-                        }
-                        if (try self.propertyWriteStore(gate.obj, prop_name, &val, gate.vr, .reinit, base_frame) == .dispatched) {
-                            dispatched = true;
-                            break;
-                        }
-                    }
-                    if (dispatched) continue;
+                    if (try self.applyCloneWith(target.object, with_val.array, base_frame)) continue;
                 },
 
                 .check_deprecated => {
@@ -8768,100 +8736,11 @@ pub const VM = struct {
                 },
                 .clone_obj => {
                     const val = self.pop();
-                    // PHP rejects cloning of generators and fibers with Error
-                    if (val == .generator) {
-                        if (try self.throwBuiltinException("Error", "Trying to clone an uncloneable object of class Generator")) continue;
+                    const copy = self.cloneValue(val) catch {
+                        if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                         return error.RuntimeError;
-                    }
-                    if (val == .fiber) {
-                        if (try self.throwBuiltinException("Error", "Trying to clone an uncloneable object of class Fiber")) continue;
-                        return error.RuntimeError;
-                    }
-                    if (val.closureName()) |name| {
-                        // a cloned closure is a new instance with the same
-                        // captures, $this and scope
-                        const copy = try self.copyClosureInstance(name, self.closureThisByName(name), self.closureDefClassByName(name), self.closureScopeByName(name));
-                        self.pushTransfer(copy);
-                    } else if (val == .object and val.object.fakeClosure() != null) {
-                        const state = val.object.fakeClosure().?;
-                        const copy = try self.newFakeClosure(state.callable, state.called_class);
-                        self.push(.{ .object = copy });
-                    } else if (val == .object) {
-                        var src = val.object;
-                        self.triggerLazyInit(src) catch {
-                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
-                            return error.RuntimeError;
-                        };
-                        src = src.storage();
-                        const native_clone = self.nativeCloneHook(src.class_name);
-                        const uncloneable = self.classUncloneable(src.class_name);
-                        if ((src.native.kind != .none and native_clone == null) or uncloneable) {
-                            if (try self.throwUncloneable(src.class_name)) continue;
-                            return error.RuntimeError;
-                        }
-                        // ZEND_CLONE: a __clone the scope can't call refuses the clone
-                        if (self.findMethodInfo(src.class_name, "__clone")) |f| if (f.info.visibility != .public and !self.checkVisibility(f.defining, f.info.visibility) and !self.protectedRootVisible(f.defining, "__clone", f.info.visibility)) {
-                            const msg = try std.fmt.allocPrint(self.allocator, "Call to {s} method {s}::__clone(){s}", .{ @tagName(f.info.visibility), f.defining, self.visScopeSuffix() });
-                            defer self.allocator.free(msg);
-                            if (try self.throwBuiltinException("Error", msg)) continue;
-                            return error.RuntimeError;
-                        };
-                        const copy = try self.allocObject(.{ .class_name = src.class_name });
-                        if (src.slots) |src_slots| {
-                            const new_slots = try self.allocator.alloc(Value, src_slots.len);
-                            for (src_slots, 0..) |sv, i| {
-                                new_slots[i] = try self.copyValue(sv);
-                            }
-                            copy.slots = new_slots;
-                            copy.slot_layout = src.slot_layout;
-                        }
-                        var it = src.properties.iterator();
-                        while (it.next()) |entry| {
-                            try copy.putProperty(self.allocator, entry.key_ptr.*, try self.copyObjectCloneValue(entry.value_ptr.*));
-                        }
-                        if (native_clone) |hook| if (!hook(self, src, copy)) {
-                            // a hook may refuse with its class's own error
-                            if (self.pending_exception != null) {
-                                if (self.dispatchPendingException(base_frame)) continue;
-                                return error.RuntimeError;
-                            }
-                            if (try self.throwUncloneable(src.class_name)) continue;
-                            return error.RuntimeError;
-                        };
-                        if (src.ref_mirrored) {
-                            if (src.slot_layout) |layout| {
-                                for (layout.names) |name| {
-                                    if (self.ref_index) |ri| {
-                                        if (ri.prop_rev.get(.{ .object = src, .class_name = "", .prop_name = name })) |cells| {
-                                            if (cells.items.len > 0) {
-                                                const cell = cells.items[0];
-                                                try self.regRefObject(try self.persistentRefOwner(), cell, copy, name);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if (self.hasMethod(src.class_name, "__clone")) {
-                            _ = self.callMethod(copy, "__clone", &.{}) catch {
-                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
-                                return error.RuntimeError;
-                            };
-                        }
-                        if (val.object.backingValue() != .null) {
-                            const proxy = try self.allocObject(.{ .class_name = val.object.class_name, .slot_layout = val.object.slot_layout });
-                            const state = try self.allocator.create(PhpObject.LazyState);
-                            state.* = .{ .initializer = .null, .proxy = true, .pending = try self.allocator.alloc(bool, 0), .backing = copy };
-                            proxy.lazy = state;
-                            copy.retain();
-                            self.push(.{ .object = proxy });
-                        } else self.push(.{ .object = copy });
-                    } else {
-                        const msg = try std.fmt.allocPrint(self.allocator, "clone(): Argument #1 ($object) must be of type object, {s} given", .{val.valueName()});
-                        defer self.allocator.free(msg);
-                        if (try self.throwBuiltinException("TypeError", msg)) continue;
-                        return error.RuntimeError;
-                    }
+                    };
+                    self.pushTransfer(copy);
                 },
 
                 .get_obj_class => {
@@ -15356,6 +15235,150 @@ pub const VM = struct {
             current = cls.parent;
         }
         return false;
+    }
+
+    // ZEND_CLONE: a copy of the object (refcount taken) with __clone run on
+    // it, in the running scope; an error is left pending
+    pub fn cloneValue(self: *VM, val: Value) RuntimeError!Value {
+        // PHP rejects cloning of generators and fibers with Error
+        if (val == .generator) {
+            try self.setPendingException("Error", "Trying to clone an uncloneable object of class Generator");
+            return error.RuntimeError;
+        }
+        if (val == .fiber) {
+            try self.setPendingException("Error", "Trying to clone an uncloneable object of class Fiber");
+            return error.RuntimeError;
+        }
+        if (val.closureName()) |name| {
+            // a cloned closure is a new instance with the same
+            // captures, $this and scope
+            return self.copyClosureInstance(name, self.closureThisByName(name), self.closureDefClassByName(name), self.closureScopeByName(name));
+        } else if (val == .object and val.object.fakeClosure() != null) {
+            const state = val.object.fakeClosure().?;
+            const copy = try self.newFakeClosure(state.callable, state.called_class);
+            copy.retain();
+            return .{ .object = copy };
+        } else if (val == .object) {
+            var src = val.object;
+            try self.triggerLazyInit(src);
+            src = src.storage();
+            const native_clone = self.nativeCloneHook(src.class_name);
+            const uncloneable = self.classUncloneable(src.class_name);
+            if ((src.native.kind != .none and native_clone == null) or uncloneable) {
+                try self.setUncloneable(src.class_name);
+                return error.RuntimeError;
+            }
+            // ZEND_CLONE: a __clone the scope can't call refuses the clone
+            if (self.findMethodInfo(src.class_name, "__clone")) |f| if (f.info.visibility != .public and !self.checkVisibility(f.defining, f.info.visibility) and !self.protectedRootVisible(f.defining, "__clone", f.info.visibility)) {
+                const msg = try std.fmt.allocPrint(self.allocator, "Call to {s} method {s}::__clone(){s}", .{ @tagName(f.info.visibility), f.defining, self.visScopeSuffix() });
+                defer self.allocator.free(msg);
+                try self.setPendingException("Error", msg);
+                return error.RuntimeError;
+            };
+            const copy = try self.allocObject(.{ .class_name = src.class_name });
+            if (src.slots) |src_slots| {
+                const new_slots = try self.allocator.alloc(Value, src_slots.len);
+                for (src_slots, 0..) |sv, i| {
+                    new_slots[i] = try self.copyValue(sv);
+                }
+                copy.slots = new_slots;
+                copy.slot_layout = src.slot_layout;
+            }
+            var it = src.properties.iterator();
+            while (it.next()) |entry| {
+                try copy.putProperty(self.allocator, entry.key_ptr.*, try self.copyObjectCloneValue(entry.value_ptr.*));
+            }
+            if (native_clone) |hook| if (!hook(self, src, copy)) {
+                // a hook may refuse with its class's own error
+                if (self.pending_exception == null) try self.setUncloneable(src.class_name);
+                return error.RuntimeError;
+            };
+            if (src.ref_mirrored) {
+                if (src.slot_layout) |layout| {
+                    for (layout.names) |name| {
+                        if (self.ref_index) |ri| {
+                            if (ri.prop_rev.get(.{ .object = src, .class_name = "", .prop_name = name })) |cells| {
+                                if (cells.items.len > 0) {
+                                    const cell = cells.items[0];
+                                    try self.regRefObject(try self.persistentRefOwner(), cell, copy, name);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (self.hasMethod(src.class_name, "__clone")) {
+                // the clone is freed when __clone throws
+                copy.retain();
+                _ = self.callMethod(copy, "__clone", &.{}) catch |err| {
+                    // zend_object_store_ctor_failed: no destructor for it
+                    copy.destructed = true;
+                    self.objRelease(copy);
+                    return err;
+                };
+                copy.refcount -= 1;
+            }
+            if (val.object.backingValue() != .null) {
+                const proxy = try self.allocObject(.{ .class_name = val.object.class_name, .slot_layout = val.object.slot_layout });
+                const state = try self.allocator.create(PhpObject.LazyState);
+                state.* = .{ .initializer = .null, .proxy = true, .pending = try self.allocator.alloc(bool, 0), .backing = copy };
+                proxy.lazy = state;
+                copy.retain();
+                proxy.retain();
+                return .{ .object = proxy };
+            }
+            copy.retain();
+            return .{ .object = copy };
+        } else {
+            const msg = try std.fmt.allocPrint(self.allocator, "clone(): Argument #1 ($object) must be of type object, {s} given", .{val.valueName()});
+            defer self.allocator.free(msg);
+            try self.setPendingException("TypeError", msg);
+            return error.RuntimeError;
+        }
+    }
+
+    // clone with: each property assigned to the clone after __clone ran,
+    // with the running scope's rules (MutationAction.reinit lets a readonly
+    // property be written again). true when an exception was dispatched to a
+    // handler at or above base_frame; one left pending is an error
+    pub fn applyCloneWith(self: *VM, clone_obj: *PhpObject, props: *PhpArray, base_frame: usize) RuntimeError!bool {
+        arrayRetain(props);
+        defer self.arrayRelease(props);
+        clone_obj.refcount +%= 1;
+        defer self.objRelease(clone_obj);
+        var dispatched = false;
+        var i: usize = 0;
+        while (i < props.entries.items.len) : (i += 1) {
+            const entry = props.entries.items[i];
+            const prop_name = switch (entry.key) {
+                .string => |k| k.bytes(),
+                .int => |n| (try self.transientFormatted(.{ .int = n })).bytes(),
+            };
+            var val = try self.preparePropertyStore(entry.value);
+            const val_pin: ?*PhpObject = if (val == .object) val.object else null;
+            if (val_pin) |pin| pin.refcount +%= 1;
+            defer if (val_pin) |pin| self.objRelease(pin);
+            const gate = try self.propertyWriteGate(clone_obj, prop_name, val, .reinit, base_frame);
+            switch (gate.step) {
+                .dispatched => {
+                    dispatched = true;
+                    break;
+                },
+                .stored => continue,
+                .proceed => {},
+            }
+            if (try self.propertyWriteStore(gate.obj, prop_name, &val, gate.vr, .reinit, base_frame) == .dispatched) {
+                dispatched = true;
+                break;
+            }
+        }
+        return dispatched;
+    }
+
+    pub fn setUncloneable(self: *VM, class_name: []const u8) !void {
+        const msg = try std.fmt.allocPrint(self.allocator, "Trying to clone an uncloneable object of class {s}", .{class_name});
+        defer self.allocator.free(msg);
+        try self.setPendingException("Error", msg);
     }
 
     pub fn throwUncloneable(self: *VM, class_name: []const u8) !bool {

@@ -1872,7 +1872,7 @@ pub fn compileCallableRef(self: *Compiler, node: Ast.Node) Error!void {
         // global function when the closure is made. die is exit's alias,
         // and neither is namespaced
         const tok = self.ast.tokens[callee.main_token].tag;
-        const name = if (tok == .kw_exit or tok == .kw_die) "exit" else self.resolveFunctionName(self.ast.tokenSlice(callee.main_token));
+        const name = if (tok == .kw_exit or tok == .kw_die) "exit" else if (tok == .kw_clone) "clone" else self.resolveFunctionName(self.ast.tokenSlice(callee.main_token));
         const idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });
         try self.emitOp(.constant);
         try self.emitU16(idx);

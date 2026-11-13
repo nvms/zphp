@@ -2961,20 +2961,47 @@ const Parser = struct {
                 // php 8.5's clone($object, $withProperties); a single argument
                 // is the plain clone of it
                 if (self.peek() == .l_paren) {
-                    _ = self.advance();
-                    const object = try self.parseExpression();
-                    var with: u32 = 0;
-                    if (self.peek() == .comma) {
+                    const open = self.pos;
+                    const paren_tok = self.advance();
+                    // clone(...): the clone() function as a closure
+                    if (self.peek() == .ellipsis and self.peekAt(1) == .r_paren) {
                         _ = self.advance();
-                        if (self.peek() != .r_paren) {
-                            with = try self.parseExpression();
-                            if (self.peek() == .comma) _ = self.advance();
-                        }
+                        _ = self.advance();
+                        const callee = try self.addNode(.{ .tag = .identifier, .main_token = tok, .data = .{} });
+                        return self.addNode(.{ .tag = .callable_ref, .main_token = paren_tok, .data = .{ .lhs = callee } });
+                    }
+                    var args = std.ArrayListUnmanaged(u32).empty;
+                    defer args.deinit(self.allocator);
+                    while (self.peek() != .r_paren) {
+                        try args.append(self.allocator, try self.parseCallArg());
+                        if (self.peek() != .comma) break;
+                        _ = self.advance();
                     }
                     _ = try self.expect(.r_paren);
-                    if (with != 0) return self.addNode(.{ .tag = .clone_with, .main_token = tok, .data = .{ .lhs = object, .rhs = with } });
-                    const grouped = try self.addNode(.{ .tag = .grouped_expr, .main_token = tok, .data = .{ .lhs = object } });
-                    return self.addNode(.{ .tag = .prefix_op, .main_token = tok, .data = .{ .lhs = grouped } });
+                    const plain = args.items.len >= 1 and args.items.len <= 2 and for (args.items) |arg| {
+                        const tag = self.nodes.items[arg].tag;
+                        if (tag == .named_arg or tag == .splat_expr) break false;
+                    } else true;
+                    // clone($o)->x is clone of ($o)->x: the parentheses belong
+                    // to the operand when a dereference follows them
+                    if (plain and args.items.len == 1) switch (self.peek()) {
+                        .arrow, .question_arrow, .l_bracket, .colon_colon, .l_paren, .l_brace => {
+                            self.pos = open;
+                            const operand = try self.parseExprPrec(18);
+                            return self.addNode(.{ .tag = .prefix_op, .main_token = tok, .data = .{ .lhs = operand } });
+                        },
+                        else => {},
+                    };
+                    if (plain) {
+                        if (args.items.len == 2) return self.addNode(.{ .tag = .clone_with, .main_token = tok, .data = .{ .lhs = args.items[0], .rhs = args.items[1] } });
+                        const grouped = try self.addNode(.{ .tag = .grouped_expr, .main_token = tok, .data = .{ .lhs = args.items[0] } });
+                        return self.addNode(.{ .tag = .prefix_op, .main_token = tok, .data = .{ .lhs = grouped } });
+                    }
+                    // names, a spread, or a count the opcode doesn't take:
+                    // a call to the clone() function
+                    const callee = try self.addNode(.{ .tag = .identifier, .main_token = tok, .data = .{} });
+                    const extra = try self.addExtraList(args.items);
+                    return self.addNode(.{ .tag = .call, .main_token = paren_tok, .data = .{ .lhs = callee, .rhs = extra } });
                 }
                 const operand = try self.parseExprPrec(18);
                 return self.addNode(.{ .tag = .prefix_op, .main_token = tok, .data = .{ .lhs = operand } });
