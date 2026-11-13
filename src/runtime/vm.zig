@@ -4998,6 +4998,7 @@ pub const VM = struct {
                         self.push(cur);
                         continue;
                     }
+                    if (cur == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
                     const arr: Value = .{ .array = try self.allocArray() };
                     retainValue(arr);
                     try self.setVariableByName(frame, try self.internName(dollar_name), arr);
@@ -6205,6 +6206,28 @@ pub const VM = struct {
                     } else if (op == .array_get_list and arr_val != .object) {
                         if (arr_val != .null) self.warnListFromScalar(arr_val) catch if (try self.resumeRaised()) continue;
                         self.push(.null);
+                    } else if (op == .array_get_unset and arr_val != .null and arr_val != .undef) {
+                        // zend_fetch_dimension_address with BP_VAR_UNSET
+                        switch (arr_val) {
+                            .bool => |b| if (!b) {
+                                self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
+                                self.push(.null);
+                                continue;
+                            },
+                            .string => {
+                                if (try self.throwBuiltinException("Error", "Cannot use string offset as an array")) continue;
+                                return error.RuntimeError;
+                            },
+                            .object => |o| {
+                                const msg = try std.fmt.allocPrint(self.allocator, "Cannot use object of type {s} as array", .{o.class_name});
+                                defer self.allocator.free(msg);
+                                if (try self.throwBuiltinException("Error", msg)) continue;
+                                return error.RuntimeError;
+                            },
+                            else => {},
+                        }
+                        if (try self.throwBuiltinException("Error", "Cannot unset offset in a non-array variable")) continue;
+                        return error.RuntimeError;
                     } else if (arr_val == .string) {
                         const string = arr_val.string;
                         switch (try self.stringOffset(string.len, key, .coalesce)) {
@@ -6361,6 +6384,7 @@ pub const VM = struct {
                                 if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
                                 return error.RuntimeError;
                             } else {
+                                if (existing == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
                                 const new_arr = try self.allocArray();
                                 const new_val = Value{ .array = new_arr };
                                 try self.arraySetOwned(arr_val.array, arr_key, new_val);
@@ -6515,6 +6539,7 @@ pub const VM = struct {
                         continue;
                     }
                     if (existing == .null or (existing == .bool and !existing.bool)) {
+                        if (existing == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
                         // vivifying a property nothing declares creates it, as
                         // ensure_array_prop does
                         if (hook_cell == null and (obj.isUnset(pname) or !obj.properties.contains(pname)) and
@@ -6688,6 +6713,7 @@ pub const VM = struct {
                         continue;
                     }
                     if (existing == .null or (existing == .bool and !existing.bool)) {
+                        if (existing == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
                         const new_arr = try self.allocArray();
                         try new_arr.set(self.allocator, ik, v);
                         if (base == .array) {
@@ -6853,6 +6879,7 @@ pub const VM = struct {
                     }
 
                     if (cur == .null or (cur == .bool and !cur.bool)) {
+                        if (cur == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
                         if (key == .array or key == .object) {
                             if (try self.throwOffsetKeyType(key, .access)) continue;
                             return error.RuntimeError;
@@ -6949,6 +6976,7 @@ pub const VM = struct {
                         self.push(cur);
                         continue;
                     }
+                    if (cur == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
                     const new_arr = try self.allocArray();
                     const new_val = Value{ .array = new_arr };
                     retainValue(new_val);
@@ -6973,6 +7001,7 @@ pub const VM = struct {
                         if (c.* == .array) {
                             _ = try self.separateReferencedArray(self.currentFrame(), name, c, c.array);
                         } else if (c.* == .null or (c.* == .bool and !c.bool)) {
+                            if (c.* == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
                             const arr = try self.allocArray();
                             self.setCell(c, .{ .array = arr });
                         } else if (c.* != .string and c.* != .object) {
@@ -7040,6 +7069,7 @@ pub const VM = struct {
                         self.push(cur);
                         continue;
                     }
+                    if (cur == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
                     const new_arr = try self.allocArray();
                     const new_val = Value{ .array = new_arr };
                     if (from_request) {
@@ -7214,6 +7244,7 @@ pub const VM = struct {
                     {
                         if (try self.checkDynamicProperty(eap_obj, prop_name)) continue;
                     }
+                    if (cur == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
                     const new_arr = try self.allocArray();
                     // obj.set retains -> refcount 1 (the property slot owns it)
                     if (hook_cell) |cell| {
@@ -7270,6 +7301,7 @@ pub const VM = struct {
                             self.push(cur);
                             continue;
                         }
+                        if (cur == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
                         const new_arr = try self.allocArray();
                         arrayRetain(new_arr); // the static slot owns it
                         slot.* = .{ .array = new_arr };
@@ -8615,7 +8647,21 @@ pub const VM = struct {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
+                        } else {
+                            const msg = try std.fmt.allocPrint(self.allocator, "Cannot use object of type {s} as array", .{arr_val.object.class_name});
+                            defer self.allocator.free(msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
                         }
+                    } else if (arr_val == .bool and !arr_val.bool) {
+                        // ZEND_UNSET_DIM on false
+                        self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
+                    } else if (arr_val == .string) {
+                        if (try self.throwBuiltinException("Error", "Cannot unset string offsets")) continue;
+                        return error.RuntimeError;
+                    } else if (arr_val != .null and arr_val != .undef) {
+                        if (try self.throwBuiltinException("Error", "Cannot unset offset in a non-array variable")) continue;
+                        return error.RuntimeError;
                     }
                 },
                 .concat_assign_local => {
@@ -14111,6 +14157,11 @@ pub const VM = struct {
             },
             else => {},
         }
+    }
+
+    // zend_false_to_array_deprecated: a write made false an array
+    pub fn falseToArrayDeprecated(self: *VM) RuntimeError!void {
+        return self.raiseError(E_DEPRECATED, "Automatic conversion of false to array is deprecated");
     }
 
     pub fn warnResourceOffset(self: *VM, key: Value) RuntimeError!void {

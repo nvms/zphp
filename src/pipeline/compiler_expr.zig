@@ -1103,6 +1103,10 @@ fn compileUnsetDimensionBase(self: *Compiler, node_idx: u32) Error!void {
         try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(class_name) }));
         try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(prop_name) }));
         try compileCoalesceFetch(self, node_idx);
+    } else if (node.tag == .variable and !std.mem.eql(u8, self.ast.tokenSlice(node.main_token), "$this")) {
+        // the root variable is fetched for unset, which warns when it is
+        // undefined
+        try self.compileNode(node_idx);
     } else {
         try compileCoalesceFetch(self, node_idx);
     }
