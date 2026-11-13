@@ -290,8 +290,42 @@ pub fn applyToVm(vm: *VM) RuntimeError!void {
             if (vm.memoryLimitCap(@import("runtime/memory.zig").parseQuantity(d.value).value)) |cap| try vm.ini_settings.put(vm.allocator, d.name, cap.text);
         }
     }
+    if (!startup_reported) {
+        startup_reported = true;
+        try reportStartupDeprecations(vm);
+    }
     vm.syncGcEnabled();
     vm.syncFloatPrecision();
+}
+
+// php raises its ini handlers' startup diagnostics once, when a module
+// registers its settings; a serve process applies the directives per request
+var startup_reported = false;
+
+// zend_ini_parse_bool
+fn iniBool(v: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(v, "true") or std.ascii.eqlIgnoreCase(v, "yes") or std.ascii.eqlIgnoreCase(v, "on")) return true;
+    return (std.fmt.parseInt(i64, std.mem.trim(u8, v, " "), 10) catch 0) != 0;
+}
+
+// ext/standard/assert.c's handlers deprecate the assert.* settings set away
+// from their defaults, in the order the module declares them
+fn reportStartupDeprecations(vm: *VM) RuntimeError!void {
+    const checks = [_]struct { []const u8, ?bool }{
+        .{ "assert.active", false },
+        .{ "assert.bail", true },
+        .{ "assert.warning", false },
+        .{ "assert.callback", null },
+        .{ "assert.exception", false },
+    };
+    for (checks) |c| {
+        const value = get(c[0]) orelse continue;
+        const deprecated = if (c[1]) |when| iniBool(value) == when else value.len > 0;
+        if (!deprecated) continue;
+        const msg = try std.fmt.allocPrint(vm.allocator, "PHP Startup: {s} INI setting is deprecated", .{c[0]});
+        defer vm.allocator.free(msg);
+        try vm.raiseErrorAt(8192, msg, .{ .file = "Unknown", .line = 0 });
+    }
 }
 
 test "ini values are cooked the way php cooks them" {

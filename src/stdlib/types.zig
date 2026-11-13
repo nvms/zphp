@@ -1723,7 +1723,7 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
             try ctx.vm.raiseError(8192, msg);
         }
     }
-    if (std.mem.eql(u8, name, "assert.callback") and buf.items.len > 0) try ctx.vm.raiseError(8192, "ini_set(): assert.callback INI setting is deprecated");
+    if (std.mem.eql(u8, name, "assert.callback") and (buf.items.len > 0 or ctx.vm.ini_callbacks.contains("assert.callback"))) try ctx.vm.raiseError(8192, "ini_set(): assert.callback INI setting is deprecated");
     // php's OnUpdateFiberStackSize
     if (std.mem.eql(u8, name, "fiber.stack_size") and @import("../runtime/memory.zig").parseQuantity(buf.items).value < 0) {
         try ctx.vm.emitWarning("fiber.stack_size must be a positive number");
@@ -1773,6 +1773,12 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         ctx.vm.setExecutionLimit(seconds);
     }
     if (std.mem.eql(u8, name, "zend.enable_gc")) ctx.vm.syncGcEnabled();
+    // OnChangeCallback at run time: the setting replaces the callback
+    // assert_options() set, and an empty one just drops it
+    if (std.mem.eql(u8, name, "assert.callback")) {
+        if (ctx.vm.ini_callbacks.fetchRemove("assert.callback")) |old| ctx.vm.releaseValue(old.value);
+        if (new_val.len > 0) try ctx.vm.ini_callbacks.put(ctx.vm.allocator, "assert.callback", .{ .string = try Value.String.create(ctx.vm.allocator, new_val) });
+    }
     if (std.mem.eql(u8, name, "precision") or std.mem.eql(u8, name, "serialize_precision")) ctx.vm.syncFloatPrecision();
     return result;
 }
@@ -2026,11 +2032,8 @@ fn native_assert(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         ctx.vm.raise(args[1]);
         return error.RuntimeError;
     }
-    const callback: ?Value = ctx.vm.ini_callbacks.get("assert.callback") orelse blk: {
-        const text = ctx.vm.ini_settings.get("assert.callback") orelse break :blk null;
-        if (text.len == 0) break :blk null;
-        break :blk Value{ .string = Value.String.borrowed(text) };
-    };
+    // ASSERTG(callback), else the startup setting's ASSERTG(cb)
+    const callback: ?Value = ctx.vm.ini_callbacks.get("assert.callback") orelse startupAssertCallback();
     if (callback) |cb| {
         const pos = ctx.vm.currentSourcePosition();
         var cb_args = [_]Value{ .{ .string = Value.String.borrowed(pos.file) }, .{ .int = @intCast(pos.line) }, .null, .null };
@@ -2049,11 +2052,28 @@ fn native_assert(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         defer ctx.allocator.free(msg);
         try ctx.vm.emitWarning(msg);
     }
-    if (ctx.vm.pending_exception != null) return error.RuntimeError;
     if (bail) {
-        ctx.vm.exit_requested = true;
+        // an exception the callback threw is reported as a warning
+        // (zend_exception_error with E_WARNING), then the script exits
+        if (ctx.vm.takePending()) |exc| {
+            defer ctx.vm.stackRelease(exc);
+            if (exc == .object) {
+                const text = try ctx.vm.objectToString(exc.object);
+                if (ctx.vm.pending_exception != null) return error.RuntimeError;
+                const file = exc.object.get("file");
+                const line = exc.object.get("line");
+                const msg = try std.fmt.allocPrint(ctx.allocator, "Uncaught {s}\n  thrown", .{text});
+                defer ctx.allocator.free(msg);
+                try ctx.vm.raiseErrorAt(2, msg, .{
+                    .file = if (file == .string) file.string.bytes() else "Unknown",
+                    .line = if (line == .int) line.int else 0,
+                });
+            }
+        }
+        if (ctx.vm.pending_exception == null) ctx.vm.exit_requested = true;
         return error.RuntimeError;
     }
+    if (ctx.vm.pending_exception != null) return error.RuntimeError;
     return NativeResult.scalar(.{ .bool = false });
 }
 
@@ -2061,6 +2081,15 @@ fn native_noop_true(_: *NativeContext, _: []const Value) RuntimeError!NativeResu
     return NativeResult.scalar(.{ .bool = true });
 }
 
+// ASSERTG(cb): the assert.callback the process started with
+fn startupAssertCallback() ?Value {
+    const text = @import("../ini_config.zig").get("assert.callback") orelse return null;
+    if (text.len == 0) return null;
+    return Value{ .string = Value.String.borrowed(text) };
+}
+
+// php's assert_options(): the old setting as an int (the callback as it
+// was), and a new one set through the ini entry without its deprecation
 fn native_assert_options(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     const opt = Value.toInt(args[0]);
@@ -2069,40 +2098,34 @@ fn native_assert_options(ctx: *NativeContext, args: []const Value) RuntimeError!
         2 => "assert.callback",
         3 => "assert.bail",
         4 => "assert.warning",
-        5 => "assert.quiet_eval",
         6 => "assert.exception",
-        else => return NativeResult.scalar(.{ .bool = false }),
+        else => {
+            try ctx.vm.setPendingException("ValueError", "assert_options(): Argument #1 ($option) must be an ASSERT_* constant");
+            return error.RuntimeError;
+        },
     };
 
-    // get previous value (defaults match PHP: ACTIVE=1, EXCEPTION=1, others=0)
-    var prev: Value = .{ .int = 0 };
     if (opt == 2) {
-        if (ctx.vm.ini_callbacks.get("assert.callback")) |cb| {
-            prev = cb;
+        const prev: Value = ctx.vm.ini_callbacks.get("assert.callback") orelse startupAssertCallback() orelse .null;
+        const result = NativeResult.share(prev);
+        if (args.len >= 2) {
+            if (ctx.vm.ini_callbacks.fetchRemove("assert.callback")) |old| ctx.vm.releaseValue(old.value);
+            if (args[1] != .null) {
+                VM.retainValue(args[1]);
+                try ctx.vm.ini_callbacks.put(ctx.vm.allocator, "assert.callback", args[1]);
+            }
         }
-    } else {
-        const default_v: i64 = if (opt == 1 or opt == 6) 1 else 0;
-        var buf: [4]u8 = undefined;
-        const default_s = std.fmt.bufPrint(&buf, "{d}", .{default_v}) catch "0";
-        const s = ctx.vm.ini_settings.get(key) orelse default_s;
-        prev = .{ .int = std.fmt.parseInt(i64, s, 10) catch 0 };
+        return result;
     }
-
-    const result = NativeResult.share(prev);
-    errdefer if (result.value == .string) result.value.string.release();
+    const prev: i64 = if (assertIni(ctx, key)) 1 else 0;
     if (args.len >= 2) {
-        if (opt == 2) {
-            VM.retainValue(args[1]);
-            if (ctx.vm.ini_callbacks.get("assert.callback")) |old| ctx.vm.releaseValue(old);
-            try ctx.vm.ini_callbacks.put(ctx.allocator, "assert.callback", args[1]);
-        } else {
-            var buf: [32]u8 = undefined;
-            const v = Value.toInt(args[1]);
-            const s = std.fmt.bufPrint(&buf, "{d}", .{v}) catch return result;
-            _ = try ctx.vm.setIni(key, s);
-        }
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer buf.deinit(ctx.allocator);
+        try args[1].format(&buf, ctx.allocator);
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+        _ = try ctx.vm.setIni(key, buf.items);
     }
-    return result;
+    return NativeResult.scalar(.{ .int = prev });
 }
 
 fn native_noop_null(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -2151,6 +2174,13 @@ fn native_ini_restore(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     try ctx.vm.restoreIni(name);
     if (std.mem.eql(u8, name, "memory_limit")) ctx.vm.applyConfiguredMemoryLimit(false);
     if (std.mem.eql(u8, name, "zend.enable_gc")) ctx.vm.syncGcEnabled();
+    // OnChangeCallback at run time: the setting replaces the callback
+    // assert_options() set, and an empty one just drops it
+    if (std.mem.eql(u8, name, "assert.callback")) {
+        const new_val = ctx.vm.ini_settings.get(name) orelse "";
+        if (ctx.vm.ini_callbacks.fetchRemove("assert.callback")) |old| ctx.vm.releaseValue(old.value);
+        if (new_val.len > 0) try ctx.vm.ini_callbacks.put(ctx.vm.allocator, "assert.callback", .{ .string = try Value.String.create(ctx.vm.allocator, new_val) });
+    }
     if (std.mem.eql(u8, name, "precision") or std.mem.eql(u8, name, "serialize_precision")) ctx.vm.syncFloatPrecision();
     return NativeResult.scalar(.null);
 }
