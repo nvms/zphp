@@ -28,6 +28,8 @@ pub const PropertyHooks = struct {
     // with hooks
     pub const prop_abstract: u32 = 1 << 8;
     pub const prop_static_hooked: u32 = 1 << 9;
+    // the hooked property a promoted constructor parameter declares
+    pub const prop_promoted: u32 = 1 << 10;
 };
 
 pub const Ast = struct {

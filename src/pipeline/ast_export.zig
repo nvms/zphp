@@ -960,6 +960,12 @@ const Exporter = struct {
             try e.str(" = ");
             try e.expr(n.data.lhs, 0, indent);
         }
+        // a promoted property's hooks follow its parameter
+        if (promotion != 0) for (e.ast.nodes) |h| {
+            if (h.tag != .class_property_hooks or h.main_token != n.main_token or h.data.rhs & AstMod.PropertyHooks.prop_promoted == 0) continue;
+            try e.hooks(e.ast.extra_data[h.data.lhs .. h.data.lhs + 9], indent);
+            break;
+        };
     }
 
     fn params(e: *Exporter, extra: u32, indent: u32) Error!void {
@@ -1459,6 +1465,8 @@ const Exporter = struct {
             },
             .class_property, .static_class_property, .class_property_hooks => {
                 const flags = n.data.rhs;
+                // printed with its promoted parameter
+                if (n.tag == .class_property_hooks and flags & AstMod.PropertyHooks.prop_promoted != 0) return 1;
                 try e.indentBy(indent);
                 var first_tok = n.main_token;
                 const type_extra = flags >> 16;

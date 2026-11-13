@@ -96,6 +96,10 @@ const Parser = struct {
     // has list() only as the left side of an assignment
     bare_list_at: u32 = std.math.maxInt(u32),
     pending_top_stmts: std.ArrayListUnmanaged(u32) = .empty,
+    // the hooked properties promoted parameters of the method just parsed
+    // declare: class members after it (the compiler knows a hooked promoted
+    // parameter by the member with its token)
+    promoted_hooks: std.ArrayListUnmanaged(u32) = .empty,
     // inside a bracketed namespace's body
     in_namespace_block: bool = false,
 
@@ -123,6 +127,7 @@ const Parser = struct {
             try stmts.append(self.allocator, node);
         }
         self.pending_top_stmts.deinit(self.allocator);
+        self.promoted_hooks.deinit(self.allocator);
 
         const extra = try self.addExtraList(stmts.items);
         self.nodes.items[0].data.lhs = extra;
@@ -1625,6 +1630,8 @@ const Parser = struct {
                     // encode visibility in rhs bits 28-29; abstract is implicit for interface_method tag
                     self.nodes.items[method].data.rhs = self.nodes.items[method].data.rhs | (visibility << 28);
                     try members.append(self.allocator, method);
+                    try members.appendSlice(self.allocator, self.promoted_hooks.items);
+                    self.promoted_hooks.clearRetainingCapacity();
                 } else {
                     const method = try self.parseClassMethod();
                     if (is_static) {
@@ -1633,6 +1640,8 @@ const Parser = struct {
                     // bits 0-27: body index, bit 28: is_final, bits 30-31: visibility
                     self.nodes.items[method].data.rhs = self.nodes.items[method].data.rhs | (visibility << 30) | (if (is_final) @as(u32, 1) << 28 else 0);
                     try members.append(self.allocator, method);
+                    try members.appendSlice(self.allocator, self.promoted_hooks.items);
+                    self.promoted_hooks.clearRetainingCapacity();
                 }
             } else if (self.peek() == .variable) {
                 self.checkMemberModifiers(mods_at, mod_list, .property);
@@ -1970,6 +1979,8 @@ const Parser = struct {
                     const method = try self.parseInterfaceMethod(is_static);
                     self.nodes.items[method].data.rhs |= visibility << 28;
                     try members.append(self.allocator, method);
+                    try members.appendSlice(self.allocator, self.promoted_hooks.items);
+                    self.promoted_hooks.clearRetainingCapacity();
                     continue;
                 }
 
@@ -1981,6 +1992,8 @@ const Parser = struct {
                     (visibility << 30) |
                     (if (is_final) @as(u32, 1) << 28 else 0);
                 try members.append(self.allocator, method);
+                    try members.appendSlice(self.allocator, self.promoted_hooks.items);
+                    self.promoted_hooks.clearRetainingCapacity();
             } else if (self.peek() == .variable) {
                 if (has_set_vis) {
                     try self.addError(.unexpected_token);
@@ -2134,6 +2147,8 @@ const Parser = struct {
                     }
                     self.nodes.items[method].data.rhs = self.nodes.items[method].data.rhs | (visibility << 30) | (if (is_final) @as(u32, 1) << 28 else 0);
                     try members.append(self.allocator, method);
+                    try members.appendSlice(self.allocator, self.promoted_hooks.items);
+                    self.promoted_hooks.clearRetainingCapacity();
                 } else if (self.peek() == .kw_const) {
                     try self.parseConstMembers(&members, visibility | (if (is_final) @as(u32, 1) << 4 else 0));
                 } else {
@@ -2835,6 +2850,22 @@ const Parser = struct {
         if (self.peek() == .equal) {
             _ = self.advance();
             default = try self.parseExpression();
+        }
+        // a promoted property with hooks: the property is a hooked class
+        // member of its own, without the parameter's default
+        // hooks alone promote a public property (zend_compile_params)
+        if (self.peek() == .l_brace) {
+            if (promotion == 0) promotion = 1;
+            const hooks = try self.parsePropertyHooks(tok, 0);
+            const vis: u32 = promotion - 1;
+            const set_vis: u32 = if (set_promotion > 0) set_promotion - 1 else vis;
+            var prop_rhs = encodePropertyFlags(vis, set_vis, set_promotion > 0, param_readonly, param_final) | PropertyHooks.prop_promoted;
+            if (type_range[0] != type_range[1]) {
+                const ext = try self.addExtra(&type_range);
+                prop_rhs |= (ext + 1) << 16;
+            }
+            self.nodes.items[hooks].data.rhs = prop_rhs;
+            try self.promoted_hooks.append(self.allocator, hooks);
         }
         // rhs encoding: bit 0 = variadic, bit 1 = by-reference, bits 2-3 = read promotion,
         // bit 4 = readonly, bits 5-6 = set promotion (0 = same as read), bit 7 = final,

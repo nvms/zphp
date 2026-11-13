@@ -1156,6 +1156,16 @@ fn paramName(self: *Compiler, p: u32) []const u8 {
 
 // the checks and deprecations php's zend_compile_params makes on a
 // function's declared return and parameters
+// a promoted parameter with hooks declares its property as a hooked member
+// carrying the parameter's token
+fn hookedPromotion(self: *Compiler, members: []const u32, token: u32) bool {
+    for (members) |m| {
+        const member = self.ast.nodes[m];
+        if (member.tag == .class_property_hooks and member.main_token == token and member.data.rhs & ast_mod.PropertyHooks.prop_promoted != 0) return true;
+    }
+    return false;
+}
+
 // where parameters are declared, for php's promoted property checks
 const PromotionSite = enum { outside, constructor, abstract_constructor };
 
@@ -2550,6 +2560,8 @@ fn checkDuplicateMembers(self: *Compiler, class_name: []const u8, members: []con
                 }
             },
             .class_property, .static_class_property, .class_property_hooks => {
+                // a promoted parameter's property is counted with the parameter
+                if (m.tag == .class_property_hooks and m.data.rhs & ast_mod.PropertyHooks.prop_promoted != 0) continue;
                 const raw = self.ast.tokenSlice(m.main_token);
                 const name = if (raw.len > 0 and raw[0] == '$') raw[1..] else raw;
                 if ((try props.getOrPut(arena, name)).found_existing) return self.failFmt(m.main_token, "Cannot redeclare {s}::${s}", .{ class, name });
@@ -2665,7 +2677,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
             constructor_params = self.ast.extraSlice(member.data.lhs);
             for (constructor_params) |p| {
                 const pnode = self.ast.nodes[p];
-                if ((pnode.data.rhs >> 2) & 3 > 0) promoted_count += 1;
+                if ((pnode.data.rhs >> 2) & 3 > 0 and !hookedPromotion(self, members, pnode.main_token)) promoted_count += 1;
             }
             break;
         }
@@ -2873,7 +2885,9 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
             try self.emitU16(pname_idx);
             const default_idx = self.ast.extra_data[member.data.lhs];
             try self.emitByte((if (default_idx != 0) @as(u8, 1) else @as(u8, 0)) | propertyVirtualFlag(self, member));
-            try self.emitByte(@intCast(member.data.rhs & 0xff));
+            // 0x40: promoted, as a promoted parameter's property is
+            const promoted: u8 = if (member.data.rhs & ast_mod.PropertyHooks.prop_promoted != 0) 0x40 else 0;
+            try self.emitByte(@as(u8, @intCast(member.data.rhs & 0xff)) | promoted);
             try self.emitU16(try propertyTypeConst(self, member.data.rhs));
             try self.emitU16(try docCommentConst(self, member.main_token));
         }
@@ -2898,11 +2912,11 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
         const owner = self.trait_property_owner.get(tpi) orelse "";
         try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(owner) }));
     }
-    // promoted constructor params as properties
+    // promoted constructor params as properties (a hooked one is a member)
     for (constructor_params) |p| {
         const pnode = self.ast.nodes[p];
         const promotion = (pnode.data.rhs >> 2) & 3;
-        if (promotion > 0) {
+        if (promotion > 0 and !hookedPromotion(self, members, pnode.main_token)) {
             var param_name = self.ast.tokenSlice(pnode.main_token);
             if (param_name.len > 0 and param_name[0] == '$') param_name = param_name[1..];
             const pname_idx = try self.addConstant(.{ .string = Value.String.borrowed(param_name) });
