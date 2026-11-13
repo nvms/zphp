@@ -3,6 +3,7 @@ const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
+const filesystem = @import("filesystem.zig");
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 pub const entries = .{
@@ -304,353 +305,197 @@ fn native_pack(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     return NativeResult.takeString(try Value.String.adopt(ctx.allocator, try buf.toOwnedSlice(ctx.allocator)));
 }
 
-// emit PHP's 'not enough input values' warning and return false. PHP's
-// unpack reports the per-element byte size as 'need N values' and the bytes
-// still available as 'only M were provided'
-fn unpackShort(ctx: *NativeContext, code: u8, need: usize, have: usize) RuntimeError!NativeResult {
-    // PHP pluralizes the trailing verb: '1 was provided' vs 'N were provided'
-    const verb: []const u8 = if (have == 1) "was" else "were";
-    const msg = std.fmt.allocPrint(ctx.allocator, "unpack(): Type {c}: not enough input values, need {d} values but only {d} {s} provided", .{ code, need, have, verb }) catch return NativeResult.scalar(.{ .bool = false });
-    defer ctx.allocator.free(msg);
-    try ctx.vm.emitWarning(msg);
-    return NativeResult.scalar(.{ .bool = false });
-}
-
+// PHP_FUNCTION(unpack) (ext/standard/pack.c): each format code with its
+// repeater and name, read from the data after `offset`
 fn native_unpack(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2) return NativeResult.scalar(.{ .bool = false });
-    const fmt = switch (args[0]) {
-        .string => |s| s.bytes(),
-        else => return NativeResult.scalar(.{ .bool = false }),
-    };
-    const data = switch (args[1]) {
-        .string => |s| s.bytes(),
-        else => return NativeResult.scalar(.{ .bool = false }),
-    };
-    var offset: usize = 0;
-    if (args.len >= 3) {
-        const off_val = Value.toInt(args[2]);
-        if (off_val < 0) return NativeResult.scalar(.{ .bool = false });
-        offset = @intCast(off_val);
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
+    var format = args[0].string.bytes();
+    const all_input = args[1].string.bytes();
+    const offset: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
+    if (offset < 0 or offset > @as(i64, @intCast(all_input.len))) {
+        try ctx.vm.setPendingException("ValueError", "unpack(): Argument #3 ($offset) must be contained in argument #2 ($data)");
+        return error.RuntimeError;
     }
+    const input = all_input[@intCast(offset)..];
+    const inputlen: i64 = @intCast(input.len);
+    var inputpos: i64 = 0;
+    const int_max: i64 = std.math.maxInt(i32);
 
     const arr = try ctx.createArray();
-    var parser = parseFormat(fmt, true);
+    while (format.len > 0) {
+        const type_code = format[0];
+        format = format[1..];
+        var repetitions: i64 = 1;
+        if (format.len > 0) {
+            const c = format[0];
+            if (c >= '0' and c <= '9') {
+                var digits: usize = 0;
+                while (digits < format.len and format[digits] >= '0' and format[digits] <= '9') digits += 1;
+                const tmp = std.fmt.parseInt(i64, format[0..digits], 10) catch std.math.maxInt(i64);
+                if (tmp > int_max) {
+                    try filesystem.warnDocref(ctx, "Type {c}: integer overflow", .{type_code});
+                    return NativeResult.scalar(.{ .bool = false });
+                }
+                repetitions = tmp;
+                format = format[digits..];
+            } else if (c == '*') {
+                repetitions = -1;
+                format = format[1..];
+            }
+        }
+        const name_end = std.mem.indexOfScalar(u8, format, '/') orelse format.len;
+        const name = format[0..@min(name_end, 200)];
+        format = format[name_end..];
+        const argb = repetitions;
 
-    while (parser.next()) |entry| {
-        switch (entry.code) {
+        var size: i64 = 0;
+        switch (type_code) {
+            'X' => {
+                size = -1;
+                if (repetitions < 0) {
+                    try filesystem.warnDocref(ctx, "Type {c}: '*' ignored", .{type_code});
+                    repetitions = 1;
+                }
+            },
+            '@' => size = 0,
             'a', 'A', 'Z' => {
-                const count = switch (entry.count) {
-                    .star => if (data.len > offset) data.len - offset else 0,
-                    .exact => |n| n,
-                };
-                if (offset + count > data.len) return try unpackShort(ctx, entry.code, count, if (data.len > offset) data.len - offset else 0);
-                var slice = data[offset .. offset + count];
-                offset += count;
+                size = repetitions;
+                repetitions = 1;
+            },
+            'h', 'H' => {
+                size = if (repetitions > 0) @divTrunc(repetitions + 1, 2) else repetitions;
+                repetitions = 1;
+            },
+            'c', 'C', 'x' => size = 1,
+            's', 'S', 'n', 'v' => size = 2,
+            'i', 'I', 'l', 'L', 'N', 'V', 'f', 'g', 'G' => size = 4,
+            'q', 'Q', 'J', 'P', 'd', 'e', 'E' => size = 8,
+            else => {
+                const msg = try std.fmt.allocPrint(ctx.allocator, "Invalid format type {c}", .{type_code});
+                defer ctx.allocator.free(msg);
+                try ctx.vm.setPendingException("ValueError", msg);
+                return error.RuntimeError;
+            },
+        }
 
-                if (entry.code == 'A') {
-                    var end = slice.len;
-                    while (end > 0 and (slice[end - 1] == ' ' or slice[end - 1] == 0)) end -= 1;
-                    slice = slice[0..end];
-                } else if (entry.code == 'Z') {
-                    if (std.mem.indexOfScalar(u8, slice, 0)) |nul_pos| {
-                        slice = slice[0..nul_pos];
+        var i: i64 = 0;
+        while (i != repetitions) : (i += 1) {
+            if (size != 0 and size != -1 and int_max - size + 1 < inputpos) {
+                try filesystem.warnDocref(ctx, "Type {c}: integer overflow", .{type_code});
+                return NativeResult.scalar(.{ .bool = false });
+            }
+            if (inputpos + size <= inputlen) {
+                const pos: usize = @intCast(@max(inputpos, 0));
+                var val: ?Value = null;
+                switch (type_code) {
+                    'a', 'A', 'Z' => {
+                        var len = inputlen - inputpos;
+                        if (size >= 0 and len > size) len = size;
+                        size = len;
+                        var bytes = input[pos..][0..@intCast(len)];
+                        if (type_code == 'A') {
+                            var end = bytes.len;
+                            while (end > 0) : (end -= 1) switch (bytes[end - 1]) {
+                                0, ' ', '\t', '\r', '\n' => {},
+                                else => break,
+                            };
+                            bytes = bytes[0..end];
+                        } else if (type_code == 'Z') {
+                            bytes = bytes[0 .. std.mem.indexOfScalar(u8, bytes, 0) orelse bytes.len];
+                        }
+                        val = .{ .string = try Value.String.create(ctx.allocator, bytes) };
+                    },
+                    'h', 'H' => {
+                        var len = (inputlen - inputpos) * 2;
+                        if (size > @divTrunc(int_max, 2)) {
+                            const msg = try std.fmt.allocPrint(ctx.allocator, "unpack(): Argument #1 ($format) repeater must be less than or equal to {d}", .{@divTrunc(int_max, 2)});
+                            defer ctx.allocator.free(msg);
+                            try ctx.vm.setPendingException("ValueError", msg);
+                            return error.RuntimeError;
+                        }
+                        if (size >= 0 and len > size * 2) len = size * 2;
+                        if (len > 0 and argb > 0) len -= @rem(argb, 2);
+                        const buf = try ctx.allocator.alloc(u8, @intCast(@max(len, 0)));
+                        var nibbleshift: u3 = if (type_code == 'h') 0 else 4;
+                        var first = true;
+                        var ipos: usize = 0;
+                        for (buf) |*out| {
+                            const cc: u8 = (input[pos + ipos] >> nibbleshift) & 0xf;
+                            out.* = if (cc < 10) cc + '0' else cc - 10 + 'a';
+                            nibbleshift = if (nibbleshift == 0) 4 else 0;
+                            if (!first) ipos += 1;
+                            first = !first;
+                        }
+                        val = .{ .string = try Value.String.adopt(ctx.allocator, buf) };
+                    },
+                    'c' => val = .{ .int = @as(i8, @bitCast(input[pos])) },
+                    'C' => val = .{ .int = input[pos] },
+                    's' => val = .{ .int = std.mem.readInt(i16, input[pos..][0..2], .little) },
+                    'S', 'v' => val = .{ .int = std.mem.readInt(u16, input[pos..][0..2], .little) },
+                    'n' => val = .{ .int = std.mem.readInt(u16, input[pos..][0..2], .big) },
+                    'i', 'l' => val = .{ .int = std.mem.readInt(i32, input[pos..][0..4], .little) },
+                    'I', 'L', 'V' => val = .{ .int = std.mem.readInt(u32, input[pos..][0..4], .little) },
+                    'N' => val = .{ .int = std.mem.readInt(u32, input[pos..][0..4], .big) },
+                    'q', 'Q', 'P' => val = .{ .int = std.mem.readInt(i64, input[pos..][0..8], .little) },
+                    'J' => val = .{ .int = std.mem.readInt(i64, input[pos..][0..8], .big) },
+                    'f', 'g', 'G' => {
+                        const bits = std.mem.readInt(u32, input[pos..][0..4], if (type_code == 'G') .big else .little);
+                        val = .{ .float = @as(f32, @bitCast(bits)) };
+                    },
+                    'd', 'e', 'E' => {
+                        const bits = std.mem.readInt(u64, input[pos..][0..8], if (type_code == 'E') .big else .little);
+                        val = .{ .float = @bitCast(bits) };
+                    },
+                    'x' => {},
+                    'X' => {
+                        if (inputpos < size) {
+                            inputpos = -size;
+                            i = repetitions - 1;
+                            if (repetitions >= 0) try filesystem.warnDocref(ctx, "Type {c}: outside of string", .{type_code});
+                        }
+                    },
+                    '@' => {
+                        if (repetitions <= inputlen) {
+                            inputpos = repetitions;
+                        } else {
+                            try filesystem.warnDocref(ctx, "Type {c}: outside of string", .{type_code});
+                        }
+                        i = repetitions - 1;
+                    },
+                    else => unreachable,
+                }
+                if (val) |v| {
+                    defer if (v == .string) v.string.release();
+                    // the 1-based element number goes after the name of a
+                    // repeated code; a numeric name is an integer key
+                    if (name.len == 0) {
+                        try ctx.vm.arraySetOwned(arr, .{ .int = i + 1 }, v);
+                    } else {
+                        const key_bytes = if (repetitions == 1)
+                            try ctx.allocator.dupe(u8, name)
+                        else
+                            try std.fmt.allocPrint(ctx.allocator, "{s}{d}", .{ name, i + 1 });
+                        const key = try Value.String.adopt(ctx.allocator, key_bytes);
+                        defer key.release();
+                        try ctx.vm.arraySetOwned(arr, .{ .string = key }, v);
                     }
                 }
-
-                const owned = try Value.String.create(ctx.allocator, slice);
-                defer owned.release();
-                const key = try makeKey(ctx, entry.name, 0, 1);
-                defer if (key == .string) key.string.release();
-                try ctx.vm.arraySetOwned(arr, key, .{ .string = owned });
-            },
-            'H', 'h' => {
-                const nibbles = switch (entry.count) {
-                    .star => if (data.len > offset) (data.len - offset) * 2 else 0,
-                    .exact => |n| n,
-                };
-                const bytes_needed = (nibbles + 1) / 2;
-                if (offset + bytes_needed > data.len) return try unpackShort(ctx, entry.code, bytes_needed, if (data.len > offset) data.len - offset else 0);
-
-                const hex_buf = try ctx.allocator.alloc(u8, nibbles);
-                const hex_owned = try Value.String.adopt(ctx.allocator, hex_buf);
-                defer hex_owned.release();
-
-                for (0..nibbles) |i| {
-                    const byte = data[offset + i / 2];
-                    const nibble: u4 = if (entry.code == 'H')
-                        (if (i % 2 == 0) @as(u4, @truncate(byte >> 4)) else @as(u4, @truncate(byte & 0x0f)))
-                    else
-                        (if (i % 2 == 0) @as(u4, @truncate(byte & 0x0f)) else @as(u4, @truncate(byte >> 4)));
-                    hex_buf[i] = hexChar(nibble);
+                inputpos += size;
+                if (inputpos < 0) {
+                    if (size != -1) try filesystem.warnDocref(ctx, "Type {c}: outside of string", .{type_code});
+                    inputpos = 0;
                 }
-                offset += bytes_needed;
-
-                const key = try makeKey(ctx, entry.name, 0, 1);
-                defer if (key == .string) key.string.release();
-                try ctx.vm.arraySetOwned(arr, key, .{ .string = hex_owned });
-            },
-            'c' => {
-                const repeat = resolveRepeat(entry.count, 1, data.len, offset);
-                if (offset + repeat > data.len) return try unpackShort(ctx, entry.code, 1, if (data.len > offset) data.len - offset else 0);
-                for (0..repeat) |i| {
-                    const val: i8 = @bitCast(data[offset]);
-                    offset += 1;
-                    const key = try makeKey(ctx, entry.name, i, repeat);
-                    defer if (key == .string) key.string.release();
-                    try ctx.vm.arraySetOwned(arr, key, .{ .int = val });
-                }
-            },
-            'C' => {
-                const repeat = resolveRepeat(entry.count, 1, data.len, offset);
-                if (offset + repeat > data.len) return try unpackShort(ctx, entry.code, 1, if (data.len > offset) data.len - offset else 0);
-                for (0..repeat) |i| {
-                    const val = data[offset];
-                    offset += 1;
-                    const key = try makeKey(ctx, entry.name, i, repeat);
-                    defer if (key == .string) key.string.release();
-                    try ctx.vm.arraySetOwned(arr, key, .{ .int = val });
-                }
-            },
-            's' => {
-                const repeat = resolveRepeat(entry.count, 2, data.len, offset);
-                if (offset + repeat * 2 > data.len) return try unpackShort(ctx, entry.code, 2, if (data.len > offset) data.len - offset else 0);
-                for (0..repeat) |i| {
-                    const val: i16 = @bitCast(data[offset..][0..2].*);
-                    offset += 2;
-                    const key = try makeKey(ctx, entry.name, i, repeat);
-                    defer if (key == .string) key.string.release();
-                    try ctx.vm.arraySetOwned(arr, key, .{ .int = val });
-                }
-            },
-            'S' => {
-                const repeat = resolveRepeat(entry.count, 2, data.len, offset);
-                if (offset + repeat * 2 > data.len) return try unpackShort(ctx, entry.code, 2, if (data.len > offset) data.len - offset else 0);
-                for (0..repeat) |i| {
-                    const val: u16 = @bitCast(data[offset..][0..2].*);
-                    offset += 2;
-                    const key = try makeKey(ctx, entry.name, i, repeat);
-                    defer if (key == .string) key.string.release();
-                    try ctx.vm.arraySetOwned(arr, key, .{ .int = val });
-                }
-            },
-            'n' => {
-                const repeat = resolveRepeat(entry.count, 2, data.len, offset);
-                if (offset + repeat * 2 > data.len) return try unpackShort(ctx, entry.code, 2, if (data.len > offset) data.len - offset else 0);
-                for (0..repeat) |i| {
-                    const val = std.mem.bigToNative(u16, @bitCast(data[offset..][0..2].*));
-                    offset += 2;
-                    const key = try makeKey(ctx, entry.name, i, repeat);
-                    defer if (key == .string) key.string.release();
-                    try ctx.vm.arraySetOwned(arr, key, .{ .int = val });
-                }
-            },
-            'v' => {
-                const repeat = resolveRepeat(entry.count, 2, data.len, offset);
-                if (offset + repeat * 2 > data.len) return try unpackShort(ctx, entry.code, 2, if (data.len > offset) data.len - offset else 0);
-                for (0..repeat) |i| {
-                    const val = std.mem.littleToNative(u16, @bitCast(data[offset..][0..2].*));
-                    offset += 2;
-                    const key = try makeKey(ctx, entry.name, i, repeat);
-                    defer if (key == .string) key.string.release();
-                    try ctx.vm.arraySetOwned(arr, key, .{ .int = val });
-                }
-            },
-            'l' => {
-                const repeat = resolveRepeat(entry.count, 4, data.len, offset);
-                if (offset + repeat * 4 > data.len) return try unpackShort(ctx, entry.code, 4, if (data.len > offset) data.len - offset else 0);
-                for (0..repeat) |i| {
-                    const val: i32 = @bitCast(data[offset..][0..4].*);
-                    offset += 4;
-                    const key = try makeKey(ctx, entry.name, i, repeat);
-                    defer if (key == .string) key.string.release();
-                    try ctx.vm.arraySetOwned(arr, key, .{ .int = val });
-                }
-            },
-            'L' => {
-                const repeat = resolveRepeat(entry.count, 4, data.len, offset);
-                if (offset + repeat * 4 > data.len) return try unpackShort(ctx, entry.code, 4, if (data.len > offset) data.len - offset else 0);
-                for (0..repeat) |i| {
-                    const val: u32 = @bitCast(data[offset..][0..4].*);
-                    offset += 4;
-                    const key = try makeKey(ctx, entry.name, i, repeat);
-                    defer if (key == .string) key.string.release();
-                    try ctx.vm.arraySetOwned(arr, key, .{ .int = val });
-                }
-            },
-            'N' => {
-                const repeat = resolveRepeat(entry.count, 4, data.len, offset);
-                if (offset + repeat * 4 > data.len) return try unpackShort(ctx, entry.code, 4, if (data.len > offset) data.len - offset else 0);
-                for (0..repeat) |i| {
-                    const val = std.mem.bigToNative(u32, @bitCast(data[offset..][0..4].*));
-                    offset += 4;
-                    const key = try makeKey(ctx, entry.name, i, repeat);
-                    defer if (key == .string) key.string.release();
-                    try ctx.vm.arraySetOwned(arr, key, .{ .int = val });
-                }
-            },
-            'V' => {
-                const repeat = resolveRepeat(entry.count, 4, data.len, offset);
-                if (offset + repeat * 4 > data.len) return try unpackShort(ctx, entry.code, 4, if (data.len > offset) data.len - offset else 0);
-                for (0..repeat) |i| {
-                    const val = std.mem.littleToNative(u32, @bitCast(data[offset..][0..4].*));
-                    offset += 4;
-                    const key = try makeKey(ctx, entry.name, i, repeat);
-                    defer if (key == .string) key.string.release();
-                    try ctx.vm.arraySetOwned(arr, key, .{ .int = val });
-                }
-            },
-            'i' => {
-                const sz = @sizeOf(c_int);
-                const repeat = resolveRepeat(entry.count, sz, data.len, offset);
-                if (offset + repeat * sz > data.len) return try unpackShort(ctx, entry.code, sz, if (data.len > offset) data.len - offset else 0);
-                for (0..repeat) |i| {
-                    var bytes: [@sizeOf(c_int)]u8 = undefined;
-                    @memcpy(&bytes, data[offset .. offset + sz]);
-                    const val: c_int = @bitCast(bytes);
-                    offset += sz;
-                    const key = try makeKey(ctx, entry.name, i, repeat);
-                    defer if (key == .string) key.string.release();
-                    try ctx.vm.arraySetOwned(arr, key, .{ .int = val });
-                }
-            },
-            'I' => {
-                const sz = @sizeOf(c_uint);
-                const repeat = resolveRepeat(entry.count, sz, data.len, offset);
-                if (offset + repeat * sz > data.len) return try unpackShort(ctx, entry.code, sz, if (data.len > offset) data.len - offset else 0);
-                for (0..repeat) |i| {
-                    var bytes: [@sizeOf(c_uint)]u8 = undefined;
-                    @memcpy(&bytes, data[offset .. offset + sz]);
-                    const val: c_uint = @bitCast(bytes);
-                    offset += sz;
-                    const key = try makeKey(ctx, entry.name, i, repeat);
-                    defer if (key == .string) key.string.release();
-                    try ctx.vm.arraySetOwned(arr, key, .{ .int = @intCast(val) });
-                }
-            },
-            'q' => {
-                const repeat = resolveRepeat(entry.count, 8, data.len, offset);
-                if (offset + repeat * 8 > data.len) return try unpackShort(ctx, entry.code, 8, if (data.len > offset) data.len - offset else 0);
-                for (0..repeat) |i| {
-                    const val: i64 = @bitCast(data[offset..][0..8].*);
-                    offset += 8;
-                    const key = try makeKey(ctx, entry.name, i, repeat);
-                    defer if (key == .string) key.string.release();
-                    try ctx.vm.arraySetOwned(arr, key, .{ .int = val });
-                }
-            },
-            'Q' => {
-                const repeat = resolveRepeat(entry.count, 8, data.len, offset);
-                if (offset + repeat * 8 > data.len) return try unpackShort(ctx, entry.code, 8, if (data.len > offset) data.len - offset else 0);
-                for (0..repeat) |i| {
-                    const val: u64 = @bitCast(data[offset..][0..8].*);
-                    offset += 8;
-                    const key = try makeKey(ctx, entry.name, i, repeat);
-                    defer if (key == .string) key.string.release();
-                    const int_val: i64 = if (val > std.math.maxInt(i64)) @bitCast(val) else @intCast(val);
-                    try ctx.vm.arraySetOwned(arr, key, .{ .int = int_val });
-                }
-            },
-            'J' => {
-                const repeat = resolveRepeat(entry.count, 8, data.len, offset);
-                if (offset + repeat * 8 > data.len) return try unpackShort(ctx, entry.code, 8, if (data.len > offset) data.len - offset else 0);
-                for (0..repeat) |i| {
-                    const val = std.mem.bigToNative(u64, @bitCast(data[offset..][0..8].*));
-                    offset += 8;
-                    const key = try makeKey(ctx, entry.name, i, repeat);
-                    defer if (key == .string) key.string.release();
-                    const int_val: i64 = if (val > std.math.maxInt(i64)) @bitCast(val) else @intCast(val);
-                    try ctx.vm.arraySetOwned(arr, key, .{ .int = int_val });
-                }
-            },
-            'P' => {
-                const repeat = resolveRepeat(entry.count, 8, data.len, offset);
-                if (offset + repeat * 8 > data.len) return try unpackShort(ctx, entry.code, 8, if (data.len > offset) data.len - offset else 0);
-                for (0..repeat) |i| {
-                    const val = std.mem.littleToNative(u64, @bitCast(data[offset..][0..8].*));
-                    offset += 8;
-                    const key = try makeKey(ctx, entry.name, i, repeat);
-                    defer if (key == .string) key.string.release();
-                    const int_val: i64 = if (val > std.math.maxInt(i64)) @bitCast(val) else @intCast(val);
-                    try ctx.vm.arraySetOwned(arr, key, .{ .int = int_val });
-                }
-            },
-            'f', 'g', 'G' => {
-                const repeat = resolveRepeat(entry.count, 4, data.len, offset);
-                if (offset + repeat * 4 > data.len) return try unpackShort(ctx, entry.code, 4, if (data.len > offset) data.len - offset else 0);
-                for (0..repeat) |i| {
-                    var bits: u32 = @bitCast(data[offset..][0..4].*);
-                    offset += 4;
-                    bits = switch (entry.code) {
-                        'G' => std.mem.bigToNative(u32, bits),
-                        'g' => std.mem.littleToNative(u32, bits),
-                        else => bits,
-                    };
-                    const val: f32 = @bitCast(bits);
-                    const key = try makeKey(ctx, entry.name, i, repeat);
-                    defer if (key == .string) key.string.release();
-                    try ctx.vm.arraySetOwned(arr, key, .{ .float = val });
-                }
-            },
-            'd', 'e', 'E' => {
-                const repeat = resolveRepeat(entry.count, 8, data.len, offset);
-                if (offset + repeat * 8 > data.len) return try unpackShort(ctx, entry.code, 8, if (data.len > offset) data.len - offset else 0);
-                for (0..repeat) |i| {
-                    var bits: u64 = @bitCast(data[offset..][0..8].*);
-                    offset += 8;
-                    bits = switch (entry.code) {
-                        'E' => std.mem.bigToNative(u64, bits),
-                        'e' => std.mem.littleToNative(u64, bits),
-                        else => bits,
-                    };
-                    const val: f64 = @bitCast(bits);
-                    const key = try makeKey(ctx, entry.name, i, repeat);
-                    defer if (key == .string) key.string.release();
-                    try ctx.vm.arraySetOwned(arr, key, .{ .float = val });
-                }
-            },
-            'x' => {
-                const count = switch (entry.count) {
-                    .star => @as(usize, 1),
-                    .exact => |n| n,
-                };
-                offset += count;
-            },
-            'X' => {
-                const count = switch (entry.count) {
-                    .star => offset,
-                    .exact => |n| n,
-                };
-                if (count > offset) return NativeResult.scalar(.{ .bool = false });
-                offset -= count;
-            },
-            '@' => {
-                const pos = switch (entry.count) {
-                    .star => return NativeResult.scalar(.{ .bool = false }),
-                    .exact => |n| n,
-                };
-                offset = pos;
-            },
-            else => return NativeResult.scalar(.{ .bool = false }),
+            } else if (repetitions < 0) {
+                break;
+            } else {
+                const have = inputlen - inputpos;
+                try filesystem.warnDocref(ctx, "Type {c}: not enough input values, need {d} values but only {d} {s} provided", .{ type_code, size, have, @as([]const u8, if (have == 1) "was" else "were") });
+                return NativeResult.scalar(.{ .bool = false });
+            }
         }
+        if (format.len > 0) format = format[1..];
     }
-
     return NativeResult.borrowed(.{ .array = arr });
-}
-
-fn resolveRepeat(count: FormatEntry.Count, byte_size: usize, data_len: usize, offset: usize) usize {
-    return switch (count) {
-        .star => if (data_len > offset) (data_len - offset) / byte_size else 0,
-        .exact => |n| n,
-    };
-}
-
-fn makeKey(ctx: *NativeContext, name: ?[]const u8, i: usize, repeat: usize) !PhpArray.Key {
-    if (name) |n| {
-        if (repeat <= 1) return .{ .string = try Value.String.create(ctx.allocator, n) };
-        const buf = try std.fmt.allocPrint(ctx.allocator, "{s}{d}", .{ n, i + 1 });
-        return .{ .string = try Value.String.adopt(ctx.allocator, buf) };
-    }
-    return .{ .int = @intCast(i + 1) };
 }
 
 fn hexDigitVal(c: u8) u4 {
@@ -660,11 +505,6 @@ fn hexDigitVal(c: u8) u4 {
         'A'...'F' => @truncate(c - 'A' + 10),
         else => 0,
     };
-}
-
-fn hexChar(nibble: u4) u8 {
-    const chars = "0123456789abcdef";
-    return chars[nibble];
 }
 
 test "format parser" {
