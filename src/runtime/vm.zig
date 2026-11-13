@@ -25750,7 +25750,21 @@ pub const VM = struct {
         const shape = php_types.shape(type_str);
         if (self.typeHoldsExactly(val, type_str, shape, scope orelse "")) return val;
         if (self.representationHolds(val, type_str, shape, scope)) return val;
-        if (shape.mask & php_types.CALLABLE != 0 and self.isValueCallable(val)) return val;
+        if (shape.mask & php_types.CALLABLE != 0) {
+            // zend_is_callable for a user parameter: a "Class::method" or
+            // array callable resolves against the scope, with php's
+            // deprecations for self, parent and static
+            const by_name = switch (val) {
+                .string => |s| std.mem.indexOf(u8, s.bytes(), "::") != null,
+                .array => true,
+                else => false,
+            };
+            if (by_name) {
+                const resolved = try callables.resolveCallback(self, val, .{});
+                if (self.pending_exception != null) return error.RuntimeError;
+                if (resolved == .callee) return val;
+            } else if (self.isValueCallable(val)) return val;
+        }
         if (strict) {
             if (shape.mask & php_types.DOUBLE == 0 or val != .int) return null;
         } else if (val == .null) return null;
