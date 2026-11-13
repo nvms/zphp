@@ -118,6 +118,8 @@ Zend/tests/assert/expect_019.phpt
 Zend/tests/assert/expect_020.phpt
 Zend/tests/assert/expect_empty_stmt_bug.phpt
 Zend/tests/assert/gh11580.phpt
+Zend/tests/assert/gh16293_001.phpt
+Zend/tests/assert/gh16293_002.phpt
 Zend/tests/assign_array_object_property.phpt
 Zend/tests/assign_by_val_function_by_ref_return_value.phpt
 Zend/tests/assign_dim_obj_null_return.phpt
@@ -504,6 +506,8 @@ Zend/tests/bug60169.phpt
 Zend/tests/bug60350.phpt
 Zend/tests/bug60362.phpt
 Zend/tests/bug60598.phpt
+Zend/tests/bug60611.phpt
+Zend/tests/bug60613.phpt
 Zend/tests/bug60738.phpt
 Zend/tests/bug60738_variation.phpt
 Zend/tests/bug60771.phpt
@@ -564,6 +568,7 @@ Zend/tests/bug69755.phpt
 Zend/tests/bug69756.phpt
 Zend/tests/bug69758.phpt
 Zend/tests/bug69788.phpt
+Zend/tests/bug69805.phpt
 Zend/tests/bug69825.phpt
 Zend/tests/bug69871.phpt
 Zend/tests/bug69891.phpt
@@ -584,6 +589,7 @@ Zend/tests/bug70478.phpt
 Zend/tests/bug70681.phpt
 Zend/tests/bug70689.phpt
 Zend/tests/bug70748.phpt
+Zend/tests/bug70782.phpt
 Zend/tests/bug70785.phpt
 Zend/tests/bug70895.phpt
 Zend/tests/bug70898.phpt
@@ -637,6 +643,7 @@ Zend/tests/bug74603.phpt
 Zend/tests/bug74810.phpt
 Zend/tests/bug74947.phpt
 Zend/tests/bug75079.phpt
+Zend/tests/bug75079_2.phpt
 Zend/tests/bug75252.phpt
 Zend/tests/bug75426.phpt
 Zend/tests/bug75474.phpt
@@ -712,6 +719,7 @@ Zend/tests/call_user_functions/call_user_func_closure_from_static_method.phpt
 Zend/tests/call_user_functions/call_user_func_strict_arginfo_check.phpt
 Zend/tests/call_with_refs.phpt
 Zend/tests/callable_param_exception_leak.phpt
+Zend/tests/callable_self_parent_static_deprecation.phpt
 Zend/tests/catch.phpt
 Zend/tests/class_alias/bug54624.phpt
 Zend/tests/class_alias/bug76451.phpt
@@ -742,6 +750,18 @@ Zend/tests/class_exists_003.phpt
 Zend/tests/class_exists_basic.phpt
 Zend/tests/class_name/bug66811.phpt
 Zend/tests/class_name/bug69754.phpt
+Zend/tests/class_name/bug77530.phpt
+Zend/tests/class_name/class_name_as_scalar.phpt
+Zend/tests/class_name/class_name_as_scalar_error_001.phpt
+Zend/tests/class_name/class_name_as_scalar_error_002.phpt
+Zend/tests/class_name/class_name_as_scalar_error_003.phpt
+Zend/tests/class_name/class_name_as_scalar_error_004.phpt
+Zend/tests/class_name/class_name_as_scalar_error_005.phpt
+Zend/tests/class_name/class_name_as_scalar_error_006.phpt
+Zend/tests/class_name/class_name_as_scalar_error_007.phpt
+Zend/tests/class_name/class_on_constant_evaluated_expression.phpt
+Zend/tests/class_name/class_on_object.phpt
+Zend/tests/class_name/parent_class_name_without_parent.phpt
 Zend/tests/class_properties_dynamic.phpt
 Zend/tests/class_properties_static.phpt
 Zend/tests/class_underscore_as_name.phpt
@@ -1096,6 +1116,12 @@ Zend/tests/dynamic_call/bug69124.phpt
 Zend/tests/dynamic_call/bug69167.phpt
 Zend/tests/dynamic_call/bug77877.phpt
 Zend/tests/dynamic_call/bug78898.phpt
+Zend/tests/dynamic_call/dynamic_call_002.phpt
+Zend/tests/dynamic_call/dynamic_call_003.phpt
+Zend/tests/dynamic_call/dynamic_call_005.phpt
+Zend/tests/dynamic_call/dynamic_call_006.phpt
+Zend/tests/dynamic_call/dynamic_call_007.phpt
+Zend/tests/dynamic_call/dynamic_call_008.phpt
 Zend/tests/dynamic_call/dynamic_call_freeing.phpt
 Zend/tests/dynamic_call/dynamic_call_non_static.phpt
 Zend/tests/dynamic_call/dynamic_call_to_ref_returning_function.phpt
@@ -1275,6 +1301,8 @@ Zend/tests/errmsg/errmsg_023.phpt
 Zend/tests/errmsg/errmsg_024.phpt
 Zend/tests/errmsg/errmsg_025.phpt
 Zend/tests/errmsg/errmsg_026.phpt
+Zend/tests/errmsg/errmsg_028.phpt
+Zend/tests/errmsg/errmsg_029.phpt
 Zend/tests/errmsg/errmsg_030.phpt
 Zend/tests/errmsg/errmsg_031.phpt
 Zend/tests/errmsg/errmsg_032.phpt
@@ -1341,6 +1369,7 @@ Zend/tests/exceptions/exception_008.phpt
 Zend/tests/exceptions/exception_014.phpt
 Zend/tests/exceptions/exception_015.phpt
 Zend/tests/exceptions/exception_016.phpt
+Zend/tests/exceptions/exception_017.phpt
 Zend/tests/exceptions/exception_018.phpt
 Zend/tests/exceptions/exception_019.phpt
 Zend/tests/exceptions/exception_020.phpt
@@ -1924,6 +1953,7 @@ Zend/tests/gh10251.phpt
 Zend/tests/gh10486.phpt
 Zend/tests/gh10486_2.phpt
 Zend/tests/gh10570.phpt
+Zend/tests/gh10634.phpt
 Zend/tests/gh11016.phpt
 Zend/tests/gh11171.phpt
 Zend/tests/gh11189.phpt
@@ -2014,6 +2044,7 @@ Zend/tests/grammar/bug78441.phpt
 Zend/tests/grammar/gh14961.phpt
 Zend/tests/grammar/readonly_function.phpt
 Zend/tests/grammar/regression_001.phpt
+Zend/tests/grammar/regression_002.phpt
 Zend/tests/grammar/regression_004.phpt
 Zend/tests/grammar/regression_005.phpt
 Zend/tests/grammar/regression_006.phpt
@@ -2229,6 +2260,7 @@ Zend/tests/interface_exists_002.phpt
 Zend/tests/interface_exists_basic.phpt
 Zend/tests/interface_extends_static.phpt
 Zend/tests/interface_underscore_as_name.phpt
+Zend/tests/invalid_const_class_name.phpt
 Zend/tests/invalid_parent_const_ref_leak.phpt
 Zend/tests/is_callable_trampoline_uaf-deprecated.phpt
 Zend/tests/is_callable_trampoline_uaf.phpt
@@ -2459,6 +2491,7 @@ Zend/tests/lazy_objects/write_initializes.phpt
 Zend/tests/lazy_objects/write_magic_circular_may_initialize.phpt
 Zend/tests/lazy_objects/write_magic_may_initialize.phpt
 Zend/tests/lazy_objects/write_skipped_no_initialize.phpt
+Zend/tests/line_numbers/bug81631.phpt
 Zend/tests/line_numbers/gh16509.phpt
 Zend/tests/line_numbers/gh8810_3.phpt
 Zend/tests/line_numbers/gh8810_4.phpt
@@ -2626,6 +2659,7 @@ Zend/tests/magic_methods/bug80037.phpt
 Zend/tests/magic_methods/bug80045.phpt
 Zend/tests/magic_methods/call_static.phpt
 Zend/tests/magic_methods/call_static_002.phpt
+Zend/tests/magic_methods/call_static_004.phpt
 Zend/tests/magic_methods/call_static_007.phpt
 Zend/tests/magic_methods/class_toString_concat_non_interned_with_itself.phpt
 Zend/tests/magic_methods/class_toString_concat_with_itself.phpt
@@ -2983,6 +3017,7 @@ Zend/tests/objects/objects_033.phpt
 Zend/tests/objects/objects_034.phpt
 Zend/tests/objects/objects_035.phpt
 Zend/tests/oct_overflow.phpt
+Zend/tests/oct_overflow_char.phpt
 Zend/tests/oct_whitespace.phpt
 Zend/tests/offset_array.phpt
 Zend/tests/offset_bool.phpt
@@ -3354,6 +3389,7 @@ Zend/tests/replace_pred_pi_node.phpt
 Zend/tests/require_once_warning_to_exception.phpt
 Zend/tests/required_param_after_optional.phpt
 Zend/tests/required_param_after_optional_named_args.phpt
+Zend/tests/restore_error_reporting.phpt
 Zend/tests/restrict_globals/globals_in_globals.phpt
 Zend/tests/restrict_globals/invalid_append.phpt
 Zend/tests/restrict_globals/invalid_append_isset.phpt
@@ -3471,6 +3507,8 @@ Zend/tests/serialize/bug76502.phpt
 Zend/tests/serialize/serializable_deprecation.phpt
 Zend/tests/shift_001.phpt
 Zend/tests/shift_002.phpt
+Zend/tests/special_name_error2.phpt
+Zend/tests/special_name_error3.phpt
 Zend/tests/static_global_scope.phpt
 Zend/tests/static_method_non_existing_class.phpt
 Zend/tests/static_variables/static_variable.phpt
@@ -4397,6 +4435,7 @@ Zend/tests/unset/unset_cv10.phpt
 Zend/tests/unset/unset_cv11.phpt
 Zend/tests/unset/unset_cv12.phpt
 Zend/tests/unset/unset_non_array.phpt
+Zend/tests/unterminated_comment.phpt
 Zend/tests/use_const/alias.phpt
 Zend/tests/use_const/basic.phpt
 Zend/tests/use_const/case_sensivity.phpt
@@ -6092,6 +6131,7 @@ ext/spl/tests/RecursiveCallbackFilterIterator_trampoline_usage.phpt
 ext/spl/tests/RecursiveDirectoryIterator_getSubPath_basic.phpt
 ext/spl/tests/RecursiveDirectoryIterator_getSubPathname_basic.phpt
 ext/spl/tests/RecursiveDirectoryIterator_hasChildren.phpt
+ext/spl/tests/RecursiveIteratorIterator_dtor_order.phpt
 ext/spl/tests/RecursiveIteratorIterator_invalid_aggregate.phpt
 ext/spl/tests/RecursiveIteratorIterator_not_initialized.phpt
 ext/spl/tests/RegexIterator_with_reference_replacement.phpt
@@ -7231,6 +7271,7 @@ ext/standard/tests/array/bug69723.phpt
 ext/standard/tests/array/bug70250.phpt
 ext/standard/tests/array/bug70668.phpt
 ext/standard/tests/array/bug70910.phpt
+ext/standard/tests/array/bug71220.phpt
 ext/standard/tests/array/bug71603.phpt
 ext/standard/tests/array/bug71660.phpt
 ext/standard/tests/array/bug71837.phpt
@@ -7537,8 +7578,24 @@ ext/standard/tests/array/unexpected_array_mod_bug.phpt
 ext/standard/tests/array/var_export.phpt
 ext/standard/tests/array/var_export2.phpt
 ext/standard/tests/array/var_export3.phpt
+ext/standard/tests/assert/assert.phpt
+ext/standard/tests/assert/assert03.phpt
+ext/standard/tests/assert/assert04.phpt
+ext/standard/tests/assert/assert_basic.phpt
+ext/standard/tests/assert/assert_basic1.phpt
+ext/standard/tests/assert/assert_basic2.phpt
+ext/standard/tests/assert/assert_basic3.phpt
+ext/standard/tests/assert/assert_basic4.phpt
+ext/standard/tests/assert/assert_basic5.phpt
+ext/standard/tests/assert/assert_basic6.phpt
+ext/standard/tests/assert/assert_closures.phpt
 ext/standard/tests/assert/assert_closures_multiple.phpt
 ext/standard/tests/assert/assert_custom_exception.phpt
+ext/standard/tests/assert/assert_error2.phpt
+ext/standard/tests/assert/assert_options_error.phpt
+ext/standard/tests/assert/assert_return_value.phpt
+ext/standard/tests/assert/assert_variation.phpt
+ext/standard/tests/assert/assert_warnings.phpt
 ext/standard/tests/assert/bug80290.phpt
 ext/standard/tests/assert/gh18509.phpt
 ext/standard/tests/assert/gh22290.phpt
@@ -7576,6 +7633,7 @@ ext/standard/tests/class_object/method_exists_variation_003.phpt
 ext/standard/tests/class_object/trait_class_exists_variation_003.phpt
 ext/standard/tests/constant_with_typed_class_constant.phpt
 ext/standard/tests/crypt/bcrypt_invalid_algorithm.phpt
+ext/standard/tests/crypt/bcrypt_invalid_cost.phpt
 ext/standard/tests/crypt/bcrypt_salt_dollar.phpt
 ext/standard/tests/crypt/des_fallback_invalid_salt.phpt
 ext/standard/tests/dir/bug41693.phpt
@@ -8808,9 +8866,19 @@ ext/standard/tests/network/tcp4loop.phpt
 ext/standard/tests/network/tcp6loop.phpt
 ext/standard/tests/network/unixloop.phpt
 ext/standard/tests/password/bug75221.phpt
+ext/standard/tests/password/password_bcrypt_errors.phpt
 ext/standard/tests/password/password_bcrypt_short.phpt
 ext/standard/tests/password/password_default.phpt
+ext/standard/tests/password/password_get_info.phpt
+ext/standard/tests/password/password_get_info_argon2.phpt
+ext/standard/tests/password/password_hash_argon2.phpt
+ext/standard/tests/password/password_hash_error.phpt
+ext/standard/tests/password/password_hash_error_argon2.phpt
 ext/standard/tests/password/password_hash_sensitive_parameter.phpt
+ext/standard/tests/password/password_needs_rehash.phpt
+ext/standard/tests/password/password_needs_rehash_argon2.phpt
+ext/standard/tests/password/password_needs_rehash_error.phpt
+ext/standard/tests/password/password_verify.phpt
 ext/standard/tests/password/password_verify_argon2.phpt
 ext/standard/tests/password/password_verify_error.phpt
 ext/standard/tests/serialize/001.phpt
@@ -9174,6 +9242,7 @@ ext/standard/tests/strings/bug47481.phpt
 ext/standard/tests/strings/bug47842.phpt
 ext/standard/tests/strings/bug48709.phpt
 ext/standard/tests/strings/bug49785.phpt
+ext/standard/tests/strings/bug50052.phpt
 ext/standard/tests/strings/bug50847.phpt
 ext/standard/tests/strings/bug51059.phpt
 ext/standard/tests/strings/bug51899.phpt
@@ -9184,6 +9253,7 @@ ext/standard/tests/strings/bug54238.phpt
 ext/standard/tests/strings/bug54322.phpt
 ext/standard/tests/strings/bug54332.phpt
 ext/standard/tests/strings/bug54454.phpt
+ext/standard/tests/strings/bug54721.phpt
 ext/standard/tests/strings/bug55451.phpt
 ext/standard/tests/strings/bug55674.phpt
 ext/standard/tests/strings/bug60801.phpt
@@ -9203,6 +9273,7 @@ ext/standard/tests/strings/bug67252.phpt
 ext/standard/tests/strings/bug68636.phpt
 ext/standard/tests/strings/bug68710.phpt
 ext/standard/tests/strings/bug69144.phpt
+ext/standard/tests/strings/bug69522.phpt
 ext/standard/tests/strings/bug69751.phpt
 ext/standard/tests/strings/bug70487.phpt
 ext/standard/tests/strings/bug70667.phpt
@@ -9223,12 +9294,14 @@ ext/standard/tests/strings/bug72823.phpt
 ext/standard/tests/strings/bug73058.phpt
 ext/standard/tests/strings/bug73817.phpt
 ext/standard/tests/strings/bug74041.phpt
+ext/standard/tests/strings/bug75075.phpt
 ext/standard/tests/strings/bug77439.phpt
 ext/standard/tests/strings/bug77853.phpt
 ext/standard/tests/strings/bug78003.phpt
 ext/standard/tests/strings/bug78346.phpt
 ext/standard/tests/strings/bug78612.phpt
 ext/standard/tests/strings/bug78814.phpt
+ext/standard/tests/strings/bug78833.phpt
 ext/standard/tests/strings/bug78840.phpt
 ext/standard/tests/strings/bug79951.phpt
 ext/standard/tests/strings/chop_basic.phpt
@@ -9257,7 +9330,15 @@ ext/standard/tests/strings/count_chars.phpt
 ext/standard/tests/strings/count_chars_basic.phpt
 ext/standard/tests/strings/crc32.phpt
 ext/standard/tests/strings/crc32_basic.phpt
+ext/standard/tests/strings/crypt.phpt
+ext/standard/tests/strings/crypt_blowfish.phpt
+ext/standard/tests/strings/crypt_blowfish_variation1.phpt
 ext/standard/tests/strings/crypt_blowfish_variation2.phpt
+ext/standard/tests/strings/crypt_chars.phpt
+ext/standard/tests/strings/crypt_des_error.phpt
+ext/standard/tests/strings/crypt_sha256.phpt
+ext/standard/tests/strings/crypt_sha512.phpt
+ext/standard/tests/strings/crypt_variation1.phpt
 ext/standard/tests/strings/default_charset.phpt
 ext/standard/tests/strings/dirname_basic.phpt
 ext/standard/tests/strings/dirname_error.phpt
@@ -9391,6 +9472,8 @@ ext/standard/tests/strings/oom_unpack.phpt
 ext/standard/tests/strings/ord_basic.phpt
 ext/standard/tests/strings/ord_not_1_byte.phpt
 ext/standard/tests/strings/oss_fuzz_57392.phpt
+ext/standard/tests/strings/pack64.phpt
+ext/standard/tests/strings/pack_A.phpt
 ext/standard/tests/strings/pack_Z.phpt
 ext/standard/tests/strings/pack_arrays.phpt
 ext/standard/tests/strings/pack_float.phpt
@@ -9686,6 +9769,8 @@ ext/standard/tests/strings/ucwords_variation3.phpt
 ext/standard/tests/strings/ucwords_variation4.phpt
 ext/standard/tests/strings/ucwords_variation5.phpt
 ext/standard/tests/strings/unpack_bug68225.phpt
+ext/standard/tests/strings/unpack_error.phpt
+ext/standard/tests/strings/unpack_offset.phpt
 ext/standard/tests/strings/url_t.phpt
 ext/standard/tests/strings/utf8.phpt
 ext/standard/tests/strings/uuencode.phpt
