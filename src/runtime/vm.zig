@@ -13050,6 +13050,10 @@ pub const VM = struct {
         };
         const sc_target = self.functions.get(full_name);
         const sc_target_is_static = if (sc_target) |scf| scf.is_static else if (found) |f| f.info.is_static else false;
+        // an internal method php declares non-static (zphp's own classes
+        // aren't in php's signatures)
+        const native_instance_method = sc_target == null and self.native_fns.contains(full_name) and
+            if (@import("../stdlib/native_params_generated.zig").map.get(full_name)) |sig| !sig.is_static else false;
         if (site) |st| {
             if (sc_target) |func| {
                 const public = if (found) |f| f.info.visibility == .public else true;
@@ -13059,7 +13063,7 @@ pub const VM = struct {
         // an instance method called statically runs on $this when $this is
         // an instance of the class, and is an Error otherwise
         const this_fits = if (this_val) |tv| tv == .object and self.isInstanceOf(tv.object.class_name, class_name) else false;
-        if (sc_target != null and !sc_target_is_static and !this_fits) {
+        if ((native_instance_method or (sc_target != null and !sc_target_is_static)) and !this_fits) {
             self.dropN(arg_count);
             const msg = try std.fmt.allocPrint(self.allocator, "Non-static method {s}() cannot be called statically", .{full_name});
             defer self.allocator.free(msg);
