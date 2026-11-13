@@ -431,6 +431,11 @@ pub fn executablePath() []const u8 {
     return executable_path;
 }
 
+pub const ReinitWindow = struct {
+    obj: *PhpObject,
+    written: std.StringHashMapUnmanaged(void) = .empty,
+};
+
 pub const RefSource = union(enum) {
     none,
     simple: []const u8,
@@ -989,6 +994,11 @@ pub const VM = struct {
     // named arguments a native that accepts them (call_user_func) gets past
     // its declared parameters; invokeNative hands them to the native's context
     native_named_args: ?*PhpArray = null,
+    // php's IS_PROP_REINITABLE: while __clone runs on a clone, and while
+    // clone() assigns its properties, each initialized readonly property of
+    // the clone may be written once more. a window per clone in progress,
+    // with the properties already written again
+    reinit_windows: std.ArrayListUnmanaged(ReinitWindow) = .empty,
     free_closure_names: std.ArrayListUnmanaged(struct { compile_name: []const u8, name: []const u8 }) = .empty,
     php_constants: std.StringHashMapUnmanaged(Value) = .{},
     user_constants: std.StringHashMapUnmanaged(void) = .{},
@@ -3557,6 +3567,8 @@ pub const VM = struct {
         if (self.spl_autoload_extensions) |exts| self.allocator.free(exts);
         self.magic_guards.deinit(self.allocator);
         self.magic_call_guard.deinit(self.allocator);
+        for (self.reinit_windows.items) |*window| window.written.deinit(self.allocator);
+        self.reinit_windows.deinit(self.allocator);
         self.prop_hook_guard.deinit(self.allocator);
         for (self.serve_cache_keys.items) |k| self.allocator.free(k);
         self.serve_cache_keys.deinit(self.allocator);
@@ -8160,7 +8172,7 @@ pub const VM = struct {
                         }
                         {
                             const vr = self.findPropertyVisibility(obj.class_name, prop_name);
-                            if (vr.is_readonly and obj.get(prop_name) != .null) {
+                            if (vr.is_readonly and obj.get(prop_name) != .null and !self.inReinitWindow(obj)) {
                                 const msg = try std.fmt.allocPrint(self.allocator, "Cannot unset readonly property {s}::${s}", .{ obj.class_name, prop_name });
                                 defer self.allocator.free(msg);
                                 if (try self.throwBuiltinException("Error", msg)) continue;
@@ -8223,7 +8235,7 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
                         const vr = self.findPropertyVisibility(obj.class_name, prop_name);
-                        if (vr.is_readonly and obj.get(prop_name) != .null) {
+                        if (vr.is_readonly and obj.get(prop_name) != .null and !self.inReinitWindow(obj)) {
                             const msg = try std.fmt.allocPrint(self.allocator, "Cannot unset readonly property {s}::${s}", .{ obj.class_name, prop_name });
                             defer self.allocator.free(msg);
                             if (try self.throwBuiltinException("Error", msg)) continue;
@@ -15310,9 +15322,11 @@ pub const VM = struct {
             if (self.hasMethod(src.class_name, "__clone")) {
                 // the clone is freed when __clone throws
                 copy.retain();
+                try self.openReinitWindow(copy);
+                defer self.closeReinitWindow();
                 _ = self.callMethod(copy, "__clone", &.{}) catch |err| {
                     // zend_object_store_ctor_failed: no destructor for it
-                    copy.destructed = true;
+                    copy.destructor_called = true;
                     self.objRelease(copy);
                     return err;
                 };
@@ -15346,10 +15360,18 @@ pub const VM = struct {
         defer self.arrayRelease(props);
         clone_obj.refcount +%= 1;
         defer self.objRelease(clone_obj);
+        try self.openReinitWindow(clone_obj);
+        defer self.closeReinitWindow();
         var dispatched = false;
         var i: usize = 0;
         while (i < props.entries.items.len) : (i += 1) {
             const entry = props.entries.items[i];
+            // a reference only the array holds is its value; one shared
+            // with anything else can't be assigned
+            if (entry.ref) |cell| if (cellOf(cell).binders > 1) {
+                if (try self.throwBuiltinException("Error", "Cannot assign by reference when cloning with updated properties")) return true;
+                return error.RuntimeError;
+            };
             const prop_name = switch (entry.key) {
                 .string => |k| k.bytes(),
                 .int => |n| (try self.transientFormatted(.{ .int = n })).bytes(),
@@ -15373,6 +15395,43 @@ pub const VM = struct {
             }
         }
         return dispatched;
+    }
+
+    fn openReinitWindow(self: *VM, obj: *PhpObject) !void {
+        try self.reinit_windows.append(self.allocator, .{ .obj = obj });
+    }
+
+    fn closeReinitWindow(self: *VM) void {
+        var window = self.reinit_windows.pop() orelse return;
+        window.written.deinit(self.allocator);
+    }
+
+    // a readonly property of a clone that __clone (or clone()'s properties)
+    // may still write once
+    fn readonlyReinitable(self: *VM, obj: *PhpObject, name: []const u8) bool {
+        var i = self.reinit_windows.items.len;
+        while (i > 0) {
+            i -= 1;
+            const window = &self.reinit_windows.items[i];
+            if (window.obj == obj) return !window.written.contains(name);
+        }
+        return false;
+    }
+
+    fn inReinitWindow(self: *VM, obj: *PhpObject) bool {
+        for (self.reinit_windows.items) |window| if (window.obj == obj) return true;
+        return false;
+    }
+
+    fn consumeReinit(self: *VM, obj: *PhpObject, name: []const u8) void {
+        var i = self.reinit_windows.items.len;
+        while (i > 0) {
+            i -= 1;
+            const window = &self.reinit_windows.items[i];
+            if (window.obj != obj) continue;
+            window.written.put(self.allocator, name, {}) catch {};
+            return;
+        }
     }
 
     pub fn setUncloneable(self: *VM, class_name: []const u8) !void {
@@ -21978,6 +22037,9 @@ pub const VM = struct {
     // or inaccessible property, else the visibility, readonly, and type checks
     // and the write itself. val may be coerced to the declared type
     fn propertyWriteStore(self: *VM, obj: *PhpObject, prop_name: []const u8, val: *Value, vr: VisResult, action: MutationAction, base_frame: usize) RuntimeError!PropWriteOutcome {
+        // a readonly property is written again only through a reinit window
+        // (__clone, clone()'s properties), whatever the action
+        _ = action;
         const has_prop = !obj.isUnset(prop_name) and (obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndexForScope(prop_name, vr.defining_class) != null));
         if (!has_prop and self.magicApplies(obj, prop_name, .set)) {
             _ = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicProperty(obj, .set, prop_name, val.*) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) return .dispatched; return error.RuntimeError; }; });
@@ -21996,7 +22058,8 @@ pub const VM = struct {
             return error.RuntimeError;
         }
         const sp_scope: ?[]const u8 = vr.defining_class;
-        if (vr.is_readonly and action != .reinit) {
+        const reinit = vr.is_readonly and self.reinit_windows.items.len > 0 and self.readonlyReinitable(obj, prop_name);
+        if (vr.is_readonly and !reinit) {
             const existing = obj.getForScope(prop_name, sp_scope);
             if (existing != .null) {
                 const msg = try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{
@@ -22025,6 +22088,7 @@ pub const VM = struct {
         // before the new value lands (Stage 1)
         try obj.setForScope(self.allocator, prop_name, val.*, sp_scope);
         self.syncObjPropRefs(obj, prop_name, val.*);
+        if (reinit) self.consumeReinit(obj, prop_name);
         return .written;
     }
 
@@ -22049,10 +22113,13 @@ pub const VM = struct {
                 try std.fmt.allocPrint(self.allocator, "Cannot unset {s}::${s}", .{ self.declaredClassName(obj.class_name), name })
             else
                 try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property DatePeriod::${s}", .{name});
-        } else if (action == .write and vr.is_readonly and obj.rawForScope(name, vr.defining_class) != .undef) {
+        } else if (action == .write and vr.is_readonly and obj.rawForScope(name, vr.defining_class) != .undef and !obj.isUnset(name) and !(self.reinit_windows.items.len > 0 and self.readonlyReinitable(obj, name))) {
             // zend_std_write_property: an initialized readonly property is
             // refused before its set visibility is
             msg = try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{ vr.defining_class, name });
+        } else if (action == .unset and vr.is_readonly and self.reinit_windows.items.len > 0 and self.readonlyReinitable(obj, name)) {
+            // __clone may unset a readonly property once
+            self.consumeReinit(obj, name);
         } else if (action == .unset and vr.is_readonly and obj.rawForScope(name, vr.defining_class) != .undef) {
             msg = try std.fmt.allocPrint(self.allocator, "Cannot unset readonly property {s}::${s}", .{ vr.defining_class, name });
         } else if (action == .indirect and vr.is_readonly and self.checkVisibility(vr.defining_class, vr.visibility)) {
