@@ -65,6 +65,30 @@ var_dump(plain(7));
 (new Box)->m();
 (new Box)->closures();
 
+// first-class callables in a constant expression: a fully qualified name
+// doesn't fall back to the global function, and what would need
+// __callStatic or names an abstract method is refused
+abstract class Shape {
+    abstract public static function area();
+}
+class Magic {
+    public static function __callStatic($name, $args) {
+        return $name;
+    }
+}
+function qualified($f = \App\strrev(...)) {}
+function relative($f = namespace\strrev(...)) {}
+function unqualified($f = strrev(...)) { return $f('abc'); }
+function abstracted($f = Shape::area(...)) {}
+function magic($f = Magic::anything(...)) {}
+foreach (['App\qualified', 'App\relative', 'App\unqualified', 'App\abstracted', 'App\magic'] as $f) {
+    try {
+        var_dump($f());
+    } catch (\Error $e) {
+        echo get_class($e), ': ', $e->getMessage(), "\n";
+    }
+}
+
 // magic constants are case-insensitive
 var_dump(__line__, __class__, basename(__file__), __namespace__);
 

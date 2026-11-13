@@ -531,11 +531,15 @@ pub const OpCode = enum(u8) {
     // `&$GLOBALS[name]` (php's global FETCH_W): u16 destination name; pops
     // the variable's name and binds the destination to the global's cell
     make_global_ref,
+    // a first-class callable in a constant expression, before
+    // callable_closure: u8 1 when the function name was fully qualified (no
+    // global fallback). checks what zend_ast_evaluate refuses
+    const_expr_fcc_check,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
             .arg_variable => 6,
-            .return_ref_value, .array_get_w => 2,
+            .return_ref_value, .array_get_w, .const_expr_fcc_check => 2,
             .tick => 3,
             .jump_if_class_declared, .bind_const_attributes => 5,
             .parent_hook_call => 7,

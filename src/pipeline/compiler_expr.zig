@@ -1977,6 +1977,11 @@ pub fn compileCallableRef(self: *Compiler, node: Ast.Node) Error!void {
     } else {
         try self.compileNode(node.data.lhs);
     }
+    if (self.const_expr) {
+        // a name written with a backslash doesn't fall back to the global one
+        try self.emitOp(.const_expr_fcc_check);
+        try self.emitByte(@intFromBool(callee.tag == .qualified_name));
+    }
     try self.emitOp(.callable_closure);
 }
 

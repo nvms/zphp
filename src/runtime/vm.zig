@@ -9372,6 +9372,18 @@ pub const VM = struct {
 
                 .closure_new => try self.newClosureFromTop(),
 
+                .const_expr_fcc_check => {
+                    const fully_qualified = self.readByte() != 0;
+                    const refused = self.constExprCallableRefused(self.stack[self.sp - 1], fully_qualified) catch {
+                        if (try self.resumeRaised()) continue;
+                        return error.RuntimeError;
+                    };
+                    if (refused) {
+                        if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    }
+                },
+
                 .callable_closure => {
                     var callable = self.pop();
                     // a closure's first-class callable is the closure itself
@@ -13341,6 +13353,69 @@ pub const VM = struct {
 
     // a method's declaration as the class or an ancestor makes it, or an
     // interface's (abstract) one
+    // zend_ast_evaluate's checks on a first-class callable in a constant
+    // expression, before the closure is made: a fully qualified function
+    // name doesn't fall back to the global one, a method that would reach
+    // __callStatic is refused, an abstract one is an Error, and a trait's
+    // static method is deprecated. true with the Error pending
+    fn constExprCallableRefused(self: *VM, callable: Value, fully_qualified: bool) RuntimeError!bool {
+        switch (callable) {
+            .string => |s| {
+                const name = s.bytes();
+                if (self.functionKnown(name)) return false;
+                if (!fully_qualified) if (std.mem.lastIndexOfScalar(u8, name, '\\')) |sep| {
+                    if (self.functionKnown(name[sep + 1 ..])) return false;
+                };
+                const msg = try std.fmt.allocPrint(self.allocator, "Call to undefined function {s}()", .{name});
+                defer self.allocator.free(msg);
+                try self.setPendingException("Error", msg);
+                return true;
+            },
+            .array => |pair| {
+                if (pair.entries.items.len != 2) return false;
+                const class_val = pair.entries.items[0].value;
+                const method_val = pair.entries.items[1].value;
+                if (class_val != .string or method_val != .string) return false;
+                const class_name = class_val.string.bytes();
+                const method_name = method_val.string.bytes();
+                const magic = "Creating a callable for the magic __callStatic() method is not supported in constant expressions";
+                const found = self.findMethodInfo(class_name, method_name) orelse {
+                    if (self.classes.contains(class_name) and self.hasMethod(class_name, "__callStatic")) {
+                        try self.setPendingException("Error", magic);
+                        return true;
+                    }
+                    return false;
+                };
+                if (found.info.visibility != .public and self.hasMethod(class_name, "__callStatic")) {
+                    const scope = self.currentDefiningClass();
+                    const visible = if (scope) |sc| (if (found.info.visibility == .private) std.ascii.eqlIgnoreCase(sc, found.defining) else self.isInstanceOf(sc, found.defining) or self.isInstanceOf(found.defining, sc)) else false;
+                    if (!visible) {
+                        try self.setPendingException("Error", magic);
+                        return true;
+                    }
+                }
+                if (!found.info.is_static) return false;
+                if (found.info.is_abstract) {
+                    const msg = try std.fmt.allocPrint(self.allocator, "Cannot call abstract method {s}::{s}()", .{ found.defining, found.info.name });
+                    defer self.allocator.free(msg);
+                    try self.setPendingException("Error", msg);
+                    return true;
+                }
+                if (self.traits.contains(found.defining)) {
+                    const msg = try std.fmt.allocPrint(self.allocator, "Calling static trait method {s}::{s} is deprecated, it should only be called on a class using the trait", .{ found.defining, found.info.name });
+                    defer self.allocator.free(msg);
+                    try self.raiseError(E_DEPRECATED, msg);
+                }
+                return false;
+            },
+            else => return false,
+        }
+    }
+
+    fn functionKnown(self: *VM, name: []const u8) bool {
+        return self.functions.contains(name) or self.native_fns.contains(name) or self.functionNamedIgnoringCase(name) != null;
+    }
+
     fn findMethodInfo(self: *VM, class_name: []const u8, method_name: []const u8) ?struct { info: ClassDef.MethodInfo, defining: []const u8 } {
         var current: ?[]const u8 = class_name;
         while (current) |cn| {
