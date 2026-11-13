@@ -587,7 +587,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionFunction::getNumberOfParameters", rfGetNumberOfParameters);
     try vm.native_fns.put(a, "ReflectionFunction::getNumberOfRequiredParameters", rfGetNumberOfRequiredParameters);
     try vm.native_fns.put(a, "ReflectionFunction::isAnonymous", rfIsAnonymous);
-    try vm.native_fns.put(a, "ReflectionFunction::isClosure", rfIsAnonymous);
+    try vm.native_fns.put(a, "ReflectionFunction::isClosure", rfIsClosure);
     try vm.native_fns.put(a, "ReflectionFunction::isInternal", rfIsInternal);
     try vm.native_fns.put(a, "ReflectionFunction::isUserDefined", rfIsUserDefined);
     try vm.native_fns.put(a, "ReflectionFunction::isGenerator", rfIsGenerator);
@@ -3562,7 +3562,13 @@ fn rpIsPassedByReference(ctx: *NativeContext, _: []const Value) RuntimeError!Nat
 fn rpCanBePassedByValue(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = true });
     const by_ref = this.get("__by_reference");
-    return NativeResult.scalar(.{ .bool = !(by_ref == .bool and by_ref.bool) });
+    if (!(by_ref == .bool and by_ref.bool)) return NativeResult.scalar(.{ .bool = true });
+    // ZEND_SEND_PREFER_REF: array_multisort's and extract's array take a
+    // value too
+    const function = this.get("__function");
+    const prefer_ref = this.get("__method_name") != .string and function == .string and ctx.vm.functions.get(function.string.bytes()) == null and
+        (std.ascii.eqlIgnoreCase(function.string.bytes(), "array_multisort") or std.ascii.eqlIgnoreCase(function.string.bytes(), "extract"));
+    return NativeResult.scalar(.{ .bool = prefer_ref });
 }
 
 fn rpHasType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -4057,6 +4063,15 @@ fn rfInNamespace(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
     const name_v = this.get("name");
     if (name_v != .string) return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = std.mem.indexOfScalar(u8, name_v.string.bytes(), '\\') != null });
+}
+
+// ZEND_ACC_CLOSURE: what a Closure object runs, a closure made from a
+// callable included
+fn rfIsClosure(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const from_closure = this.get("__from_closure");
+    if (from_closure == .bool and from_closure.bool) return NativeResult.scalar(.{ .bool = true });
+    return rfIsAnonymous(ctx, args);
 }
 
 fn rfIsAnonymous(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -5584,6 +5599,8 @@ fn rpropGetModifiers(ctx: *NativeContext, _: []const Value) RuntimeError!NativeR
 
     // a property with an abstract hook is abstract
     if ((try rpropIsAbstract(ctx, &.{})).value.bool) mods |= 64;
+    // ZEND_ACC_VIRTUAL: a hooked property with no backing store
+    if ((try rpropIsVirtual(ctx, &.{})).value.bool) mods |= 512;
 
     return NativeResult.scalar(.{ .int = mods });
 }
