@@ -4523,6 +4523,13 @@ pub const VM = struct {
                 const caller = self.currentSourcePosition();
                 const where = try std.fmt.allocPrint(self.allocator, "{s}({d}) : eval()'d code", .{ caller.file, caller.line });
                 defer self.allocator.free(where);
+                // eval is an opcode to php: a compile fatal's trace has no
+                // frame for it
+                const outer_call = self.native_call;
+                defer self.native_call = outer_call;
+                if (outer_call) |n| if (std.mem.eql(u8, n.label, "eval")) {
+                    self.native_call = n.outer;
+                };
                 const raised = self.raiseCompileFatal(d.message(), .{ .file = where, .line = line });
                 if (!d.trace) if (self.pending_exception) |exc| if (exc == .object) try exc.object.set(self.allocator, "__no_trace", .{ .bool = true });
                 return raised;

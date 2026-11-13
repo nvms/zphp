@@ -202,7 +202,7 @@ const Parser = struct {
             .kw_interface => self.parseInterfaceDecl(),
             .kw_trait => self.parseTraitDecl(),
             // php's scanner reads `enum` as the keyword only before a name
-            .kw_enum => if (self.peekAt(1) == .identifier) self.parseEnumDecl() else self.parseExpressionStmt(),
+            .kw_enum => if (self.peekAt(1) == .identifier or self.peekAt(1) == .kw_self or self.peekAt(1) == .kw_parent) self.parseEnumDecl() else self.parseExpressionStmt(),
             .kw_throw => self.parseThrowStmt(),
             .kw_try => self.parseTryCatch(),
             .kw_declare => self.parseDeclare(),
@@ -519,7 +519,7 @@ const Parser = struct {
                 if (self.peek() == .kw_as) {
                     _ = self.advance();
                     alias = self.pos;
-                    _ = try self.expect(.identifier);
+                    _ = try self.expectName();
                 }
                 const ex = try self.addExtraList(item_parts.items);
                 const t: Ast.Node.Tag = if (item_is_fn) .use_fn_stmt else if (item_is_const) .use_const_stmt else .use_stmt;
@@ -537,7 +537,7 @@ const Parser = struct {
         if (self.peek() == .kw_as and self.peekAt(2) == .comma) {
             _ = self.advance();
             first_alias = self.pos;
-            _ = try self.expect(.identifier);
+            _ = try self.expectName();
         }
         if (self.peek() == .comma) {
             var stmts = std.ArrayListUnmanaged(u32).empty;
@@ -561,7 +561,7 @@ const Parser = struct {
                 if (self.peek() == .kw_as) {
                     _ = self.advance();
                     item_alias = self.pos;
-                    _ = try self.expect(.identifier);
+                    _ = try self.expectName();
                 }
                 const item_extra = try self.addExtraList(parts.items);
                 try stmts.append(self.allocator, try self.addNode(.{ .tag = tag, .main_token = tok, .data = .{ .lhs = item_extra, .rhs = item_alias } }));
@@ -575,7 +575,7 @@ const Parser = struct {
         if (self.peek() == .kw_as) {
             _ = self.advance();
             alias = self.pos;
-            _ = try self.expect(.identifier);
+            _ = try self.expectName();
         }
         _ = try self.expect(.semicolon);
 
@@ -1704,7 +1704,7 @@ const Parser = struct {
             _ = self.advance();
         }
         _ = self.advance(); // class
-        const name_tok = if (self.peek() == .kw_enum) self.advance() else try self.expect(.identifier);
+        const name_tok = if (self.peek() == .kw_enum) self.advance() else try self.expectName();
 
         var parent: u32 = 0;
         if (self.peek() == .kw_extends) {
@@ -1754,7 +1754,7 @@ const Parser = struct {
 
     fn parseInterfaceDecl(self: *Parser) Error!u32 {
         _ = self.advance(); // interface
-        const name_tok = try self.expect(.identifier);
+        const name_tok = try self.expectName();
 
         var parents = std.ArrayListUnmanaged(u32).empty;
         defer parents.deinit(self.allocator);
@@ -1886,7 +1886,7 @@ const Parser = struct {
 
     fn parseTraitDecl(self: *Parser) Error!u32 {
         _ = self.advance(); // trait
-        const name_tok = try self.expect(.identifier);
+        const name_tok = try self.expectName();
         _ = try self.expect(.l_brace);
 
         var members = std.ArrayListUnmanaged(u32).empty;
@@ -2062,7 +2062,7 @@ const Parser = struct {
 
     fn parseEnumDecl(self: *Parser) Error!u32 {
         _ = self.advance(); // enum
-        const name_tok = try self.expect(.identifier);
+        const name_tok = try self.expectName();
 
         // the backing type's first token; the compiler reads the whole type
         // to refuse anything but int and string
@@ -3725,6 +3725,13 @@ const Parser = struct {
 
     fn expect(self: *Parser, tag: Tag) Error!u32 {
         return self.expectTag(tag);
+    }
+
+    // a declared name: self and parent are plain names (T_STRING) to php's
+    // grammar, refused later as reserved
+    fn expectName(self: *Parser) Error!u32 {
+        if (self.peek() == .kw_self or self.peek() == .kw_parent) return self.advance();
+        return self.expect(.identifier);
     }
 
     fn expectTag(self: *Parser, tag: Tag) Error!u32 {

@@ -3299,6 +3299,8 @@ fn warnUnderscoreName(self: *Compiler, token: u32, comptime kind: []const u8) Er
 }
 
 pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
+    const unqualified = self.ast.tokenSlice(node.main_token);
+    if (isReservedClassName(unqualified)) return self.failFmt(node.main_token, "Cannot use \"{s}\" as an interface name as it is reserved", .{unqualified});
     try warnUnderscoreName(self, node.main_token, "an interface name");
     const iface_name = self.declaredName(self.ast.tokenSlice(node.main_token));
     for (self.ast.extraSlice(node.data.lhs)) |m| {
@@ -3473,6 +3475,8 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
+    const unqualified = self.ast.tokenSlice(node.main_token);
+    if (isReservedClassName(unqualified)) return self.failFmt(node.main_token, "Cannot use \"{s}\" as a trait name as it is reserved", .{unqualified});
     try warnUnderscoreName(self, node.main_token, "a trait name");
     const trait_name = self.declaredName(self.ast.tokenSlice(node.main_token));
     const members = self.ast.extraSlice(node.data.lhs);
