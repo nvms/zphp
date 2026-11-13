@@ -338,6 +338,10 @@ pub const Compiler = struct {
     // the outer loops a return has already ended while the finally copies
     // it runs compile: a return inside one of those must not end them again
     loops_ended: u32 = 0,
+    // loop levels a return being compiled has already ended while a finally
+    // it runs is inlined: a return inside that finally must not end them again
+    ended_gap_lo: u32 = 0,
+    ended_gap_hi: u32 = 0,
     // return values waiting on the operand stack while those finally copies
     // compile: a return inside one replaces them, so it discards them first
     pending_returns: u32 = 0,
@@ -713,40 +717,69 @@ pub const Compiler = struct {
                     self.finally_depth = saved_fd;
                     try self.emitOp(.generator_return);
                 } else {
-                    // close suspended generators in active foreach scopes; the
-                    // function is returning so the iterables go out of scope
-                    var fei: usize = self.loop_depth;
-                    while (fei > self.loops_ended) {
-                        fei -= 1;
-                        if (fei < 32 and self.loop_is_foreach[fei]) try self.emitForeachEnd(fei);
+                    // zend_handle_loops_and_finally: the loops inside the
+                    // innermost try end before its finally runs, the loops
+                    // around it after (so a finally that throws into a catch
+                    // around a loop leaves that loop running)
+                    var ended: u32 = self.loop_depth;
+                    const first_boundary: u32 = if (self.finally_depth == 0) self.loops_ended else @max(self.loops_ended, self.finally_loop_depth[self.finally_depth - 1]);
+                    // inside a finally inlined for another return: the loops
+                    // the finally runs, which sit above that return's value
+                    while (ended > @max(first_boundary, self.ended_gap_hi)) {
+                        ended -= 1;
+                        try self.endReturnLoop(ended, false);
                     }
                     var stale = self.pending_returns;
                     while (stale > 0) : (stale -= 1) try self.emitOp(.pop);
+                    while (ended > first_boundary) {
+                        ended -= 1;
+                        try self.endReturnLoop(ended, false);
+                    }
                     // ref-returning function: route refable return shapes
                     // (`return $arr[$k]`, `return $obj->prop`, `return $var`)
                     // through make_var_*_ref + return_ref so the caller can
                     // bind to the same storage. unrefable expressions fall
                     // through to plain return_val
+                    // the binding is made now and returned after the finally
+                    // blocks, which may still write through it
                     const ref_return_emitted = self.returns_ref and node.data.lhs != 0 and
-                        try self.tryCompileRefReturn(node.data.lhs);
+                        try self.tryBindRefReturn(node.data.lhs);
                     if (!ref_return_emitted and node.data.lhs != 0) {
                         try self.compileNode(node.data.lhs);
                     }
+                    const value_pushed = !ref_return_emitted and node.data.lhs != 0;
                     // emit finally blocks (innermost first) before returning;
                     // temporarily lower finally_depth around each inline emit so
                     // that a return inside the finally itself does not re-enter
                     // its own finally block (would cause infinite recursion)
                     const saved_fd = self.finally_depth;
                     const saved_ended = self.loops_ended;
-                    self.loops_ended = self.loop_depth;
                     const saved_pending = self.pending_returns;
-                    self.pending_returns = @intFromBool(!ref_return_emitted and node.data.lhs != 0);
+                    const saved_gap_lo = self.ended_gap_lo;
+                    const saved_gap_hi = self.ended_gap_hi;
+                    self.pending_returns = @intFromBool(value_pushed);
                     var fd = self.finally_depth;
                     while (fd > 0) {
                         fd -= 1;
+                        // the loops between this finally and the one inside it
+                        const boundary = @max(saved_ended, self.finally_loop_depth[fd]);
+                        while (ended > boundary) {
+                            ended -= 1;
+                            try self.endReturnLoop(ended, value_pushed);
+                        }
+                        // a return inside the finally skips the loops already
+                        // ended, which lie under this return's value
+                        self.ended_gap_lo = ended;
+                        self.ended_gap_hi = self.loop_depth;
                         self.finally_depth = fd;
                         try self.emitOp(.pop_handler);
                         try self.compileNode(self.finally_nodes[fd]);
+                    }
+                    self.ended_gap_lo = saved_gap_lo;
+                    self.ended_gap_hi = saved_gap_hi;
+                    while (ended > saved_ended) {
+                        ended -= 1;
+                        try self.endReturnLoop(ended, value_pushed);
                     }
                     self.finally_depth = saved_fd;
                     self.loops_ended = saved_ended;
@@ -758,7 +791,8 @@ pub const Compiler = struct {
                         try self.emitByte(if (node.data.lhs != 0) 0 else 2);
                     }
                     if (ref_return_emitted) {
-                        // tryCompileRefReturn already emitted return_ref
+                        try self.emitOp(.return_ref);
+                        try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed("$__ret_ref") }));
                     } else if (node.data.lhs != 0) {
                         try self.emitOp(.return_val);
                     } else {
@@ -2226,6 +2260,19 @@ pub const Compiler = struct {
         }
     }
 
+    // ends the foreach at loop level d for a return, unless an enclosing
+    // return already ended it; under_value moves the return's value below the
+    // loop's slots first
+    fn endReturnLoop(self: *Compiler, d: u32, under_value: bool) Error!void {
+        if (d >= 32 or !self.loop_is_foreach[d]) return;
+        if (d >= self.ended_gap_lo and d < self.ended_gap_hi) return;
+        if (under_value) {
+            try self.emitOp(.bury);
+            try self.emitByte(2);
+        }
+        try self.emitForeachEnd(d);
+    }
+
     // ends the foreach at loop level d early (break, continue N, return)
     pub fn emitForeachEnd(self: *Compiler, d: usize) Error!void {
         if (self.loop_foreach_live[d]) |src| {
@@ -2337,14 +2384,20 @@ pub const Compiler = struct {
     }
 
     pub fn tryCompileRefReturn(self: *Compiler, expr_idx: u32) Error!bool {
+        if (!try self.tryBindRefReturn(expr_idx)) return false;
+        try self.emitOp(.return_ref);
+        try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed("$__ret_ref") }));
+        return true;
+    }
+
+    // binds $__ret_ref to what a by-reference return returns, false when
+    // the expression is no reference source
+    fn tryBindRefReturn(self: *Compiler, expr_idx: u32) Error!bool {
         // php's tree has no node for parentheses: `return ($a);` returns $a
         var target = expr_idx;
         while (self.ast.nodes[target].tag == .grouped_expr) target = self.ast.nodes[target].data.lhs;
         const name = try self.addConstant(.{ .string = Value.String.borrowed("$__ret_ref") });
-        if (!try compiler_expr.compileReferenceBinding(self, target, name)) return false;
-        try self.emitOp(.return_ref);
-        try self.emitU16(name);
-        return true;
+        return compiler_expr.compileReferenceBinding(self, target, name);
     }
 
     // superinstruction: $local_dst op= $local_src as a statement (no stack effect)
