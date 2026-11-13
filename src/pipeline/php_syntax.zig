@@ -100,6 +100,12 @@ const Scanner = struct {
             const tok = self.tokens[self.index];
             self.index += 1;
             self.line = tok.line;
+            // the scanner's ParseError for a block comment that runs to the end
+            if ((tok.id == t.T_COMMENT or tok.id == t.T_DOC_COMMENT) and std.mem.startsWith(u8, tok.text, "/*") and
+                (tok.text.len < 4 or !std.mem.endsWith(u8, tok.text, "*/")))
+            {
+                return .{ .failed = .{ .message = try std.fmt.allocPrint(allocator, "Unterminated comment starting line {d}", .{tok.line}), .line = tok.line } };
+            }
             const id: i64 = switch (tok.id) {
                 t.T_WHITESPACE, t.T_COMMENT, t.T_DOC_COMMENT, t.T_OPEN_TAG => continue,
                 t.T_OPEN_TAG_WITH_ECHO => t.T_ECHO,

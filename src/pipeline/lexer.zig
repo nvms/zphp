@@ -8,6 +8,8 @@ pub const Lexer = struct {
     state: State,
     // byte offset just past `__halt_compiler();`, where the file's data begins
     halt_offset: ?usize = null,
+    // where a block comment that never ends starts
+    unterminated_comment: ?usize = null,
 
     const State = enum { html, php };
 
@@ -81,6 +83,10 @@ pub const Lexer = struct {
 
     fn lexPhp(self: *Lexer) Token {
         self.skipTrivia();
+        if (self.unterminated_comment) |at| {
+            self.unterminated_comment = null;
+            return .{ .tag = .invalid, .start = @intCast(at), .end = @intCast(self.source.len) };
+        }
         if (self.pos >= self.source.len) return self.makeEof();
 
         const start = self.pos;
@@ -542,6 +548,7 @@ pub const Lexer = struct {
     }
 
     fn skipBlockComment(self: *Lexer) void {
+        const start = self.pos;
         self.pos += 2;
         while (self.pos + 1 < self.source.len) {
             if (self.source[self.pos] == '*' and self.source[self.pos + 1] == '/') {
@@ -550,6 +557,9 @@ pub const Lexer = struct {
             }
             self.pos += 1;
         }
+        // php's scanner fails on a comment that never ends; the parser
+        // sees an invalid token there
+        self.unterminated_comment = start;
         self.pos = self.source.len;
     }
 
