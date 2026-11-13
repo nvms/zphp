@@ -505,6 +505,16 @@ pub const OpCode = enum(u8) {
     array_get_w,
     // the same for `$a[]->p = v`: [array] -> [the appended null]
     array_append_w,
+    // iter_check for a by-reference foreach over a variable, with the
+    // variable's current value pushed above the loop's slots: an array the
+    // loop iterates live (php's HashTable iterator) is read from it, so
+    // elements added or removed while the loop runs count. u16 exit offset
+    iter_check_live,
+    // before iter_end of such a loop, with the variable's value pushed: the
+    // loop stops counting as a live iterator of the array
+    iter_live_end,
+    // iter_begin_ref for such a loop: an array is iterated live
+    iter_begin_live,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -545,6 +555,7 @@ pub const OpCode = enum(u8) {
             .closure_bind_ref,
             .define_const,
             .iter_check,
+            .iter_check_live,
             .iter_check_nokey,
             .inc_local,
             .dec_local,

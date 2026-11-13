@@ -332,6 +332,9 @@ pub const Compiler = struct {
     // therefore should be closed when the loop exits. `break` uses this to
     // pick iter_end_close vs iter_end
     loop_foreach_close: [32]bool = @as([32]bool, @splat(false)),
+    // per-foreach: the variable a by-reference loop iterates live, read again
+    // where the loop ends so it stops counting as the array's iterator
+    loop_foreach_live: [32]?LiveIterable = @as([32]?LiveIterable, @splat(null)),
     // the outer loops a return has already ended while the finally copies
     // it runs compile: a return inside one of those must not end them again
     loops_ended: u32 = 0,
@@ -715,9 +718,7 @@ pub const Compiler = struct {
                     var fei: usize = self.loop_depth;
                     while (fei > self.loops_ended) {
                         fei -= 1;
-                        if (fei < 32 and self.loop_is_foreach[fei]) {
-                            try self.emitOp(if (self.loop_foreach_close[fei]) .iter_end_close else .iter_end);
-                        }
+                        if (fei < 32 and self.loop_is_foreach[fei]) try self.emitForeachEnd(fei);
                     }
                     var stale = self.pending_returns;
                     while (stale > 0) : (stale -= 1) try self.emitOp(.pop);
@@ -780,9 +781,7 @@ pub const Compiler = struct {
                 }
                 self.finally_depth = saved_fd;
                 for (target_depth..self.loop_depth) |d| {
-                    if (d < 32 and self.loop_is_foreach[d]) {
-                        try self.emitOp(if (self.loop_foreach_close[d]) .iter_end_close else .iter_end);
-                    }
+                    if (d < 32 and self.loop_is_foreach[d]) try self.emitForeachEnd(d);
                 }
                 const j = try self.emitJump(.jump);
                 try self.break_jumps.append(self.allocator, .{
@@ -810,9 +809,7 @@ pub const Compiler = struct {
                         // emit iter_end for inner foreach loops being skipped
                         const skip_target = self.loop_depth -| (level - 1);
                         for (skip_target..self.loop_depth) |d| {
-                            if (d < 32 and self.loop_is_foreach[d]) {
-                                try self.emitOp(if (self.loop_foreach_close[d]) .iter_end_close else .iter_end);
-                            }
+                            if (d < 32 and self.loop_is_foreach[d]) try self.emitForeachEnd(d);
                         }
                         const j = try self.emitJump(.jump);
                         try self.continue_jumps.append(self.allocator, .{
@@ -2214,6 +2211,28 @@ pub const Compiler = struct {
         if (name.len == 0 or name[0] != '$') return null;
         if (!self.resolveArrowCapture(name)) return null;
         return self.getOrCreateSlot(name);
+    }
+
+    pub const LiveIterable = union(enum) { node: u32, temp: []const u8 };
+
+    // reads the variable a live by-reference foreach iterates, quietly
+    pub fn emitLiveIterable(self: *Compiler, src: LiveIterable) Error!void {
+        const saved = self.quiet_reads;
+        self.quiet_reads = true;
+        defer self.quiet_reads = saved;
+        switch (src) {
+            .node => |n| try self.compileNode(n),
+            .temp => |t| try self.emitGetVar(t),
+        }
+    }
+
+    // ends the foreach at loop level d early (break, continue N, return)
+    pub fn emitForeachEnd(self: *Compiler, d: usize) Error!void {
+        if (self.loop_foreach_live[d]) |src| {
+            try self.emitLiveIterable(src);
+            try self.emitOp(.iter_live_end);
+        }
+        try self.emitOp(if (self.loop_foreach_close[d]) .iter_end_close else .iter_end);
     }
 
     pub fn emitGetVar(self: *Compiler, name: []const u8) Error!void {

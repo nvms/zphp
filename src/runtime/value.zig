@@ -150,6 +150,33 @@ pub const PhpArray = struct {
     byref_pins: u8 = 0,
     // Recursion flags
     recursion: u8 = 0,
+    // set while a by-reference foreach iterates the array live (php's
+    // HashTable iterators): what it needs to keep its place as entries are
+    // removed. allocated with the c allocator, freed with the array
+    iter_log: ?*IterLog = null,
+
+    pub const IterLog = struct {
+        // by-reference loops that registered on the array and haven't ended
+        loops: u32 = 0,
+        // the array this one was copied from while a loop iterated it
+        // (zend_array_dup copies the iterators): the loop goes on here
+        copied_from: ?*const PhpArray = null,
+        // the index of every entry removed since the log was made, in order
+        removed: std.ArrayListUnmanaged(u32) = .empty,
+
+        pub fn destroy(log: *IterLog) void {
+            log.removed.deinit(std.heap.c_allocator);
+            std.heap.c_allocator.destroy(log);
+        }
+    };
+
+    pub fn iterLog(self: *PhpArray) ?*IterLog {
+        if (self.iter_log) |log| return log;
+        const log = std.heap.c_allocator.create(IterLog) catch return null;
+        log.* = .{};
+        self.iter_log = log;
+        return log;
+    }
 
     pub const Entry = struct {
         key: Key,
@@ -208,6 +235,10 @@ pub const PhpArray = struct {
         }
         self.entries.deinit(allocator);
         self.string_index.deinit(allocator);
+        if (self.iter_log) |log| {
+            log.destroy();
+            self.iter_log = null;
+        }
     }
 
     // increment the refcount (Stage 2). a method on PhpArray so value.zig
@@ -460,6 +491,11 @@ pub const PhpArray = struct {
         }
         if (remove_idx) |idx| {
             const removed = self.entries.orderedRemove(idx);
+            // php leaves a hole where the element was, so positions past it
+            // keep naming the same elements: the internal pointer and live
+            // iterators move back with the entries that shift
+            if (idx < self.cursor and self.cursor != std.math.maxInt(usize)) self.cursor -= 1;
+            if (self.iter_log) |log| log.removed.append(std.heap.c_allocator, @intCast(idx)) catch {};
             if (removed.ref) |cell| unbindCell(cell);
             if (removed.key == .string) removed.key.string.release();
             // rebuild string index for shifted entries

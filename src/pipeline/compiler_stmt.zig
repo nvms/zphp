@@ -285,12 +285,24 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     } else {
         try self.compileNode(iter_n);
     }
-    try self.emitOp(if (val_by_ref) .iter_begin_ref else .iter_begin);
+    // a by-reference loop over a variable iterates the variable's array
+    // live, as php's does: each step reads the variable again
+    const live: ?Compiler.LiveIterable = if (!val_by_ref or !val_node_is_plain(self, val_n))
+        null
+    else if (iter_temp) |synth|
+        .{ .temp = synth }
+    else if (iter_tag == .variable and !std.mem.eql(u8, self.ast.tokenSlice(self.ast.nodes[iter_n].main_token), "$this"))
+        .{ .node = iter_n }
+    else
+        null;
+    if (self.loop_depth - 1 < 32) self.loop_foreach_live[self.loop_depth - 1] = live;
+    try self.emitOp(if (live != null) .iter_begin_live else if (val_by_ref) .iter_begin_ref else .iter_begin);
 
     const loop_top = self.chunk.offset();
     self.loop_start = loop_top;
 
-    const exit_jump = try self.emitJump(if (key_n == 0 and !val_by_ref) .iter_check_nokey else .iter_check);
+    if (live) |src| try self.emitLiveIterable(src);
+    const exit_jump = try self.emitJump(if (live != null) .iter_check_live else if (key_n == 0 and !val_by_ref) .iter_check_nokey else .iter_check);
 
     // iter_check pushed: key, value (value on top)
     const val_node = self.ast.nodes[val_n];
@@ -352,6 +364,10 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     // true-ref binding propagates writes live, so there is no end-of-iteration
     // writeback to route break jumps through (the old copy+writeback model
     // needed that); break just lands at iter_end
+    if (live) |src| {
+        try self.emitLiveIterable(src);
+        try self.emitOp(.iter_live_end);
+    }
     const end_op: bytecode.OpCode = if (close_on_exit) .iter_end_close else .iter_end;
     try self.emitOp(end_op);
     try self.patchBreaks(&prev_breaks);
@@ -365,6 +381,7 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     self.loop_depth -= 1;
     self.popJumpScope();
     if (self.loop_depth < 32) self.loop_is_foreach[self.loop_depth] = false;
+    if (self.loop_depth < 32) self.loop_foreach_live[self.loop_depth] = null;
     self.foreach_depth -= 1;
     self.loop_start = prev_start;
 }

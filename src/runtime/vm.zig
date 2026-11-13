@@ -7348,8 +7348,8 @@ pub const VM = struct {
                     }
                 },
 
-                .iter_begin, .iter_begin_ref => {
-                    const by_ref = op == .iter_begin_ref;
+                .iter_begin, .iter_begin_ref, .iter_begin_live => {
+                    const by_ref = op != .iter_begin;
                     var iterable = self.stack[self.sp - 1];
                     // ZEND_FE_RESET: anything but an array or object is
                     // skipped with php's warning
@@ -7360,6 +7360,19 @@ pub const VM = struct {
                             defer self.allocator.free(msg);
                             self.emitWarning(msg) catch if (try self.resumeRaised()) continue;
                         },
+                    }
+                    if (op == .iter_begin_live and iterable == .array) {
+                        // php's FE_RESET_RW: the loop keeps a position in the
+                        // variable's array, not a reference to it, so writes in
+                        // the body don't separate it. the slot holds the array's
+                        // address only to tell it from another array later
+                        const arr = iterable.array;
+                        const log = arr.iterLog() orelse return error.OutOfMemory;
+                        log.loops += 1;
+                        self.stack[self.sp - 1] = .{ .int = @intCast(@intFromPtr(arr)) };
+                        self.stackRelease(iterable);
+                        self.push(.{ .int = liveIterState(0, log.removed.items.len) });
+                        continue;
                     }
                     if (iterable == .array) {
                         const src = iterable.array;
@@ -7521,8 +7534,15 @@ pub const VM = struct {
                         self.push(.{ .int = 0 });
                     }
                 },
-                .iter_check, .iter_check_nokey => {
+                .iter_check, .iter_check_nokey, .iter_check_live => {
                     const offset = self.readU16();
+                    if (op == .iter_check_live) {
+                        const current = self.pop();
+                        if (self.stack[self.sp - 2] == .int) {
+                            if (!self.liveIterStep(current)) self.currentFrame().ip += offset;
+                            continue;
+                        }
+                    }
                     const idx_val = self.stack[self.sp - 1];
                     const iterable = self.stack[self.sp - 2];
 
@@ -7579,8 +7599,25 @@ pub const VM = struct {
                         self.currentFrame().ip += offset;
                     }
                 },
+                .iter_live_end => {
+                    const current = self.pop();
+                    const slot = self.stack[self.sp - 2];
+                    // the array the loop ended on, still the variable's: it no
+                    // longer needs to log removals for this loop
+                    if (slot == .int and current == .array and @intFromPtr(current.array) == @as(usize, @intCast(slot.int))) {
+                        if (current.array.iter_log) |log| {
+                            log.loops -|= 1;
+                            if (log.loops == 0) {
+                                log.destroy();
+                                current.array.iter_log = null;
+                            }
+                        }
+                    }
+                },
                 .iter_advance => {
                     const iterable = self.stack[self.sp - 2];
+                    // a live loop moved past its element when it fetched it
+                    if (iterable == .int) continue;
                     if (iterable == .generator) {
                         const gen = iterable.generator;
                         self.resumeGenerator(gen, .null) catch {
@@ -7668,6 +7705,13 @@ pub const VM = struct {
                             .int => |i| .{ .int = i },
                             .string => |s| .{ .string = s },
                             else => .{ .int = Value.toInt(key_val) },
+                        };
+                        // an element that already is a reference (another loop
+                        // over the array is bound to it) is shared, not copied
+                        if (arr_ptr.getPtr(key)) |ep| if (ep.ref) |existing| {
+                            try self.bindRefSlot(&self.currentFrame().ref_slots, name, existing);
+                            try self.mirrorBoundName(self.currentFrame(), name, existing.*);
+                            continue;
                         };
                         const cell = try self.newRefCell();
                         var elem = arr_ptr.get(key);
@@ -19234,6 +19278,58 @@ pub const VM = struct {
     }
 
     // php's FE_FREE drops the iterated value, then the iterator
+    // a live by-reference foreach keeps the index of the next element and
+    // how much of the array's removal log it has applied in its position slot
+    fn liveIterState(next: usize, seen: usize) i64 {
+        return @intCast((@as(u64, @intCast(seen)) << 32) | @as(u64, @intCast(next)));
+    }
+
+    // php's FE_FETCH_RW over a HashTable iterator: finds the loop's place in
+    // the array the variable holds now (its own, a copy made of it while the
+    // loop ran, or a new one, where it starts over), pushes the next key and
+    // value and moves past them. false when the loop is done
+    fn liveIterStep(self: *VM, current: Value) bool {
+        if (current != .array) return false;
+        const arr = current.array;
+        const stored: usize = @intCast(self.stack[self.sp - 2].int);
+        const state: u64 = @intCast(self.stack[self.sp - 1].int);
+        var next: usize = @intCast(state & 0xffffffff);
+        var seen: usize = @intCast(state >> 32);
+        // an array reused at the same address has no log of its own
+        if (@intFromPtr(arr) != stored or arr.iter_log == null) {
+            const copied = if (arr.iter_log) |log| if (log.copied_from) |from| @intFromPtr(from) == stored else false else false;
+            const log = arr.iterLog() orelse return false;
+            log.loops += 1;
+            if (!copied) {
+                // zend_hash_iterator_pos_ex on another array: its internal
+                // pointer
+                next = @min(arr.cursor, arr.entries.items.len);
+                seen = log.removed.items.len;
+            }
+            self.stack[self.sp - 2] = .{ .int = @intCast(@intFromPtr(arr)) };
+        }
+        const log = arr.iter_log.?;
+        // an entry removed before the loop's place moved the rest back
+        if (seen < log.removed.items.len) {
+            for (log.removed.items[seen..]) |idx| {
+                if (idx < next) next -= 1;
+            }
+            seen = log.removed.items.len;
+        }
+        if (next >= arr.entries.items.len) {
+            self.stack[self.sp - 1] = .{ .int = liveIterState(next, seen) };
+            return false;
+        }
+        const entry = arr.entries.items[next];
+        self.stack[self.sp - 1] = .{ .int = liveIterState(next + 1, seen) };
+        self.push(switch (entry.key) {
+            .int => |i| .{ .int = i },
+            .string => |s| .{ .string = s },
+        });
+        self.push(if (entry.ref) |cell| cell.* else entry.value);
+        return true;
+    }
+
     fn endForeach(self: *VM) void {
         const position = self.stack[self.sp - 1];
         self.stack[self.sp - 1] = .null;
@@ -23955,6 +24051,12 @@ pub const VM = struct {
             }
         }
         try self.registerCloneRefs(copy);
+        // zend_array_dup copies the iterators of a live by-reference loop:
+        // the copy keeps the removals the loop hasn't seen yet
+        if (src.iter_log) |log| if (log.loops > 0) if (copy.iterLog()) |copy_log| {
+            copy_log.copied_from = src;
+            copy_log.removed.appendSlice(std.heap.c_allocator, log.removed.items) catch {};
+        };
         return copy;
     }
 
