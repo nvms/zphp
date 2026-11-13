@@ -1117,6 +1117,14 @@ pub const Compiler = struct {
             try self.emitConstant(idx);
             return;
         }
+        if (std.mem.eql(u8, name, "__PROPERTY__")) {
+            // a property hook is named $prop::get / $prop::set
+            const f = self.current_function;
+            const val = if (f.len > 1 and f[0] == '$' and (std.mem.endsWith(u8, f, "::get") or std.mem.endsWith(u8, f, "::set"))) f[1 .. f.len - 5] else "";
+            const idx = try self.addConstant(.{ .string = Value.String.borrowed(val) });
+            try self.emitConstant(idx);
+            return;
+        }
         if (std.mem.eql(u8, name, "__NAMESPACE__")) {
             const ns = if (self.namespace.len > 0) self.namespace else "";
             const idx = try self.addConstant(.{ .string = Value.String.borrowed(ns) });
