@@ -13345,6 +13345,8 @@ pub const VM = struct {
     // zend_fetch_class: self, parent and static with no class scope are
     // their own error; any other missing class is "not found"
     pub fn classNotFoundMessage(self: *VM, class_name: []const u8) ![]u8 {
+        if (std.ascii.eqlIgnoreCase(class_name, "parent") and self.currentDefiningClass() != null)
+            return std.fmt.allocPrint(self.allocator, "Cannot access \"parent\" when current class scope has no parent", .{});
         inline for (.{ "self", "parent", "static" }) |word| {
             if (std.ascii.eqlIgnoreCase(class_name, word)) return std.fmt.allocPrint(self.allocator, "Cannot access \"" ++ word ++ "\" when no class scope is active", .{});
         }
