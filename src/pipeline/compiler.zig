@@ -1601,7 +1601,7 @@ pub const Compiler = struct {
                     }
                     if (elem.data.rhs != 0) {
                         const key = self.evalConstExpr(elem.data.rhs);
-                        const set_key: PhpArray.Key = if (key == .string) .{ .string = key.string } else .{ .int = Value.toInt(key) };
+                        const set_key: PhpArray.Key = if (key == .string) .{ .string = key.string } else if (key == .null) .{ .string = Value.String.borrowed("") } else .{ .int = Value.toInt(key) };
                         arr.set(self.allocator, set_key, val) catch {
                             ok = false;
                             break;

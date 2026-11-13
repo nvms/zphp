@@ -5934,7 +5934,7 @@ pub const VM = struct {
                         if (try self.throwOffsetKeyType(key, .access)) continue;
                         return error.RuntimeError;
                     }
-                    if (key == .resource or key == .float) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
+                    if (key == .resource or key == .float or (key == .null and op == .array_set_elem_ref)) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
                     if (op == .array_push_ref and array.nextElementOccupied()) {
                         if (try self.throwNextElementOccupied()) continue;
                         return error.RuntimeError;
@@ -5994,7 +5994,7 @@ pub const VM = struct {
                             if (try self.throwOffsetKeyType(key, .access)) continue;
                             return error.RuntimeError;
                         }
-                        if (key == .resource or key == .float) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
+                        if (key == .resource or key == .float or key == .null) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
                         const norm_key = Value.toArrayKey(key);
                         // zend_handle_named_arg: a name given twice
                         if (op == .arg_array_set and key == .string and arr_val.array.contains(norm_key)) {
@@ -6093,7 +6093,7 @@ pub const VM = struct {
                             if (try self.throwOffsetKeyType(key, .access)) continue;
                             return error.RuntimeError;
                         }
-                        if (key == .resource or key == .float) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
+                        if (key == .resource or key == .float or key == .null) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
                         const ak = Value.toArrayKey(key);
                         if (!capturing and !arr_val.array.contains(ak)) {
                             // ZEND_FETCH_GLOBALS reads $GLOBALS[k] as the global $k
@@ -6151,7 +6151,7 @@ pub const VM = struct {
                             self.push(.null);
                             continue;
                         }
-                        if (key == .resource or key == .float) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
+                        if (key == .resource or key == .float or key == .null) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
                         const arr_key = Value.toArrayKey(key);
                         const existing = arr_val.array.get(arr_key);
                         // an unset descends through this array to change it: give
@@ -6294,7 +6294,7 @@ pub const VM = struct {
                                 if (try self.throwOffsetKeyType(key, .access)) continue;
                                 return error.RuntimeError;
                             }
-                            if (key == .resource or key == .float) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
+                            if (key == .resource or key == .float or key == .null) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
                             const arr_key = Value.toArrayKey(key);
                             if (arr.getPtr(arr_key)) |entry| {
                                 const existing = if (entry.ref) |cell| cell.* else entry.value;
@@ -6348,7 +6348,7 @@ pub const VM = struct {
                             if (try self.throwOffsetKeyType(key, .access)) continue;
                             return error.RuntimeError;
                         }
-                        if (key == .resource or key == .float) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
+                        if (key == .resource or key == .float or key == .null) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
                         const arr_key = Value.toArrayKey(key);
                         const existing = arr_val.array.get(arr_key);
                         if (existing != .null) {
@@ -6448,7 +6448,7 @@ pub const VM = struct {
                         return error.RuntimeError;
                     };
                     obj = obj.storage();
-                    if (inner_key == .resource) self.warnResourceOffset(inner_key) catch if (try self.resumeRaised()) continue;
+                    if (inner_key == .resource or inner_key == .null) self.warnOffsetKey(inner_key) catch if (try self.resumeRaised()) continue;
                     const ik = Value.toArrayKey(inner_key);
                     // Hook reads must precede vivification/COW. A by-value hook
                     // may expose an object for offsetSet, but not writable array storage.
@@ -6580,13 +6580,13 @@ pub const VM = struct {
                     const inner_key = self.pop();
                     const outer_key = self.pop();
                     const base = self.pop();
-                    if (inner_key == .resource) self.warnResourceOffset(inner_key) catch if (try self.resumeRaised()) continue;
+                    if (inner_key == .resource or inner_key == .null) self.warnOffsetKey(inner_key) catch if (try self.resumeRaised()) continue;
                     const ik = Value.toArrayKey(inner_key);
                     var existing: Value = .null;
                     var base_is_array_access_obj = false;
                     var wb_key = outer_key;
                     if (base == .array) {
-                        if (outer_key == .resource or outer_key == .float) self.warnOffsetKey(outer_key) catch if (try self.resumeRaised()) continue;
+                        if (outer_key == .resource or outer_key == .float or outer_key == .null) self.warnOffsetKey(outer_key) catch if (try self.resumeRaised()) continue;
                         existing = base.array.get(Value.toArrayKey(outer_key));
                     } else if (base == .object and self.hasMethod(base.object.class_name, "offsetGet")) {
                         // ArrayObject / WeakMap / custom ArrayAccess: fetch the
@@ -6780,7 +6780,7 @@ pub const VM = struct {
                             if (try self.throwOffsetKeyType(key, .access)) continue;
                             return error.RuntimeError;
                         }
-                        if (key == .resource or key == .float) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
+                        if (key == .resource or key == .float or key == .null) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
                         const norm_key = Value.toArrayKey(key);
                         // Stage 2 element-overwrite release: if this set replaces
                         // an existing entry, the array loses its retain on the
@@ -6819,7 +6819,7 @@ pub const VM = struct {
                     const key = self.pop();
                     const arr_val = self.pop();
                     if (arr_val == .array) {
-                        if (key == .resource or key == .float) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
+                        if (key == .resource or key == .float or key == .null) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
                         const ak = Value.toArrayKey(key);
                         if (arr_val.array.contains(ak)) {
                             // set/writeArrayElemRef retain once; copyValue would
@@ -6888,7 +6888,7 @@ pub const VM = struct {
                         const arr_val = Value{ .array = new_arr };
                         retainValue(arr_val);
                         try self.storeLocalSlot(frame, slot, arr_val);
-                        if (key == .resource or key == .float) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
+                        if (key == .resource or key == .float or key == .null) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
                         try new_arr.set(self.allocator, Value.toArrayKey(key), val);
                         self.push(val);
                         continue;
@@ -6910,7 +6910,7 @@ pub const VM = struct {
                             if (ref_cell == null) try self.storeLocalSlot(frame, slot, .{ .array = dst });
                             cur = .{ .array = dst };
                         }
-                        if (key == .resource or key == .float) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
+                        if (key == .resource or key == .float or key == .null) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
                         const norm_key = Value.toArrayKey(key);
                         // Stage 2 element-overwrite release - see array_set above.
                         // a plain write to a referenced element routes through the
@@ -7363,6 +7363,7 @@ pub const VM = struct {
                         }
                     }
                     if (elem_arr) |arr| {
+                        if (elem_key == null and (aei_key == .resource or aei_key == .float or aei_key == .null)) self.warnOffsetKey(aei_key) catch if (try self.resumeRaised()) continue;
                         const ak = elem_key orelse Value.toArrayKey(aei_key);
                         const old = arr.get(ak);
                         const new_val = try self.stepValue(old, op == .array_elem_inc) orelse continue;
@@ -7801,7 +7802,7 @@ pub const VM = struct {
                         if (self.dispatchPendingException(base_frame)) continue;
                         return error.RuntimeError;
                     }
-                    if (key_val == .resource or key_val == .float) self.warnOffsetKey(key_val) catch if (try self.resumeRaised()) continue;
+                    if (key_val == .resource or key_val == .float or key_val == .null) self.warnOffsetKey(key_val) catch if (try self.resumeRaised()) continue;
                     const key = PhpArray.normalizeKey(Value.toArrayKey(key_val));
                     self.push(try self.bindArrayElementRef(arr_val, key, var_name));
                 },
@@ -7990,7 +7991,7 @@ pub const VM = struct {
                             if (try self.throwOffsetKeyType(key, .access)) continue;
                             return error.RuntimeError;
                         }
-                        if (key == .resource or key == .float) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
+                        if (key == .resource or key == .float or key == .null) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
                         const array = arr_val.array;
                         const ak = PhpArray.normalizeKey(Value.toArrayKey(key));
                         self.detachArrayEntryRef(array, ak);
@@ -8985,7 +8986,7 @@ pub const VM = struct {
                         };
                         self.push(.{ .bool = result.isTruthy() });
                     } else if (arr_val == .array) {
-                        if (key == .resource or key == .float) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
+                        if (key == .resource or key == .float or key == .null) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
                         const v = arr_val.array.get(Value.toArrayKey(key));
                         self.push(.{ .bool = v != .null });
                     } else if (arr_val == .string) {
@@ -14156,6 +14157,8 @@ pub const VM = struct {
     pub fn warnOffsetKey(self: *VM, key: Value) RuntimeError!void {
         switch (key) {
             .resource => return self.warnResourceOffset(key),
+            // php 8.5: null names the "" key, deprecated
+            .null => return self.raiseError(E_DEPRECATED, "Using null as an array offset is deprecated, use an empty string instead"),
             .float => |f| {
                 if (!(f >= -9.2233720368547758e18 and f < 9.2233720368547758e18)) {
                     var tmp: [64]u8 = undefined;

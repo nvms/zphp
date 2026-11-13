@@ -688,7 +688,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const ag_key = stack[sp - 1];
                     const ag_arr = stack[sp - 2];
                     const ag_elem: ?Value = switch (ag_arr) {
-                        .array => |arr| if (ag_key == .resource or ag_key == .float or ag_key == .array or ag_key == .object or arr == self.globals_array)
+                        .array => |arr| if (ag_key == .resource or ag_key == .float or ag_key == .null or ag_key == .array or ag_key == .object or arr == self.globals_array)
                             null
                         else if (arr.getPtr(Value.toArrayKey(ag_key))) |entry| entry.value else null,
                         .string => |str| if (code[ip - 1] == @intFromEnum(OpCode.array_get) and ag_key == .int and ag_key.int >= 0 and @as(usize, @intCast(ag_key.int)) < str.len) blk: {
@@ -722,7 +722,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const agv_key = stack[sp - 1];
                     const agv_arr = stack[sp - 2];
                     sp -= 2;
-                    if (agv_arr == .array and agv_key != .resource and agv_key != .float) {
+                    if (agv_arr == .array and agv_key != .resource and agv_key != .float and agv_key != .null) {
                         const agv_arr_key = Value.toArrayKey(agv_key);
                         const agv_existing = agv_arr.array.get(agv_arr_key);
                         if (agv_existing == .array) {
@@ -746,7 +746,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .array_elem_inc => {
                     const aei_key = stack[sp - 1];
                     const aei_arr = stack[sp - 2];
-                    if (aei_arr == .array and aei_key != .resource and aei_key != .float) {
+                    if (aei_arr == .array and aei_key != .resource and aei_key != .float and aei_key != .null) {
                         const ak = Value.toArrayKey(aei_key);
                         const old = aei_arr.array.get(ak);
                         if (old == .int) {
@@ -770,7 +770,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .array_elem_dec => {
                     const aei_key = stack[sp - 1];
                     const aei_arr = stack[sp - 2];
-                    if (aei_arr == .array and aei_key != .resource and aei_key != .float) {
+                    if (aei_arr == .array and aei_key != .resource and aei_key != .float and aei_key != .null) {
                         const ak = Value.toArrayKey(aei_key);
                         const old = aei_arr.array.get(ak);
                         if (old == .int) {
@@ -841,7 +841,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         self.sp = sp;
                         return;
                     }
-                    if (as_arr == .array and as_key != .resource and as_key != .float) {
+                    if (as_arr == .array and as_key != .resource and as_key != .float and as_key != .null) {
                         arraySetOwned(self, ic, as_arr.array, Value.toArrayKey(as_key), as_val) catch {
                             frame.ip = ip - 1;
                             self.sp = sp;
@@ -891,7 +891,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         self.sp = sp;
                         return;
                     }
-                    if (ase_arr == .array and ase_key != .resource and ase_key != .float) {
+                    if (ase_arr == .array and ase_key != .resource and ase_key != .float and ase_key != .null) {
                         arraySetOwned(self, ic, ase_arr.array, Value.toArrayKey(ase_key), ase_val) catch {
                             frame.ip = ip - 1;
                             self.sp = sp;
