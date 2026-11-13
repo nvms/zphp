@@ -357,6 +357,9 @@ pub const Compiler = struct {
     // parent is one of them is recognized as early-bindable too (PHP only
     // early-binds a class whose parent is already bound at its declaration point)
     hoisted_names: std.StringHashMapUnmanaged(void) = .{},
+    // top-level classes with no parent, interface or trait: php binds them
+    // while compiling the file, so a subclass declared before one finds it
+    php_bound_names: std.StringHashMapUnmanaged(void) = .{},
     is_generator: bool = false,
     returns_ref: bool = false,
     // the declaration of the function being compiled, where php reports
@@ -2066,6 +2069,7 @@ pub const Compiler = struct {
         self.local_slots.deinit(a);
         self.hoisted_nodes.deinit(a);
         self.hoisted_names.deinit(a);
+        self.php_bound_names.deinit(a);
         var it = self.trait_properties.valueIterator();
         while (it.next()) |v| a.free(v.*);
         self.trait_properties.deinit(a);

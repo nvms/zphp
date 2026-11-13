@@ -61,16 +61,77 @@ const Pending = struct {
     // an error an autoloader raised while a check looked a class up; the
     // variance callbacks can only answer yes or no, so it is raised after
     failure: ?RuntimeError = null,
+    // method checks look classes up without autoloading (php's
+    // ZEND_FETCH_CLASS_NO_AUTOLOAD): what they miss is loaded once the class
+    // is checked (CG(delayed_autoloads)) and the checks that needed it run
+    // again (variance obligations)
+    autoload: bool = true,
+    arena: ?std.mem.Allocator = null,
+    delayed: std.ArrayListUnmanaged([]const u8) = .empty,
+    obligations: std.ArrayListUnmanaged(Obligation) = .empty,
+    registered: bool = false,
 };
 
+// a class whose method checks wait on classes still to load: php's nearly
+// linked class with variance obligations, resolved once it is registered
+pub const Deferred = struct {
+    arena_state: std.heap.ArenaAllocator,
+    pending: Pending,
+    resolved: bool = false,
+};
+
+pub fn discardDeferred(vm: *VM, deferred: *Deferred) void {
+    deferred.arena_state.deinit();
+    vm.allocator.destroy(deferred);
+}
+
+// zend_do_link_class's end for a class with obligations: the classes the
+// checks missed load (seeing this class registered), then the checks run again
+pub fn resolveDeferred(vm: *VM, deferred: *Deferred) RuntimeError!void {
+    defer discardDeferred(vm, deferred);
+    try vm.loadDelayedClasses(deferred.pending.name);
+    try resolveObligationsOf(deferred);
+}
+
+// resolve_delayed_variance_obligations: the checks run again (once), the
+// class being registered
+pub fn resolveObligationsOf(deferred: *Deferred) RuntimeError!void {
+    if (deferred.resolved) return;
+    deferred.resolved = true;
+    const p = &deferred.pending;
+    p.registered = true;
+    try resolveObligations(p, deferred.arena_state.allocator());
+}
+
+const Obligation = struct { child: Method, parent: Method, is_ctor: bool };
+
 fn pendingIs(p: *const Pending, name: []const u8) bool {
+    // once registered (resolving its obligations) the class is in the table
+    if (p.registered) return false;
     return std.ascii.eqlIgnoreCase(p.name, name);
+}
+
+// a class still being linked (loading its parent): visible to the checks
+fn unlinkedDef(p: *const Pending, name: []const u8) ?*const ClassDef {
+    const entry = p.vm.linkingClass(name) orelse return null;
+    if (pendingIs(p, name)) return null;
+    entry.used = true;
+    return entry.def;
 }
 
 fn classExists(context: *anyopaque, name: []const u8) bool {
     const p: *Pending = @ptrCast(@alignCast(context));
     if (pendingIs(p, name)) return true;
     if (p.vm.classes.contains(name) or p.vm.interfaces.contains(name)) return true;
+    if (unlinkedDef(p, name) != null) return true;
+    if (!p.autoload) {
+        if (p.arena) |arena| {
+            for (p.delayed.items) |d| if (std.ascii.eqlIgnoreCase(d, name)) return false;
+            p.delayed.append(arena, name) catch {};
+            p.vm.delayAutoload(name) catch {};
+        }
+        return false;
+    }
     if (p.failure != null) return false;
     p.vm.tryAutoload(name) catch |err| {
         p.failure = err;
@@ -82,14 +143,16 @@ fn classExists(context: *anyopaque, name: []const u8) bool {
 fn classSubtype(context: *anyopaque, child: []const u8, ancestor: []const u8) bool {
     const p: *const Pending = @ptrCast(@alignCast(context));
     if (std.ascii.eqlIgnoreCase(child, ancestor)) return true;
-    const def: *const ClassDef = if (pendingIs(p, child)) p.def else if (p.vm.classes.getPtr(child)) |d| d else {
+    const def: *const ClassDef = if (pendingIs(p, child)) p.def else if (p.vm.classes.getPtr(child)) |d| d else if (unlinkedDef(p, child)) |d| d else {
         const iface = p.vm.interfaces.getPtr(child) orelse return false;
         if (iface.parent) |parent| if (classSubtype(context, parent, ancestor)) return true;
         for (iface.parents.items) |parent| if (classSubtype(context, parent, ancestor)) return true;
         return false;
     };
-    if (def.parent) |parent| if (classSubtype(context, parent, ancestor)) return true;
-    for (def.interfaces.items) |iface| if (classSubtype(context, iface, ancestor)) return true;
+    // unlinked_instanceof: a class that names itself as its parent or an
+    // interface isn't followed into itself
+    if (def.parent) |parent| if (!std.ascii.eqlIgnoreCase(parent, child) and classSubtype(context, parent, ancestor)) return true;
+    for (def.interfaces.items) |iface| if (!std.ascii.eqlIgnoreCase(iface, child) and classSubtype(context, iface, ancestor)) return true;
     return false;
 }
 
@@ -102,7 +165,7 @@ fn classFinal(context: *anyopaque, name: []const u8) bool {
 
 fn defOf(p: *const Pending, name: []const u8) ?*const ClassDef {
     if (pendingIs(p, name)) return p.def;
-    return p.vm.classes.getPtr(name);
+    return p.vm.classes.getPtr(name) orelse unlinkedDef(p, name);
 }
 
 fn parentOf(p: *const Pending, class: []const u8) ?[]const u8 {
@@ -386,12 +449,42 @@ fn checkMethodWith(p: *Pending, arena: std.mem.Allocator, child: Method, parent:
             try vm.raiseErrorAt(VM.E_DEPRECATED, msg, .{ .file = if (child.file.len > 0) child.file else vm.currentSourcePosition().file, .line = child.line });
         },
         .unresolved => {
+            // a class it needs may still load: checked again once the class
+            // is (add_compatibility_obligation)
+            if (p.arena != null and !p.autoload and p.obligations.items.len < 4096 and p.delayed.items.len > 0) {
+                if (findObligation(p, child, parent) == null) {
+                    try p.obligations.append(arena, .{ .child = child, .parent = parent, .is_ctor = is_ctor });
+                    return;
+                }
+            }
             // the classes a variance check needs were looked up (loading them
             // through autoloaders); one that still doesn't exist ends it here
             const missing = try missingClass(p, arena, child, parent);
             return fatal(vm, child, "Could not check compatibility between {s} and {s}, because class {s} is not available", .{ try declaration(p, arena, child), try declaration(p, arena, parent), missing });
         },
     }
+}
+
+fn findObligation(p: *const Pending, child: Method, parent: Method) ?usize {
+    for (p.obligations.items, 0..) |o, i| {
+        if (std.mem.eql(u8, o.child.class, child.class) and std.mem.eql(u8, o.child.name, child.name) and std.mem.eql(u8, o.parent.class, parent.class)) return i;
+    }
+    return null;
+}
+
+// load_delayed_classes and resolve_delayed_variance_obligations: what the
+// method checks missed is autoloaded, and the checks that needed it run
+// again, an error now being final
+fn resolveObligations(p: *Pending, arena: std.mem.Allocator) RuntimeError!void {
+    if (p.obligations.items.len == 0) return;
+    const obligations = try arena.dupe(Obligation, p.obligations.items);
+    p.obligations.clearRetainingCapacity();
+    p.delayed.clearRetainingCapacity();
+    p.arena = null;
+    // the second look loads nothing either: a class still missing is the error
+    p.autoload = false;
+    defer p.autoload = true;
+    for (obligations) |o| try checkMethodWith(p, arena, o.child, o.parent, o.is_ctor, false);
 }
 
 fn missingClass(p: *Pending, arena: std.mem.Allocator, child: Method, parent: Method) ![]const u8 {
@@ -486,34 +579,94 @@ fn traitSideMethod(arena: std.mem.Allocator, side: TraitSide) !Method {
 // zend_add_trait_method's check of an abstract trait method against the
 // method that satisfies it: ZEND_INHERITANCE_CHECK_PROTO without the
 // visibility rule, which "abstract protected" requirements relied on
+// a trait method against an abstract one: a check that needs a class not
+// loaded yet waits with the class's other obligations (vm.trait_deferred,
+// taken over by checkClass)
 pub fn checkTraitMethod(vm: *VM, owner: []const u8, def: *const ClassDef, child: TraitSide, parent: TraitSide) RuntimeError!void {
-    var arena_state = std.heap.ArenaAllocator.init(vm.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var pending: Pending = .{ .vm = vm, .name = owner, .def = def };
+    const deferred = traitDeferred(vm, owner) orelse blk: {
+        const d = try vm.allocator.create(Deferred);
+        d.* = .{ .arena_state = std.heap.ArenaAllocator.init(vm.allocator), .pending = .{ .vm = vm, .name = owner, .def = def } };
+        vm.trait_deferred.append(vm.allocator, d) catch {
+            discardDeferred(vm, d);
+            return error.OutOfMemory;
+        };
+        break :blk d;
+    };
+    const arena = deferred.arena_state.allocator();
+    const p = &deferred.pending;
+    p.def = def;
+    p.autoload = false;
+    p.arena = arena;
+    defer p.autoload = true;
     const c = traitSideMethod(arena, child) catch return error.OutOfMemory;
     const pm = traitSideMethod(arena, parent) catch return error.OutOfMemory;
-    try checkMethodWith(&pending, arena, c, pm, false, false);
+    try checkMethodWith(p, arena, c, pm, false, false);
+}
+
+fn traitDeferred(vm: *VM, owner: []const u8) ?*Deferred {
+    for (vm.trait_deferred.items) |d| if (std.mem.eql(u8, d.pending.name, owner)) return d;
+    return null;
+}
+
+fn takeTraitDeferred(vm: *VM, owner: []const u8) ?*Deferred {
+    for (vm.trait_deferred.items, 0..) |d, i| if (std.mem.eql(u8, d.pending.name, owner)) {
+        _ = vm.trait_deferred.swapRemove(i);
+        return d;
+    };
+    return null;
+}
+
+// the trait checks' obligations of a declaration that ends early
+pub fn dropTraitDeferred(vm: *VM, owner: []const u8) void {
+    const d = takeTraitDeferred(vm, owner) orelse return;
+    discardDeferred(vm, d);
 }
 
 // the checks php makes while linking `class_name` (declared as `def`)
-pub fn checkClass(vm: *VM, class_name: []const u8, def: *const ClassDef) RuntimeError!void {
-    var arena_state = std.heap.ArenaAllocator.init(vm.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var pending: Pending = .{ .vm = vm, .name = class_name, .def = def };
-    const p = &pending;
+// the checks php makes while linking a class. checks that need a class not
+// loaded yet are handed back, to resolve once the class is registered
+pub fn checkClass(vm: *VM, class_name: []const u8, def: *const ClassDef) RuntimeError!?*Deferred {
+    // the trait checks may have started its obligations
+    const deferred = blk: {
+        if (takeTraitDeferred(vm, class_name)) |d| {
+            d.pending.def = def;
+            break :blk d;
+        }
+        const d = try vm.allocator.create(Deferred);
+        d.* = .{ .arena_state = std.heap.ArenaAllocator.init(vm.allocator), .pending = .{ .vm = vm, .name = class_name, .def = def } };
+        break :blk d;
+    };
+    var handed = false;
+    defer if (!handed) {
+        deferred.arena_state.deinit();
+        vm.allocator.destroy(deferred);
+    };
+    const arena = deferred.arena_state.allocator();
+    const p = &deferred.pending;
 
     checkProperties(p, arena) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else err;
+
+    // the method checks autoload nothing until they are done
+    p.autoload = false;
+    p.arena = arena;
 
     // methods it declares against the ones its parents declare
     if (def.parent) |parent_name| {
         for (def.method_order.items) |name| {
             if (std.mem.indexOf(u8, name, "$hook_") != null) continue;
             const owner = ancestorDeclaring(p, parent_name, name) orelse continue;
-            const parent = (methodOf(p, arena, owner, name, false) catch return error.OutOfMemory) orelse continue;
+            var parent = (methodOf(p, arena, owner, name, false) catch return error.OutOfMemory) orelse continue;
             const child = (methodOf(p, arena, class_name, name, false) catch return error.OutOfMemory) orelse continue;
-            try checkMethod(p, arena, child, parent, std.ascii.eqlIgnoreCase(name, "__construct"));
+            const is_ctor = std.ascii.eqlIgnoreCase(name, "__construct");
+            // a constructor that isn't abstract is checked against the
+            // abstract one it implements, its prototype
+            if (is_ctor and !parent.is_abstract and !parent.is_final) proto: {
+                const def_parent = defOf(p, owner) orelse break :proto;
+                const proto_owner = ancestorDeclaring(p, def_parent.parent, name) orelse break :proto;
+                const proto = (methodOf(p, arena, proto_owner, name, false) catch return error.OutOfMemory) orelse break :proto;
+                if (proto.is_abstract) parent = proto;
+            }
+            try checkMethod(p, arena, child, parent, is_ctor);
         }
     }
 
@@ -530,7 +683,11 @@ pub fn checkClass(vm: *VM, class_name: []const u8, def: *const ClassDef) Runtime
         const proto = (methodOf(p, arena, iface, name, true) catch return error.OutOfMemory) orelse continue;
         try checkMethod(p, arena, child, proto, std.ascii.eqlIgnoreCase(name, "__construct"));
     }
+    p.autoload = true;
     checkConstants(p, arena) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else err;
+    if (p.obligations.items.len == 0) return null;
+    handed = true;
+    return deferred;
 }
 
 // the checks php makes while linking an interface: its constants against

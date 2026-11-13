@@ -2372,6 +2372,19 @@ fn usesTraits(self: *Compiler, node: Ast.Node) bool {
     return false;
 }
 
+// zend_compile_class_decl binds a top-level class without a parent,
+// interfaces or traits at compile time
+fn phpBindsWhileCompiling(self: *Compiler, node: Ast.Node) bool {
+    const rhs_base = node.data.rhs;
+    if (self.ast.extra_data[rhs_base + 1] != 0 or self.ast.extra_data[rhs_base + 2] != 0) return false;
+    for (self.ast.extraSlice(node.data.lhs)) |m_idx| if (self.ast.nodes[m_idx].tag == .trait_use) return false;
+    return true;
+}
+
+fn notePhpBound(self: *Compiler, node: Ast.Node) Error!void {
+    if (phpBindsWhileCompiling(self, node)) try self.php_bound_names.put(self.allocator, self.declaredName(self.ast.tokenSlice(node.main_token)), {});
+}
+
 pub fn hoistEarlyClasses(self: *Compiler, stmts: []const u32) Error!void {
     for (stmts) |idx| {
         const node = self.ast.nodes[idx];
@@ -2382,12 +2395,13 @@ pub fn hoistEarlyClasses(self: *Compiler, stmts: []const u32) Error!void {
             .use_const_stmt => try compiler_stmt.compileUseConst(self, node),
             .block => try hoistEarlyClasses(self, self.ast.extraSlice(node.data.lhs)),
             .class_decl => if (classDeclEarlyBindable(self, node)) {
+                try notePhpBound(self, node);
                 self.current_source_offset = self.ast.tokens[node.main_token].start;
                 const name = self.declaredName(self.ast.tokenSlice(node.main_token));
                 try compileClassDecl(self, node);
                 try self.hoisted_nodes.put(self.allocator, idx, {});
                 try self.hoisted_names.put(self.allocator, name, {});
-            },
+            } else try notePhpBound(self, node),
             // php binds a trait that uses no other trait at compile time.
             // zphp evaluates a trait's defaults where it is declared, so only
             // a trait whose defaults fold moves
@@ -2788,8 +2802,14 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
     }
 
     const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(class_name) });
+    // 0x80: php has the parent bound while compiling the file, wherever it
+    // stands; zphp may not have hoisted it, so a missing parent isn't an error
+    const lax_parent: u8 = if (parent_node != 0) blk: {
+        const parent_name = resolveNodeClassName(self, self.ast.nodes[parent_node]) catch break :blk 0;
+        break :blk if (self.php_bound_names.contains(parent_name)) 0x80 else 0;
+    } else 0;
     try self.emitOp(.class_decl);
-    try self.emitByte(class_modifiers);
+    try self.emitByte(class_modifiers | lax_parent);
     try self.emitU16(name_idx);
     try self.emitU32(lineForToken(self, shape.at));
     try self.emitU32(endLineForBlockStartingAt(self, shape.at));

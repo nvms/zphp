@@ -431,6 +431,17 @@ pub fn executablePath() []const u8 {
     return executable_path;
 }
 
+pub const NearlyLinked = struct {
+    name: []const u8,
+    deferred: ?*inheritance.Deferred,
+};
+
+pub const Linking = struct {
+    name: []const u8,
+    def: *const ClassDef,
+    used: bool = false,
+};
+
 pub const ReinitWindow = struct {
     obj: *PhpObject,
     written: std.StringHashMapUnmanaged(void) = .empty,
@@ -999,6 +1010,19 @@ pub const VM = struct {
     // the clone may be written once more. a window per clone in progress,
     // with the properties already written again
     reinit_windows: std.ArrayListUnmanaged(ReinitWindow) = .empty,
+    // classes whose declaration is loading their parent: php's unlinked
+    // classes, which variance checks see (ZEND_FETCH_CLASS_ALLOW_UNLINKED)
+    // while nothing else does. used: a check depended on one, so its
+    // declaration can no longer fail with an exception
+    linking: std.ArrayListUnmanaged(Linking) = .empty,
+    // CG(delayed_autoloads): classes method checks needed and didn't load,
+    // loaded when a class with obligations is registered
+    delayed_autoloads: std.ArrayListUnmanaged([]const u8) = .empty,
+    // classes registered while their obligations resolve (php's nearly
+    // linked): a subclass declared meanwhile loads the delayed classes too
+    nearly_linked: std.ArrayListUnmanaged(NearlyLinked) = .empty,
+    // obligations the trait method checks of the class being declared began
+    trait_deferred: std.ArrayListUnmanaged(*inheritance.Deferred) = .empty,
     free_closure_names: std.ArrayListUnmanaged(struct { compile_name: []const u8, name: []const u8 }) = .empty,
     php_constants: std.StringHashMapUnmanaged(Value) = .{},
     user_constants: std.StringHashMapUnmanaged(void) = .{},
@@ -3569,6 +3593,11 @@ pub const VM = struct {
         self.magic_call_guard.deinit(self.allocator);
         for (self.reinit_windows.items) |*window| window.written.deinit(self.allocator);
         self.reinit_windows.deinit(self.allocator);
+        self.linking.deinit(self.allocator);
+        self.delayed_autoloads.deinit(self.allocator);
+        self.nearly_linked.deinit(self.allocator);
+        for (self.trait_deferred.items) |d| inheritance.discardDeferred(self, d);
+        self.trait_deferred.deinit(self.allocator);
         self.prop_hook_guard.deinit(self.allocator);
         for (self.serve_cache_keys.items) |k| self.allocator.free(k);
         self.serve_cache_keys.deinit(self.allocator);
@@ -16966,6 +16995,7 @@ pub const VM = struct {
         const class_modifiers = self.readByte();
         const name_idx = self.readU16();
         const class_name = self.currentChunk().constants.items[name_idx].string.bytes();
+        defer inheritance.dropTraitDeferred(self, class_name);
         if (!class_names.isAnonymous(class_name)) try self.refuseRedeclaration(class_name);
         // PHP reserves the type keywords as class names
         {
@@ -17303,8 +17333,24 @@ pub const VM = struct {
             }
         }
 
+        // zend_do_link_class: the class is visible, unlinked, to the
+        // variance checks of classes its parent's loading declares
+        try self.linking.append(self.allocator, .{ .name = class_name, .def = &def });
+        const linking_index = self.linking.items.len - 1;
+        defer self.linking.shrinkRetainingCapacity(linking_index);
         if (def.parent) |parent_name| {
-            if (!self.classes.contains(parent_name)) try self.tryAutoload(parent_name);
+            if (!self.classes.contains(parent_name)) {
+                // an unlinked class isn't a parent yet, and isn't autoloaded
+                const unlinked = self.linkingClass(parent_name) != null;
+                if (!unlinked) self.tryAutoload(parent_name) catch |err| return self.unrecoverableLoadFailure(linking_index, err);
+                if (!self.classes.contains(parent_name) and class_modifiers & 0x80 == 0) {
+                    if (self.pending_exception != null) return self.unrecoverableLoadFailure(linking_index, error.RuntimeError);
+                    const msg = try std.fmt.allocPrint(self.allocator, "Class \"{s}\" not found", .{parent_name});
+                    defer self.allocator.free(msg);
+                    try self.setPendingException("Error", msg);
+                    return self.unrecoverableLoadFailure(linking_index, error.RuntimeError);
+                }
+            }
 
             var current_parent: ?[]const u8 = parent_name;
             while (current_parent) |parent_class_name| {
@@ -17429,7 +17475,8 @@ pub const VM = struct {
         if (def.methods.contains("__toString") and !self.classImplements(&def, "Stringable")) {
             try def.interfaces.append(self.allocator, "Stringable");
         }
-        try inheritance.checkClass(self, class_name, &def);
+        const deferred = try inheritance.checkClass(self, class_name, &def);
+        defer if (deferred) |d| inheritance.discardDeferred(self, d);
 
         // unless this class is itself abstract, every abstract method inherited
         // from the parent chain (and required by any implemented interface)
@@ -17475,6 +17522,18 @@ pub const VM = struct {
         };
         try self.classes.put(self.allocator, class_name, def);
         registered = true;
+        // a class with obligations, or one whose parent still has some,
+        // loads the delayed classes (seeing it registered) before it is done
+        const parent_nearly: ?NearlyLinked = if (def.parent) |parent_name| self.nearlyLinked(parent_name) else null;
+        if (deferred != null or parent_nearly != null) {
+            try self.nearly_linked.append(self.allocator, .{ .name = class_name, .deferred = deferred });
+            defer _ = self.nearly_linked.pop();
+            try self.loadDelayedClasses(class_name);
+            // a nearly linked parent's checks run first (php's dependency
+            // obligation), then its own
+            if (parent_nearly) |parent| if (parent.deferred) |pd| try inheritance.resolveObligationsOf(pd);
+            if (deferred) |d| try inheritance.resolveObligationsOf(d);
+        }
         // a parent's constants still waiting are evaluated on this class's
         // first use too
         if (def.parent) |parent_name| if (self.classes.getPtr(parent_name)) |parent_def| if (parent_def.lazy_constants) {
@@ -17740,7 +17799,7 @@ pub const VM = struct {
         }
 
         try self.registerEnumMethods(enum_name, backed_type_byte);
-        try inheritance.checkClass(self, enum_name, &def);
+        if (try inheritance.checkClass(self, enum_name, &def)) |d| try inheritance.resolveDeferred(self, d);
         try self.verifyAbstractClass(enum_name, &def);
         // zend_verify_enum: a trait may have brought what an enum can't have
         for (def.properties.items) |prop| {
@@ -21505,6 +21564,64 @@ pub const VM = struct {
             }
         }
         return null;
+    }
+
+    pub fn delayAutoload(self: *VM, name: []const u8) !void {
+        for (self.delayed_autoloads.items) |d| if (std.ascii.eqlIgnoreCase(d, name)) return;
+        try self.delayed_autoloads.append(self.allocator, try self.internName(name));
+    }
+
+    // load_delayed_classes: each in the order the checks met them; one that
+    // throws ends everything
+    pub fn loadDelayedClasses(self: *VM, class_name: []const u8) RuntimeError!void {
+        while (self.delayed_autoloads.items.len > 0) {
+            const name = self.delayed_autoloads.orderedRemove(0);
+            self.tryAutoload(name) catch |err| {
+                if (self.uncatchable_fatal) return err;
+                const exc = self.takePending() orelse return err;
+                defer self.stackRelease(exc);
+                const prefix = try std.fmt.allocPrint(self.allocator, "During inheritance of {s}, while autoloading {s}", .{ class_name, name });
+                defer self.allocator.free(prefix);
+                return self.uncaughtExceptionFatal(prefix, exc);
+            };
+        }
+    }
+
+    fn nearlyLinked(self: *VM, name: []const u8) ?NearlyLinked {
+        for (self.nearly_linked.items) |n| if (std.ascii.eqlIgnoreCase(n.name, name)) return n;
+        return null;
+    }
+
+    // a class whose declaration is linking it (its parent loading)
+    pub fn linkingClass(self: *VM, name: []const u8) ?*Linking {
+        var i = self.linking.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (std.ascii.eqlIgnoreCase(self.linking.items[i].name, name)) return &self.linking.items[i];
+        }
+        return null;
+    }
+
+    // check_unrecoverable_load_failure: a class a variance check already
+    // relied on while it was unlinked can't be dropped with an exception
+    fn unrecoverableLoadFailure(self: *VM, index: usize, err: RuntimeError) RuntimeError {
+        if (index >= self.linking.items.len or !self.linking.items[index].used) return err;
+        if (self.uncatchable_fatal) return err;
+        const exc = self.takePending() orelse return err;
+        defer self.stackRelease(exc);
+        const prefix = try std.fmt.allocPrint(self.allocator, "During inheritance of {s} with variance dependencies", .{self.linking.items[index].name});
+        defer self.allocator.free(prefix);
+        return self.uncaughtExceptionFatal(prefix, exc);
+    }
+
+    // zend_exception_uncaught_error: "<prefix>: Uncaught <the exception as
+    // a string>" as a fatal error
+    pub fn uncaughtExceptionFatal(self: *VM, prefix: []const u8, exc: Value) RuntimeError {
+        const text: []const u8 = if (exc == .object) (self.objectToString(exc.object) catch "") else "";
+        const msg = try std.fmt.allocPrint(self.allocator, "{s}: Uncaught {s}", .{ prefix, text });
+        defer self.allocator.free(msg);
+        self.discardPending();
+        return self.raiseFatal(msg);
     }
 
     pub fn tryAutoload(self: *VM, raw_class_name: []const u8) RuntimeError!void {
