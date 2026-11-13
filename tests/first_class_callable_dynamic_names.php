@@ -83,3 +83,6 @@ $x2 = $r();
 unset($r);
 echo $x2, "\n";
 var_dump(array_map(fn($f) => $f(), [Closure::fromCallable([$foo, "bb" . str_repeat("q", 2)])]));
+
+// a trampoline takes ...$arguments
+var_dump($foo->anythingInstance(...), Foo::anythingStatic(...));

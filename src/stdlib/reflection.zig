@@ -4661,6 +4661,7 @@ fn closureInstanceTable(ctx: *NativeContext, table: *PhpArray, name: []const u8)
 // a Closure made from a callable: the function it calls, and the object for
 // a method
 fn callableClosureTable(ctx: *NativeContext, table: *PhpArray, callable: Value) RuntimeError!void {
+    var trampoline = false;
     var function: []const u8 = "";
     var this: Value = .null;
     var buf: [512]u8 = undefined;
@@ -4680,6 +4681,8 @@ fn callableClosureTable(ctx: *NativeContext, table: *PhpArray, callable: Value) 
             };
             const registered = ctx.vm.resolveMethod(class, method.string.bytes()) catch null;
             function = registered orelse (class_names.memberKey(&buf, class, method.string.bytes()));
+            // a __call/__callStatic trampoline takes ...$arguments
+            if (registered == null and ctx.vm.hasMethod(class, if (target == .object) "__call" else "__callStatic")) trampoline = true;
         },
         else => return,
     }
@@ -4708,6 +4711,8 @@ fn callableClosureTable(ctx: *NativeContext, table: *PhpArray, callable: Value) 
             if (param.variadic) variadic = true;
         }
         try parameterTable(ctx, table, params, refs, required, variadic);
+    } else if (trampoline) {
+        try parameterTable(ctx, table, &.{"$arguments"}, &.{false}, 0, true);
     }
 }
 
