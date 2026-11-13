@@ -94,6 +94,7 @@ test {
     _ = @import("testing.zig");
     _ = @import("session.zig");
     _ = @import("crypto.zig");
+    _ = @import("crypt.zig");
     _ = @import("hash.zig");
     _ = @import("hash_algos.zig");
     _ = @import("serialize.zig");

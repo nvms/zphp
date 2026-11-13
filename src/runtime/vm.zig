@@ -2912,6 +2912,15 @@ pub const VM = struct {
         try c.put(a, "PASSWORD_BCRYPT", .{ .string = Value.String.borrowed("2y") });
         try c.put(a, "PASSWORD_ARGON2I", .{ .string = Value.String.borrowed("argon2i") });
         try c.put(a, "PASSWORD_ARGON2ID", .{ .string = Value.String.borrowed("argon2id") });
+        try c.put(a, "PASSWORD_BCRYPT_DEFAULT_COST", .{ .int = 12 });
+        try c.put(a, "PASSWORD_ARGON2_PROVIDER", .{ .string = Value.String.borrowed("standard") });
+        try c.put(a, "PASSWORD_ARGON2_DEFAULT_MEMORY_COST", .{ .int = 65536 });
+        try c.put(a, "PASSWORD_ARGON2_DEFAULT_TIME_COST", .{ .int = 4 });
+        try c.put(a, "PASSWORD_ARGON2_DEFAULT_THREADS", .{ .int = 1 });
+        try c.put(a, "CRYPT_SALT_LENGTH", .{ .int = 123 });
+        try c.put(a, "CRYPT_STD_DES", .{ .int = 1 });
+        try c.put(a, "CRYPT_EXT_DES", .{ .int = 1 });
+        try c.put(a, "CRYPT_MD5", .{ .int = 1 });
         try c.put(a, "CRYPT_BLOWFISH", .{ .int = 1 });
         try c.put(a, "CRYPT_SHA256", .{ .int = 1 });
         try c.put(a, "CRYPT_SHA512", .{ .int = 1 });
@@ -25978,7 +25987,7 @@ pub const VM = struct {
     }
 
     // zend_verify_weak_scalar_type_hint: int, then float, then string, then bool
-    fn weakScalarHint(self: *VM, mask: u32, val: Value) RuntimeError!?Value {
+    pub fn weakScalarHint(self: *VM, mask: u32, val: Value) RuntimeError!?Value {
         if (mask & php_types.LONG != 0) {
             if (mask & php_types.DOUBLE != 0 and val == .string) {
                 switch (numericStr(val.string.bytes())) {
