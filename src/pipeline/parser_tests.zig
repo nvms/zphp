@@ -801,8 +801,8 @@ test "php85 final promoted properties" {
 }
 
 test "php84 promoted asymmetric visibility validation" {
-    try expectError("<?php class T { function __construct(protected public(set) string $x) {} }");
-    try expectError("<?php class T { function __construct(public private(set) $x) {} }");
+    try expectCompileError("<?php class T { function __construct(protected public(set) string $x) {} }");
+    try expectCompileError("<?php class T { function __construct(public private(set) $x) {} }");
 }
 
 test "php84 abbreviated promoted asymmetric visibility parses" {

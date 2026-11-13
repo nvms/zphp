@@ -1156,7 +1156,15 @@ fn paramName(self: *Compiler, p: u32) []const u8 {
 
 // the checks and deprecations php's zend_compile_params makes on a
 // function's declared return and parameters
-fn checkParams(self: *Compiler, func_name: []const u8, at: u32, param_nodes: []const u32, return_type: []const u8, returns_ref: bool) Error!void {
+// where parameters are declared, for php's promoted property checks
+const PromotionSite = enum { outside, constructor, abstract_constructor };
+
+fn promotionSite(method_name: []const u8, abstract: bool) PromotionSite {
+    if (!std.ascii.eqlIgnoreCase(method_name, "__construct")) return .outside;
+    return if (abstract) .abstract_constructor else .constructor;
+}
+
+fn checkParams(self: *Compiler, func_name: []const u8, at: u32, param_nodes: []const u32, return_type: []const u8, returns_ref: bool, site: PromotionSite) Error!void {
     const scope: ?[]const u8 = if (self.current_class.len > 0) self.current_class else null;
     const parent: ?[]const u8 = if (self.current_parent.len > 0) self.current_parent else null;
     if (returns_ref and return_type.len > 0) {
@@ -1169,6 +1177,7 @@ fn checkParams(self: *Compiler, func_name: []const u8, at: u32, param_nodes: []c
         const node = self.ast.nodes[p];
         if (node.data.lhs == 0 and (node.data.rhs & 1) == 0) last_required = i;
     }
+    var seen_variadic = false;
     for (param_nodes, 0..) |p, i| {
         const node = self.ast.nodes[p];
         // the parameter's name: no superglobal, no repeat, no $this
@@ -1178,6 +1187,12 @@ fn checkParams(self: *Compiler, func_name: []const u8, at: u32, param_nodes: []c
             if (std.mem.eql(u8, paramName(self, prev), name)) return self.failFmt(node.main_token, "Redefinition of parameter ${s}", .{name});
         }
         if (std.mem.eql(u8, name, "this")) return self.fail(node.main_token, "Cannot use $this as parameter");
+        const variadic = node.data.rhs & 1 != 0;
+        if (seen_variadic) return self.fail(node.main_token, "Only the last parameter can be variadic");
+        if (variadic) {
+            seen_variadic = true;
+            if (node.data.lhs != 0) return self.fail(node.main_token, "Variadic parameter cannot have a default value");
+        }
         const promoted = ((node.data.rhs >> 2) & 3) != 0 or (node.data.rhs & 16) != 0 or ((node.data.rhs >> 5) & 3) != 0;
         const default = foldedDefault(self, node.data.lhs);
         const force_nullable = default == .null and !promoted;
@@ -1193,6 +1208,11 @@ fn checkParams(self: *Compiler, func_name: []const u8, at: u32, param_nodes: []c
             }
             if (t.mask & php_types.VOID != 0) return self.fail(at, "void cannot be used as a parameter type");
             if (t.mask & php_types.NEVER != 0) return self.fail(at, "never cannot be used as a parameter type");
+            if (promoted and site == .constructor and !variadic and t.mask & php_types.CALLABLE != 0) {
+                const type_text = php_types.format(self.allocator, t) catch return error.OutOfMemory;
+                defer self.allocator.free(type_text);
+                return self.failFmt(node.main_token, "Property {s}::${s} cannot have type {s}", .{ self.current_class, name, type_text });
+            }
             if (default) |kind_of| if (!force_nullable) {
                 const accepted, const kind = defaultFits(kind_of, t);
                 if (!accepted) {
@@ -1202,6 +1222,12 @@ fn checkParams(self: *Compiler, func_name: []const u8, at: u32, param_nodes: []c
                 }
             };
         }
+        // zend_compile_params on a promoted property
+        if (promoted) switch (site) {
+            .outside => return self.fail(node.main_token, "Cannot declare promoted property outside a constructor"),
+            .abstract_constructor => return self.fail(node.main_token, "Cannot declare promoted property in an abstract constructor"),
+            .constructor => if (variadic) return self.fail(node.main_token, "Cannot declare variadic promoted property"),
+        };
         if (last_required) |required| if (i < required and node.data.lhs != 0 and !forced_nullable) {
             try self.warn(at, 8192, "{s}(): Optional parameter ${s} declared before required parameter ${s} is implicitly treated as a required parameter", .{ func_name, paramName(self, p), paramName(self, param_nodes[required]) });
         };
@@ -1705,7 +1731,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
         // zend_begin_func_decl: assert() is compiled specially
         if (std.ascii.eqlIgnoreCase(raw_name, "assert")) return self.fail(name_tok, "Defining a custom assert() function is not allowed, as the function has special semantics");
         try checkImportCollision(self, name_tok, .function, name);
-        try checkParams(self, name, name_tok, param_nodes, try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len)), (node.data.rhs & (1 << 30)) != 0);
+        try checkParams(self, name, name_tok, param_nodes, try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len)), (node.data.rhs & (1 << 30)) != 0, .outside);
     }
 
     var handed_over = false;
@@ -1932,7 +1958,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
             if (std.mem.eql(u8, self.ast.tokenSlice(self.ast.nodes[prev].main_token), use_name)) return self.failFmt(tok, "Cannot use variable {s} twice", .{use_name});
         }
     }
-    try checkParams(self, display_name, node.main_token, param_nodes, try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len)), closure_returns_ref);
+    try checkParams(self, display_name, node.main_token, param_nodes, try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len)), closure_returns_ref, .outside);
     // zend_compile_closure_uses: a lexical variable is no parameter
     for (use_vars) |use_var| {
         const tok = self.ast.nodes[use_var].main_token;
@@ -3878,7 +3904,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     if ((member.data.rhs >> 30) & 3 == 2 and (member.data.rhs & (1 << 28)) != 0 and !std.ascii.eqlIgnoreCase(method_name, "__construct")) {
         try self.warn(member.main_token, 128, "Private methods cannot be final as they are never overridden by other classes", .{});
     }
-    try checkParams(self, full_name, member.main_token, param_nodes, try extractReturnType(self, member.data.lhs, @intCast(param_nodes.len)), (member.data.rhs & (1 << 27)) != 0);
+    try checkParams(self, full_name, member.main_token, param_nodes, try extractReturnType(self, member.data.lhs, @intCast(param_nodes.len)), (member.data.rhs & (1 << 27)) != 0, promotionSite(method_name, false));
     var handed_over = false;
     const param_names = try self.allocator.alloc([]const u8, param_nodes.len);
     errdefer if (!handed_over) self.allocator.free(param_names);
@@ -4507,7 +4533,7 @@ fn compileInterfaceMethodStub(self: *Compiler, owner_name: []const u8, member: A
     try self.string_allocs.append(self.allocator, full_name);
 
     const param_nodes = self.ast.extraSlice(member.data.lhs);
-    try checkParams(self, full_name, member.main_token, param_nodes, try extractReturnType(self, member.data.lhs, @intCast(param_nodes.len)), (member.data.rhs >> 31) & 1 != 0);
+    try checkParams(self, full_name, member.main_token, param_nodes, try extractReturnType(self, member.data.lhs, @intCast(param_nodes.len)), (member.data.rhs >> 31) & 1 != 0, promotionSite(method_name, true));
     const param_names = try self.allocator.alloc([]const u8, param_nodes.len);
     const ref_flags = try self.allocator.alloc(bool, param_nodes.len);
     for (param_nodes, 0..) |p, i| {

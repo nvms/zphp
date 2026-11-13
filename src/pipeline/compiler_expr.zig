@@ -1443,6 +1443,17 @@ fn compileCallPlain(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     if (callee.tag == .identifier and std.mem.eql(u8, self.ast.tokenSlice(callee.main_token), "isset")) {
+        // zend_compile_isset_or_empty: only a variable has a value to test
+        for (args) |arg_idx| {
+            var arg = self.ast.nodes[arg_idx];
+            while (arg.tag == .grouped_expr) arg = self.ast.nodes[arg.data.lhs];
+            const variable = switch (arg.tag) {
+                .variable, .variable_variable, .array_access, .array_push_target, .property_access, .nullsafe_property_access => true,
+                .static_prop_access => arg.main_token == 0 or self.ast.tokens[arg.main_token].tag == .variable,
+                else => false,
+            };
+            if (!variable) return self.fail(callee.main_token, "Cannot use isset() on the result of an expression (you can use \"null !== expression\" instead)");
+        }
         if (args.len > 0) {
             var end_jumps: [16]usize = undefined;
             var jump_count: usize = 0;
@@ -1745,6 +1756,7 @@ fn compileUnset(self: *Compiler, args: []const u32) Error!void {
         if (arg.tag == .array_push_target) return self.fail(arg.main_token, "Cannot use [] for unsetting");
         if (isGlobalsFetch(self, arg_idx)) return self.fail(arg.main_token, "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax");
         try checkTemporaryBase(self, arg_idx, arg.main_token);
+        if (arg.tag == .variable and std.mem.eql(u8, self.ast.tokenSlice(arg.main_token), "$this")) return self.fail(arg.main_token, "Cannot unset $this");
         if (arg.tag == .variable) {
             const name = self.ast.tokenSlice(arg.main_token);
             const idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });

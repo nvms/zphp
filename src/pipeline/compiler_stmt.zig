@@ -370,6 +370,14 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 pub fn compileSwitch(self: *Compiler, node: Ast.Node) Error!void {
+    // zend_compile_switch
+    var seen_default = false;
+    for (self.ast.extraSlice(node.data.rhs)) |c| {
+        const case = self.ast.nodes[c];
+        if (case.tag != .switch_default) continue;
+        if (seen_default) return self.fail(case.main_token, "Switch statements may only contain one default clause");
+        seen_default = true;
+    }
     const prev_start = self.loop_start;
     var prev_breaks = self.break_jumps;
     var prev_continue_jumps = self.continue_jumps;
@@ -631,6 +639,12 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
     const catch_count = self.ast.extra_data[node.data.rhs];
     const catch_nodes = self.ast.extra_data[node.data.rhs + 1 .. node.data.rhs + 1 + catch_count];
     const finally_node = self.ast.extra_data[node.data.rhs + 1 + catch_count];
+    // zend_compile_try
+    if (catch_count == 0 and finally_node == 0) return self.fail(node.main_token, "Cannot use try without catch or finally");
+    for (catch_nodes) |c| {
+        const clause = self.ast.nodes[c];
+        if (clause.main_token != 0 and std.mem.eql(u8, self.ast.tokenSlice(clause.main_token), "$this")) return self.fail(clause.main_token, "Cannot re-assign $this");
+    }
 
     if (finally_node != 0 and self.finally_depth < 8) {
         self.finally_nodes[self.finally_depth] = finally_node;
@@ -789,6 +803,7 @@ fn compileFinallyCopy(self: *Compiler, finally_node: u32) Error!void {
 pub fn compileGlobal(self: *Compiler, node: Ast.Node) Error!void {
     for (self.ast.extraSlice(node.data.lhs)) |var_idx| {
         const var_node = self.ast.nodes[var_idx];
+        if (var_node.tag == .variable and std.mem.eql(u8, self.ast.tokenSlice(var_node.main_token), "$this")) return self.fail(var_node.main_token, "Cannot use $this as global variable");
         if (var_node.tag == .variable_variable) {
             try self.compileNode(var_node.data.lhs);
             try self.emitOp(.get_global_dynamic);

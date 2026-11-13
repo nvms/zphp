@@ -89,6 +89,8 @@ const Parser = struct {
     // a property declaration ended in a comma: another property follows
     property_list_continues: bool = false,
     in_property_list: bool = false,
+    // the class being read is `readonly`: its properties are readonly too
+    class_readonly: bool = false,
     // the token where a list() may stand without an `=` after it: the start
     // of an array element or a foreach target. anywhere else php's grammar
     // has list() only as the left side of an assignment
@@ -1468,7 +1470,14 @@ const Parser = struct {
         defer members.deinit(self.allocator);
         const outer_class = self.current_class_name;
         self.current_class_name = "class@anonymous";
+        const outer_readonly = self.class_readonly;
+        self.class_readonly = false;
+        var t = new_tok + 1;
+        while (self.tokens[t].tag != .kw_class) : (t += 1) {
+            if (self.tokens[t].tag == .kw_readonly) self.class_readonly = true;
+        }
         try self.parseClassMembers(&members);
+        self.class_readonly = outer_readonly;
         self.current_class_name = outer_class;
         _ = try self.expect(.r_brace);
 
@@ -1708,7 +1717,10 @@ const Parser = struct {
 
         const outer_class = self.current_class_name;
         self.current_class_name = self.tokenText(name_tok);
+        const outer_readonly = self.class_readonly;
+        self.class_readonly = class_modifiers & 4 != 0;
         try self.parseClassMembers(&members);
+        self.class_readonly = outer_readonly;
         self.current_class_name = outer_class;
         _ = try self.expect(.r_brace);
 
@@ -2788,21 +2800,26 @@ const Parser = struct {
         // final alone promotes a public property, as php 8.5 does
         if (param_final and promotion == 0) promotion = 1;
 
-        // PHP 8.4 asymmetric promoted-property validation.
-        if (set_promotion > 0) {
-            if (promotion == 0) promotion = 1;
-
-            if (set_promotion < promotion or type_range[0] == type_range[1]) {
-                try self.addError(.unexpected_token);
-                return error.ParseError;
-            }
-        }
+        if (set_promotion > 0 and promotion == 0) promotion = 1;
         const is_ref = self.peek() == .amp;
         if (is_ref) _ = self.advance();
         const is_variadic = self.peek() == .ellipsis;
         if (is_variadic) _ = self.advance();
 
         const tok = try self.expect(.variable);
+        // zend_compile_params and zend_declare_typed_property on a promoted
+        // property
+        if (promotion != 0 or param_readonly) {
+            const prop = self.tokenText(tok)[1..];
+            const typed = type_range[0] != type_range[1];
+            if ((param_readonly or self.class_readonly) and !typed) {
+                self.deferCompileError(tok, "Readonly property {s}::${s} must have type", .{ self.current_class_name, prop });
+            } else if (set_promotion > 0 and !typed) {
+                self.deferCompileError(tok, "Property with asymmetric visibility {s}::${s} must have type", .{ self.current_class_name, prop });
+            } else if (set_promotion > 0 and set_promotion < promotion) {
+                self.deferCompileError(tok, "Visibility of property {s}::${s} must not be weaker than set visibility", .{ self.current_class_name, prop });
+            }
+        }
         var default: u32 = 0;
         if (self.peek() == .equal) {
             _ = self.advance();
@@ -3786,7 +3803,7 @@ const Parser = struct {
         var name = self.tokenText(node.main_token);
         if (name.len > 0 and name[0] == '$') name = name[1..];
         const class = self.current_class_name;
-        if (readonly) {
+        if (readonly or self.class_readonly) {
             if (!typed) return self.deferCompileError(node.main_token, "Readonly property {s}::${s} must have type", .{ class, name });
             if (node.tag == .class_property and node.data.lhs != 0) return self.deferCompileError(node.main_token, "Readonly property {s}::${s} cannot have default value", .{ class, name });
             if (static) return self.deferCompileError(node.main_token, "Static property {s}::${s} cannot be readonly", .{ class, name });
