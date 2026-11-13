@@ -695,7 +695,7 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
         if (vm.exit_requested) {
             const shutdown_failed = try runShutdown(allocator, vm);
             const aborted = !flushScriptOutput(vm);
-            std.process.exit(if (shutdown_failed or aborted) 255 else vm.exit_code);
+            platform.exitWithStatus(if (shutdown_failed or aborted) 255 else vm.exit_code);
         }
         // dispatch to user exception handler if one is installed and we have
         // an uncaught exception. handler runs, then we exit 0 unless it
@@ -712,7 +712,7 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
                 const aborted = !flushScriptOutput(vm);
                 if (platform.getenv("ZPHP_DBG_PROFILE") != null) dumpProfile(vm);
                 if (shutdown_failed or aborted) std.process.exit(255);
-                if (vm.exit_requested) std.process.exit(vm.exit_code);
+                if (vm.exit_requested) platform.exitWithStatus(vm.exit_code);
                 if (handler_failed) std.process.exit(255);
                 return;
             }
@@ -729,7 +729,7 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
     const shutdown_failed = try runShutdown(allocator, vm);
     const aborted = !flushScriptOutput(vm);
     if (shutdown_failed or aborted) std.process.exit(255);
-    if (vm.exit_requested) std.process.exit(vm.exit_code);
+    if (vm.exit_requested) platform.exitWithStatus(vm.exit_code);
 }
 
 // the shutdown functions. one that fails ends them as php's fatal error does:

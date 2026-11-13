@@ -1329,7 +1329,7 @@ fn native_exit(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
         if (text) |t| {
             try ctx.vm.output.appendSlice(ctx.allocator, t);
         } else {
-            ctx.vm.exit_code = @intCast(@mod(status, 256));
+            ctx.vm.exit_code = @truncate(status);
         }
     }
     ctx.vm.exit_requested = true;

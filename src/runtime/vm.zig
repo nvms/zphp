@@ -1035,7 +1035,8 @@ pub const VM = struct {
     compile_results: std.ArrayListUnmanaged(*CompileResult) = .empty,
     error_msg: ?[]const u8 = null,
     exit_requested: bool = false,
-    exit_code: u8 = 0,
+    // php keeps a C int; posix keeps its low byte, windows all 32 bits
+    exit_code: i32 = 0,
     source: []const u8 = "",
     file_path: []const u8 = "",
     autoload_callbacks: std.ArrayListUnmanaged(Value) = .empty,

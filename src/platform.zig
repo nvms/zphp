@@ -315,6 +315,16 @@ pub fn tempDir() []const u8 {
     return getenv("TMPDIR") orelse "/tmp";
 }
 
+// ends the process with php's int exit status: posix passes on its low byte,
+// windows the whole value
+pub fn exitWithStatus(code: i32) noreturn {
+    if (is_windows) {
+        const ExitProcess = @extern(*const fn (u32) callconv(.winapi) noreturn, .{ .name = "ExitProcess", .library_name = "kernel32" });
+        ExitProcess(@bitCast(code));
+    }
+    std.process.exit(@truncate(@as(u32, @bitCast(code))));
+}
+
 // argv for running a shell command line the way php's shell functions do
 pub fn shellArgv(command: []const u8) [3][]const u8 {
     return if (is_windows) .{ "cmd.exe", "/c", command } else .{ "/bin/sh", "-c", command };
