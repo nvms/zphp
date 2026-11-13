@@ -962,6 +962,7 @@ fn native_settype(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
 
 fn native_call_user_func(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(.null);
+    if (ctx.named_args) |named| return NativeResult.share(try ctx.invokeCallableNamed(args[0], args[1..], named));
     return NativeResult.share(try ctx.invokeCallable(args[0], args[1..]));
 }
 
@@ -969,6 +970,8 @@ fn native_call_user_func_array(ctx: *NativeContext, args: []const Value) Runtime
     if (args.len < 2) return NativeResult.scalar(.null);
     if (args[1] != .array) return NativeResult.share(try ctx.invokeCallable(args[0], &.{}));
     const arr = args[1].array;
+    // string keys name parameters
+    for (arr.entries.items) |e| if (e.key == .string) return NativeResult.share(try ctx.invokeCallableArgArray(args[0], arr));
     // an element that is a reference is passed as that reference, so a
     // callback taking it by reference writes through it
     const items = arr.entries.items;

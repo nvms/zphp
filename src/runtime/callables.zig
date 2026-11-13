@@ -14,6 +14,7 @@ const ClassDef = vm_mod.ClassDef;
 const RuntimeError = vm_mod.RuntimeError;
 const Value = @import("value.zig").Value;
 const PhpObject = @import("value.zig").PhpObject;
+const PhpArray = @import("value.zig").PhpArray;
 
 pub const Callee = union(enum) {
     // a function or closure name
@@ -422,6 +423,238 @@ pub fn invoke(vm: *VM, callee: Callee, args: []const Value) RuntimeError!Value {
             return vm.callByNameAs(registered, &magic_args, m.class);
         },
     }
+}
+
+// zend_call_function with named_params: an argument array whose integer keys
+// are positional arguments and whose string keys name parameters. a name
+// lands on its parameter (zend_handle_named_arg), names no parameter has go
+// to a variadic or are an Error, a trampoline (__call, __callStatic) gets
+// them as keys of its argument array, and a skipped parameter takes its
+// default or is php's "not passed" (zend_handle_undef_args)
+pub fn invokeArgArray(vm: *VM, callee: Callee, arr: *PhpArray) RuntimeError!Value {
+    return invokeArgArrayFrom(vm, callee, arr, false);
+}
+
+// from_native: an internal function makes the call (call_user_func), so a
+// by-reference parameter given a value warns as zend_call_function does
+pub fn invokeArgArrayFrom(vm: *VM, callee: Callee, arr: *PhpArray, from_native: bool) RuntimeError!Value {
+    var named = false;
+    for (arr.entries.items) |entry| {
+        if (entry.key == .string) {
+            named = true;
+        } else if (named) {
+            try vm.setPendingException("Error", "Cannot use positional argument after named argument");
+            return error.RuntimeError;
+        }
+    }
+    if (!named) {
+        var buf: [16]Value = undefined;
+        const args = if (arr.entries.items.len <= buf.len) buf[0..arr.entries.items.len] else try vm.allocator.alloc(Value, arr.entries.items.len);
+        defer if (args.ptr != &buf) vm.allocator.free(args);
+        for (arr.entries.items, args) |entry, *arg| arg.* = if (entry.ref) |cell| cell.* else entry.value;
+        return invoke(vm, callee, args);
+    }
+    switch (callee) {
+        .magic => |m| {
+            // positional arguments, then the named ones under their names
+            const packed_args = try vm.allocArray();
+            for (arr.entries.items) |entry| {
+                const v = if (entry.ref) |cell| cell.* else entry.value;
+                if (entry.key == .string) try packed_args.set(vm.allocator, entry.key, v) else try packed_args.append(vm.allocator, v);
+            }
+            const magic_args = [_]Value{ .{ .string = try vm.transientBytes(m.name) }, .{ .array = packed_args } };
+            if (m.object) |obj| return vm.callMethod(obj, "__call", &magic_args);
+            const registered = try vm.resolveMethod(m.class, "__callStatic");
+            return vm.callByNameAs(registered, &magic_args, m.class);
+        },
+        .closure => |obj| {
+            if (obj.closureName() == null) {
+                const state = obj.fakeClosure() orelse return .null;
+                var target = try vm.callbackCallee(state.callable);
+                if (state.called_class) |called| if (target == .static_method) {
+                    target.static_method.called_class = called;
+                };
+                return invokeArgArrayFrom(vm, target, arr, from_native);
+            }
+        },
+        else => {},
+    }
+    // the function the call reaches, by its registered name
+    const name: []const u8 = switch (callee) {
+        .function => |n| n,
+        .closure => |obj| obj.closureName().?,
+        .invoke => |obj| try vm.resolveMethod(obj.class_name, "__invoke"),
+        .method => |m| m.registered orelse try vm.resolveMethod(m.object.class_name, m.name),
+        .static_method => |m| m.registered,
+        .magic => unreachable,
+    };
+    if (vm.functions.get(name)) |func| {
+        const bound = try bindNamed(vm, name, func, arr) orelse return error.RuntimeError;
+        defer bound.deinit(vm.allocator);
+        if (from_native) for (bound.origins[0..bound.count], 0..) |origin, i| {
+            if (i >= func.ref_params.len or !func.ref_params[i] or i >= func.params.len) continue;
+            if (origin) |ei| if (arr.entries.items[ei].ref != null) continue;
+            const shown = try vm.callableDisplayName(name, func);
+            const param = func.params[i];
+            const msg = try std.fmt.allocPrint(vm.allocator, "{s}(): Argument #{d} (${s}) must be passed by reference, value given", .{ shown, i + 1, if (param.len > 0 and param[0] == '$') param[1..] else param });
+            defer vm.allocator.free(msg);
+            try vm.emitWarning(msg);
+        };
+        // names a variadic collects, for the frame to add to it
+        vm.pending_named_extras = bound.extras;
+        defer vm.pending_named_extras = null;
+        const values = bound.args();
+        return switch (callee) {
+            .function => |n| vm.callByName(n, values),
+            .closure => |obj| vm.callByName(obj.closureName().?, values),
+            .invoke => |obj| vm.callMethodAs(obj, "__invoke", name, values),
+            .method => |m| vm.callMethodAs(m.object, m.name, m.registered, values),
+            .static_method => |m| vm.callByNameAs(m.registered, values, m.called_class),
+            .magic => unreachable,
+        };
+    }
+    const native_params = @import("../stdlib/native_params.zig");
+    const signature = native_params.get(name) orelse {
+        // a native with no known parameter list takes the values in order
+        var buf: [16]Value = undefined;
+        const args = if (arr.entries.items.len <= buf.len) buf[0..arr.entries.items.len] else try vm.allocator.alloc(Value, arr.entries.items.len);
+        defer if (args.ptr != &buf) vm.allocator.free(args);
+        for (arr.entries.items, args) |entry, *arg| arg.* = if (entry.ref) |cell| cell.* else entry.value;
+        return invoke(vm, callee, args);
+    };
+    var resolved: [256]Value = undefined;
+    var sources: [256]vm_mod.RefSource = undefined;
+    const placed = try vm.placeNativeNamedArgs(arr, signature.params, &resolved, &sources, @import("natives.zig").acceptsNamedExtras(name));
+    if (placed.problem) |problem| {
+        const class: []const u8, const msg = try vm.namedArgProblemMessage(name, signature.params, problem);
+        defer vm.allocator.free(msg);
+        vm.discardNativeNamedArgs();
+        try vm.setPendingException(class, msg);
+        return error.RuntimeError;
+    }
+    if (from_native) {
+        // an internal function's by-reference parameter given a value
+        const byref = @import("../stdlib/byref_args.zig");
+        for (0..placed.count) |i| {
+            if (!byref.isByRef(name, i)) continue;
+            if (std.ascii.eqlIgnoreCase(name, "array_multisort") or std.ascii.eqlIgnoreCase(name, "extract")) continue;
+            const text = try vm.cannotPassByReference(name, @intCast(@min(i, 255)));
+            defer vm.allocator.free(text);
+            const suffix = " could not be passed by reference";
+            const head = if (std.mem.endsWith(u8, text, suffix)) text[0 .. text.len - suffix.len] else text;
+            const msg = try std.fmt.allocPrint(vm.allocator, "{s} must be passed by reference, value given", .{head});
+            defer vm.allocator.free(msg);
+            try vm.emitWarning(msg);
+        }
+    }
+    return invoke(vm, callee, resolved[0..placed.count]);
+}
+
+pub const Bound = struct {
+    // the arguments in parameter order, count of them used
+    values: []Value,
+    // the argument array entry each came from, null for a default
+    origins: []?usize,
+    count: usize,
+    // named arguments matching no parameter, for the variadic
+    extras: ?*PhpArray,
+
+    pub fn args(self: Bound) []Value {
+        return self.values[0..self.count];
+    }
+
+    pub fn deinit(self: Bound, allocator: std.mem.Allocator) void {
+        allocator.free(self.values);
+        allocator.free(self.origins);
+    }
+};
+
+// zend_handle_named_arg and zend_handle_undef_args for a user function: the
+// arguments an argument array with names gives each parameter, or null with
+// php's Error pending
+pub fn bindNamed(vm: *VM, name: []const u8, func: *const @import("../pipeline/bytecode.zig").ObjFunction, arr: *PhpArray) RuntimeError!?Bound {
+    const slots = func.params.len + arr.entries.items.len;
+    const values = try vm.allocator.alloc(Value, slots);
+    var keep = false;
+    defer if (!keep) vm.allocator.free(values);
+    const origins = try vm.allocator.alloc(?usize, slots);
+    defer if (!keep) vm.allocator.free(origins);
+    @memset(values, .null);
+    @memset(origins, null);
+    // a variadic's own parameter takes no name: names matching nothing else
+    // are its keyed entries
+    const fixed: usize = if (func.is_variadic and func.arity > 0) func.arity - 1 else func.params.len;
+    var extras: ?*PhpArray = null;
+    var count: usize = 0;
+    var position: usize = 0;
+    for (arr.entries.items, 0..) |entry, ei| {
+        const v = if (entry.ref) |cell| cell.* else entry.value;
+        if (entry.key == .int) {
+            values[position] = v;
+            origins[position] = ei;
+            position += 1;
+            count = @max(count, position);
+            continue;
+        }
+        const key = entry.key.string.bytes();
+        const index = for (func.params[0..fixed], 0..) |p, pi| {
+            if (std.mem.eql(u8, if (p.len > 0 and p[0] == '$') p[1..] else p, key)) break pi;
+        } else null;
+        if (index) |i| {
+            if (origins[i] != null) {
+                const msg = try std.fmt.allocPrint(vm.allocator, "Named parameter ${s} overwrites previous argument", .{key});
+                defer vm.allocator.free(msg);
+                try vm.setPendingException("Error", msg);
+                return null;
+            }
+            values[i] = v;
+            origins[i] = ei;
+            count = @max(count, i + 1);
+            continue;
+        }
+        if (!func.is_variadic) {
+            const msg = try std.fmt.allocPrint(vm.allocator, "Unknown named parameter ${s}", .{key});
+            defer vm.allocator.free(msg);
+            try vm.setPendingException("Error", msg);
+            return null;
+        }
+        // checked against the variadic's type, coerced in weak mode
+        var ev = v;
+        const vtype: []const u8 = blk: {
+            const ti = vm.typeInfoFor(name) orelse break :blk "";
+            const vi = func.arity - 1;
+            break :blk if (vi < ti.param_types.len) ti.param_types[vi] else "";
+        };
+        if (vtype.len > 0 and !vm.checkTypeMatch(ev, vtype)) {
+            const strict = if (vm.frame_count >= 1) (if (vm.currentFrame().func) |cf| cf.strict_types else vm.script_strict_types) else vm.script_strict_types;
+            const coerced = if (strict) null else try vm.tryWeakCoerce(ev, vtype);
+            if (coerced) |c| ev = c else {
+                const msg = try std.fmt.allocPrint(vm.allocator, "{s}(): Argument ${s} must be of type {s}, {s} given", .{ name, key, vtype, VM.valueTypeName(ev) });
+                defer vm.allocator.free(msg);
+                try vm.setPendingException("TypeError", msg);
+                return null;
+            }
+        }
+        if (extras == null) extras = try vm.allocArray();
+        try extras.?.set(vm.allocator, entry.key, ev);
+    }
+    // a skipped parameter before the last one passed takes its default; one
+    // before a required parameter has none (its default is ignored)
+    for (0..count) |i| {
+        if (origins[i] != null) continue;
+        if (i < func.defaults.len and i >= func.required_params) {
+            values[i] = try vm.resolveParamDefault(func, i);
+            continue;
+        }
+        const shown = try vm.callableDisplayName(name, func);
+        const param = func.params[i];
+        const msg = try std.fmt.allocPrint(vm.allocator, "{s}(): Argument #{d} (${s}) not passed", .{ shown, i + 1, if (param.len > 0 and param[0] == '$') param[1..] else param });
+        defer vm.allocator.free(msg);
+        try vm.setPendingException("ArgumentCountError", msg);
+        return null;
+    }
+    keep = true;
+    return .{ .values = values, .origins = origins, .count = count, .extras = extras };
 }
 
 // as invoke, writing by-reference parameters back into args

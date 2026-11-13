@@ -82,6 +82,14 @@ const no_discard = std.StaticStringMap([]const u8).initComptime(.{
     .{ "DateTimeImmutable::setMicrosecond", "as DateTimeImmutable::setMicrosecond() does not modify the object itself" },
 });
 
+// internal functions whose variadic takes named arguments
+// (Z_PARAM_VARIADIC_WITH_NAMED) and passes them on to what they call
+pub fn acceptsNamedExtras(name: []const u8) bool {
+    const accepting = [_][]const u8{ "call_user_func", "forward_static_call", "Closure::__invoke", "Closure::call", "ReflectionFunction::invoke", "ReflectionMethod::invoke", "ReflectionClass::newInstance" };
+    for (accepting) |n| if (std.ascii.eqlIgnoreCase(n, name)) return true;
+    return false;
+}
+
 // the parameters php checks as callbacks before the function runs
 pub fn callbackParams(name: []const u8) u32 {
     // Z_PARAM_ZVAL: it reports a bad callable in its own words

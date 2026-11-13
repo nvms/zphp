@@ -1684,7 +1684,8 @@ fn rcIsSubclassOf(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
 }
 
 fn rcNewInstance(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    return newInstanceWith(ctx, args, null, args.len);
+    const named = ctx.named_args;
+    return newInstanceWith(ctx, args, named, args.len + if (named) |n| n.entries.items.len else 0);
 }
 
 fn rcNewInstanceArgs(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -1756,7 +1757,7 @@ fn bindArguments(ctx: *NativeContext, func_key: []const u8, display: []const u8,
     if (native_params.get(func_key)) |sig| {
         var resolved: [256]Value = undefined;
         var sources: [256]vm_mod.RefSource = undefined;
-        const placed = try ctx.vm.placeNativeNamedArgs(arr, sig.params, &resolved, &sources);
+        const placed = try ctx.vm.placeNativeNamedArgs(arr, sig.params, &resolved, &sources, false);
         if (placed.problem) |problem| {
             const class, const msg = try ctx.vm.namedArgProblemMessage(display, sig.params, problem);
             defer ctx.allocator.free(msg);
@@ -3879,6 +3880,11 @@ pub fn functionKey(this: *PhpObject) Value {
 fn rfInvoke(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const fn_name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.null);
+    if (ctx.named_args) |named| {
+        var bound = try bindArguments(ctx, fn_name, fn_name, args, named);
+        defer bound.deinit(ctx.allocator);
+        return NativeResult.share(try ctx.vm.callByName(fn_name, bound.list.items));
+    }
     return NativeResult.share(try ctx.vm.callByName(fn_name, args));
 }
 
@@ -4585,12 +4591,14 @@ fn closureCall(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     const instance = this.closureName() orelse {
         const bound = (try bindFakeClosure(ctx, this, new_this)).value;
         defer vm.discardOrphan(bound);
+        if (ctx.named_args) |named| return NativeResult.share(try ctx.invokeCallableNamed(bound, call_args, named));
         return NativeResult.share(try vm.callValueCallable(bound, call_args));
     };
     const bound = try vm.copyClosureInstance(instance, new_this, scope, scope);
     // the temporary bound closure lives for this call only; the callee
     // frame holds it while it runs
     defer vm.releaseValue(bound);
+    if (ctx.named_args) |named| return NativeResult.share(try ctx.invokeCallableNamed(bound, call_args, named));
     const name = bound.closureName() orelse return NativeResult.scalar(.null);
     return NativeResult.share(try vm.callByName(name, call_args));
 }
@@ -4598,6 +4606,7 @@ fn closureCall(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
 // $closure->__invoke(...$args) calls the closure as it is bound
 fn closureInvoke(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    if (ctx.named_args) |named| return NativeResult.share(try ctx.invokeCallableNamed(.{ .object = this }, args, named));
     return NativeResult.share(try ctx.vm.callValueCallable(.{ .object = this }, args));
 }
 
@@ -5656,7 +5665,7 @@ fn methodInvoke(ctx: *NativeContext, args: []const Value, variadic: bool) Runtim
             if (target != .null and target != .object) return zpp.typeError(ctx, label, 0, "object", "?object", target);
             return throwReflection(ctx, "Given object is not an instance of the class this method was declared in");
         }
-        const named: ?*PhpArray = if (variadic) null else try zpp.array(ctx, label, args, 1, "args");
+        const named: ?*PhpArray = if (variadic) ctx.named_args else try zpp.array(ctx, label, args, 1, "args");
         const rest = if (variadic and args.len > 1) args[1..] else &[_]Value{};
         const key = target.closureName() orelse "";
         var bound = try bindArguments(ctx, key, "{closure}", rest, named);
@@ -5667,7 +5676,7 @@ fn methodInvoke(ctx: *NativeContext, args: []const Value, variadic: bool) Runtim
     var object: ?*PhpObject = null;
     var closure_target: ?Value = null;
     if (args.len > 0 and args[0].closureName() != null) closure_target = args[0] else object = try zpp.optObject(ctx, label, args, 0, "object");
-    const named: ?*PhpArray = if (variadic) null else try zpp.array(ctx, label, args, 1, "args");
+    const named: ?*PhpArray = if (variadic) ctx.named_args else try zpp.array(ctx, label, args, 1, "args");
     const is_static = this.get("__is_static") == .bool and this.get("__is_static").bool;
     if (!is_static) {
         if (closure_target) |closure| {
