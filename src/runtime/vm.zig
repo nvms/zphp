@@ -6224,7 +6224,7 @@ pub const VM = struct {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
-                            self.pushCallResult(result);
+                            try self.pushOverloadedElement(obj, result) orelse continue;
                         } else {
                             if (try self.throwBuiltinException("Error", "Cannot use object as array")) continue;
                             return error.RuntimeError;
@@ -6287,7 +6287,7 @@ pub const VM = struct {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
-                            self.pushCallResult(result);
+                            try self.pushOverloadedElement(obj, result) orelse continue;
                         } else {
                             if (try self.throwBuiltinException("Error", "Cannot use object as array")) continue;
                             return error.RuntimeError;
@@ -6365,7 +6365,7 @@ pub const VM = struct {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
-                        self.pushCallResult(result);
+                        try self.pushOverloadedElement(arr_val.object, result) orelse continue;
                     } else if (arr_val == .string) {
                         // descending through a string offset as a container
                         if (try self.throwBuiltinException("Error", "Cannot use string offset as an array")) continue;
@@ -6575,6 +6575,13 @@ pub const VM = struct {
                         self.releaseValue(v);
                         self.releaseValue(inner_key);
                         self.releaseValue(outer_key);
+                        if (!(self.overloadedElementWritable(base.object, existing) catch {
+                            _ = try self.resumeRaised();
+                            continue;
+                        })) {
+                            self.push(v);
+                            continue;
+                        }
                         base_is_array_access_obj = true;
                     } else if (base == .object and outer_key == .string) {
                         self.triggerLazyAccess(base.object, outer_key.string.bytes()) catch {
@@ -7316,6 +7323,14 @@ pub const VM = struct {
                         try self.arraySetOwned(arr, ak, new_val);
                         if (new_val == .string) self.releaseValue(new_val);
                         self.push(old);
+                    } else if (aei_arr == .object and self.hasMethod(aei_arr.object.class_name, "offsetGet") and !self.offsetGetReturnsRef(aei_arr.object)) {
+                        // FETCH_DIM_RW on an ArrayAccess object: offsetGet's
+                        // value is stepped as a temporary, with php's notice
+                        const result = self.callMethod(aei_arr.object, "offsetGet", &.{aei_key}) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        try self.pushOverloadedElement(aei_arr.object, result) orelse continue;
                     } else {
                         self.push(.null);
                     }
@@ -23278,6 +23293,39 @@ pub const VM = struct {
             return key.class.ptr[0 .. key.class.len + key.method.len];
         }
     };
+
+    fn offsetGetReturnsRef(self: *VM, obj: *PhpObject) bool {
+        const full_name = self.resolveMethod(obj.class_name, "offsetGet") catch return false;
+        const func = self.functions.get(full_name) orelse return false;
+        return func.returns_ref;
+    }
+
+    // pushes what offsetGet returned for a nested write: the value itself
+    // when the write reaches it, else a copy the write can't leak through.
+    // null when the notice raised an exception that was dispatched
+    fn pushOverloadedElement(self: *VM, obj: *PhpObject, result: Value) RuntimeError!?void {
+        const writable = self.overloadedElementWritable(obj, result) catch {
+            _ = try self.resumeRaised();
+            return null;
+        };
+        if (!writable and result == .array) {
+            self.pushCallResult(.{ .array = try self.shallowCloneCow(result.array) });
+        } else self.pushCallResult(result);
+    }
+
+    // php's zend_fetch_dimension_address on an ArrayAccess object: what
+    // offsetGet returned is written into only when it is a reference or an
+    // object; anything else draws the notice and the write lands on a
+    // temporary copy. false when the caller's write has no effect
+    fn overloadedElementWritable(self: *VM, obj: *PhpObject, result: Value) RuntimeError!bool {
+        if (result == .object) return true;
+        if (try self.splOwnOffsetGet(obj)) return true;
+        if (self.offsetGetReturnsRef(obj)) return true;
+        const msg = try std.fmt.allocPrint(self.allocator, "Indirect modification of overloaded element of {s} has no effect", .{obj.class_name});
+        defer self.allocator.free(msg);
+        try self.raiseError(8, msg);
+        return false;
+    }
 
     // functions and classes are only ever added within a request, so a count
     // change is exactly when a cached resolution may have gone stale
