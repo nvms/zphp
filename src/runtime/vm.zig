@@ -8444,7 +8444,10 @@ pub const VM = struct {
                     // a reference only from a call that returned one
                     const returned_ref = if (self.return_ref_fresh) self.last_return_ref else null;
                     self.return_ref_fresh = false;
-                    self.ref_bind_degraded = if (returned_ref == null) dst_name.ptr else null;
+                    // a by-reference callee that returned no variable gave
+                    // php's new reference (after its own notice), which a
+                    // return by reference passes on without another
+                    self.ref_bind_degraded = if (returned_ref == null and !by_ref_function) dst_name.ptr else null;
                     if (returned_ref) |cell| {
                         try self.bindRefSlot(&frame.ref_slots, dst_name, cell);
                         const owner = try self.ensureRefOwner(frame);

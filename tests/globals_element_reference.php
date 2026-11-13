@@ -32,3 +32,13 @@ $counter = 1;
 bump();
 bump();
 var_dump($counter, $a, $b);
+
+// a by-reference function returning another one's non-variable result
+function &constantByRef() {
+    return 100;
+}
+function &passOn() {
+    return constantByRef();
+}
+$d = &passOn();
+var_dump($d);
