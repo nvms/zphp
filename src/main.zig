@@ -107,7 +107,7 @@ fn loadStartupFlags(allocator: std.mem.Allocator, raw_args: []const []const u8) 
             ini_path = try flagValue(raw_args, i, "usage: zphp -c PATH <command>\n");
         } else if (std.mem.startsWith(u8, arg, "-c") and arg.len > 2) {
             ini_path = arg[2..];
-        } else if (std.mem.eql(u8, arg, "-n")) {
+        } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--no-php-ini")) {
             skip_ini = true;
         } else if (std.mem.eql(u8, arg, "-q")) {
             // php's quiet mode drops cgi headers, which the cli never prints
@@ -130,7 +130,12 @@ fn loadStartupFlags(allocator: std.mem.Allocator, raw_args: []const []const u8) 
             break;
         }
     }
-    if (!skip_ini) ini_config.discover(ini_path);
+    // with no ini file php runs on its built-in defaults, where the cli
+    // displays errors and logs none
+    if (skip_ini) {
+        ini_config.define("display_errors=1");
+        ini_config.define("log_errors=0");
+    } else ini_config.discover(ini_path);
     for (defines.items) |d| ini_config.define(d);
     if (platform.getenv("ZPHP_EXTENSION_DIR")) |dir| extension.loadDirectory(dir);
     return args.toOwnedSlice(allocator);
