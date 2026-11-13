@@ -7778,6 +7778,10 @@ pub const VM = struct {
                     }
                     const key_val = self.pop();
                     const arr_val = self.pop();
+                    if (arr_val == .string) {
+                        if (try self.throwBuiltinException("Error", "Cannot create references to/from string offsets")) continue;
+                        return error.RuntimeError;
+                    }
                     const frame = self.currentFrame();
                     self.unbindRefSlot(&frame.ref_slots, dst_name);
                     if (arr_val == .object and try self.splOwnOffsetGet(arr_val.object)) {
