@@ -460,10 +460,11 @@ fn processHandle(pc: *const ProcChild) ?win32.HANDLE {
     return @ptrFromInt(pc.process);
 }
 
+// php reads the DWORD exit code into an int
 fn exitCodeOf(handle: win32.HANDLE) i64 {
     var code: u32 = 0;
     if (win32.GetExitCodeProcess(handle, &code) == 0) return -1;
-    return @intCast(code);
+    return @as(i32, @bitCast(code));
 }
 
 // the exit code once the process has ended, null while it still runs
