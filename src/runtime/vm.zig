@@ -27702,6 +27702,7 @@ pub const VM = struct {
     // 4. remaining nodes (scratch_rc == 0) are unreachable cycles - destruct
     //    + free
     pub fn collectCycles(self: *VM) usize {
+        self.dropUnreachableWeakMapEntries();
         var rerun = false;
         var collected = self.collectCyclesPass(&rerun, true);
         // destructors ran for garbage that was left out: php collects what
@@ -27711,6 +27712,121 @@ pub const VM = struct {
             collected += self.collectCyclesPass(&again, false);
         }
         return collected;
+    }
+
+    // php's gc treats a WeakMap entry as an edge from its key to its value
+    // (zend_weakmap_get_gc): a key reachable only through its own value is
+    // garbage. each entry whose value can reach its key is tried by trial
+    // deletion over what the value reaches, the map's own hold on the value
+    // counted as internal; one with nothing outside holding it is removed,
+    // and refcounting (or the cycle pass that follows) frees what it held
+    fn dropUnreachableWeakMapEntries(self: *VM) void {
+        if (self.draining_destructors or self.collecting_cycles) return;
+        var dead: std.ArrayListUnmanaged(struct { map: *PhpObject, key: *PhpObject }) = .empty;
+        defer dead.deinit(self.allocator);
+        var dtors: std.ArrayListUnmanaged(*PhpObject) = .empty;
+        defer dtors.deinit(self.allocator);
+        {
+            self.collecting_cycles = true;
+            defer self.collecting_cycles = false;
+            for (self.weakmaps.items) |wm| {
+                if (wm.destructed) continue;
+                const data_v = wm.get("__data");
+                const keys_v = wm.get("__keys");
+                if (data_v != .array or keys_v != .array) continue;
+                for (keys_v.array.entries.items) |entry| {
+                    if (entry.value != .object) continue;
+                    const key = entry.value.object;
+                    const value = data_v.array.get(.{ .int = @intCast(@intFromPtr(key)) });
+                    if (value != .object and value != .array) continue;
+                    if (self.weakMapEntryUnreachable(key, value, &dtors)) dead.append(self.allocator, .{ .map = wm, .key = key }) catch return;
+                }
+            }
+        }
+        // as php's gc does, the garbage's destructors run first, while all of
+        // it is intact
+        for (dtors.items) |obj| {
+            if (obj.destructed or obj.destructor_called) continue;
+            obj.destructor_called = true;
+            objRetain(obj);
+            self.callGarbageDestructor(obj);
+            self.objRelease(obj);
+        }
+        for (dead.items) |d| {
+            const data_v = d.map.get("__data");
+            const keys_v = d.map.get("__keys");
+            if (keys_v == .array) {
+                for (keys_v.array.entries.items, 0..) |e, j| {
+                    if (e.value == .object and e.value.object == d.key) {
+                        _ = keys_v.array.entries.orderedRemove(j);
+                        break;
+                    }
+                }
+            }
+            if (data_v == .array) self.arrayRemoveOwned(data_v.array, .{ .int = @intCast(@intFromPtr(d.key)) });
+        }
+        if (dead.items.len > 0) self.drainPendingDestruct();
+    }
+
+    fn weakMapEntryUnreachable(self: *VM, key: *PhpObject, value: Value, dtors: *std.ArrayListUnmanaged(*PhpObject)) bool {
+        var visited_objs = std.AutoArrayHashMapUnmanaged(*PhpObject, void){};
+        defer visited_objs.deinit(self.allocator);
+        var visited_arrs = std.AutoArrayHashMapUnmanaged(*PhpArray, void){};
+        defer visited_arrs.deinit(self.allocator);
+        defer {
+            self.cycle_gens.deinit(self.allocator);
+            self.cycle_gens = .{};
+            self.cycle_fibers.deinit(self.allocator);
+            self.cycle_fibers = .{};
+        }
+        for (self.ref_cells.items) |cell| cell.visited = false;
+        self.cycleVisitChild(value, &visited_objs, &visited_arrs);
+        if (!visited_objs.contains(key)) return false;
+        var oi = visited_objs.iterator();
+        while (oi.next()) |kv| self.cycleDecrementChildren(kv.key_ptr.*, &visited_objs, &visited_arrs);
+        var ai = visited_arrs.iterator();
+        while (ai.next()) |kv| self.cycleDecrementChildrenArr(kv.key_ptr.*, &visited_objs, &visited_arrs);
+        for (self.ref_cells.items) |cell| {
+            if (cell.visited) self.cycleDecChild(cell.value, &visited_objs, &visited_arrs);
+        }
+        for (self.cycle_gens.keys()) |g| _ = self.cycleGeneratorEdges(g, .decrement, &visited_objs, &visited_arrs);
+        for (self.cycle_fibers.keys()) |f| _ = self.cycleFiberEdges(f, .decrement, &visited_objs, &visited_arrs);
+        // the map holds the value
+        self.cycleDecChild(value, &visited_objs, &visited_arrs);
+        if (self.globals_array) |ga| {
+            for (ga.entries.items) |e| switch (e.value) {
+                .object => |o| if (visited_objs.contains(o)) {
+                    o.scratch_rc += 1;
+                },
+                .array => |a| if (visited_arrs.contains(a)) {
+                    a.scratch_rc += 1;
+                },
+                else => {},
+            };
+        }
+        self.cyclePropagateAlive(&visited_objs, &visited_arrs);
+        // the value must be garbage too: a value held elsewhere keeps its
+        // key alive through it
+        const value_dead = switch (value) {
+            .object => |o| o.scratch_rc == 0,
+            .array => |a| a.scratch_rc == 0,
+            else => false,
+        };
+        if (key.scratch_rc != 0 or !value_dead) return false;
+        // the key's destructor first, then the rest of the garbage in the
+        // order it was reached
+        self.queueGarbageDestructor(key, dtors);
+        for (visited_objs.keys()) |obj| {
+            if (obj != key and obj.scratch_rc == 0) self.queueGarbageDestructor(obj, dtors);
+        }
+        return true;
+    }
+
+    fn queueGarbageDestructor(self: *VM, obj: *PhpObject, dtors: *std.ArrayListUnmanaged(*PhpObject)) void {
+        if (obj.destructed or obj.destructor_called or !obj.ownsDestructor()) return;
+        if (!self.hasMethod(obj.class_name, "__destruct")) return;
+        for (dtors.items) |queued| if (queued == obj) return;
+        dtors.append(self.allocator, obj) catch {};
     }
 
     fn collectCyclesPass(self: *VM, rerun_needed: *bool, first: bool) usize {
