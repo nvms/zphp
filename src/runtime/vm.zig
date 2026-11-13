@@ -12865,6 +12865,15 @@ pub const VM = struct {
         const found = self.methodInfoOf(full_name, class_name, method_name);
         // an interface's method resolves to no class's declaration
         if (found == null and try self.refuseInterfaceStaticCall(class_name, method_name, arg_count)) return;
+        // ZEND_INIT_STATIC_METHOD_CALL for a constructor: a private one runs
+        // only on an object of its own class
+        if (found) |f| if (f.info.visibility == .private and std.ascii.eqlIgnoreCase(method_name, "__construct")) if (self.currentThis()) |this| if (this == .object and !std.ascii.eqlIgnoreCase(this.object.class_name, f.defining)) {
+            self.dropN(arg_count);
+            const msg = try std.fmt.allocPrint(self.allocator, "Cannot call private {s}::__construct()", .{self.declaredClassName(class_name)});
+            defer self.allocator.free(msg);
+            if (try self.throwBuiltinException("Error", msg)) return;
+            return error.RuntimeError;
+        };
         if (found) |f| if (f.info.visibility != .public and !self.checkVisibility(f.defining, f.info.visibility) and !self.protectedRootVisible(f.defining, method_name, f.info.visibility)) {
             if (try self.staticCallFallback(class_name, method_name, arg_count, effective_called)) return;
             self.dropN(arg_count);
