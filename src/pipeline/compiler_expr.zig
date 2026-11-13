@@ -70,6 +70,18 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                 try self.emitOp(.array_push_bind_ref_var_var);
                 return;
             }
+            // a call's result keeps the value path: php's append fails
+            // before the "Only variables should be assigned by reference"
+            // notice a reference binding of it raises
+            switch (ref_inner.tag) {
+                .property_access, .array_access, .static_prop_access => {
+                    try compileVivifyChain(self, target.data.lhs);
+                    try compileReferenceSource(self, self.ast.nodes[node.data.rhs].data.lhs);
+                    try self.emitOp(.array_push_bind_ref_source);
+                    return;
+                },
+                else => {},
+            }
         }
         try compileVivifyChain(self, target.data.lhs);
         try self.compileNode(node.data.rhs);
@@ -150,6 +162,16 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
             }
             if (rhs_is_ref and target.data.rhs != 0) {
                 const ref_inner = self.ast.nodes[node.data.rhs].data.lhs;
+                // php fetches the source before the target's containers
+                // (zend_delayed_compile_var); only calls in the target run
+                // before it
+                if (self.ast.nodes[ref_inner].tag == .array_access and !chainHasCall(self, target.data.lhs) and !chainHasCall(self, target.data.rhs)) {
+                    try compileReferenceSource(self, ref_inner);
+                    try compileVivifyChain(self, target.data.lhs);
+                    try self.compileNode(target.data.rhs);
+                    try self.emitOp(.array_bind_ref_source_late);
+                    return;
+                }
                 switch (self.ast.nodes[ref_inner].tag) {
                     .property_access, .array_access, .static_prop_access, .call, .method_call, .static_call => {
                         try compileVivifyChain(self, target.data.lhs);

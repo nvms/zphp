@@ -518,6 +518,12 @@ pub const OpCode = enum(u8) {
     // ensure_array_static_prop for `$c::$p[] = v`: u16 property; the class
     // name or an object on the stack
     ensure_array_static_prop_dyn,
+    // `$a[] = &<fetch>`: [array, reference source] -> [value]. appends an
+    // element bound to the source's reference
+    array_push_bind_ref_source,
+    // array_bind_ref_source with the source fetched first, as php's delayed
+    // compile of the target does: [source, array, key] -> [value]
+    array_bind_ref_source_late,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -705,8 +711,8 @@ pub const OpCode = enum(u8) {
             .array_push_ref,
             .array_spread,
             => -1,
-            .array_set_elem, .array_set_elem_ref, .prop_bind_ref_source_dyn, .array_bind_ref_source => -2,
-            .prop_bind_ref_source => -1,
+            .array_set_elem, .array_set_elem_ref, .prop_bind_ref_source_dyn, .array_bind_ref_source, .array_bind_ref_source_late => -2,
+            .prop_bind_ref_source, .array_push_bind_ref_source => -1,
             // unary ops: pop 1, push 1
             .negate,
             .bit_not,

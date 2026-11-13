@@ -8060,12 +8060,16 @@ pub const VM = struct {
                     self.push(cell.*);
                 },
 
-                .array_bind_ref_source => {
-                    var source = self.retainArgSource(self.ic.?.arg_stack[self.sp - 1]);
+                .array_bind_ref_source, .array_bind_ref_source_late => |bind_op| {
+                    // _late has the source fetched before the container:
+                    // [source, array, key]
+                    const late = bind_op == .array_bind_ref_source_late;
+                    var source = self.retainArgSource(self.ic.?.arg_stack[if (late) self.sp - 3 else self.sp - 1]);
                     defer self.releaseArgSource(&source);
-                    _ = self.pop();
+                    if (!late) _ = self.pop();
                     const key = self.pop();
                     const arr_val = self.pop();
+                    if (late) _ = self.pop();
                     if (source != .cell) return error.RuntimeError;
                     try self.checkArgCell(source.cell.denial);
                     const cell = source.cell.value;
@@ -8081,6 +8085,39 @@ pub const VM = struct {
                         const old = array.get(ak);
                         try self.arraySetOwned(array, ak, cell.*);
                         self.releaseValue(old);
+                        self.setEntryRef(array.getPtr(ak).?, cell);
+                        const persistent = try self.persistentRefOwner();
+                        const frame = self.currentFrame();
+                        if (frame.ref_owner != 0) try (try self.refIndex()).transferCell(self.allocator, frame.ref_owner, persistent, cell);
+                        try self.regRefArray(persistent, cell, array, ak);
+                        self.array_ref_active = true;
+                    }
+                    self.push(cell.*);
+                },
+
+                .array_push_bind_ref_source => {
+                    var source = self.retainArgSource(self.ic.?.arg_stack[self.sp - 1]);
+                    defer self.releaseArgSource(&source);
+                    _ = self.pop();
+                    const arr_val = self.pop();
+                    if (source != .cell) return error.RuntimeError;
+                    try self.checkArgCell(source.cell.denial);
+                    const cell = source.cell.value;
+                    if (arr_val == .object and try self.splOwnOffsetGet(arr_val.object)) {
+                        const msg = try std.fmt.allocPrint(self.allocator, "Indirect modification of overloaded element of {s} has no effect", .{arr_val.object.class_name});
+                        defer self.allocator.free(msg);
+                        self.raiseError(8, msg) catch if (try self.resumeRaised()) continue;
+                        if (try self.throwBuiltinException("Error", "Cannot assign by reference to an array dimension of an object")) continue;
+                        return error.RuntimeError;
+                    }
+                    if (arr_val == .array) {
+                        const array = arr_val.array;
+                        if (array.nextElementOccupied()) {
+                            if (try self.throwNextElementOccupied()) continue;
+                            return error.RuntimeError;
+                        }
+                        const ak: PhpArray.Key = .{ .int = if (array.has_int_keys) array.next_int_key else 0 };
+                        try self.arraySetOwned(array, ak, cell.*);
                         self.setEntryRef(array.getPtr(ak).?, cell);
                         const persistent = try self.persistentRefOwner();
                         const frame = self.currentFrame();
