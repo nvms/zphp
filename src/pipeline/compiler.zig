@@ -1176,15 +1176,27 @@ pub const Compiler = struct {
         for (self.ast.extraSlice(target.data.lhs)) |slot| {
             if (slot != 0) break;
         } else return self.fail(target.main_token, "Cannot use empty list");
-        // zend_compile_list_assign: every entry has a key or none does
+        // zend_compile_list_assign: the first entry decides whether all are
+        // keyed; no entry is empty in a keyed list, unpacked, or array()
         {
-            var keyed = false;
-            var unkeyed = false;
-            for (self.ast.extraSlice(target.data.lhs)) |slot| {
+            const slots = self.ast.extraSlice(target.data.lhs);
+            const keyed = for (slots) |slot| {
                 if (slot == 0) continue;
                 const entry = self.ast.nodes[slot];
-                if (entry.tag == .array_element and entry.data.rhs != 0) keyed = true else unkeyed = true;
-                if (keyed and unkeyed) return self.fail(target.main_token, "Cannot mix keyed and unkeyed array entries in assignments");
+                break entry.tag == .array_element and entry.data.rhs != 0;
+            } else false;
+            for (slots) |slot| {
+                if (slot == 0) {
+                    if (keyed) return self.fail(target.main_token, "Cannot use empty array entries in keyed array assignment");
+                    continue;
+                }
+                const entry = self.ast.nodes[slot];
+                if (entry.tag == .array_spread) return self.fail(target.main_token, "Spread operator is not supported in assignments");
+                const has_key = entry.tag == .array_element and entry.data.rhs != 0;
+                if (keyed != has_key) return self.fail(target.main_token, "Cannot mix keyed and unkeyed array entries in assignments");
+                var inner = if (entry.tag == .array_element) self.ast.nodes[entry.data.lhs] else entry;
+                if (inner.tag == .ref_target) inner = self.ast.nodes[inner.data.lhs];
+                if (inner.tag == .array_literal and self.ast.tokens[inner.main_token].tag == .kw_array) return self.fail(inner.main_token, "Cannot assign to array(), use [] instead");
             }
         }
         // a nested list must be written the way the outer one is

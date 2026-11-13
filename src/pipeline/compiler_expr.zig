@@ -1721,7 +1721,29 @@ pub fn hasSplatOrNamed(ast: *const Ast, args: []const u32) bool {
     return false;
 }
 
+// zend_compile_args: nothing positional after a named or unpacked
+// argument, and no unpacking after a named one
+fn checkArgOrder(self: *Compiler, args: []const u32) Error!void {
+    var named: ?u32 = null;
+    var unpacked = false;
+    for (args) |arg_idx| {
+        const arg = self.ast.nodes[arg_idx];
+        switch (arg.tag) {
+            .splat_expr => {
+                if (named) |tok| return self.fail(tok, "Cannot use argument unpacking after named arguments");
+                unpacked = true;
+            },
+            .named_arg => named = arg.main_token,
+            else => {
+                if (unpacked) return self.fail(if (arg.main_token != 0) arg.main_token else named orelse 0, "Cannot use positional argument after argument unpacking");
+                if (named) |tok| return self.fail(tok, "Cannot use positional argument after named argument");
+            },
+        }
+    }
+}
+
 pub fn emitSpreadArgs(self: *Compiler, args: []const u32) Error!ArgGuards {
+    try checkArgOrder(self, args);
     var guards: ArgGuards = .empty;
     errdefer guards.deinit(self.allocator);
     try self.emitOp(.array_new);
@@ -2079,9 +2101,13 @@ fn compileReferenceSource(self: *Compiler, source: u32) Error!void {
 
 pub fn compileArrayLiteral(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitOp(.array_new);
+    var last_token = node.main_token;
     for (self.ast.extraSlice(node.data.lhs)) |elem_idx| {
-        // an omitted element only means something in a destructuring target
-        if (elem_idx == 0) return self.fail(node.main_token, "Cannot use empty array elements in arrays");
+        // an omitted element only means something in a destructuring
+        // target; php reports it at the line it last compiled
+        if (elem_idx == 0) return self.fail(last_token, "Cannot use empty array elements in arrays");
+        const first = self.ast.nodes[self.ast.nodes[elem_idx].data.lhs];
+        if (first.main_token != 0) last_token = first.main_token;
         const elem = self.ast.nodes[elem_idx];
         if (elem.tag == .array_spread) {
             try self.compileNode(elem.data.lhs);
