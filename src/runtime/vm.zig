@@ -26840,7 +26840,24 @@ pub const VM = struct {
             }
             const nullable = param.type.len > 0 and param.type[0] == '?';
             if (nullable and arg == .null) continue;
-            switch (try callables.resolveCallback(self, arg, .{})) {
+            const resolved = callables.resolveCallback(self, arg, .{}) catch |err| {
+                // an error handler threw from the check's deprecation. zpp
+                // lets that exception go; call_user_func and
+                // call_user_func_array are php's ZEND_INIT_USER_CALL, which
+                // has no reason to give, so its TypeError says "(null)" and
+                // takes the exception as its previous
+                if (!std.mem.eql(u8, label, "call_user_func") and !std.mem.eql(u8, label, "call_user_func_array")) return err;
+                const thrown = self.takePending() orelse return err;
+                defer self.stackRelease(thrown);
+                const msg = try std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} (${s}) must be a valid callback{s}, (null)", .{ label, i + 1, param.name, if (nullable) " or null" else "" });
+                defer self.allocator.free(msg);
+                try self.setPendingException("TypeError", msg);
+                if (thrown == .object) if (self.pending_exception) |raised| if (raised == .object) {
+                    _ = try self.chainPrevious(raised.object, thrown.object);
+                };
+                return error.RuntimeError;
+            };
+            switch (resolved) {
                 .callee => continue,
                 .failure => |failure| {
                     var buf: std.ArrayListUnmanaged(u8) = .empty;
