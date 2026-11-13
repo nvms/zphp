@@ -2135,6 +2135,13 @@ pub fn compileReferenceBinding(self: *Compiler, source: u32, dst: u16) Error!boo
             try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(self.ast.tokenSlice(node.main_token)) }));
         },
         .array_access, .array_push_target => {
+            // $GLOBALS['x'] is the global variable x itself
+            if (node.tag == .array_access and node.data.rhs != 0 and isGlobalsFetch(self, node.data.lhs)) {
+                try self.compileNode(node.data.rhs);
+                try self.emitOp(.make_global_ref);
+                try self.emitU16(dst);
+                return true;
+            }
             try compileVivifyChain(self, node.data.lhs);
             if (node.tag == .array_push_target) try self.emitOp(.op_null) else try self.compileNode(node.data.rhs);
             try self.emitOp(.make_var_array_elem_ref);

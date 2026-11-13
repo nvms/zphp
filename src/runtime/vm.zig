@@ -7970,6 +7970,22 @@ pub const VM = struct {
                     }
                 },
 
+                .make_global_ref => {
+                    const dst_idx = self.readU16();
+                    const dst_name = self.currentChunk().constants.items[dst_idx].string.bytes();
+                    if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
+                    var name_hold: Value = .null;
+                    defer self.stackRelease(name_hold);
+                    const text = self.popHeldName(&name_hold) catch {
+                        if (try self.resumeRaised()) continue;
+                        return error.RuntimeError;
+                    };
+                    const name = try std.fmt.allocPrint(self.allocator, "${s}", .{text});
+                    defer self.allocator.free(name);
+                    const cell = try self.globalVariableCell(try self.internName(name));
+                    try self.bindRefSlot(&self.currentFrame().ref_slots, dst_name, cell);
+                },
+
                 .make_var_array_elem_ref => {
                     const dst_idx = self.readU16();
                     const dst_name = self.currentChunk().constants.items[dst_idx].string.bytes();
@@ -15341,6 +15357,19 @@ pub const VM = struct {
     // `global $name`: the variable becomes a reference to the global of that
     // name, created when it doesn't exist. `name` must outlive the frame
     fn bindGlobalVariable(self: *VM, name: []const u8) RuntimeError!void {
+        const cell = try self.globalVariableCell(name);
+        // bind the local name to the cell so set_var/get_var on this
+        // frame routes through ref_slots and stays in sync across
+        // recursive calls
+        try self.bindRefSlot(&self.currentFrame().ref_slots, name, cell);
+        // vars/locals are one owning mirror, even for a cell.
+        retainValue(cell.*);
+        try self.setVariableByName(self.currentFrame(), name, cell.*);
+    }
+
+    // the cell a global variable lives in, made shared with the top frame
+    // (so top-level reads of $name pick up writes through it)
+    fn globalVariableCell(self: *VM, name: []const u8) RuntimeError!*Value {
         // resolve or allocate the shared cell. picks up the current
         // value from the top-frame's view (locals + ref_slots + vars
         // + constants) so this is the first read after a value was
@@ -15387,18 +15416,10 @@ pub const VM = struct {
             try self.bindRefSlot(&self.globals_cells, try self.internName(name), c);
             cell = c;
         }
-        // bind the local name to the cell so set_var/get_var on this
-        // frame routes through ref_slots and stays in sync across
-        // recursive calls. also point the top frame at the cell so
-        // top-level reads of $name pick up writes done by function
-        // frames sharing the cell
-        try self.bindRefSlot(&self.currentFrame().ref_slots, name, cell.?);
-        // vars/locals are one owning mirror, even for a cell.
-        retainValue(cell.?.*);
-        try self.setVariableByName(self.currentFrame(), name, cell.?.*);
         if (self.frame_count > 1) {
             try self.bindRefSlot(&self.frames[0].ref_slots, name, cell.?);
         }
+        return cell.?;
     }
 
     // the reference cell a static property is bound through, made on first

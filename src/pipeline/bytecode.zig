@@ -528,6 +528,9 @@ pub const OpCode = enum(u8) {
     // [object, name] -> [object, name as a string]. a non-enum object is
     // php's "Fetching properties on non-enums" Error
     const_expr_prop_check,
+    // `&$GLOBALS[name]` (php's global FETCH_W): u16 destination name; pops
+    // the variable's name and binds the destination to the global's cell
+    make_global_ref,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -559,6 +562,7 @@ pub const OpCode = enum(u8) {
             .set_local,
             .set_local_transfer,
             .get_global,
+            .make_global_ref,
             .concat_assign,
             .concat_assign_local,
             .unset_var,
