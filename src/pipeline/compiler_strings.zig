@@ -14,6 +14,7 @@ pub fn compileString(self: *Compiler, node: Ast.Node) (Allocator.Error || error{
             try self.emitConstant(idx);
             return;
         }
+        try warnOctalOverflow(self, node.main_token, body);
         if (std.mem.indexOf(u8, body, "$") == null) {
             if (std.mem.indexOf(u8, body, "\\") == null) {
                 const idx = try self.addConstant(.{ .string = Value.String.borrowed(body) });
@@ -38,6 +39,7 @@ pub fn compileString(self: *Compiler, node: Ast.Node) (Allocator.Error || error{
     }
     const quote = lexeme[0];
     const inner = lexeme[1 .. lexeme.len - 1];
+    if (quote == '"' or quote == '`') try warnOctalOverflow(self, node.main_token, inner);
 
     if (quote == '`') {
         // `cmd` is shell_exec("cmd"), resolved globally like php does
@@ -573,6 +575,33 @@ pub fn processSingleQuoteEscapes(allocator: Allocator, s: []const u8) Allocator.
 // escape sequences of a double-quoted string, heredoc, or backtick command.
 // quote is the delimiter (`"` or '`'), or 0 for a heredoc: an escaped quote
 // character only loses its backslash inside its own kind of string
+// zend_scan_escape_string's warning for a three-digit octal escape past
+// \377, whose value is cut to a byte. the scanner counts the string's lines
+// as it goes, so the warning names the escape's own line; a heredoc's body
+// starts on the line after its opening
+fn warnOctalOverflow(self: *Compiler, token: u32, s: []const u8) (Allocator.Error || error{CompileError})!void {
+    if (std.mem.indexOfScalar(u8, s, '\\') == null) return;
+    const src = self.ast.source;
+    const tok_start = @min(self.ast.tokens[token].start, src.len);
+    const in_source = @intFromPtr(s.ptr) >= @intFromPtr(src.ptr) and @intFromPtr(s.ptr) + s.len <= @intFromPtr(src.ptr) + src.len;
+    const body_start: usize = if (in_source) @intFromPtr(s.ptr) - @intFromPtr(src.ptr) else if (std.mem.indexOfScalarPos(u8, src, tok_start, '\n')) |nl| nl + 1 else tok_start;
+    const first_line: u32 = 1 + @as(u32, @intCast(std.mem.count(u8, src[0..body_start], "\n")));
+    var i: usize = 0;
+    while (i + 1 < s.len) {
+        if (s[i] != '\\') {
+            i += 1;
+            continue;
+        }
+        var n: usize = 0;
+        while (n < 3 and i + 1 + n < s.len and s[i + 1 + n] >= '0' and s[i + 1 + n] <= '7') n += 1;
+        if (n == 3 and s[i + 1] > '3') {
+            const line = first_line + @as(u32, @intCast(std.mem.count(u8, s[0..i], "\n")));
+            try self.warnAtLine(line, 128, "Octal escape sequence overflow \\{s} is greater than \\377", .{s[i + 1 .. i + 4]});
+        }
+        i += if (n > 0) 1 + n else 2;
+    }
+}
+
 pub fn processEscapes(allocator: Allocator, s: []const u8, quote: u8) ![]const u8 {
     var buf = std.ArrayListUnmanaged(u8).empty;
     var i: usize = 0;
@@ -637,16 +666,15 @@ pub fn processEscapes(allocator: Allocator, s: []const u8, quote: u8) ![]const u
                     }
                 },
                 '0'...'7' => {
-                    // \NNN octal escape (up to 3 digits)
+                    // \NNN octal escape (up to 3 digits); php keeps the
+                    // low byte of a value past \377
                     var val: u8 = 0;
                     var consumed: usize = 1;
                     var digits: usize = 0;
                     while (digits < 3 and i + 1 + digits < s.len) : (digits += 1) {
                         const c = s[i + 1 + digits];
                         if (c < '0' or c > '7') break;
-                        const new_val = @as(u16, val) * 8 + (c - '0');
-                        if (new_val > 255) break;
-                        val = @intCast(new_val);
+                        val = val *% 8 +% (c - '0');
                         consumed += 1;
                     }
                     try buf.append(allocator, val);

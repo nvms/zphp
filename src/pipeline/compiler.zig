@@ -574,6 +574,15 @@ pub const Compiler = struct {
         self.warnings.appendAssumeCapacity(.{ .level = level, .message = message, .line = line });
     }
 
+    // the same, at a line
+    pub fn warnAtLine(self: *Compiler, line: u32, level: u16, comptime fmt: []const u8, args: anytype) Error!void {
+        try self.warnings.ensureUnusedCapacity(self.allocator, 1);
+        try self.string_allocs.ensureUnusedCapacity(self.allocator, 1);
+        const message = try std.fmt.allocPrint(self.allocator, fmt, args);
+        self.string_allocs.appendAssumeCapacity(message);
+        self.warnings.appendAssumeCapacity(.{ .level = level, .message = message, .line = line });
+    }
+
     // the same, at a byte offset of the source
     pub fn warnAtOffset(self: *Compiler, offset: usize, level: u16, comptime fmt: []const u8, args: anytype) Error!void {
         try self.warnings.ensureUnusedCapacity(self.allocator, 1);
