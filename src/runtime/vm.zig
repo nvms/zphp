@@ -499,9 +499,6 @@ pub const ClassDef = struct {
     interfaces: std.ArrayListUnmanaged([]const u8) = .empty,
     is_enum: bool = false,
     is_internal: bool = true,
-    // the class this one names through class_alias(), which zphp models as
-    // a subclass; php treats both names as one class
-    alias_of: ?[]const u8 = null,
     // its hidden initializer still has to install some instance defaults
     defaults_pending: bool = false,
     // constants whose expression waits for first access hold `.undef`
@@ -1045,9 +1042,9 @@ pub const VM = struct {
     tick_function_ids: u64 = 0,
     strtok_state: ?[]const u8 = null,
     strtok_pos: usize = 0,
-    classes: class_names.Map(ClassDef) = .{},
-    interfaces: class_names.Map(InterfaceDef) = .{},
-    traits: class_names.Map(void) = .{},
+    classes: class_names.AliasMap(ClassDef) = .{},
+    interfaces: class_names.AliasMap(InterfaceDef) = .{},
+    traits: class_names.AliasMap(void) = .{},
     trait_uses: std.StringHashMapUnmanaged([]const []const u8) = .{},
     trait_rules: std.StringHashMapUnmanaged(TraitRules) = .{},
     trait_props: std.StringHashMapUnmanaged([]const ClassDef.PropertyDef) = .{},
@@ -3337,6 +3334,8 @@ pub const VM = struct {
             // valid here even though freeHeapItems already ran
             self.removeNonBuiltin(&self.classes, &self.builtin_classes);
             self.removeNonBuiltin(&self.interfaces, &self.builtin_interfaces);
+            self.classes.clearAliases();
+            self.interfaces.clearAliases();
         } else {
             var class_iter = self.classes.valueIterator();
             while (class_iter.next()) |c| c.deinit(self.allocator);
@@ -10150,6 +10149,7 @@ pub const VM = struct {
                         }
                     }
 
+                    class_name = self.classes.aliasTarget(class_name) orelse class_name;
                     if (std.ascii.eqlIgnoreCase(class_name, "Generator")) {
                         self.dropN(arg_count);
                         if (try self.throwBuiltinException("Error", "The \"Generator\" class is reserved for internal use and cannot be manually instantiated")) continue;
@@ -10470,7 +10470,7 @@ pub const VM = struct {
                         return error.RuntimeError;
                     };
                     // strip leading backslash from fully-qualified class names
-                    const class_name = if (raw_class_name.len > 0 and raw_class_name[0] == '\\') raw_class_name[1..] else raw_class_name;
+                    var class_name = if (raw_class_name.len > 0 and raw_class_name[0] == '\\') raw_class_name[1..] else raw_class_name;
                     if (!self.classes.contains(class_name)) try self.tryAutoload(class_name);
                     if (!self.classes.contains(class_name)) {
                         self.dropN(ac + 1);
@@ -10479,6 +10479,14 @@ pub const VM = struct {
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
                     }
+                    class_name = self.classes.aliasTarget(class_name) orelse class_name;
+                    if (self.classes.get(class_name)) |cls_ref| if (cls_ref.is_abstract and !self.interfaces.contains(class_name) and !self.traits.contains(class_name)) {
+                        self.dropN(ac + 1);
+                        const msg = try std.fmt.allocPrint(self.allocator, "Cannot instantiate abstract class {s}", .{self.declaredClassName(class_name)});
+                        defer self.allocator.free(msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    };
 
                     const obj = try self.allocUserObject(class_name);
                     self.initObjectProperties(obj, class_name) catch {
@@ -13285,6 +13293,8 @@ pub const VM = struct {
             }
         } else {
             if (class_name.len > 0 and class_name[0] == '\\') class_name = class_name[1..];
+            // a class_alias() name calls the class it names
+            class_name = self.classes.aliasTarget(class_name) orelse class_name;
             if (self.currentFrame().called_class) |cc| {
                 if (self.isAncestor(class_name, cc)) lsb_class = cc;
             }
@@ -15141,8 +15151,7 @@ pub const VM = struct {
                 line = site.start_line;
             }
         } else if (self.classes.getPtr(name)) |found| {
-            // an alias stands for the class it names
-            const def = if (found.alias_of) |target| self.classes.getPtr(target) orelse found else found;
+            const def = found;
             declared = def.name;
             if (self.interfaces.contains(def.name)) kind = "interface" else if (def.is_enum) kind = "enum";
             if (!def.is_internal) {
@@ -22254,6 +22263,14 @@ pub const VM = struct {
     }
 
     pub fn isInstanceOf(self: *VM, raw_obj_class: []const u8, raw_target: []const u8) bool {
+        if (self.isInstanceOfNamed(raw_obj_class, raw_target)) return true;
+        // a class_alias() name is the class it names
+        const written_target = if (raw_target.len > 0 and raw_target[0] == '\\') raw_target[1..] else raw_target;
+        const canonical = self.classes.aliasTarget(written_target) orelse self.interfaces.aliasTarget(written_target) orelse return false;
+        return self.isInstanceOfNamed(raw_obj_class, canonical);
+    }
+
+    fn isInstanceOfNamed(self: *VM, raw_obj_class: []const u8, raw_target: []const u8) bool {
         // PHP normalizes leading-backslash equivalence for class names
         const obj_class = if (raw_obj_class.len > 0 and raw_obj_class[0] == '\\') raw_obj_class[1..] else raw_obj_class;
         const target_class = if (raw_target.len > 0 and raw_target[0] == '\\') raw_target[1..] else raw_target;

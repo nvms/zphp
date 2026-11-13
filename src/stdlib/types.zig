@@ -1299,7 +1299,7 @@ fn native_is_subclass_of(ctx: *NativeContext, args: []const Value) RuntimeError!
     try ctx.vm.tryAutoload(class_name);
     try ctx.vm.tryAutoload(target_name);
     // is_subclass_of returns false if same class, only true for actual subclasses
-    if (std.mem.eql(u8, class_name, target_name)) return NativeResult.scalar(.{ .bool = false });
+    if (std.ascii.eqlIgnoreCase(ctx.vm.declaredClassName(class_name), ctx.vm.declaredClassName(target_name))) return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = ctx.vm.isInstanceOf(class_name, target_name) });
 }
 
@@ -2368,7 +2368,10 @@ fn native_class_alias(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     {
         // zend_register_class_alias_ex: a reserved alias is a compile error
         const bare = if (alias.len > 0 and alias[0] == '\\') alias[1..] else alias;
-        if (@import("../pipeline/compiler_class.zig").isReservedClassName(bare)) {
+        const unqualified = if (std.mem.lastIndexOfScalar(u8, bare, '\\')) |i| bare[i + 1 ..] else bare;
+        if (@import("../pipeline/compiler_class.zig").isReservedClassName(bare) or
+            std.ascii.eqlIgnoreCase(unqualified, "array") or std.ascii.eqlIgnoreCase(unqualified, "callable"))
+        {
             const lower = try std.ascii.allocLowerString(ctx.allocator, bare);
             defer ctx.allocator.free(lower);
             const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot use \"{s}\" as a class alias as it is reserved", .{lower});
@@ -2376,34 +2379,32 @@ fn native_class_alias(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
             return ctx.vm.raiseFatal(msg);
         }
     }
-    if (autoload and !ctx.vm.classes.contains(original)) {
-        try ctx.vm.tryAutoload(original);
+    const vm = ctx.vm;
+    if (autoload and !vm.classes.contains(original) and !vm.interfaces.contains(original) and !vm.traits.contains(original)) {
+        try vm.tryAutoload(original);
     }
-    if (ctx.vm.classes.get(original)) |cls| {
-        const taken = ctx.vm.classes.contains(alias) or ctx.vm.interfaces.contains(alias) or ctx.vm.traits.contains(alias);
-        if (if (taken) try ctx.vm.redeclarationMessageAs(cls.alias_of orelse cls.name, alias) else null) |msg| {
-            defer ctx.allocator.free(msg);
-            try ctx.vm.emitWarning(msg);
-            return NativeResult.scalar(.{ .bool = false });
-        }
-        var alias_def = ClassDef{ .name = alias, .parent = original, .alias_of = cls.alias_of orelse cls.name, .is_internal = cls.is_internal };
-        // copy interfaces
-        for (cls.interfaces.items) |iface| {
-            try alias_def.interfaces.append(ctx.allocator, iface);
-        }
-        try ctx.vm.classes.put(ctx.allocator, alias, alias_def);
-        // copy method info so hasMethod and method visibility checks work
-        var method_iter = cls.methods.iterator();
-        while (method_iter.next()) |entry| {
-            var alias_class = ctx.vm.classes.getPtr(alias) orelse continue;
-            try alias_class.methods.put(ctx.allocator, entry.key_ptr.*, entry.value_ptr.*);
-        }
-        // don't register alias::method in functions map - resolveMethod walks
-        // the parent chain and must find the original class name for correct
-        // private visibility checks in currentDefiningClass
-        return NativeResult.scalar(.{ .bool = true });
+    const in_classes = vm.classes.getKey(original);
+    const in_interfaces = vm.interfaces.getKey(original);
+    const in_traits = vm.traits.getKey(original);
+    const declared = in_classes orelse in_interfaces orelse in_traits orelse {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Class \"{s}\" not found", .{written});
+        defer ctx.allocator.free(msg);
+        try vm.emitWarning(msg);
+        return NativeResult.scalar(.{ .bool = false });
+    };
+    // zend_register_class_alias_ex: the alias names the class entry itself
+    const bare_alias = if (alias.len > 0 and alias[0] == '\\') alias[1..] else alias;
+    const taken = vm.classes.contains(bare_alias) or vm.interfaces.contains(bare_alias) or vm.traits.contains(bare_alias);
+    if (if (taken) try vm.redeclarationMessageAs(declared, alias) else null) |msg| {
+        defer ctx.allocator.free(msg);
+        try vm.emitWarning(msg);
+        return NativeResult.scalar(.{ .bool = false });
     }
-    return NativeResult.scalar(.{ .bool = false });
+    const kept = try vm.internName(bare_alias);
+    if (in_classes) |name| try vm.classes.putAlias(vm.allocator, kept, name);
+    if (in_interfaces) |name| try vm.interfaces.putAlias(vm.allocator, kept, name);
+    if (in_traits) |name| try vm.traits.putAlias(vm.allocator, kept, name);
+    return NativeResult.scalar(.{ .bool = true });
 }
 
 // a parameter's current value (php reads the CV, so a parameter the function

@@ -151,6 +151,126 @@ pub fn Map(comptime V: type) type {
     return std.HashMapUnmanaged([]const u8, V, Context, std.hash_map.default_max_load_percentage);
 }
 
+// a class table that also answers to class_alias() names: php registers the
+// same class entry under the alias, so a lookup by an alias finds the class
+// itself (its declared name, its storage). aliases are not listed by
+// iteration or counted
+pub fn AliasMap(comptime V: type) type {
+    return struct {
+        const Self = @This();
+        const Inner = Map(V);
+        pub const Entry = Inner.Entry;
+        pub const KV = Inner.KV;
+
+        map: Inner = .{},
+        // alias -> the declared name of the class it stands for
+        aliases: Map([]const u8) = .{},
+        // a bit per alias (by length and last character, case-folded), so
+        // the lookups that miss the class table (instanceof checks, names
+        // that are interfaces) rarely hash the name a second time
+        alias_bits: [4]u64 = .{ 0, 0, 0, 0 },
+
+        fn aliasBit(name: []const u8) u8 {
+            const last: u8 = if (name.len > 0) std.ascii.toLower(name[name.len - 1]) else 0;
+            return @truncate(name.len *% 31 +% last);
+        }
+
+        // the declared name an alias stands for, null when name is no alias
+        pub inline fn aliasTarget(self: *const Self, name: []const u8) ?[]const u8 {
+            if (self.aliases.count() == 0) return null;
+            const bit = aliasBit(name);
+            if (self.alias_bits[bit >> 6] & (@as(u64, 1) << @intCast(bit & 63)) == 0) return null;
+            return self.aliases.get(name);
+        }
+
+        pub fn putAlias(self: *Self, allocator: std.mem.Allocator, alias: []const u8, target: []const u8) !void {
+            try self.aliases.put(allocator, alias, target);
+            const bit = aliasBit(alias);
+            self.alias_bits[bit >> 6] |= @as(u64, 1) << @intCast(bit & 63);
+        }
+
+        pub inline fn get(self: *const Self, name: []const u8) ?V {
+            if (self.map.get(name)) |v| return v;
+            const target = self.aliasTarget(name) orelse return null;
+            return self.map.get(target);
+        }
+
+        pub inline fn getPtr(self: *const Self, name: []const u8) ?*V {
+            if (self.map.getPtr(name)) |v| return v;
+            const target = self.aliasTarget(name) orelse return null;
+            return self.map.getPtr(target);
+        }
+
+        pub inline fn getKey(self: *const Self, name: []const u8) ?[]const u8 {
+            if (self.map.getKey(name)) |k| return k;
+            const target = self.aliasTarget(name) orelse return null;
+            return self.map.getKey(target);
+        }
+
+        pub inline fn getEntry(self: *const Self, name: []const u8) ?Entry {
+            if (self.map.getEntry(name)) |e| return e;
+            const target = self.aliasTarget(name) orelse return null;
+            return self.map.getEntry(target);
+        }
+
+        pub inline fn contains(self: *const Self, name: []const u8) bool {
+            return self.map.contains(name) or self.aliasTarget(name) != null;
+        }
+
+        pub fn put(self: *Self, allocator: std.mem.Allocator, name: []const u8, value: V) !void {
+            try self.map.put(allocator, name, value);
+        }
+
+        pub fn fetchRemove(self: *Self, name: []const u8) ?KV {
+            return self.map.fetchRemove(name);
+        }
+
+        pub fn count(self: *const Self) Inner.Size {
+            return self.map.count();
+        }
+
+        pub fn iterator(self: *const Self) Inner.Iterator {
+            return self.map.iterator();
+        }
+
+        pub fn keyIterator(self: *const Self) Inner.KeyIterator {
+            return self.map.keyIterator();
+        }
+
+        pub fn valueIterator(self: *const Self) Inner.ValueIterator {
+            return self.map.valueIterator();
+        }
+
+        pub fn clearRetainingCapacity(self: *Self) void {
+            self.map.clearRetainingCapacity();
+            self.clearAliases();
+        }
+
+        pub fn clearAliases(self: *Self) void {
+            self.aliases.clearRetainingCapacity();
+            self.alias_bits = .{ 0, 0, 0, 0 };
+        }
+
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            self.map.deinit(allocator);
+            self.aliases.deinit(allocator);
+        }
+    };
+}
+
+test "an alias finds the class it names" {
+    const a = std.testing.allocator;
+    var m: AliasMap(u8) = .{};
+    defer m.deinit(a);
+    try m.put(a, "Foo", 1);
+    try m.putAlias(a, "Bar", "Foo");
+    try std.testing.expectEqual(@as(?u8, 1), m.get("bar"));
+    try std.testing.expectEqualStrings("Foo", m.getKey("BAR").?);
+    try std.testing.expect(m.contains("bar"));
+    try std.testing.expectEqual(@as(u32, 1), m.count());
+    try std.testing.expect(m.aliasTarget("foo") == null);
+}
+
 // method names ignore case as well, except property hook entries
 // (prop$hook_get), which follow their property's case-sensitive name
 pub const MethodContext = struct {

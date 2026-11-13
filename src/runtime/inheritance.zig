@@ -348,8 +348,7 @@ fn canonicalType(p: *const Pending, arena: std.mem.Allocator, text: []const u8, 
 }
 
 fn canonicalName(p: *const Pending, name: []const u8) []const u8 {
-    const def = p.vm.classes.getPtr(name) orelse return name;
-    return def.alias_of orelse name;
+    return p.vm.classes.aliasTarget(name) orelse p.vm.interfaces.aliasTarget(name) orelse name;
 }
 
 // zend_do_perform_implementation_check
