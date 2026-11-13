@@ -1784,7 +1784,10 @@ fn native_scandir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     }
     if (!try directoryNames(ctx, args[0].string.bytes(), &names)) {
         const err = dirOpenError(args[0].string.bytes());
-        if (userWrapperFor(ctx.vm, args[0].string.bytes()) == null) try warn(ctx, "scandir({s}): Failed to open directory: {s}", .{ args[0].string.bytes(), err.text });
+        if (userWrapperFor(ctx.vm, args[0].string.bytes()) == null) {
+            try warnWindowsDirFailure(ctx, "scandir", args[0].string.bytes(), err);
+            try warn(ctx, "scandir({s}): Failed to open directory: {s}", .{ args[0].string.bytes(), err.text });
+        }
         try warn(ctx, "scandir(): (errno {d}): {s}", .{ err.errno, err.text });
         return NativeResult.scalar(.{ .bool = false });
     }
@@ -1812,7 +1815,8 @@ fn native_scandir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
 // the names in a directory, `.` and `..` first: the disk and the executable's
 // packed application both contribute, a name once; false when neither has the
 // directory
-const DirOpenError = struct { errno: i64, text: []const u8 };
+// errno and its text, and the windows error the same failure gives there
+const DirOpenError = struct { errno: i64, text: []const u8, win32: u32 = 2 };
 
 // why the plain wrapper's opendir failed, as strerror(errno) words it
 fn dirOpenError(path: []const u8) DirOpenError {
@@ -1820,14 +1824,22 @@ fn dirOpenError(path: []const u8) DirOpenError {
     const dir_path = bundle.osPath(&os_buf, path);
     var dir = std.Io.Dir.cwd().openDir(platform.io, dir_path, .{ .iterate = true }) catch |err| return switch (err) {
         error.FileNotFound, error.BadPathName => .{ .errno = 2, .text = "No such file or directory" },
-        error.NotDir => .{ .errno = 20, .text = "Not a directory" },
-        error.AccessDenied, error.PermissionDenied => .{ .errno = 13, .text = "Permission denied" },
-        error.NameTooLong => .{ .errno = 36, .text = "File name too long" },
-        error.SymLinkLoop => .{ .errno = 40, .text = "Too many levels of symbolic links" },
+        error.NotDir => .{ .errno = 20, .text = "Not a directory", .win32 = 267 },
+        error.AccessDenied, error.PermissionDenied => .{ .errno = 13, .text = "Permission denied", .win32 = 5 },
+        error.NameTooLong => .{ .errno = 36, .text = "File name too long", .win32 = 206 },
+        error.SymLinkLoop => .{ .errno = 40, .text = "Too many levels of symbolic links", .win32 = 1921 },
         else => .{ .errno = 2, .text = "No such file or directory" },
     };
     dir.close(platform.io);
     return .{ .errno = 2, .text = "No such file or directory" };
+}
+
+// php's windows plain wrapper reports the system's own error before the
+// generic failure
+fn warnWindowsDirFailure(ctx: *NativeContext, comptime func: []const u8, path: []const u8, err: DirOpenError) RuntimeError!void {
+    if (!platform.is_windows) return;
+    var buf: [1100]u8 = undefined;
+    try warn(ctx, func ++ "({s}): {s}", .{ path, @import("filesystem_win.zig").docrefFromError(&buf, err.win32) });
 }
 
 fn directoryNames(ctx: *NativeContext, path: []const u8, names: *std.ArrayListUnmanaged(Value.String)) RuntimeError!bool {
@@ -1954,7 +1966,9 @@ fn openDirectory(ctx: *NativeContext, args: []const Value, comptime func: []cons
     defer names.deinit(ctx.allocator);
     defer for (names.items) |name| name.release();
     if (!try directoryNames(ctx, args[0].string.bytes(), &names)) {
-        try warn(ctx, func ++ "({s}): Failed to open directory: {s}", .{ args[0].string.bytes(), dirOpenError(args[0].string.bytes()).text });
+        const err = dirOpenError(args[0].string.bytes());
+        try warnWindowsDirFailure(ctx, func, args[0].string.bytes(), err);
+        try warn(ctx, func ++ "({s}): Failed to open directory: {s}", .{ args[0].string.bytes(), err.text });
         return NativeResult.scalar(.{ .bool = false });
     }
     const names_arr = try ctx.vm.allocArray();

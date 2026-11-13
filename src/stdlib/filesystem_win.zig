@@ -90,3 +90,18 @@ fn native_stream_set_blocking(ctx: *NativeContext, args: []const Value) RuntimeE
     const path = obj.get("__path");
     return NativeResult.scalar(.{ .bool = path == .string and std.mem.startsWith(u8, path.string.bytes(), "php://") });
 }
+
+// php_win32_docref1_from_error's text: the system's message for the error
+// without its trailing line break and period, then two more characters cut
+// off (php trims twice), and the code
+pub fn docrefFromError(buf: []u8, code: u32) []const u8 {
+    const win32 = @import("../win32.zig");
+    var wide: [512]u16 = undefined;
+    const n = win32.FormatMessageW(win32.FORMAT_MESSAGE_FROM_SYSTEM | win32.FORMAT_MESSAGE_IGNORE_INSERTS, null, code, 0, &wide, wide.len, null);
+    var text: []const u16 = wide[0..n];
+    while (text.len > 0 and (text[text.len - 1] == '\r' or text[text.len - 1] == '\n' or text[text.len - 1] == '.')) text = text[0 .. text.len - 1];
+    if (text.len >= 2) text = text[0 .. text.len - 2];
+    var utf8: [1024]u8 = undefined;
+    const len = std.unicode.utf16LeToUtf8(&utf8, text) catch 0;
+    return std.fmt.bufPrint(buf, "{s} (code: {d})", .{ utf8[0..len], code }) catch "";
+}

@@ -75,6 +75,9 @@ pub const PROCESS_INFORMATION = extern struct {
 
 pub extern "kernel32" fn CloseHandle(handle: HANDLE) callconv(.winapi) BOOL;
 pub extern "kernel32" fn GetLastError() callconv(.winapi) DWORD;
+pub extern "kernel32" fn FormatMessageW(flags: DWORD, source: ?*const anyopaque, message_id: DWORD, language_id: DWORD, buffer: [*]u16, size: DWORD, arguments: ?*anyopaque) callconv(.winapi) DWORD;
+pub const FORMAT_MESSAGE_IGNORE_INSERTS: DWORD = 0x200;
+pub const FORMAT_MESSAGE_FROM_SYSTEM: DWORD = 0x1000;
 pub extern "kernel32" fn GetCurrentProcess() callconv(.winapi) HANDLE;
 pub extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) DWORD;
 pub extern "kernel32" fn GetStdHandle(id: DWORD) callconv(.winapi) ?HANDLE;
