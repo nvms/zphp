@@ -1242,8 +1242,17 @@ fn native_get_class_vars(ctx: *NativeContext, args: []const Value) RuntimeError!
     return NativeResult.borrowed(.{ .array = arr });
 }
 
+// Z_PARAM_OBJ_OR_CLASS_NAME's TypeError
+fn parentClassArgError(ctx: *NativeContext, arg: Value) RuntimeError!NativeResult {
+    const msg = try std.fmt.allocPrint(ctx.allocator, "get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, {s} given", .{phpTypeName(arg)});
+    defer ctx.allocator.free(msg);
+    try ctx.vm.setPendingException("TypeError", msg);
+    return error.RuntimeError;
+}
+
 fn native_get_parent_class(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) {
+        try ctx.vm.raiseError(8192, "Calling get_parent_class() without arguments is deprecated");
         // no-arg form: use the calling class
         const caller = ctx.vm.currentDefiningClass() orelse return NativeResult.scalar(Value{ .bool = false });
         const cls = ctx.vm.classes.get(caller) orelse return NativeResult.scalar(Value{ .bool = false });
@@ -1255,13 +1264,11 @@ fn native_get_parent_class(ctx: *NativeContext, args: []const Value) RuntimeErro
     else if (args[0] == .string)
         args[0].string.bytes()
     else
-        return NativeResult.scalar(Value{ .bool = false });
+        return parentClassArgError(ctx, args[0]);
     const class_name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
+    if (args[0] == .string and !ctx.vm.classes.contains(class_name) and !ctx.vm.interfaces.contains(class_name) and !ctx.vm.traits.contains(class_name)) try ctx.vm.tryAutoload(class_name);
     if (ctx.vm.traits.contains(class_name) or ctx.vm.interfaces.contains(class_name)) return NativeResult.scalar(.{ .bool = false });
-    const cls = ctx.vm.classes.get(class_name) orelse {
-        try ctx.vm.setPendingException("TypeError", "get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name");
-        return error.RuntimeError;
-    };
+    const cls = ctx.vm.classes.get(class_name) orelse return parentClassArgError(ctx, args[0]);
     if (cls.parent) |p| return NativeResult.copyString(ctx.allocator, p);
     return NativeResult.scalar(Value{ .bool = false });
 }
