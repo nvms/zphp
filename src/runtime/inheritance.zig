@@ -724,6 +724,7 @@ fn checkProperties(p: *Pending, arena: std.mem.Allocator) (RuntimeError || error
     const parent_name = def.parent orelse return;
     for (def.properties.items) |child| {
         const found = inheritedProperty(p, parent_name, child.name) orelse continue;
+        for ([_][]const u8{ "get", "set" }) |kind| try checkPropertyHook(p, arena, child.name, parent_name, kind);
         try checkPropertyType(p, arena, child.name, child.type_str, found.class, found.prop.type_str, propertyVariance(found.def, found.prop));
     }
     for (def.static_props.keys()) |name| {
@@ -738,6 +739,26 @@ fn checkProperties(p: *Pending, arena: std.mem.Allocator) (RuntimeError || error
             current = cdef.parent;
         }
     }
+}
+
+// inherit_property_hook: a hook the class declares for a property it
+// redeclares is checked against the parent's hook of that kind as a method
+// (final, then do_inheritance_check_on_method), before the property's type
+fn checkPropertyHook(p: *Pending, arena: std.mem.Allocator, prop: []const u8, parent_name: []const u8, kind: []const u8) (RuntimeError || error{OutOfMemory})!void {
+    const hook = try std.fmt.allocPrint(arena, "{s}$hook_{s}", .{ prop, kind });
+    if (!p.def.methods.contains(hook)) return;
+    const owner = ancestorDeclaring(p, parent_name, hook) orelse return;
+    var parent = (try methodOf(p, arena, owner, hook, false)) orelse return;
+    var child = (try methodOf(p, arena, p.name, hook, false)) orelse return;
+    // hooks are registered private; the property's own visibility was
+    // checked with the property (a private parent property never gets here)
+    parent.visibility = .public;
+    child.visibility = .public;
+    const shown = try std.fmt.allocPrint(arena, "${s}::{s}", .{ prop, kind });
+    parent.name = shown;
+    child.name = shown;
+    if (parent.is_final) return fatal(p.vm, child, "Cannot override final property hook {s}::{s}()", .{ parent.class, shown });
+    try checkMethod(p, arena, child, parent, false);
 }
 
 const PropVariance = enum { invariant, covariant, contravariant };
