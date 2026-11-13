@@ -7046,7 +7046,7 @@ pub const VM = struct {
                         const vr = self.findPropertyVisibility(eap_obj.class_name, prop_name);
                         const slot_present = eap_obj.slots != null and eap_obj.getSlotIndexForScope(prop_name, vr.defining_class) != null;
                         const present = !eap_obj.isUnset(prop_name) and (slot_present or eap_obj.properties.contains(prop_name));
-                        if (present and !(vr.declared and !self.checkVisibility(vr.defining_class, vr.visibility))) break :overloaded;
+                        if (present and !(vr.declared and !self.propVisible(vr, prop_name, vr.visibility))) break :overloaded;
                         // &__get: the write goes through the reference it returns
                         if (try self.magicGetReturnsRef(eap_obj)) {
                             self.setReturnRef(null);
@@ -8304,7 +8304,7 @@ pub const VM = struct {
                         const cur = obj.getForScope(name, scope);
                         // only plain, visible storage is ours to separate: hooks,
                         // __get, and referenced properties are left to the fetch
-                        if (cur == .array and self.checkVisibility(vr.defining_class, vr.visibility) and
+                        if (cur == .array and self.propVisible(vr, name, vr.visibility) and
                             !self.hasPropHook(obj.class_name, name, .get) and !self.propIsReferenced(obj, name))
                         {
                             const sep = try self.cowSeparate(cur.array);
@@ -8684,7 +8684,7 @@ pub const VM = struct {
                         // a property the running scope can't reach is not set
                         // for it: __isset decides, else false
                         const vr = self.findPropertyVisibility(obj.class_name, prop_name);
-                        const reachable = self.checkVisibility(vr.defining_class, vr.visibility) and !obj.isUnset(prop_name);
+                        const reachable = self.propVisible(vr, prop_name, vr.visibility) and !obj.isUnset(prop_name);
                         if (reachable and (obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndexForScope(prop_name, vr.defining_class) != null))) {
                             self.push(.{ .bool = obj.getForScope(prop_name, vr.defining_class) != .null });
                         } else if (self.magicApplies(obj, prop_name, .isset)) {
@@ -8727,7 +8727,7 @@ pub const VM = struct {
                         // a property the running scope can't reach is not set
                         // for it: __isset decides, else false
                         const vr = self.findPropertyVisibility(obj.class_name, prop_name);
-                        const reachable = self.checkVisibility(vr.defining_class, vr.visibility) and !obj.isUnset(prop_name);
+                        const reachable = self.propVisible(vr, prop_name, vr.visibility) and !obj.isUnset(prop_name);
                         if (reachable and (obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndexForScope(prop_name, vr.defining_class) != null))) {
                             self.push(.{ .bool = obj.getForScope(prop_name, vr.defining_class) != .null });
                         } else if (self.magicApplies(obj, prop_name, .isset)) {
@@ -10447,7 +10447,7 @@ pub const VM = struct {
                             (val != .null or obj.properties.contains(prop_name) or slot_present_gp);
                         if (is_present) {
                             const vr = gp_vr;
-                            if (!self.checkVisibility(vr.defining_class, vr.visibility)) {
+                            if (!self.propVisible(vr, prop_name, vr.visibility)) {
                                 if (self.magicApplies(obj, prop_name, .get)) {
                                     const result = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicGet(obj, prop_name) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
                                     self.push(result);
@@ -10575,7 +10575,7 @@ pub const VM = struct {
                             // "not set" - route to __get or null, never the
                             // raw value (a parent's private prop must not leak
                             // to a subclass scope)
-                            if (!self.checkVisibility(cvr.defining_class, cvr.visibility)) {
+                            if (!self.propVisible(cvr, prop_name, cvr.visibility)) {
                                 self.push((implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.coalesceMagic(obj, prop_name, true) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; }));
                             } else {
                                 self.push(val);
@@ -21128,7 +21128,7 @@ pub const VM = struct {
     fn capturePropertyCell(self: *VM, slot: usize, obj: *PhpObject, name: []const u8) RuntimeError!void {
         const vr = self.findPropertyVisibility(obj.class_name, name);
         var denial: ?[]const u8 = null;
-        if (vr.set_visibility != vr.visibility and !self.checkVisibility(vr.defining_class, vr.set_visibility)) {
+        if (vr.set_visibility != vr.visibility and !self.propVisible(vr, name, vr.set_visibility)) {
             const ro: []const u8 = if (vr.is_readonly and vr.set_visibility == .protected) " readonly" else "";
             denial = if (self.currentDefiningClass()) |sc|
                 try std.fmt.allocPrint(self.allocator, "Cannot indirectly modify {s}(set){s} property {s}::${s} from scope {s}", .{ @tagName(vr.set_visibility), ro, vr.defining_class, name, sc })
@@ -21919,6 +21919,34 @@ pub const VM = struct {
         return self.checkVisibility(root, vis);
     }
 
+    // php checks a protected property against the class that first declared
+    // it (property_info->prototype->ce with is_protected_compatible_scope),
+    // so classes under a common declaring ancestor reach each other's
+    pub fn propVisible(self: *VM, vr: VisResult, name: []const u8, vis: ClassDef.Visibility) bool {
+        if (self.checkVisibility(vr.defining_class, vis)) return true;
+        if (vis != .protected) return false;
+        const root = self.propertyRootClass(vr.defining_class, name) orelse return false;
+        return self.checkVisibility(root, vis);
+    }
+
+    // the topmost ancestor whose declaration of the property the given
+    // class's overrides (a private one starts a new chain), or null
+    fn propertyRootClass(self: *VM, defining: []const u8, name: []const u8) ?[]const u8 {
+        var root: ?[]const u8 = null;
+        var current = if (self.classes.getPtr(defining)) |d| d.parent else null;
+        while (current) |cn| {
+            const cls = self.classes.getPtr(cn) orelse break;
+            for (cls.properties.items) |p| {
+                if (!std.mem.eql(u8, p.name, name)) continue;
+                if (p.visibility == .private) return root;
+                root = cls.name;
+                break;
+            }
+            current = cls.parent;
+        }
+        return root;
+    }
+
     pub fn checkVisibility(self: *VM, target_class: []const u8, vis: ClassDef.Visibility) bool {
         if (vis == .public) return true;
         // a running closure sees what its scope sees, never what the class
@@ -21985,14 +22013,14 @@ pub const VM = struct {
     fn accessDeniedMessage(self: *VM, obj: *PhpObject, name: []const u8) RuntimeError!?[]u8 {
         if (badPropertyName(name)) return try self.allocator.dupe(u8, bad_property_name_message);
         const vr = self.findPropertyVisibility(obj.class_name, name);
-        if (!vr.declared or self.checkVisibility(vr.defining_class, vr.visibility)) return null;
+        if (!vr.declared or self.propVisible(vr, name, vr.visibility)) return null;
         return try std.fmt.allocPrint(self.allocator, "Cannot access {s} property {s}::${s}", .{ @tagName(vr.visibility), obj.class_name, name });
     }
 
     fn shouldCallMagicUnset(self: *VM, obj: *PhpObject, name: []const u8) bool {
         if (!self.magicApplies(obj, name, .unset)) return false;
         const vr = self.findPropertyVisibility(obj.class_name, name);
-        return obj.isUnset(name) or !self.checkVisibility(vr.defining_class, vr.visibility) or
+        return obj.isUnset(name) or !self.propVisible(vr, name, vr.visibility) or
             (obj.getSlotIndex(name) == null and !obj.properties.contains(name));
     }
 
@@ -22162,7 +22190,7 @@ pub const VM = struct {
             _ = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicProperty(obj, .set, prop_name, val.*) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) return .dispatched; return error.RuntimeError; }; });
             return .magic;
         }
-        if (!self.checkVisibility(vr.defining_class, vr.visibility)) {
+        if (!self.propVisible(vr, prop_name, vr.visibility)) {
             if (self.magicApplies(obj, prop_name, .set)) {
                 _ = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicProperty(obj, .set, prop_name, val.*) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) return .dispatched; return error.RuntimeError; }; });
                 return .magic;
@@ -22239,11 +22267,11 @@ pub const VM = struct {
             self.consumeReinit(obj, name);
         } else if (action == .unset and vr.is_readonly and obj.rawForScope(name, vr.defining_class) != .undef) {
             msg = try std.fmt.allocPrint(self.allocator, "Cannot unset readonly property {s}::${s}", .{ vr.defining_class, name });
-        } else if (action == .indirect and vr.is_readonly and self.checkVisibility(vr.defining_class, vr.visibility)) {
+        } else if (action == .indirect and vr.is_readonly and self.propVisible(vr, name, vr.visibility)) {
             // zend_std_read_property for writing: a readonly property is never
             // modified in place, whatever the scope
             msg = try std.fmt.allocPrint(self.allocator, "Cannot indirectly modify readonly property {s}::${s}", .{ vr.defining_class, name });
-        } else if (vr.set_visibility != vr.visibility and !self.checkVisibility(vr.defining_class, vr.set_visibility)) {
+        } else if (vr.set_visibility != vr.visibility and !self.propVisible(vr, name, vr.set_visibility)) {
             const verb: []const u8 = switch (action) {
                 .write => "modify",
                 .indirect => "indirectly modify",
@@ -22256,7 +22284,7 @@ pub const VM = struct {
                 try std.fmt.allocPrint(self.allocator, "Cannot {s} {s}(set){s} property {s}::${s} from scope {s}", .{ verb, @tagName(vr.set_visibility), ro, vr.defining_class, name, sc })
             else
                 try std.fmt.allocPrint(self.allocator, "Cannot {s} {s}(set){s} property {s}::${s} from global scope", .{ verb, @tagName(vr.set_visibility), ro, vr.defining_class, name });
-        } else if (action == .indirect and !self.checkVisibility(vr.defining_class, vr.visibility)) {
+        } else if (action == .indirect and !self.propVisible(vr, name, vr.visibility)) {
             msg = try std.fmt.allocPrint(self.allocator, "Cannot access {s} property {s}::${s}", .{ @tagName(vr.visibility), obj.class_name, name });
         } else if (action == .indirect and vr.is_readonly) {
             msg = try std.fmt.allocPrint(self.allocator, "Cannot indirectly modify readonly property {s}::${s}", .{ vr.defining_class, name });
