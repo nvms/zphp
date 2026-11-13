@@ -12361,7 +12361,8 @@ pub const VM = struct {
                     }
                     const method_val = self.stack[self.sp - ac - 1];
                     const method_name = if (method_val == .string) method_val.string.bytes() else {
-                        self.setErrorMsg("Fatal error: dynamic method name must be a string", .{});
+                        self.dropN(ac + 1);
+                        if (try self.throwBuiltinException("Error", "Method name must be a string")) continue;
                         return error.RuntimeError;
                     };
                     const full_name = self.resolveMethod(class_name, method_name) catch {
@@ -12399,12 +12400,15 @@ pub const VM = struct {
                     const ac: usize = arg_count;
                     const method_val = self.stack[self.sp - ac - 1];
                     const class_val = self.stack[self.sp - ac - 2];
-                    const method_name = if (method_val == .string) method_val.string.bytes() else {
-                        self.setErrorMsg("Fatal error: dynamic method name must be a string", .{});
+                    // zend_fetch_class's check comes before the method name's
+                    const raw_class = if (class_val == .string) class_val.string.bytes() else if (class_val == .object) class_val.object.class_name else {
+                        self.dropN(ac + 2);
+                        if (try self.throwBuiltinException("Error", "Class name must be a valid object or a string")) continue;
                         return error.RuntimeError;
                     };
-                    const raw_class = if (class_val == .string) class_val.string.bytes() else if (class_val == .object) class_val.object.class_name else {
-                        self.setErrorMsg("Fatal error: dynamic class name must be a string", .{});
+                    const method_name = if (method_val == .string) method_val.string.bytes() else {
+                        self.dropN(ac + 2);
+                        if (try self.throwBuiltinException("Error", "Method name must be a string")) continue;
                         return error.RuntimeError;
                     };
                     const target = self.dynamicStaticTarget(raw_class);
@@ -12451,12 +12455,18 @@ pub const VM = struct {
                         self.error_msg = "Fatal error: argument unpacking requires an array";
                         return error.RuntimeError;
                     }
-                    const method_name = if (method_val == .string) method_val.string.bytes() else {
-                        self.error_msg = "Fatal error: dynamic method name must be a string";
+                    const raw_class = if (class_val == .string) class_val.string.bytes() else if (class_val == .object) class_val.object.class_name else {
+                        self.stackRelease(args_val);
+                        self.stackRelease(method_val);
+                        self.stackRelease(class_val);
+                        if (try self.throwBuiltinException("Error", "Class name must be a valid object or a string")) continue;
                         return error.RuntimeError;
                     };
-                    const raw_class = if (class_val == .string) class_val.string.bytes() else if (class_val == .object) class_val.object.class_name else {
-                        self.error_msg = "Fatal error: dynamic class name must be a string";
+                    const method_name = if (method_val == .string) method_val.string.bytes() else {
+                        self.stackRelease(args_val);
+                        self.stackRelease(method_val);
+                        self.stackRelease(class_val);
+                        if (try self.throwBuiltinException("Error", "Method name must be a string")) continue;
                         return error.RuntimeError;
                     };
                     const target = self.dynamicStaticTarget(raw_class);
