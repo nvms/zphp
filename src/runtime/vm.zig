@@ -19,6 +19,7 @@ const MemoryAccount = @import("memory.zig").MemoryAccount;
 const PhpArray = @import("value.zig").PhpArray;
 const byref_args = @import("../stdlib/byref_args.zig");
 const PhpObject = @import("value.zig").PhpObject;
+const FakeClosure = @import("value.zig").FakeClosure;
 const Generator = @import("value.zig").Generator;
 const Fiber = @import("value.zig").Fiber;
 const ArrayRefBinding = @import("value.zig").ArrayRefBinding;
@@ -298,7 +299,7 @@ pub const NativeContext = struct {
             .function => |n| n,
             .closure => |obj| blk: {
                 if (obj.closureName()) |instance| break :blk instance;
-                const inner = obj.get("__callable");
+                const inner = obj.fakeCallable();
                 break :blk if (inner == .string) inner.string.bytes() else return;
             },
             else => return,
@@ -363,7 +364,7 @@ pub const NativeContext = struct {
             .function => |n| n,
             .closure => |obj| blk: {
                 if (obj.closureName()) |instance| break :blk instance;
-                const inner = obj.get("__callable");
+                const inner = obj.fakeCallable();
                 break :blk if (inner == .string) inner.string.bytes() else return null;
             },
             .method => |m| m.registered orelse return null,
@@ -2146,6 +2147,13 @@ pub const VM = struct {
             self.releaseClosureInstance(obj);
             return true;
         }
+        if (obj.fakeClosure()) |state| {
+            obj.native = .{};
+            const callable = state.callable;
+            self.allocator.destroy(state);
+            self.releaseValue(callable);
+            return true;
+        }
         if (self.nativeCleanup(obj.class_name)) |cleanup| return cleanup(obj);
         return obj.native.kind == .none;
     }
@@ -3185,6 +3193,11 @@ pub const VM = struct {
                 if (o.lazyInitializer() == .string) {
                     self.releaseValue(o.lazyInitializer());
                     o.lazy.?.initializer = .null;
+                }
+                if (o.fakeClosure()) |state| {
+                    if (state.callable == .string) self.releaseValue(state.callable);
+                    o.native = .{};
+                    self.allocator.destroy(state);
                 }
                 if (o.slots) |slots| {
                     for (slots) |*slot| {
@@ -8729,6 +8742,10 @@ pub const VM = struct {
                         // captures, $this and scope
                         const copy = try self.copyClosureInstance(name, self.closureThisByName(name), self.closureDefClassByName(name), self.closureScopeByName(name));
                         self.pushTransfer(copy);
+                    } else if (val == .object and val.object.fakeClosure() != null) {
+                        const state = val.object.fakeClosure().?;
+                        const copy = try self.newFakeClosure(state.callable, state.called_class);
+                        self.push(.{ .object = copy });
                     } else if (val == .object) {
                         var src = val.object;
                         self.triggerLazyInit(src) catch {
@@ -8961,10 +8978,7 @@ pub const VM = struct {
                     }
                     if (held_pair) |pair| callable = .{ .array = pair };
                     if (function) |registered| callable = .{ .string = Value.String.borrowed(registered) };
-                    const obj = try self.allocObject(.{ .class_name = "Closure" });
-                    try obj.set(self.allocator, "__callable", callable);
-                    if (forwarded) |class| try obj.set(self.allocator, "__called_class", .{ .string = Value.String.borrowed(class) });
-                    self.push(.{ .object = obj });
+                    self.push(.{ .object = try self.newFakeClosure(callable, forwarded) });
                 },
 
                 .closure_bind => {
@@ -18540,6 +18554,30 @@ pub const VM = struct {
         }
     }
 
+    // a Closure made from a callable (php's zend_create_fake_closure): the
+    // object comes with no reference taken, like allocObject's
+    pub fn newFakeClosure(self: *VM, callable: Value, called_class: ?[]const u8) !*PhpObject {
+        // php's fake closure holds the object and the function, not an array:
+        // a private pair, uncounted, so the cycle collector counts what php's does
+        var target = callable;
+        if (callable == .array and callable.array.entries.items.len == 2) {
+            const pair = try self.allocArray();
+            try pair.append(self.allocator, callable.array.entries.items[0].value);
+            try pair.append(self.allocator, callable.array.entries.items[1].value);
+            pair.uncounted = true;
+            target = .{ .array = pair };
+        }
+        const state = try self.allocator.create(FakeClosure);
+        errdefer self.allocator.destroy(state);
+        state.* = .{ .callable = target, .called_class = called_class };
+        const obj = try self.allocObject(.{
+            .class_name = "Closure",
+            .native = .{ .kind = .fake_closure, .ptr = @intFromPtr(state) },
+        });
+        retainValue(target);
+        return obj;
+    }
+
     fn allocClosureInstanceName(self: *VM, compile_name: []const u8) ![]const u8 {
         var i = self.free_closure_names.items.len;
         while (i > 0) {
@@ -19186,7 +19224,7 @@ pub const VM = struct {
     // what a Closure made from a callable (first-class callable syntax,
     // fromCallable) calls: its function's scope and staticness
     pub fn fakeClosureTarget(self: *VM, closure: *PhpObject) FakeClosureTarget {
-        const callable = closure.get("__callable");
+        const callable = closure.fakeCallable();
         var class: []const u8 = "";
         var method: []const u8 = "";
         switch (callable) {
@@ -20729,7 +20767,7 @@ pub const VM = struct {
             },
             .object => |o| {
                 if (o.closureName()) |name| return self.functionByValue(name, pos);
-                if (std.mem.eql(u8, o.class_name, "Closure")) return self.callableByValue(o.get("__callable"), pos);
+                if (o.fakeClosure()) |state| return self.callableByValue(state.callable, pos);
                 return self.methodByValue(callable, "__invoke", pos);
             },
             .array => |a| {
@@ -25207,8 +25245,8 @@ pub const VM = struct {
 
     // the function a Closure made from a function's name calls
     fn fakeClosureFunction(v: Value) ?[]const u8 {
-        if (v != .object or v.object.native.kind != .none or !std.mem.eql(u8, v.object.class_name, "Closure")) return null;
-        const callable = v.object.get("__callable");
+        if (v != .object) return null;
+        const callable = v.object.fakeCallable();
         if (callable != .string or std.mem.indexOf(u8, callable.string.bytes(), "::") != null) return null;
         return callable.string.bytes();
     }
@@ -28306,6 +28344,7 @@ pub const VM = struct {
             while (pit.next()) |e| if (gcTargetMatches(t, e.value_ptr.*)) gcNote(&c, in_graph, "object {s}#{d} rc {d} scratch {d} prop {s}", .{ obj.class_name, obj.id, obj.refcount, obj.scratch_rc, e.key_ptr.* });
             if (gcTargetMatches(t, obj.backingValue())) gcNote(&c, in_graph, "object {s}#{d} lazy_backing", .{ obj.class_name, obj.id });
             if (gcTargetMatches(t, obj.lazyInitializer())) gcNote(&c, in_graph, "object {s}#{d} lazy_initializer", .{ obj.class_name, obj.id });
+            if (gcTargetMatches(t, obj.fakeCallable())) gcNote(&c, in_graph, "object {s}#{d} fake closure", .{ obj.class_name, obj.id });
         }
         const rc: u32 = switch (t) {
             .obj => |o| o.refcount,
@@ -28644,6 +28683,7 @@ pub const VM = struct {
                             }
                         };
                         work.append(self.allocator, .{ .value = obj.lazyInitializer() }) catch return;
+                        work.append(self.allocator, .{ .value = obj.fakeCallable() }) catch return;
                         work.append(self.allocator, .{ .value = obj.backingValue() }) catch return;
                         if (obj.slots) |slots| for (slots) |slot| {
                             work.append(self.allocator, .{ .value = slot }) catch return;
@@ -28692,6 +28732,7 @@ pub const VM = struct {
             }
         };
         self.cycleDecChild(obj.lazyInitializer(), vo, va);
+        self.cycleDecChild(obj.fakeCallable(), vo, va);
         self.cycleDecChild(obj.backingValue(), vo, va);
         if (obj.slots) |s| {
             for (s) |v| self.cycleDecChild(v, vo, va);
@@ -28849,6 +28890,7 @@ pub const VM = struct {
             }
         };
         changed = self.cycleMarkAliveChild(obj.lazyInitializer(), vo, va) or changed;
+        changed = self.cycleMarkAliveChild(obj.fakeCallable(), vo, va) or changed;
         changed = self.cycleMarkAliveChild(obj.backingValue(), vo, va) or changed;
         if (obj.slots) |s| {
             for (s) |v| if (self.cycleMarkAliveChild(v, vo, va)) {

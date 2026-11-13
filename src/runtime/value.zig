@@ -1014,6 +1014,9 @@ pub const NativeHandle = struct {
         // a Closure: ptr and aux are the instance name the vm keys the
         // closure's function, captures and statics by
         closure,
+        // a Closure made from a callable (strlen(...), fromCallable): ptr is
+        // its FakeClosure
+        fake_closure,
         // a stream resource's php_stream state (streams.zig)
         stream,
         // a stream filter resource, a user filter's brigade and bucket
@@ -1054,6 +1057,14 @@ pub const NativeHandle = struct {
         if (self.kind != kind or self.extra == 0) return null;
         return @ptrFromInt(self.extra);
     }
+};
+
+// what a Closure made from a callable calls (php's fake closure): the
+// callable it was made from, resolved to its registered spelling, and the
+// class static:: names when it was made through self::/parent::/static::
+pub const FakeClosure = struct {
+    callable: Value,
+    called_class: ?[]const u8 = null,
 };
 
 pub const PhpObject = struct {
@@ -1124,6 +1135,16 @@ pub const PhpObject = struct {
         if (self.native.kind != .closure) return null;
         const ptr: [*]const u8 = @ptrFromInt(self.native.ptr);
         return ptr[0..self.native.aux];
+    }
+
+    pub inline fn fakeClosure(self: *const PhpObject) ?*FakeClosure {
+        return self.native.get(FakeClosure, .fake_closure);
+    }
+
+    // the callable a Closure made from one calls; null for every other object
+    pub inline fn fakeCallable(self: *const PhpObject) Value {
+        const state = self.fakeClosure() orelse return .null;
+        return state.callable;
     }
 
     pub fn backingValue(self: *const PhpObject) Value {
@@ -1926,11 +1947,13 @@ pub const Value = union(enum) {
     fn closuresCompare(a: *PhpObject, b: *PhpObject) i64 {
         if (!isClosureObject(a) or !isClosureObject(b)) return 1;
         if (a.closureName() != null or b.closureName() != null) return 1;
-        if (!sameCallable(a.get("__callable"), b.get("__callable"))) return 1;
-        const ca = a.get("__called_class");
-        const cb = b.get("__called_class");
-        if (@intFromEnum(ca) != @intFromEnum(cb)) return 1;
-        if (ca == .string and !std.ascii.eqlIgnoreCase(ca.string.bytes(), cb.string.bytes())) return 1;
+        const fa = a.fakeClosure() orelse return 1;
+        const fb = b.fakeClosure() orelse return 1;
+        if (!sameCallable(fa.callable, fb.callable)) return 1;
+        const ca = fa.called_class;
+        const cb = fb.called_class;
+        if ((ca == null) != (cb == null)) return 1;
+        if (ca != null and !std.ascii.eqlIgnoreCase(ca.?, cb.?)) return 1;
         return 0;
     }
 

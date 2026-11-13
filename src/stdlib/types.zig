@@ -859,7 +859,7 @@ fn closureCallableName(ctx: *NativeContext, closure: *value_mod.PhpObject, buf: 
         const func = ctx.vm.functions.get(instance) orelse return "{closure}";
         return if (func.display_name.len > 0) func.display_name else "{closure}";
     }
-    const callable = closure.get("__callable");
+    const callable = closure.fakeCallable();
     return switch (callable) {
         .string => |s| s.bytes(),
         .object => |o| std.fmt.bufPrint(buf, "{s}::__invoke", .{o.class_name}) catch "{closure}",

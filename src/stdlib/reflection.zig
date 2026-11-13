@@ -3823,7 +3823,7 @@ fn rfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
         const display = if (ctx.vm.functions.get(instance)) |func| func.display_name else "";
         try this.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(if (display.len > 0) display else "{closure}") });
     } else if (args[0] == .object and std.mem.eql(u8, args[0].object.class_name, "Closure")) {
-        const callable = args[0].object.get("__callable");
+        const callable = args[0].object.fakeCallable();
         // a first-class callable reflects as a closure of the function
         try this.set(ctx.allocator, "__from_closure", .{ .bool = true });
         if (callable == .string) {
@@ -4562,7 +4562,7 @@ fn bindClosure(ctx: *NativeContext, comptime func: []const u8, comptime this_par
 
 // a Closure made from a callable, bound anew: a method's now runs on new_this
 fn bindFakeClosure(ctx: *NativeContext, closure: *PhpObject, new_this: Value) RuntimeError!NativeResult {
-    var callable = closure.get("__callable");
+    var callable = closure.fakeCallable();
     if (new_this == .object and callable == .array and callable.array.entries.items.len == 2) {
         const pair = try ctx.createArray();
         try pair.append(ctx.allocator, new_this);
@@ -4611,7 +4611,7 @@ fn closureProperties(ctx: *NativeContext, obj: *PhpObject, purpose: object_prope
     if (obj.closureName()) |instance| {
         try closureInstanceTable(ctx, table, instance);
     } else {
-        try callableClosureTable(ctx, table, obj.get("__callable"));
+        try callableClosureTable(ctx, table, obj.fakeCallable());
     }
     return table;
 }
@@ -4719,9 +4719,7 @@ fn parameterTable(ctx: *NativeContext, table: *PhpArray, params: []const []const
 }
 
 fn wrapCallableClosure(ctx: *NativeContext, callable: Value) RuntimeError!NativeResult {
-    const obj = try ctx.createObject("Closure");
-    try obj.set(ctx.allocator, "__callable", callable);
-    return NativeResult.borrowed(.{ .object = obj });
+    return NativeResult.borrowed(.{ .object = try ctx.vm.newFakeClosure(callable, null) });
 }
 
 // the closure the calling frame runs, as the same instance it was called

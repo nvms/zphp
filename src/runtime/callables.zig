@@ -399,11 +399,13 @@ pub fn invoke(vm: *VM, callee: Callee, args: []const Value) RuntimeError!Value {
         .function => |name| return vm.callByName(name, args),
         .closure => |obj| {
             if (obj.closureName()) |name| return vm.callByName(name, args);
-            var target = try vm.callbackCallee(obj.get("__callable"));
+            const state = obj.fakeClosure() orelse return .null;
+            var target = try vm.callbackCallee(state.callable);
             // made through self:: or parent::, a static method keeps the
             // class static:: named where it was made
-            const called = obj.get("__called_class");
-            if (called == .string and target == .static_method) target.static_method.called_class = called.string.bytes();
+            if (state.called_class) |called| if (target == .static_method) {
+                target.static_method.called_class = called;
+            };
             return invoke(vm, target, args);
         },
         .invoke => |obj| return vm.callMethod(obj, "__invoke", args),
