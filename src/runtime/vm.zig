@@ -8013,6 +8013,18 @@ pub const VM = struct {
                         if (!self.inPropHook(obj_val.object, prop_name) and
                             (self.hasPropHook(obj_val.object.class_name, prop_name, .get) or self.hasPropHook(obj_val.object.class_name, prop_name, .set)))
                         {
+                            // the write fetch runs a &get hook first
+                            if (self.hasPropHook(obj_val.object.class_name, prop_name, .get) and try self.propGetReturnsRef(obj_val.object, prop_name)) {
+                                const hooked = obj_val.object;
+                                hooked.refcount +%= 1;
+                                defer self.releaseValue(.{ .object = hooked });
+                                self.setReturnRef(null);
+                                _ = self.callPropHook(hooked, prop_name, .get, .null) catch {
+                                    if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                    return error.RuntimeError;
+                                };
+                                self.setReturnRef(null);
+                            }
                             if (try self.throwBuiltinException("Error", "Cannot assign by reference to overloaded object")) continue;
                             return error.RuntimeError;
                         }
@@ -8028,6 +8040,16 @@ pub const VM = struct {
                             continue;
                         };
                         if (static_kind == .denied) continue;
+                        if (overloaded: {
+                            const handlers_before = self.handler_count;
+                            break :overloaded self.overloadedReferenceTarget(target, prop_name) catch {
+                                if (self.resumeAfterThrow(base_frame, handlers_before)) continue;
+                                return error.RuntimeError;
+                            };
+                        }) {
+                            if (try self.throwBuiltinException("Error", "Cannot assign by reference to overloaded object")) continue;
+                            return error.RuntimeError;
+                        }
                         try self.bindPropToCell(target, prop_name, cell);
                     } else {
                         // ZEND_ASSIGN_OBJ_REF: the source is fetched for
@@ -8145,6 +8167,18 @@ pub const VM = struct {
                         if (!self.inPropHook(obj_val.object, prop_name) and
                             (self.hasPropHook(obj_val.object.class_name, prop_name, .get) or self.hasPropHook(obj_val.object.class_name, prop_name, .set)))
                         {
+                            // the write fetch runs a &get hook first
+                            if (self.hasPropHook(obj_val.object.class_name, prop_name, .get) and try self.propGetReturnsRef(obj_val.object, prop_name)) {
+                                const hooked = obj_val.object;
+                                hooked.refcount +%= 1;
+                                defer self.releaseValue(.{ .object = hooked });
+                                self.setReturnRef(null);
+                                _ = self.callPropHook(hooked, prop_name, .get, .null) catch {
+                                    if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                    return error.RuntimeError;
+                                };
+                                self.setReturnRef(null);
+                            }
                             if (try self.throwBuiltinException("Error", "Cannot assign by reference to overloaded object")) continue;
                             return error.RuntimeError;
                         }
@@ -8152,6 +8186,16 @@ pub const VM = struct {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
+                        if (overloaded: {
+                            const handlers_before = self.handler_count;
+                            break :overloaded self.overloadedReferenceTarget(obj_val.object.storage(), prop_name) catch {
+                                if (self.resumeAfterThrow(base_frame, handlers_before)) continue;
+                                return error.RuntimeError;
+                            };
+                        }) {
+                            if (try self.throwBuiltinException("Error", "Cannot assign by reference to overloaded object")) continue;
+                            return error.RuntimeError;
+                        }
                         try self.bindPropToCell(obj_val.object.storage(), prop_name, cell);
                     }
                     self.push(cell.*);
@@ -8176,7 +8220,7 @@ pub const VM = struct {
                             return error.RuntimeError;
                         };
                         obj_ptr = obj_ptr.storage();
-                        if (try self.checkPropertyMutation(obj_ptr, prop_name, .indirect)) continue;
+                        if (!self.overloadedForWrite(obj_ptr, prop_name) and try self.checkPropertyMutation(obj_ptr, prop_name, .indirect)) continue;
                         if (self.hasPropHook(obj_ptr.class_name, prop_name, .get) and !self.inPropHook(obj_ptr, prop_name) and !try self.propGetReturnsRef(obj_ptr, prop_name)) {
                             obj_ptr.refcount +%= 1;
                             defer self.releaseValue(.{ .object = obj_ptr });
@@ -8191,17 +8235,32 @@ pub const VM = struct {
                         }
                         const has_prop = obj_ptr.properties.contains(prop_name) or (obj_ptr.slots != null and obj_ptr.getSlotIndex(prop_name) != null);
                         const ref_hook = self.hasPropHook(obj_ptr.class_name, prop_name, .get) and !self.inPropHook(obj_ptr, prop_name);
-                        if (ref_hook or (!has_prop and self.magicApplies(obj_ptr, prop_name, .get))) {
+                        if (ref_hook or self.overloadedForWrite(obj_ptr, prop_name)) {
                             obj_ptr.refcount +%= 1;
                             defer self.releaseValue(.{ .object = obj_ptr });
                             self.setReturnRef(null);
+                            var magic_result: Value = .null;
                             if (ref_hook) {
                                 _ = self.callPropHook(obj_ptr, prop_name, .get, .null) catch {
                                     if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                     return error.RuntimeError;
                                 };
                             } else {
-                                _ = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicGet(obj_ptr, prop_name) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
+                                magic_result = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicGet(obj_ptr, prop_name) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
+                            }
+                            if (!ref_hook and self.last_return_ref == null) {
+                                // read_property(BP_VAR_W) through a by-value
+                                // __get: the reference is to a copy (the
+                                // result is borrowed)
+                                if (magic_result != .object) {
+                                    const msg = try std.fmt.allocPrint(self.allocator, "Indirect modification of overloaded property {s}::${s} has no effect", .{ obj_ptr.class_name, prop_name });
+                                    defer self.allocator.free(msg);
+                                    self.raiseError(8, msg) catch if (try self.resumeRaised()) continue;
+                                }
+                                const temp = try self.newRefCell();
+                                self.setCell(temp, magic_result);
+                                try self.bindRefSlot(&frame.ref_slots, dst_name, temp);
+                                continue;
                             }
                             if (self.last_return_ref) |cell| {
                                 try self.bindRefSlot(&frame.ref_slots, dst_name, cell);
@@ -23360,6 +23419,36 @@ pub const VM = struct {
             try self.propagateCellWrite(cell, cell.*);
         }
         return cell.*;
+    }
+
+    // zend_assign_to_property_reference on a property __get answers for: the
+    // write fetch reads it through __get (php's notice for a by-value
+    // result), and there is no slot to bind. false when the property has one
+    fn overloadedReferenceTarget(self: *VM, obj: *PhpObject, prop_name: []const u8) RuntimeError!bool {
+        if (!self.overloadedForWrite(obj, prop_name)) return false;
+        obj.refcount +%= 1;
+        defer self.releaseValue(.{ .object = obj });
+        self.setReturnRef(null);
+        // borrowed, as callMethod results are
+        const result = try self.callMagicGet(obj, prop_name);
+        const by_ref = self.last_return_ref != null;
+        self.setReturnRef(null);
+        if (!by_ref and result != .object) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Indirect modification of overloaded property {s}::${s} has no effect", .{ obj.class_name, prop_name });
+            defer self.allocator.free(msg);
+            try self.raiseError(8, msg);
+        }
+        return true;
+    }
+
+    // zend_std_get_property_ptr_ptr has no slot to hand out and leaves a
+    // write fetch to __get: the property isn't there or isn't visible here
+    fn overloadedForWrite(self: *VM, obj: *PhpObject, prop_name: []const u8) bool {
+        if (self.splArrayAsProps(obj) or !self.magicApplies(obj, prop_name, .get)) return false;
+        const vr = self.findPropertyVisibility(obj.class_name, prop_name);
+        const slot_present = obj.slots != null and obj.getSlotIndexForScope(prop_name, vr.defining_class) != null;
+        const present = !obj.isUnset(prop_name) and (slot_present or obj.properties.contains(prop_name));
+        return !present or (vr.declared and !self.propVisible(vr, prop_name, vr.visibility));
     }
 
     fn magicGetReturnsRef(self: *VM, obj: *PhpObject) RuntimeError!bool {
