@@ -1835,8 +1835,10 @@ pub fn compileCallableRef(self: *Compiler, node: Ast.Node) Error!void {
     const callee = self.ast.nodes[node.data.lhs];
     if (callee.tag == .identifier) {
         // named as a call names it: in the namespace, falling back to the
-        // global function when the closure is made
-        const name = self.resolveFunctionName(self.ast.tokenSlice(callee.main_token));
+        // global function when the closure is made. die is exit's alias,
+        // and neither is namespaced
+        const tok = self.ast.tokens[callee.main_token].tag;
+        const name = if (tok == .kw_exit or tok == .kw_die) "exit" else self.resolveFunctionName(self.ast.tokenSlice(callee.main_token));
         const idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });
         try self.emitOp(.constant);
         try self.emitU16(idx);

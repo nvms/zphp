@@ -1280,17 +1280,67 @@ fn throwObjectArg(ctx: *NativeContext, comptime func: []const u8, v: Value) Runt
     return error.RuntimeError;
 }
 
+// php 8.4's exit() function: Z_PARAM_STR_OR_LONG, so a string is printed
+// and anything else becomes the exit status by php's weak rules (or is
+// refused in strict mode)
 fn native_exit(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len > 0) {
-        if (args[0] == .string) {
-            try ctx.vm.output.appendSlice(ctx.allocator, args[0].string.bytes());
-        } else if (args[0] == .int) {
-            // PHP truncates to u8 ([0,255]) for the process exit status
-            const code: i64 = args[0].int;
-            ctx.vm.exit_code = @intCast(@as(i64, @mod(code, 256)));
+        const arg = args[0];
+        const strict = ctx.vm.topFrameStrict();
+        var text: ?[]const u8 = null;
+        var status: i64 = 0;
+        switch (arg) {
+            .string => |str| text = str.bytes(),
+            .int => |i| status = i,
+            .null => {
+                if (strict) return exitTypeError(ctx, arg);
+                try ctx.vm.raiseError(8192, "exit(): Passing null to parameter #1 ($status) of type string|int is deprecated");
+                if (ctx.vm.pending_exception != null) return error.RuntimeError;
+            },
+            .bool => |b| {
+                if (strict) return exitTypeError(ctx, arg);
+                status = @intFromBool(b);
+            },
+            .float => |f| {
+                if (strict) return exitTypeError(ctx, arg);
+                if (std.math.isFinite(f) and f >= -9223372036854775808.0 and f < 9223372036854775808.0) {
+                    if (f != @trunc(f)) {
+                        var buf: [64]u8 = undefined;
+                        const msg = try std.fmt.allocPrint(ctx.allocator, "Implicit conversion from float {s} to int loses precision", .{@import("formatted_print.zig").gcvt(f, -1, '.', 'E', &buf)});
+                        defer ctx.allocator.free(msg);
+                        try ctx.vm.raiseError(8192, msg);
+                        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+                    }
+                    status = @intFromFloat(@trunc(f));
+                } else {
+                    // too large for an int, it is read as a string
+                    var buf: [64]u8 = undefined;
+                    try ctx.vm.output.appendSlice(ctx.allocator, @import("formatted_print.zig").gcvt(f, 14, '.', 'E', &buf));
+                    ctx.vm.exit_requested = true;
+                    return error.RuntimeError;
+                }
+            },
+            .object => |o| {
+                if (strict or !ctx.vm.hasMethod(o.class_name, "__toString")) return exitTypeError(ctx, arg);
+                text = try ctx.vm.objectToString(o);
+            },
+            else => return exitTypeError(ctx, arg),
+        }
+        if (text) |t| {
+            try ctx.vm.output.appendSlice(ctx.allocator, t);
+        } else {
+            ctx.vm.exit_code = @intCast(@mod(status, 256));
         }
     }
     ctx.vm.exit_requested = true;
+    return error.RuntimeError;
+}
+
+fn exitTypeError(ctx: *NativeContext, arg: Value) RuntimeError!NativeResult {
+    const given = if (arg == .object) arg.object.class_name else arg.valueName();
+    const msg = try std.fmt.allocPrint(ctx.allocator, "exit(): Argument #1 ($status) must be of type string|int, {s} given", .{given});
+    defer ctx.allocator.free(msg);
+    try ctx.vm.setPendingException("TypeError", msg);
     return error.RuntimeError;
 }
 
