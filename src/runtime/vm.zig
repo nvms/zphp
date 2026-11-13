@@ -7756,7 +7756,13 @@ pub const VM = struct {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
-                        try self.bindPropToCell(obj_val.object.storage(), prop_name, cell);
+                        const target = obj_val.object.storage();
+                        const static_kind = self.staticAsInstance(target, prop_name, self.hasMethod(target.class_name, "__get")) catch {
+                            _ = try self.resumeRaised();
+                            continue;
+                        };
+                        if (static_kind == .denied) continue;
+                        try self.bindPropToCell(target, prop_name, cell);
                     }
                 },
 
@@ -8208,7 +8214,12 @@ pub const VM = struct {
                                 return error.RuntimeError;
                             }
                         }
-                        if (self.shouldCallMagicUnset(obj, prop_name)) {
+                        const static_kind = self.staticAsInstance(obj, prop_name, self.hasMethod(obj.class_name, "__unset")) catch {
+                            _ = try self.resumeRaised();
+                            continue;
+                        };
+                        if (static_kind == .denied and !self.hasMethod(obj.class_name, "__unset")) continue;
+                        if (static_kind == .denied or self.shouldCallMagicUnset(obj, prop_name)) {
                             _ = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicProperty(obj, .unset, prop_name, .null) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
                         } else if (try self.propertyAccessDenied(obj, prop_name)) {
                             continue;
@@ -8270,7 +8281,12 @@ pub const VM = struct {
                             if (try self.throwBuiltinException("Error", msg)) continue;
                             return error.RuntimeError;
                         }
-                        if (self.shouldCallMagicUnset(obj, prop_name)) {
+                        const static_kind = self.staticAsInstance(obj, prop_name, self.hasMethod(obj.class_name, "__unset")) catch {
+                            _ = try self.resumeRaised();
+                            continue;
+                        };
+                        if (static_kind == .denied and !self.hasMethod(obj.class_name, "__unset")) continue;
+                        if (static_kind == .denied or self.shouldCallMagicUnset(obj, prop_name)) {
                             _ = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicProperty(obj, .unset, prop_name, .null) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
                         } else if (try self.propertyAccessDenied(obj, prop_name)) {
                             continue;
@@ -8684,7 +8700,8 @@ pub const VM = struct {
                         // a property the running scope can't reach is not set
                         // for it: __isset decides, else false
                         const vr = self.findPropertyVisibility(obj.class_name, prop_name);
-                        const reachable = self.propVisible(vr, prop_name, vr.visibility) and !obj.isUnset(prop_name);
+                        const reachable = self.propVisible(vr, prop_name, vr.visibility) and !obj.isUnset(prop_name) and
+                            (vr.declared or (self.staticAsInstance(obj, prop_name, true) catch .none) != .denied);
                         if (reachable and (obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndexForScope(prop_name, vr.defining_class) != null))) {
                             self.push(.{ .bool = obj.getForScope(prop_name, vr.defining_class) != .null });
                         } else if (self.magicApplies(obj, prop_name, .isset)) {
@@ -8727,7 +8744,8 @@ pub const VM = struct {
                         // a property the running scope can't reach is not set
                         // for it: __isset decides, else false
                         const vr = self.findPropertyVisibility(obj.class_name, prop_name);
-                        const reachable = self.propVisible(vr, prop_name, vr.visibility) and !obj.isUnset(prop_name);
+                        const reachable = self.propVisible(vr, prop_name, vr.visibility) and !obj.isUnset(prop_name) and
+                            (vr.declared or (self.staticAsInstance(obj, prop_name, true) catch .none) != .denied);
                         if (reachable and (obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndexForScope(prop_name, vr.defining_class) != null))) {
                             self.push(.{ .bool = obj.getForScope(prop_name, vr.defining_class) != .null });
                         } else if (self.magicApplies(obj, prop_name, .isset)) {
@@ -10439,6 +10457,28 @@ pub const VM = struct {
                         // private storage), and obj.get's name-only lookup
                         // would pick the wrong one in deep hierarchies
                         const gp_vr = self.findPropertyVisibility(obj.class_name, prop_name);
+                        var static_notice = false;
+                        if (!gp_vr.declared) {
+                            const silent = self.hasMethod(obj.class_name, "__get");
+                            const kind = self.staticAsInstance(obj, prop_name, silent) catch {
+                                _ = try self.resumeRaised();
+                                continue;
+                            };
+                            if (kind == .denied) {
+                                if (silent and self.magicApplies(obj, prop_name, .get)) {
+                                    const result = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicGet(obj, prop_name) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
+                                    self.push(result);
+                                    continue;
+                                }
+                                // raised already, or __get is guarded: raise it now
+                                if (silent) _ = self.staticAsInstance(obj, prop_name, false) catch {
+                                    _ = try self.resumeRaised();
+                                    continue;
+                                };
+                                continue;
+                            }
+                            static_notice = kind == .noticed;
+                        }
                         const gp_scope: ?[]const u8 = gp_vr.defining_class;
                         const raw_gp = obj.rawForScope(prop_name, gp_scope);
                         const val = if (raw_gp == .undef) Value.null else raw_gp;
@@ -10482,7 +10522,7 @@ pub const VM = struct {
                                 return error.RuntimeError;
                             }
                             if (if (op == .get_prop) self.ic else null) |ic| {
-                                if (vr.visibility == .public) {
+                                if (vr.visibility == .public and !static_notice) {
                                     const gp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), gp_ip);
                                     const si = if (obj.slot_layout != null) obj.getSlotIndex(prop_name) orelse @as(u16, 0xFFFF) else @as(u16, 0xFFFF);
                                     ic.prop[gp_idx] = .{ .key = gp_ip, .chunk_key = @intFromPtr(self.currentChunk()), .class_ptr = @intFromPtr(obj.class_name.ptr), .slot_index = si };
@@ -10507,7 +10547,6 @@ pub const VM = struct {
                                 if (try self.throwBuiltinException("Error", msg)) continue;
                                 return error.RuntimeError;
                             }
-                            self.warnStaticAsInstance(obj, prop_name) catch if (try self.resumeRaised()) continue;
                             // a by-reference argument creates the property
                             if (!capturing) {
                                 const msg = try std.fmt.allocPrint(self.allocator, "Undefined property: {s}::${s}", .{ obj.class_name, prop_name });
@@ -22110,30 +22149,54 @@ pub const VM = struct {
     // chain declares: a readonly class (or one that forbids it) refuses,
     // stdClass or #[\AllowDynamicProperties] in the chain allows it, and
     // anything else is deprecated (php 8.2)
-    // zend_get_property_offset: a static property the scope can see, named
-    // through an object, is no instance property; php notices and goes on
-    // with a dynamic one
-    fn warnStaticAsInstance(self: *VM, obj: *const PhpObject, name: []const u8) RuntimeError!void {
+    pub const StaticAsInstance = enum { none, noticed, denied };
+
+    // zend_get_property_offset for a name whose nearest declaration in the
+    // object's chain is a static property: one the scope can see is no
+    // instance property, so php notices (unless silent) and goes on with a
+    // dynamic one; a protected or private one it can't see is php's access
+    // error (raised unless silent), and an ancestor's private one is just a
+    // dynamic name. silent is php's: the class has the magic method the
+    // access would fall back to, or the access is isset/`??`
+    fn staticAsInstance(self: *VM, obj: *const PhpObject, name: []const u8, silent: bool) RuntimeError!StaticAsInstance {
         var current: ?[]const u8 = obj.class_name;
+        const cls = while (current) |cn| {
+            const c = self.classes.getPtr(cn) orelse return .none;
+            if (c.static_props.count() > 0 and c.static_props.contains(name)) break c;
+            for (c.properties.items) |prop| if (std.mem.eql(u8, prop.name, name)) return .none;
+            current = c.parent;
+        } else return .none;
+        const declaring = cls.name;
+        const vis = cls.static_prop_visibility.get(name) orelse .public;
         const scope = self.currentDefiningClass();
-        while (current) |cn| {
-            const cls = self.classes.getPtr(cn) orelse return;
-            current = cls.parent;
-            if (!cls.static_props.contains(name)) continue;
-            const vis = cls.static_prop_visibility.get(name) orelse .public;
-            if (vis == .public) break;
-            const sc = scope orelse return;
-            if (vis == .private) {
-                // a private one the scope can't see may hide the scope's own
-                if (std.ascii.eqlIgnoreCase(sc, cls.name)) break;
-                continue;
+        const visible = switch (vis) {
+            .public => true,
+            .private => if (scope) |sc| std.ascii.eqlIgnoreCase(sc, declaring) else false,
+            .protected => if (scope) |sc| self.isInstanceOf(sc, declaring) or self.isInstanceOf(declaring, sc) else false,
+        };
+        // zend_get_parent_private_property: the scope's own private static
+        // of the name, on an object of a subclass, is the one meant
+        const scope_private = if (!visible) if (scope) |sc| blk: {
+            const scls = self.classes.getPtr(sc) orelse break :blk false;
+            break :blk (scls.static_prop_visibility.get(name) orelse .public) == .private and scls.static_props.contains(name) and self.isInstanceOf(obj.class_name, sc);
+        } else false else false;
+        if (!visible and !scope_private) {
+            // a private static of an ancestor is not this class's: dynamic
+            if (vis == .private and !std.ascii.eqlIgnoreCase(declaring, obj.class_name)) return .none;
+            if (!silent) {
+                const msg = try std.fmt.allocPrint(self.allocator, "Cannot access {s} property {s}::${s}", .{ @tagName(vis), obj.class_name, name });
+                defer self.allocator.free(msg);
+                // dispatched to a handler, or uncaught
+                if (!try self.throwBuiltinException("Error", msg)) return error.RuntimeError;
             }
-            if (self.isInstanceOf(sc, cls.name) or self.isInstanceOf(cls.name, sc)) break;
-            return;
-        } else return;
-        const msg = try std.fmt.allocPrint(self.allocator, "Accessing static property {s}::${s} as non static", .{ obj.class_name, name });
-        defer self.allocator.free(msg);
-        try self.raiseError(8, msg);
+            return .denied;
+        }
+        if (!silent) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Accessing static property {s}::${s} as non static", .{ obj.class_name, name });
+            defer self.allocator.free(msg);
+            try self.raiseError(8, msg);
+        }
+        return .noticed;
     }
 
     pub fn dynamicPropertyRule(self: *VM, obj: *const PhpObject) DynamicPropertyRule {
@@ -22154,10 +22217,15 @@ pub const VM = struct {
     // raises what dynamicPropertyRule asks for, from the run loop. returns
     // true when an exception was raised and dispatched
     fn checkDynamicProperty(self: *VM, obj: *PhpObject, name: []const u8) RuntimeError!bool {
-        self.warnStaticAsInstance(obj, name) catch {
+        const kind = self.staticAsInstance(obj, name, false) catch {
             _ = try self.resumeRaised();
             return true;
         };
+        if (kind == .denied) return true;
+        return self.checkDynamicPropertyRule(obj, name);
+    }
+
+    fn checkDynamicPropertyRule(self: *VM, obj: *PhpObject, name: []const u8) RuntimeError!bool {
         switch (self.dynamicPropertyRule(obj)) {
             .allowed => return false,
             .forbidden => {
@@ -22185,6 +22253,25 @@ pub const VM = struct {
         // a readonly property is written again only through a reinit window
         // (__clone, clone()'s properties), whatever the action
         _ = action;
+        if (!vr.declared) {
+            const silent = self.hasMethod(obj.class_name, "__set");
+            const kind = self.staticAsInstance(obj, prop_name, silent) catch {
+                _ = try self.resumeRaised();
+                return .dispatched;
+            };
+            if (kind == .denied) {
+                // raised already, or __set is guarded: raise it now
+                if (!silent or !self.magicApplies(obj, prop_name, .set)) {
+                    if (silent) _ = self.staticAsInstance(obj, prop_name, false) catch {
+                        _ = try self.resumeRaised();
+                        return .dispatched;
+                    };
+                    return .dispatched;
+                }
+                _ = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicProperty(obj, .set, prop_name, val.*) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) return .dispatched; return error.RuntimeError; }; });
+                return .magic;
+            }
+        }
         const has_prop = !obj.isUnset(prop_name) and (obj.properties.contains(prop_name) or (obj.slots != null and obj.getSlotIndexForScope(prop_name, vr.defining_class) != null));
         if (!has_prop and self.magicApplies(obj, prop_name, .set)) {
             _ = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicProperty(obj, .set, prop_name, val.*) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) return .dispatched; return error.RuntimeError; }; });
@@ -22220,7 +22307,7 @@ pub const VM = struct {
                 if (try self.throwBuiltinException("Error", bad_property_name_message)) return .dispatched;
                 return error.RuntimeError;
             }
-            if (try self.checkDynamicProperty(obj, prop_name)) return .dispatched;
+            if (try self.checkDynamicPropertyRule(obj, prop_name)) return .dispatched;
         }
         // typed property: coerce/enforce the declared type before storing
         // (matches PHP weak/strict mode)
