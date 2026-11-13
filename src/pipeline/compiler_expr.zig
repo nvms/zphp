@@ -1521,6 +1521,7 @@ fn compileCallPlain(self: *Compiler, node: Ast.Node) Error!void {
 
     if (!hasSplatOrNamed(self.ast, args) and isGlobalSprintf(self, callee) and try compileSprintfRope(self, args)) return;
 
+    if (callee.tag == .property_access and callee.main_token == 0) try checkMethodName(self, callee.data.rhs);
     if (hasSplatOrNamed(self.ast, args)) {
         if (callee.tag == .property_access and self.isDynamicProp(callee)) {
             try self.compileNode(callee.data.lhs);
@@ -2582,6 +2583,56 @@ fn compileStaticPropRead(self: *Compiler, node: Ast.Node, quiet: bool) Error!voi
 fn staticClassOperand(self: *Compiler, class_node: Ast.Node) ![]const u8 {
     if (class_node.tag == .identifier or class_node.tag == .qualified_name) return resolveNodeClassName(self, class_node);
     return self.ast.tokenSlice(class_node.main_token);
+}
+
+// an expression php folds to a constant other than a string
+fn foldsToNonString(self: *Compiler, idx: u32) bool {
+    const n = self.ast.nodes[idx];
+    return switch (n.tag) {
+        .integer_literal, .float_literal, .true_literal, .false_literal, .null_literal => true,
+        .grouped_expr => foldsToNonString(self, n.data.lhs),
+        .prefix_op => switch (self.ast.tokens[n.main_token].tag) {
+            .minus, .plus => switch (self.ast.nodes[n.data.lhs].tag) {
+                .integer_literal, .float_literal => true,
+                .grouped_expr, .prefix_op => foldsToNonString(self, n.data.lhs),
+                else => false,
+            },
+            else => false,
+        },
+        .array_literal => blk: {
+            for (self.ast.extraSlice(n.data.lhs)) |el_idx| {
+                const el = self.ast.nodes[el_idx];
+                if (el.tag != .array_element) break :blk false;
+                if (!foldsToNonString(self, el.data.lhs) and self.ast.nodes[el.data.lhs].tag != .string_literal) break :blk false;
+            }
+            break :blk true;
+        },
+        else => false,
+    };
+}
+
+// zend_compile_class_ref: a class given as a constant that isn't a string
+pub fn checkClassRef(self: *Compiler, idx: u32) Error!void {
+    if (idx == 0 or idx >= self.ast.nodes.len) return;
+    const n = self.ast.nodes[idx];
+    // a bare name token is a class name, whatever it spells
+    if (n.tag != .grouped_expr and n.tag != .array_literal and n.tag != .prefix_op and n.tag != .integer_literal and n.tag != .float_literal) return;
+    if (foldsToNonString(self, idx)) return self.fail(firstToken(self, idx), "Illegal class name");
+}
+
+// a token of the expression to report it at: a grouped expression's node
+// keeps none of its own
+fn firstToken(self: *Compiler, idx: u32) u32 {
+    var i = idx;
+    while (self.ast.nodes[i].main_token == 0 and self.ast.nodes[i].data.lhs != 0) i = self.ast.nodes[i].data.lhs;
+    return self.ast.nodes[i].main_token;
+}
+
+// zend_compile_method_call / zend_compile_static_call: a method named by a
+// constant that isn't a string
+pub fn checkMethodName(self: *Compiler, idx: u32) Error!void {
+    if (idx == 0 or idx >= self.ast.nodes.len) return;
+    if (foldsToNonString(self, idx)) return self.fail(firstToken(self, idx), "Method name must be a string");
 }
 
 pub fn resolveNodeClassName(self: *Compiler, class_node: Ast.Node) ![]const u8 {
