@@ -194,7 +194,8 @@ const Parser = struct {
             .kw_class, .kw_abstract, .kw_final => self.parseClassDecl(),
             .kw_interface => self.parseInterfaceDecl(),
             .kw_trait => self.parseTraitDecl(),
-            .kw_enum => self.parseEnumDecl(),
+            // php's scanner reads `enum` as the keyword only before a name
+            .kw_enum => if (self.peekAt(1) == .identifier) self.parseEnumDecl() else self.parseExpressionStmt(),
             .kw_throw => self.parseThrowStmt(),
             .kw_try => self.parseTryCatch(),
             .kw_declare => self.parseDeclare(),
@@ -887,7 +888,7 @@ const Parser = struct {
         const const_tok = self.pos;
         var decls = std.ArrayListUnmanaged(u32).empty;
         defer decls.deinit(self.allocator);
-        try self.parseConstList(&decls);
+        try self.parseConstListOf(&decls, true);
         if (decls.items.len == 1) return decls.items[0];
         const extra = try self.addExtraList(decls.items);
         return self.addNode(.{ .tag = .block, .main_token = const_tok, .data = .{ .lhs = extra } });
@@ -896,6 +897,11 @@ const Parser = struct {
     // `const [type] A = expr, B = expr;`: one const_decl node per name, all
     // carrying the declared type
     fn parseConstList(self: *Parser, out: *std.ArrayListUnmanaged(u32)) Error!void {
+        return self.parseConstListOf(out, false);
+    }
+
+    // `global`: a top-level `const`, whose names are php's T_STRING only
+    fn parseConstListOf(self: *Parser, out: *std.ArrayListUnmanaged(u32), global: bool) Error!void {
         _ = self.advance(); // const
         // php 8.3 typed class constants (`const int|string NAME = 1;`): a
         // name followed by `=` is an untyped constant, anything else a type
@@ -913,6 +919,10 @@ const Parser = struct {
         // the declaration back as one statement
         var continuation: u32 = 0;
         while (true) {
+            if (global and !isPlainName(self.peek())) {
+                try self.addError(expectedError(.identifier));
+                return error.ParseError;
+            }
             const name_tok = try self.expectFunctionName();
             _ = try self.expect(.equal);
             const value = try self.parseExpression();
@@ -1113,7 +1123,13 @@ const Parser = struct {
         _ = self.advance();
         const returns_ref = self.peek() == .amp;
         if (returns_ref) _ = self.advance();
-        const name_tok = try self.expectFunctionName();
+        // php's function_name is T_STRING or readonly: other keywords (exit,
+        // die, list...) can't name a function
+        if (!isPlainName(self.peek()) and self.peek() != .kw_readonly) {
+            try self.addError(expectedError(.identifier));
+            return error.ParseError;
+        }
+        const name_tok = self.advance();
         _ = try self.expect(.l_paren);
 
         var params = std.ArrayListUnmanaged(u32).empty;
@@ -3033,7 +3049,7 @@ const Parser = struct {
             .l_bracket => self.parseArrayLiteral(),
             .kw_array => self.parseArrayKw(),
             .kw_static => if (self.peekAt(1) == .kw_function) self.parseClosureExpr() else if (self.peekAt(1) == .kw_fn) self.parseStaticArrowFunc() else self.addLiteral(.identifier),
-            .kw_self, .kw_parent => self.addLiteral(.identifier),
+            .kw_self, .kw_parent, .kw_enum => self.addLiteral(.identifier),
             else => {
                 try self.addError(.expected_expression);
                 return error.ParseError;
@@ -3630,6 +3646,15 @@ const Parser = struct {
         if (tag == .semicolon and self.peek() == .close_tag) return self.advance();
         try self.addError(expectedError(tag));
         return error.ParseError;
+    }
+
+    // what php's scanner reads as T_STRING: zphp lexes true, false, null
+    // and enum as keywords, php only as names
+    fn isPlainName(tag: Token.Tag) bool {
+        return switch (tag) {
+            .identifier, .kw_true, .kw_false, .kw_null, .kw_enum => true,
+            else => false,
+        };
     }
 
     fn isSemiReserved(tag: Token.Tag) bool {
