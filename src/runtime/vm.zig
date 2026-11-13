@@ -1698,6 +1698,10 @@ pub const VM = struct {
         const ri = self.ref_index orelse return;
         const frame = self.currentFrame();
         const c_old = frame.ref_slots.get(name) orelse return;
+        // bound by the element and the loop variable alone; a third binder
+        // (a variable the element was a reference to before the loop, or one
+        // that took a reference since) keeps it a reference
+        if (cellOf(c_old).binders > 2) return;
         const list = ri.fwd.getPtr(c_old) orelse return;
         if (list.items.len != 1) return; // captured (>1) -> leave is_ref
         const t = list.items[0];
@@ -7827,7 +7831,6 @@ pub const VM = struct {
                         // over the array is bound to it) is shared, not copied
                         if (arr_ptr.getPtr(key)) |ep| if (ep.ref) |existing| {
                             try self.bindRefSlot(&self.currentFrame().ref_slots, name, existing);
-                            try self.mirrorBoundName(self.currentFrame(), name, existing.*);
                             continue;
                         };
                         const cell = try self.newRefCell();
