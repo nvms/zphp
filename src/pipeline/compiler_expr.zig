@@ -233,7 +233,7 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
             const ref_inner = self.ast.nodes[self.ast.nodes[node.data.rhs].data.lhs];
             if (ref_inner.tag == .variable or ref_inner.tag == .identifier) {
                 const source_idx = try self.addConstant(.{ .string = Value.String.borrowed(self.ast.tokenSlice(ref_inner.main_token)) });
-                try self.compileNode(target.data.lhs);
+                try compilePropWriteBase(self, target.data.lhs);
                 if (self.isDynamicProp(target)) {
                     try self.compileNode(target.data.rhs);
                     try self.emitOp(.prop_bind_ref_dyn);
@@ -1970,7 +1970,7 @@ fn compilePropWriteBase(self: *Compiler, node_idx: u32) Error!void {
 // BP_VAR_RW, which warns when it is undefined
 fn compilePropFetchBase(self: *Compiler, node_idx: u32, rw: bool) Error!void {
     const node = self.ast.nodes[node_idx];
-    if (!rw and node.tag == .variable and !std.mem.eql(u8, self.ast.tokenSlice(node.main_token), "$this")) {
+    if (!rw and ((node.tag == .variable and !std.mem.eql(u8, self.ast.tokenSlice(node.main_token), "$this")) or node.tag == .variable_variable)) {
         const saved = self.quiet_reads;
         self.quiet_reads = true;
         defer self.quiet_reads = saved;
@@ -1985,7 +1985,35 @@ fn compilePropFetchBase(self: *Compiler, node_idx: u32, rw: bool) Error!void {
         try self.emitU16(name_idx);
         return;
     }
+    // an element is fetched for writing too (FETCH_DIM_W): the chain is
+    // vivified and a missing element created null
+    if ((node.tag == .array_access or (node.tag == .array_push_target and !rw)) and dimWriteChainRoot(self, node_idx)) {
+        try compileVivifyChain(self, node.data.lhs);
+        if (node.tag == .array_push_target) {
+            try self.emitOp(.array_append_w);
+        } else {
+            try self.compileNode(node.data.rhs);
+            try self.emitOp(.array_get_w);
+            try self.emitByte(@intFromBool(rw));
+        }
+        return;
+    }
     return self.compileNode(node_idx);
+}
+
+// whether a dimension chain ends in a variable or a property, the roots
+// the vivify chain fetches for writing
+fn dimWriteChainRoot(self: *Compiler, node_idx: u32) bool {
+    var idx = node_idx;
+    while (true) {
+        const node = self.ast.nodes[idx];
+        switch (node.tag) {
+            .array_access, .array_push_target => idx = node.data.lhs,
+            .variable => return !std.mem.eql(u8, self.ast.tokenSlice(node.main_token), "$this"),
+            .property_access => return true,
+            else => return false,
+        }
+    }
 }
 
 pub fn compileVivifyChain(self: *Compiler, node_idx: u32) Error!void {

@@ -498,11 +498,18 @@ pub const OpCode = enum(u8) {
     // new_reserve for `new C`: u16 class name. ZEND_NEW looks the class up,
     // autoloading it, before it takes the object's handle
     new_reserve_class,
+    // php's FETCH_DIM_W for the container of a property write
+    // ($a[k]->p = v): [array, key] -> [element]. a missing element is
+    // created null, an array element is separated in place. u8 1 for a
+    // read-modify-write (FETCH_DIM_RW), which warns for a missing element
+    array_get_w,
+    // the same for `$a[]->p = v`: [array] -> [the appended null]
+    array_append_w,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
             .arg_variable => 6,
-            .return_ref_value => 2,
+            .return_ref_value, .array_get_w => 2,
             .tick => 3,
             .jump_if_class_declared, .bind_const_attributes => 5,
             .parent_hook_call => 7,

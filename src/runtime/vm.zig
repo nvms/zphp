@@ -6239,6 +6239,72 @@ pub const VM = struct {
                         },
                     }
                 },
+                .array_get_w, .array_append_w => {
+                    const append = op == .array_append_w;
+                    const rw = !append and self.readByte() == 1;
+                    const key: Value = if (append) .null else self.pop();
+                    const container = self.pop();
+                    switch (container) {
+                        .array => |arr| {
+                            if (append) {
+                                if (arr.nextElementOccupied()) {
+                                    if (try self.throwNextElementOccupied()) continue;
+                                    return error.RuntimeError;
+                                }
+                                try self.arrayAppendOwned(arr, .null);
+                                self.push(.null);
+                                continue;
+                            }
+                            if (key == .array or key == .object) {
+                                if (try self.throwOffsetKeyType(key, .access)) continue;
+                                return error.RuntimeError;
+                            }
+                            if (key == .resource or key == .float) self.warnOffsetKey(key) catch if (try self.resumeRaised()) continue;
+                            const arr_key = Value.toArrayKey(key);
+                            if (arr.getPtr(arr_key)) |entry| {
+                                const existing = if (entry.ref) |cell| cell.* else entry.value;
+                                if (existing == .array and entry.ref == null) {
+                                    // the element is written through: separate it from
+                                    // co-holders in place, as the vivify chain does
+                                    const inner = try self.cowSeparate(existing.array);
+                                    if (inner != existing.array) {
+                                        try self.arraySetOwned(arr, arr_key, .{ .array = inner });
+                                        inner.refcount -= 1;
+                                    }
+                                    self.push(.{ .array = inner });
+                                } else self.push(existing);
+                            } else {
+                                if (rw) self.emitUndefinedKeyWarning(PhpArray.normalizeKey(arr_key)) catch if (try self.resumeRaised()) continue;
+                                try self.arraySetOwned(arr, arr_key, .null);
+                                self.push(.null);
+                            }
+                        },
+                        .object => |obj| if (self.hasMethod(obj.class_name, "offsetGet")) {
+                            const saved_append = self.dim_append_depth;
+                            if (append) self.dim_append_depth = self.frame_count + 1;
+                            defer self.dim_append_depth = saved_append;
+                            const result = (if (append) self.callMethod(obj, "offsetGet", &.{.null}) else self.offsetGetForWrite(obj, key)) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            self.pushCallResult(result);
+                        } else {
+                            if (try self.throwBuiltinException("Error", "Cannot use object as array")) continue;
+                            return error.RuntimeError;
+                        },
+                        .string => {
+                            const msg = if (append) "[] operator not supported for strings" else "Cannot use string offset as an object";
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        },
+                        // the vivify chain made a null or false root an array;
+                        // anything else under it is php's scalar error
+                        else => {
+                            if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
+                            return error.RuntimeError;
+                        },
+                    }
+                },
                 .array_get_vivify => {
                     const key = self.pop();
                     const arr_val = self.pop();
@@ -7763,6 +7829,14 @@ pub const VM = struct {
                         };
                         if (static_kind == .denied) continue;
                         try self.bindPropToCell(target, prop_name, cell);
+                    } else {
+                        // ZEND_ASSIGN_OBJ_REF: the source is fetched for
+                        // writing first, then the container refuses
+                        _ = try self.getOrCreateVarCell(self.currentFrame(), source_name);
+                        const msg = try std.fmt.allocPrint(self.allocator, "Attempt to modify property \"{s}\" on {s}", .{ prop_name, obj_val.valueName() });
+                        defer self.allocator.free(msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
                     }
                 },
 
