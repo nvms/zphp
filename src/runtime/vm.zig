@@ -11979,7 +11979,7 @@ pub const VM = struct {
                             try self.callStaticFunction(cs_name, 2, target.called_class);
                             continue;
                         }
-                        const msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name });
+                        const msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ self.declaredClassName(class_name), method_name });
                         defer self.allocator.free(msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
@@ -12087,7 +12087,7 @@ pub const VM = struct {
                             try self.callStaticFunction(cs_name, 2, class_name);
                             continue;
                         }
-                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch return error.OutOfMemory;
+                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ self.declaredClassName(class_name), method_name }) catch return error.OutOfMemory;
                         defer self.allocator.free(msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
@@ -12165,7 +12165,7 @@ pub const VM = struct {
                             try self.callStaticFunction(cs_name, 2, effective_called);
                             continue;
                         }
-                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch return error.OutOfMemory;
+                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ self.declaredClassName(class_name), method_name }) catch return error.OutOfMemory;
                         defer self.allocator.free(msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
@@ -12214,7 +12214,7 @@ pub const VM = struct {
                             try self.callStaticFunction(cs_name, 2, effective_called);
                             continue;
                         }
-                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch return error.OutOfMemory;
+                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ self.declaredClassName(class_name), method_name }) catch return error.OutOfMemory;
                         defer self.allocator.free(msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
@@ -12269,7 +12269,7 @@ pub const VM = struct {
                             try self.callStaticFunction(cs_name, 2, target.called_class);
                             continue;
                         }
-                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch return error.OutOfMemory;
+                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ self.declaredClassName(class_name), method_name }) catch return error.OutOfMemory;
                         defer self.allocator.free(msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
@@ -12854,7 +12854,7 @@ pub const VM = struct {
                 return error.RuntimeError;
             }
             if (try self.staticCallFallback(class_name, method_name, arg_count, effective_called)) return;
-            const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch return error.OutOfMemory;
+            const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ self.declaredClassName(class_name), method_name }) catch return error.OutOfMemory;
             defer self.allocator.free(msg);
             if (try self.throwBuiltinException("Error", msg)) return;
             self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
@@ -13008,7 +13008,7 @@ pub const VM = struct {
                     self.deinitFrameSlot(self.frame_count);
                     self.pushNativeResult(result);
                 } else {
-                    const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch return error.OutOfMemory;
+                    const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ self.declaredClassName(class_name), method_name }) catch return error.OutOfMemory;
                     defer self.allocator.free(msg);
                     if (try self.throwBuiltinException("Error", msg)) return;
                     self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
