@@ -4719,7 +4719,12 @@ pub const VM = struct {
 
     // A constructor is a nested execution boundary: its caller's handlers
     // must not resume PHP while the new opcode still owns cleanup state.
-    fn runConstructor(self: *VM, base_frame: usize, fast: bool) RuntimeError!void {
+    fn runConstructor(self: *VM, base_frame: usize, fast: bool, obj: *PhpObject) RuntimeError!void {
+        // zend_object_store_ctor_failed: an object whose constructor threw
+        // never has its destructor called
+        errdefer if (self.pending_exception != null) {
+            obj.destructor_called = true;
+        };
         const saved_handlers = self.handler_count;
         const saved_floor = self.handler_floor;
         self.handler_floor = saved_handlers;
@@ -10247,6 +10252,7 @@ pub const VM = struct {
                             var ctx = self.makeContext(null);
                             const pre_handlers = self.handler_count;
                             const ctor_result = self.invokeNative(native, &ctx, .{ .args = args_buf_s, .name = cn, .instance = true }) catch {
+                                obj.destructor_called = true;
                                 // clean up temp frame if throwBuiltinException didn't already unwind past it
                                 if (self.frame_count >= saved_fc) {
                                     self.frame_count -= 1;
@@ -10269,7 +10275,10 @@ pub const VM = struct {
                             if (ctor_result == .string) ctor_result.string.release();
                             // a constructor that threw straight into a handler and then
                             // returned: the handler already unwound the temp frame
-                            if (self.handler_count < pre_handlers) continue;
+                            if (self.handler_count < pre_handlers) {
+                                obj.destructor_called = true;
+                                continue;
+                            }
                             self.frame_count -= 1;
                             self.deinitFrameSlot(self.frame_count);
                         } else if (self.functions.get(cn)) |func| {
@@ -10326,7 +10335,7 @@ pub const VM = struct {
                                 self.frame_count += 1;
                                 self.retainFrameObjects(self.frame_count - 1);
                                 if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
-                                self.runConstructor(self.frame_count - 1, true) catch |err| {
+                                self.runConstructor(self.frame_count - 1, true, obj) catch |err| {
                                     if (self.dispatchPendingException(base_frame)) continue;
                                     return err;
                                 };
@@ -10377,7 +10386,7 @@ pub const VM = struct {
                                 self.frame_count += 1;
                                 self.retainFrameObjects(self.frame_count - 1);
                                 if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
-                                self.runConstructor(self.frame_count - 1, false) catch |err| {
+                                self.runConstructor(self.frame_count - 1, false, obj) catch |err| {
                                     if (self.dispatchPendingException(base_frame)) continue;
                                     return err;
                                 };
@@ -10493,7 +10502,10 @@ pub const VM = struct {
                             if (ctor_result == .string) ctor_result.string.release();
                             // a constructor that threw straight into a handler and then
                             // returned: the handler already unwound the temp frame
-                            if (self.handler_count < pre_handlers) continue;
+                            if (self.handler_count < pre_handlers) {
+                                obj.destructor_called = true;
+                                continue;
+                            }
                             self.frame_count -= 1;
                             self.deinitFrameSlot(self.frame_count);
                         } else if (self.functions.get(cn)) |func| {
@@ -10535,7 +10547,7 @@ pub const VM = struct {
                             self.frame_count += 1;
                             self.retainFrameObjects(self.frame_count - 1);
                             if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
-                            self.runConstructor(self.frame_count - 1, false) catch |err| {
+                            self.runConstructor(self.frame_count - 1, false, obj) catch |err| {
                                 if (self.dispatchPendingException(base_frame)) continue;
                                 return err;
                             };
