@@ -4843,7 +4843,19 @@ pub const VM = struct {
                     const idx = self.readU16();
                     const name = self.currentChunk().constants.items[idx].string.bytes();
                     if (isSuperglobal(name)) {
-                        self.push(if (self.globals_cells.get(name)) |cell| cell.* else .null);
+                        const sv: Value = if (self.globals_cells.get(name)) |cell| cell.* else .undef;
+                        // an unset superglobal (or $_SESSION before a session
+                        // starts) is php's undefined global
+                        if (sv == .undef) {
+                            if (op == .get_var) {
+                                const msg = try std.fmt.allocPrint(self.allocator, "Undefined global variable {s}", .{name});
+                                defer self.allocator.free(msg);
+                                self.emitWarning(msg) catch if (try self.resumeRaised()) continue;
+                            }
+                            self.push(.null);
+                            continue;
+                        }
+                        self.push(sv);
                         continue;
                     }
                     // $GLOBALS is a true superglobal: always resolve to the
