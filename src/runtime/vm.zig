@@ -9222,7 +9222,10 @@ pub const VM = struct {
                         .generator => self.push(.{ .string = Value.String.borrowed("Generator") }),
                         .fiber => self.push(.{ .string = Value.String.borrowed("Fiber") }),
                         else => {
-                            self.setErrorMsg("Fatal error: Cannot use \"::class\" on non-object", .{});
+                            const msg = try std.fmt.allocPrint(self.allocator, "Cannot use \"::class\" on {s}", .{v.valueName()});
+                            defer self.allocator.free(msg);
+                            self.stackRelease(v);
+                            if (try self.throwBuiltinException("TypeError", msg)) continue;
                             return error.RuntimeError;
                         },
                     }
@@ -12517,9 +12520,17 @@ pub const VM = struct {
                     const quiet = op == .get_static_prop_quiet;
                     const class_idx = self.readU16();
                     const prop_idx = self.readU16();
-                    const class_name = self.resolveStaticClassName(self.currentChunk().constants.items[class_idx].string.bytes());
+                    const written = self.currentChunk().constants.items[class_idx].string.bytes();
+                    const class_name = self.resolveStaticClassName(written);
                     const prop_name = self.currentChunk().constants.items[prop_idx].string.bytes();
                     if (std.mem.eql(u8, prop_name, "class")) {
+                        // ZEND_FETCH_CLASS_NAME: self, parent and static need
+                        // a class to name
+                        const refused = if (self.inInitializer()) null else classNameFetchError(written, class_name, self.currentDefiningClass() != null);
+                        if (refused) |msg| {
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        }
                         self.push(.{ .string = Value.String.borrowed(class_name) });
                         continue;
                     }
@@ -13453,6 +13464,18 @@ pub const VM = struct {
             }
         }
         return name;
+    }
+
+    // the error ZEND_FETCH_CLASS_NAME throws for a relative class name that
+    // resolved to nothing
+    fn classNameFetchError(written: []const u8, resolved: []const u8, has_scope: bool) ?[]const u8 {
+        if (!std.mem.eql(u8, written, resolved)) return null;
+        if (std.ascii.eqlIgnoreCase(written, "self")) return "Cannot use \"self\" in the global scope";
+        if (std.ascii.eqlIgnoreCase(written, "static")) return "Cannot use \"static\" in the global scope";
+        if (std.ascii.eqlIgnoreCase(written, "parent")) {
+            return if (has_scope) "Cannot use \"parent\" when current class scope has no parent" else "Cannot use \"parent\" in the global scope";
+        }
+        return null;
     }
 
     // an uninitialized typed static property reads as null here
@@ -25080,6 +25103,10 @@ pub const VM = struct {
                         }
                         return self.unresolvedDefault("Undefined constant \"{s}\"", .{const_name});
                     }
+                    // Name::class, resolved while compiling
+                    if (std.mem.eql(u8, const_name, "class") and !std.ascii.eqlIgnoreCase(class_name, "self") and
+                        !std.ascii.eqlIgnoreCase(class_name, "parent") and !std.ascii.eqlIgnoreCase(class_name, "static"))
+                        return .{ .string = Value.String.borrowed(class_name) };
                     if (self.getClassConstant(class_name, const_name)) |v| return v;
                     if (self.pending_exception != null) return error.RuntimeError;
                     // fall back to class constants (ClassName::CONST_NAME)

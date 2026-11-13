@@ -2543,6 +2543,32 @@ fn compileStaticPropRead(self: *Compiler, node: Ast.Node, quiet: bool) Error!voi
     if (node.main_token != 0 and self.ast.tokens[node.main_token].tag == .kw_class and
         class_node.tag != .identifier and class_node.tag != .qualified_name)
     {
+        // zend_compile_class_name: a literal number is no class name, and
+        // another expression folded to a constant can't have one, except a
+        // string, which names its class
+        var inner = node.data.lhs;
+        while (self.ast.nodes[inner].tag == .grouped_expr) inner = self.ast.nodes[inner].data.lhs;
+        switch (self.ast.nodes[inner].tag) {
+            .integer_literal, .float_literal => return self.fail(firstToken(self, inner), "Illegal class name"),
+            else => {},
+        }
+        if (foldsToConstant(self, node.data.lhs)) {
+            const v = self.evalConstExpr(node.data.lhs);
+            const what: []const u8 = switch (v) {
+                .null => "null",
+                .bool => |b| if (b) "true" else "false",
+                .int => "int",
+                .float => "float",
+                .array => "array",
+                else => "",
+            };
+            if (what.len > 0) return self.failFmt(firstToken(self, node.data.lhs), "Cannot use \"::class\" on {s}", .{what});
+            if (v == .string) {
+                const name = v.string.bytes();
+                try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(if (name.len > 0 and name[0] == '\\') name[1..] else name) }));
+                return;
+            }
+        }
         try self.compileNode(node.data.lhs);
         try self.emitOp(.get_obj_class);
         return;
@@ -2564,7 +2590,13 @@ fn compileStaticPropRead(self: *Compiler, node: Ast.Node, quiet: bool) Error!voi
     const written_class = if (class_node.tag == .identifier) self.ast.tokenSlice(class_node.main_token) else "";
     const keep_written = self.relative_const_classes and !is_static_prop and (std.ascii.eqlIgnoreCase(written_class, "self") or std.ascii.eqlIgnoreCase(written_class, "parent"));
     const class_name = if (keep_written) written_class else try resolveNodeClassName(self, class_node);
-    const prop_name = if (is_static_prop) raw[1..] else raw;
+    // ::class is matched in any case
+    const prop_name = if (is_static_prop) raw[1..] else if (std.ascii.eqlIgnoreCase(raw, "class")) "class" else raw;
+    if (self.trait_const_values and std.mem.eql(u8, prop_name, "class") and
+        (std.ascii.eqlIgnoreCase(written_class, "self") or std.ascii.eqlIgnoreCase(written_class, "parent") or std.ascii.eqlIgnoreCase(written_class, "static")))
+    {
+        return self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(written_class) }));
+    }
     const class_idx = try self.addConstant(.{ .string = Value.String.borrowed(class_name) });
     const prop_idx = try self.addConstant(.{ .string = Value.String.borrowed(prop_name) });
     // a bare-identifier member (not $prop, not ::class) is a class constant or
@@ -2583,6 +2615,32 @@ fn compileStaticPropRead(self: *Compiler, node: Ast.Node, quiet: bool) Error!voi
 fn staticClassOperand(self: *Compiler, class_node: Ast.Node) ![]const u8 {
     if (class_node.tag == .identifier or class_node.tag == .qualified_name) return resolveNodeClassName(self, class_node);
     return self.ast.tokenSlice(class_node.main_token);
+}
+
+// an operator expression over literals, which php folds while compiling
+fn foldsToConstant(self: *Compiler, idx: u32) bool {
+    const n = self.ast.nodes[idx];
+    return switch (n.tag) {
+        .integer_literal, .float_literal, .true_literal, .false_literal, .null_literal, .string_literal => n.tag != .string_literal or self.ast.tokens[n.main_token].tag != .heredoc,
+        .grouped_expr => foldsToConstant(self, n.data.lhs),
+        .array_literal => blk: {
+            for (self.ast.extraSlice(n.data.lhs)) |el_idx| {
+                const el = self.ast.nodes[el_idx];
+                if (el.tag != .array_element or !foldsToConstant(self, el.data.lhs)) break :blk false;
+                if (el.data.rhs != 0 and !foldsToConstant(self, el.data.rhs)) break :blk false;
+            }
+            break :blk true;
+        },
+        .prefix_op => switch (self.ast.tokens[n.main_token].tag) {
+            .minus, .plus, .tilde => foldsToConstant(self, n.data.lhs),
+            else => false,
+        },
+        .binary_op => switch (self.ast.tokens[n.main_token].tag) {
+            .plus, .minus, .star, .pipe, .amp, .caret, .dot => foldsToConstant(self, n.data.lhs) and foldsToConstant(self, n.data.rhs),
+            else => false,
+        },
+        else => false,
+    };
 }
 
 // an expression php folds to a constant other than a string

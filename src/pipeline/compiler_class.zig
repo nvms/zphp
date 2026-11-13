@@ -470,6 +470,56 @@ fn allowedInConstExpr(ast: *const Ast, idx: u32) bool {
     };
 }
 
+// a constant expression's static::class, and its parent:: in a class known
+// to have no parent (zend_compile_const_expr_class_name and
+// zend_ensure_valid_class_fetch_type)
+fn checkRelativeClassFetches(self: *Compiler, idx: u32) Error!void {
+    if (idx == 0) return;
+    if (findStaticClass(self.ast, idx)) |t| return self.fail(t, "static::class cannot be used for compile-time class name resolution");
+    if (self.current_class.len > 0 and self.current_parent.len == 0 and !self.in_trait and !self.closure_signature) {
+        if (findRelative(self.ast, idx, "parent")) |t| return self.fail(t, "Cannot use \"parent\" when current class scope has no parent");
+    }
+}
+
+// parent:: in the constants of a class known to have no parent
+fn checkConstParentFetches(self: *Compiler, members: []const u32) Error!void {
+    if (self.current_parent.len > 0) return;
+    for (members) |m_idx| {
+        const m = self.ast.nodes[m_idx];
+        if (m.tag != .const_decl) continue;
+        if (findRelative(self.ast, m.data.lhs, "parent")) |t| return self.fail(t, "Cannot use \"parent\" when current class scope has no parent");
+    }
+}
+
+// parent::class, the one relative fetch a constant expression resolves
+// while compiling
+
+// the token of a `<name>::` class fetch inside a constant expression
+fn findRelative(ast: *const Ast, idx: u32, name: []const u8) ?u32 {
+    if (idx == 0) return null;
+    const node = ast.nodes[idx];
+    switch (node.tag) {
+        .static_prop_access => {
+            const class_node = ast.nodes[node.data.lhs];
+            if (class_node.tag == .identifier and std.ascii.eqlIgnoreCase(ast.tokenSlice(class_node.main_token), name) and
+                std.ascii.eqlIgnoreCase(ast.tokenSlice(node.main_token), "class")) return class_node.main_token;
+            return null;
+        },
+        .prefix_op, .grouped_expr, .cast_expr => return findRelative(ast, node.data.lhs, name),
+        .binary_op, .logical_and, .logical_or, .null_coalesce, .array_access => return findRelative(ast, node.data.lhs, name) orelse findRelative(ast, node.data.rhs, name),
+        .array_literal => {
+            for (ast.extraSlice(node.data.lhs)) |el_idx| {
+                const el = ast.nodes[el_idx];
+                if (el.tag != .array_element) continue;
+                if (findRelative(ast, el.data.lhs, name)) |t| return t;
+                if (el.data.rhs != 0) if (findRelative(ast, el.data.rhs, name)) |t| return t;
+            }
+            return null;
+        },
+        else => return null,
+    }
+}
+
 // the token of a static::class inside a constant expression
 fn findStaticClass(ast: *const Ast, idx: u32) ?u32 {
     const node = ast.nodes[idx];
@@ -1092,6 +1142,7 @@ fn checkConstDecls(self: *Compiler, class_name: []const u8, members: []const u32
             if (prev.tag == .const_decl and std.mem.eql(u8, self.ast.tokenSlice(prev.main_token), name))
                 return self.failFmt(m.main_token, "Cannot redefine class constant {s}::{s}", .{ class_name, name });
         }
+        if (findStaticClass(self.ast, m.data.lhs)) |t| return self.fail(t, "static::class cannot be used for compile-time class name resolution");
         const type_extra = m.data.rhs >> 16;
         if (type_extra == 0) continue;
         const text = try buildTypeString(self, self.ast.extra_data[type_extra - 1], self.ast.extra_data[type_extra]);
@@ -1204,6 +1255,7 @@ fn checkParams(self: *Compiler, func_name: []const u8, at: u32, param_nodes: []c
             if (node.data.lhs != 0) return self.fail(node.main_token, "Variadic parameter cannot have a default value");
         }
         const promoted = ((node.data.rhs >> 2) & 3) != 0 or (node.data.rhs & 16) != 0 or ((node.data.rhs >> 5) & 3) != 0;
+        try checkRelativeClassFetches(self, node.data.lhs);
         const default = foldedDefault(self, node.data.lhs);
         const force_nullable = default == .null and !promoted;
         var forced_nullable = false;
@@ -2647,6 +2699,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
         break :blk try resolveNodeClassName(self, pnode);
     } else "";
     defer self.current_parent = prev_parent;
+    try checkConstParentFetches(self, members);
     for (members) |m| try checkPropertyDeclaration(self, class_name, self.ast.nodes[m], false);
     // a readonly class makes its properties readonly
     if (class_modifiers & 4 != 0) for (members) |m| {
@@ -3566,10 +3619,13 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     // compile defaults for trait constants first (popped third by VM)
+    const outer_trait_consts = self.trait_const_values;
+    self.trait_const_values = true;
     for (const_decls.items) |pi| {
         const pmember = self.ast.nodes[pi];
         if (pmember.data.lhs != 0) try self.compileNode(pmember.data.lhs);
     }
+    defer self.trait_const_values = outer_trait_consts;
 
     // compile defaults for static properties (popped second by VM)
     for (static_props.items) |pi| {

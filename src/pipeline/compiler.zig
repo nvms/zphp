@@ -418,6 +418,10 @@ pub const Compiler = struct {
     // a class constant's initializer: self and parent stay as written in
     // class constant fetches, resolved as it runs (its errors name them so)
     relative_const_classes: bool = false,
+    // compiling a trait's constant and property defaults, which php leaves
+    // unevaluated until a class uses the trait: a relative ::class there
+    // names itself
+    trait_const_values: bool = false,
     // inside a property hook: the property and whether it is the set hook,
     // for parent::$prop::get()/set()
     hook_property: []const u8 = "",
@@ -982,7 +986,8 @@ pub const Compiler = struct {
                 try compiler_expr.compileDynamicStaticCall(self, node);
             },
             .static_prop_access => {
-                try compiler_expr.checkClassRef(self, node.data.lhs);
+                // ::class checks its operand itself
+                if (node.main_token == 0 or !std.ascii.eqlIgnoreCase(self.ast.tokenSlice(node.main_token), "class")) try compiler_expr.checkClassRef(self, node.data.lhs);
                 try compiler_expr.compileStaticPropAccess(self, node);
             },
             .dynamic_class_const => {
@@ -1688,6 +1693,7 @@ pub const Compiler = struct {
                 const class_name = @import("compiler_expr.zig").resolveNodeClassName(self, class_node) catch break :blk Value.null;
                 var prop_name = self.ast.tokenSlice(n.main_token);
                 if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+                if (std.ascii.eqlIgnoreCase(prop_name, "class")) prop_name = "class";
                 // resolve well-known builtin class constants eagerly so attribute
                 // arg expressions like `Attribute::TARGET_CLASS | Attribute::IS_REPEATABLE`
                 // can fold to a single int at compile time
