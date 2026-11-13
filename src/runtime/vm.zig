@@ -7990,10 +7990,11 @@ pub const VM = struct {
                             .{ .int = if (arr_ptr.has_int_keys) arr_ptr.next_int_key else 0 }
                         else switch (key_val) {
                             .int => |i| .{ .int = i },
-                            .string => |s| .{ .string = s },
+                            .string => |s| PhpArray.normalizeKey(.{ .string = s }),
                             else => .{ .int = Value.toInt(key_val) },
                         };
-                        if (append_ref) try self.arraySetOwned(arr_ptr, key, .null);
+                        // FETCH_DIM_W: a missing element is created null
+                        if (append_ref or !arr_ptr.contains(key)) try self.arraySetOwned(arr_ptr, key, .null);
                         try self.bindSlotToElement(frame, dst_name, arr_ptr, key);
                     }
                 },
