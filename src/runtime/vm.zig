@@ -12507,6 +12507,12 @@ pub const VM = struct {
                     if (!std.mem.eql(u8, const_name, "class")) {
                         if (self.getClassConstant(class_name, const_name)) |val| {
                             const visibility = self.classConstantVisibility(class_name, const_name);
+                            if (visibility.missing) {
+                                const msg = try std.fmt.allocPrint(self.allocator, "Undefined constant {s}::{s}", .{ self.declaredClassName(class_name), const_name });
+                                defer self.allocator.free(msg);
+                                if (try self.throwBuiltinException("Error", msg)) continue;
+                                return error.RuntimeError;
+                            }
                             if (visibility.denied) {
                                 if (try self.refuseClassConstant(class_name, const_name, visibility.level)) continue;
                             }
@@ -13532,13 +13538,16 @@ pub const VM = struct {
             if (self.dispatchPendingException(self.run_base_frame)) return true;
             return error.RuntimeError;
         }
-        if (found) |val| {
+        const inherited_private = if (found != null) blk: {
             const visibility = self.classConstantVisibility(class_name, const_name);
-            if (visibility.denied) return self.refuseClassConstant(class_name, const_name, visibility.level);
+            if (visibility.denied and !visibility.missing) return self.refuseClassConstant(class_name, const_name, visibility.level);
+            break :blk visibility.missing;
+        } else false;
+        if (found) |val| if (!inherited_private) {
             _ = try self.warnDeprecatedClassConstant(class_name, const_name);
             self.push(val);
             return false;
-        }
+        };
         const msg = if (!self.classes.contains(class_name) and !self.interfaces.contains(class_name))
             try self.classNotFoundMessage(class_name)
         else
@@ -13552,15 +13561,20 @@ pub const VM = struct {
     // php's zend_verify_const_access: a private constant is readable in the
     // class that declares it, a protected one in a class of the same
     // inheritance chain
-    fn classConstantVisibility(self: *VM, class_name: []const u8, const_name: []const u8) struct { level: ClassDef.Visibility, denied: bool } {
+    pub fn classConstantVisibility(self: *VM, class_name: []const u8, const_name: []const u8) struct { level: ClassDef.Visibility, denied: bool, missing: bool = false } {
         var current: ?[]const u8 = class_name;
+        var inherited = false;
         const declarer: *const ClassDef = while (current) |cn| {
             const cls = self.classes.getPtr(cn) orelse return .{ .level = .public, .denied = false };
             if (cls.constants.contains(const_name)) break cls;
             current = cls.parent;
+            inherited = true;
         } else return .{ .level = .public, .denied = false };
         const level = declarer.const_visibility.get(const_name) orelse .public;
         if (level == .public) return .{ .level = level, .denied = false };
+        // do_inherit_constant: a private constant isn't inherited, so a
+        // subclass has none of that name
+        if (level == .private and inherited) return .{ .level = level, .denied = true, .missing = true };
         const scope = self.currentDefiningClass() orelse return .{ .level = level, .denied = true };
         const allowed = switch (level) {
             .public => true,
@@ -13575,6 +13589,12 @@ pub const VM = struct {
     pub fn checkClassConstantAccess(self: *VM, class_name: []const u8, const_name: []const u8) RuntimeError!void {
         const visibility = self.classConstantVisibility(class_name, const_name);
         if (!visibility.denied) return;
+        if (visibility.missing) {
+            const msg = try std.fmt.allocPrint(self.allocator, "Undefined constant {s}::{s}", .{ self.declaredClassName(class_name), const_name });
+            defer self.allocator.free(msg);
+            try self.setPendingException("Error", msg);
+            return error.RuntimeError;
+        }
         const msg = try std.fmt.allocPrint(self.allocator, "Cannot access {s} constant {s}::{s}", .{ @tagName(visibility.level), self.declaredClassName(class_name), const_name });
         defer self.allocator.free(msg);
         try self.setPendingException("Error", msg);

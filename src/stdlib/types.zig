@@ -200,7 +200,8 @@ fn native_defined(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     if (std.mem.indexOf(u8, name, "::")) |sep| {
         const class_name = name[0..sep];
         const prop_name = name[sep + 2 ..];
-        if (ctx.vm.getClassConstant(class_name, prop_name) != null) return NativeResult.scalar(.{ .bool = true });
+        // ZEND_FETCH_CLASS_SILENT: a constant the scope can't see isn't defined
+        if (ctx.vm.getClassConstant(class_name, prop_name) != null) return NativeResult.scalar(.{ .bool = !ctx.vm.classConstantVisibility(class_name, prop_name).denied });
         if (ctx.vm.pending_exception != null) return error.RuntimeError;
     }
     return NativeResult.scalar(.{ .bool = false });
