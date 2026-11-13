@@ -4,6 +4,7 @@ const Value = @import("../runtime/value.zig").Value;
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
 const filesystem = @import("filesystem.zig");
+const formatted_print = @import("formatted_print.zig");
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 pub const entries = .{
@@ -90,219 +91,243 @@ fn formatByteSize(code: u8) ?usize {
     };
 }
 
-fn native_pack(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
-    const fmt = switch (args[0]) {
-        .string => |s| s.bytes(),
-        else => return NativeResult.scalar(.{ .bool = false }),
-    };
-
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(ctx.allocator);
-
-    var parser = parseFormat(fmt, false);
-    var arg_idx: usize = 1;
-
-    while (parser.next()) |entry| {
-        switch (entry.code) {
-            'a', 'A', 'Z' => {
-                if (arg_idx >= args.len) return NativeResult.scalar(.{ .bool = false });
-                const s = switch (args[arg_idx]) {
-                    .string => |v| v.bytes(),
-                    else => "",
-                };
-                arg_idx += 1;
-                const is_star = entry.count == .star;
-                const count: usize = switch (entry.count) {
-                    .star => if (entry.code == 'Z') s.len + 1 else s.len,
-                    .exact => |n| n,
-                };
-                const pad: u8 = if (entry.code == 'A') ' ' else 0;
-                // PHP Z with fixed length reserves the last byte for NUL terminator
-                const max_data: usize = if (entry.code == 'Z' and !is_star and count > 0)
-                    count - 1
-                else
-                    count;
-                const copy_len = @min(s.len, max_data);
-                try buf.appendSlice(ctx.allocator, s[0..copy_len]);
-                if (count > copy_len) {
-                    try buf.appendNTimes(ctx.allocator, pad, count - copy_len);
-                }
-            },
-            'H', 'h' => {
-                if (arg_idx >= args.len) return NativeResult.scalar(.{ .bool = false });
-                const s = switch (args[arg_idx]) {
-                    .string => |v| v.bytes(),
-                    else => "",
-                };
-                arg_idx += 1;
-                // match PHP: truncate requested nibble count to the available string length
-                // so pack("H4", "ab") writes only 1 byte (from 2 hex chars) instead of zero-padding
-                const requested = switch (entry.count) {
-                    .star => s.len,
-                    .exact => |n| n,
-                };
-                const nibbles = @min(requested, s.len);
-                const bytes_needed = (nibbles + 1) / 2;
-                var i: usize = 0;
-                while (i < bytes_needed) : (i += 1) {
-                    const ni0: u8 = if (i * 2 < nibbles) hexDigitVal(s[i * 2]) else 0;
-                    const ni1: u8 = if (i * 2 + 1 < nibbles) hexDigitVal(s[i * 2 + 1]) else 0;
-                    if (entry.code == 'H') {
-                        try buf.append(ctx.allocator, (ni0 << 4) | ni1);
-                    } else {
-                        try buf.append(ctx.allocator, (ni1 << 4) | ni0);
-                    }
-                }
-            },
-            'c', 'C' => {
-                const repeat = switch (entry.count) {
-                    .star => args.len - arg_idx,
-                    .exact => |n| n,
-                };
-                for (0..repeat) |_| {
-                    if (arg_idx >= args.len) return NativeResult.scalar(.{ .bool = false });
-                    const val: u8 = @truncate(@as(u64, @bitCast(Value.toInt(args[arg_idx]))));
-                    arg_idx += 1;
-                    try buf.append(ctx.allocator, val);
-                }
-            },
-            's', 'S', 'n', 'v' => {
-                const repeat = switch (entry.count) {
-                    .star => args.len - arg_idx,
-                    .exact => |n| n,
-                };
-                for (0..repeat) |_| {
-                    if (arg_idx >= args.len) return NativeResult.scalar(.{ .bool = false });
-                    const val: u16 = @truncate(@as(u64, @bitCast(Value.toInt(args[arg_idx]))));
-                    arg_idx += 1;
-                    const bytes = switch (entry.code) {
-                        'n' => std.mem.toBytes(std.mem.nativeToBig(u16, val)),
-                        'v' => std.mem.toBytes(std.mem.nativeToLittle(u16, val)),
-                        else => std.mem.toBytes(val),
-                    };
-                    try buf.appendSlice(ctx.allocator, &bytes);
-                }
-            },
-            'l', 'L', 'N', 'V' => {
-                const repeat = switch (entry.count) {
-                    .star => args.len - arg_idx,
-                    .exact => |n| n,
-                };
-                for (0..repeat) |_| {
-                    if (arg_idx >= args.len) return NativeResult.scalar(.{ .bool = false });
-                    const val: u32 = @truncate(@as(u64, @bitCast(Value.toInt(args[arg_idx]))));
-                    arg_idx += 1;
-                    const bytes = switch (entry.code) {
-                        'N' => std.mem.toBytes(std.mem.nativeToBig(u32, val)),
-                        'V' => std.mem.toBytes(std.mem.nativeToLittle(u32, val)),
-                        else => std.mem.toBytes(val),
-                    };
-                    try buf.appendSlice(ctx.allocator, &bytes);
-                }
-            },
-            'i', 'I' => {
-                const repeat = switch (entry.count) {
-                    .star => args.len - arg_idx,
-                    .exact => |n| n,
-                };
-                for (0..repeat) |_| {
-                    if (arg_idx >= args.len) return NativeResult.scalar(.{ .bool = false });
-                    const int_val = Value.toInt(args[arg_idx]);
-                    arg_idx += 1;
-                    if (entry.code == 'i') {
-                        const val: c_int = @truncate(int_val);
-                        try buf.appendSlice(ctx.allocator, std.mem.asBytes(&val));
-                    } else {
-                        const val: c_uint = @truncate(@as(u64, @bitCast(int_val)));
-                        try buf.appendSlice(ctx.allocator, std.mem.asBytes(&val));
-                    }
-                }
-            },
-            'q', 'Q', 'J', 'P' => {
-                const repeat = switch (entry.count) {
-                    .star => args.len - arg_idx,
-                    .exact => |n| n,
-                };
-                for (0..repeat) |_| {
-                    if (arg_idx >= args.len) return NativeResult.scalar(.{ .bool = false });
-                    const val: u64 = @bitCast(Value.toInt(args[arg_idx]));
-                    arg_idx += 1;
-                    const bytes = switch (entry.code) {
-                        'J' => std.mem.toBytes(std.mem.nativeToBig(u64, val)),
-                        'P' => std.mem.toBytes(std.mem.nativeToLittle(u64, val)),
-                        else => std.mem.toBytes(val),
-                    };
-                    try buf.appendSlice(ctx.allocator, &bytes);
-                }
-            },
-            'f', 'g', 'G' => {
-                const repeat = switch (entry.count) {
-                    .star => args.len - arg_idx,
-                    .exact => |n| n,
-                };
-                for (0..repeat) |_| {
-                    if (arg_idx >= args.len) return NativeResult.scalar(.{ .bool = false });
-                    const val: f32 = @floatCast(Value.toFloat(args[arg_idx]));
-                    arg_idx += 1;
-                    const bits: u32 = @bitCast(val);
-                    const bytes = switch (entry.code) {
-                        'G' => std.mem.toBytes(std.mem.nativeToBig(u32, bits)),
-                        'g' => std.mem.toBytes(std.mem.nativeToLittle(u32, bits)),
-                        else => std.mem.toBytes(bits),
-                    };
-                    try buf.appendSlice(ctx.allocator, &bytes);
-                }
-            },
-            'd', 'e', 'E' => {
-                const repeat = switch (entry.count) {
-                    .star => args.len - arg_idx,
-                    .exact => |n| n,
-                };
-                for (0..repeat) |_| {
-                    if (arg_idx >= args.len) return NativeResult.scalar(.{ .bool = false });
-                    const val: f64 = Value.toFloat(args[arg_idx]);
-                    arg_idx += 1;
-                    const bits: u64 = @bitCast(val);
-                    const bytes = switch (entry.code) {
-                        'E' => std.mem.toBytes(std.mem.nativeToBig(u64, bits)),
-                        'e' => std.mem.toBytes(std.mem.nativeToLittle(u64, bits)),
-                        else => std.mem.toBytes(bits),
-                    };
-                    try buf.appendSlice(ctx.allocator, &bytes);
-                }
-            },
-            'x' => {
-                const count = switch (entry.count) {
-                    .star => @as(usize, 1),
-                    .exact => |n| n,
-                };
-                try buf.appendNTimes(ctx.allocator, 0, count);
-            },
-            'X' => {
-                const count = switch (entry.count) {
-                    .star => buf.items.len,
-                    .exact => |n| n,
-                };
-                const to_remove = @min(count, buf.items.len);
-                buf.items.len -= to_remove;
-            },
-            '@' => {
-                const pos = switch (entry.count) {
-                    .star => return NativeResult.scalar(.{ .bool = false }),
-                    .exact => |n| n,
-                };
-                if (pos > buf.items.len) {
-                    try buf.appendNTimes(ctx.allocator, 0, pos - buf.items.len);
-                } else {
-                    buf.items.len = pos;
-                }
-            },
-            else => return NativeResult.scalar(.{ .bool = false }),
+// zval_get_long as pack() reads its integer arguments: a float past the int
+// range is php 8.5's warning, then the modular cast
+fn argLong(ctx: *NativeContext, v: Value) RuntimeError!i64 {
+    if (v == .float) {
+        const f = v.float;
+        if (!(f >= -9.2233720368547758e18 and f < 9.2233720368547758e18)) {
+            var tmp: [64]u8 = undefined;
+            const m = try std.fmt.allocPrint(ctx.allocator, "The float {s} is not representable as an int, cast occurred", .{formatted_print.gcvt(f, -1, '.', 'E', &tmp)});
+            defer ctx.allocator.free(m);
+            try ctx.vm.emitWarning(m);
         }
     }
+    return Value.toInt(v);
+}
 
-    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, try buf.toOwnedSlice(ctx.allocator)));
+// zval_get_tmp_string
+fn argString(ctx: *NativeContext, v: Value) RuntimeError![]const u8 {
+    return switch (v) {
+        .string => |s| s.bytes(),
+        .object => |o| try ctx.vm.objectToString(o),
+        .array => blk: {
+            try ctx.vm.emitWarning("Array to string conversion");
+            break :blk "Array";
+        },
+        else => (try ctx.vm.transientFormatted(v)).bytes(),
+    };
+}
+
+fn packValueError(ctx: *NativeContext, comptime fmt: []const u8, args: anytype) RuntimeError {
+    const msg = try std.fmt.allocPrint(ctx.allocator, fmt, args);
+    defer ctx.allocator.free(msg);
+    try ctx.vm.setPendingException("ValueError", msg);
+    return error.RuntimeError;
+}
+
+// PHP_FUNCTION(pack) (ext/standard/pack.c): the format is read once into
+// codes and counts, the output sized, then written
+fn native_pack(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    const format = args[0].string.bytes();
+    const argv = args[1..];
+    const num_args: i64 = @intCast(argv.len);
+    const int_max: i64 = std.math.maxInt(i32);
+
+    const codes = try ctx.allocator.alloc(u8, format.len);
+    defer ctx.allocator.free(codes);
+    const counts = try ctx.allocator.alloc(i64, format.len);
+    defer ctx.allocator.free(counts);
+    // a '*' string argument converted once, as php converts it in place
+    const star_strings = try ctx.allocator.alloc(?[]const u8, format.len);
+    defer ctx.allocator.free(star_strings);
+    var formatcount: usize = 0;
+    var currentarg: i64 = 0;
+
+    var i: usize = 0;
+    while (i < format.len) : (formatcount += 1) {
+        const code = format[i];
+        i += 1;
+        var arg: i64 = 1;
+        star_strings[formatcount] = null;
+        if (i < format.len) {
+            const c = format[i];
+            if (c == '*') {
+                arg = -1;
+                i += 1;
+            } else if (c >= '0' and c <= '9') {
+                // atoi: the digits as a C int
+                var end = i;
+                while (end < format.len and format[end] >= '0' and format[end] <= '9') end += 1;
+                const wide = std.fmt.parseInt(u64, format[i..end], 10) catch std.math.maxInt(u64);
+                arg = @as(i32, @truncate(@as(i64, @bitCast(wide))));
+                i = end;
+            }
+        }
+        switch (code) {
+            'x', 'X', '@' => if (arg < 0) {
+                try filesystem.warnDocref(ctx, "Type {c}: '*' ignored", .{code});
+                arg = 1;
+            },
+            'a', 'A', 'Z', 'h', 'H' => {
+                if (currentarg >= num_args) return packValueError(ctx, "Type {c}: not enough arguments", .{code});
+                if (arg < 0) {
+                    const s = try argString(ctx, argv[@intCast(currentarg)]);
+                    if (ctx.vm.pending_exception != null) return error.RuntimeError;
+                    star_strings[formatcount] = s;
+                    arg = @intCast(s.len);
+                    if (code == 'Z') arg += 1;
+                }
+                currentarg += 1;
+            },
+            'q', 'Q', 'J', 'P', 'c', 'C', 's', 'S', 'i', 'I', 'l', 'L', 'n', 'N', 'v', 'V', 'f', 'g', 'G', 'd', 'e', 'E' => {
+                if (arg < 0) arg = num_args - currentarg;
+                if (currentarg > int_max - arg) return packValueError(ctx, "Type {c}: too few arguments", .{code});
+                currentarg += arg;
+                if (currentarg > num_args) return packValueError(ctx, "Type {c}: too few arguments", .{code});
+            },
+            else => return packValueError(ctx, "Type {c}: unknown format code", .{code}),
+        }
+        codes[formatcount] = code;
+        counts[formatcount] = arg;
+    }
+    if (currentarg < num_args) try filesystem.warnDocref(ctx, "{d} arguments unused", .{num_args - currentarg});
+
+    var outputpos: i64 = 0;
+    var outputsize: i64 = 0;
+    for (codes[0..formatcount], counts[0..formatcount]) |code, arg| {
+        const unit: i64 = switch (code) {
+            'h', 'H', 'a', 'A', 'Z', 'c', 'C', 'x' => 1,
+            's', 'S', 'n', 'v' => 2,
+            'i', 'I', 'l', 'L', 'N', 'V', 'f', 'g', 'G' => 4,
+            'q', 'Q', 'J', 'P', 'd', 'e', 'E' => 8,
+            else => 0,
+        };
+        if (unit != 0) {
+            const a = if (code == 'h' or code == 'H') @divTrunc(arg, 2) + @rem(arg, 2) else arg;
+            if (a < 0 or @divTrunc(int_max - outputpos, unit) < a) return packValueError(ctx, "Type {c}: integer overflow in format string", .{code});
+            outputpos += a * unit;
+        } else if (code == 'X') {
+            outputpos -= arg;
+            if (outputpos < 0) {
+                try filesystem.warnDocref(ctx, "Type {c}: outside of string", .{code});
+                outputpos = 0;
+            }
+        } else if (code == '@') {
+            outputpos = arg;
+        }
+        if (outputsize < outputpos) outputsize = outputpos;
+    }
+
+    const output = try ctx.allocator.alloc(u8, @intCast(outputsize));
+    errdefer ctx.allocator.free(output);
+    @memset(output, 0);
+    outputpos = 0;
+    currentarg = 0;
+    for (codes[0..formatcount], counts[0..formatcount], star_strings[0..formatcount]) |code, count, star| {
+        var arg = count;
+        switch (code) {
+            'a', 'A', 'Z' => {
+                const arg_cp: usize = @intCast(if (code != 'Z') arg else @max(0, arg - 1));
+                const str = star orelse try argString(ctx, argv[@intCast(currentarg)]);
+                currentarg += 1;
+                const start: usize = @intCast(outputpos);
+                @memset(output[start..][0..@intCast(arg)], if (code == 'A') ' ' else 0);
+                const n = @min(str.len, arg_cp);
+                @memcpy(output[start..][0..n], str[0..n]);
+                outputpos += arg;
+            },
+            'h', 'H' => {
+                var nibbleshift: u3 = if (code == 'h') 0 else 4;
+                var first = true;
+                const str = star orelse try argString(ctx, argv[@intCast(currentarg)]);
+                currentarg += 1;
+                outputpos -= 1;
+                if (arg > @as(i64, @intCast(str.len))) {
+                    try filesystem.warnDocref(ctx, "Type {c}: not enough characters in string", .{code});
+                    arg = @intCast(str.len);
+                }
+                var vi: usize = 0;
+                while (arg > 0) : (arg -= 1) {
+                    var n = str[vi];
+                    vi += 1;
+                    if (n >= '0' and n <= '9') {
+                        n -= '0';
+                    } else if (n >= 'A' and n <= 'F') {
+                        n -= 'A' - 10;
+                    } else if (n >= 'a' and n <= 'f') {
+                        n -= 'a' - 10;
+                    } else {
+                        try filesystem.warnDocref(ctx, "Type {c}: illegal hex digit {c}", .{ code, n });
+                        n = 0;
+                    }
+                    if (first) {
+                        outputpos += 1;
+                        output[@intCast(outputpos)] = 0;
+                        first = false;
+                    } else {
+                        first = true;
+                    }
+                    output[@intCast(outputpos)] |= n << nibbleshift;
+                    nibbleshift = if (nibbleshift == 0) 4 else 0;
+                }
+                outputpos += 1;
+            },
+            'c', 'C', 's', 'S', 'n', 'v', 'i', 'I', 'l', 'L', 'N', 'V', 'q', 'Q', 'J', 'P' => {
+                const size: usize = switch (code) {
+                    'c', 'C' => 1,
+                    's', 'S', 'n', 'v' => 2,
+                    'i', 'I', 'l', 'L', 'N', 'V' => 4,
+                    else => 8,
+                };
+                const big = code == 'n' or code == 'N' or code == 'J';
+                while (arg > 0) : (arg -= 1) {
+                    const v: u64 = @bitCast(try argLong(ctx, argv[@intCast(currentarg)]));
+                    currentarg += 1;
+                    var bytes: [8]u8 = undefined;
+                    std.mem.writeInt(u64, &bytes, v, .little);
+                    const dst = output[@intCast(outputpos)..][0..size];
+                    if (big) {
+                        for (0..size) |k| dst[k] = bytes[size - 1 - k];
+                    } else @memcpy(dst, bytes[0..size]);
+                    outputpos += @intCast(size);
+                }
+            },
+            'f', 'g', 'G' => while (arg > 0) : (arg -= 1) {
+                const v: f32 = @floatCast(Value.toFloat(argv[@intCast(currentarg)]));
+                currentarg += 1;
+                std.mem.writeInt(u32, output[@intCast(outputpos)..][0..4], @bitCast(v), if (code == 'G') .big else .little);
+                outputpos += 4;
+            },
+            'd', 'e', 'E' => while (arg > 0) : (arg -= 1) {
+                const v: f64 = Value.toFloat(argv[@intCast(currentarg)]);
+                currentarg += 1;
+                std.mem.writeInt(u64, output[@intCast(outputpos)..][0..8], @bitCast(v), if (code == 'E') .big else .little);
+                outputpos += 8;
+            },
+            'x' => {
+                @memset(output[@intCast(outputpos)..][0..@intCast(arg)], 0);
+                outputpos += arg;
+            },
+            'X' => {
+                outputpos -= arg;
+                if (outputpos < 0) outputpos = 0;
+            },
+            '@' => {
+                if (arg > outputpos) @memset(output[@intCast(outputpos)..@intCast(arg)], 0);
+                outputpos = arg;
+            },
+            else => unreachable,
+        }
+    }
+    const len: usize = @intCast(outputpos);
+    if (len == 0) {
+        ctx.allocator.free(output);
+        return NativeResult.literal("");
+    }
+    const result = try ctx.allocator.realloc(output, len);
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, result));
 }
 
 // PHP_FUNCTION(unpack) (ext/standard/pack.c): each format code with its
