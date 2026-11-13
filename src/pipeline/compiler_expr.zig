@@ -2057,6 +2057,13 @@ pub fn compileVivifyChain(self: *Compiler, node_idx: u32) Error!void {
         try self.emitOp(.ensure_array_static_prop);
         try self.emitU16(class_idx);
         try self.emitU16(prop_idx);
+    } else if (node.tag == .static_prop_access and node.main_token != 0) {
+        // $c::$prop[] = x: the class comes from the variable
+        var prop_name = self.ast.tokenSlice(node.main_token);
+        if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+        try self.compileNode(node.data.lhs);
+        try self.emitOp(.ensure_array_static_prop_dyn);
+        try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(prop_name) }));
     } else if (node.tag == .variable_variable) {
         try self.compileNode(node.data.lhs);
         try self.emitOp(.ensure_array_var_var);

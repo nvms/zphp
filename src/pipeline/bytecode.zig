@@ -515,6 +515,9 @@ pub const OpCode = enum(u8) {
     iter_live_end,
     // iter_begin_ref for such a loop: an array is iterated live
     iter_begin_live,
+    // ensure_array_static_prop for `$c::$p[] = v`: u16 property; the class
+    // name or an object on the stack
+    ensure_array_static_prop_dyn,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -565,6 +568,7 @@ pub const OpCode = enum(u8) {
             .get_static_prop_dyn_name_quiet,
             .ensure_array_local,
             .ensure_array_prop,
+            .ensure_array_static_prop_dyn,
             .prepare_prop_w,
             .array_set_var,
             .cow_separate_local,

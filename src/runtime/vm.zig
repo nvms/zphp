@@ -7254,15 +7254,25 @@ pub const VM = struct {
                     self.push(.{ .array = new_arr });
                 },
 
-                .ensure_array_static_prop => {
+                .ensure_array_static_prop, .ensure_array_static_prop_dyn => {
                     // load a static property array for in-place write
                     // (Class::$prop[]=x, Class::$prop[k] op= v): COW-separate it
                     // and write the unshared array back to the static slot
-                    const class_idx = self.readU16();
-                    const prop_idx = self.readU16();
-                    var class_name = self.currentChunk().constants.items[class_idx].string.bytes();
-                    const prop_name = self.currentChunk().constants.items[prop_idx].string.bytes();
-                    class_name = self.resolveStaticClassName(class_name);
+                    var class_name: []const u8 = undefined;
+                    var prop_name: []const u8 = undefined;
+                    if (op == .ensure_array_static_prop) {
+                        const class_idx = self.readU16();
+                        const prop_idx = self.readU16();
+                        class_name = self.resolveStaticClassName(self.currentChunk().constants.items[class_idx].string.bytes());
+                        prop_name = self.currentChunk().constants.items[prop_idx].string.bytes();
+                    } else {
+                        prop_name = self.currentChunk().constants.items[self.readU16()].string.bytes();
+                        class_name = classNameOf(self.pop());
+                        if (class_name.len == 0) {
+                            self.push(.null);
+                            continue;
+                        }
+                    }
                     self.resolveStaticDefaults(class_name) catch {
                         if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                         return error.RuntimeError;
