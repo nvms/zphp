@@ -25,6 +25,7 @@ const ParsedAttr = struct {
     name: []const u8,
     args: []const Value,
     arg_names: []const ?[]const u8 = &.{},
+    line: u32 = 0,
 };
 
 fn isModifierToken(tag: Token.Tag) bool {
@@ -185,7 +186,7 @@ fn appendParamAttributes(self: *Compiler, func_name: []const u8, param_nodes: []
         if (attrs.len == 0) continue;
         defer self.allocator.free(attrs);
         const defs = try self.allocator.alloc(AttributeDef, attrs.len);
-        for (attrs, 0..) |pa, i| defs[i] = .{ .name = pa.name, .args = pa.args, .arg_names = pa.arg_names };
+        for (attrs, 0..) |pa, i| defs[i] = .{ .name = pa.name, .args = pa.args, .arg_names = pa.arg_names, .line = pa.line };
         const key = try @import("bytecode.zig").paramAttributesName(self.allocator, func_name, paramName(self, p));
         try self.string_allocs.append(self.allocator, key);
         try self.function_attrs.append(self.allocator, .{ .name = key, .attrs = defs });
@@ -206,7 +207,7 @@ pub fn emitConstantAttributes(self: *Compiler, main_token: u32, name_idx: u16) E
     if (attrs.len == 0) return;
     defer self.allocator.free(attrs);
     const defs = try self.allocator.alloc(AttributeDef, attrs.len);
-    for (attrs, 0..) |pa, i| defs[i] = .{ .name = pa.name, .args = pa.args, .arg_names = pa.arg_names };
+    for (attrs, 0..) |pa, i| defs[i] = .{ .name = pa.name, .args = pa.args, .arg_names = pa.arg_names, .line = pa.line };
     const key = try @import("bytecode.zig").constantAttributesName(self.allocator, self.file_path, main_token);
     try self.string_allocs.append(self.allocator, key);
     try self.function_attrs.append(self.allocator, .{ .name = key, .attrs = defs });
@@ -398,7 +399,7 @@ fn extractAttributes(self: *Compiler, main_token: u32, target: AttrTarget) Error
         @memset(args, .null);
         const arg_names = try self.allocator.alloc(?[]const u8, arg_nodes.len);
         @memset(arg_names, null);
-        try all_attrs.append(self.allocator, .{ .name = name, .args = args, .arg_names = arg_names });
+        try all_attrs.append(self.allocator, .{ .name = name, .args = args, .arg_names = arg_names, .line = lineForToken(self, @intCast(items[i])) });
         var named = false;
         for (arg_nodes, 0..) |arg_idx, ai| {
             const arg = self.ast.nodes[arg_idx];
@@ -765,6 +766,7 @@ fn emitAttributeData(self: *Compiler, attrs: []const ParsedAttr) Error!void {
     for (attrs) |attr| {
         const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(attr.name) });
         try self.emitU16(name_idx);
+        try self.emitU32(attr.line);
         // an attribute can take any number of arguments
         try self.emitU32(@intCast(attr.args.len));
         for (attr.args, 0..) |arg, i| {
@@ -2188,7 +2190,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
         if (func_attrs.len > 0) {
             const attr_defs = try self.allocator.alloc(AttributeDef, func_attrs.len);
             for (func_attrs, 0..) |pa, i| {
-                attr_defs[i] = .{ .name = pa.name, .args = pa.args, .arg_names = pa.arg_names };
+                attr_defs[i] = .{ .name = pa.name, .args = pa.args, .arg_names = pa.arg_names, .line = pa.line };
             }
             try self.function_attrs.append(self.allocator, .{ .name = name, .attrs = attr_defs });
             self.allocator.free(func_attrs);
@@ -2420,7 +2422,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
     if (closure_attrs.len > 0) {
         const attr_defs = try self.allocator.alloc(AttributeDef, closure_attrs.len);
         for (closure_attrs, 0..) |pa, i| {
-            attr_defs[i] = .{ .name = pa.name, .args = pa.args, .arg_names = pa.arg_names };
+            attr_defs[i] = .{ .name = pa.name, .args = pa.args, .arg_names = pa.arg_names, .line = pa.line };
         }
         try self.function_attrs.append(self.allocator, .{ .name = owned_name, .attrs = attr_defs });
         self.allocator.free(closure_attrs);

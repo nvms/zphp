@@ -488,6 +488,21 @@ pub const AttributeDef = struct {
     name: []const u8,
     args: []const Value = &.{},
     arg_names: []const ?[]const u8 = &.{},
+    // where it is written and that file's strict_types: newInstance() runs
+    // the constructor as called from there
+    line: u32 = 0,
+    file: []const u8 = "",
+    strict: bool = false,
+};
+
+// php's dummy call frame in zend_get_attribute_object: the constructor an
+// attribute's newInstance() runs (frame index `frame`) is called from where
+// the attribute is written, with that file's strict_types
+pub const AttributeCallSite = struct {
+    file: []const u8,
+    line: u32,
+    strict: bool,
+    frame: usize,
 };
 
 pub const StreamWrapperEntry = struct {
@@ -1108,6 +1123,7 @@ pub const VM = struct {
     // the native whose callback is being called (array_map, usort, ...) and
     // the frame depth it called from; a deeper frame means php code calls
     native_caller: struct { name: ?[]const u8 = null, frames: usize = 0 } = .{},
+    attribute_call_site: ?AttributeCallSite = null,
     // late-static-binding class for the next executeFunction frame. set by
     // callMethod (the native-side method dispatch used by reflection
     // newInstance, __toString, etc.) so static::class inside the called method
@@ -13905,7 +13921,11 @@ pub const VM = struct {
 
     // $this in the running frame, a local slot or the frame's vars
     pub fn currentThis(self: *VM) ?Value {
-        const f = self.currentFrame();
+        return frameThis(self.currentFrame());
+    }
+
+    // the $this frame `f` runs with, if any
+    pub fn frameThis(f: *const CallFrame) ?Value {
         if (f.vars.get("$this")) |v| return v;
         if (f.func) |fn_info| if (fn_info.locals_only) {
             for (fn_info.slot_names, 0..) |sn, si| {
@@ -14402,12 +14422,18 @@ pub const VM = struct {
                 var site_frame = i;
                 if (site_frame > 0 and site_frame == self.hidden_trace_frame +% 1 and self.frames[site_frame].native) site_frame -= 1;
                 if (site_frame > 0 and site_frame == self.hidden_trace_frame) site_frame -= 1;
-                const site = if (outermost and !natives[next_native].from_native) self.framePosition(site_frame) else null;
+                // the constructor an attribute's newInstance() calls, refused
+                // before its frame, is called from the attribute's line
+                const innermost = next_native == 0 or natives[next_native - 1].depth != i + 1;
+                const attribute_site: ?SourcePosition = if (!outermost and innermost) if (self.attributeSiteAt(i + 1)) |a| SourcePosition{ .file = a.file, .line = a.line } else null else null;
+                const site = attribute_site orelse if (outermost and !natives[next_native].from_native) self.framePosition(site_frame) else null;
                 try arr.append(self.allocator, .{ .array = try self.nativeTraceEntry(natives[next_native], site, true) });
             }
             if (self.frames[i].func) |f| if (f.name.len > 0 and i != self.hidden_trace_frame) {
                 const called_by_native = next_native < native_count and natives[next_native].depth == i;
-                const call_site: ?SourcePosition = if (i > 0 and !called_by_native) self.framePosition(i - 1) else null;
+                const call_site: ?SourcePosition = if (self.attributeSiteAt(i)) |s|
+                    .{ .file = s.file, .line = s.line }
+                else if (i > 0 and !called_by_native) self.framePosition(i - 1) else null;
                 // a generator running as a delegate was reached through the
                 // generators waiting in yield from, which php lists between
                 // it and the frame that resumed them
@@ -14512,6 +14538,11 @@ pub const VM = struct {
     }
 
     pub fn nativeTraceEntry(self: *VM, call: *const NativeCall, call_site: ?SourcePosition, with_args: bool) !*PhpArray {
+        return self.nativeTraceEntryWith(call, call_site, with_args, null);
+    }
+
+    // with debug_backtrace's object: the $this an instance native runs with
+    pub fn nativeTraceEntryWith(self: *VM, call: *const NativeCall, call_site: ?SourcePosition, with_args: bool, object: ?Value) !*PhpArray {
         const entry = try self.allocArray();
         if (call_site) |site| {
             try entry.set(self.allocator, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(site.file) });
@@ -14520,6 +14551,7 @@ pub const VM = struct {
         if (std.mem.indexOf(u8, call.label, "::")) |sep| {
             try entry.set(self.allocator, .{ .string = Value.String.borrowed("function") }, .{ .string = Value.String.borrowed(call.label[sep + 2 ..]) });
             try entry.set(self.allocator, .{ .string = Value.String.borrowed("class") }, .{ .string = Value.String.borrowed(call.label[0..sep]) });
+            if (object) |o| try entry.set(self.allocator, .{ .string = Value.String.borrowed("object") }, o);
             try entry.set(self.allocator, .{ .string = Value.String.borrowed("type") }, .{ .string = Value.String.borrowed(if (call.instance) "->" else "::") });
         } else {
             try entry.set(self.allocator, .{ .string = Value.String.borrowed("function") }, .{ .string = Value.String.borrowed(call.label) });
@@ -14701,7 +14733,10 @@ pub const VM = struct {
         const scope = self.exceptionTraceScope(exc);
         const old = exc.getForScope("trace", scope);
         const trace = try self.allocArray();
-        const entry = try self.newTraceEntry(f, if (self.frame_count > 0 and !self.calledFromNative()) self.framePosition(self.frame_count - 1) else null);
+        const site: ?SourcePosition = if (self.attributeSiteAt(self.frame_count)) |a|
+            .{ .file = a.file, .line = a.line }
+        else if (self.frame_count > 0 and !self.calledFromNative()) self.framePosition(self.frame_count - 1) else null;
+        const entry = try self.newTraceEntry(f, site);
         const entry_args = try self.traceArgs(entry);
         const sensitive = try self.sensitiveParamMask(f);
         for (args, 0..) |a, i| try entry_args.append(self.allocator, try self.traceArgValue(a, sensitive, @min(i, if (f.is_variadic and f.params.len > 0) f.params.len - 1 else i)));
@@ -16688,6 +16723,13 @@ pub const VM = struct {
     }
 
     pub const SourcePosition = struct { file: []const u8, line: i64 };
+
+    // the attribute call site frame `index` runs from, if it is the
+    // constructor an attribute's newInstance() called
+    pub fn attributeSiteAt(self: *const VM, index: usize) ?AttributeCallSite {
+        const site = self.attribute_call_site orelse return null;
+        return if (site.frame == index) site else null;
+    }
 
     // the file and line the executing frame is at
     pub fn currentSourcePosition(self: *VM) SourcePosition {
@@ -19138,6 +19180,9 @@ pub const VM = struct {
         for (0..count) |i| {
             const name_idx = self.readU16();
             const name = self.currentChunk().constants.items[name_idx].string.bytes();
+            const line = self.readU32();
+            const site_file = self.frameFile(self.frame_count - 1);
+            const strict = self.topFrameStrict();
             const arg_count = self.readU32();
             if (arg_count > 0) {
                 const args = try self.allocator.alloc(Value, arg_count);
@@ -19162,9 +19207,9 @@ pub const VM = struct {
                         break :blk raw;
                     };
                 }
-                attrs[i] = .{ .name = name, .args = args, .arg_names = names };
+                attrs[i] = .{ .name = name, .args = args, .arg_names = names, .line = line, .file = site_file, .strict = strict };
             } else {
-                attrs[i] = .{ .name = name };
+                attrs[i] = .{ .name = name, .line = line, .file = site_file, .strict = strict };
             }
         }
         return attrs;
@@ -26753,7 +26798,10 @@ pub const VM = struct {
         // line N"; the caller is the current top frame
         var cs_file: []const u8 = self.file_path;
         var cs_line: u32 = 0;
-        if (self.frame_count >= 1) {
+        if (self.attributeSiteAt(self.frame_count)) |site| {
+            cs_file = site.file;
+            cs_line = site.line;
+        } else if (self.frame_count >= 1) {
             const caller = &self.frames[self.frame_count - 1];
             if (caller.script_path.len > 0) cs_file = caller.script_path else if (caller.func) |cf| if (cf.file_path.len > 0) {
                 cs_file = cf.file_path;
@@ -28016,7 +28064,10 @@ pub const VM = struct {
     fn formatTooFewArgs(self: *VM, name: []const u8, ac: usize, func: *const ObjFunction) ![]const u8 {
         var caller_file: []const u8 = self.file_path;
         var caller_line: u32 = 0;
-        if (self.frame_count >= 1) {
+        if (self.attributeSiteAt(self.frame_count)) |site| {
+            caller_file = site.file;
+            caller_line = site.line;
+        } else if (self.frame_count >= 1) {
             const caller = &self.frames[self.frame_count - 1];
             if (caller.script_path.len > 0) caller_file = caller.script_path else if (caller.func) |cf| if (cf.file_path.len > 0) {
                 caller_file = cf.file_path;
@@ -28038,7 +28089,7 @@ pub const VM = struct {
         // call_user_func compiles to one, a callback from array_map doesn't
         const caller = self.native_caller;
         const from_native = caller.name != null and caller.frames == self.frame_count;
-        const from_php = !from_native or
+        const from_php = !from_native or self.attributeSiteAt(self.frame_count) != null or
             std.mem.eql(u8, caller.name.?, "call_user_func") or std.mem.eql(u8, caller.name.?, "call_user_func_array");
         const msg = if (from_php) try self.formatTooFewArgs(display, ac, func) else blk: {
             const modifier: []const u8 = if (func.required_params == func.arity) "exactly" else "at least";
@@ -28371,8 +28422,10 @@ pub const VM = struct {
         if (!func.has_param_types or g_type_info.count() == 0) return args;
         const copy = if (args.len <= buf.len) buf[0..args.len] else try self.allocator.alloc(Value, args.len);
         @memcpy(copy, args);
-        const internal = self.calledFromNative();
-        const exc = (self.enforceArgTypes(name, copy, .{ .strict = if (internal) false else self.topFrameStrict(), .internal = internal }) catch |err| {
+        const site = self.attributeSiteAt(self.frame_count);
+        const internal = site == null and self.calledFromNative();
+        const strict = if (site) |s| s.strict else if (internal) false else self.topFrameStrict();
+        const exc = (self.enforceArgTypes(name, copy, .{ .strict = strict, .internal = internal }) catch |err| {
             if (copy.ptr != buf) self.allocator.free(copy);
             return err;
         }) orelse return copy;

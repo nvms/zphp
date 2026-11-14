@@ -311,6 +311,11 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
     result.source = ast.source;
     result.file_path = file_path;
     result.strict_types = strict;
+    // attributes a constructor call would come from
+    for (result.function_attrs.items) |fa| for (fa.attrs) |*attr| {
+        @constCast(attr).file = file_path;
+        @constCast(attr).strict = strict;
+    };
     return result;
 }
 

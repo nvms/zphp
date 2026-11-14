@@ -2191,6 +2191,11 @@ fn buildReflectionAttribute(ctx: *NativeContext, attr: AttributeDef, target: i64
     try obj.set(ctx.allocator, "__arguments", .{ .array = args_arr });
     try obj.set(ctx.allocator, "__target", .{ .int = target });
     try obj.set(ctx.allocator, "__is_repeated", .{ .bool = is_repeated });
+    if (attr.line != 0) {
+        try obj.set(ctx.allocator, "__line", .{ .int = attr.line });
+        try obj.set(ctx.allocator, "__file", .{ .string = Value.String.borrowed(attr.file) });
+        try obj.set(ctx.allocator, "__strict", .{ .bool = attr.strict });
+    }
     // the reflector the scope name came from may be gone by the time the
     // arguments are read
     try obj.set(ctx.allocator, "__scope", .{ .string = Value.String.borrowed(try ctx.createString(scope)) });
@@ -6171,6 +6176,17 @@ fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
     const outer = ctx.vm.native_caller;
     ctx.vm.native_caller = .{ .name = "ReflectionAttribute::newInstance", .frames = ctx.vm.frame_count };
     defer ctx.vm.native_caller = outer;
+    // php calls it from a dummy frame at the attribute's line
+    const outer_site = ctx.vm.attribute_call_site;
+    defer ctx.vm.attribute_call_site = outer_site;
+    const line = this.get("__line");
+    const file = this.get("__file");
+    ctx.vm.attribute_call_site = if (line == .int and file == .string) .{
+        .file = file.string.bytes(),
+        .line = @intCast(line.int),
+        .strict = this.get("__strict") == .bool and this.get("__strict").bool,
+        .frame = ctx.vm.frame_count,
+    } else null;
     _ = try ctx.callMethod(obj, "__construct", bound.list.items);
     return NativeResult.borrowed(.{ .object = obj });
 }

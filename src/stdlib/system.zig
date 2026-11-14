@@ -1054,8 +1054,13 @@ fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bool, 
         i -= 1;
         count += 1;
     }) {
-        try appendNativeEntries(vm, result, natives[0..native_count], &next_native, i, ignore_args, limit);
+        try appendNativeEntries(vm, result, natives[0..native_count], &next_native, i, ignore_args, provide_object, limit);
         if (limit > 0 and result.entries.items.len >= limit) break;
+        // the frame a native method call keeps its $this in is no php frame
+        if (vm.frames[i].native) {
+            count -%= 1;
+            continue;
+        }
         const called_by_native = next_native < native_count and natives[next_native].depth == i;
         var entry = try ctx.createArray();
         const frame = &vm.frames[i];
@@ -1063,7 +1068,11 @@ fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bool, 
         // from the generator waiting in it, and those waiting generators
         // follow it, as php lists them
         const delegator = if (frame.generator) |g| g.delegator else null;
-        if (called_by_native and delegator == null) {
+        if (vm.attributeSiteAt(i)) |site| {
+            // an attribute's constructor, called from where it is written
+            try entry.set(alloc, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(site.file) });
+            try entry.set(alloc, .{ .string = Value.String.borrowed("line") }, .{ .int = site.line });
+        } else if (called_by_native and delegator == null) {
             // [internal function]: no file or line
         } else if (delegator) |d| {
             if (vm.generatorPosition(d)) |site| {
@@ -1078,16 +1087,21 @@ fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bool, 
             }
         }
 
+        // zend_fetch_debug_backtrace's order: function, class, object, type
+        // (DEBUG_BACKTRACE_PROVIDE_OBJECT gives a method's $this), args
         if (frame.func) |func| {
             const type_str: []const u8 = if (func.is_static) "::" else "->";
+            const this_obj: ?Value = if (provide_object and !func.is_static) if (VM.frameThis(frame)) |t| (if (t == .object) t else null) else null else null;
             if (std.mem.indexOf(u8, func.name, "::")) |sep| {
-                try entry.set(alloc, .{ .string = Value.String.borrowed("class") }, .{ .string = Value.String.borrowed(func.name[0..sep]) });
                 try entry.set(alloc, .{ .string = Value.String.borrowed("function") }, .{ .string = Value.String.borrowed(try vm.phpMethodName(func.name[sep + 2 ..])) });
+                try entry.set(alloc, .{ .string = Value.String.borrowed("class") }, .{ .string = Value.String.borrowed(func.name[0..sep]) });
+                if (this_obj) |t| try entry.set(alloc, .{ .string = Value.String.borrowed("object") }, t);
                 try entry.set(alloc, .{ .string = Value.String.borrowed("type") }, .{ .string = Value.String.borrowed(type_str) });
             } else {
                 try entry.set(alloc, .{ .string = Value.String.borrowed("function") }, .{ .string = Value.String.borrowed(try vm.funcDisplayName(func)) });
                 if (frame.called_class) |cls| {
                     try entry.set(alloc, .{ .string = Value.String.borrowed("class") }, .{ .string = Value.String.borrowed(cls) });
+                    if (this_obj) |t| try entry.set(alloc, .{ .string = Value.String.borrowed("object") }, t);
                     try entry.set(alloc, .{ .string = Value.String.borrowed("type") }, .{ .string = Value.String.borrowed(type_str) });
                 }
             }
@@ -1118,15 +1132,6 @@ fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bool, 
                 }
             }
             try entry.set(alloc, .{ .string = Value.String.borrowed("args") }, .{ .array = args_arr });
-        }
-
-        // DEBUG_BACKTRACE_PROVIDE_OBJECT: include the $this bound to this
-        // frame. callers walk the backtrace looking for a frame whose object
-        // is a particular type (e.g. test runners locating the current test)
-        if (provide_object) {
-            if (frame.vars.get("$this")) |val| {
-                if (val == .object) try entry.set(alloc, .{ .string = Value.String.borrowed("object") }, val);
-            }
         }
 
         try result.append(alloc, .{ .array = entry });
@@ -1167,30 +1172,36 @@ fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bool, 
     }
 
     // natives the main script's code called
-    if (i == 0) try appendNativeEntries(vm, result, natives[0..native_count], &next_native, 0, ignore_args, limit);
+    if (i == 0) try appendNativeEntries(vm, result, natives[0..native_count], &next_native, 0, ignore_args, provide_object, limit);
     return result;
 }
 
 // the natives frame i called, innermost first: the outermost of them was
 // called from frame i's code, each other one by the native outside it
-fn appendNativeEntries(vm: *VM, result: *PhpArray, natives: []const *const @import("../runtime/vm.zig").NativeCall, next: *usize, i: usize, ignore_args: bool, limit: usize) RuntimeError!void {
+fn appendNativeEntries(vm: *VM, result: *PhpArray, natives: []const *const @import("../runtime/vm.zig").NativeCall, next: *usize, i: usize, ignore_args: bool, provide_object: bool, limit: usize) RuntimeError!void {
     while (next.* < natives.len and natives[next.*].depth == i + 1) : (next.* += 1) {
         if (natives[next.*].label.len == 0) continue;
         if (limit > 0 and result.entries.items.len >= limit) return;
         const outermost = next.* + 1 == natives.len or natives[next.* + 1].depth != i + 1;
         const site = if (outermost and !natives[next.*].from_native) vm.framePosition(i) else null;
-        const native_entry = try vm.nativeTraceEntry(natives[next.*], site, !ignore_args);
+        // an instance method's $this is in the frame pushed for the call
+        const depth = natives[next.*].depth;
+        const object: ?Value = if (provide_object and natives[next.*].instance and depth >= 1 and vm.frames[depth - 1].native)
+            if (VM.frameThis(&vm.frames[depth - 1])) |t| (if (t == .object) t else null) else null
+        else
+            null;
+        const native_entry = try vm.nativeTraceEntryWith(natives[next.*], site, !ignore_args, object);
         try result.append(vm.allocator, .{ .array = native_entry });
     }
 }
 
 fn native_debug_backtrace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    // PHP options: 0 = DEBUG_BACKTRACE_PROVIDE_OBJECT (default), 2 = DEBUG_BACKTRACE_IGNORE_ARGS.
-    // PROVIDE_OBJECT is on by default (option=0); only the inverse bit (1) suppresses it
-    const options = if (args.len >= 1) Value.toInt(args[0]) else 0;
+    // DEBUG_BACKTRACE_PROVIDE_OBJECT (1, the default) and
+    // DEBUG_BACKTRACE_IGNORE_ARGS (2)
+    const options = if (args.len >= 1) Value.toInt(args[0]) else 1;
     const limit_raw = if (args.len >= 2) Value.toInt(args[1]) else 0;
     const ignore_args = (options & 2) != 0;
-    const provide_object = (options & 1) == 0;
+    const provide_object = (options & 1) != 0;
     const limit: usize = if (limit_raw > 0) @intCast(limit_raw) else 0;
     return NativeResult.borrowed(.{ .array = try buildBacktrace(ctx, ignore_args, provide_object, limit) });
 }

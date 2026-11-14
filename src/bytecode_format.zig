@@ -18,7 +18,7 @@ const MAGIC = "ZPHPC\x00";
 // v18 adds defer_prop_defaults; v19 gives interface, trait and enum
 // declarations their start line, end line and doc comment. v20 gives class
 // constants their own opcodes.
-pub const FORMAT_VERSION: u16 = 73;
+pub const FORMAT_VERSION: u16 = 74;
 
 // tag bytes for serialized values
 const TAG_NULL: u8 = 0;
@@ -93,6 +93,7 @@ pub fn serialize(allocator: Allocator, result: *const CompileResult) ![]u8 {
         _ = try strtab.intern(allocator, fa.name);
         for (fa.attrs) |attr| {
             _ = try strtab.intern(allocator, attr.name);
+            _ = try strtab.intern(allocator, attr.file);
             for (attr.args) |arg| try internValueStrings(allocator, &strtab, arg);
             for (attr.arg_names) |arg_name| {
                 if (arg_name) |name| _ = try strtab.intern(allocator, name);
@@ -154,6 +155,9 @@ pub fn serialize(allocator: Allocator, result: *const CompileResult) ![]u8 {
         try writeU16(&buf, allocator, @intCast(fa.attrs.len));
         for (fa.attrs) |attr| {
             try writeU32(&buf, allocator, try strtab.intern(allocator, attr.name));
+            try writeU32(&buf, allocator, attr.line);
+            try writeU32(&buf, allocator, try strtab.intern(allocator, attr.file));
+            try buf.append(allocator, @intFromBool(attr.strict));
             try writeU16(&buf, allocator, @intCast(attr.args.len));
             for (attr.args) |arg| try serializeValue(&buf, allocator, &strtab, arg);
             try writeU16(&buf, allocator, @intCast(attr.arg_names.len));
@@ -593,6 +597,9 @@ pub fn deserializeRelocated(allocator: Allocator, data: []const u8, relocation: 
         const attrs = try allocator.alloc(@import("runtime/vm.zig").AttributeDef, attr_count);
         for (0..attr_count) |ai| {
             const attr_name = strings[try readStringIndex(&r, strings)];
+            const attr_line = r.readU32() catch return error.InvalidFormat;
+            const attr_file = strings[try readStringIndex(&r, strings)];
+            const attr_strict = (r.readByte() catch return error.InvalidFormat) != 0;
             const arg_count = r.readU16() catch return error.InvalidFormat;
             const args = try allocator.alloc(Value, arg_count);
             for (0..arg_count) |i| args[i] = try deserializeValue(&r, &ctx);
@@ -603,7 +610,7 @@ pub fn deserializeRelocated(allocator: Allocator, data: []const u8, relocation: 
                 if (idx != 0xFFFFFFFF and idx >= strings.len) return error.InvalidFormat;
                 arg_names[i] = if (idx == 0xFFFFFFFF) null else strings[idx];
             }
-            attrs[ai] = .{ .name = attr_name, .args = args, .arg_names = arg_names };
+            attrs[ai] = .{ .name = attr_name, .args = args, .arg_names = arg_names, .line = attr_line, .file = attr_file, .strict = attr_strict };
         }
         try function_attrs.append(allocator, .{ .name = fn_name, .attrs = attrs });
     }
