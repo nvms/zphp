@@ -352,6 +352,7 @@ fn memberSeparator(name: []const u8) ?usize {
 fn functionNamed(vm: *VM, raw: []const u8) ?[]const u8 {
     const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
     if (name.len == 0 or std.mem.indexOf(u8, name, "::") != null) return null;
+    if (VM.isLanguageConstruct(name)) return null;
     if (vm.native_fns.getKey(name)) |key| return key;
     if (vm.functions.getKey(name)) |key| return key;
     return vm.functionNamedIgnoringCase(name);

@@ -4471,8 +4471,16 @@ pub const VM = struct {
 
     // the registered name of the function a callable string names, matched
     // case-insensitively; a string never falls back to the global namespace
+    // isset, empty and eval are language constructs php has no function for;
+    // zphp compiles them to calls of natives the script can't name
+    pub fn isLanguageConstruct(name: []const u8) bool {
+        inline for (.{ "isset", "empty", "eval" }) |construct| if (std.ascii.eqlIgnoreCase(name, construct)) return true;
+        return false;
+    }
+
     pub fn canonicalFunctionName(self: *VM, raw_name: []const u8) ?[]const u8 {
         const name = if (raw_name.len > 0 and raw_name[0] == '\\') raw_name[1..] else raw_name;
+        if (isLanguageConstruct(name)) return null;
         return self.native_fns.getKey(name) orelse self.functions.getKey(name) orelse self.functionNamedIgnoringCase(name);
     }
 

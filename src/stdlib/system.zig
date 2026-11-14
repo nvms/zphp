@@ -1260,6 +1260,7 @@ fn native_get_defined_functions(ctx: *NativeContext, args: []const Value) Runtim
     while (iter_n.next()) |name| {
         // methods are registered by "C::m" beside the functions
         if (std.mem.indexOf(u8, name.*, "::") != null) continue;
+        if (VM.isLanguageConstruct(name.*)) continue;
         try internal.append(alloc, .{ .string = Value.String.borrowed(name.*) });
     }
 
