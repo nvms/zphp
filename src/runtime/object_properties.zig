@@ -166,7 +166,9 @@ pub const Laziness = enum { none, ghost, proxy };
 pub fn laziness(obj: *const PhpObject) Laziness {
     const state = obj.lazy orelse return .none;
     if (state.proxy) return if (state.initializer != .null or state.backing != null) .proxy else .none;
-    return if (state.initializer != .null) .ghost else .none;
+    // a ghost whose initializer is running is no longer lazy (php clears
+    // the flag before calling it)
+    return if (state.initializer != .null and !state.running) .ghost else .none;
 }
 
 // what var_dump and debug_zval_dump write before "object("

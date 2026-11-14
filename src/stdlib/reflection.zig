@@ -5157,7 +5157,13 @@ fn rpIsLazy(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     // static, dynamic and virtual properties have no lazy slot
     if (staticDeclaringClass(this) != null or this.get("__dynamic") == .bool) return NativeResult.scalar(.{ .bool = false });
     if (ctx.vm.propertyIsVirtual(args[0].object.class_name, name.string.bytes())) return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.scalar(.{ .bool = args[0].object.isLazySlot(name.string.bytes(), if (dc == .string) dc.string.bytes() else null) });
+    // an initialized proxy answers for its instance, which may be lazy
+    var obj = args[0].object;
+    while (obj.lazy) |state| {
+        if (!state.proxy) break;
+        obj = state.backing orelse break;
+    }
+    return NativeResult.scalar(.{ .bool = obj.isLazySlot(name.string.bytes(), if (dc == .string) dc.string.bytes() else null) });
 }
 // reflection_property_check_lazy_compatible
 fn checkLazyCompatible(ctx: *NativeContext, this: *PhpObject, method: []const u8) RuntimeError!void {
