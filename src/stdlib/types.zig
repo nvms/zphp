@@ -2143,9 +2143,10 @@ fn setMemoryLimit(ctx: *NativeContext, text: []const u8) RuntimeError!bool {
 
 fn native_set_error_handler(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const prev = ctx.vm.user_error_handler orelse Value.null;
-    if (ctx.vm.user_error_handler) |h| {
-        try ctx.vm.error_handler_stack.append(ctx.allocator, .{ .handler = h, .mask = ctx.vm.user_error_handler_mask });
-    }
+    // the running handler is pushed even when there is none (inside a
+    // handler, where php has taken it off), so restore_error_handler
+    // brings back exactly what was there
+    try ctx.vm.error_handler_stack.append(ctx.allocator, .{ .handler = prev, .mask = ctx.vm.user_error_handler_mask });
     if (args.len > 0 and args[0] != .null) {
         VM.retainValue(args[0]);
         ctx.vm.user_error_handler = args[0];
@@ -2204,7 +2205,7 @@ fn native_restore_error_handler(ctx: *NativeContext, _: []const Value) RuntimeEr
     if (ctx.vm.user_error_handler) |h| ctx.vm.releaseValue(h);
     if (ctx.vm.error_handler_stack.items.len > 0) {
         const entry = ctx.vm.error_handler_stack.pop().?;
-        ctx.vm.user_error_handler = entry.handler;
+        ctx.vm.user_error_handler = if (entry.handler == .null) null else entry.handler;
         ctx.vm.user_error_handler_mask = entry.mask;
     } else {
         ctx.vm.user_error_handler = null;
