@@ -8749,7 +8749,29 @@ pub const VM = struct {
                             const cell = try self.newRefCell();
                             self.setCell(cell, val);
                             try self.bindRefSlot(&frame.ref_slots, dst_name, cell);
-                        } else try self.putFrameVar(&frame.vars, dst_name, val);
+                        } else {
+                            // an assignment by value: the variable takes its
+                            // own copy (slot and name), the value stays on
+                            // the stack as the expression's result
+                            if (frame.func != null) {
+                                try self.mirrorBoundName(frame, dst_name, val);
+                            } else {
+                                // the script's variable and its slot share one
+                                // count, as set_var stores them
+                                const stored = try self.copyValue(val);
+                                const old = frame.vars.get(dst_name);
+                                try self.putFrameVar(&frame.vars, dst_name, stored);
+                                if (frame.include_parent == null) for (self.global_slot_names, 0..) |sn, si| if (std.mem.eql(u8, sn, dst_name)) {
+                                    if (si < frame.locals.len) {
+                                        if (old == null and frame.locals[si] != .undef) self.releaseValue(frame.locals[si]);
+                                        frame.locals[si] = stored;
+                                    }
+                                    break;
+                                };
+                                if (old) |o| self.releaseValue(o);
+                            }
+                            continue;
+                        }
                     }
                     // statement-level trailing .pop expects exactly one
                     // value on the stack from the assignment expression
