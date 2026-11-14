@@ -1787,13 +1787,7 @@ pub const Value = union(enum) {
         if (b == .null) return !a.isTruthy();
         // when one side is bool, both are cast to bool (PHP rule)
         if (a == .bool or b == .bool) return a.isTruthy() == b.isTruthy();
-        if (a == .string and b == .string) {
-            // PHP: when both strings are numeric, compare numerically (so '1' == '01')
-            if (isNumericString(a.string.bytes()) and isNumericString(b.string.bytes())) {
-                return toFloat(a) == toFloat(b);
-            }
-            return std.mem.eql(u8, a.string.bytes(), b.string.bytes());
-        }
+        if (a == .string and b == .string) return smartStrCompare(a.string.bytes(), b.string.bytes(), true) == 0;
         // php 8: a number against a non-numeric string compares as text;
         // an int's text is always numeric, a float's may not be (INF)
         if ((a == .int or a == .float) and b == .string and !isNumericString(b.string.bytes())) {
@@ -1805,6 +1799,55 @@ pub const Value = union(enum) {
             return b == .float and !std.math.isNan(b.float) and std.mem.eql(u8, doubleText(&tmp_text, b.float), a.string.bytes());
         }
         return toFloat(a) == toFloat(b);
+    }
+
+    // a numeric string as _is_numeric_string_ex reads it: an integer, or a
+    // double, where an integer too big for an int is a double that
+    // overflowed (oflow its sign)
+    const NumericText = struct { is_double: bool, lval: i64 = 0, dval: f64 = 0, oflow: i64 = 0 };
+
+    fn numericText(s: []const u8) ?NumericText {
+        if (!isNumericString(s)) return null;
+        const ws = " \t\n\r\x0b\x0c";
+        const t = std.mem.trim(u8, s, ws);
+        const digits = if (t.len > 0 and (t[0] == '-' or t[0] == '+')) t[1..] else t;
+        const integer = std.mem.indexOfAny(u8, digits, ".eE") == null;
+        if (integer) {
+            if (std.fmt.parseInt(i64, t, 10)) |n| return .{ .is_double = false, .lval = n, .dval = @floatFromInt(n) } else |_| {}
+            return .{ .is_double = true, .dval = std.fmt.parseFloat(f64, t) catch 0, .oflow = if (t[0] == '-') -1 else 1 };
+        }
+        return .{ .is_double = true, .dval = std.fmt.parseFloat(f64, t) catch 0 };
+    }
+
+    // zendi_smart_streq / zendi_smart_strcmp: two numeric strings compare as
+    // numbers, unless both are integers overflowed to the same side (the
+    // doubles would lose the difference); anything else compares as text
+    fn smartStrCompare(s1: []const u8, s2: []const u8, equality: bool) i64 {
+        numeric: {
+            const n1 = numericText(s1) orelse break :numeric;
+            const n2 = numericText(s2) orelse break :numeric;
+            if (n1.oflow != 0 and n1.oflow == n2.oflow and n1.dval - n2.dval == 0) break :numeric;
+            if (n1.is_double or n2.is_double) {
+                var d1 = n1.dval;
+                var d2 = n2.dval;
+                if (!n1.is_double) {
+                    if (n2.oflow != 0) return if (equality) 1 else -n2.oflow;
+                    d1 = @floatFromInt(n1.lval);
+                } else if (!n2.is_double) {
+                    if (n1.oflow != 0) return if (equality) 1 else n1.oflow;
+                    d2 = @floatFromInt(n2.lval);
+                } else if (d1 == d2 and !std.math.isFinite(d1)) break :numeric;
+                if (equality) return @intFromBool(d1 != d2);
+                const diff = d1 - d2;
+                return if (diff > 0) 1 else if (diff < 0) -1 else 0;
+            }
+            return if (n1.lval > n2.lval) 1 else if (n1.lval < n2.lval) -1 else 0;
+        }
+        return switch (std.mem.order(u8, s1, s2)) {
+            .lt => -1,
+            .eq => 0,
+            .gt => 1,
+        };
     }
 
     pub fn isNumericString(s: []const u8) bool {
@@ -1927,20 +1970,7 @@ pub const Value = union(enum) {
             }
             return if (a == .array) 1 else -1;
         }
-        if (a == .string and b == .string) {
-            // PHP: when both strings are numeric, compare numerically
-            if (isNumericString(a.string.bytes()) and isNumericString(b.string.bytes())) {
-                const af = toFloat(a);
-                const bf = toFloat(b);
-                if (af == bf) return 0;
-                return if (af < bf) -1 else 1;
-            }
-            return switch (std.mem.order(u8, a.string.bytes(), b.string.bytes())) {
-                .lt => -1,
-                .eq => 0,
-                .gt => 1,
-            };
-        }
+        if (a == .string and b == .string) return smartStrCompare(a.string.bytes(), b.string.bytes(), false);
         // PHP 8: number vs non-numeric string falls back to STRING comparison
         // (the number is stringified). Number vs numeric string still numeric.
         if ((a == .int or a == .float) and b == .string and !isNumericString(b.string.bytes())) {
