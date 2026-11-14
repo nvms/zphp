@@ -3423,6 +3423,9 @@ pub const VM = struct {
         self.releaseFrames();
         self.releaseCallbackRegistries();
         output_control.releaseAll(self);
+        // pipes still open mark their handles closed, so the handles must
+        // still exist
+        self.reapProcChildren();
         self.freeHeapItems(true);
         self.gc_zero_sites.deinit(self.allocator);
         self.builtin_classes.deinit(self.allocator);
