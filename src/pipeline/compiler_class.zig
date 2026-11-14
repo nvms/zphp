@@ -148,6 +148,15 @@ fn callAttributes(self: *Compiler, main_token: u32, return_type: []const u8, com
             if (std.ascii.eqlIgnoreCase(return_type, "never")) {
                 return self.fail(main_token, "A never returning " ++ kind ++ " does not return a value, but #[\\NoDiscard] requires a return value");
             }
+            // a message that isn't a plain string is php's to check when
+            // the attribute is built, at the warning
+            const plain = for (pa.args) |arg| {
+                if (!(arg == .null or (arg == .string and (arg.string.len == 0 or arg.string.bytes()[0] != 0)))) break false;
+            } else true;
+            if (!plain) {
+                out.no_discard = @import("bytecode.zig").deferred_no_discard;
+                continue;
+            }
             // the texts outlive the attribute list
             out.no_discard = try keepString(self, try self.allocator.dupe(u8, attrArg(pa, 0, "message") orelse ""));
         } else if (std.ascii.eqlIgnoreCase(name, "Deprecated")) {
@@ -322,6 +331,16 @@ fn checkInternalAttributes(self: *Compiler, attrs: []const ParsedAttr, target: A
             }
         }
         if (run_validator and target == .class) try validateClassAttribute(self, config.name, target.class, at);
+    }
+}
+
+// validate_nodiscard: a hook is no function whose result is used
+fn checkHookAttributes(self: *Compiler, attrs: []const ParsedAttr, at: u32) Error!void {
+    for (attrs) |pa| {
+        if (std.ascii.eqlIgnoreCase(bareAttributeName(pa.name), "DelayedTargetValidation")) return;
+    }
+    for (attrs) |pa| {
+        if (std.ascii.eqlIgnoreCase(bareAttributeName(pa.name), "NoDiscard")) return self.fail(at, "#[\\NoDiscard] is not supported for property hooks");
     }
 }
 
@@ -3344,7 +3363,9 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
             var it = hookIterator(self, member);
             while (it.next()) |hook| {
                 const hattrs = try extractAttributesOf(self, hook.token, AttrTarget.method, hook.method);
-                if (hattrs.len > 0) try methods_with_attrs.append(self.allocator, .{ .name = hook.method, .attrs = hattrs });
+                if (hattrs.len == 0) continue;
+                try methods_with_attrs.append(self.allocator, .{ .name = hook.method, .attrs = hattrs });
+                try checkHookAttributes(self, hattrs, hook.token);
             }
         }
     }
@@ -4196,7 +4217,9 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
             var it = hookIterator(self, member);
             while (it.next()) |hook| {
                 const hattrs = try extractAttributesOf(self, hook.token, AttrTarget.method, hook.method);
-                if (hattrs.len > 0) try methods_with_attrs.append(self.allocator, .{ .name = hook.method, .attrs = hattrs });
+                if (hattrs.len == 0) continue;
+                try methods_with_attrs.append(self.allocator, .{ .name = hook.method, .attrs = hattrs });
+                try checkHookAttributes(self, hattrs, hook.token);
             }
         }
     }

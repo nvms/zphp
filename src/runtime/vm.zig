@@ -838,6 +838,9 @@ pub const VM = struct {
     fast_return_drain: bool = false,
     // the next frame pushed is __call/__callStatic standing in for a method
     pending_trampoline: bool = false,
+    // a frame traces leave out: a function whose call attributes are built
+    // as it is entered, which php does before the function runs
+    hidden_trace_frame: usize = std.math.maxInt(usize),
     // frames below this count belong to a script that has finished (the
     // shutdown functions run): php has no executing file there
     finished_frames: usize = 0,
@@ -8853,7 +8856,11 @@ pub const VM = struct {
                         defer if (trampoline) |t| self.allocator.free(t);
                         const shown = trampoline orelse own_name;
                         const declared = self.functionAttributesOf(func);
-                        const suffix = self.deprecationText(func.deprecated orelse "", declared.attrs, declared.scope) catch |err| {
+                        const outer_hidden = self.hidden_trace_frame;
+                        self.hidden_trace_frame = self.frame_count - 1;
+                        const built = self.deprecationText(func.deprecated orelse "", declared.attrs, declared.scope);
+                        self.hidden_trace_frame = outer_hidden;
+                        const suffix = built catch |err| {
                             if (try self.resumeRaised()) continue;
                             return err;
                         };
@@ -8877,7 +8884,16 @@ pub const VM = struct {
                         const code = caller.chunk.code.items;
                         if (!native_caller and caller.ip < code.len and code[caller.ip] == @intFromEnum(OpCode.pop_boundary)) {
                             const func = self.currentFrame().func.?;
-                            const reason = func.no_discard orelse "";
+                            const declared = self.functionAttributesOf(func);
+                            const outer_hidden = self.hidden_trace_frame;
+                            self.hidden_trace_frame = self.frame_count - 1;
+                            const built = self.noDiscardText(func.no_discard orelse "", declared.attrs, declared.scope);
+                            self.hidden_trace_frame = outer_hidden;
+                            const reason = built catch |err| {
+                                if (try self.resumeRaised()) continue;
+                                return err;
+                            };
+                            defer self.allocator.free(reason);
                             const kind: []const u8 = if (std.mem.indexOf(u8, func.name, "::") != null) "method" else "function";
                             const own_name = if (func.display_name.len > 0) func.display_name else func.name;
                             const trampoline = self.trampolineDisplay(own_name);
@@ -14097,10 +14113,14 @@ pub const VM = struct {
             while (next_native < native_count and natives[next_native].depth == i + 1) : (next_native += 1) {
                 if (natives[next_native].label.len == 0) continue;
                 const outermost = next_native + 1 == native_count or natives[next_native + 1].depth != i + 1;
-                const site = if (outermost and !natives[next_native].from_native) self.framePosition(i) else null;
+                // a hidden frame's natives were called from its caller
+                var site_frame = i;
+                if (site_frame > 0 and site_frame == self.hidden_trace_frame +% 1 and self.frames[site_frame].native) site_frame -= 1;
+                if (site_frame > 0 and site_frame == self.hidden_trace_frame) site_frame -= 1;
+                const site = if (outermost and !natives[next_native].from_native) self.framePosition(site_frame) else null;
                 try arr.append(self.allocator, .{ .array = try self.nativeTraceEntry(natives[next_native], site, true) });
             }
-            if (self.frames[i].func) |f| if (f.name.len > 0) {
+            if (self.frames[i].func) |f| if (f.name.len > 0 and i != self.hidden_trace_frame) {
                 const called_by_native = next_native < native_count and natives[next_native].depth == i;
                 const call_site: ?SourcePosition = if (i > 0 and !called_by_native) self.framePosition(i - 1) else null;
                 // a generator running as a delegate was reached through the
@@ -15233,6 +15253,7 @@ pub const VM = struct {
             if (std.ascii.eqlIgnoreCase(name, "Deprecated")) break a;
         } else return self.allocator.dupe(u8, "");
         var placed: [2]Value = .{ .null, .null };
+        var count: usize = 0;
         for (attr.args, 0..) |stored, i| {
             const arg_name: ?[]const u8 = if (i < attr.arg_names.len) attr.arg_names[i] else null;
             const slot: usize = if (arg_name) |n| (if (std.mem.eql(u8, n, "message")) 0 else if (std.mem.eql(u8, n, "since")) 1 else {
@@ -15243,16 +15264,47 @@ pub const VM = struct {
             }) else i;
             if (slot >= placed.len) continue;
             placed[slot] = try self.attributeArgumentValue(stored, scope);
+            count = @max(count, slot + 1);
         }
         const obj = try self.allocObject(.{ .class_name = try self.stableClassName("Deprecated") });
         defer self.releaseValue(.{ .object = obj });
         try self.initObjectProperties(obj, "Deprecated");
-        _ = try self.callMethod(obj, "__construct", &placed);
+        // the arguments the attribute gives, no more
+        _ = try self.callMethod(obj, "__construct", placed[0..count]);
         const message = obj.get("message");
         const since = obj.get("since");
         const m = if (message == .string) message.string.bytes() else "";
         const s = if (since == .string) since.string.bytes() else "";
         return std.fmt.allocPrint(self.allocator, "{s}{s}{s}{s}", .{ if (s.len > 0) " since " else "", s, if (m.len > 0) ", " else "", m });
+    }
+
+    // a #[\NoDiscard] message: the one known at compile time, or the
+    // attribute built now, its constructor checking the argument. caller
+    // frees
+    fn noDiscardText(self: *VM, folded: []const u8, attrs: ?[]const AttributeDef, scope: []const u8) RuntimeError![]u8 {
+        if (!std.mem.eql(u8, folded, bytecode.deferred_no_discard)) return self.allocator.dupe(u8, folded);
+        const attr = for (attrs orelse &.{}) |a| {
+            const name = if (a.name.len > 0 and a.name[0] == '\\') a.name[1..] else a.name;
+            if (std.ascii.eqlIgnoreCase(name, "NoDiscard")) break a;
+        } else return self.allocator.dupe(u8, "");
+        var placed: [1]Value = .{.null};
+        for (attr.args, 0..) |stored, i| {
+            const arg_name: ?[]const u8 = if (i < attr.arg_names.len) attr.arg_names[i] else null;
+            if (arg_name) |n| if (!std.mem.eql(u8, n, "message")) {
+                const msg = try std.fmt.allocPrint(self.allocator, "Unknown named parameter ${s}", .{n});
+                defer self.allocator.free(msg);
+                try self.setPendingException("Error", msg);
+                return error.RuntimeError;
+            };
+            if (i >= placed.len and arg_name == null) continue;
+            placed[0] = try self.attributeArgumentValue(stored, scope);
+        }
+        const obj = try self.allocObject(.{ .class_name = try self.stableClassName("NoDiscard") });
+        defer self.releaseValue(.{ .object = obj });
+        try self.initObjectProperties(obj, "NoDiscard");
+        _ = try self.callMethod(obj, "__construct", &placed);
+        const message = obj.get("message");
+        return self.allocator.dupe(u8, if (message == .string) message.string.bytes() else "");
     }
 
     // the attributes declared on a compiled function or method, and the

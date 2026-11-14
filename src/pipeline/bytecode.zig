@@ -872,6 +872,8 @@ pub fn constantAttributesName(allocator: std.mem.Allocator, file_path: []const u
 // strings: php builds the attribute when the deprecation fires, so the vm
 // evaluates it then (vm.deprecationText)
 pub const deferred_deprecation = "\x00deferred deprecation";
+// the same for a #[\NoDiscard] message
+pub const deferred_no_discard = "\x00deferred nodiscard";
 
 // an attribute argument php evaluates when reflection asks for it: the
 // value stored for the argument names the initializer that computes it
