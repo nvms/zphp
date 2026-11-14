@@ -4,6 +4,7 @@ const Value = @import("../runtime/value.zig").Value;
 const phpTypeName = @import("types.zig").phpTypeName;
 const html = @import("html.zig");
 const PhpArray = @import("../runtime/value.zig").PhpArray;
+const PhpObject = @import("../runtime/value.zig").PhpObject;
 const vm_mod = @import("../runtime/vm.zig");
 const NativeContext = vm_mod.NativeContext;
 const VM = vm_mod.VM;
@@ -1169,14 +1170,16 @@ fn array_all(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
     return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_current(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+fn native_current(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len > 0 and args[0] == .object) return objectCurrent(ctx, "current", args[0].object);
     if (args.len == 0 or args[0] != .array) return NativeResult.scalar(Value{ .bool = false });
     const arr = args[0].array;
     if (arr.cursor >= arr.entries.items.len) return NativeResult.scalar(Value{ .bool = false });
     return NativeResult.share(arr.entries.items[arr.cursor].value);
 }
 
-fn native_next(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+fn native_next(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len > 0 and args[0] == .object) return objectMove(ctx, "next", args[0].object);
     if (args.len == 0 or args[0] != .array) return NativeResult.scalar(Value{ .bool = false });
     const arr = args[0].array;
     if (arr.cursor < arr.entries.items.len) arr.cursor += 1;
@@ -1184,7 +1187,8 @@ fn native_next(_: *NativeContext, args: []const Value) RuntimeError!NativeResult
     return NativeResult.share(arr.entries.items[arr.cursor].value);
 }
 
-fn native_prev(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+fn native_prev(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len > 0 and args[0] == .object) return objectMove(ctx, "prev", args[0].object);
     if (args.len == 0 or args[0] != .array) return NativeResult.scalar(Value{ .bool = false });
     const arr = args[0].array;
     if (arr.cursor == 0 or arr.cursor > arr.entries.items.len) {
@@ -1195,7 +1199,8 @@ fn native_prev(_: *NativeContext, args: []const Value) RuntimeError!NativeResult
     return NativeResult.share(arr.entries.items[arr.cursor].value);
 }
 
-fn native_reset(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+fn native_reset(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len > 0 and args[0] == .object) return objectMove(ctx, "reset", args[0].object);
     if (args.len == 0 or args[0] != .array) return NativeResult.scalar(Value{ .bool = false });
     const arr = args[0].array;
     arr.cursor = 0;
@@ -1203,7 +1208,8 @@ fn native_reset(_: *NativeContext, args: []const Value) RuntimeError!NativeResul
     return NativeResult.share(arr.entries.items[0].value);
 }
 
-fn native_end(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+fn native_end(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len > 0 and args[0] == .object) return objectMove(ctx, "end", args[0].object);
     if (args.len == 0 or args[0] != .array) return NativeResult.scalar(Value{ .bool = false });
     const arr = args[0].array;
     if (arr.entries.items.len == 0) return NativeResult.scalar(Value{ .bool = false });
@@ -1211,7 +1217,8 @@ fn native_end(_: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     return NativeResult.share(arr.entries.items[arr.cursor].value);
 }
 
-fn native_key(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+fn native_key(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len > 0 and args[0] == .object) return objectKey(ctx, args[0].object);
     if (args.len == 0 or args[0] != .array) return NativeResult.scalar(.null);
     const arr = args[0].array;
     if (arr.cursor >= arr.entries.items.len) return NativeResult.scalar(.null);
@@ -1219,6 +1226,120 @@ fn native_key(_: *NativeContext, args: []const Value) RuntimeError!NativeResult 
         .int => |i| NativeResult.scalar(.{ .int = i }),
         .string => |s| NativeResult.shareString(s),
     };
+}
+
+
+// php's internal pointer functions on an object walk its property table
+// (get_ht_for_iap): the declared slots in order, initialized or not, then
+// the dynamic properties, with the pointer kept per object
+const IapEntry = struct { key: []u8, value: Value };
+
+const ObjectIap = struct {
+    entries: std.ArrayListUnmanaged(IapEntry) = .empty,
+    allocator: std.mem.Allocator,
+
+    fn deinit(self: *ObjectIap) void {
+        for (self.entries.items) |e| self.allocator.free(e.key);
+        self.entries.deinit(self.allocator);
+    }
+};
+
+fn objectIap(ctx: *NativeContext, comptime func: []const u8, obj: *PhpObject) RuntimeError!ObjectIap {
+    try ctx.vm.raiseError(8192, func ++ "(): Calling " ++ func ++ "() on an object is deprecated");
+    const object_properties = @import("../runtime/object_properties.zig");
+    const a = ctx.allocator;
+    var table: ObjectIap = .{ .allocator = a };
+    errdefer table.deinit();
+    if (obj.slot_layout) |layout| if (obj.slots) |slots| {
+        for (layout.names, 0..) |name, i| {
+            if (i >= slots.len) break;
+            if (object_properties.isInternalState(ctx.vm, obj, name)) continue;
+            const declared = ctx.vm.propertyDeclaration(layout.declaring_classes[i], name);
+            const key = switch (declared.visibility) {
+                .public => try a.dupe(u8, name),
+                .protected => try std.fmt.allocPrint(a, "\x00*\x00{s}", .{name}),
+                .private => try std.fmt.allocPrint(a, "\x00{s}\x00{s}", .{ declared.defining_class, name }),
+            };
+            const absent = obj.isUnset(name) or (obj.isLazySlot(name, layout.declaring_classes[i]) and !obj.isLazyWrittenSlot(name, layout.declaring_classes[i]));
+            try table.entries.append(a, .{ .key = key, .value = if (absent) .undef else slots[i] });
+        }
+    };
+    var it = obj.properties.iterator();
+    while (it.next()) |entry| {
+        const name = entry.key_ptr.*;
+        if (object_properties.isInternalState(ctx.vm, obj, name)) continue;
+        if (obj.slot_layout) |layout| {
+            const in_slots = for (layout.names) |n| {
+                if (std.mem.eql(u8, n, name)) break true;
+            } else false;
+            if (in_slots) continue;
+        }
+        try table.entries.append(a, .{ .key = try a.dupe(u8, name), .value = entry.value_ptr.* });
+    }
+    return table;
+}
+
+fn iapPos(ctx: *NativeContext, obj: *PhpObject) usize {
+    return ctx.vm.iap_positions.get(obj) orelse 0;
+}
+
+fn setIapPos(ctx: *NativeContext, obj: *PhpObject, pos: usize) RuntimeError!void {
+    try ctx.vm.iap_positions.put(ctx.vm.allocator, obj, pos);
+}
+
+// php_array_iter_seek_current: an uninitialized property moves the pointer
+// on (or back)
+fn iapSeek(ctx: *NativeContext, obj: *PhpObject, table: *const ObjectIap, forward: bool) RuntimeError!?usize {
+    const n = table.entries.items.len;
+    var pos = iapPos(ctx, obj);
+    while (true) {
+        if (pos >= n) return null;
+        if (table.entries.items[pos].value != .undef) return pos;
+        if (forward) {
+            pos += 1;
+        } else {
+            pos = if (pos == 0) n else pos - 1;
+        }
+        try setIapPos(ctx, obj, pos);
+    }
+}
+
+fn iapCurrent(ctx: *NativeContext, obj: *PhpObject, table: *const ObjectIap, forward: bool) RuntimeError!NativeResult {
+    const pos = (try iapSeek(ctx, obj, table, forward)) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.share(table.entries.items[pos].value);
+}
+
+fn objectCurrent(ctx: *NativeContext, comptime func: []const u8, obj: *PhpObject) RuntimeError!NativeResult {
+    var table = try objectIap(ctx, func, obj);
+    defer table.deinit();
+    return iapCurrent(ctx, obj, &table, true);
+}
+
+fn objectKey(ctx: *NativeContext, obj: *PhpObject) RuntimeError!NativeResult {
+    var table = try objectIap(ctx, "key", obj);
+    defer table.deinit();
+    const pos = (try iapSeek(ctx, obj, &table, true)) orelse return NativeResult.scalar(.null);
+    // property names stay strings, numeric ones too
+    return NativeResult.copyString(ctx.allocator, table.entries.items[pos].key);
+}
+
+fn objectMove(ctx: *NativeContext, comptime func: []const u8, obj: *PhpObject) RuntimeError!NativeResult {
+    var table = try objectIap(ctx, func, obj);
+    defer table.deinit();
+    const n = table.entries.items.len;
+    if (n == 0) return NativeResult.scalar(.{ .bool = false });
+    const pos = iapPos(ctx, obj);
+    const forward = comptime std.mem.eql(u8, func, "next") or std.mem.eql(u8, func, "reset");
+    if (comptime std.mem.eql(u8, func, "next")) {
+        if (pos < n) try setIapPos(ctx, obj, pos + 1);
+    } else if (comptime std.mem.eql(u8, func, "prev")) {
+        if (pos < n) try setIapPos(ctx, obj, if (pos == 0) n else pos - 1);
+    } else if (comptime std.mem.eql(u8, func, "reset")) {
+        try setIapPos(ctx, obj, 0);
+    } else {
+        try setIapPos(ctx, obj, n - 1);
+    }
+    return iapCurrent(ctx, obj, &table, forward);
 }
 
 fn deepReplace(ctx: *NativeContext, base: *PhpArray, overlay: *PhpArray) RuntimeError!*PhpArray {

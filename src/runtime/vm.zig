@@ -838,6 +838,8 @@ pub const VM = struct {
     fast_return_drain: bool = false,
     // the next frame pushed is __call/__callStatic standing in for a method
     pending_trampoline: bool = false,
+    // the internal pointer of objects reset()/next()/... walked
+    iap_positions: std.AutoHashMapUnmanaged(*PhpObject, usize) = .{},
     // a frame traces leave out: a function whose call attributes are built
     // as it is entered, which php does before the function runs
     hidden_trace_frame: usize = std.math.maxInt(usize),
@@ -2212,6 +2214,7 @@ pub const VM = struct {
     }
 
     fn freeHandle(self: *VM, obj: *PhpObject) void {
+        if (self.iap_positions.count() > 0) _ = self.iap_positions.remove(obj);
         if (obj.resource or obj.id == 0) return;
         self.free_handles.append(self.allocator, obj.id) catch {};
         obj.id = 0;
@@ -3551,6 +3554,7 @@ pub const VM = struct {
         self.weakmaps.deinit(self.allocator);
         self.disabled_natives.deinit(self.allocator);
         self.weak_references.deinit(self.allocator);
+        self.iap_positions.deinit(self.allocator);
         self.held_exceptions.deinit(self.allocator);
         self.initializer_scopes.deinit(self.allocator);
         self.constants_visited.deinit(self.allocator);
@@ -3666,6 +3670,7 @@ pub const VM = struct {
 
     pub fn reset(self: *VM) void {
         self.sensitive_params.clearRetainingCapacity();
+        self.iap_positions.clearRetainingCapacity();
         @import("../stdlib/locale.zig").resetAfterRequest();
         if (self.ic) |ic| {
             for (ic.arg_stack[0..ic.arg_stack_room.committed]) |*source| self.releaseArgSource(source);
