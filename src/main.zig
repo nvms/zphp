@@ -251,13 +251,27 @@ fn compileFrom(allocator: std.mem.Allocator, source: []const u8, origin: compile
     diagnosed.diagnostic = &diag;
     return compiler.compileWithOrigin(&ast, allocator, diagnosed) catch |err| {
         const d = diag orelse return err;
-        exitOnCompileFailure(allocator, "CompileError", d.message(), .{ .file = path, .line = error_format.compileErrorLine(&ast, d) }, d.trace);
+        const line = error_format.compileErrorLine(&ast, d);
+        reportCompileNotes(allocator, &d, path, line);
+        exitOnCompileFailure(allocator, "CompileError", d.message(), .{ .file = path, .line = line }, d.trace);
     };
 }
 
 // the script never starts: php reports its syntax error or compile-time fatal
 // as an uncaught ParseError or CompileError, through the same log and display
 // copies as any other, and exits with 255
+// the warnings php raised while compiling, before the fatal that stopped it
+fn reportCompileNotes(allocator: std.mem.Allocator, d: *const compiler.Diagnostic, path: []const u8, fatal_line: i64) void {
+    if (d.note_count == 0) return;
+    const vm = VM.initOnHeap(allocator) catch return;
+    @import("ini_config.zig").applyToVm(vm) catch {};
+    for (d.noteSlice()) |*note| {
+        if (@as(i64, note.line) > fatal_line) continue;
+        vm.raiseErrorAt(note.level, note.text[0..note.len], .{ .file = path, .line = note.line }) catch {};
+    }
+    vm.flushOutputToStdout();
+}
+
 fn exitOnCompileFailure(allocator: std.mem.Allocator, class_name: []const u8, message: []const u8, at: VM.SourcePosition, trace: bool) noreturn {
     const vm = VM.initOnHeap(allocator) catch std.process.exit(255);
     report: {

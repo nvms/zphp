@@ -172,6 +172,16 @@ pub const Diagnostic = struct {
     // php raises some compile errors while it parses (a modifier where none
     // is allowed); those print no stack trace
     trace: bool = true,
+    // the warnings and deprecations compiled before the fatal, which php
+    // has already raised by the time it stops (the first few)
+    notes: [8]Note = undefined,
+    note_count: u8 = 0,
+
+    pub const Note = struct { level: u16, line: u32, text: [256]u8 = undefined, len: u16 = 0 };
+
+    pub fn noteSlice(d: *const Diagnostic) []const Note {
+        return d.notes[0..d.note_count];
+    }
 
     pub fn message(d: *const Diagnostic) []const u8 {
         return d.text[0..d.len];
@@ -205,6 +215,23 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
         c.use_const_aliases.deinit(allocator);
     }
     errdefer c.discardOutput();
+    // runs before discardOutput frees the messages
+    errdefer if (origin.diagnostic) |slot| if (slot.*) |*d| {
+        std.sort.insertion(CompileWarning, c.warnings.items, {}, struct {
+            fn lt(_: void, x: CompileWarning, y: CompileWarning) bool {
+                return x.line < y.line;
+            }
+        }.lt);
+        for (c.warnings.items) |w| {
+            if (d.note_count == d.notes.len) break;
+            var note: Diagnostic.Note = .{ .level = w.level, .line = w.line };
+            const n = @min(w.message.len, note.text.len);
+            @memcpy(note.text[0..n], w.message[0..n]);
+            note.len = @intCast(n);
+            d.notes[d.note_count] = note;
+            d.note_count += 1;
+        }
+    };
 
     // an error php's compiler raises that the parser already found
     if (ast.compile_error) |note| {
