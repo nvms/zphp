@@ -519,7 +519,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     // element's. anything else goes to the vm's handler
                     const access = code[ip];
                     const container = if (access >= 4) stack[sp - 2] else if (access >= 2) stack[sp - 1] else stack[sp - 2];
-                    const passes = if (access >= 2) container == .object else container == .array;
+                    // a key the vm converts (with its warning) goes there too
+                    const passes = if (access >= 2) container == .object else container == .array and switch (stack[sp - 1]) {
+                        .int, .string => true,
+                        else => false,
+                    };
                     if (!passes) {
                         frame.ip = ip - 1;
                         self.sp = sp;

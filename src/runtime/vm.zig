@@ -6132,6 +6132,28 @@ pub const VM = struct {
                         if (try self.throwBuiltinException("Error", if (access == 1) "Cannot increment/decrement string offsets" else "Cannot use assign-op operators with string offsets")) continue;
                         return error.RuntimeError;
                     }
+                    // php converts the key of a read-modify-write once, with
+                    // one warning, and both halves use the converted key: the
+                    // place's operands were duplicated, [array, key, array, key]
+                    const rw_key = self.stack[self.sp - 1];
+                    if (self.stack[self.sp - 2] == .array) switch (rw_key) {
+                        .float, .null, .resource, .bool => {
+                            _ = self.warnOffsetKeyOn(rw_key, self.stack[self.sp - 2].array, .null) catch {
+                                if (try self.resumeRaised()) continue;
+                                return error.RuntimeError;
+                            };
+                            const converted: Value = switch (Value.toArrayKey(rw_key)) {
+                                .int => |i| .{ .int = i },
+                                .string => |str| .{ .string = str },
+                            };
+                            self.stack[self.sp - 1] = converted;
+                            self.stackRelease(rw_key);
+                            const write_key = self.stack[self.sp - 3];
+                            self.stack[self.sp - 3] = converted;
+                            self.stackRelease(write_key);
+                        },
+                        else => {},
+                    };
                 },
                 .array_get, .array_get_list => {
                     const capturing = self.arg_capture_pending;
