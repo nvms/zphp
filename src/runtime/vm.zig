@@ -28305,6 +28305,11 @@ pub const VM = struct {
                 return self.callByNameAs(name, args, called_class);
             }
             if (args.len < func.required_params) return self.raiseTooFewArgs(name, args, func);
+            // the parameters' types are checked (and scalars coerced) as for
+            // any call, the references included
+            var checked_buf: [16]Value = undefined;
+            const checked = try self.checkedArgs(name, func, args, &checked_buf);
+            defer if (checked.ptr != &checked_buf and checked.ptr != args.ptr) self.allocator.free(checked);
             // a variadic parameter collects what the fixed ones leave
             const fixed: usize = if (func.is_variadic) func.arity - 1 else func.arity;
             const bind_count = @min(args.len, fixed);
@@ -28317,10 +28322,10 @@ pub const VM = struct {
                 if (maybe) |cell| self.unbindCell(cell);
             };
             for (0..bind_count) |i| {
-                try new_vars.put(self.allocator, func.params[i], try self.bindFrameArg(args[i]));
+                try new_vars.put(self.allocator, func.params[i], try self.bindFrameArg(checked[i]));
                 if (i < func.ref_params.len and func.ref_params[i] and i < 16) {
                     const cell = try self.newRefCell();
-                    self.setCell(cell, args[i]);
+                    self.setCell(cell, checked[i]);
 
                     try self.bindRefSlot(&ref_slots, func.params[i], cell);
                     self.bindCell(cell);
@@ -28332,7 +28337,7 @@ pub const VM = struct {
                     if (i < func.defaults.len) try new_vars.put(self.allocator, func.params[i], try self.resolveParamDefault(func, i));
                 }
                 const rest_arr = try self.allocArray();
-                for (args[bind_count..]) |arg| try rest_arr.append(self.allocator, try self.bindFrameArg(arg));
+                for (checked[bind_count..]) |arg| try rest_arr.append(self.allocator, try self.bindFrameArg(arg));
                 try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
             } else {
                 try self.fillDefaults(&new_vars, func, bind_count);
