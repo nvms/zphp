@@ -1732,6 +1732,8 @@ fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "fatal_error_backtraces")) return "1";
     if (std.mem.eql(u8, name, "error_log")) return "";
     if (std.mem.eql(u8, name, "html_errors")) return "0";
+    if (std.mem.eql(u8, name, "ignore_repeated_errors")) return "0";
+    if (std.mem.eql(u8, name, "ignore_repeated_source")) return "0";
     if (std.mem.eql(u8, name, "max_execution_time")) return "0";
     // one log copy on stderr and no display copy: php with display_errors=0
     // and log_errors=1, the setting the compatibility runners pin php to

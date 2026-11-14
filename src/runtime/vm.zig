@@ -15909,8 +15909,14 @@ pub const VM = struct {
                 else => {},
             }
         } else if (try self.callUserErrorHandler(level, msg, at)) return;
-        self.recordLastError(level, msg, at);
-        const shown = self.error_silenced_depth == 0 and (self.error_reporting_level & level) != 0;
+        // php_error_cb: with ignore_repeated_errors, the same message as the
+        // last one (from the same place unless ignore_repeated_source) is
+        // neither shown nor recorded
+        const repeated = self.last_error_message.len > 0 and self.iniFlagOn("ignore_repeated_errors", "0") and
+            std.mem.eql(u8, self.last_error_message, msg) and
+            (self.iniFlagOn("ignore_repeated_source", "0") or (self.last_error_line == at.line and std.mem.eql(u8, self.last_error_file, at.file)));
+        if (!repeated) self.recordLastError(level, msg, at);
+        const shown = !repeated and self.error_silenced_depth == 0 and (self.error_reporting_level & level) != 0;
         if (shown) self.printError(level, msg, at);
         if (!isFatalLevel(level)) return;
         self.exit_code = 255;
