@@ -657,12 +657,13 @@ fn array_pad(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
     const src = args[0].array;
     const target: i64 = Value.toInt(args[1]);
     const pad_val = args[2];
-    const abs_target_i64: i64 = if (target < 0) -target else target;
-    if (abs_target_i64 > 1_073_741_824) {
+    // @abs: the most negative int has no positive counterpart in an i64
+    const abs_target_u64: u64 = @abs(target);
+    if (abs_target_u64 > 1_073_741_824) {
         try ctx.vm.setPendingException("ValueError", "array_pad(): Argument #2 ($length) must not exceed the maximum allowed array size");
         return error.RuntimeError;
     }
-    const abs_target: usize = @intCast(abs_target_i64);
+    const abs_target: usize = @intCast(abs_target_u64);
     const current: usize = src.entries.items.len;
 
     var result = try ctx.createArray();
