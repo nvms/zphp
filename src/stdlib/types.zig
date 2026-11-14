@@ -1816,10 +1816,12 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     const previous: []const u8 = if (ctx.vm.ini_settings.get(name)) |s| s else if (iniDefault(name)) |d| d else return NativeResult.scalar(Value{ .bool = false });
     // max_memory_limit can only be set at startup, and so can the mail
     // and syslog settings (PHP_INI_SYSTEM)
-    if (std.mem.eql(u8, name, "max_memory_limit") or @import("mail.zig").isSystemIni(name) or std.mem.eql(u8, name, "syslog.facility") or std.mem.eql(u8, name, "syslog.ident")) return NativeResult.scalar(Value{ .bool = false });
+    if (std.mem.eql(u8, name, "max_memory_limit") or @import("mail.zig").isSystemIni(name) or std.mem.eql(u8, name, "syslog.facility") or std.mem.eql(u8, name, "syslog.ident") or std.mem.eql(u8, name, "arg_separator.input")) return NativeResult.scalar(Value{ .bool = false });
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(ctx.allocator);
     try args[1].format(&buf, ctx.allocator);
+    // OnUpdateStrNotEmpty and OnUpdateStringUnempty refuse an empty value
+    if (buf.items.len == 0 and (std.mem.eql(u8, name, "arg_separator.output") or std.mem.eql(u8, name, "include_path"))) return NativeResult.scalar(Value{ .bool = false });
     // php's OnUpdateAutoDetectLineEndings
     if (std.mem.eql(u8, name, "auto_detect_line_endings") and iniBoolText(buf.items)) {
         try ctx.vm.raiseError(8192, "auto_detect_line_endings is deprecated");
