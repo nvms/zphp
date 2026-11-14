@@ -9887,6 +9887,14 @@ pub const VM = struct {
                         // self/static/parent stay symbolic where the compiler
                         // cannot know the class (inside a trait)
                         const target = self.resolveRelativeClassName(class_name_val.string.bytes());
+                        // zend_fetch_class: self, parent or static with no
+                        // class to name is an Error
+                        if (std.mem.eql(u8, target, "self") or std.mem.eql(u8, target, "parent") or std.mem.eql(u8, target, "static")) {
+                            const msg = try self.classNotFoundMessage(target);
+                            defer self.allocator.free(msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        }
                         self.push(.{ .bool = self.isInstanceOf(obj_val.object.class_name, target) });
                     } else if (obj_val == .object and class_name_val == .object) {
                         // `$a instanceof $b` with an object on the right tests its class
