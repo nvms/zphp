@@ -8505,12 +8505,15 @@ pub const VM = struct {
                     const prop_name = self.currentChunk().constants.items[prop_idx].string.bytes();
                     const obj_val = self.pop();
                     const frame = self.currentFrame();
-                    self.unbindRefSlot(&frame.ref_slots, dst_name);
+                    // FETCH_OBJ_W refuses anything but an object
                     if (obj_val != .object) {
-                        const c = try self.newRefCell();
-
-                        try self.bindRefSlot(&frame.ref_slots, dst_name, c);
-                    } else {
+                        const msg = try std.fmt.allocPrint(self.allocator, "Attempt to modify property \"{s}\" on {s}", .{ prop_name, obj_val.valueName() });
+                        defer self.allocator.free(msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    }
+                    self.unbindRefSlot(&frame.ref_slots, dst_name);
+                    {
                         var obj_ptr = obj_val.object;
                         // __get answers before a lazy object is initialized
                         if (!self.lazyMagicFirst(obj_ptr, prop_name, .get)) self.triggerLazyAccess(obj_ptr, prop_name) catch {
@@ -8607,12 +8610,14 @@ pub const VM = struct {
                     const name_val = self.pop();
                     const obj_val = self.pop();
                     const frame = self.currentFrame();
-                    self.unbindRefSlot(&frame.ref_slots, dst_name);
                     if (obj_val != .object) {
-                        const c = try self.newRefCell();
-
-                        try self.bindRefSlot(&frame.ref_slots, dst_name, c);
-                    } else {
+                        const msg = try std.fmt.allocPrint(self.allocator, "Attempt to modify property \"{s}\" on {s}", .{ try self.valueToString(name_val), obj_val.valueName() });
+                        defer self.allocator.free(msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    }
+                    self.unbindRefSlot(&frame.ref_slots, dst_name);
+                    {
                         var obj_ptr = obj_val.object;
                         // interned: a lazy object's initializer runs php, whose
                         // statement boundaries free transient strings

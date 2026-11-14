@@ -2167,7 +2167,8 @@ pub fn compileReferenceBinding(self: *Compiler, source: u32, dst: u16) Error!boo
             try self.emitU16(dst);
         },
         .property_access => {
-            try self.compileNode(node.data.lhs);
+            // FETCH_OBJ_W: the base is fetched for writing
+            try compilePropWriteBase(self, node.data.lhs);
             if (self.isDynamicProp(node)) {
                 try self.compileNode(node.data.rhs);
                 try self.emitOp(.make_var_prop_ref_dyn);
