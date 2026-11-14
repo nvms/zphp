@@ -9534,6 +9534,20 @@ pub const VM = struct {
                 .throw => {
                     // a finally block rethrowing what it held no longer holds it
                     if (self.held_exceptions.items.len > 0) self.releaseHeldAt(self.frame_count - 1, self.sp - 1);
+                    // ZEND_THROW: only a Throwable object can be thrown
+                    const thrown = self.stack[self.sp - 1];
+                    const not_throwable: ?[]const u8 = switch (thrown) {
+                        // the unwind marker (exit through a finally) passes through
+                        .object => |o| if (self.isUnwindMarker(thrown) or self.isInstanceOf(o.class_name, "Throwable")) null else "Cannot throw objects that do not implement Throwable",
+                        .generator, .fiber => "Cannot throw objects that do not implement Throwable",
+                        else => "Can only throw objects",
+                    };
+                    if (not_throwable) |msg| {
+                        const bad = self.pop();
+                        self.stackRelease(bad);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    }
                     const exception = self.popTransfer();
                     if (self.handler_count <= self.handler_floor) {
                         self.setPendingOwned(exception);
