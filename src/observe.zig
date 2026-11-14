@@ -92,8 +92,8 @@ pub fn closeLog() void {
 // ---------------------------------------------------------------- JSON Lines
 
 // one log line, built on the stack and handed to the destination in a single
-// write. lines stay within the pipe atomicity limit, and the log file is
-// opened for append, so lines from concurrent workers never interleave.
+// write. the log file is opened for append and a pipe keeps writes up to
+// PIPE_BUF whole, so lines from concurrent workers do not interleave.
 // fields that do not fit are dropped whole and strings are cut short, which
 // keeps every line valid JSON whatever the input
 pub const Record = struct {
@@ -162,6 +162,16 @@ pub const Record = struct {
     fn escape(r: *Record, s: []const u8) void {
         var i: usize = 0;
         while (i < s.len) {
+            // runs of printable ascii, the common case, are copied whole
+            var end = i;
+            while (end < s.len and s[end] >= 0x20 and s[end] < 0x7f and s[end] != '"' and s[end] != '\\') end += 1;
+            if (end > i) {
+                const n = @min(end - i, r.room() -| 1);
+                r.put(s[i..][0..n]);
+                if (n < end - i) return;
+                i = end;
+                continue;
+            }
             if (r.room() < 7) return;
             const ch = s[i];
             if (ch < 0x80) {
@@ -190,21 +200,32 @@ pub const Record = struct {
         }
     }
 
+    // the calendar part changes once a second, so each thread keeps the last
+    // one it formatted
+    threadlocal var ts_second: u64 = std.math.maxInt(u64);
+    threadlocal var ts_text: [19]u8 = undefined;
+
     fn timestamp(r: *Record, ms: i64) void {
         const total_ms: u64 = @intCast(@max(ms, 0));
-        const secs = std.time.epoch.EpochSeconds{ .secs = total_ms / 1000 };
-        const year_day = secs.getEpochDay().calculateYearDay();
-        const month_day = year_day.calculateMonthDay();
-        const day_secs = secs.getDaySeconds();
-        r.len += (std.fmt.bufPrint(r.buf[r.len..], "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
-            year_day.year,
-            month_day.month.numeric(),
-            month_day.day_index + 1,
-            day_secs.getHoursIntoDay(),
-            day_secs.getMinutesIntoHour(),
-            day_secs.getSecondsIntoMinute(),
-            total_ms % 1000,
-        }) catch unreachable).len;
+        const second = total_ms / 1000;
+        if (second != ts_second) {
+            const secs = std.time.epoch.EpochSeconds{ .secs = second };
+            const year_day = secs.getEpochDay().calculateYearDay();
+            const month_day = year_day.calculateMonthDay();
+            const day_secs = secs.getDaySeconds();
+            _ = std.fmt.bufPrint(&ts_text, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{
+                year_day.year,
+                month_day.month.numeric(),
+                month_day.day_index + 1,
+                day_secs.getHoursIntoDay(),
+                day_secs.getMinutesIntoHour(),
+                day_secs.getSecondsIntoMinute(),
+            }) catch @memcpy(&ts_text, "9999-12-31T23:59:59");
+            ts_second = second;
+        }
+        r.put(&ts_text);
+        const frac: u16 = @intCast(total_ms % 1000);
+        r.put(&.{ '.', @intCast('0' + frac / 100), @intCast('0' + frac / 10 % 10), @intCast('0' + frac % 10), 'Z' });
     }
 
     pub fn bytes(r: *Record) []const u8 {
@@ -616,12 +637,30 @@ test "oversized log fields are cut short and the line stays valid" {
     const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, line, .{});
     defer parsed.deinit();
     try testing.expect(parsed.value.object.get("message") != null);
+
+    var plain = Record.init("info", "access", "request");
+    const long: [5000]u8 = @splat('a');
+    plain.str("path", &long);
+    plain.int("status", @as(i64, 200));
+    const plain_line = plain.bytes();
+    try testing.expectEqual(@as(usize, 4096), plain_line.len);
+    const plain_parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, plain_line, .{});
+    defer plain_parsed.deinit();
+    try testing.expect(plain_parsed.value.object.get("path").?.string.len > 3900);
 }
 
 test "log timestamps are RFC 3339 UTC" {
-    var r: Record = .{};
-    r.timestamp(951_782_400_123); // 2000-02-29 00:00:00.123
-    try testing.expectEqualStrings("2000-02-29T00:00:00.123Z", r.buf[0..r.len]);
+    const cases = [_]struct { ms: i64, text: []const u8 }{
+        .{ .ms = 951_782_400_123, .text = "2000-02-29T00:00:00.123Z" },
+        .{ .ms = 951_782_400_004, .text = "2000-02-29T00:00:00.004Z" },
+        .{ .ms = 951_782_399_999, .text = "2000-02-28T23:59:59.999Z" },
+        .{ .ms = 0, .text = "1970-01-01T00:00:00.000Z" },
+    };
+    for (cases) |case| {
+        var r: Record = .{};
+        r.timestamp(case.ms);
+        try testing.expectEqualStrings(case.text, r.buf[0..r.len]);
+    }
 }
 
 test "metrics aggregate every worker and keep the histogram consistent" {
