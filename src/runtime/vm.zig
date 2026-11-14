@@ -836,6 +836,9 @@ pub const VM = struct {
     release_log: ?*std.ArrayListUnmanaged(ReleasedItem) = null,
     // the fast loop returned from a frame whose locals queued destructors
     fast_return_drain: bool = false,
+    // frames below this count belong to a script that has finished (the
+    // shutdown functions run): php has no executing file there
+    finished_frames: usize = 0,
     release_depth: u32 = 0,
     // the innermost running native call; a user call made at its depth comes
     // from the native itself
@@ -16326,6 +16329,10 @@ pub const VM = struct {
             // (EG(filename_override))
             if (isScopedConstExpr(func.name) and !isBareConstantInitializer(func)) break;
         }
+        // an internal function the engine calls after the script ended
+        // (a shutdown function): no user code is executing, and php's
+        // errors name no file (exceptions say "[no active file]")
+        if (fi < self.finished_frames) return .{ .file = "Unknown", .line = 0 };
         const frame = &self.frames[fi];
         const ip = frame.ip;
         const line: i64 = if (self.sourceLocation(frame.chunk, if (ip > 0) ip - 1 else 0)) |loc| @intCast(loc.line) else 0;
@@ -24650,7 +24657,9 @@ pub const VM = struct {
     }
 
     fn stampThrowableBelow(self: *VM, obj: *PhpObject, top: usize) RuntimeError!void {
-        const at: SourcePosition = if (top > 0) self.framePosition(top - 1) orelse .{ .file = self.frameFile(top - 1), .line = 0 } else .{ .file = self.file_path, .line = 0 };
+        const at: SourcePosition = if (top > 0 and top - 1 < self.finished_frames)
+            .{ .file = "[no active file]", .line = 0 }
+        else if (top > 0) self.framePosition(top - 1) orelse .{ .file = self.frameFile(top - 1), .line = 0 } else .{ .file = self.file_path, .line = 0 };
         try obj.set(self.allocator, "file", .{ .string = Value.String.borrowed(at.file) });
         try obj.set(self.allocator, "line", .{ .int = at.line });
         const trace = try self.traceBelow(top);
@@ -27346,6 +27355,9 @@ pub const VM = struct {
         var engine = self.engineCall();
         self.native_call = &engine;
         defer self.native_call = engine.outer;
+        const outer_finished = self.finished_frames;
+        self.finished_frames = self.frame_count;
+        defer self.finished_frames = outer_finished;
         defer self.releaseCallbackRegistries();
         var i: usize = 0;
         while (i < self.shutdown_callbacks.items.len) : (i += 1) {
