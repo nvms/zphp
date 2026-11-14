@@ -8190,8 +8190,10 @@ pub const VM = struct {
                     } else {
                         try self.bindRefSlot(&frame.ref_slots, dst_name, cell);
                         // php's ASSIGN_REF frees the variable's old value as
-                        // soon as it names the reference
-                        try self.mirrorBoundName(frame, dst_name, cell.*);
+                        // soon as it names the reference. an include or eval
+                        // frame shares its variables with the frame it runs
+                        // in, which its own exit syncs, so it keeps no mirror
+                        if (frame.include_parent == null) try self.mirrorBoundName(frame, dst_name, cell.*);
                         if (self.frameInGlobalScope(frame)) if (self.globals_array) |ga| if (dst_name.len > 1 and dst_name[0] == '$') {
                             try ga.set(self.allocator, .{ .string = Value.String.borrowed(dst_name[1..]) }, cell.*);
                         };
