@@ -1080,7 +1080,7 @@ fn functionExtension(ctx: *NativeContext) ?[]const u8 {
 
 fn constantExtension(ctx: *NativeContext) ?[]const u8 {
     const this = getThis(ctx) orelse return null;
-    const name = if (this.get("name") == .string) this.get("name").string.bytes() else return null;
+    const name = if (constName(this) == .string) constName(this).string.bytes() else return null;
     return extensions.constants.get(name);
 }
 
@@ -6733,7 +6733,7 @@ fn rccIsDeprecated(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
 
 fn rconstIsDeprecated(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
-    const name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    const name = if (constName(this) == .string) constName(this).string.bytes() else return NativeResult.scalar(.{ .bool = false });
     if (deprecations.constants.has(name)) return NativeResult.scalar(.{ .bool = true });
     return NativeResult.scalar(.{ .bool = ctx.vm.deprecated_globals.contains(name) });
 }
@@ -6741,7 +6741,7 @@ fn rconstIsDeprecated(ctx: *NativeContext, _: []const Value) RuntimeError!Native
 fn rconstGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     try checkAttributeFilter(ctx, args, "ReflectionConstant");
     const this = getThis(ctx) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
-    const name = this.get("name");
+    const name = constName(this);
     if (name != .string) return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const key = ctx.vm.constant_attributes.get(name.string.bytes()) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const attrs = ctx.vm.function_attributes.get(key) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
@@ -6753,33 +6753,43 @@ fn rconstGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Na
 fn rconstConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len < 1 or args[0] != .string) return throwReflection(ctx, "ReflectionConstant::__construct() expects a constant name");
-    const name = std.mem.trimStart(u8, args[0].string.bytes(), "\\");
+    const given = args[0].string.bytes();
+    // one leading backslash is the global namespace; the name property keeps
+    // the name as given, the methods report the constant's own
+    const name = if (given.len > 0 and given[0] == '\\') given[1..] else given;
     if (!ctx.vm.php_constants.contains(name)) {
-        const msg = std.fmt.allocPrint(ctx.allocator, "Constant \"{s}\" does not exist", .{name}) catch return throwReflection(ctx, "Constant does not exist");
+        const msg = std.fmt.allocPrint(ctx.allocator, "Constant \"{s}\" does not exist", .{given}) catch return throwReflection(ctx, "Constant does not exist");
         defer ctx.allocator.free(msg);
         return throwReflection(ctx, msg);
     }
     const owned = try Value.String.create(ctx.allocator, name);
     defer owned.release();
-    try this.set(ctx.allocator, "name", .{ .string = owned });
+    try this.set(ctx.allocator, "__const", .{ .string = owned });
+    try this.set(ctx.allocator, "name", args[0]);
     return NativeResult.scalar(.null);
+}
+
+// the constant a ReflectionConstant reflects, without the leading backslash
+fn constName(this: *PhpObject) Value {
+    const resolved = this.get("__const");
+    return if (resolved == .string) resolved else this.get("name");
 }
 
 fn rconstGetName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    return NativeResult.share(this.get("name"));
+    return NativeResult.share(constName(this));
 }
 
 fn rconstGetValue(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const name_v = this.get("name");
+    const name_v = constName(this);
     if (name_v != .string) return NativeResult.scalar(.null);
     return NativeResult.share(ctx.vm.php_constants.get(name_v.string.bytes()) orelse .null);
 }
 
 fn rconstGetShortName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
-    const name_v = this.get("name");
+    const name_v = constName(this);
     if (name_v != .string) return NativeResult.scalar(.null);
     const name = name_v.string.bytes();
     const pos = std.mem.lastIndexOfScalar(u8, name, '\\') orelse return NativeResult.shareString(name_v.string);
@@ -6788,7 +6798,7 @@ fn rconstGetShortName(ctx: *NativeContext, _: []const Value) RuntimeError!Native
 
 fn rconstGetNamespaceName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.literal("");
-    const name_v = this.get("name");
+    const name_v = constName(this);
     if (name_v != .string) return NativeResult.literal("");
     const name = name_v.string.bytes();
     const pos = std.mem.lastIndexOfScalar(u8, name, '\\') orelse return NativeResult.literal("");
@@ -6797,7 +6807,7 @@ fn rconstGetNamespaceName(ctx: *NativeContext, _: []const Value) RuntimeError!Na
 
 fn rconstToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.literal("");
-    const name_v = this.get("name");
+    const name_v = constName(this);
     if (name_v != .string) return NativeResult.literal("");
     const name = name_v.string.bytes();
     const value = ctx.vm.php_constants.get(name) orelse Value.null;
