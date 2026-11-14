@@ -1505,7 +1505,22 @@ pub const VM = struct {
         if (cell.dead) return;
         std.debug.assert(cell.binders > 0);
         cell.binders -= 1;
-        if (cell.binders != 0) return;
+        if (cell.binders != 0) {
+            // php's gc takes a reference that drops to a nonzero count as a
+            // possible root: what it holds may be a cycle through it
+            switch (cell.value) {
+                .array => |arr| if (!arr.elements_released and !arr.cycle_queued) {
+                    self.cycle_array_candidates.append(self.allocator, arr) catch return;
+                    arr.cycle_queued = true;
+                },
+                .object => |obj| if (!obj.destructed and !obj.cycle_queued) {
+                    self.cycle_candidates.append(self.allocator, obj) catch return;
+                    obj.cycle_queued = true;
+                },
+                else => {},
+            }
+            return;
+        }
         cell.dead = true;
         const old = cell.value;
         cell.value = .null;
@@ -8127,6 +8142,12 @@ pub const VM = struct {
                         try self.putRequestVar(dst_name, cell.*);
                     } else {
                         try self.bindRefSlot(&frame.ref_slots, dst_name, cell);
+                        // php's ASSIGN_REF frees the variable's old value as
+                        // soon as it names the reference
+                        try self.mirrorBoundName(frame, dst_name, cell.*);
+                        if (self.frameInGlobalScope(frame)) if (self.globals_array) |ga| if (dst_name.len > 1 and dst_name[0] == '$') {
+                            try ga.set(self.allocator, .{ .string = Value.String.borrowed(dst_name[1..]) }, cell.*);
+                        };
                     }
                     if (frame.include_parent) |parent_idx| {
                         const parent = &self.frames[parent_idx];
