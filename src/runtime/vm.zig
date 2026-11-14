@@ -10391,6 +10391,8 @@ pub const VM = struct {
                         if (!self.checkVisibility(mvr.defining_class, mvr.visibility)) {
                             self.dropN(ac);
                             const suffix = self.visScopeSuffix();
+                            // gh14456: the object never constructed, so it is never destructed
+                            obj.destructor_called = true;
                             const msg = try std.fmt.allocPrint(self.allocator, "Call to {s} {s}::__construct(){s}", .{ @tagName(mvr.visibility), mvr.defining_class, suffix });
                             defer self.allocator.free(msg);
                             if (try self.throwBuiltinException("Error", msg)) continue;
@@ -10630,6 +10632,8 @@ pub const VM = struct {
                         if (!self.checkVisibility(mvr.defining_class, mvr.visibility)) {
                             self.dropN(ac + 1);
                             const suffix = self.visScopeSuffix();
+                            // gh14456: the object never constructed, so it is never destructed
+                            obj.destructor_called = true;
                             const msg = try std.fmt.allocPrint(self.allocator, "Call to {s} {s}::__construct(){s}", .{ @tagName(mvr.visibility), mvr.defining_class, suffix });
                             defer self.allocator.free(msg);
                             if (try self.throwBuiltinException("Error", msg)) continue;
