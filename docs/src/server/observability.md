@@ -99,7 +99,7 @@ With `--request-id` or `--access-log`, every request gets an ID:
 error_log("charging card, request " . $_SERVER['REQUEST_ID']);
 ```
 
-If the application sets its own `X-Request-Id` header with `header()`, the application's value is sent instead. Each request on a keep-alive or HTTP/2 connection gets its own ID.
+If the application sets its own `X-Request-Id` header with `header()`, the application's value is sent instead. Each request on a keep-alive or HTTP/2 connection gets its own ID. IDs are for correlation, not secrets: generated ones are unique but predictable, so never use them as tokens.
 
 ## JSON logs
 
@@ -130,6 +130,8 @@ User-controlled values are escaped. Control characters are written as `\u` escap
 ### Delivery
 
 Each line is formatted on the worker's stack and handed to the destination in a single write, with no lock. The log file is opened for append, so lines from concurrent workers never interleave in it. On stdout, a pipe keeps each write whole up to `PIPE_BUF` (4 KiB on Linux, 512 bytes on macOS); typical access lines are around 300 bytes. A write that fails is counted in `zphp_log_write_errors_total` and dropped. It never affects the response. Writes are blocking, so a log reader that stops consuming stdout eventually slows the workers down. Point `--log-file` at local disk, or make sure the stdout collector keeps up.
+
+With JSON logs on stdout, anything the application writes to the process's `STDOUT` lands in the same stream; use `--log-file` if it does. The log file stays open for the life of the process, so rotate it with `copytruncate` rather than by renaming it.
 
 ## Crashes
 
