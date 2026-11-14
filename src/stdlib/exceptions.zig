@@ -186,8 +186,11 @@ fn errorExceptionConstruct(ctx: *NativeContext, args: []const Value) RuntimeErro
     if (message) |m| try setMessage(ctx, obj, args[0], m);
     if (code) |c| try obj.set(ctx.allocator, "code", .{ .int = c });
     if (severity) |sv| try obj.set(ctx.allocator, "severity", .{ .int = sv });
-    if (file) |f| try obj.setCopiedString(ctx.allocator, "file", f);
-    if (line) |l| try obj.set(ctx.allocator, "line", .{ .int = l });
+    // a filename without a line puts the line at 0
+    if (file) |f| {
+        try obj.setCopiedString(ctx.allocator, "file", f);
+        try obj.set(ctx.allocator, "line", .{ .int = line orelse 0 });
+    } else if (line) |l| try obj.set(ctx.allocator, "line", .{ .int = l });
     if (previous) |p| try obj.set(ctx.allocator, "previous", .{ .object = p });
     return NativeResult.scalar(.null);
 }
