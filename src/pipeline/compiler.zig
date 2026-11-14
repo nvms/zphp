@@ -408,6 +408,10 @@ pub const Compiler = struct {
     current_class: []const u8 = "",
     current_parent: []const u8 = "",
     current_function: []const u8 = "",
+    // compiling a class's constants or property defaults: the function the
+    // class is declared in ("" at the top level), which __FUNCTION__ names
+    // there while __METHOD__ is empty (zend_try_ct_eval_magic_const)
+    class_body_function: ?[]const u8 = null,
     in_trait: bool = false,
     // set while the parameters and return type of a closure compile
     closure_signature: bool = false,
@@ -1122,7 +1126,7 @@ pub const Compiler = struct {
             return;
         }
         if (std.mem.eql(u8, magic, "__FUNCTION__")) {
-            const idx = try self.addConstant(.{ .string = Value.String.borrowed(self.current_function) });
+            const idx = try self.addConstant(.{ .string = Value.String.borrowed(self.class_body_function orelse self.current_function) });
             try self.emitConstant(idx);
             return;
         }
@@ -1143,7 +1147,9 @@ pub const Compiler = struct {
         }
         if (std.mem.eql(u8, magic, "__METHOD__")) {
             const in_closure = std.mem.startsWith(u8, self.current_function, "{closure:");
-            const val = if (self.current_class.len > 0 and self.current_function.len > 0 and !in_closure) blk: {
+            const val = if (self.class_body_function != null)
+                ""
+            else if (self.current_class.len > 0 and self.current_function.len > 0 and !in_closure) blk: {
                 const full = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ self.current_class, self.current_function });
                 try self.string_allocs.append(self.allocator, full);
                 break :blk full;

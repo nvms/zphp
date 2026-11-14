@@ -370,6 +370,9 @@ fn extractAttributesOf(self: *Compiler, token: u32, target: AttrTarget, function
     const outer = self.current_function;
     self.current_function = function;
     defer self.current_function = outer;
+    const outer_body = self.class_body_function;
+    self.class_body_function = null;
+    defer self.class_body_function = outer_body;
     return extractAttributes(self, token, target);
 }
 
@@ -1862,6 +1865,9 @@ fn paramDefaultValue(self: *Compiler, pnode: Ast.Node, function: []const u8) Err
         const outer_function = self.current_function;
         self.current_function = function;
         defer self.current_function = outer_function;
+        const outer_body = self.class_body_function;
+        self.class_body_function = null;
+        defer self.class_body_function = outer_body;
         const expr = pnode.data.lhs;
         const at = self.ast.nodes[expr].main_token;
         const text = try @import("ast_export.zig").constExprText(self.allocator, self, expr);
@@ -2869,6 +2875,10 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
     const prev_class = self.current_class;
     self.current_class = class_name;
     defer self.current_class = prev_class;
+    // constants and property defaults sit directly in the class body
+    const prev_body = self.class_body_function;
+    self.class_body_function = self.current_function;
+    defer self.class_body_function = prev_body;
 
     const class_modifiers = shape.modifiers;
     const parent_node = shape.parent_node;
@@ -3566,6 +3576,9 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     const prev_class = self.current_class;
     self.current_class = iface_name;
     defer self.current_class = prev_class;
+    const prev_body = self.class_body_function;
+    self.class_body_function = self.current_function;
+    defer self.class_body_function = prev_body;
 
     var method_count: u16 = 0;
     var const_count: u8 = 0;
@@ -4184,6 +4197,9 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     const prev_class = self.current_class;
     self.current_class = class_name;
     defer self.current_class = prev_class;
+    const prev_body = self.class_body_function;
+    self.class_body_function = null;
+    defer self.class_body_function = prev_body;
 
     const method_name = self.ast.tokenSlice(member.main_token);
     const full_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, method_name });
@@ -4542,6 +4558,7 @@ fn compileInitializer(self: *Compiler, name: []const u8, scope: InitializerScope
         .current_class = class_name,
         .current_parent = self.current_parent,
         .current_function = self.current_function,
+        .class_body_function = self.class_body_function,
         .in_trait = self.in_trait,
         .relative_const_classes = true,
         .const_expr = true,
@@ -4622,6 +4639,7 @@ fn compileDeferredPropDefaults(self: *Compiler, class_name: []const u8, members:
         .current_class = class_name,
         .current_parent = self.current_parent,
         .current_function = name,
+        .class_body_function = self.class_body_function,
         .in_trait = self.in_trait,
         .const_expr = true,
     };
