@@ -721,6 +721,16 @@ fn array_fill(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
         return error.RuntimeError;
     }
     if (num > 0 and start_idx > std.math.maxInt(i64) - num + 1) return nextElementOccupied(ctx);
+    // the table php allocates: packed up to the last index when the keys
+    // start inside it, else one slot per element (zend_hash_check_size)
+    if (num > 0) {
+        const table_size: i64 = if (start_idx >= 0 and start_idx < num) start_idx + num else num;
+        if (table_size > 0x40000000) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Possible integer overflow in memory allocation ({d} * 32 + 32)", .{@as(u32, @truncate(@as(u64, @intCast(table_size))))});
+            defer ctx.allocator.free(msg);
+            return ctx.vm.raiseFatal(msg);
+        }
+    }
     const count: usize = @intCast(num);
 
     var result = try ctx.createArray();
