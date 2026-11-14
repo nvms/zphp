@@ -317,6 +317,10 @@ fn iniBool(v: []const u8) bool {
 // ext/standard/assert.c's handlers deprecate the assert.* settings set away
 // from their defaults, in the order the module declares them
 fn reportStartupDeprecations(vm: *VM) RuntimeError!void {
+    // main.c's OnUpdateReportMemleaks, registered before any extension
+    if (get("report_memleaks")) |value| if (!iniBool(value)) {
+        try vm.raiseErrorAt(8192, "PHP Startup: Directive 'report_memleaks' is deprecated", .{ .file = "Unknown", .line = 0 });
+    };
     // the session module's handlers, in the order it registers them, then
     // the url rewriter's in ext/standard
     const session = @import("stdlib/session.zig");

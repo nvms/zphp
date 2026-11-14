@@ -1744,6 +1744,7 @@ fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "error_log")) return "";
     if (std.mem.eql(u8, name, "html_errors")) return "0";
     if (std.mem.eql(u8, name, "ignore_repeated_errors")) return "0";
+    if (std.mem.eql(u8, name, "report_memleaks")) return "1";
     if (std.mem.eql(u8, name, "ignore_repeated_source")) return "0";
     if (std.mem.eql(u8, name, "max_execution_time")) return "0";
     // one log copy on stderr and no display copy: php with display_errors=0
@@ -1860,6 +1861,10 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
             defer ctx.allocator.free(msg);
             try ctx.vm.raiseError(8192, msg);
         }
+    }
+    // main.c's OnUpdateReportMemleaks
+    if (std.mem.eql(u8, name, "report_memleaks") and !iniBoolText(buf.items)) {
+        try ctx.vm.raiseError(8192, "ini_set(): Directive 'report_memleaks' is deprecated");
     }
     // php's OnUpdateFiberStackSize
     if (std.mem.eql(u8, name, "fiber.stack_size") and @import("../runtime/memory.zig").parseQuantity(buf.items).value < 0) {
