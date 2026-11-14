@@ -183,8 +183,8 @@ fn native_define(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         return NativeResult.scalar(.{ .bool = false });
     }
     const name = try ctx.createString(args[0].string.bytes());
+    if (!try ctx.vm.defineConstant(name, args[1])) return NativeResult.scalar(.{ .bool = false });
     try ctx.vm.user_constants.put(ctx.allocator, name, {});
-    _ = try ctx.vm.defineConstant(name, args[1]);
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -2532,6 +2532,7 @@ fn native_class_alias(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
             defer ctx.allocator.free(msg);
             return ctx.vm.raiseFatal(msg);
         }
+        if (std.mem.eql(u8, bare, "_")) try ctx.vm.raiseError(8192, "Using \"_\" as a class alias is deprecated since 8.4");
     }
     const vm = ctx.vm;
     if (autoload and !vm.classes.contains(original) and !vm.interfaces.contains(original) and !vm.traits.contains(original)) {

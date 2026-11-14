@@ -15076,7 +15076,8 @@ pub const VM = struct {
     // keeps its value, with php's warning. takes a reference to the value
     // only when it defines
     pub fn defineConstant(self: *VM, name: []const u8, value: Value) RuntimeError!bool {
-        if (self.php_constants.contains(name)) {
+        // zend_register_constant: __COMPILER_HALT_OFFSET__ is never defined
+        if (self.php_constants.contains(name) or std.mem.eql(u8, name, "__COMPILER_HALT_OFFSET__")) {
             const msg = try std.fmt.allocPrint(self.allocator, "Constant {s} already defined, this will be an error in PHP 9", .{name});
             defer self.allocator.free(msg);
             try self.emitWarning(msg);
