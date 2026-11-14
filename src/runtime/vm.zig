@@ -25127,7 +25127,7 @@ pub const VM = struct {
         }
     }
 
-    fn shallowCloneCow(self: *VM, src: *PhpArray) RuntimeError!*PhpArray {
+    pub fn shallowCloneCow(self: *VM, src: *PhpArray) RuntimeError!*PhpArray {
         const copy = self.allocArray() catch return error.RuntimeError;
         copy.* = .{ .next_int_key = src.next_int_key, .has_int_keys = src.has_int_keys, .cursor = src.cursor };
         copy.entries.ensureTotalCapacity(self.allocator, src.entries.items.len) catch return error.RuntimeError;

@@ -473,7 +473,15 @@ fn userSort(ctx: *NativeContext, comptime func: []const u8, args: []const Value,
     const arr = try arrayArg(ctx, func, args);
     if (arr.entries.items.len == 0) return NativeResult.scalar(.{ .bool = true });
     var sc = SortContext{ .ctx = ctx, .by_key = by_key, .callback = args[1], .name = func };
-    try sortArray(&sc, arr, renumber);
+    // php_usort sorts a copy, so the callback never sees the array half
+    // sorted and what it does to the variable is replaced by the result
+    const copy = try ctx.vm.shallowCloneCow(arr);
+    sortArray(&sc, copy, renumber) catch |err| {
+        ctx.vm.releaseUnheldArray(copy);
+        return err;
+    };
+    ctx.setCallerVar(0, args.len, .{ .array = copy });
+    if (copy.refcount == 0) ctx.vm.releaseUnheldArray(copy);
     return NativeResult.scalar(.{ .bool = true });
 }
 
