@@ -19,6 +19,6 @@ PHP);
 
 foreach (['E_ALL', 'E_ALL & ~E_DEPRECATED'] as $level) {
     $out = shell_exec(escapeshellarg(PHP_BINARY) . ' -n -d display_errors=1 -d log_errors=0 -d ' . escapeshellarg("error_reporting=$level") . ' ' . escapeshellarg($file) . ' 2>&1');
-    echo str_replace($file, 'FILE', $out), "\n";
+    echo str_replace([$file, str_replace('/', DIRECTORY_SEPARATOR, $file)], 'FILE', $out), "\n";
 }
 unlink($file);

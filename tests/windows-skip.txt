@@ -55,3 +55,4 @@ stdout_closed_pipe_exit.php: what a windows pipe reader closing does to the writ
 mail_sendmail_path.php: the cases pipe the message to cat and exit through the shell, which cmd.exe lacks
 hash_algos_streaming_serialize.php: php's windows build serializes hash contexts with its own struct layout (a C long is 4 bytes there); zphp writes the linux layout
 pcntl.php: pcntl is posix-only, and the reference php's windows ini disables assertions so its first failure differs
+proc_open_pipes_open_at_exit.php: proc_open's ['socket'] descriptor isn't implemented on windows yet
