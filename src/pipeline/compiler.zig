@@ -413,6 +413,13 @@ pub const Compiler = struct {
     next_jump_scope: u32 = 0,
     // the scopes each label was compiled in
     label_scopes: std.StringHashMapUnmanaged([]const JumpScope) = .{},
+    // where a goto enters each label: entry k pushes the handlers of the
+    // label's try and catch scopes from k on, so a goto sharing the first k
+    // scopes jumps there; the last entry is the label itself
+    label_entries: std.StringHashMapUnmanaged([]const usize) = .{},
+    // push_handler operands to point at a try's (or catch body's) handler
+    // once it is compiled, by scope id
+    handler_patches: std.AutoHashMapUnmanaged(u32, std.ArrayListUnmanaged(usize)) = .{},
     pending_gotos: std.ArrayListUnmanaged(PendingGoto) = .empty,
     file_path: []const u8 = "",
     file_dir: ?[]const u8 = null,
@@ -477,7 +484,9 @@ pub const Compiler = struct {
     };
 
     pub const PendingGoto = struct {
-        offset: usize,
+        // the jumps between the goto's unwinding regions, innermost scope
+        // first, then the last one; owned
+        jumps: []const usize,
         label: []const u8,
         source_offset: usize,
         token: u32,
@@ -485,11 +494,69 @@ pub const Compiler = struct {
         scopes: []const JumpScope,
     };
 
-    pub const JumpScope = struct { id: u32, finally: bool };
+    pub const JumpScope = struct {
+        id: u32,
+        kind: Kind,
+        // a loop's level (loop_depth inside it, less one)
+        loop: u32 = 0,
+        // a try or catch body's finally, and its finally_nodes index
+        finally_node: u32 = 0,
+        finally_index: ?u32 = null,
+
+        pub const Kind = enum { loop, finally_body, try_body, catch_body };
+
+        // a try body, or a catch body with a finally, runs under a handler
+        fn hasHandler(scope: JumpScope) bool {
+            return scope.kind == .try_body or (scope.kind == .catch_body and scope.finally_node != 0);
+        }
+    };
 
     pub fn pushJumpScope(self: *Compiler, finally: bool) !void {
-        try self.jump_scopes.append(self.allocator, .{ .id = self.next_jump_scope, .finally = finally });
+        _ = try self.pushScope(.{ .id = 0, .kind = if (finally) .finally_body else .loop, .loop = self.loop_depth -| 1 });
+    }
+
+    // a try or catch body; the result names it for handlerPatched
+    pub fn pushScope(self: *Compiler, scope: JumpScope) !u32 {
+        var s = scope;
+        s.id = self.next_jump_scope;
+        try self.jump_scopes.append(self.allocator, s);
         self.next_jump_scope += 1;
+        return s.id;
+    }
+
+    // the handler of scope id starts here: point the gotos' push_handlers at it
+    pub fn handlerPatched(self: *Compiler, id: u32) void {
+        if (self.handler_patches.fetchRemove(id)) |entry| {
+            var list = entry.value;
+            for (list.items) |pos| self.patchJump(pos);
+            list.deinit(self.allocator);
+        }
+    }
+
+    fn sharedScopes(a: []const JumpScope, b: []const JumpScope) usize {
+        var k: usize = 0;
+        while (k < a.len and k < b.len and a[k].id == b[k].id) k += 1;
+        return k;
+    }
+
+    // what leaving one scope takes, as zend_handle_loops_and_finally emits
+    // it: a foreach frees its iterable, a try or catch body drops its
+    // handler and runs its finally
+    fn emitScopeExit(self: *Compiler, scope: JumpScope) Error!void {
+        switch (scope.kind) {
+            .loop => if (scope.loop < 32 and self.loop_is_foreach[scope.loop]) try self.emitForeachEnd(scope.loop),
+            .finally_body => {},
+            .try_body, .catch_body => {
+                if (!scope.hasHandler()) return;
+                try self.emitOp(.pop_handler);
+                if (scope.finally_index) |fd| {
+                    const saved_fd = self.finally_depth;
+                    self.finally_depth = fd;
+                    defer self.finally_depth = saved_fd;
+                    try compiler_stmt.compileFinallyCopy(self, scope.finally_node);
+                }
+            },
+        }
     }
 
     pub fn popJumpScope(self: *Compiler) void {
@@ -504,13 +571,15 @@ pub const Compiler = struct {
     // the goto too, and a goto in a finally body stays in it
     fn checkGoto(self: *Compiler, token: u32, from: []const JumpScope, to: []const JumpScope) error{CompileError}!void {
         for (to) |scope| {
-            if (!hasJumpScope(from, scope.id)) {
-                if (scope.finally) return self.fail(token, "jump into a finally block is disallowed");
-                return self.fail(token, "'goto' into loop or switch statement is disallowed");
-            }
+            if (!hasJumpScope(from, scope.id)) switch (scope.kind) {
+                .finally_body => return self.fail(token, "jump into a finally block is disallowed"),
+                .loop => return self.fail(token, "'goto' into loop or switch statement is disallowed"),
+                // a goto may enter a try or catch body
+                .try_body, .catch_body => {},
+            };
         }
         for (from) |scope| {
-            if (scope.finally and !hasJumpScope(to, scope.id)) return self.fail(token, "jump out of a finally block is disallowed");
+            if (scope.kind == .finally_body and !hasJumpScope(to, scope.id)) return self.fail(token, "jump out of a finally block is disallowed");
         }
     }
 
@@ -1064,12 +1133,36 @@ pub const Compiler = struct {
                 const site = try self.label_sites.getOrPut(self.allocator, label);
                 if (site.found_existing and site.value_ptr.* != node.main_token) return self.failFmt(node.main_token, "Label '{s}' already defined", .{label});
                 site.value_ptr.* = node.main_token;
-                const target = self.chunk.offset();
-                try self.labels.put(self.allocator, label, target);
                 const here = try self.jumpScopesNow();
+                // a goto from outside a try or catch body the label is in
+                // enters it through push_handlers placed before the label
+                const entries = try self.allocator.alloc(usize, here.len + 1);
+                const has_handlers = for (here) |scope| {
+                    if (scope.hasHandler()) break true;
+                } else false;
+                if (has_handlers) {
+                    const skip = try self.emitJump(.jump);
+                    for (here, 0..) |scope, i| {
+                        entries[i] = self.chunk.offset();
+                        if (!scope.hasHandler()) continue;
+                        try self.emitOp(.push_handler);
+                        const gop = try self.handler_patches.getOrPut(self.allocator, scope.id);
+                        if (!gop.found_existing) gop.value_ptr.* = .empty;
+                        try gop.value_ptr.append(self.allocator, self.chunk.offset());
+                        try self.emitU16(0xffff);
+                    }
+                    self.patchJump(skip);
+                }
+                const target = self.chunk.offset();
+                if (!has_handlers) @memset(entries, target);
+                entries[here.len] = target;
+                try self.labels.put(self.allocator, label, target);
                 const scopes = try self.label_scopes.getOrPut(self.allocator, label);
                 if (scopes.found_existing) self.allocator.free(scopes.value_ptr.*);
                 scopes.value_ptr.* = here;
+                const entry_slot = try self.label_entries.getOrPut(self.allocator, label);
+                if (entry_slot.found_existing) self.allocator.free(entry_slot.value_ptr.*);
+                entry_slot.value_ptr.* = entries;
                 // forward gotos land on the label as compiled now, so a goto
                 // in one copy of a finally body jumps within that copy
                 var i: usize = 0;
@@ -1077,8 +1170,15 @@ pub const Compiler = struct {
                     const pg = self.pending_gotos.items[i];
                     if (std.mem.eql(u8, pg.label, label)) {
                         try self.checkGoto(pg.token, pg.scopes, here);
-                        self.patchJumpTo(pg.offset, target);
+                        // the goto unwound every scope it was in, innermost
+                        // first; it stops after the ones the label is not in
+                        const k = sharedScopes(pg.scopes, here);
+                        const leave = pg.scopes.len - k;
+                        for (pg.jumps, 0..) |j, n| {
+                            if (n < leave) self.patchJumpTo(j, j + 2) else self.patchJumpTo(j, entries[k]);
+                        }
                         self.allocator.free(pg.scopes);
+                        self.allocator.free(pg.jumps);
                         _ = self.pending_gotos.swapRemove(i);
                     } else i += 1;
                 }
@@ -1096,12 +1196,40 @@ pub const Compiler = struct {
             },
             .goto_stmt => {
                 const label = self.ast.tokenSlice(node.main_token);
-                if (self.labels.get(label)) |target| {
-                    try self.checkGoto(node.main_token, self.jump_scopes.items, self.label_scopes.get(label).?);
-                    try self.emitLoop(target);
+                // zend_compile_goto: the loops and finallys being left are
+                // unwound before the jump, innermost first
+                if (self.labels.get(label) != null) {
+                    const to = self.label_scopes.get(label).?;
+                    try self.checkGoto(node.main_token, self.jump_scopes.items, to);
+                    const entries = self.label_entries.get(label).?;
+                    const from = try self.jumpScopesNow();
+                    defer self.allocator.free(from);
+                    const k = sharedScopes(from, to);
+                    var n = from.len;
+                    while (n > k) {
+                        n -= 1;
+                        try self.emitScopeExit(from[n]);
+                    }
+                    try self.emitLoop(entries[k]);
                 } else {
-                    const j = try self.emitJump(.jump);
-                    try self.pending_gotos.append(self.allocator, .{ .offset = j, .label = label, .source_offset = self.current_source_offset, .token = node.main_token, .scopes = try self.jumpScopesNow() });
+                    // the label's scopes aren't known yet: every scope is
+                    // unwound, with a jump before each that the label patches
+                    // to go on or to jump there (zend_resolve_goto_label
+                    // turns the frees it doesn't need into nops)
+                    const from = try self.jumpScopesNow();
+                    errdefer self.allocator.free(from);
+                    const jumps = try self.allocator.alloc(usize, from.len + 1);
+                    errdefer self.allocator.free(jumps);
+                    var n = from.len;
+                    var j: usize = 0;
+                    while (true) {
+                        jumps[j] = try self.emitJump(.jump);
+                        j += 1;
+                        if (n == 0) break;
+                        n -= 1;
+                        try self.emitScopeExit(from[n]);
+                    }
+                    try self.pending_gotos.append(self.allocator, .{ .jumps = jumps, .label = label, .source_offset = self.current_source_offset, .token = node.main_token, .scopes = from });
                 }
             },
             .qualified_name => {
@@ -2176,11 +2304,20 @@ pub const Compiler = struct {
         self.type_warned.deinit(a);
         self.break_jumps.deinit(a);
         self.continue_jumps.deinit(a);
-        for (self.pending_gotos.items) |pg| a.free(pg.scopes);
+        for (self.pending_gotos.items) |pg| {
+            a.free(pg.scopes);
+            a.free(pg.jumps);
+        }
         self.pending_gotos.deinit(a);
         var ls_it = self.label_scopes.valueIterator();
         while (ls_it.next()) |v| a.free(v.*);
         self.label_scopes.deinit(a);
+        var le_it = self.label_entries.valueIterator();
+        while (le_it.next()) |v| a.free(v.*);
+        self.label_entries.deinit(a);
+        var hp_it = self.handler_patches.valueIterator();
+        while (hp_it.next()) |v| v.deinit(a);
+        self.handler_patches.deinit(a);
         self.jump_scopes.deinit(a);
         self.labels.deinit(a);
         self.label_sites.deinit(a);
