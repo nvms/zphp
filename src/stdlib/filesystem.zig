@@ -4636,8 +4636,11 @@ const FdDesc = union(enum) {
     pipe_w,
     socket,
     pty,
-    file: struct { path: []const u8, mode: []const u8 },
+    // a descriptor the parent opened for the child (a file, /dev/null)
+    opened: std.posix.fd_t,
     redirect: std.posix.fd_t,
+    // the child end of an earlier descriptor of the same spec
+    redirect_index: i64,
 };
 
 const ProcDesc = struct { role: i64, action: FdDesc };
@@ -4716,9 +4719,14 @@ fn closePrepared(descs: []PreparedDesc) void {
 const ProcCommand = union(enum) { shell: []const u8, argv: []const []const u8 };
 
 fn forkExecDesc(allocator: std.mem.Allocator, command: ProcCommand, specs: []const ProcDesc, cwd: ?[]const u8, env: ?[]const []const u8) !ProcSpawn {
+    // descriptors the parent opened are closed here, whatever happens
+    var opened_taken = false;
+    errdefer if (!opened_taken) closeOpenedSpecs(specs);
     const prepared = try allocator.alloc(PreparedDesc, specs.len);
     defer allocator.free(prepared);
-    for (specs, 0..) |spec, i| prepared[i] = .{ .role = spec.role, .action = spec.action };
+    for (specs, 0..) |spec, i| prepared[i] = .{ .role = spec.role, .action = spec.action, .child_fd = if (spec.action == .opened) spec.action.opened else -1 };
+    // the descriptors the parent opened are the prepared list's to close now
+    opened_taken = true;
     errdefer closePrepared(prepared);
 
     for (prepared) |*d| switch (d.action) {
@@ -4749,12 +4757,7 @@ fn forkExecDesc(allocator: std.mem.Allocator, command: ProcCommand, specs: []con
             d.parent_fd = master;
             d.child_fd = slave;
         },
-        .file => |f| {
-            const file = try openWithMode(f.path, f.mode);
-            setCloexec(file.handle);
-            d.child_fd = file.handle;
-        },
-        .inherit, .redirect => {},
+        .inherit, .opened, .redirect, .redirect_index => {},
     };
 
     const xrep = try sys.pipeCloexec();
@@ -4799,8 +4802,14 @@ fn forkExecDesc(allocator: std.mem.Allocator, command: ProcCommand, specs: []con
             const target: std.posix.fd_t = @intCast(d.role);
             switch (d.action) {
                 .inherit => {},
-                .pipe_r, .pipe_w, .socket, .pty, .file => procChildDup(d.child_fd, target, xrep[1]),
+                .pipe_r, .pipe_w, .socket, .pty, .opened => procChildDup(d.child_fd, target, xrep[1]),
                 .redirect => |src| procChildDup(src, target, xrep[1]),
+                .redirect_index => |index| for (prepared) |other| {
+                    if (other.role != index) continue;
+                    const src = if (other.child_fd != -1) other.child_fd else if (other.action == .redirect) other.action.redirect else continue;
+                    procChildDup(src, target, xrep[1]);
+                    break;
+                },
             }
         }
         for (prepared) |d| {
@@ -4842,6 +4851,103 @@ fn forkExecDesc(allocator: std.mem.Allocator, command: ProcCommand, specs: []con
     return .{ .pid = pid, .pipe_fds = pipes };
 }
 
+fn closeOpenedSpecs(specs: []const ProcDesc) void {
+    for (specs) |spec| if (spec.action == .opened) sys.close(spec.action.opened);
+}
+
+// proc_open's descriptor spec, as php's set_proc_descriptor_* read it: each
+// entry is a stream or an array naming what the child gets. a bad entry is
+// a ValueError (thrown, error.RuntimeError) or a warning (null), and leaves
+// nothing open
+fn procDescriptors(ctx: *NativeContext, spec: *PhpArray, descs: *std.ArrayListUnmanaged(ProcDesc)) RuntimeError!bool {
+    errdefer closeOpenedSpecs(descs.items);
+    for (spec.entries.items) |entry| {
+        if (entry.key != .int) return procValueError(ctx, "proc_open(): Argument #2 ($descriptor_spec) must be an integer indexed array", .{});
+        const role = entry.key.int;
+        const v = if (entry.ref) |cell| cell.* else entry.value;
+        const action: FdDesc = switch (v) {
+            .resource => |res| blk: {
+                // a descriptor given as a resource must be an open stream
+                if (!std.mem.eql(u8, res.class_name, "FileHandle") or value_mod.resourceClosed(res)) {
+                    return throwStreamArg(ctx, "proc_open(): supplied resource is not a valid stream resource", .{});
+                }
+                const fdv = res.get("__fd");
+                if (fdv != .int or fdv.int < 0) continue;
+                break :blk .{ .redirect = @intCast(fdv.int) };
+            },
+            .array => |item| (try procDescriptorFromArray(ctx, item, descs.items)) orelse {
+                closeOpenedSpecs(descs.items);
+                return false;
+            },
+            else => return procValueError(ctx, "proc_open(): Argument #2 ($descriptor_spec) must only contain arrays and streams", .{}),
+        };
+        try descs.append(ctx.allocator, .{ .role = role, .action = action });
+    }
+    return true;
+}
+
+fn procValueError(ctx: *NativeContext, comptime fmt: []const u8, args: anytype) RuntimeError {
+    const msg = try std.fmt.allocPrint(ctx.allocator, fmt, args);
+    defer ctx.allocator.free(msg);
+    try ctx.vm.setPendingException("ValueError", msg);
+    return error.RuntimeError;
+}
+
+fn procWarning(ctx: *NativeContext, comptime fmt: []const u8, args: anytype) RuntimeError!?FdDesc {
+    const msg = try std.fmt.allocPrint(ctx.allocator, "proc_open(): " ++ fmt, args);
+    defer ctx.allocator.free(msg);
+    try ctx.vm.emitWarning(msg);
+    return null;
+}
+
+// get_string_parameter
+fn procSpecString(ctx: *NativeContext, item: *PhpArray, index: i64, comptime what: []const u8) RuntimeError![]const u8 {
+    const key = PhpArray.Key{ .int = index };
+    if (!item.contains(key)) return procValueError(ctx, "Missing " ++ what, .{});
+    return ownedText(ctx, item.get(key));
+}
+
+fn procDescriptorFromArray(ctx: *NativeContext, item: *PhpArray, earlier: []const ProcDesc) RuntimeError!?FdDesc {
+    const kind = try procSpecString(ctx, item, 0, "handle qualifier");
+    if (std.mem.eql(u8, kind, "pipe")) {
+        // anything but a mode starting with w is the child's to read
+        const mode = try procSpecString(ctx, item, 1, "mode parameter for 'pipe'");
+        return if (std.mem.startsWith(u8, mode, "w")) .pipe_w else .pipe_r;
+    }
+    if (std.mem.eql(u8, kind, "socket")) return .socket;
+    if (std.mem.eql(u8, kind, "file")) {
+        const path = try procSpecString(ctx, item, 1, "file name parameter for 'file'");
+        const mode = try procSpecString(ctx, item, 2, "mode parameter for 'file'");
+        const file = openWithMode(path, mode) catch |err| {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "proc_open({s}): Failed to open stream: {s}", .{ path, if (err == error.RuntimeError) "Invalid argument" else spawnFailureMessage(err) });
+            defer ctx.allocator.free(msg);
+            try ctx.vm.emitWarning(msg);
+            return null;
+        };
+        setCloexec(file.handle);
+        return .{ .opened = file.handle };
+    }
+    if (std.mem.eql(u8, kind, "redirect")) {
+        const key = PhpArray.Key{ .int = 1 };
+        if (!item.contains(key)) return procValueError(ctx, "Missing redirection target", .{});
+        const target_v = item.get(key);
+        if (target_v != .int) return procValueError(ctx, "Redirection target must be of type int, {s} given", .{target_v.valueName()});
+        const target = target_v.int;
+        for (earlier) |desc| if (desc.role == target) return .{ .redirect_index = target };
+        // the parent's own stdin, stdout or stderr
+        if (target < 0 or target > 2) return procWarning(ctx, "Redirection target {d} not found", .{target});
+        return .{ .redirect = @intCast(target) };
+    }
+    if (std.mem.eql(u8, kind, "null")) {
+        const fd = sys.open("/dev/null", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0) catch |err| {
+            return procWarning(ctx, "Failed to open /dev/null: {s}", .{spawnFailureMessage(err)});
+        };
+        return .{ .opened = fd };
+    }
+    if (std.mem.eql(u8, kind, "pty")) return .pty;
+    return procWarning(ctx, "{s} is not a valid descriptor spec/mode", .{kind});
+}
+
 // a value as text for the rest of the native call
 pub fn ownedText(ctx: *NativeContext, v: Value) RuntimeError![]const u8 {
     if (v == .string) return v.string.bytes();
@@ -4853,10 +4959,17 @@ fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     var words: std.ArrayListUnmanaged([]const u8) = .empty;
     defer words.deinit(ctx.allocator);
     if (args[0] == .array) {
-        for (args[0].array.entries.items) |entry| try words.append(ctx.allocator, try ownedText(ctx, entry.value));
-        if (words.items.len == 0) {
+        if (args[0].array.entries.items.len == 0) {
             try ctx.vm.setPendingException("ValueError", "proc_open(): Argument #1 ($command) must not be empty");
             return error.RuntimeError;
+        }
+        // get_valid_arg_string
+        for (args[0].array.entries.items, 1..) |entry, n| {
+            const word = try ownedText(ctx, if (entry.ref) |cell| cell.* else entry.value);
+            if (ctx.vm.pending_exception != null) return error.RuntimeError;
+            if (n == 1 and word.len == 0) return procValueError(ctx, "First element must contain a non-empty program name", .{});
+            if (std.mem.indexOfScalar(u8, word, 0) != null) return procValueError(ctx, "Command array element {d} contains a null byte", .{n});
+            try words.append(ctx.allocator, word);
         }
     }
     const cmd = if (args[0] == .string) args[0].string.bytes() else try std.mem.join(ctx.allocator, " ", words.items);
@@ -4875,51 +4988,23 @@ fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
         try env_vars.append(ctx.allocator, try std.fmt.allocPrint(ctx.allocator, "{s}={s}", .{ key, try ownedText(ctx, entry.value) }));
     };
 
+    var descs: std.ArrayListUnmanaged(ProcDesc) = .empty;
+    defer descs.deinit(ctx.allocator);
+    if (args[1] == .array) {
+        if (!try procDescriptors(ctx, args[1].array, &descs)) return NativeResult.scalar(.{ .bool = false });
+    }
+
     // php numbers the process after its pipes
-    const proc = try ctx.vm.allocResource("ProcessResource");
+    const proc = ctx.vm.allocResource("ProcessResource") catch |err| {
+        closeOpenedSpecs(descs.items);
+        return err;
+    };
     const cmd_str = try Value.String.create(ctx.allocator, cmd);
     defer cmd_str.release();
     try proc.set(ctx.allocator, "__cmd", .{ .string = cmd_str });
     const cmd_copy = cmd_str.bytes();
     try proc.set(ctx.allocator, "__exit", .{ .int = 0 });
     try proc.set(ctx.allocator, "__running", .{ .bool = true });
-
-    var descs: std.ArrayListUnmanaged(ProcDesc) = .empty;
-    defer descs.deinit(ctx.allocator);
-    if (args[1] == .array) {
-        for (args[1].array.entries.items) |entry| {
-            if (entry.key != .int or entry.key.int < 0) continue;
-            const role = entry.key.int;
-            const v = entry.value;
-            var action: FdDesc = .inherit;
-            if (v == .array) {
-                const tag = v.array.get(.{ .int = 0 });
-                if (tag != .string) continue;
-                if (std.mem.eql(u8, tag.string.bytes(), "pipe")) {
-                    const mode = v.array.get(.{ .int = 1 });
-                    action = if (mode == .string and mode.string.bytes().len > 0 and mode.string.bytes()[0] == 'r') .pipe_r else .pipe_w;
-                } else if (std.mem.eql(u8, tag.string.bytes(), "file")) {
-                    const pathv = v.array.get(.{ .int = 1 });
-                    const modev = v.array.get(.{ .int = 2 });
-                    if (pathv != .string or modev != .string) continue;
-                    action = .{ .file = .{ .path = pathv.string.bytes(), .mode = modev.string.bytes() } };
-                } else if (std.mem.eql(u8, tag.string.bytes(), "socket")) {
-                    action = .socket;
-                } else if (std.mem.eql(u8, tag.string.bytes(), "pty")) {
-                    action = .pty;
-                } else continue;
-            } else if (v == .resource) {
-                // a descriptor given as a resource must be an open stream
-                if (!std.mem.eql(u8, v.resource.class_name, "FileHandle") or value_mod.resourceClosed(v.resource)) {
-                    return throwStreamArg(ctx, "proc_open(): supplied resource is not a valid stream resource", .{});
-                }
-                const fdv = v.resource.get("__fd");
-                if (fdv != .int or fdv.int < 0) continue;
-                action = .{ .redirect = @intCast(fdv.int) };
-            } else continue;
-            try descs.append(ctx.allocator, .{ .role = role, .action = action });
-        }
-    }
 
     var stdout_specified = false;
     var stderr_specified = false;

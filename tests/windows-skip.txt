@@ -56,3 +56,4 @@ mail_sendmail_path.php: the cases pipe the message to cat and exit through the s
 hash_algos_streaming_serialize.php: php's windows build serializes hash contexts with its own struct layout (a C long is 4 bytes there); zphp writes the linux layout
 pcntl.php: pcntl is posix-only, and the reference php's windows ini disables assertions so its first failure differs
 proc_open_pipes_open_at_exit.php: proc_open's ['socket'] descriptor isn't implemented on windows yet
+proc_open_descriptor_spec.php: the windows proc_open (proc_win.zig) parses its descriptor spec on its own, without php's null and redirect handling, and the test runs sh and cat
