@@ -1811,6 +1811,9 @@ fn compileUnset(self: *Compiler, args: []const u32) Error!void {
             const idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });
             try self.emitOp(.unset_var);
             try self.emitU16(idx);
+        } else if (arg.tag == .variable_variable) {
+            try self.compileNode(arg.data.lhs);
+            try self.emitOp(.unset_var_var);
         } else if (arg.tag == .property_access) {
             try self.compileNode(arg.data.lhs);
             if (self.isDynamicProp(arg)) {

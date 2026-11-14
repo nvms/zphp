@@ -539,6 +539,8 @@ pub const OpCode = enum(u8) {
     // leaves: checks (and coerces) the value on top against the declared
     // return type, so the TypeError is thrown inside the try blocks
     verify_return,
+    // unset($$name): pops the name and unsets the variable it names
+    unset_var_var,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {

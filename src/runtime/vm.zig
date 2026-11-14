@@ -8629,59 +8629,33 @@ pub const VM = struct {
                 .unset_var => {
                     const idx = self.readU16();
                     const name = self.currentChunk().constants.items[idx].string.bytes();
-                    if (isSuperglobal(name)) {
-                        self.unsetSuperglobal(name);
-                        continue;
+                    self.unsetVariableNamed(name);
+                    // widen gate at unset: explicit-close intent drains every
+                    // queue so __destruct timing matches PHP. inline-narrow
+                    // gate elsewhere stays object-focused to avoid the
+                    // recursive-yield-from regression (drain widening at
+                    // every .pop closes inner generators mid-handoff)
+                    if (self.pending_destruct.items.len > 0 or
+                        self.pending_gen_release.items.len > 0 or
+                        self.pending_fiber_release.items.len > 0 or
+                        self.pending_array_release.items.len > 0 or
+                        self.pending_string_release.items.len > 0)
+                    {
+                        self.drainPendingDestruct();
                     }
-                    const uframe = self.currentFrame();
-                    const u_is_ref = uframe.ref_slots.contains(name);
-                    if (uframe.vars.get(name)) |existing| {
-                        // release the object the variable held (Stage 1).
-                        // skip ref-bound vars - the value lives in a shared
-                        // cell, released through the ref machinery later
-                        self.releaseValue(existing);
+                    if (self.drainRaised()) {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
                     }
-                    const u_had_vars = uframe.vars.remove(name);
-                    // a slot-backed variable also lives in frame.locals; remove
-                    // from vars alone left the old value readable (so isset()
-                    // still reported it set). reset the slot and drop any ref
-                    // binding so the name reads as undefined afterward
-                    const u_cell = uframe.ref_slots.get(name);
-                    self.unbindRefSlot(&uframe.ref_slots, name);
-                    // this variable may have been the last alias of a ref cell
-                    // (`$r = &$a[k]; unset($r)` / post-foreach `unset($it)`) -
-                    // revert the bound element/prop to a plain value if so
-                    if (u_cell) |cell| self.revertUncapturedCell(cell);
-                    const u_sn = if (uframe.func) |f| f.slot_names else self.global_slot_names;
-                    for (u_sn, 0..) |sn, si| {
-                        if (sn.len == name.len and std.mem.eql(u8, sn, name)) {
-                            if (si < uframe.locals.len) {
-                                if (!u_had_vars) self.releaseValue(uframe.locals[si]);
-                                uframe.locals[si] = .undef;
-                            }
-                            break;
-                        }
-                    }
-                    // a global-scope variable is mirrored into the $GLOBALS
-                    // array (a separate refcounted holder) and the global cell
-                    // by setLocalGlobal - mirror the removal so the object's
-                    // last reference is dropped now, not at the shutdown sweep
-                    if (uframe.include_parent) |parent_idx| self.unsetIncludeVar(parent_idx, name);
-                    if (uframe.func == null and self.frameInGlobalScope(uframe) and name.len > 1 and name[0] == '$') {
-                        self.unbindRefSlot(&self.globals_cells, name);
-                        if (self.globals_array) |ga| {
-                            const gkey = PhpArray.Key{ .string = Value.String.borrowed(name[1..]) };
-                            // the $GLOBALS mirror is non-owning (setLocalGlobal
-                            // cancels its retain), so don't release here - the
-                            // variable's own release above drops the reference.
-                            // just remove the stale mirror entry so the value
-                            // becomes unreachable and a cycle can be collected
-                            ga.remove(gkey);
-                        }
-                        if (!u_is_ref) {
-                            if (self.globals_cells.get(name)) |cell| self.setCell(cell, .null);
-                        }
-                    }
+                },
+                .unset_var_var => {
+                    // unset($$name): the name as a variable-variable read takes it
+                    const name_val = self.pop();
+                    defer self.stackRelease(name_val);
+                    var text_buf: [32]u8 = undefined;
+                    const raw_name = varVarText(name_val, &text_buf);
+                    var buf: [256]u8 = undefined;
+                    self.unsetVariableNamed(try self.internName(varVarName(raw_name, &buf)));
                     // widen gate at unset: explicit-close intent drains every
                     // queue so __destruct timing matches PHP. inline-narrow
                     // gate elsewhere stays object-focused to avoid the
@@ -12833,7 +12807,8 @@ pub const VM = struct {
                     const class_idx = self.readU16();
                     const class_name = self.resolveStaticClassName(self.currentChunk().constants.items[class_idx].string.bytes());
                     const name_val = self.pop();
-                    const prop_name: []const u8 = if (name_val == .string) name_val.string.bytes() else "";
+                    var name_text: [32]u8 = undefined;
+                    const prop_name: []const u8 = varVarText(name_val, &name_text);
                     if (prop_name.len == 0) {
                         self.push(.null);
                     } else if (std.mem.eql(u8, prop_name, "class")) {
@@ -12854,7 +12829,8 @@ pub const VM = struct {
                     // class pushed first, then property name on top
                     const name_val = self.pop();
                     const class_val = self.pop();
-                    const prop_name: []const u8 = if (name_val == .string) name_val.string.bytes() else "";
+                    var name_text: [32]u8 = undefined;
+                    const prop_name: []const u8 = varVarText(name_val, &name_text);
                     const class_name = self.resolveStaticClassName(classNameOf(class_val));
                     if (class_name.len == 0 or prop_name.len == 0) {
                         self.push(.null);
@@ -25813,11 +25789,75 @@ pub const VM = struct {
 
     // the name a variable variable's scalar value gives: ${10} is $10,
     // ${true} is $1
+    // unset() of a variable by name in the current frame
+    fn unsetVariableNamed(self: *VM, name: []const u8) void {
+        if (isSuperglobal(name)) {
+            self.unsetSuperglobal(name);
+            return;
+        }
+        const uframe = self.currentFrame();
+        const u_is_ref = uframe.ref_slots.contains(name);
+        if (uframe.vars.get(name)) |existing| {
+            // release the object the variable held (Stage 1).
+            // skip ref-bound vars - the value lives in a shared
+            // cell, released through the ref machinery later
+            self.releaseValue(existing);
+        }
+        const u_had_vars = uframe.vars.remove(name);
+        // a slot-backed variable also lives in frame.locals; remove
+        // from vars alone left the old value readable (so isset()
+        // still reported it set). reset the slot and drop any ref
+        // binding so the name reads as undefined afterward
+        const u_cell = uframe.ref_slots.get(name);
+        self.unbindRefSlot(&uframe.ref_slots, name);
+        // this variable may have been the last alias of a ref cell
+        // (`$r = &$a[k]; unset($r)` / post-foreach `unset($it)`) -
+        // revert the bound element/prop to a plain value if so
+        if (u_cell) |cell| self.revertUncapturedCell(cell);
+        const u_sn = if (uframe.func) |f| f.slot_names else self.global_slot_names;
+        for (u_sn, 0..) |sn, si| {
+            if (sn.len == name.len and std.mem.eql(u8, sn, name)) {
+                if (si < uframe.locals.len) {
+                    if (!u_had_vars) self.releaseValue(uframe.locals[si]);
+                    uframe.locals[si] = .undef;
+                }
+                break;
+            }
+        }
+        // a global-scope variable is mirrored into the $GLOBALS
+        // array (a separate refcounted holder) and the global cell
+        // by setLocalGlobal - mirror the removal so the object's
+        // last reference is dropped now, not at the shutdown sweep
+        if (uframe.include_parent) |parent_idx| self.unsetIncludeVar(parent_idx, name);
+        if (uframe.func == null and self.frameInGlobalScope(uframe) and name.len > 1 and name[0] == '$') {
+            self.unbindRefSlot(&self.globals_cells, name);
+            if (self.globals_array) |ga| {
+                const gkey = PhpArray.Key{ .string = Value.String.borrowed(name[1..]) };
+                // the $GLOBALS mirror is non-owning (setLocalGlobal
+                // cancels its retain), so don't release here - the
+                // variable's own release above drops the reference.
+                // just remove the stale mirror entry so the value
+                // becomes unreachable and a cycle can be collected
+                ga.remove(gkey);
+            }
+            if (!u_is_ref) {
+                if (self.globals_cells.get(name)) |cell| self.setCell(cell, .null);
+            }
+        }
+    }
+
     fn varVarText(v: Value, buf: *[32]u8) []const u8 {
         return switch (v) {
             .string => |str| str.bytes(),
             .int => |i| std.fmt.bufPrint(buf, "{d}", .{i}) catch "",
             .bool => |b| if (b) "1" else "",
+            .float => |f| blk: {
+                var text: [1100]u8 = undefined;
+                const t = Value.doubleText(&text, f);
+                if (t.len > buf.len) break :blk "";
+                @memcpy(buf[0..t.len], t);
+                break :blk buf[0..t.len];
+            },
             else => "",
         };
     }
