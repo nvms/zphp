@@ -7343,6 +7343,9 @@ pub const VM = struct {
                             from_request = true;
                         }
                     }
+                    // an unset's base (separate_only): a shared array is
+                    // separated, anything else is left for the unset to judge
+                    if (separate_only and cur != .array) continue;
                     if (cur == .int or cur == .float or (cur == .bool and cur.bool)) {
                         if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
                         return error.RuntimeError;
@@ -7373,11 +7376,11 @@ pub const VM = struct {
                                         }
                                     }
                                 }
-                                self.push(sv);
+                                if (!separate_only) self.push(sv);
                                 continue;
                             }
                         }
-                        self.push(cur);
+                        if (!separate_only) self.push(cur);
                         continue;
                     }
                     if (cur == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;

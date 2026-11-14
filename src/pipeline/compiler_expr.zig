@@ -1922,6 +1922,12 @@ fn compileUnset(self: *Compiler, args: []const u32) Error!void {
                 if (slot_opt) |slot| {
                     try self.emitOp(.cow_separate_local);
                     try self.emitU16(slot);
+                } else if (!Compiler.isSuperglobal(bname) and !std.mem.eql(u8, bname, "$GLOBALS") and !std.mem.eql(u8, bname, "$this")) {
+                    // a variable known by name (global, a closure's by-reference
+                    // use) is separated the same way
+                    try self.emitOp(.ensure_array_var);
+                    try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(bname) }));
+                    try self.emitByte(1);
                 }
             }
             // for `unset($a[k1][k2]...[kn])`, the intermediate reads should
