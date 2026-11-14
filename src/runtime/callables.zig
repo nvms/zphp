@@ -418,7 +418,7 @@ pub fn invoke(vm: *VM, callee: Callee, args: []const Value) RuntimeError!Value {
             // a transient copy: __call may return the name, which then
             // outlives whatever callable it came from
             const magic_args = [_]Value{ .{ .string = try vm.transientBytes(m.name) }, .{ .array = packed_args } };
-            if (m.object) |obj| return vm.callMethod(obj, "__call", &magic_args);
+            if (m.object) |obj| return vm.callTrampoline(obj, &magic_args);
             const registered = try vm.resolveMethod(m.class, "__callStatic");
             return vm.callByNameAs(registered, &magic_args, m.class);
         },
@@ -463,7 +463,7 @@ pub fn invokeArgArrayFrom(vm: *VM, callee: Callee, arr: *PhpArray, from_native: 
                 if (entry.key == .string) try packed_args.set(vm.allocator, entry.key, v) else try packed_args.append(vm.allocator, v);
             }
             const magic_args = [_]Value{ .{ .string = try vm.transientBytes(m.name) }, .{ .array = packed_args } };
-            if (m.object) |obj| return vm.callMethod(obj, "__call", &magic_args);
+            if (m.object) |obj| return vm.callTrampoline(obj, &magic_args);
             const registered = try vm.resolveMethod(m.class, "__callStatic");
             return vm.callByNameAs(registered, &magic_args, m.class);
         },

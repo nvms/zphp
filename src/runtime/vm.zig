@@ -836,6 +836,8 @@ pub const VM = struct {
     release_log: ?*std.ArrayListUnmanaged(ReleasedItem) = null,
     // the fast loop returned from a frame whose locals queued destructors
     fast_return_drain: bool = false,
+    // the next frame pushed is __call/__callStatic standing in for a method
+    pending_trampoline: bool = false,
     // frames below this count belong to a script that has finished (the
     // shutdown functions run): php has no executing file there
     finished_frames: usize = 0,
@@ -2105,6 +2107,9 @@ pub const VM = struct {
         include_parent: ?usize = null,
         // the frame a native method runs in: no code of its own, only $this
         native: bool = false,
+        // a __call or __callStatic run for a missing method: php's call
+        // trampoline, named after that method in deprecations and NoDiscard
+        trampoline: bool = false,
     };
 
     fn allocGenerator(self: *VM, initial: Generator) RuntimeError!*Generator {
@@ -8843,7 +8848,10 @@ pub const VM = struct {
                     if (self.frame_count >= 2) {
                         const func = self.currentFrame().func.?;
                         const kind: []const u8 = if (std.mem.indexOf(u8, func.name, "::") != null) "Method" else "Function";
-                        const shown = if (func.display_name.len > 0) func.display_name else func.name;
+                        const own_name = if (func.display_name.len > 0) func.display_name else func.name;
+                        const trampoline = self.trampolineDisplay(own_name);
+                        defer if (trampoline) |t| self.allocator.free(t);
+                        const shown = trampoline orelse own_name;
                         const declared = self.functionAttributesOf(func);
                         const suffix = self.deprecationText(func.deprecated orelse "", declared.attrs, declared.scope) catch |err| {
                             if (try self.resumeRaised()) continue;
@@ -8871,7 +8879,10 @@ pub const VM = struct {
                             const func = self.currentFrame().func.?;
                             const reason = func.no_discard orelse "";
                             const kind: []const u8 = if (std.mem.indexOf(u8, func.name, "::") != null) "method" else "function";
-                            const shown = if (func.display_name.len > 0) func.display_name else func.name;
+                            const own_name = if (func.display_name.len > 0) func.display_name else func.name;
+                            const trampoline = self.trampolineDisplay(own_name);
+                            defer if (trampoline) |t| self.allocator.free(t);
+                            const shown = trampoline orelse own_name;
                             const msg = try std.fmt.allocPrint(self.allocator, "The return value of {s} {s}() should either be used or intentionally ignored by casting it as (void){s}{s}", .{ kind, shown, if (reason.len > 0) ", " else "", reason });
                             defer self.allocator.free(msg);
                             const line: i64 = if (self.sourceLocation(caller.chunk, if (caller.ip > 0) caller.ip - 1 else 0)) |loc| @intCast(loc.line) else 0;
@@ -11492,7 +11503,7 @@ pub const VM = struct {
                                 var args_arr = try self.allocArray();
                                 for (0..ac) |i| try args_arr.append(self.allocator, self.stack[self.sp - ac + i]);
                                 self.dropN(ac + 1);
-                                const result = self.callMethod(obj, "__call", &.{ .{ .string = Value.String.borrowed(method_name) }, .{ .array = args_arr } }) catch |err| {
+                                const result = self.callTrampoline(obj, &.{ .{ .string = Value.String.borrowed(method_name) }, .{ .array = args_arr } }) catch |err| {
                                     self.removeCallGuard(obj_id, method_name);
                                     if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                     return err;
@@ -11810,7 +11821,7 @@ pub const VM = struct {
                             for (0..ac) |ai| try args_arr.append(self.allocator, self.stack[self.sp - ac + ai]);
                             self.dropN(ac);
                             self.dropN(1);
-                            const result = self.callMethod(obj, "__call", &.{ .{ .string = Value.String.borrowed(method_name) }, .{ .array = args_arr } }) catch {
+                            const result = self.callTrampoline(obj, &.{ .{ .string = Value.String.borrowed(method_name) }, .{ .array = args_arr } }) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
@@ -11965,7 +11976,7 @@ pub const VM = struct {
                             for (0..ac) |ai| try args_arr.append(self.allocator, self.stack[self.sp - ac + ai]);
                             self.dropN(ac);
                             self.dropN(1);
-                            const result = self.callMethod(obj, "__call", &.{ .{ .string = try self.transientBytes(method_name) }, .{ .array = args_arr } }) catch {
+                            const result = self.callTrampoline(obj, &.{ .{ .string = try self.transientBytes(method_name) }, .{ .array = args_arr } }) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
@@ -12149,7 +12160,7 @@ pub const VM = struct {
                                 for (0..ac) |ai| try call_args_arr.append(self.allocator, self.stack[self.sp - ac + ai]);
                                 self.dropN(ac);
                                 self.dropN(1);
-                                const result = self.callMethod(obj, "__call", &.{ .{ .string = try self.transientBytes(method_name) }, .{ .array = call_args_arr } }) catch |err| {
+                                const result = self.callTrampoline(obj, &.{ .{ .string = try self.transientBytes(method_name) }, .{ .array = call_args_arr } }) catch |err| {
                                     self.removeCallGuard(obj_id, method_name);
                                     if (err == error.RuntimeError and self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                     return err;
@@ -12358,7 +12369,7 @@ pub const VM = struct {
                             const cs_name = try self.resolveMethod(class_name, "__callStatic");
                             self.push(.{ .string = Value.String.borrowed(method_name) });
                             self.push(.{ .array = arr });
-                            try self.callStaticFunction(cs_name, 2, target.called_class);
+                            try self.callStaticTrampoline(cs_name, target.called_class);
                             continue;
                         }
                         const msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ self.declaredClassName(class_name), method_name });
@@ -12466,7 +12477,7 @@ pub const VM = struct {
                             const cs_name = try self.resolveMethod(class_name, "__callStatic");
                             self.push(.{ .string = Value.String.borrowed(method_name) });
                             self.push(.{ .array = args_arr });
-                            try self.callStaticFunction(cs_name, 2, class_name);
+                            try self.callStaticTrampoline(cs_name, class_name);
                             continue;
                         }
                         const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ self.declaredClassName(class_name), method_name }) catch return error.OutOfMemory;
@@ -12545,7 +12556,7 @@ pub const VM = struct {
                             const cs_name = try self.resolveMethod(class_name, "__callStatic");
                             self.push(.{ .string = Value.String.borrowed(method_name) });
                             self.push(.{ .array = args_arr });
-                            try self.callStaticFunction(cs_name, 2, effective_called);
+                            try self.callStaticTrampoline(cs_name, effective_called);
                             continue;
                         }
                         const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ self.declaredClassName(class_name), method_name }) catch return error.OutOfMemory;
@@ -12597,7 +12608,7 @@ pub const VM = struct {
                             const cs_name = try self.resolveMethod(class_name, "__callStatic");
                             self.push(.{ .string = Value.String.borrowed(method_name) });
                             self.push(.{ .array = args_arr });
-                            try self.callStaticFunction(cs_name, 2, effective_called);
+                            try self.callStaticTrampoline(cs_name, effective_called);
                             continue;
                         }
                         const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ self.declaredClassName(class_name), method_name }) catch return error.OutOfMemory;
@@ -12658,7 +12669,7 @@ pub const VM = struct {
                             const cs_name = try self.resolveMethod(class_name, "__callStatic");
                             self.push(.{ .string = Value.String.borrowed(method_name) });
                             self.push(args_val);
-                            try self.callStaticFunction(cs_name, 2, target.called_class);
+                            try self.callStaticTrampoline(cs_name, target.called_class);
                             continue;
                         }
                         const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ self.declaredClassName(class_name), method_name }) catch return error.OutOfMemory;
@@ -13568,7 +13579,7 @@ pub const VM = struct {
             var args_arr = try self.allocArray();
             for (0..ac) |i| try args_arr.append(self.allocator, self.stack[self.sp - ac + i]);
             self.dropN(ac);
-            const result = try self.callMethod(tv.object, "__call", &.{ .{ .string = Value.String.borrowed(method_name) }, .{ .array = args_arr } });
+            const result = try self.callTrampoline(tv.object, &.{ .{ .string = Value.String.borrowed(method_name) }, .{ .array = args_arr } });
             self.push(result);
             return true;
         };
@@ -13586,7 +13597,7 @@ pub const VM = struct {
         self.dropN(ac);
         self.push(.{ .string = Value.String.borrowed(method_name) });
         self.push(.{ .array = args_arr });
-        try self.callStaticFunction(cs_name, 2, effective_called);
+        try self.callStaticTrampoline(cs_name, effective_called);
         return true;
     }
 
@@ -20762,8 +20773,39 @@ pub const VM = struct {
         while (it.next()) |v| retainValue(v.*);
     }
 
+    // __call for a method the object lacks
+    pub fn callTrampoline(self: *VM, obj: *PhpObject, args: []const Value) RuntimeError!Value {
+        self.pending_trampoline = true;
+        defer self.pending_trampoline = false;
+        return self.callMethod(obj, "__call", args);
+    }
+
+    fn callStaticTrampoline(self: *VM, cs_name: []const u8, called_class: []const u8) RuntimeError!void {
+        self.pending_trampoline = true;
+        defer self.pending_trampoline = false;
+        return self.callStaticFunction(cs_name, 2, called_class);
+    }
+
+    // the name a trampoline frame stands for: "Class::method" from the
+    // __call frame's display name and its first argument
+    fn trampolineDisplay(self: *VM, shown: []const u8) ?[]const u8 {
+        const frame = self.currentFrame();
+        if (!frame.trampoline) return null;
+        const func = frame.func orelse return null;
+        if (func.params.len == 0) return null;
+        var name = self.getLocalByName(func.params[0]);
+        if (name != .string) name = frame.vars.get(func.params[0]) orelse return null;
+        if (name != .string) return null;
+        const sep = std.mem.indexOf(u8, shown, "::") orelse return null;
+        return std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ shown[0..sep], name.string.bytes() }) catch null;
+    }
+
     pub fn retainFrameObjects(self: *VM, idx: usize) void {
         const frame = &self.frames[idx];
+        if (self.pending_trampoline) {
+            self.pending_trampoline = false;
+            frame.trampoline = true;
+        }
         if (frame.generator != null) return;
         if (frame.call_name) |name| self.retainClosureByName(name);
         self.markOwnedArrayArgs(idx, frame) catch {};
