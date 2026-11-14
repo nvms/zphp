@@ -18408,13 +18408,19 @@ pub const VM = struct {
         var mit = def.methods.iterator();
         while (mit.next()) |entry| {
             const method = entry.key_ptr.*;
-            if (std.mem.indexOf(u8, method, "$hook_") != null) continue;
+            const hook_at = std.mem.indexOf(u8, method, "$hook_");
             const attrs = self.ownMethodAttributes(class_name, def, method) orelse continue;
             if (!hasOverrideAttribute(attrs)) continue;
-            if (try self.overridesInherited(def, method)) continue;
+            // a hook overrides when the property it inherits can already
+            // do what the hook does (property_has_operation)
+            if (hook_at) |at| {
+                if (self.inheritsPropertyOperation(def, method[0..at], method[at + "$hook_".len ..])) continue;
+            } else if (try self.overridesInherited(def, method)) continue;
             var key_buf: [512]u8 = undefined;
             const func = self.functions.get(class_names.memberKey(&key_buf, class_name, method));
-            const msg = try std.fmt.allocPrint(self.allocator, "{s}::{s}() has #[\\Override] attribute, but no matching parent method exists", .{ class_names.display(class_name), method });
+            var shown_buf: [512]u8 = undefined;
+            const shown = if (hook_at) |at| std.fmt.bufPrint(&shown_buf, "${s}::{s}", .{ method[0..at], method[at + "$hook_".len ..] }) catch method else method;
+            const msg = try std.fmt.allocPrint(self.allocator, "{s}::{s}() has #[\\Override] attribute, but no matching parent method exists", .{ class_names.display(class_name), shown });
             defer self.allocator.free(msg);
             const at: SourcePosition = if (func) |f| .{ .file = if (f.file_path.len > 0) f.file_path else def.file_path, .line = f.start_line } else .{ .file = def.file_path, .line = def.start_line };
             return self.raiseCompileFatal(msg, at);
@@ -18470,6 +18476,35 @@ pub const VM = struct {
 
     // a property redeclared over a parent's that isn't private, or one an
     // interface declares
+    // an inherited declaration of the property that can be read (kind
+    // "get") or written ("set"): stored and not readonly for a write, or
+    // with that hook
+    fn inheritsPropertyOperation(self: *VM, def: *const ClassDef, name: []const u8, kind: []const u8) bool {
+        const has = struct {
+            fn f(cls: *const ClassDef, prop: ClassDef.PropertyDef, k: []const u8) bool {
+                if (!prop.is_virtual and (std.mem.eql(u8, k, "get") or !prop.is_readonly)) return true;
+                var buf: [512]u8 = undefined;
+                const hook = std.fmt.bufPrint(&buf, "{s}$hook_{s}", .{ prop.name, k }) catch return false;
+                return cls.methods.contains(hook);
+            }
+        }.f;
+        var current = def.parent;
+        while (current) |pn| {
+            const cls = self.classes.getPtr(pn) orelse return true;
+            for (cls.properties.items) |prop| if (std.mem.eql(u8, prop.name, name) and prop.visibility != .private) return has(cls, prop, kind);
+            current = cls.parent;
+        }
+        var owner: ?*const ClassDef = def;
+        while (owner) |cls| {
+            for (cls.interfaces.items) |iface| {
+                const idef = self.classes.getPtr(iface) orelse return true;
+                for (idef.properties.items) |prop| if (std.mem.eql(u8, prop.name, name) and has(idef, prop, kind)) return true;
+            }
+            owner = if (cls.parent) |p| self.classes.getPtr(p) else null;
+        }
+        return false;
+    }
+
     fn inheritsProperty(self: *VM, def: *const ClassDef, name: []const u8) bool {
         var current = def.parent;
         while (current) |pn| {
