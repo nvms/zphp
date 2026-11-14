@@ -3121,10 +3121,12 @@ const Parser = struct {
             .float => self.addLiteral(.float_literal),
             .string => blk: {
                 try self.checkUnicodeEscapes(self.pos);
+                try self.checkSimpleOffsets(self.pos);
                 break :blk self.addLiteral(.string_literal);
             },
             .heredoc, .nowdoc => blk: {
                 try self.checkHeredocIndentation(self.pos);
+                try self.checkSimpleOffsets(self.pos);
                 break :blk self.addLiteral(.string_literal);
             },
             .kw_true => self.addLiteral(.true_literal),
@@ -3977,6 +3979,45 @@ const Parser = struct {
     // zend_scan_escape_string's \u{...} rules for a double-quoted string:
     // hex digits between the braces, at least one, at most U+10FFFF. a \u
     // without a brace stays as written
+    // php's scanner reads the offset of "$a[...]" as a name, a number or a
+    // variable: a quoted key or a space there is a syntax error
+    fn checkSimpleOffsets(self: *Parser, token: u32) Error!void {
+        const text = self.tokens[token].lexeme(self.source);
+        const first_line = text[0 .. std.mem.indexOfScalar(u8, text, '\n') orelse text.len];
+        const interpolates = (text.len > 0 and text[0] == '"') or
+            (std.mem.startsWith(u8, text, "<<<") and std.mem.indexOfScalar(u8, first_line, '\'') == null);
+        if (!interpolates) return;
+        var i: usize = 0;
+        var depth: usize = 0;
+        while (i < text.len) : (i += 1) {
+            const c = text[i];
+            if (c == '\\') {
+                i += 1;
+                continue;
+            }
+            if (depth > 0) {
+                if (c == '{') depth += 1 else if (c == '}') depth -= 1;
+                continue;
+            }
+            if (c == '{' and i + 1 < text.len and text[i + 1] == '$') {
+                depth = 1;
+                i += 1;
+                continue;
+            }
+            if (c != '$' or i + 1 >= text.len or !(std.ascii.isAlphabetic(text[i + 1]) or text[i + 1] == '_' or text[i + 1] >= 0x80)) continue;
+            var j = i + 2;
+            while (j < text.len and (std.ascii.isAlphanumeric(text[j]) or text[j] == '_' or text[j] >= 0x80)) j += 1;
+            if (j + 1 < text.len and text[j] == '[') switch (text[j + 1]) {
+                '\'', '"', '\\', ' ', '\t', '\n', '\r' => {
+                    try self.addErrorAt(token, .unexpected_token);
+                    return error.ParseError;
+                },
+                else => {},
+            };
+            i = j - 1;
+        }
+    }
+
     fn checkUnicodeEscapes(self: *Parser, token: u32) Error!void {
         const text = self.tokens[token].lexeme(self.source);
         if (text.len == 0 or text[0] != '"') return;
