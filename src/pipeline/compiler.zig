@@ -362,16 +362,6 @@ pub const Compiler = struct {
     // per-foreach: the variable a by-reference loop iterates live, read again
     // where the loop ends so it stops counting as the array's iterator
     loop_foreach_live: [32]?LiveIterable = @as([32]?LiveIterable, @splat(null)),
-    // the outer loops a return has already ended while the finally copies
-    // it runs compile: a return inside one of those must not end them again
-    loops_ended: u32 = 0,
-    // loop levels a return being compiled has already ended while a finally
-    // it runs is inlined: a return inside that finally must not end them again
-    ended_gap_lo: u32 = 0,
-    ended_gap_hi: u32 = 0,
-    // return values waiting on the operand stack while those finally copies
-    // compile: a return inside one replaces them, so it discards them first
-    pending_returns: u32 = 0,
     closure_count: u32 = 0,
     // the static variables the function being compiled declares
     static_vars: std.ArrayListUnmanaged(bytecode.StaticVar) = .empty,
@@ -474,9 +464,6 @@ pub const Compiler = struct {
     // the file's top-level statements, for declare(strict_types)'s placement
     root_stmts: []const u32 = &.{},
     hook_is_set: bool = false,
-    finally_nodes: [8]u32 = @as([8]u32, @splat(0)),
-    finally_loop_depth: [8]u32 = @as([8]u32, @splat(0)),
-    finally_depth: u32 = 0,
 
     pub const LoopJump = struct {
         offset: usize,
@@ -499,9 +486,13 @@ pub const Compiler = struct {
         kind: Kind,
         // a loop's level (loop_depth inside it, less one)
         loop: u32 = 0,
-        // a try or catch body's finally, and its finally_nodes index
+        // a try or catch body's finally
         finally_node: u32 = 0,
-        finally_index: ?u32 = null,
+        // a finally body inlined by a way out of the scope owner: the scopes
+        // from the owner in were unwound before it, and pending_value says
+        // a returned value waits under the finally's own operands
+        owner: ?u32 = null,
+        pending_value: bool = false,
 
         pub const Kind = enum { loop, finally_body, try_body, catch_body };
 
@@ -540,22 +531,69 @@ pub const Compiler = struct {
     }
 
     // what leaving one scope takes, as zend_handle_loops_and_finally emits
-    // it: a foreach frees its iterable, a try or catch body drops its
-    // handler and runs its finally
-    fn emitScopeExit(self: *Compiler, scope: JumpScope) Error!void {
+    // it: a foreach frees its iterable (from under a returned value), a try
+    // or catch body drops its handler and runs its finally
+    fn emitScopeExit(self: *Compiler, scope: JumpScope, under_value: bool) Error!void {
         switch (scope.kind) {
-            .loop => if (scope.loop < 32 and self.loop_is_foreach[scope.loop]) try self.emitForeachEnd(scope.loop),
+            .loop => if (scope.loop < 32 and self.loop_is_foreach[scope.loop]) {
+                if (under_value) {
+                    try self.emitOp(.bury);
+                    try self.emitByte(2);
+                }
+                try self.emitForeachEnd(scope.loop);
+            },
             .finally_body => {},
             .try_body, .catch_body => {
                 if (!scope.hasHandler()) return;
                 try self.emitOp(.pop_handler);
-                if (scope.finally_index) |fd| {
-                    const saved_fd = self.finally_depth;
-                    self.finally_depth = fd;
-                    defer self.finally_depth = saved_fd;
-                    try compiler_stmt.compileFinallyCopy(self, scope.finally_node);
-                }
+                if (scope.finally_node != 0) try compiler_stmt.compileFinallyCopyFor(self, scope.finally_node, scope.id, under_value);
             },
+        }
+    }
+
+    pub const Unwind = enum { return_, generator_return, break_, continue_ };
+
+    // a return here leaves a foreach or a try block
+    fn hasUnwindWork(self: *Compiler) bool {
+        for (self.jump_scopes.items) |scope| switch (scope.kind) {
+            .loop => if (scope.loop < 32 and self.loop_is_foreach[scope.loop]) return true,
+            .try_body, .catch_body => if (scope.hasHandler()) return true,
+            .finally_body => {},
+        };
+        return false;
+    }
+
+    // zend_handle_loops_and_finally: leave the scopes a return (all of
+    // them), a break (the loops from target_depth in) or a continue (the
+    // ones inside loop target_depth) leaves, innermost first. a finally
+    // inlined for another way out has had the scopes from its owner in
+    // unwound already, and a value that way out returns is discarded
+    fn unwindScopes(self: *Compiler, how: Unwind, target_depth: u32, value_pushed: bool) Error!void {
+        var i = self.jump_scopes.items.len;
+        while (i > 0) {
+            i -= 1;
+            const scope = self.jump_scopes.items[i];
+            switch (scope.kind) {
+                .loop => {
+                    switch (how) {
+                        .break_ => if (scope.loop < target_depth) return,
+                        .continue_ => if (scope.loop <= target_depth) return,
+                        .return_ => {},
+                        .generator_return => continue,
+                    }
+                    try self.emitScopeExit(scope, value_pushed);
+                },
+                .finally_body => if (scope.owner) |owner| {
+                    if (scope.pending_value) {
+                        if (value_pushed) try self.emitOp(.swap);
+                        try self.emitOp(.pop);
+                    }
+                    while (i > 0 and self.jump_scopes.items[i - 1].id != owner) i -= 1;
+                    // the owner's handler is gone and its finally running
+                    if (i > 0) i -= 1;
+                },
+                .try_body, .catch_body => try self.emitScopeExit(scope, value_pushed),
+            }
         }
     }
 
@@ -821,87 +859,26 @@ pub const Compiler = struct {
                     } else {
                         try self.emitOp(.op_null);
                     }
-                    // emit finally blocks (innermost first) before generator_return,
-                    // matching the non-generator return path. PHP's finally fires
-                    // on every exit including generator completion via return
-                    const saved_fd = self.finally_depth;
-                    var fd = self.finally_depth;
-                    while (fd > 0) {
-                        fd -= 1;
-                        self.finally_depth = fd;
-                        try self.emitOp(.pop_handler);
-                        try self.compileNode(self.finally_nodes[fd]);
-                    }
-                    self.finally_depth = saved_fd;
+                    // the finally blocks run before generator_return, as on
+                    // every other way out (a generator's loops end with its
+                    // frame)
+                    try self.unwindScopes(.generator_return, 0, true);
                     try self.emitOp(.generator_return);
                 } else {
-                    // zend_handle_loops_and_finally: the loops inside the
-                    // innermost try end before its finally runs, the loops
-                    // around it after (so a finally that throws into a catch
-                    // around a loop leaves that loop running)
-                    var ended: u32 = self.loop_depth;
-                    const first_boundary: u32 = if (self.finally_depth == 0) self.loops_ended else @max(self.loops_ended, self.finally_loop_depth[self.finally_depth - 1]);
-                    // inside a finally inlined for another return: the loops
-                    // the finally runs, which sit above that return's value
-                    while (ended > @max(first_boundary, self.ended_gap_hi)) {
-                        ended -= 1;
-                        try self.endReturnLoop(ended, false);
-                    }
-                    var stale = self.pending_returns;
-                    while (stale > 0) : (stale -= 1) try self.emitOp(.pop);
-                    while (ended > first_boundary) {
-                        ended -= 1;
-                        try self.endReturnLoop(ended, false);
-                    }
-                    // ref-returning function: route refable return shapes
-                    // (`return $arr[$k]`, `return $obj->prop`, `return $var`)
-                    // through make_var_*_ref + return_ref so the caller can
-                    // bind to the same storage. unrefable expressions fall
-                    // through to plain return_val
-                    // the binding is made now and returned after the finally
-                    // blocks, which may still write through it
+                    // zend_compile_return: the value first, then
+                    // zend_handle_loops_and_finally ends the loops and runs
+                    // the finallys, innermost first. a by-reference return
+                    // binds now and returns after the finally blocks, which
+                    // may still write through it
                     const ref_return_emitted = self.returns_ref and node.data.lhs != 0 and
                         try self.tryBindRefReturn(node.data.lhs);
                     if (!ref_return_emitted and node.data.lhs != 0) {
                         try self.compileNode(node.data.lhs);
                     }
                     const value_pushed = !ref_return_emitted and node.data.lhs != 0;
-                    // emit finally blocks (innermost first) before returning;
-                    // temporarily lower finally_depth around each inline emit so
-                    // that a return inside the finally itself does not re-enter
-                    // its own finally block (would cause infinite recursion)
-                    const saved_fd = self.finally_depth;
-                    const saved_ended = self.loops_ended;
-                    const saved_pending = self.pending_returns;
-                    const saved_gap_lo = self.ended_gap_lo;
-                    const saved_gap_hi = self.ended_gap_hi;
-                    self.pending_returns = @intFromBool(value_pushed);
-                    var fd = self.finally_depth;
-                    while (fd > 0) {
-                        fd -= 1;
-                        // the loops between this finally and the one inside it
-                        const boundary = @max(saved_ended, self.finally_loop_depth[fd]);
-                        while (ended > boundary) {
-                            ended -= 1;
-                            try self.endReturnLoop(ended, value_pushed);
-                        }
-                        // a return inside the finally skips the loops already
-                        // ended, which lie under this return's value
-                        self.ended_gap_lo = ended;
-                        self.ended_gap_hi = self.loop_depth;
-                        self.finally_depth = fd;
-                        try self.emitOp(.pop_handler);
-                        try self.compileNode(self.finally_nodes[fd]);
-                    }
-                    self.ended_gap_lo = saved_gap_lo;
-                    self.ended_gap_hi = saved_gap_hi;
-                    while (ended > saved_ended) {
-                        ended -= 1;
-                        try self.endReturnLoop(ended, value_pushed);
-                    }
-                    self.finally_depth = saved_fd;
-                    self.loops_ended = saved_ended;
-                    self.pending_returns = saved_pending;
+                    // the return type is checked before anything is left
+                    if (value_pushed and self.declared_return.len > 0 and self.hasUnwindWork()) try self.emitOp(.verify_return);
+                    try self.unwindScopes(.return_, 0, value_pushed);
                     // a function returning by reference that returns no
                     // variable: php's notice, then the value
                     if (!ref_return_emitted and self.returns_ref and !self.isCallLike(node.data.lhs)) {
@@ -921,20 +898,8 @@ pub const Compiler = struct {
             .break_stmt => {
                 const level = try self.breakContinueLevel(node, "break");
                 const target_depth = self.loop_depth -| level;
-                // emit any finally blocks declared inside loops being broken
-                const saved_fd = self.finally_depth;
-                var fd = self.finally_depth;
-                while (fd > 0) {
-                    fd -= 1;
-                    if (self.finally_loop_depth[fd] <= target_depth) break;
-                    self.finally_depth = fd;
-                    try self.emitOp(.pop_handler);
-                    try self.compileNode(self.finally_nodes[fd]);
-                }
-                self.finally_depth = saved_fd;
-                for (target_depth..self.loop_depth) |d| {
-                    if (d < 32 and self.loop_is_foreach[d]) try self.emitForeachEnd(d);
-                }
+                // the try blocks and loops being left, innermost first
+                try self.unwindScopes(.break_, target_depth, false);
                 const j = try self.emitJump(.jump);
                 try self.break_jumps.append(self.allocator, .{
                     .offset = j,
@@ -945,24 +910,11 @@ pub const Compiler = struct {
                 const checked_level = try self.breakContinueLevel(node, "continue");
                 if (self.loop_start) |start| {
                     const level = checked_level;
-                    // run any finally inside the loop(s) being continued/skipped
+                    // the try blocks and inner loops inside the loop being
+                    // continued, innermost first
                     const target_depth = self.loop_depth -| level;
-                    const saved_fd = self.finally_depth;
-                    var fd = self.finally_depth;
-                    while (fd > 0) {
-                        fd -= 1;
-                        if (self.finally_loop_depth[fd] <= target_depth) break;
-                        self.finally_depth = fd;
-                        try self.emitOp(.pop_handler);
-                        try self.compileNode(self.finally_nodes[fd]);
-                    }
-                    self.finally_depth = saved_fd;
+                    try self.unwindScopes(.continue_, target_depth, false);
                     if (level > 1) {
-                        // emit iter_end for inner foreach loops being skipped
-                        const skip_target = self.loop_depth -| (level - 1);
-                        for (skip_target..self.loop_depth) |d| {
-                            if (d < 32 and self.loop_is_foreach[d]) try self.emitForeachEnd(d);
-                        }
                         const j = try self.emitJump(.jump);
                         try self.continue_jumps.append(self.allocator, .{
                             .offset = j,
@@ -1208,7 +1160,7 @@ pub const Compiler = struct {
                     var n = from.len;
                     while (n > k) {
                         n -= 1;
-                        try self.emitScopeExit(from[n]);
+                        try self.emitScopeExit(from[n], false);
                     }
                     try self.emitLoop(entries[k]);
                 } else {
@@ -1227,7 +1179,7 @@ pub const Compiler = struct {
                         j += 1;
                         if (n == 0) break;
                         n -= 1;
-                        try self.emitScopeExit(from[n]);
+                        try self.emitScopeExit(from[n], false);
                     }
                     try self.pending_gotos.append(self.allocator, .{ .jumps = jumps, .label = label, .source_offset = self.current_source_offset, .token = node.main_token, .scopes = from });
                 }
@@ -2484,18 +2436,6 @@ pub const Compiler = struct {
         }
     }
 
-    // ends the foreach at loop level d for a return, unless an enclosing
-    // return already ended it; under_value moves the return's value below the
-    // loop's slots first
-    fn endReturnLoop(self: *Compiler, d: u32, under_value: bool) Error!void {
-        if (d >= 32 or !self.loop_is_foreach[d]) return;
-        if (d >= self.ended_gap_lo and d < self.ended_gap_hi) return;
-        if (under_value) {
-            try self.emitOp(.bury);
-            try self.emitByte(2);
-        }
-        try self.emitForeachEnd(d);
-    }
 
     // ends the foreach at loop level d early (break, continue N, return)
     pub fn emitForeachEnd(self: *Compiler, d: usize) Error!void {

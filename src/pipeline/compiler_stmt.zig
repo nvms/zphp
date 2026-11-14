@@ -663,14 +663,6 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
         if (clause.main_token != 0 and std.mem.eql(u8, self.ast.tokenSlice(clause.main_token), "$this")) return self.fail(clause.main_token, "Cannot re-assign $this");
     }
 
-    var finally_index: ?u32 = null;
-    if (finally_node != 0 and self.finally_depth < 8) {
-        finally_index = self.finally_depth;
-        self.finally_nodes[self.finally_depth] = finally_node;
-        self.finally_loop_depth[self.finally_depth] = self.loop_depth;
-        self.finally_depth += 1;
-    }
-
     // emit push_handler with placeholder catch offset
     try self.emitOp(.push_handler);
     const handler_offset_pos = self.chunk.offset();
@@ -678,7 +670,7 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
 
     // compile try body; a goto leaving it drops the handler and runs the
     // finally, one entering it pushes the handler
-    const try_scope = try self.pushScope(.{ .id = 0, .kind = .try_body, .finally_node = finally_node, .finally_index = finally_index });
+    const try_scope = try self.pushScope(.{ .id = 0, .kind = .try_body, .finally_node = finally_node });
     try self.compileNode(node.data.lhs);
     self.popJumpScope();
 
@@ -749,7 +741,7 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
             }
             try self.emitOp(.pop); // remove exc
 
-            try compileCatchBody(self, body_idx, finally_node, finally_index, &catch_scopes);
+            try compileCatchBody(self, body_idx, finally_node, &catch_scopes);
             const ej = try self.emitJump(.jump);
             try end_jumps.append(self.allocator, ej);
 
@@ -763,16 +755,10 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
             }
             try self.emitOp(.pop);
 
-            try compileCatchBody(self, body_idx, finally_node, finally_index, &catch_scopes);
+            try compileCatchBody(self, body_idx, finally_node, &catch_scopes);
             const ej = try self.emitJump(.jump);
             try end_jumps.append(self.allocator, ej);
         }
-    }
-
-    // restore finally_depth before compiling the finally code paths
-    // (return inside the finally itself should not re-enter this finally)
-    if (finally_node != 0 and self.finally_depth > 0) {
-        self.finally_depth -= 1;
     }
 
     if (finally_node != 0) {
@@ -809,9 +795,9 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 // a catch body is a scope of its own when a finally's handler covers it
-fn compileCatchBody(self: *Compiler, body_idx: u32, finally_node: u32, finally_index: ?u32, scopes: *std.ArrayListUnmanaged(u32)) Error!void {
+fn compileCatchBody(self: *Compiler, body_idx: u32, finally_node: u32, scopes: *std.ArrayListUnmanaged(u32)) Error!void {
     if (finally_node == 0) return self.compileNode(body_idx);
-    const id = try self.pushScope(.{ .id = 0, .kind = .catch_body, .finally_node = finally_node, .finally_index = finally_index });
+    const id = try self.pushScope(.{ .id = 0, .kind = .catch_body, .finally_node = finally_node });
     try scopes.append(self.allocator, id);
     try self.compileNode(body_idx);
     self.popJumpScope();
@@ -822,11 +808,20 @@ fn compileCatchBody(self: *Compiler, body_idx: u32, finally_node: u32, finally_i
 // compiled: drop them after each one, or a goto in the next copy would take
 // the previous copy's label for a backward jump
 pub fn compileFinallyCopy(self: *Compiler, finally_node: u32) Error!void {
+    return compileFinallyCopyIn(self, finally_node, .{ .id = 0, .kind = .finally_body });
+}
+
+// a copy inlined by a way out of scope owner (return, break, continue, goto)
+pub fn compileFinallyCopyFor(self: *Compiler, finally_node: u32, owner: u32, pending_value: bool) Error!void {
+    return compileFinallyCopyIn(self, finally_node, .{ .id = 0, .kind = .finally_body, .owner = owner, .pending_value = pending_value });
+}
+
+fn compileFinallyCopyIn(self: *Compiler, finally_node: u32, scope: Compiler.JumpScope) Error!void {
     var before: std.StringHashMapUnmanaged(void) = .{};
     defer before.deinit(self.allocator);
     var it = self.labels.keyIterator();
     while (it.next()) |k| try before.put(self.allocator, k.*, {});
-    try self.pushJumpScope(true);
+    _ = try self.pushScope(scope);
     try self.compileNode(finally_node);
     self.popJumpScope();
     var added: std.ArrayListUnmanaged([]const u8) = .empty;

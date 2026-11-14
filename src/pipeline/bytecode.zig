@@ -535,6 +535,10 @@ pub const OpCode = enum(u8) {
     // callable_closure: u8 1 when the function name was fully qualified (no
     // global fallback). checks what zend_ast_evaluate refuses
     const_expr_fcc_check,
+    // php's VERIFY_RETURN_TYPE ahead of the loops and finallys a return
+    // leaves: checks (and coerces) the value on top against the declared
+    // return type, so the TypeError is thrown inside the try blocks
+    verify_return,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {

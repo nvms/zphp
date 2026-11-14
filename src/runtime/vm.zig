@@ -5882,6 +5882,13 @@ pub const VM = struct {
                     }
                     if (self.frame_count <= base_frame) return;
                 },
+                .verify_return => {
+                    if (g_type_info.count() > 0) {
+                        var checked = self.stack[self.sp - 1];
+                        if (try self.checkReturnType(&checked)) continue;
+                        self.stack[self.sp - 1] = checked;
+                    }
+                },
                 .return_void => {
                     const saved_entry_sp = self.currentFrame().entry_sp;
                     try self.popFrame();
