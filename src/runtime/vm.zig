@@ -21843,8 +21843,17 @@ pub const VM = struct {
     // a static property write from outside the vm's opcodes (reflection)
     pub fn setStaticPropValue(self: *VM, class_name: []const u8, prop_name: []const u8, val: Value) RuntimeError!void {
         try self.resolveClassDefaults(class_name);
-        try self.writeStaticProp(class_name, prop_name, val);
-        self.syncStaticPropRefs(class_name, prop_name, val);
+        // a static that is a reference typed properties hold takes only what
+        // they allow (zend_update_static_property_ex's ZEND_TRY_ASSIGN)
+        var stored = val;
+        if (self.obj_ref_active) if (self.ref_index) |ri| if (ri.prop_rev.get(.{ .object = null, .class_name = class_name, .prop_name = prop_name })) |cells| {
+            for (cells.items) |cell| if (cellOf(cell).typed) {
+                stored = try self.verifyRefAssignable(cell, stored);
+                break;
+            };
+        };
+        try self.writeStaticProp(class_name, prop_name, stored);
+        self.syncStaticPropRefs(class_name, prop_name, stored);
     }
 
     pub fn staticPropertyValue(self: *VM, class_name: []const u8, prop_name: []const u8) RuntimeError!?Value {
