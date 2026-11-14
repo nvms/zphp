@@ -2277,10 +2277,61 @@ fn native_noop_false(_: *NativeContext, _: []const Value) RuntimeError!NativeRes
     return NativeResult.scalar(.{ .bool = false });
 }
 
-fn native_ini_get_all(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    // returns an empty array - PHP returns a dict of all settings, but most
-    // userland code just iterates it or queries specific keys (use ini_get)
-    return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+// php's ini_get_all: the directives of one extension (or all of them),
+// sorted by name, as their values or with global_value, local_value and
+// access. a directive zphp has no value for is listed as null
+fn native_ini_get_all(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const ext: ?[]const u8 = if (args.len > 0 and args[0] == .string) args[0].string.bytes() else null;
+    const details = args.len < 2 or args[1].isTruthy();
+    if (ext) |name| {
+        // the module registry is keyed by lowercased names, looked up as given
+        const lower = for (name) |c| {
+            if (std.ascii.isUpper(c)) break false;
+        } else true;
+        const known = lower and for (SUPPORTED_EXTENSIONS) |e| {
+            if (std.ascii.eqlIgnoreCase(name, e)) break true;
+        } else @import("../extension.zig").isLoaded(name);
+        if (!known) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "ini_get_all(): Extension \"{s}\" cannot be found", .{name});
+            defer ctx.allocator.free(msg);
+            try ctx.vm.emitWarning(msg);
+            return NativeResult.scalar(.{ .bool = false });
+        }
+    }
+    const generated = @import("extensions_generated.zig");
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer names.deinit(ctx.allocator);
+    for (generated.ini) |entry| {
+        if (ext) |name| if (!std.ascii.eqlIgnoreCase(entry[1], name)) continue;
+        try names.append(ctx.allocator, entry[0]);
+    }
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lt);
+    const ini_config = @import("../ini_config.zig");
+    const result = try ctx.createArray();
+    for (names.items) |name| {
+        const local_text: ?[]const u8 = ctx.vm.ini_settings.get(name) orelse ini_config.get(name) orelse iniDefault(name);
+        const global_text: ?[]const u8 = ini_config.get(name) orelse iniDefault(name);
+        const local: Value = if (local_text) |v| .{ .string = try Value.String.create(ctx.allocator, v) } else .null;
+        defer if (local == .string) local.string.release();
+        const key = PhpArray.Key{ .string = Value.String.borrowed(name) };
+        if (!details) {
+            try result.set(ctx.allocator, key, local);
+            continue;
+        }
+        const global: Value = if (global_text) |v| .{ .string = try Value.String.create(ctx.allocator, v) } else .null;
+        defer if (global == .string) global.string.release();
+        const entry = try ctx.createArray();
+        try entry.set(ctx.allocator, .{ .string = Value.String.borrowed("global_value") }, global);
+        try entry.set(ctx.allocator, .{ .string = Value.String.borrowed("local_value") }, local);
+        const system = std.mem.eql(u8, name, "max_memory_limit") or @import("mail.zig").isSystemIni(name) or std.mem.eql(u8, name, "syslog.facility") or std.mem.eql(u8, name, "syslog.ident");
+        try entry.set(ctx.allocator, .{ .string = Value.String.borrowed("access") }, .{ .int = if (system) 4 else 7 });
+        try result.set(ctx.allocator, key, .{ .array = entry });
+    }
+    return NativeResult.borrowed(.{ .array = result });
 }
 
 fn native_ini_restore(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
