@@ -959,6 +959,11 @@ pub const Compiler = struct {
             .foreach_stmt => try compiler_stmt.compileForeach(self, node),
             .function_decl => try compiler_class.compileFunction(self, node),
             .const_decl => {
+                // zend_get_special_const: true, false and null can't be declared
+                const declared = self.ast.tokenSlice(node.main_token);
+                inline for (.{ "true", "false", "null" }) |special| if (std.ascii.eqlIgnoreCase(declared, special)) {
+                    return self.failFmt(node.main_token, "Cannot redeclare constant '{s}'", .{declared});
+                };
                 try compiler_class.checkConstExpr(self, node.data.lhs, true, node.main_token);
                 const outer_const_expr = self.const_expr;
                 self.const_expr = true;
@@ -2549,6 +2554,15 @@ pub const Compiler = struct {
         if (depth > self.loop_depth) return self.failFmt(tok, "Cannot '" ++ word ++ "' {d} level{s}", .{ depth, if (depth == 1) "" else "s" });
         const level: u32 = @intCast(depth);
         const target = self.loop_depth - level;
+        // zend_check_finally_breakout: the loop left must be inside the
+        // finally block the jump is in, if any
+        var si = self.jump_scopes.items.len;
+        while (si > 0) {
+            si -= 1;
+            const scope = self.jump_scopes.items[si];
+            if (scope.kind == .loop and scope.loop == target) break;
+            if (scope.kind == .finally_body and scope.owner == null) return self.fail(tok, "jump out of a finally block is disallowed");
+        }
         if (comptime std.mem.eql(u8, word, "continue")) if (target < 32 and self.loop_is_switch[target]) {
             const outermost = target == 0;
             if (level == 1) {

@@ -1802,6 +1802,12 @@ pub fn emitSpreadCallOp(self: *Compiler, guards: *ArgGuards, op: OpCode, a: ?u16
 fn compileUnset(self: *Compiler, args: []const u32) Error!void {
     for (args) |arg_idx| {
         const arg = self.ast.nodes[arg_idx];
+        // zend_ensure_writable_variable
+        switch (arg.tag) {
+            .call, .pipe_expr => return self.fail(arg.main_token, "Can't use function return value in write context"),
+            .method_call, .static_call, .dynamic_static_call, .nullsafe_method_call => return self.fail(arg.main_token, "Can't use method return value in write context"),
+            else => {},
+        }
         if (isShortCircuited(self, arg_idx)) return self.fail(arg.main_token, "Can't use nullsafe operator in write context");
         if (arg.tag == .array_push_target) return self.fail(arg.main_token, "Cannot use [] for unsetting");
         if (isGlobalsFetch(self, arg_idx)) return self.fail(arg.main_token, "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax");
