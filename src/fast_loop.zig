@@ -1335,6 +1335,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         self.sp = sp;
                         if (ret_string_pin) |s| s.release();
                         if (ret_arr_pin) |a| VM.arrayUnpin(a);
+                        if (self.pending_destruct.items.len > 0) self.fast_return_drain = true;
                         return;
                     }
 
@@ -1344,6 +1345,12 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     self.sp = sp;
                     if (ret_string_pin) |s| s.release();
                     if (ret_arr_pin) |a| VM.arrayUnpin(a);
+                    // the locals released objects: their destructors run now,
+                    // before the caller goes on (the wrapper drains)
+                    if (self.pending_destruct.items.len > 0) {
+                        self.fast_return_drain = true;
+                        return;
+                    }
                     continue :reenter;
                 },
                 .return_void => {
@@ -1366,6 +1373,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     if (self.frame_count < entry_fc) {
                         stack[sp] = .null;
                         self.sp = sp + 1;
+                        if (self.pending_destruct.items.len > 0) self.fast_return_drain = true;
                         return;
                     }
 
@@ -1373,6 +1381,10 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     stack[sp] = .null;
                     sp += 1;
                     self.sp = sp;
+                    if (self.pending_destruct.items.len > 0) {
+                        self.fast_return_drain = true;
+                        return;
+                    }
                     continue :reenter;
                 },
                 .inc_local => {

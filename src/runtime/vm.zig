@@ -834,6 +834,8 @@ pub const VM = struct {
     free_handles: std.ArrayListUnmanaged(u32) = .empty,
     // while a release drain destroys a value: what that destruction drops
     release_log: ?*std.ArrayListUnmanaged(ReleasedItem) = null,
+    // the fast loop returned from a frame whose locals queued destructors
+    fast_return_drain: bool = false,
     release_depth: u32 = 0,
     // the innermost running native call; a user call made at its depth comes
     // from the native itself
@@ -5542,7 +5544,7 @@ pub const VM = struct {
                         return error.RuntimeError;
                     }
                     if (self.currentFrame().locals.len > 0) {
-                        try self.fastLoop();
+                        try self.fastLoopDrainingAbove(base_frame);
                         if (self.frame_count <= base_frame) return;
                     }
                 },
@@ -5830,8 +5832,13 @@ pub const VM = struct {
                     self.return_ref_fresh = self.last_return_ref != null;
                     if (rr_saved_entry_sp > 0) self.sp = rr_saved_entry_sp;
                     self.pushTransfer(rr_result);
+                    const rr_drained = self.frame_count > base_frame and self.drainAtReturn();
                     if (rr_ret_pin) |p| self.objRelease(p);
                     if (rr_ret_arr_pin) |a| arrayUnpin(a);
+                    if (rr_drained and self.drainRaised()) {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    }
                     if (self.frame_count <= base_frame) return;
                 },
                 .return_val => {
@@ -5865,9 +5872,14 @@ pub const VM = struct {
                     try self.popFrame();
                     if (saved_entry_sp > 0) self.sp = saved_entry_sp;
                     self.pushTransfer(result);
+                    const drained = self.frame_count > base_frame and self.drainAtReturn();
                     if (ret_pin) |p| self.objRelease(p);
                     if (ret_string_pin) |s| s.release();
                     if (ret_arr_pin) |a| arrayUnpin(a);
+                    if (drained and self.drainRaised()) {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    }
                     if (self.frame_count <= base_frame) return;
                 },
                 .return_void => {
@@ -5875,6 +5887,10 @@ pub const VM = struct {
                     try self.popFrame();
                     if (saved_entry_sp > 0) self.sp = saved_entry_sp;
                     self.push(.null);
+                    if (self.frame_count > base_frame and self.drainAtReturn() and self.drainRaised()) {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    }
                     if (self.frame_count <= base_frame) return;
                 },
 
@@ -10625,6 +10641,11 @@ pub const VM = struct {
                     }
 
                     self.push(.{ .object = obj });
+                    // the constructor's locals are freed as it returns
+                    if (self.drainAtReturn() and self.drainRaised()) {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    }
                 },
 
                 .new_obj_dynamic => {
@@ -20481,7 +20502,7 @@ pub const VM = struct {
         self.frame_count += 1;
         self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
-        try self.fastLoop();
+        try self.fastLoopDraining();
     }
 
     // a locals-only method: $this in slot 0, the arguments after it, run in
@@ -20517,7 +20538,7 @@ pub const VM = struct {
         self.frame_count += 1;
         self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
-        try self.fastLoop();
+        try self.fastLoopDraining();
     }
 
     fn callLocalsOnly(self: *VM, func: *const ObjFunction, arg_count: u32) RuntimeError!void {
@@ -20551,7 +20572,7 @@ pub const VM = struct {
         self.frame_count += 1;
         self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
-        try self.fastLoop();
+        try self.fastLoopDraining();
     }
 
     // hand the current frame back to the fast loop at a statement end, unless
@@ -20565,7 +20586,7 @@ pub const VM = struct {
         const slot = &ic.fast_stalls[@as(u8, @truncate(site *% 0x9E3779B97F4A7C15 >> 56))];
         if (slot.* == site) return false;
         const fc = self.frame_count;
-        try self.fastLoop();
+        try self.fastLoopDrainingAbove(base_frame);
         if (self.frame_count == fc and self.currentFrame().ip == ip and self.currentChunk() == chunk) slot.* = site;
         return self.frame_count <= base_frame;
     }
@@ -20575,12 +20596,36 @@ pub const VM = struct {
     fn fastLoop(self: *VM) RuntimeError!void {
         const code = zphp_fast_loop(@ptrCast(self));
         self.flushTopWrites();
+        self.fast_return_drain = false;
         return switch (code) {
             0 => {},
             1 => error.RuntimeError,
             2 => error.OutOfMemory,
             else => unreachable,
         };
+    }
+
+    // the fast loop run from a bytecode frame: a frame it returned from
+    // released objects, so their destructors run before the caller goes on
+    fn fastLoopDraining(self: *VM) RuntimeError!void {
+        return self.fastLoopDrainingAbove(0);
+    }
+
+    // the same for a loop driving frames above base_frame: a return to a
+    // frame below it goes to code (a constructor call, a native) that still
+    // holds what the frame released without counting it
+    fn fastLoopDrainingAbove(self: *VM, base_frame: usize) RuntimeError!void {
+        const code = zphp_fast_loop(@ptrCast(self));
+        self.flushTopWrites();
+        const drain = self.fast_return_drain;
+        self.fast_return_drain = false;
+        switch (code) {
+            0 => {},
+            1 => return error.RuntimeError,
+            2 => return error.OutOfMemory,
+            else => unreachable,
+        }
+        if (drain and self.frame_count > base_frame and self.drainAtReturn() and self.drainRaised()) return error.RuntimeError;
     }
 
     fn executeFunctionLocalsOnly(self: *VM, func: *const ObjFunction, args: []const Value) RuntimeError!Value {
@@ -29057,6 +29102,15 @@ pub const VM = struct {
         self.release_log = outer_log;
         self.destroyDropped(dropped.items, deferred_stack_arrays);
         if (!self.serve_mode) self.released_arrays.append(self.allocator, arr) catch {};
+    }
+
+    // php frees a function's variables as it returns (zend_leave_helper), so
+    // the destructors of objects only its locals held run before the caller
+    // sees the result. true when a drain ran
+    pub fn drainAtReturn(self: *VM) bool {
+        if (self.pending_destruct.items.len == 0) return false;
+        self.drainPendingDestruct();
+        return true;
     }
 
     pub fn drainPendingDestruct(self: *VM) void {
