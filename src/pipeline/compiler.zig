@@ -1039,13 +1039,19 @@ pub const Compiler = struct {
             },
             .try_catch => try compiler_stmt.compileTryCatch(self, node),
             .catch_clause => {},
-            .class_decl => try compiler_class.compileClassDecl(self, node),
+            .class_decl, .interface_decl, .trait_decl, .enum_decl => {
+                // zend_compile_class_decl inside a class's methods
+                if (self.current_class.len > 0) return self.fail(node.main_token, "Class declarations may not be nested");
+                switch (node.tag) {
+                    .class_decl => try compiler_class.compileClassDecl(self, node),
+                    .interface_decl => try compiler_class.compileInterfaceDecl(self, node),
+                    .trait_decl => try compiler_class.compileTraitDecl(self, node),
+                    else => try compiler_class.compileEnumDecl(self, node),
+                }
+            },
             .class_method, .class_property, .class_property_hooks, .static_class_method, .static_class_property => {},
-            .interface_decl => try compiler_class.compileInterfaceDecl(self, node),
             .interface_method => {},
-            .trait_decl => try compiler_class.compileTraitDecl(self, node),
             .trait_use, .trait_insteadof, .trait_as => {},
-            .enum_decl => try compiler_class.compileEnumDecl(self, node),
             .enum_case => {},
             .new_expr => try compiler_expr.compileNewExpr(self, node),
             .new_expr_dynamic => try compiler_expr.compileNewExprDynamic(self, node),
