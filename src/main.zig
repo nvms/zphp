@@ -157,7 +157,10 @@ fn dispatch(allocator: std.mem.Allocator, args: []const []const u8) !void {
         try runFile(allocator, args[2], if (args.len > 3) args[3..] else &.{});
     } else if (std.mem.eql(u8, cmd, "-r")) {
         try requireArg(args, 3, "usage: zphp -r <code> [args]\n");
-        try runCode(allocator, args[2], if (args.len > 3) args[3..] else &.{});
+        // php's getopt ends the options at a "--" right after the code,
+        // and leaves it out of $argv
+        const rest = if (args.len > 3) args[3..] else &.{};
+        try runCode(allocator, args[2], if (rest.len > 0 and std.mem.eql(u8, rest[0], "--")) rest[1..] else rest);
     } else if (std.mem.eql(u8, cmd, "serve")) {
         try serveCommand(allocator, args);
     } else if (std.mem.eql(u8, cmd, "test")) {
