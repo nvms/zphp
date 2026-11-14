@@ -569,27 +569,28 @@ const env = @import("env.zig");
 fn initCliServerVars(vm: *VM, a: std.mem.Allocator) !void {
     const arr = try vm.allocArray();
 
-    const entries = .{
-        .{ "REQUEST_URI", "/" },
-        .{ "SERVER_NAME", "localhost" },
-        .{ "SERVER_PORT", "80" },
-        .{ "HTTP_HOST", "localhost" },
-        .{ "REQUEST_METHOD", "GET" },
-        .{ "SCRIPT_NAME", "/" },
-        .{ "SCRIPT_FILENAME", "" },
-        .{ "DOCUMENT_ROOT", "" },
-        .{ "SERVER_PROTOCOL", "HTTP/1.1" },
-        .{ "GATEWAY_INTERFACE", "CGI/1.1" },
-        .{ "SERVER_SOFTWARE", "zphp" },
-        .{ "REMOTE_ADDR", "127.0.0.1" },
-        .{ "REQUEST_TIME", "" },
-        .{ "argv", "" },
-        .{ "argc", "" },
-        .{ "PHP_SELF", "/" },
-    };
-    inline for (entries) |e| {
-        try arr.set(a, .{ .string = Value.String.borrowed(e[0]) }, .{ .string = Value.String.borrowed(e[1]) });
+    // php's cli: the environment (php_import_environment_variables), then
+    // what sapi_cli_register_variables and php_register_server_variables
+    // add; initArgv fills in the script's path and arguments
+    if (platform.getEnvMap(a)) |env_map| {
+        defer @constCast(&env_map).deinit();
+        var iter = env_map.iterator();
+        while (iter.next()) |entry| {
+            const key_owned = try a.dupe(u8, entry.key_ptr.*);
+            try vm.strings.append(a, key_owned);
+            const val_owned = try a.dupe(u8, entry.value_ptr.*);
+            try vm.strings.append(a, val_owned);
+            try arr.set(a, .{ .string = Value.String.borrowed(key_owned) }, .{ .string = Value.String.borrowed(val_owned) });
+        }
+    } else |_| {}
+    inline for (.{ "PHP_SELF", "SCRIPT_NAME", "SCRIPT_FILENAME", "PATH_TRANSLATED", "DOCUMENT_ROOT" }) |key| {
+        try arr.set(a, .{ .string = Value.String.borrowed(key) }, .{ .string = Value.String.borrowed("") });
     }
+    const now_ns = platform.nanoTimestamp();
+    try arr.set(a, .{ .string = Value.String.borrowed("REQUEST_TIME_FLOAT") }, .{ .float = @as(f64, @floatFromInt(@divTrunc(now_ns, 1000))) / 1_000_000.0 });
+    try arr.set(a, .{ .string = Value.String.borrowed("REQUEST_TIME") }, .{ .int = @intCast(@divTrunc(now_ns, std.time.ns_per_s)) });
+    try arr.set(a, .{ .string = Value.String.borrowed("argv") }, .null);
+    try arr.set(a, .{ .string = Value.String.borrowed("argc") }, .{ .int = 0 });
     try vm.putRequestVar("$_SERVER", .{ .array = arr });
 
     const superglobal_names = [_][]const u8{ "$_GET", "$_POST", "$_REQUEST", "$_COOKIE", "$_FILES" };
@@ -622,6 +623,7 @@ fn initArgv(vm: *VM, a: std.mem.Allocator, script_path: []const u8, script_args:
             try sv.array.set(a, .{ .string = Value.String.borrowed("SCRIPT_FILENAME") }, .{ .string = Value.String.borrowed(dup_path) });
             try sv.array.set(a, .{ .string = Value.String.borrowed("SCRIPT_NAME") }, .{ .string = Value.String.borrowed(dup_path) });
             try sv.array.set(a, .{ .string = Value.String.borrowed("PHP_SELF") }, .{ .string = Value.String.borrowed(dup_path) });
+            try sv.array.set(a, .{ .string = Value.String.borrowed("PATH_TRANSLATED") }, .{ .string = Value.String.borrowed(dup_path) });
         }
     }
 }
