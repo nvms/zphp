@@ -73,6 +73,7 @@ pub const Recursion = struct {
     pub const json: u8 = 8;
 };
 extern fn zphp_value_hooks() callconv(.c) *anyopaque;
+extern fn zphp_double_text(buf: *[1100]u8, f: f64) callconv(.c) usize;
 
 pub inline fn hooks() *Hooks {
     if (@import("build_role").fast_loop_object) return @ptrCast(@alignCast(zphp_value_hooks()));
@@ -1793,12 +1794,15 @@ pub const Value = union(enum) {
             }
             return std.mem.eql(u8, a.string.bytes(), b.string.bytes());
         }
-        // php 8: int/float vs non-numeric string is always false
-        if ((a == .int or a == .float) and b == .string) {
-            if (!isNumericString(b.string.bytes())) return false;
+        // php 8: a number against a non-numeric string compares as text;
+        // an int's text is always numeric, a float's may not be (INF)
+        if ((a == .int or a == .float) and b == .string and !isNumericString(b.string.bytes())) {
+            var tmp_text: [1100]u8 = undefined;
+            return a == .float and !std.math.isNan(a.float) and std.mem.eql(u8, doubleText(&tmp_text, a.float), b.string.bytes());
         }
-        if ((b == .int or b == .float) and a == .string) {
-            if (!isNumericString(a.string.bytes())) return false;
+        if ((b == .int or b == .float) and a == .string and !isNumericString(a.string.bytes())) {
+            var tmp_text: [1100]u8 = undefined;
+            return b == .float and !std.math.isNan(b.float) and std.mem.eql(u8, doubleText(&tmp_text, b.float), a.string.bytes());
         }
         return toFloat(a) == toFloat(b);
     }
@@ -1850,6 +1854,20 @@ pub const Value = union(enum) {
 
     pub fn lessThan(a: Value, b: Value) bool {
         return compare(a, b) < 0;
+    }
+
+    // zend_double_to_str: a float as (string) prints it, with the precision
+    // ini. the fast loop's copy of the runtime asks the main object, which
+    // has the float formatter
+    pub fn doubleText(buf: *[1100]u8, f: f64) []const u8 {
+        if (@import("build_role").fast_loop_object) return buf[0..zphp_double_text(buf, f)];
+        return doubleTextHere(buf, f);
+    }
+
+    pub fn doubleTextHere(buf: *[1100]u8, f: f64) []const u8 {
+        var list: std.ArrayListUnmanaged(u8) = .initBuffer(buf);
+        (Value{ .float = f }).format(&list, std.testing.failing_allocator) catch return "";
+        return list.items;
     }
 
     pub fn compare(a_in: Value, b_in: Value) i64 {
@@ -1926,8 +1944,9 @@ pub const Value = union(enum) {
         // PHP 8: number vs non-numeric string falls back to STRING comparison
         // (the number is stringified). Number vs numeric string still numeric.
         if ((a == .int or a == .float) and b == .string and !isNumericString(b.string.bytes())) {
-            var buf: [64]u8 = undefined;
-            const as: []const u8 = if (a == .int) (std.fmt.bufPrint(&buf, "{d}", .{a.int}) catch "") else (std.fmt.bufPrint(&buf, "{d}", .{a.float}) catch "");
+            if (a == .float and std.math.isNan(a.float)) return 1;
+            var buf: [1100]u8 = undefined;
+            const as: []const u8 = if (a == .int) (std.fmt.bufPrint(&buf, "{d}", .{a.int}) catch "") else doubleText(&buf, a.float);
             return switch (std.mem.order(u8, as, b.string.bytes())) {
                 .lt => -1,
                 .eq => 0,
@@ -1935,8 +1954,9 @@ pub const Value = union(enum) {
             };
         }
         if ((b == .int or b == .float) and a == .string and !isNumericString(a.string.bytes())) {
-            var buf: [64]u8 = undefined;
-            const bs: []const u8 = if (b == .int) (std.fmt.bufPrint(&buf, "{d}", .{b.int}) catch "") else (std.fmt.bufPrint(&buf, "{d}", .{b.float}) catch "");
+            if (b == .float and std.math.isNan(b.float)) return 1;
+            var buf: [1100]u8 = undefined;
+            const bs: []const u8 = if (b == .int) (std.fmt.bufPrint(&buf, "{d}", .{b.int}) catch "") else doubleText(&buf, b.float);
             return switch (std.mem.order(u8, a.string.bytes(), bs)) {
                 .lt => -1,
                 .eq => 0,
