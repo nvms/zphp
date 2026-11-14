@@ -2084,15 +2084,57 @@ fn sameCallable(a: Value, b: Value) bool {
     };
 }
 
+// Z_PARAM_FUNC: the callback is resolved where it is registered (its
+// self::, an inferred $this, the deprecations), and kept as what it
+// resolved to for the call at shutdown
 fn native_register_shutdown_function(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(.null);
+    // the callable parameter was checked, with its deprecations, before the call
+    const callee = switch (try callables.resolveCallback(ctx.vm, args[0], .{ .deprecations = false })) {
+        .failure => |failure| {
+            if (ctx.vm.pending_exception != null) return error.RuntimeError;
+            var reason: std.ArrayListUnmanaged(u8) = .empty;
+            defer reason.deinit(ctx.allocator);
+            try callables.writeReason(failure, &reason, ctx.allocator);
+            const msg = try std.fmt.allocPrint(ctx.allocator, "register_shutdown_function(): Argument #1 ($callback) must be a valid callback, {s}", .{reason.items});
+            defer ctx.allocator.free(msg);
+            try ctx.vm.setPendingException("TypeError", msg);
+            return error.RuntimeError;
+        },
+        .callee => |c| c,
+    };
+    if (ctx.vm.pending_exception != null) return error.RuntimeError;
+    const callable: Value = switch (callee) {
+        .function => |name| .{ .string = try Value.String.create(ctx.allocator, name) },
+        .closure, .invoke => |obj| blk: {
+            VM.retainValue(.{ .object = obj });
+            break :blk .{ .object = obj };
+        },
+        .method => |m| try callablePair(ctx, .{ .object = m.object }, m.name),
+        .static_method => |m| blk: {
+            const sep = std.mem.indexOf(u8, m.registered, "::") orelse break :blk try callablePair(ctx, .{ .string = Value.String.borrowed(m.called_class) }, m.registered);
+            break :blk try callablePair(ctx, .{ .string = Value.String.borrowed(m.called_class) }, m.registered[sep + 2 ..]);
+        },
+        .magic => |m| try callablePair(ctx, if (m.object) |o| Value{ .object = o } else Value{ .string = Value.String.borrowed(m.class) }, m.name),
+    };
     const extra = try ctx.allocator.alloc(Value, args.len - 1);
     errdefer ctx.allocator.free(extra);
     @memcpy(extra, args[1..]);
-    try ctx.vm.shutdown_callbacks.append(ctx.allocator, .{ .callable = args[0], .args = extra });
-    VM.retainValue(args[0]);
+    try ctx.vm.shutdown_callbacks.append(ctx.allocator, .{ .callable = callable, .args = extra });
     for (extra) |v| VM.retainValue(v);
     return NativeResult.scalar(.null);
+}
+
+// [target, method] as a callable array the caller owns
+fn callablePair(ctx: *NativeContext, target: Value, method: []const u8) RuntimeError!Value {
+    const pair = try ctx.vm.allocArray();
+    if (target == .string) {
+        try pair.appendCopiedString(ctx.allocator, target.string.bytes());
+    } else try pair.append(ctx.allocator, target);
+    try pair.appendCopiedString(ctx.allocator, method);
+    const v: Value = .{ .array = pair };
+    VM.retainValue(v);
+    return v;
 }
 
 fn native_memory_get_usage(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
