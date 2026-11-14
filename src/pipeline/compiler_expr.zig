@@ -957,14 +957,13 @@ pub fn compilePrefixOp(self: *Compiler, node: Ast.Node) Error!void {
     }
     try self.compileNode(node.data.lhs);
     switch (op_tag) {
-        // unary `+` coerces to numeric per PHP. an integer/float passes through;
-        // a numeric string converts via +0. emit `0 + operand` to leverage the
-        // existing arithmetic coercion path without a dedicated opcode
+        // php compiles unary `+` as a multiplication by 1, which keeps -0.0
+        // and names the operand first in a TypeError
         .plus => {
-            const zero_idx = try self.addConstant(.{ .int = 0 });
+            const one_idx = try self.addConstant(.{ .int = 1 });
             try self.emitOp(.constant);
-            try self.emitU16(zero_idx);
-            try self.emitOp(.add);
+            try self.emitU16(one_idx);
+            try self.emitOp(.multiply);
         },
         .minus => try self.emitOp(.negate),
         .bang => try self.emitOp(.not),
