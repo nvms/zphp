@@ -704,7 +704,9 @@ fn method_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     else if (args[0] == .string)
         args[0].string.bytes()
     else {
-        try ctx.vm.setPendingException("TypeError", "method_exists(): Argument #1 ($object_or_class) must be of type object|string");
+        const msg = try std.fmt.allocPrint(ctx.allocator, "method_exists(): Argument #1 ($object_or_class) must be of type object|string, {s} given", .{phpTypeName(args[0])});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.setPendingException("TypeError", msg);
         return error.RuntimeError;
     };
     const method_name = args[1].string.bytes();
@@ -732,8 +734,9 @@ fn method_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
                 if (entry.value_ptr.visibility == .private) private_at_this_class = true;
             }
         }
-        // ancestor private methods are not visible from a subclass
-        if (depth > 0 and private_at_this_class) {
+        // an inherited private method is in the class's function table too,
+        // but a class named by string doesn't count it (php's method_exists)
+        if (depth > 0 and private_at_this_class and args[0] != .object) {
             // skip this class's match; continue up
         } else {
             const full = class_names.memberKey(&buf, cn, canonical_method);
@@ -755,6 +758,12 @@ fn method_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
 }
 
 fn property_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len >= 1 and args[0] != .object and args[0] != .string) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "property_exists(): Argument #1 ($object_or_class) must be of type object|string, {s} given", .{phpTypeName(args[0])});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.setPendingException("TypeError", msg);
+        return error.RuntimeError;
+    }
     if (args.len < 2 or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     const prop_name = args[1].string.bytes();
     if (args[0] == .object) {
@@ -779,6 +788,9 @@ fn property_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     if (args[0] == .string) {
         const raw = args[0].string.bytes();
         const class_name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
+        // zend_lookup_class: the class may be autoloaded
+        try ctx.vm.tryAutoload(raw);
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
         var is_own = true;
         var current: ?[]const u8 = class_name;
         while (current) |name| {
@@ -1136,16 +1148,32 @@ fn isInClassHierarchy(vm: *@import("../runtime/vm.zig").VM, candidate: []const u
 
 fn native_get_class_methods(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0) return NativeResult.scalar(Value{ .bool = false });
-    const class_name = if (args[0] == .object)
+    // Z_PARAM_OBJ_OR_CLASS_NAME: an object or the name of a class that
+    // exists, autoloaded if need be
+    const class_name: ?[]const u8 = if (args[0] == .object)
         args[0].object.class_name
     else if (args[0] == .generator)
         "Generator"
     else if (args[0] == .fiber)
         "Fiber"
-    else if (args[0] == .string)
-        args[0].string.bytes()
-    else
-        return NativeResult.scalar(Value{ .bool = false });
+    else if (args[0] == .string) known: {
+        const raw = args[0].string.bytes();
+        try ctx.vm.tryAutoload(raw);
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+        const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
+        if (ctx.vm.classes.contains(name) or ctx.vm.interfaces.contains(name) or ctx.vm.traits.contains(name)) break :known name;
+        break :known null;
+    } else null;
+    if (class_name == null) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "get_class_methods(): Argument #1 ($object_or_class) must be an object or a valid class name, {s} given", .{phpTypeName(args[0])});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.setPendingException("TypeError", msg);
+        return error.RuntimeError;
+    }
+    return getClassMethodsOf(ctx, class_name.?);
+}
+
+fn getClassMethodsOf(ctx: *NativeContext, class_name: []const u8) RuntimeError!NativeResult {
 
     if (std.mem.eql(u8, class_name, "Generator")) {
         var arr = try ctx.createArray();
@@ -1160,8 +1188,34 @@ fn native_get_class_methods(ctx: *NativeContext, args: []const Value) RuntimeErr
         return NativeResult.borrowed(.{ .array = arr });
     }
 
+    // an interface's methods are its own, then those of the interfaces it
+    // extends, all public
+    if (ctx.vm.interfaces.get(class_name)) |_| {
+        const arr = try ctx.createArray();
+        var seen = std.StringHashMapUnmanaged(void){};
+        defer seen.deinit(ctx.allocator);
+        var pending = std.ArrayListUnmanaged([]const u8).empty;
+        defer pending.deinit(ctx.allocator);
+        try pending.append(ctx.allocator, class_name);
+        var at: usize = 0;
+        while (at < pending.items.len) : (at += 1) {
+            const iface = ctx.vm.interfaces.get(pending.items[at]) orelse continue;
+            for (iface.methods.items) |m| {
+                // a property hook is no method of the interface
+                if (std.mem.indexOf(u8, m, "$hook_") != null) continue;
+                var lower_buf: [256]u8 = undefined;
+                const key = if (m.len <= lower_buf.len) std.ascii.lowerString(&lower_buf, m) else m;
+                if (seen.contains(key)) continue;
+                try seen.put(ctx.allocator, try ctx.vm.internName(key), {});
+                try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(m) });
+            }
+            for (iface.parents.items) |p| try pending.append(ctx.allocator, p);
+        }
+        return NativeResult.borrowed(.{ .array = arr });
+    }
+
     // visibility: caller in same class sees all; subclass sees public+protected;
-    // outside sees only public. ancestor private methods don't appear regardless.
+    // outside sees only public
     const caller = ctx.vm.currentDefiningClass();
     const arr = try ctx.createArray();
     var seen = std.StringHashMapUnmanaged(void){};
@@ -1173,7 +1227,9 @@ fn native_get_class_methods(ctx: *NativeContext, args: []const Value) RuntimeErr
             const emit = struct {
                 fn run(c: *NativeContext, a: *@import("../runtime/value.zig").PhpArray, s: *std.StringHashMapUnmanaged(void), name: []const u8, info: anytype, d: usize, cnn: []const u8, clsn: []const u8, callr: ?[]const u8) !void {
                     if (std.mem.indexOf(u8, name, "$hook_") != null) return;
-                    if (d > 0 and info.visibility == .private) return;
+                    // an inherited private method stays in the function table,
+                    // listed only for its own class's scope
+                    _ = d;
                     const visible = switch (info.visibility) {
                         .public => true,
                         .protected => callr != null and isInClassChain(c.vm, callr.?, clsn),
@@ -1287,42 +1343,43 @@ fn native_get_parent_class(ctx: *NativeContext, args: []const Value) RuntimeErro
 }
 
 fn native_is_a(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return isAImpl(ctx, args, false);
+}
+
+fn native_is_subclass_of(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return isAImpl(ctx, args, true);
+}
+
+// php's is_a_impl: a class name is accepted (and autoloaded) only with
+// $allow_string, which is_subclass_of defaults to; the class to test against
+// is never autoloaded
+fn isAImpl(ctx: *NativeContext, args: []const Value, only_subclass: bool) RuntimeError!NativeResult {
     if (args.len < 2 or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
     const raw_target = args[1].string.bytes();
     const target = if (raw_target.len > 0 and raw_target[0] == '\\') raw_target[1..] else raw_target;
     if (args[0] == .generator) {
+        if (only_subclass) return NativeResult.scalar(.{ .bool = std.mem.eql(u8, target, "Iterator") or std.mem.eql(u8, target, "Traversable") });
         return NativeResult.scalar(.{ .bool = std.mem.eql(u8, target, "Generator") or std.mem.eql(u8, target, "Iterator") or std.mem.eql(u8, target, "Traversable") });
     }
-    if (args[0] == .fiber) return NativeResult.scalar(.{ .bool = std.mem.eql(u8, target, "Fiber") });
-    if (args[0] == .string) {
-        // string arg requires explicit allow_string=true (3rd arg)
-        const allow_string = args.len >= 3 and args[2].isTruthy();
-        if (!allow_string) return NativeResult.scalar(.{ .bool = false });
-        return NativeResult.scalar(.{ .bool = ctx.vm.isInstanceOf(args[0].string.bytes(), target) });
-    }
-    const class_name = if (args[0] == .object) args[0].object.class_name else return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.scalar(.{ .bool = ctx.vm.isInstanceOf(class_name, target) });
-}
-
-fn native_is_subclass_of(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 2 or args[1] != .string) return NativeResult.scalar(.{ .bool = false });
-    if (args[0] == .generator) {
-        const t = args[1].string.bytes();
-        return NativeResult.scalar(.{ .bool = std.mem.eql(u8, t, "Iterator") or std.mem.eql(u8, t, "Traversable") });
-    }
-    if (args[0] == .fiber) return NativeResult.scalar(.{ .bool = false });
-    const class_name = if (args[0] == .object)
-        args[0].object.class_name
-    else if (args[0] == .string)
-        args[0].string.bytes()
-    else
-        return NativeResult.scalar(Value{ .bool = false });
-    const target_name = args[1].string.bytes();
-    try ctx.vm.tryAutoload(class_name);
-    try ctx.vm.tryAutoload(target_name);
-    // is_subclass_of returns false if same class, only true for actual subclasses
-    if (std.ascii.eqlIgnoreCase(ctx.vm.declaredClassName(class_name), ctx.vm.declaredClassName(target_name))) return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.scalar(.{ .bool = ctx.vm.isInstanceOf(class_name, target_name) });
+    if (args[0] == .fiber) return NativeResult.scalar(.{ .bool = !only_subclass and std.mem.eql(u8, target, "Fiber") });
+    const allow_string = if (args.len >= 3) args[2].isTruthy() else only_subclass;
+    const instance: []const u8 = switch (args[0]) {
+        .object => |o| o.class_name,
+        .string => |str| blk: {
+            if (!allow_string) return NativeResult.scalar(.{ .bool = false });
+            const raw = str.bytes();
+            try ctx.vm.tryAutoload(raw);
+            if (ctx.vm.pending_exception != null) return error.RuntimeError;
+            const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
+            if (!(ctx.vm.classes.contains(name) or ctx.vm.interfaces.contains(name) or ctx.vm.traits.contains(name))) return NativeResult.scalar(.{ .bool = false });
+            break :blk ctx.vm.declaredClassName(name);
+        },
+        else => return NativeResult.scalar(.{ .bool = false }),
+    };
+    if (!only_subclass and std.mem.eql(u8, instance, raw_target)) return NativeResult.scalar(.{ .bool = true });
+    if (!(ctx.vm.classes.contains(target) or ctx.vm.interfaces.contains(target) or ctx.vm.traits.contains(target))) return NativeResult.scalar(.{ .bool = false });
+    if (only_subclass and std.ascii.eqlIgnoreCase(instance, ctx.vm.declaredClassName(target))) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .bool = ctx.vm.isInstanceOf(instance, target) });
 }
 
 fn native_spl_object_id(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

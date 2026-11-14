@@ -1428,6 +1428,11 @@ fn native_trait_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Na
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const raw = args[0].string.bytes();
     const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
+    // class_exists_impl: autoloaded unless $autoload is false
+    if (!ctx.vm.traits.contains(name) and (args.len < 2 or args[1].isTruthy())) {
+        try ctx.vm.tryAutoload(raw);
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+    }
     return NativeResult.scalar(.{ .bool = ctx.vm.traits.contains(name) });
 }
 

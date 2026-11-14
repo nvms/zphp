@@ -22399,6 +22399,13 @@ pub const VM = struct {
         if (self.classes.contains(class_name)) return;
         if (self.interfaces.contains(class_name)) return;
         if (self.traits.contains(class_name)) return;
+        // zend_lookup_class_ex: no name, or one with a character no class
+        // name has (zend_is_valid_class_name), never reaches the autoloaders
+        if (class_name.len == 0) return;
+        for (raw_class_name) |c| switch (c) {
+            '0'...'9', 'a'...'z', 'A'...'Z', '_', '\\', 0x80...0xff => {},
+            else => return,
+        };
         // php never re-enters the autoloaders for a class it is already
         // autoloading, so a cycle (a class file that class_exists() an alias
         // whose file aliases back to it) ends at the class in progress instead
