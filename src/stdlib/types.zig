@@ -768,18 +768,34 @@ fn property_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     const prop_name = args[1].string.bytes();
     if (args[0] == .object) {
         const obj = args[0].object;
-        if (obj.getSlotIndex(prop_name) != null) return NativeResult.scalar(.{ .bool = true });
-        if (obj.properties.contains(prop_name)) return NativeResult.scalar(.{ .bool = true });
-        // a static property (or a declared instance property not yet
-        // materialized) of the object's class or an ancestor also counts
+        // the class's property table first: its own declarations, and an
+        // ancestor's unless private to it
+        var is_own = true;
+        var hidden = false;
+        // has_property looks the name up from the calling scope, which
+        // sees its own private property on a subclass's object
+        const scope = ctx.vm.currentDefiningClass();
         var current: ?[]const u8 = obj.class_name;
         while (current) |name| {
             const cls = ctx.vm.classes.get(name) orelse break;
-            if (cls.static_props.contains(prop_name)) return NativeResult.scalar(.{ .bool = true });
             for (cls.properties.items) |p| {
-                if (std.mem.eql(u8, p.name, prop_name)) return NativeResult.scalar(.{ .bool = true });
+                if (!std.mem.eql(u8, p.name, prop_name)) continue;
+                if (is_own or p.visibility != .private) return NativeResult.scalar(.{ .bool = true });
+                if (scope) |sc| if (std.ascii.eqlIgnoreCase(sc, name)) return NativeResult.scalar(.{ .bool = true });
+                hidden = true;
+            }
+            if (cls.static_props.contains(prop_name)) {
+                const vis = cls.static_prop_visibility.get(prop_name) orelse @as(ClassDef.Visibility, .public);
+                if (is_own or vis != .private) return NativeResult.scalar(.{ .bool = true });
             }
             current = cls.parent;
+            is_own = false;
+        }
+        // then the object's own (dynamic) properties; an ancestor's private
+        // one is no property of this class
+        if (!hidden) {
+            if (obj.getSlotIndex(prop_name) != null) return NativeResult.scalar(.{ .bool = true });
+            if (obj.properties.contains(prop_name)) return NativeResult.scalar(.{ .bool = true });
         }
         // spl_array_has_property: under ARRAY_AS_PROPS, an element
         if (try @import("spl.zig").propertyAsElementExists(ctx, obj, args[1])) |found| return NativeResult.scalar(.{ .bool = found });

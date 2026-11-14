@@ -839,6 +839,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rref_def.methods.put(a, "getId", .{ .name = "getId", .arity = 0 });
     try vm.classes.put(a, "ReflectionReference", rref_def);
 
+    // the constructor is private: references come from fromArrayElement
+    try vm.native_fns.put(a, "ReflectionReference::__construct", rrefConstruct);
     try vm.native_fns.put(a, "ReflectionReference::fromArrayElement", rrefFromArrayElement);
     try vm.native_fns.put(a, "ReflectionReference::getId", rrefGetId);
 
@@ -4955,6 +4957,10 @@ fn rpropGetHooks(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
         }
     }
     return NativeResult.borrowed(.{ .array = arr });
+}
+
+fn rrefConstruct(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.null);
 }
 
 // ReflectionReference::fromArrayElement: the element's reference, null for a
