@@ -1701,9 +1701,23 @@ fn rcNewInstanceArgs(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
 // without one
 const BoundArgs = struct {
     list: std.ArrayListUnmanaged(Value) = .empty,
+    // whether each argument came as a reference (an array entry bound to one)
+    by_ref: std.ArrayListUnmanaged(bool) = .empty,
 
     fn deinit(self: *BoundArgs, allocator: Allocator) void {
         self.list.deinit(allocator);
+        self.by_ref.deinit(allocator);
+    }
+
+    fn append(self: *BoundArgs, allocator: Allocator, v: Value, is_ref: bool) !void {
+        try self.list.append(allocator, v);
+        try self.by_ref.append(allocator, is_ref);
+    }
+
+    // zend_call_function's warning for a by-reference parameter given a
+    // value, before the call
+    fn warnValues(self: *const BoundArgs, ctx: *NativeContext, func_key: []const u8) RuntimeError!void {
+        try ctx.warnValuesForReferencesMask(.{ .function = func_key }, self.list.items.len, self.by_ref.items);
     }
 };
 
@@ -1719,14 +1733,14 @@ fn raiseError(ctx: *NativeContext, class: []const u8, comptime fmt: []const u8, 
 fn bindArguments(ctx: *NativeContext, func_key: []const u8, display: []const u8, positional: []const Value, named: ?*PhpArray) RuntimeError!BoundArgs {
     var bound: BoundArgs = .{};
     errdefer bound.deinit(ctx.allocator);
-    try bound.list.appendSlice(ctx.allocator, positional);
+    for (positional) |v| try bound.append(ctx.allocator, v, false);
     const arr = named orelse return bound;
     var saw_named = false;
     for (arr.entries.items) |entry| {
         const v = if (entry.ref) |r| r.* else entry.value;
         if (entry.key == .int) {
             if (saw_named) return raiseError(ctx, "Error", "Cannot use positional argument after named argument", .{});
-            try bound.list.append(ctx.allocator, v);
+            try bound.append(ctx.allocator, v, entry.ref != null);
         } else saw_named = true;
     }
     if (!saw_named) return bound;
@@ -1741,8 +1755,9 @@ fn bindArguments(ctx: *NativeContext, func_key: []const u8, display: []const u8,
             } else return raiseError(ctx, "Error", "Unknown named parameter ${s}", .{name});
             if (index < given or (index < bound.list.items.len and bound.list.items[index] != .undef))
                 return raiseError(ctx, "Error", "Named parameter ${s} overwrites previous argument", .{name});
-            while (bound.list.items.len <= index) try bound.list.append(ctx.allocator, .undef);
+            while (bound.list.items.len <= index) try bound.append(ctx.allocator, .undef, false);
             bound.list.items[index] = if (entry.ref) |r| r.* else entry.value;
+            bound.by_ref.items[index] = entry.ref != null;
         }
         for (bound.list.items, 0..) |*slot, i| {
             if (slot.* != .undef) continue;
@@ -1765,7 +1780,8 @@ fn bindArguments(ctx: *NativeContext, func_key: []const u8, display: []const u8,
             return error.RuntimeError;
         }
         bound.list.clearRetainingCapacity();
-        try bound.list.appendSlice(ctx.allocator, resolved[0..placed.count]);
+        bound.by_ref.clearRetainingCapacity();
+        for (resolved[0..placed.count], sources[0..placed.count]) |v, source| try bound.append(ctx.allocator, v, source != .none);
         return bound;
     }
     for (arr.entries.items) |entry| if (entry.key == .string)
@@ -1826,6 +1842,7 @@ fn newInstanceWith(ctx: *NativeContext, positional: []const Value, named: ?*PhpA
     const outer = ctx.vm.native_caller;
     ctx.vm.native_caller = .{ .name = "ReflectionClass::newInstance", .frames = ctx.vm.frame_count };
     defer ctx.vm.native_caller = outer;
+    try bound.warnValues(ctx, key);
     _ = try ctx.callMethod(obj, "__construct", bound.list.items);
     return NativeResult.borrowed(.{ .object = obj });
 }
@@ -3921,12 +3938,10 @@ pub fn functionKey(this: *PhpObject) Value {
 fn rfInvoke(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const fn_name = if (functionKey(this) == .string) functionKey(this).string.bytes() else return NativeResult.scalar(.null);
-    if (ctx.named_args) |named| {
-        var bound = try bindArguments(ctx, fn_name, fn_name, args, named);
-        defer bound.deinit(ctx.allocator);
-        return NativeResult.share(try ctx.vm.callByName(fn_name, bound.list.items));
-    }
-    return NativeResult.share(try ctx.vm.callByName(fn_name, args));
+    var bound = try bindArguments(ctx, fn_name, fn_name, args, ctx.named_args);
+    defer bound.deinit(ctx.allocator);
+    try bound.warnValues(ctx, fn_name);
+    return NativeResult.share(try ctx.vm.callByName(fn_name, bound.list.items));
 }
 
 fn rfInvokeArgs(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -3935,6 +3950,7 @@ fn rfInvokeArgs(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     const arr = try zpp.array(ctx, "ReflectionFunction::invokeArgs", args, 0, "args");
     var bound = try bindArguments(ctx, fn_name, fn_name, &.{}, arr);
     defer bound.deinit(ctx.allocator);
+    try bound.warnValues(ctx, fn_name);
     return NativeResult.share(try ctx.vm.callByName(fn_name, bound.list.items));
 }
 
@@ -5759,6 +5775,7 @@ fn methodInvoke(ctx: *NativeContext, args: []const Value, variadic: bool) Runtim
     const outer = ctx.vm.native_caller;
     ctx.vm.native_caller = .{ .name = label, .frames = ctx.vm.frame_count };
     defer ctx.vm.native_caller = outer;
+    try bound.warnValues(ctx, owned_key);
     if (!is_static) return NativeResult.share(try ctx.vm.callMethodAs(object.?, method_name, owned_key, bound.list.items));
     const called = reflectedClass(this) orelse declaring;
     return NativeResult.share(try ctx.vm.callByNameAs(owned_key, bound.list.items, called));

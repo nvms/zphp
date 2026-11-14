@@ -277,7 +277,7 @@ pub const NativeContext = struct {
         return self.warnValuesForReferencesMask(callee, count, &.{});
     }
 
-    fn warnValuesForReferencesMask(self: *NativeContext, callee: callables.Callee, count: usize, is_ref: []const bool) RuntimeError!void {
+    pub fn warnValuesForReferencesMask(self: *NativeContext, callee: callables.Callee, count: usize, is_ref: []const bool) RuntimeError!void {
         // an internal function's by-reference parameter warns the same way
         if (callee == .function and self.vm.native_fns.get(callee.function) != null) {
             const byref = @import("../stdlib/byref_args.zig");
