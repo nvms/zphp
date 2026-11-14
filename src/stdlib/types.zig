@@ -232,6 +232,18 @@ fn native_constant(ctx: *NativeContext, args: []const Value) RuntimeError!Native
             _ = try ctx.vm.warnDeprecatedClassConstant(class_name, prop_name);
             return NativeResult.share(v);
         }
+        // zend_get_class_constant_ex: a class that doesn't exist is
+        // zend_fetch_class's error, a missing constant names the class as given
+        const relative = std.ascii.eqlIgnoreCase(class_name, "self") or std.ascii.eqlIgnoreCase(class_name, "parent") or std.ascii.eqlIgnoreCase(class_name, "static");
+        if (!relative) {
+            const msg = if (ctx.vm.classes.contains(class_name) or ctx.vm.interfaces.contains(class_name) or ctx.vm.traits.contains(class_name))
+                try std.fmt.allocPrint(ctx.allocator, "Undefined constant {s}::{s}", .{ name[0..sep], prop_name })
+            else
+                try ctx.vm.classNotFoundMessage(class_name);
+            defer ctx.allocator.free(msg);
+            try ctx.vm.setPendingException("Error", msg);
+            return error.RuntimeError;
+        }
     }
     const msg = try std.fmt.allocPrint(ctx.allocator, "Undefined constant \"{s}\"", .{written});
     defer ctx.allocator.free(msg);
