@@ -394,6 +394,9 @@ fn sortArray(sc: *SortContext, arr: *PhpArray, renumber: bool) RuntimeError!void
     // a comparison that ran php code may have changed the array under the
     // sort; php sorts a copy then, and its changes are lost either way
     if (arr.entries.items.len != n) return;
+    // reference bindings name elements by key, which the reorder changes
+    sc.ctx.vm.detachArrayRefs(arr);
+    defer sc.ctx.vm.attachArrayRefs(arr) catch {};
     for (items, 0..) |item, i| arr.entries.items[i] = item.entry;
     if (renumber) {
         for (arr.entries.items, 0..) |*entry, i| {
