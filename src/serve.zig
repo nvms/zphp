@@ -796,9 +796,11 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
             r.emit();
         } else if (active < worker_count) {
             var active_buf: [8]u8 = undefined;
-            try writeStderr("warning: running with ");
-            try writeStderr(std.fmt.bufPrint(&active_buf, "{d}", .{active}) catch "?");
-            try writeStderr(" workers\n");
+            // workers are running: a failed stderr write must not return
+            // past the code that stops them
+            writeStderr("warning: running with ") catch {};
+            writeStderr(std.fmt.bufPrint(&active_buf, "{d}", .{active}) catch "?") catch {};
+            writeStderr(" workers\n") catch {};
         }
 
         var main_poll: [2]sys.pollfd = .{
@@ -2065,13 +2067,13 @@ fn writeResponse(conn: *Connection, code: i64, content_type: []const u8, extra_h
                 // (curl truncates the rest of the headers at that point)
                 if (std.mem.startsWith(u8, hdr, "HTTP/")) continue;
                 if (std.mem.indexOfScalar(u8, hdr, '\r') != null or std.mem.indexOfScalar(u8, hdr, '\n') != null) continue;
-                if (id_header.len > 0 and std.ascii.startsWithIgnoreCase(hdr, "x-request-id:")) app_set_id = true;
                 if (pos + hdr.len + 2 < hdr_buf.len) {
                     @memcpy(hdr_buf[pos .. pos + hdr.len], hdr);
                     pos += hdr.len;
                     hdr_buf[pos] = '\r';
                     hdr_buf[pos + 1] = '\n';
                     pos += 2;
+                    if (id_header.len > 0 and std.ascii.startsWithIgnoreCase(hdr, "x-request-id:")) app_set_id = true;
                 }
             }
         }
