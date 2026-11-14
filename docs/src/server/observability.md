@@ -129,7 +129,7 @@ User-controlled values are escaped. Control characters are written as `\u` escap
 
 ### Delivery
 
-Each line is formatted on the worker's stack and handed to the destination in a single write, with no lock. Lines up to 4 KiB are written atomically to pipes, and the log file is opened for append, so lines from concurrent workers never interleave. A write that fails is counted in `zphp_log_write_errors_total` and dropped. It never affects the response. Writes are blocking, so a log reader that stops consuming stdout eventually slows the workers down. Point `--log-file` at local disk, or make sure the stdout collector keeps up.
+Each line is formatted on the worker's stack and handed to the destination in a single write, with no lock. The log file is opened for append, so lines from concurrent workers never interleave in it. On stdout, a pipe keeps each write whole up to `PIPE_BUF` (4 KiB on Linux, 512 bytes on macOS); typical access lines are around 300 bytes. A write that fails is counted in `zphp_log_write_errors_total` and dropped. It never affects the response. Writes are blocking, so a log reader that stops consuming stdout eventually slows the workers down. Point `--log-file` at local disk, or make sure the stdout collector keeps up.
 
 ## Crashes
 
