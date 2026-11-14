@@ -29,6 +29,11 @@ cleanup() {
         wait "$FAIL_PID" 2>/dev/null || true
     fi
     if [ -n "${READY_FILE:-}" ]; then rm -f "$READY_FILE"; fi
+    if [ -n "${OBS_PID:-}" ]; then
+        kill "$OBS_PID" 2>/dev/null || true
+        wait "$OBS_PID" 2>/dev/null || true
+    fi
+    if [ -n "${OBS_DIR:-}" ]; then rm -rf "$OBS_DIR"; fi
     exit "$status"
 }
 trap cleanup EXIT
@@ -313,7 +318,7 @@ kill $TLS_PID 2>/dev/null; wait $TLS_PID 2>/dev/null || true
 # --- HTTP/2 tests ---
 H2_PORT=19880
 
-"$ZPHP" serve "$APP" --port $H2_PORT --workers 2 --tls-cert /tmp/zphp_test.crt --tls-key /tmp/zphp_test.key &
+"$ZPHP" serve "$APP" --port $H2_PORT --workers 2 --tls-cert /tmp/zphp_test.crt --tls-key /tmp/zphp_test.key --request-id &
 H2_PID=$!
 for i in $(seq 1 20); do
     if curl -sk -o /dev/null "https://localhost:$H2_PORT/health" 2>/dev/null; then break; fi
@@ -337,6 +342,10 @@ check "h2 status 201" "201" "$h2_status"
 
 h1_fallback=$(curl -sk --http1.1 https://localhost:$H2_PORT/health)
 check "h1 fallback" '{"status":"ok"}' "$h1_fallback"
+
+h2_rid=$(curl -sk --http2 -D - -o /dev/null -H "X-Request-Id: h2-rid-1" https://localhost:$H2_PORT/request-id | tr -d '\r')
+check_contains "h2 echoes the request id" "x-request-id: h2-rid-1" "$h2_rid"
+check "h2 request id reaches php" "h2-rid-2" "$(curl -sk --http2 -H "X-Request-Id: h2-rid-2" https://localhost:$H2_PORT/request-id)"
 
 h2_multi=$(curl -sk --http2 https://localhost:$H2_PORT/health https://localhost:$H2_PORT/health https://localhost:$H2_PORT/health 2>&1)
 h2_count=$(echo "$h2_multi" | grep -o '"status":"ok"' | wc -l | tr -d ' ')
@@ -575,6 +584,224 @@ PY
 )
 check "stalled connection closed by idle timeout" "closed" "$idle_result"
 kill $IDLE_PID 2>/dev/null; wait $IDLE_PID 2>/dev/null || true
+
+# --- observability: admin listener, metrics, access logs, request ids ---
+OBS_PORT=$((PORT + 40))
+OBS_ADMIN=$((PORT + 41))
+OBS_DIR=$(mktemp -d /tmp/zphp_obs.XXXXXX)
+is_windows=0
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) is_windows=1 ;; esac
+# zphp is a native program under msys2 and needs the windows spelling
+native_path() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else echo "$1"; fi; }
+limited() { if command -v timeout >/dev/null 2>&1; then timeout 20 "$@"; else "$@"; fi; }
+pass() { passed=$((passed + 1)); echo "  pass  $1"; }
+fail() { failed=$((failed + 1)); echo "  FAIL  $1"; errors="$errors${nl}--- $1 ---${nl}$2${nl}"; }
+check_absent() {
+    if echo "$3" | grep -qi -- "$2"; then fail "$1" "expected no: $2${nl}got: $3"; else pass "$1"; fi
+}
+wait_ready() {
+    for i in $(seq 1 100); do
+        [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$1/ready")" = "200" ] && return 0
+        sleep 0.1
+    done
+    return 1
+}
+metric_value() { curl -s "http://127.0.0.1:$OBS_ADMIN/metrics" | awk -v m="$1" '$1 == m {print $2}'; }
+# counters update right after the response is written, so poll briefly
+wait_metric() {
+    local v=""
+    for i in $(seq 1 50); do
+        v=$(metric_value "$1")
+        [ "$v" = "$2" ] && break
+        sleep 0.05
+    done
+    echo "$v"
+}
+
+# defaults: nothing observable changes without the flags
+check_absent "no request id header by default" "^X-Request-Id:" "$(curl -si http://localhost:$PORT/health | tr -d '\r')"
+check "no REQUEST_ID by default" "none" "$(curl -s http://localhost:$PORT/request-id)"
+
+# --request-id with a text-logging admin listener: ids, but no log lines
+"$ZPHP" serve "$APP" --port $OBS_PORT --workers 2 --request-id --admin-port $OBS_ADMIN > "$OBS_DIR/plain.out" 2> "$OBS_DIR/plain.err" &
+OBS_PID=$!
+if wait_ready $OBS_ADMIN; then pass "admin ready with text logs"; else fail "admin ready with text logs" "/ready never answered 200"; fi
+check "request id reaches php" "plain-1" "$(curl -s -H 'X-Request-Id: plain-1' http://localhost:$OBS_PORT/request-id)"
+check_contains "request id echoed" "X-Request-Id: plain-1" "$(curl -si -H 'X-Request-Id: plain-1' http://localhost:$OBS_PORT/health | tr -d '\r')"
+kill $OBS_PID 2>/dev/null; wait $OBS_PID 2>/dev/null || true
+OBS_PID=
+check "text mode writes nothing to stdout" "" "$(cat "$OBS_DIR/plain.out")"
+check_contains "text mode keeps the startup line" "zphp serving" "$(cat "$OBS_DIR/plain.err")"
+
+# configuration is validated before anything binds
+config_error() {
+    local name="$1" needle="$2" out st=0
+    shift 2
+    out=$(limited "$ZPHP" serve "$APP" --port $OBS_PORT "$@" 2>&1 >/dev/null) || st=$?
+    if [ "$st" -eq 1 ] && echo "$out" | grep -q -- "$needle"; then pass "$name"; else fail "$name" "exit $st, got: $out"; fi
+}
+config_error "admin port zero rejected" "needs a port" --admin-port 0
+config_error "admin port text rejected" "needs a port" --admin-port nope
+config_error "admin port needs a value" "needs a value" --admin-port
+config_error "admin host needs a port" "requires --admin-port" --admin-host 127.0.0.1
+config_error "admin port must differ" "must differ" --admin-port $OBS_PORT
+config_error "admin host must be an address" "IPv4 or IPv6" --admin-port $OBS_ADMIN --admin-host localhost.invalid
+config_error "unknown log format rejected" "text or json" --log-format xml
+config_error "access log needs json" "drop --log-format text" --log-format text --access-log
+config_error "unwritable log file rejected" "could not open log file" --log-file "$(native_path "$OBS_DIR")/missing/dir/x.log"
+
+# everything on, four workers, logging to a file
+OBS_LOG="$OBS_DIR/access.log"
+"$ZPHP" serve "$APP" --port $OBS_PORT --workers 4 --admin-port $OBS_ADMIN --access-log --log-file "$(native_path "$OBS_LOG")" > "$OBS_DIR/obs.out" 2> "$OBS_DIR/obs.err" &
+OBS_PID=$!
+if wait_ready $OBS_ADMIN; then pass "admin ready"; else fail "admin ready" "/ready never answered 200"; fi
+
+check "admin health" "ok" "$(curl -s http://127.0.0.1:$OBS_ADMIN/health)"
+check "admin ready body" "ready" "$(curl -s http://127.0.0.1:$OBS_ADMIN/ready)"
+check "metrics content type" "text/plain; version=0.0.4; charset=utf-8" "$(curl -s -o /dev/null -w '%{content_type}' http://127.0.0.1:$OBS_ADMIN/metrics)"
+check_contains "metrics histogram" "# TYPE zphp_http_request_duration_seconds histogram" "$(curl -s http://127.0.0.1:$OBS_ADMIN/metrics)"
+check "metrics worker count" "4" "$(metric_value zphp_workers_running)"
+check "metrics head" "200" "$(curl -s -I -o /dev/null -w '%{http_code}' http://127.0.0.1:$OBS_ADMIN/metrics)"
+check "admin unknown path" "404" "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$OBS_ADMIN/index.php)"
+check "admin rejects post" "405" "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:$OBS_ADMIN/health)"
+check_contains "admin paths on the app port run php" '"error":"not found"' "$(curl -s http://localhost:$OBS_PORT/metrics)"
+check "app health still the application's" '{"status":"ok"}' "$(curl -s http://localhost:$OBS_PORT/health)"
+
+# request ids on one keep-alive connection: each request gets its own
+rid_result=$(python3 - "$OBS_PORT" <<'PY'
+import re, socket, sys
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=10)
+def request(rid):
+    head = "GET /request-id HTTP/1.1\r\nHost: x\r\n" + ("" if rid is None else "X-Request-Id: " + rid + "\r\n") + "\r\n"
+    s.sendall(head.encode("latin-1"))
+    data = b""
+    while b"\r\n\r\n" not in data:
+        data += s.recv(65536)
+    hdr, body = data.split(b"\r\n\r\n", 1)
+    n = int(re.search(rb"(?im)^content-length:\s*(\d+)", hdr).group(1))
+    while len(body) < n:
+        body += s.recv(65536)
+    m = re.search(rb"(?im)^x-request-id: ([^\r]*)", hdr)
+    return (m.group(1).decode() if m else "-"), body[:n].decode()
+ids = [request("client-1"), request(None), request("x" * 65), request("bad id\x01"), request("client-2")]
+hexid = re.compile(r"^[0-9a-f]{32}$")
+print("given=" + ("ok" if ids[0] == ("client-1", "client-1") and ids[4] == ("client-2", "client-2") else repr(ids)))
+gen = ids[1:4]
+print("generated=" + ("ok" if all(h == b and hexid.match(h) for h, b in gen) else repr(gen)))
+print("unique=" + ("ok" if len({h for h, _ in gen}) == 3 else repr(gen)))
+PY
+)
+check_contains "incoming request ids kept per request" "given=ok" "$rid_result"
+check_contains "missing and invalid ids replaced" "generated=ok" "$rid_result"
+check_contains "generated ids unique on keep-alive" "unique=ok" "$rid_result"
+check_contains "static files carry the id" "X-Request-Id: static-1" "$(curl -si -H 'X-Request-Id: static-1' http://localhost:$OBS_PORT/style.css | tr -d '\r')"
+check "uncaught exception still 500" "500" "$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Request-Id: boom-1' http://localhost:$OBS_PORT/uncaught)"
+check "malformed request still 400" "HTTP/1.1 400 Bad Request" "$(PORT=$OBS_PORT hostile 'POST /reject HTTP/1.1\r\nHost: x\r\nX-Request-Id: reject-1\r\nContent-Length: -1\r\n\r\n')"
+PORT=$OBS_PORT hostile 'GET /esc"\x01\\\xff HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' > /dev/null || true
+curl -s -o /dev/null -H "Authorization: Bearer topsecret-auth" -H "Cookie: session=topsecret-cookie" "http://localhost:$OBS_PORT/echo?token=topsecret-query"
+
+# admin keeps answering while workers are busy, and active requests show
+slow_pids=""
+for i in 1 2; do curl -s -o /dev/null "http://localhost:$OBS_PORT/slow?ms=1500" & slow_pids="$slow_pids $!"; done
+sleep 0.5
+check "admin health while workers are busy" "ok" "$(curl -s -m 1 http://127.0.0.1:$OBS_ADMIN/health)"
+active=$(metric_value zphp_http_requests_active)
+if [ "${active:-0}" -ge 1 ]; then pass "active requests visible"; else fail "active requests visible" "got: $active"; fi
+wait $slow_pids
+
+# requests spread over workers are counted exactly once
+seq 1 200 | xargs -P 16 -I{} curl -s -o /dev/null "http://localhost:$OBS_PORT/echo?n={}" || true
+# since startup: /health, /request-id x5, /style.css, /echo with secrets, /slow x2 and the 200
+check "2xx requests counted across workers" "210" "$(wait_metric 'zphp_http_requests_total{code="2xx"}' 210)"
+check "4xx requests counted" "3" "$(wait_metric 'zphp_http_requests_total{code="4xx"}' 3)"
+check "5xx requests counted" "1" "$(wait_metric 'zphp_http_requests_total{code="5xx"}' 1)"
+check "no request left active" "0" "$(wait_metric zphp_http_requests_active 0)"
+hist=$(curl -s http://127.0.0.1:$OBS_ADMIN/metrics | awk '
+    /^zphp_http_requests_total/ {sum += $2}
+    /^zphp_http_request_duration_seconds_count/ {count = $2}
+    /^zphp_http_request_duration_seconds_bucket\{le="\+Inf"\}/ {inf = $2}
+    END {print (sum == count && count == inf) ? "ok" : sum " " count " " inf}')
+check "histogram matches the request counters" "ok" "$hist"
+check "connections all closed" "0" "$(wait_metric zphp_connections_active 0)"
+
+kill -TERM $OBS_PID 2>/dev/null
+obs_exit=0
+wait $OBS_PID 2>/dev/null || obs_exit=$?
+OBS_PID=
+if [ $obs_exit -eq 0 ] || [ $obs_exit -eq 143 ]; then pass "observability server shuts down"; else fail "observability server shuts down" "exit $obs_exit"; fi
+check "admin listener closed on shutdown" "000" "$(curl -s -o /dev/null -w '%{http_code}' -m 2 http://127.0.0.1:$OBS_ADMIN/health || true)"
+check "log file mode leaves stdout empty" "" "$(cat "$OBS_DIR/obs.out")"
+
+log_result=$(python3 - "$(native_path "$OBS_LOG")" "$OBS_ADMIN" "$is_windows" <<'PY'
+import json, sys
+path, admin, windows = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+raw = open(path, "rb").read()
+out = []
+try:
+    lines = [json.loads(l) for l in raw.decode("utf-8").splitlines()]
+    out.append("json=ok")
+except Exception as e:
+    print("json=" + repr(e)); sys.exit()
+access = [l for l in lines if l.get("component") == "access"]
+fields = {"ts", "level", "component", "msg", "request_id", "worker", "method", "path", "protocol", "status", "bytes", "duration_ms", "remote_addr"}
+out.append("fields=" + ("ok" if access and all(fields <= set(l) for l in access) else "missing"))
+out.append("count=%d" % len(access))
+out.append("workers=%d" % len({l["worker"] for l in access}))
+start = [l for l in lines if l.get("msg") == "server started"]
+out.append("startup=" + ("ok" if start and start[0].get("admin") == "127.0.0.1:" + admin and start[0].get("workers") == 4 else repr(start)))
+err = [l for l in lines if l.get("component") == "php" and l.get("request_id") == "boom-1"]
+out.append("exception=" + ("ok" if err and err[0].get("exception") == "RuntimeException" and err[0].get("message") == "boom" else repr(err)))
+boom = [l for l in access if l["request_id"] == "boom-1"]
+out.append("exception_access=" + ("ok" if boom and boom[0]["status"] == 500 else repr(boom)))
+rej = [l for l in access if l["request_id"] == "reject-1"]
+out.append("rejected=" + ("ok" if rej and rej[0]["status"] == 400 and rej[0]["path"] == "/reject" else repr(rej)))
+esc = [l for l in access if l["path"].startswith("/esc")]
+out.append("escaped=" + ("ok" if esc and esc[0]["path"] == '/esc"\x01\\�' else repr(esc)))
+out.append("secrets=" + ("leaked" if b"topsecret" in raw else "ok"))
+stops = [l["msg"] for l in lines if l.get("component") == "server"]
+out.append("shutdown=" + ("ok" if windows or stops[-2:] == ["shutting down", "server stopped"] else repr(stops)))
+print(" ".join(out))
+PY
+)
+for k in json=ok fields=ok startup=ok exception=ok exception_access=ok rejected=ok escaped=ok secrets=ok shutdown=ok; do
+    check_contains "log ${k%%=*}" "$k" "$log_result"
+done
+check_contains "every request logged once" "count=214" "$log_result"
+if echo "$log_result" | grep -q "workers=[2-4]"; then pass "log shows several workers"; else fail "log shows several workers" "$log_result"; fi
+
+# repeated start and stop with everything on leaves nothing behind
+cycle_ok=1
+for i in 1 2 3; do
+    "$ZPHP" serve "$APP" --port $OBS_PORT --workers 2 --admin-port $OBS_ADMIN --access-log --log-file "$(native_path "$OBS_DIR/cycle.log")" > /dev/null 2> "$OBS_DIR/cycle.err" &
+    OBS_PID=$!
+    wait_ready $OBS_ADMIN || { cycle_ok=0; echo "cycle $i: never ready"; }
+    [ "$(curl -s http://localhost:$OBS_PORT/health)" = '{"status":"ok"}' ] || { cycle_ok=0; echo "cycle $i: request failed"; }
+    kill -TERM $OBS_PID 2>/dev/null
+    st=0; wait $OBS_PID 2>/dev/null || st=$?
+    OBS_PID=
+    [ $st -eq 0 ] || [ $st -eq 143 ] || { cycle_ok=0; echo "cycle $i: exit $st"; }
+    if grep -q "leaked" "$OBS_DIR/cycle.err"; then cycle_ok=0; echo "cycle $i: leak"; head -5 "$OBS_DIR/cycle.err"; fi
+done
+check "repeated start and stop" "1" "$cycle_ok"
+if [ $is_windows -eq 0 ]; then
+    check "every cycle logged its shutdown" "3" "$(grep -c '"server stopped"' "$OBS_DIR/cycle.log")"
+fi
+
+# a second server cannot take an admin port that is in use. windows lets
+# SO_REUSEADDR bind over a listener, so the check only holds elsewhere
+[ $is_windows -eq 0 ] && python3 -c "
+import socket, time
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', $OBS_ADMIN)); s.listen(1); time.sleep(8)
+" &
+HOLD_PID=$!
+if [ $is_windows -eq 0 ]; then
+    sleep 0.5
+    config_error "admin port conflict reported" "could not start the admin listener" --admin-port $OBS_ADMIN
+fi
+kill $HOLD_PID 2>/dev/null; wait $HOLD_PID 2>/dev/null || true
+rm -rf "$OBS_DIR"
+OBS_DIR=
 
 # test: graceful shutdown
 kill -TERM $SERVER_PID

@@ -168,6 +168,11 @@ if ($path === "/health") {
         "atom" => DateTime::ATOM,
         "enum_case" => RoundingMode::HalfEven->name,
     ]);
+} elseif ($path === "/request-id") {
+    echo $_SERVER["REQUEST_ID"] ?? "none";
+} elseif ($path === "/slow") {
+    usleep(((int) ($_GET["ms"] ?? 500)) * 1000);
+    echo "slow";
 } elseif ($path === "/header-trailing-space") {
     header("X-Trailing-Space: hello    ");
     header("X-Tab-Space: world\t  ");
