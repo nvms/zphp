@@ -1248,28 +1248,42 @@ fn noSortArgs(ctx: *NativeContext, args: []const Value, comptime method: []const
     if (!try sic.argCount(ctx, lbl, args.len, 0, 0)) return error.RuntimeError;
 }
 
+// spl_array_method calls the array function of the same name, which
+// disable_functions may have removed
+fn requireSortFunction(ctx: *NativeContext, comptime name: []const u8) RuntimeError!void {
+    if (!ctx.vm.disabled_natives.contains(name)) return;
+    try ctx.vm.setPendingException("Error", "Cannot call method " ++ name ++ " when function " ++ name ++ " is disabled");
+    return error.RuntimeError;
+}
+
 fn aoKsort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    try requireSortFunction(ctx, "ksort");
     return splSort(ctx, .{ .keys = try sortFlags(ctx, args, "ksort") });
 }
 
 fn aoAsort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    try requireSortFunction(ctx, "asort");
     return splSort(ctx, .{ .values = try sortFlags(ctx, args, "asort") });
 }
 
 fn aoUasort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    try requireSortFunction(ctx, "uasort");
     return splSort(ctx, .{ .user_values = try sortCallback(ctx, args, "uasort") });
 }
 
 fn aoUksort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    try requireSortFunction(ctx, "uksort");
     return splSort(ctx, .{ .user_keys = try sortCallback(ctx, args, "uksort") });
 }
 
 fn aoNatsort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    try requireSortFunction(ctx, "natsort");
     try noSortArgs(ctx, args, "natsort");
     return splSort(ctx, .{ .natural = false });
 }
 
 fn aoNatcasesort(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    try requireSortFunction(ctx, "natcasesort");
     try noSortArgs(ctx, args, "natcasesort");
     return splSort(ctx, .{ .natural = true });
 }
