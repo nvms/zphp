@@ -20876,7 +20876,13 @@ pub const VM = struct {
         self.saveFrameArgs(arg_count);
         self.dropN(ac);
         try self.ensureCallRoom();
-        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = self.currentFrame().called_class };
+        // a declared function has no class scope, whoever calls it; a closure
+        // keeps its own
+        const called: ?[]const u8 = if (self.pending_call_name) |n|
+            (if (std.mem.startsWith(u8, n, "__closure_")) self.closureScopeByName(n) orelse self.currentFrame().called_class else null)
+        else
+            self.currentFrame().called_class;
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = .{}, .locals = locals, .func = func, .called_class = called };
         self.frames[self.frame_count].entry_sp = self.sp;
         self.setFrameArgCount(arg_count);
         self.frame_count += 1;

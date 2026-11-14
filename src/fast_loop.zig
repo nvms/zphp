@@ -1286,7 +1286,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         .vars = .{},
                         .locals = new_locals,
                         .func = func,
-                        .called_class = frame.called_class,
+                        // a declared function has no class scope of its own,
+                        // whoever calls it (the slow path's call does the same)
+                        .called_class = null,
                     };
                     ic.arg_counts[self.frame_count] = arg_count;
                     self.frame_count += 1;
