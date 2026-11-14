@@ -322,7 +322,9 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
     if (ctx.vm.pending_exception != null) return;
     var val = val_in;
     if (val == .object and val.object.lazy != null) {
-        if (!val.object.lazy.?.skip_serialize) try ctx.vm.triggerLazyInit(val.object);
+        // __serialize runs on the lazy object as it is: only what it reads
+        // initializes it
+        if (!val.object.lazy.?.skip_serialize and !ctx.vm.hasMethod(val.object.class_name, "__serialize")) try ctx.vm.triggerLazyInit(val.object);
         val = .{ .object = val.object.storage() };
     }
     const already = try addVarHash(ctx, sctx, val, via, in_rcn_array);

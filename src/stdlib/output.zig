@@ -664,6 +664,9 @@ fn varExportValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: V
                     }
                 }
             }
+            // zend_get_properties_for(VAR_EXPORT) initializes a lazy object
+            // before anything is written
+            if (obj.lazy != null) try ctx.vm.triggerLazyInit(obj);
             const is_std = std.mem.eql(u8, obj.class_name, "stdClass");
             if (is_std) {
                 try out.appendSlice(a, "(object) array(\n");
