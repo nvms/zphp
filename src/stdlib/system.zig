@@ -1246,8 +1246,12 @@ fn native_debug_print_backtrace(ctx: *NativeContext, args: []const Value) Runtim
     return NativeResult.scalar(.null);
 }
 
-fn native_get_defined_functions(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+fn native_get_defined_functions(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const vm = ctx.vm;
+    if (args.len == 1) {
+        _ = try @import("string_ports.zig").Args.init(ctx, "get_defined_functions", args).boolean(0, "exclude_disabled", true);
+        try vm.raiseError(8192, "get_defined_functions(): The $exclude_disabled parameter has no effect since PHP 8.0");
+    }
     const alloc = ctx.allocator;
     var result = try ctx.createArray();
 
