@@ -252,7 +252,7 @@ pub const Record = struct {
 
 // a value with a single writer: plain loads and stores, no read-modify-write,
 // so a worker never contends with anyone over its own counters
-const Cell = struct {
+pub const Cell = struct {
     v: std.atomic.Value(u64) = .init(0),
 
     pub inline fn add(c: *Cell, n: u64) void {
@@ -304,14 +304,6 @@ pub const WorkerStats = struct {
         s.busy.set(0);
     }
 
-    pub fn setConnections(s: *WorkerStats, n: usize) void {
-        s.connections.set(n);
-    }
-
-    pub fn connectionDropped(s: *WorkerStats) void {
-        s.connections_dropped.add(1);
-    }
-
     // a stopped worker holds no connections and runs nothing; its totals stay
     pub fn stopped(s: *WorkerStats) void {
         s.busy.set(0);
@@ -330,18 +322,6 @@ pub const Global = struct {
     reloads: Cell = .{},
     accepted: Cell = .{},
     log_errors: std.atomic.Value(u64) = .init(0),
-
-    pub fn connectionAccepted(g: *Global) void {
-        g.accepted.add(1);
-    }
-
-    pub fn workerStartFailed(g: *Global) void {
-        g.worker_start_failures.add(1);
-    }
-
-    pub fn reloaded(g: *Global) void {
-        g.reloads.add(1);
-    }
 
     pub fn setWorkers(g: *Global, running: usize, ready_now: bool) void {
         g.workers_running.set(running);
@@ -469,7 +449,9 @@ pub const Admin = struct {
     const io_deadline_ns: i128 = 2 * std.time.ns_per_s;
 
     pub fn start(self: *Admin, addr: net.Address) !void {
-        self.server = try platform.tcpListen(addr, true);
+        // windows' SO_REUSEADDR would let another process bind the same port
+        // and take over the endpoint
+        self.server = try platform.tcpListen(addr, !platform.is_windows);
         errdefer self.server.deinit();
         try platform.setNonBlocking(self.server.stream.handle, true);
         self.wake = try platform.socketPair();
@@ -501,7 +483,12 @@ pub const Admin = struct {
             };
             if (fds[1].revents != 0) return;
             if (fds[0].revents & sys.POLL.IN == 0) continue;
-            const conn = self.server.accept() catch continue;
+            // a failed accept leaves the listener readable, so back off
+            // rather than spin, e.g. while the process is out of descriptors
+            const conn = self.server.accept() catch {
+                platform.sleep(10 * std.time.ns_per_ms);
+                continue;
+            };
             handle(conn.stream.handle);
             conn.stream.close();
         }
@@ -684,8 +671,8 @@ test "metrics aggregate every worker and keep the histogram consistent" {
     slots[1].requestFinished(503, 20 * std.time.ns_per_s, 2000);
     slots[1].requestFinished(0, 0, 2000);
     slots[1].requestStarted();
-    slots[0].setConnections(3);
-    slots[1].setConnections(4);
+    slots[0].connections.set(3);
+    slots[1].connections.set(4);
 
     var buf: [16384]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);

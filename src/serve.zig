@@ -422,7 +422,7 @@ fn loadFile(path: []const u8, allocator: Allocator, vm: *@import("runtime/vm.zig
 }
 
 fn initWorker(allocator: Allocator, slot: usize, result: *const CompileResult, doc_root: []const u8, port: u16, ws_enabled: bool, tls_ctx: ?*tls.SSL_CTX, idle_timeout_ms: i64) !Worker {
-    const stats = if (observe.metrics_enabled) observe.statsFor(slot) else null;
+    const stats = observe.statsFor(slot);
     var vm = try VM.init(allocator);
     errdefer vm.deinit();
     vm.file_loader = &loadFile;
@@ -502,7 +502,7 @@ fn stopWorkers(workers: []Worker, threads: []std.Thread) void {
 }
 
 fn reportWorkerFailure(err: anyerror) void {
-    observe.global.workerStartFailed();
+    observe.global.worker_start_failures.add(1);
     if (observe.log_json) {
         var r = observe.Record.init("warn", "server", "worker failed to start");
         r.str("error", @errorName(err));
@@ -821,7 +821,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
 
             if (main_poll[0].revents & sys.POLL.IN != 0) {
                 const conn = server.accept() catch continue;
-                if (observe.metrics_enabled) observe.global.connectionAccepted();
+                if (observe.metrics_enabled) observe.global.accepted.add(1);
                 queue.push(.{ .conn = conn });
                 wake(workers_data[robin].wake_socket);
                 robin = (robin + 1) % active;
@@ -860,7 +860,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
         allocator.free(source);
 
         if (!needs_restart) break;
-        observe.global.reloaded();
+        observe.global.reloads.add(1);
     }
     if (observe.log_json) logEvent("info", "server stopped", "");
 }
@@ -904,7 +904,7 @@ fn eventLoop(w: *Worker) void {
 
         closeIdleConnections(w);
         compactConnections(w);
-        if (w.stats) |s| s.setConnections(w.n_fds - 1);
+        if (w.stats) |s| s.connections.set(w.n_fds - 1);
     }
 }
 
@@ -925,7 +925,7 @@ fn closeIdleConnections(w: *Worker) void {
 
 fn registerConnection(w: *Worker, server_conn: net.Server.Connection) void {
     if (w.n_fds >= MAX_CONNS + 1) {
-        if (w.stats) |s| s.connectionDropped();
+        if (w.stats) |s| s.connections_dropped.add(1);
         server_conn.stream.close();
         return;
     }
