@@ -7842,6 +7842,16 @@ pub const VM = struct {
                     if (op == .iter_check_live) {
                         const current = self.pop();
                         if (self.stack[self.sp - 2] == .int) {
+                            // FE_FETCH_RW re-reads the variable: anything but an
+                            // array or object ends the loop with php's warning
+                            switch (current) {
+                                .array, .object, .generator, .fiber => {},
+                                else => {
+                                    const msg = try std.fmt.allocPrint(self.allocator, "foreach() argument must be of type array|object, {s} given", .{current.valueName()});
+                                    defer self.allocator.free(msg);
+                                    self.emitWarning(msg) catch if (try self.resumeRaised()) continue;
+                                },
+                            }
                             if (!self.liveIterStep(current)) self.currentFrame().ip += offset;
                             continue;
                         }
