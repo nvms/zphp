@@ -309,7 +309,7 @@ pub fn applyToVm(vm: *VM) RuntimeError!void {
 var startup_reported = false;
 
 // zend_ini_parse_bool
-fn iniBool(v: []const u8) bool {
+pub fn iniBool(v: []const u8) bool {
     if (std.ascii.eqlIgnoreCase(v, "true") or std.ascii.eqlIgnoreCase(v, "yes") or std.ascii.eqlIgnoreCase(v, "on")) return true;
     return (std.fmt.parseInt(i64, std.mem.trim(u8, v, " "), 10) catch 0) != 0;
 }

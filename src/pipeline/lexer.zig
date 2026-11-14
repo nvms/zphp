@@ -2,6 +2,10 @@ const std = @import("std");
 const Token = @import("token.zig").Token;
 const Tag = Token.Tag;
 
+// php's short_open_tag (CG(short_tags)): `<?` opens php code. a startup
+// setting (PHP_INI_SYSTEM|PHP_INI_PERDIR), on unless an ini turns it off
+pub var short_open_tag: bool = true;
+
 pub const Lexer = struct {
     source: []const u8,
     pos: usize,
@@ -57,6 +61,15 @@ pub const Lexer = struct {
                 if (self.pos > start) return self.makeToken(.inline_html, start);
                 const tag_start = self.pos;
                 self.pos += 5;
+                self.state = .php;
+                return self.makeToken(.open_tag, tag_start);
+            }
+
+            // `<?phpx` is `<?` then phpx, as php's scanner reads it
+            if (short_open_tag) {
+                if (self.pos > start) return self.makeToken(.inline_html, start);
+                const tag_start = self.pos;
+                self.pos += 2;
                 self.state = .php;
                 return self.makeToken(.open_tag, tag_start);
             }

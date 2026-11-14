@@ -137,6 +137,7 @@ fn loadStartupFlags(allocator: std.mem.Allocator, raw_args: []const []const u8) 
         ini_config.define("log_errors=0");
     } else ini_config.discover(ini_path);
     for (defines.items) |d| ini_config.define(d);
+    if (ini_config.get("short_open_tag")) |v| @import("pipeline/lexer.zig").short_open_tag = ini_config.iniBool(v);
     if (platform.getenv("ZPHP_EXTENSION_DIR")) |dir| extension.loadDirectory(dir);
     return args.toOwnedSlice(allocator);
 }
@@ -340,6 +341,8 @@ fn compileCachePath(allocator: std.mem.Allocator, path: []const u8, stat: std.Io
     hasher.update(std.mem.asBytes(&stat.mtime.nanoseconds));
     hasher.update(std.mem.asBytes(&stat.ctime.nanoseconds));
     hasher.update(std.mem.asBytes(&closure_counter));
+    // the same source lexes differently with short tags off
+    hasher.update(&.{@intFromBool(@import("pipeline/lexer.zig").short_open_tag)});
     hasher.final(&digest);
     const hex = std.fmt.bytesToHex(digest, .lower);
     const cache_root = try compileCacheRoot(allocator);
