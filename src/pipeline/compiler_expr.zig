@@ -1460,7 +1460,15 @@ fn compileCallPlain(self: *Compiler, node: Ast.Node) Error!void {
             // an array element or static-name property read uses isset-
             // semantics here: an undefined key or an uninitialized typed
             // property must not warn/throw, just count as empty
-            if (arg.tag == .variable or arg.tag == .array_access or arg.tag == .static_prop_access or arg.tag == .nullsafe_property_access or (arg.tag == .property_access and !self.isDynamicProp(arg))) {
+            if (arg.tag == .array_access) {
+                try compileCoalesceFetch(self, arg.data.lhs);
+                try self.compileNode(arg.data.rhs);
+                try self.emitOp(.array_get_empty);
+                try self.emitOp(.cast_bool);
+                try self.emitOp(.not);
+                return;
+            }
+            if (arg.tag == .variable or arg.tag == .static_prop_access or arg.tag == .nullsafe_property_access or (arg.tag == .property_access and !self.isDynamicProp(arg))) {
                 try compileCoalesceFetch(self, args[0]);
                 try self.emitOp(.cast_bool);
                 try self.emitOp(.not);

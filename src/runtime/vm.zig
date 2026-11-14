@@ -6321,7 +6321,7 @@ pub const VM = struct {
                         self.push(.null);
                     }
                 },
-                .array_get_coalesce, .array_get_unset => {
+                .array_get_coalesce, .array_get_unset, .array_get_empty => {
                     // like array_get but with isset-style semantics for `??`:
                     // OOB string offsets and missing array keys are null, and we
                     // route object access through offsetExists+offsetGet so user
@@ -6331,8 +6331,9 @@ pub const VM = struct {
                     const arr_val = self.pop();
                     if (arr_val == .array) {
                         if (key == .array or key == .object) {
-                            self.push(.null);
-                            continue;
+                            // FETCH_DIM_IS and ISSET_ISEMPTY_DIM_OBJ refuse the key
+                            if (try self.throwOffsetKeyType(key, if (op == .array_get_empty) .isset_or_empty else .access)) continue;
+                            return error.RuntimeError;
                         }
                         if (key == .resource or key == .float or key == .null) { if (!(self.warnOffsetKeyOn(key, arr_val.array, .null) catch {
                             _ = try self.resumeRaised();
@@ -6358,7 +6359,7 @@ pub const VM = struct {
                             continue;
                         }
                         self.push(existing);
-                    } else if (arr_val == .object and op == .array_get_coalesce and try self.splOwnMethod(arr_val.object, "offsetGet") and try self.splOwnMethod(arr_val.object, "offsetExists")) {
+                    } else if (arr_val == .object and op != .array_get_unset and try self.splOwnMethod(arr_val.object, "offsetGet") and try self.splOwnMethod(arr_val.object, "offsetExists")) {
                         // spl_array_read_dimension for BP_VAR_IS: a quiet
                         // fetch, with no offsetExists() of its own
                         var ctx = self.makeContext(null);

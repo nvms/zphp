@@ -543,6 +543,9 @@ pub const OpCode = enum(u8) {
     unset_var_var,
     // unset($GLOBALS[name]): pops the name and unsets that global variable
     unset_global_var,
+    // array_get_coalesce for the element empty() tests: an illegal key is
+    // "Cannot access offset of type T in isset or empty"
+    array_get_empty,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -691,6 +694,7 @@ pub const OpCode = enum(u8) {
             // binary ops: pop 2, push 1
             .array_get,
             .array_get_coalesce,
+            .array_get_empty,
             .array_get_vivify,
             .get_prop_dynamic,
             .ensure_array_prop_dynamic,
