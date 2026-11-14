@@ -4661,6 +4661,11 @@ pub const VM = struct {
                 const caller = self.currentSourcePosition();
                 const where = try std.fmt.allocPrint(self.allocator, "{s}({d}) : eval()'d code", .{ caller.file, caller.line });
                 defer self.allocator.free(where);
+                // what php warned about while compiling, up to the error
+                for (d.noteSlice()) |*note| {
+                    if (@as(i64, note.line) > line) continue;
+                    try self.raiseErrorAt(note.level, note.text[0..note.len], .{ .file = where, .line = note.line });
+                }
                 // eval is an opcode to php: a compile fatal's trace has no
                 // frame for it
                 const outer_call = self.native_call;

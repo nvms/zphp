@@ -23,6 +23,10 @@ const Error = Allocator.Error || error{CompileError};
 // so two compile units must never mint the same name
 var next_closure_id = std.atomic.Value(u32).init(0);
 
+// php's zend.multibyte (CG(multibyte)), set once at startup from the ini:
+// declare(encoding=...) is read only when it is on
+pub var zend_multibyte: bool = false;
+
 pub fn closureCounter() u32 {
     return next_closure_id.load(.monotonic);
 }
@@ -238,6 +242,8 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
         if (!note.trace) return c.failParse(note.token, "{s}", .{note.message()});
         return c.fail(note.token, note.message());
     }
+
+    try c.checkEncodingDeclares();
 
     const root = ast.nodes[0];
     // PHP early-binds (relocates to before main execution) top-level class and
@@ -650,21 +656,92 @@ pub const Compiler = struct {
     }
 
     // declare(strict_types=...) comes before anything but other declares,
-    // in the file itself, and has no body
+    // in the file itself, and has no body; so does declare(encoding=...)
     fn checkStrictTypesDeclare(self: *Compiler, node: Ast.Node) Error!void {
         var strict = false;
+        var encoding = false;
         var t = node.main_token + 1;
         while (t < node.data.lhs) : (t += 1) {
-            if (self.ast.tokens[t].tag == .identifier and std.ascii.eqlIgnoreCase(self.ast.tokenSlice(t), "strict_types")) strict = true;
+            if (self.ast.tokens[t].tag != .identifier) continue;
+            if (std.ascii.eqlIgnoreCase(self.ast.tokenSlice(t), "strict_types")) strict = true;
+            if (std.ascii.eqlIgnoreCase(self.ast.tokenSlice(t), "encoding")) encoding = true;
         }
-        if (!strict) return;
+        if (!strict and !encoding) return;
         const first = for (self.root_stmts) |idx| {
             const stmt = self.ast.nodes[idx];
             if (stmt.tag == .declare_stmt and stmt.main_token == node.main_token) break true;
             if (stmt.tag != .declare_stmt) break false;
         } else false;
+        if (encoding and !first) return self.fail(node.main_token, "Encoding declaration pragma must be the very first statement in the script");
+        if (!strict) return;
         if (!first) return self.fail(node.main_token, "strict_types declaration must be the very first statement in the script");
         if (node.data.rhs != 0) return self.fail(node.main_token, "strict_types declaration must not use block mode");
+    }
+
+    // zend_handle_encoding_declaration, which php's parser runs on every
+    // declare as it reads it: the encoding must be a literal, and with
+    // zend.multibyte on one mbstring doesn't know is warned about
+    fn checkEncodingDeclares(self: *Compiler) Error!void {
+        const tokens = self.ast.tokens;
+        var i: u32 = 0;
+        while (i < tokens.len) : (i += 1) {
+            if (tokens[i].tag != .kw_declare or i + 1 >= tokens.len or tokens[i + 1].tag != .l_paren) continue;
+            var t = i + 2;
+            while (t + 2 < tokens.len and tokens[t].tag == .identifier and tokens[t + 1].tag == .equal) {
+                const name = self.ast.tokenSlice(t);
+                const value = t + 2;
+                // the value runs to the next comma or the closing paren
+                var end = value;
+                var depth: u32 = 0;
+                while (end < tokens.len) : (end += 1) {
+                    switch (tokens[end].tag) {
+                        .l_paren, .l_bracket => depth += 1,
+                        .r_paren, .r_bracket => {
+                            if (depth == 0) break;
+                            depth -= 1;
+                        },
+                        .comma => if (depth == 0) break,
+                        else => {},
+                    }
+                }
+                if (std.ascii.eqlIgnoreCase(name, "encoding")) try self.checkEncodingValue(i, value, end);
+                if (end >= tokens.len or tokens[end].tag != .comma) break;
+                t = end + 1;
+            }
+        }
+    }
+
+    fn checkEncodingValue(self: *Compiler, declare: u32, value: u32, end: u32) Error!void {
+        const tok = self.ast.tokens[value];
+        const text = self.ast.tokenSlice(value);
+        const literal = end == value + 1 and switch (tok.tag) {
+            .integer, .float => true,
+            .string => text.len >= 2 and (text[0] == '\'' or (text[0] == '"' and std.mem.indexOfScalar(u8, text, '$') == null)),
+            else => false,
+        };
+        if (!literal) return self.failParse(declare, "Encoding must be a literal", .{});
+        if (!zend_multibyte) return self.warn(declare, 128, "declare(encoding=...) ignored because Zend multibyte feature is turned off by settings", .{});
+        var buf: [1100]u8 = undefined;
+        const name: []const u8 = switch (tok.tag) {
+            .string => try compiler_strings.processEscapes(self.allocator, text[1 .. text.len - 1], text[0]),
+            .integer => switch (parsePhpIntLiteral(text)) {
+                .int => |n| try std.fmt.allocPrint(self.allocator, "{d}", .{n}),
+                .float => |f| try self.allocator.dupe(u8, Value.doubleTextHere(&buf, f)),
+                else => unreachable,
+            },
+            else => blk: {
+                var clean: [128]u8 = undefined;
+                var n: usize = 0;
+                for (text) |ch| if (ch != '_' and n < clean.len) {
+                    clean[n] = ch;
+                    n += 1;
+                };
+                const f = std.fmt.parseFloat(f64, clean[0..n]) catch 0;
+                break :blk try self.allocator.dupe(u8, Value.doubleTextHere(&buf, f));
+            },
+        };
+        defer self.allocator.free(name);
+        if (!@import("../stdlib/strings.zig").mbEncodingKnown(name)) try self.warn(declare, 128, "Unsupported encoding [{s}]", .{name});
     }
 
     // zend_compile_return: a bare return in a function with a return type,

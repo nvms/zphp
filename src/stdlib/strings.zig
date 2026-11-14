@@ -1770,12 +1770,8 @@ fn native_mb_encoding_aliases(ctx: *NativeContext, args: []const Value) RuntimeE
     return NativeResult.borrowed(.{ .array = arr });
 }
 
-fn native_mb_list_encodings(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const arr = try ctx.createArray();
-    // mirrors PHP 8.4's mb_list_encodings() output, in the same order.
-    // zphp doesn't actually transcode most of these - it lists them so feature
-    // detection in libraries (intl, symfony, wp) finds the names it expects
-    const list = [_][]const u8{
+// mbstring's encodings in mb_list_encodings() order
+pub const mb_encoding_names = [_][]const u8{
         "BASE64",       "UUENCODE",            "HTML-ENTITIES",       "Quoted-Printable",        "7bit",                  "8bit",
         "UCS-4",        "UCS-4BE",             "UCS-4LE",             "UCS-2",                   "UCS-2BE",               "UCS-2LE",
         "UTF-32",       "UTF-32BE",            "UTF-32LE",            "UTF-16",                  "UTF-16BE",              "UTF-16LE",
@@ -1790,8 +1786,22 @@ fn native_mb_list_encodings(ctx: *NativeContext, _: []const Value) RuntimeError!
         "UHC",          "ISO-2022-KR",         "Windows-1251",        "CP866",                   "KOI8-R",                "KOI8-U",
         "ArmSCII-8",    "CP850",               "ISO-2022-JP-2004",    "ISO-2022-JP-MOBILE#KDDI", "CP50220",               "CP50221",
         "CP50222",
-    };
-    for (list) |n| try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(n) });
+};
+
+// a name mbfl_name2encoding knows: an encoding's name or a common alias,
+// in any case
+pub fn mbEncodingKnown(name: []const u8) bool {
+    for (mb_encoding_names) |n| if (std.ascii.eqlIgnoreCase(n, name)) return true;
+    for ([_][]const u8{ "utf8", "latin1", "us-ascii", "shift_jis", "big5", "euc_jp", "cp1252", "cp1251", "cp1254" }) |n| if (std.ascii.eqlIgnoreCase(n, name)) return true;
+    return false;
+}
+
+fn native_mb_list_encodings(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const arr = try ctx.createArray();
+    // mirrors PHP 8.4's mb_list_encodings() output, in the same order.
+    // zphp doesn't actually transcode most of these - it lists them so feature
+    // detection in libraries (intl, symfony, wp) finds the names it expects
+    for (mb_encoding_names) |n| try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(n) });
     return NativeResult.borrowed(.{ .array = arr });
 }
 
