@@ -2334,6 +2334,12 @@ pub const Compiler = struct {
             try self.emitOp(.iter_live_end);
         }
         try self.emitOp(if (self.loop_foreach_close[d]) .iter_end_close else .iter_end);
+        // a return or break frees the hidden variable holding a by-reference
+        // loop's iterable with the loop, as php's FE_FREE does
+        if (self.loop_foreach_live[d]) |src| if (src == .temp) {
+            try self.emitOp(.unset_var);
+            try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(src.temp) }));
+        };
     }
 
     pub fn emitGetVar(self: *Compiler, name: []const u8) Error!void {

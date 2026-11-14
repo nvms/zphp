@@ -1297,7 +1297,9 @@ fn native_get_defined_vars(ctx: *NativeContext, _: []const Value) RuntimeError!N
         if (sn.len == 0) continue;
         if (i >= frame.locals.len) break;
         if (frame.locals[i] == .undef) continue;
-        const name = if (sn.len > 0 and sn[0] == '$') sn[1..] else sn;
+        // names without a $ are the compiler's own temporaries
+        if (sn[0] != '$') continue;
+        const name = sn[1..];
         if (name.len == 0) continue;
         if (std.mem.eql(u8, name, "this")) continue;
         try result.set(alloc, .{ .string = Value.String.borrowed(name) }, frame.locals[i]);
@@ -1307,7 +1309,8 @@ fn native_get_defined_vars(ctx: *NativeContext, _: []const Value) RuntimeError!N
     var iter = frame.vars.iterator();
     while (iter.next()) |entry| {
         const raw = entry.key_ptr.*;
-        const name = if (raw.len > 0 and raw[0] == '$') raw[1..] else raw;
+        if (raw.len == 0 or raw[0] != '$') continue;
+        const name = raw[1..];
         if (name.len == 0) continue;
         if (entry.value_ptr.* == .null) continue;
         if (std.mem.eql(u8, name, "this")) continue;
