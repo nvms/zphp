@@ -70,6 +70,45 @@ fn isTypeToken(tag: Token.Tag) bool {
 
 const ast_mod = @import("ast.zig");
 
+// the first get and set hook of a hooked property as written, with the
+// method each compiles to ("prop$hook_get")
+const HookIterator = struct {
+    self: *Compiler,
+    written: []const u32,
+    prop: []const u8,
+    i: usize = 0,
+    seen_get: bool = false,
+    seen_set: bool = false,
+
+    const Hook = struct { token: u32, params: u32, method: []const u8 };
+
+    fn next(it: *HookIterator) ?Hook {
+        while (it.i + 3 < it.written.len) {
+            const tok = it.written[it.i];
+            const params = it.written[it.i + 2];
+            it.i += 4;
+            const name = it.self.ast.tokenSlice(tok);
+            const is_get = std.ascii.eqlIgnoreCase(name, "get") and !it.seen_get;
+            const is_set = std.ascii.eqlIgnoreCase(name, "set") and !it.seen_set;
+            if (!is_get and !is_set) continue;
+            if (is_get) it.seen_get = true else it.seen_set = true;
+            const method = std.fmt.allocPrint(it.self.allocator, "{s}$hook_{s}", .{ it.prop, if (is_get) "get" else "set" }) catch return null;
+            it.self.string_allocs.append(it.self.allocator, method) catch {
+                it.self.allocator.free(method);
+                return null;
+            };
+            return .{ .token = tok, .params = params, .method = method };
+        }
+        return null;
+    }
+};
+
+fn hookIterator(self: *Compiler, member: Ast.Node) HookIterator {
+    var prop = self.ast.tokenSlice(member.main_token);
+    if (prop.len > 0 and prop[0] == '$') prop = prop[1..];
+    return .{ .self = self, .written = self.ast.extraSlice(self.ast.extra_data[member.data.lhs + 8]), .prop = prop };
+}
+
 fn findAttrRangeForToken(attr_ranges: []const ast_mod.AttrRange, tokens: []const Token, main_token: u32) ?ast_mod.AttrRange {
     for (attr_ranges) |ar| {
         if (ar.target_tok > main_token) continue;
@@ -3300,6 +3339,13 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
                     .attrs = mattrs,
                 });
             }
+        } else if (member.tag == .class_property_hooks) {
+            // a hook's attributes are its method's
+            var it = hookIterator(self, member);
+            while (it.next()) |hook| {
+                const hattrs = try extractAttributesOf(self, hook.token, AttrTarget.method, hook.method);
+                if (hattrs.len > 0) try methods_with_attrs.append(self.allocator, .{ .name = hook.method, .attrs = hattrs });
+            }
         }
     }
     try self.emitByte(@intCast(methods_with_attrs.items.len));
@@ -3417,6 +3463,22 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
                 });
             } else {
                 params_with_attrs.deinit(self.allocator);
+            }
+        } else if (member.tag == .class_property_hooks) {
+            // a set hook's parameter
+            var it = hookIterator(self, member);
+            while (it.next()) |hook| {
+                if (hook.params == ast_mod.PropertyHooks.no_hook_params) continue;
+                const param_nodes = self.ast.extraSlice(hook.params);
+                if (param_nodes.len == 0) continue;
+                const pnode = self.ast.nodes[param_nodes[0]];
+                const pattrs = try extractAttributes(self, pnode.main_token, AttrTarget.parameter);
+                if (pattrs.len == 0) continue;
+                var pname = self.ast.tokenSlice(pnode.main_token);
+                if (pname.len > 0 and pname[0] == '$') pname = pname[1..];
+                const params = try self.allocator.alloc(ParamAttr, 1);
+                params[0] = .{ .name = pname, .attrs = pattrs };
+                try methods_with_param_attrs.append(self.allocator, .{ .method_name = hook.method, .params = params });
             }
         }
     }
@@ -4128,6 +4190,13 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
                     .name = self.ast.tokenSlice(member.main_token),
                     .attrs = mattrs,
                 });
+            }
+        } else if (member.tag == .class_property_hooks) {
+            // a hook's attributes are its method's
+            var it = hookIterator(self, member);
+            while (it.next()) |hook| {
+                const hattrs = try extractAttributesOf(self, hook.token, AttrTarget.method, hook.method);
+                if (hattrs.len > 0) try methods_with_attrs.append(self.allocator, .{ .name = hook.method, .attrs = hattrs });
             }
         }
     }
