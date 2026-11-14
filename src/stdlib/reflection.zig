@@ -1936,6 +1936,19 @@ fn methodMatchesFilter(info: ClassDef.MethodInfo, filter: i64) bool {
     return (methodModifiers(info) & filter) != 0;
 }
 
+// a trait's method, which only its compiled function describes
+fn traitMethodInfo(vm: *VM, trait: []const u8, method_name: []const u8) ClassDef.MethodInfo {
+    var info = ClassDef.MethodInfo{ .name = method_name, .arity = 0 };
+    var buf: [256]u8 = undefined;
+    if (vm.functions.get(class_names.memberKey(&buf, trait, method_name))) |f| {
+        info.visibility = @fromBackingInt(@intCast(f.method_visibility));
+        info.is_static = f.is_static;
+        info.is_final = f.is_final;
+        info.is_abstract = f.is_abstract;
+    }
+    return info;
+}
+
 fn methodModifiers(info: ClassDef.MethodInfo) i64 {
     var bits: i64 = 0;
     switch (info.visibility) {
@@ -3212,7 +3225,7 @@ fn initMethodReflection(ctx: *NativeContext, this: *PhpObject, args: []const Val
         } else if (ctx.vm.classes.get(class_name)) |cls| {
             break :blk cls.methods.get(method_name) orelse ClassDef.MethodInfo{ .name = method_name, .arity = 0 };
         } else {
-            break :blk ClassDef.MethodInfo{ .name = method_name, .arity = 0 };
+            break :blk traitMethodInfo(ctx.vm, declaring, method_name);
         }
     };
 
@@ -5863,6 +5876,7 @@ fn rmGetModifiers(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
     // an interface's methods are public and abstract
     const in_interface = ctx.vm.interfaces.contains(declaring);
     const interface_bits: i64 = if (in_interface) 64 else 0;
+    if (!in_interface and ctx.vm.classes.get(declaring) == null and ctx.vm.traits.contains(declaring)) return NativeResult.scalar(.{ .int = methodModifiers(traitMethodInfo(ctx.vm, declaring, method_name)) });
     const cls = ctx.vm.classes.get(declaring) orelse return NativeResult.scalar(.{ .int = if (in_interface) 65 else 0 });
     const info = cls.methods.get(method_name) orelse return NativeResult.scalar(.{ .int = if (in_interface) 65 else 0 });
     return NativeResult.scalar(.{ .int = interface_bits | if (this.get("__hook_method") == .string) (methodModifiers(info) & ~@as(i64, 7)) | 1 else methodModifiers(info) });
