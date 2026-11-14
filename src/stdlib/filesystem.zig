@@ -170,9 +170,22 @@ const common_entries = .{
 
 // file handle management - store handles in PhpObjects with class "FileHandle"
 
+// a proc_open pipe: its process is named by address (it doesn't keep the
+// process alive, the process owns it), or held on windows
+fn isProcPipe(obj: *PhpObject) bool {
+    return obj.get("__proc_ptr") == .int or obj.get("__proc_ref") == .resource;
+}
+
+fn procOfPipe(obj: *PhpObject) ?*PhpObject {
+    const ptr = obj.get("__proc_ptr");
+    if (ptr == .int) return @ptrFromInt(@as(usize, @intCast(ptr.int)));
+    const ref = obj.get("__proc_ref");
+    return if (ref == .resource) ref.resource else null;
+}
+
 fn cleanupPoolableHandle(obj: *PhpObject) bool {
     cleanupHandle(obj);
-    if (obj.get("__proc_ref") == .resource) return false;
+    if (isProcPipe(obj)) return false;
     const fd = obj.get("__fd");
     return fd != .int or fd.int > 2;
 }
@@ -502,7 +515,7 @@ fn parseDataUri(a: Allocator, path: []const u8) DataUriError![]u8 {
 pub fn cleanupHandle(obj: *PhpObject) void {
     if (obj.pooled or !std.mem.eql(u8, obj.class_name, "FileHandle")) return;
     streams.release(obj);
-    if (obj.get("__proc_ref") == .resource) return;
+    if (isProcPipe(obj)) return;
     const fd = obj.get("__fd");
     if (fd == .int and fd.int <= 2) return;
     const open = obj.get("__open");
@@ -3045,10 +3058,9 @@ fn closeHandle(ctx: *NativeContext, obj: *PhpObject) RuntimeError!bool {
     // closing a proc_open pipe: close our fd and detach it from the live child so
     // proc_close's wait() (cleanupStreams) won't double-close the same fd. closing
     // the stdin pipe also signals EOF to the child. each fd is owned exactly once
-    const proc_ref = obj.get("__proc_ref");
     const proc_role = obj.get("__proc_role");
-    if (proc_ref == .resource and proc_role == .int) {
-        if (ctx.vm.lookupProcChild(proc_ref.resource)) |pc| {
+    if (procOfPipe(obj)) |proc| if (proc_role == .int) {
+        if (ctx.vm.lookupProcChild(proc)) |pc| {
             for (pc.pipe_fds.items) |*pipe| {
                 if (pipe.role == proc_role.int and pipe.fd != -1) {
                     platform.closeFd(pipe.fd);
@@ -3060,7 +3072,7 @@ fn closeHandle(ctx: *NativeContext, obj: *PhpObject) RuntimeError!bool {
         obj.set(ctx.allocator, "__fd", .{ .int = -1 }) catch {};
         obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
         return true;
-    }
+    };
     const popen_cmd = obj.get("__popen_cmd");
     if (popen_cmd == .string) {
         const buf_v_p = obj.get("__buffer");
@@ -3541,7 +3553,7 @@ fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!N
     // sockets have no wrapper and name their address; process pipes and
     // tmpfile() have neither a wrapper nor a uri
     const is_socket = isNetStream(obj);
-    const is_pipe = obj.get("__proc_ref") != .null;
+    const is_pipe = isProcPipe(obj);
     if (is_socket) {
         const sock_type = obj.get("__sock_type");
         stream_type = if (sock_type == .string) sock_type.string.bytes() else "generic_socket";
@@ -4275,7 +4287,7 @@ fn native_stream_is_local(ctx: *NativeContext, args: []const Value) RuntimeError
     if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
     if (args[0] == .resource) {
         const obj = try streamArg(ctx, args, .{ .func = "stream_is_local" });
-        if (isNetStream(obj) or obj.get("__proc_ref") != .null or obj.get("__popen_cmd") != .null or obj.get("__popen_exit") != .null) return NativeResult.scalar(.{ .bool = false });
+        if (isNetStream(obj) or isProcPipe(obj) or obj.get("__popen_cmd") != .null or obj.get("__popen_exit") != .null) return NativeResult.scalar(.{ .bool = false });
         // the standard streams and tmpfile() are plain files to php
         const path_val = obj.get("__path");
         if (path_val != .string) return NativeResult.scalar(.{ .bool = true });
@@ -5065,7 +5077,7 @@ fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
             try fobj.set(ctx.allocator, "__open", .{ .bool = true });
             try fobj.set(ctx.allocator, "__mode", .{ .string = Value.String.borrowed(m) });
             try fobj.set(ctx.allocator, "__fd", .{ .int = @intCast(parent_fd) });
-            try fobj.set(ctx.allocator, "__proc_ref", .{ .resource = proc });
+            try fobj.set(ctx.allocator, "__proc_ptr", .{ .int = @intCast(@intFromPtr(proc)) });
             try fobj.set(ctx.allocator, "__proc_role", .{ .int = desc.role });
             try pipes.set(ctx.allocator, .{ .int = desc.role }, .{ .resource = fobj });
             ctx.vm.adoptProcPipe(proc, desc.role, fobj);

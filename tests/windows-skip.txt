@@ -57,3 +57,4 @@ hash_algos_streaming_serialize.php: php's windows build serializes hash contexts
 pcntl.php: pcntl is posix-only, and the reference php's windows ini disables assertions so its first failure differs
 proc_open_pipes_open_at_exit.php: proc_open's ['socket'] descriptor isn't implemented on windows yet
 proc_open_descriptor_spec.php: the windows proc_open (proc_win.zig) parses its descriptor spec on its own, without php's null and redirect handling, and the test runs sh and cat
+proc_open_resource_release.php: the test runs sh, and the windows proc_open still has its pipes hold the process resource

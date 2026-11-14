@@ -1361,6 +1361,9 @@ pub const VM = struct {
     // proc_close can wait() it; reapProcChildren SIGKILL+wait+frees any that the
     // script opened but never closed, so serve mode doesn't leak fds or zombies
     proc_children: ?*ProcChildMap = null,
+    // children whose process resource was freed while they ran, as php
+    // leaves them: waited for without blocking when the vm resets
+    proc_orphans: std.ArrayListUnmanaged(platform.Pid) = .empty,
 
     fn procChildren(self: *VM) RuntimeError!*ProcChildMap {
         if (self.proc_children) |pc| return pc;
@@ -1380,6 +1383,21 @@ pub const VM = struct {
             pipe.handle = null;
         }
         pc.pipe_fds.deinit(self.allocator);
+        self.removeProcChild(proc);
+    }
+
+    // php's proc_open_rsrc_dtor, for a process resource nothing references:
+    // its pipes are closed and the child is waited for without blocking
+    pub fn procResourceDestroyed(self: *VM, proc: *PhpObject) void {
+        if (platform.is_windows) return;
+        const pc = self.lookupProcChild(proc) orelse return;
+        for (pc.pipe_fds.items) |*pipe| {
+            pipe.close();
+            if (pipe.handle) |handle| self.objRelease(handle);
+            pipe.handle = null;
+        }
+        pc.pipe_fds.deinit(self.allocator);
+        if (!pc.reaped and sys.waitpid(pc.pid, std.posix.W.NOHANG).pid == 0) self.proc_orphans.append(self.allocator, pc.pid) catch {};
         self.removeProcChild(proc);
     }
 
@@ -1416,6 +1434,10 @@ pub const VM = struct {
     // pipe fd the script never fclose'd is closed. runs at reset (before
     // freeHeapItems) and deinit; clears the map after
     fn reapProcChildren(self: *VM) void {
+        if (!platform.is_windows) for (self.proc_orphans.items) |pid| {
+            _ = sys.waitpid(pid, std.posix.W.NOHANG);
+        };
+        self.proc_orphans.clearAndFree(self.allocator);
         const pc = self.proc_children orelse return;
         var it = pc.valueIterator();
         while (it.next()) |entry| {
@@ -29240,6 +29262,7 @@ pub const VM = struct {
         // property slots held. runs after __destruct (PHP tears
         // properties down after)
         if (obj.resource and obj.native.kind == .stream) @import("../stdlib/streams.zig").destroyed(self, obj);
+        if (obj.resource and std.mem.eql(u8, obj.class_name, "ProcessResource")) self.procResourceDestroyed(obj);
         const reusable = self.releaseNativeState(obj);
         self.releaseObjectProperties(obj);
         self.release_log = outer_log;
