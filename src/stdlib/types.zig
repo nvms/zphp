@@ -1140,7 +1140,7 @@ pub fn getObjectVars(ctx: *NativeContext, object: *PhpObject) RuntimeError!*PhpA
     var from: usize = 0;
     while (try object_iter.fetch(ctx.vm, it, obj, from)) |step| {
         from = step.index + 1;
-        const name = step.key.string;
+        const name = step.raw orelse step.key.string;
         if (name.owner == null) {
             try arr.set(ctx.allocator, .{ .string = name }, step.value);
         } else {

@@ -121,7 +121,14 @@ pub fn innermost(obj: *PhpObject) *PhpObject {
     return o;
 }
 
-pub const Step = struct { index: usize, key: Value, value: Value };
+pub const Step = struct {
+    index: usize,
+    key: Value,
+    value: Value,
+    // a dynamic property's name as the table holds it (foreach shows a
+    // mangled-looking one unmangled, get_object_vars as it is)
+    raw: ?Value.String = null,
+};
 
 fn slotValue(vm: *VM, obj: *PhpObject, index: usize, name: []const u8, declaring: []const u8) ?Value {
     const slots = obj.slots orelse return null;
@@ -164,10 +171,10 @@ pub fn fetch(vm: *VM, it: *ObjectIter, obj: *PhpObject, from: usize) RuntimeErro
                         // a name that looks mangled is a dynamic property's own;
                         // the loop shows the part after the class
                         const prop = object_properties.unmangle(name, v);
-                        return .{ .index = i, .key = .{ .string = item.name.borrowedSlice(name.len - prop.key.name.len, name.len) }, .value = v };
+                        return .{ .index = i, .key = .{ .string = item.name.borrowedSlice(name.len - prop.key.name.len, name.len) }, .value = v, .raw = item.name };
                     }
                     if (scopePrivateShadows(vm, obj, it.scope, name)) continue;
-                    return .{ .index = i, .key = .{ .string = item.name }, .value = v };
+                    return .{ .index = i, .key = .{ .string = item.name }, .value = v, .raw = item.name };
                 },
                 .hooked => {
                     // a private property's hooks are its declaring class's
