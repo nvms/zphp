@@ -1634,6 +1634,8 @@ fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "error_reporting")) return "30719";
     if (std.mem.eql(u8, name, "zend.assertions")) return "1";
     if (std.mem.eql(u8, name, "zend.enable_gc")) return "1";
+    if (std.mem.eql(u8, name, "zend.exception_ignore_args")) return "0";
+    if (std.mem.eql(u8, name, "zend.exception_string_param_max_len")) return "15";
     if (std.mem.eql(u8, name, "fiber.stack_size")) return "";
     if (std.mem.eql(u8, name, "assert.active")) return "1";
     if (std.mem.eql(u8, name, "assert.exception")) return "1";
@@ -1729,6 +1731,11 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         try ctx.vm.emitWarning("fiber.stack_size must be a positive number");
         return NativeResult.scalar(Value{ .bool = false });
     }
+    // php's OnSetExceptionStringParamMaxLen
+    if (std.mem.eql(u8, name, "zend.exception_string_param_max_len")) {
+        const n = @import("../runtime/memory.zig").parseQuantity(buf.items).value;
+        if (n < 0 or n > 1000000) return NativeResult.scalar(Value{ .bool = false });
+    }
     if (std.mem.eql(u8, name, "memory_limit")) {
         const requested = @import("../runtime/memory.zig").parseQuantity(buf.items).value;
         if (ctx.vm.memoryLimitCap(requested)) |cap| {
@@ -1780,6 +1787,7 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         if (new_val.len > 0) try ctx.vm.ini_callbacks.put(ctx.vm.allocator, "assert.callback", .{ .string = try Value.String.create(ctx.vm.allocator, new_val) });
     }
     if (std.mem.eql(u8, name, "precision") or std.mem.eql(u8, name, "serialize_precision")) ctx.vm.syncFloatPrecision();
+    if (std.mem.eql(u8, name, "zend.exception_string_param_max_len")) ctx.vm.syncStringParamMaxLen();
     return result;
 }
 
@@ -2182,6 +2190,7 @@ fn native_ini_restore(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
         if (new_val.len > 0) try ctx.vm.ini_callbacks.put(ctx.vm.allocator, "assert.callback", .{ .string = try Value.String.create(ctx.vm.allocator, new_val) });
     }
     if (std.mem.eql(u8, name, "precision") or std.mem.eql(u8, name, "serialize_precision")) ctx.vm.syncFloatPrecision();
+    if (std.mem.eql(u8, name, "zend.exception_string_param_max_len")) ctx.vm.syncStringParamMaxLen();
     return NativeResult.scalar(.null);
 }
 

@@ -14253,6 +14253,20 @@ pub const VM = struct {
         return entry;
     }
 
+    // zend.exception_ignore_args: an exception's trace has no "args"
+    // (zend_fetch_debug_backtrace with DEBUG_BACKTRACE_IGNORE_ARGS)
+    fn dropExceptionTraceArgs(self: *VM, trace: *PhpArray) void {
+        if (!self.iniFlagOn("zend.exception_ignore_args", "0")) return;
+        const key: PhpArray.Key = .{ .string = Value.String.borrowed("args") };
+        for (trace.entries.items) |e| {
+            if (e.value != .array) continue;
+            const args = e.value.array.get(key);
+            if (args == .null) continue;
+            e.value.array.remove(key);
+            self.releaseValue(args);
+        }
+    }
+
     fn traceArgs(self: *VM, entry: *PhpArray) !*PhpArray {
         const args = try self.allocArray();
         try entry.set(self.allocator, .{ .string = Value.String.borrowed("args") }, .{ .array = args });
@@ -14293,6 +14307,7 @@ pub const VM = struct {
                 }
             }
         };
+        self.dropExceptionTraceArgs(trace);
         try exc.setForScope(self.allocator, "trace", .{ .array = trace }, scope);
     }
 
@@ -15846,6 +15861,11 @@ pub const VM = struct {
         const h = value_mod.hooks();
         h.precision = self.iniInt("precision", 14);
         h.serialize_precision = self.iniInt("serialize_precision", -1);
+    }
+
+    // zend.exception_string_param_max_len, read where traces are printed
+    pub fn syncStringParamMaxLen(self: *VM) void {
+        @import("../error_format.zig").string_param_max_len = @intCast(std.math.clamp(self.iniInt("zend.exception_string_param_max_len", 15), 0, 1000000));
     }
 
     fn iniInt(self: *const VM, name: []const u8, default: i32) i32 {
@@ -24484,10 +24504,12 @@ pub const VM = struct {
                 try full.append(self.allocator, .{ .array = entry });
                 for (trace.entries.items) |e| try full.append(self.allocator, e.value);
                 self.releaseUnheldArray(trace);
+                self.dropExceptionTraceArgs(full);
                 try obj.setForScope(self.allocator, "trace", .{ .array = full }, self.exceptionTraceScope(obj));
                 return;
             }
         };
+        self.dropExceptionTraceArgs(trace);
         try obj.setForScope(self.allocator, "trace", .{ .array = trace }, self.exceptionTraceScope(obj));
     }
 
@@ -24495,7 +24517,9 @@ pub const VM = struct {
         const at: SourcePosition = if (top > 0) self.framePosition(top - 1) orelse .{ .file = self.frameFile(top - 1), .line = 0 } else .{ .file = self.file_path, .line = 0 };
         try obj.set(self.allocator, "file", .{ .string = Value.String.borrowed(at.file) });
         try obj.set(self.allocator, "line", .{ .int = at.line });
-        try obj.setForScope(self.allocator, "trace", .{ .array = try self.traceBelow(top) }, self.exceptionTraceScope(obj));
+        const trace = try self.traceBelow(top);
+        self.dropExceptionTraceArgs(trace);
+        try obj.setForScope(self.allocator, "trace", .{ .array = trace }, self.exceptionTraceScope(obj));
     }
 
     // copy a template value (a property/static default) into a fresh owner.

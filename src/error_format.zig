@@ -342,6 +342,9 @@ pub fn writeEscaped(buf: *Writer, alloc: std.mem.Allocator, bytes: []const u8) v
     };
 }
 
+// zend.exception_string_param_max_len (VM.syncStringParamMaxLen)
+pub threadlocal var string_param_max_len: usize = 15;
+
 pub fn writeTraceArg(buf: *Writer, alloc: std.mem.Allocator, v: Value) void {
     switch (v) {
         .null => write(buf, alloc, "NULL"),
@@ -357,8 +360,9 @@ pub fn writeTraceArg(buf: *Writer, alloc: std.mem.Allocator, v: Value) void {
         .string => |s| {
             const bytes = s.bytes();
             write(buf, alloc, "'");
-            writeEscaped(buf, alloc, bytes[0..@min(bytes.len, 15)]);
-            write(buf, alloc, if (bytes.len > 15) "...'" else "'");
+            const max = string_param_max_len;
+            writeEscaped(buf, alloc, bytes[0..@min(bytes.len, max)]);
+            write(buf, alloc, if (bytes.len > max) "...'" else "'");
         },
         .array => write(buf, alloc, "Array"),
         .object => |o| if (o.enum_case) {

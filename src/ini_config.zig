@@ -296,6 +296,7 @@ pub fn applyToVm(vm: *VM) RuntimeError!void {
     }
     vm.syncGcEnabled();
     vm.syncFloatPrecision();
+    vm.syncStringParamMaxLen();
 }
 
 // php raises its ini handlers' startup diagnostics once, when a module
