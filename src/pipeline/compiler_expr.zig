@@ -2461,7 +2461,7 @@ pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
     // object (e.g. (new X())::foo()): evaluate the object, derive its class,
     // then emit static_call_dynamic
     switch (class_node.tag) {
-        .new_expr, .method_call, .nullsafe_method_call, .call, .property_access, .nullsafe_property_access, .array_access => {
+        .new_expr, .new_expr_dynamic, .anonymous_class, .method_call, .nullsafe_method_call, .call, .property_access, .nullsafe_property_access, .array_access => {
             try self.compileNode(class_lhs_idx);
             try self.emitOp(.get_obj_class);
             const method_idx = try self.addConstant(.{ .string = Value.String.borrowed(method_name) });
