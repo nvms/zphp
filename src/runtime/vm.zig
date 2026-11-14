@@ -8816,7 +8816,8 @@ pub const VM = struct {
                             const msg = try std.fmt.allocPrint(self.allocator, "The return value of {s} {s}() should either be used or intentionally ignored by casting it as (void){s}{s}", .{ kind, shown, if (reason.len > 0) ", " else "", reason });
                             defer self.allocator.free(msg);
                             const line: i64 = if (self.sourceLocation(caller.chunk, if (caller.ip > 0) caller.ip - 1 else 0)) |loc| @intCast(loc.line) else 0;
-                            self.raiseErrorAt(E_WARNING, msg, .{ .file = self.frameFile(self.frame_count - 2), .line = line }) catch if (try self.resumeRaised()) continue;
+                            // php raises it as E_USER_WARNING
+                            self.raiseErrorAt(512, msg, .{ .file = self.frameFile(self.frame_count - 2), .line = line }) catch if (try self.resumeRaised()) continue;
                         }
                     }
                 },
@@ -15277,7 +15278,7 @@ pub const VM = struct {
             if (frame.ip >= code.len or code[frame.ip] != @intFromEnum(OpCode.pop_boundary)) return;
             const msg = try std.fmt.allocPrint(self.allocator, "The return value of {s} {s}() should either be used or intentionally ignored by casting it as (void){s}{s}", .{ if (is_method) "method" else "function", shown, if (reason.len > 0) ", " else "", reason });
             defer self.allocator.free(msg);
-            try self.raiseError(E_WARNING, msg);
+            try self.raiseError(512, msg);
         }
     }
 

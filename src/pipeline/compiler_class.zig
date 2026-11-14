@@ -4383,6 +4383,17 @@ const MagicMethod = struct {
 // php's zend_check_magic_method_implementation: the arity, static-ness,
 // visibility and types php requires of each magic method, checked as the
 // method compiles. only visibility is a warning, the rest end compilation
+fn hasNoDiscard(self: *Compiler, token: u32) Error!bool {
+    if (self.ast.attr_ranges.len == 0) return false;
+    const attrs = try extractAttributes(self, token, .unchecked);
+    defer freeParsedAttrs(self.allocator, attrs);
+    for (attrs) |pa| {
+        const attr_name = if (pa.name.len > 0 and pa.name[0] == '\\') pa.name[1..] else pa.name;
+        if (std.ascii.eqlIgnoreCase(attr_name, "NoDiscard")) return true;
+    }
+    return false;
+}
+
 fn checkMagicMethod(self: *Compiler, class_name: []const u8, member: Ast.Node, m: MagicMethod) Error!void {
     const name = self.ast.tokenSlice(member.main_token);
     if (name.len < 2 or name[0] != '_' or name[1] != '_') return;
@@ -4455,6 +4466,11 @@ fn checkMagicMethod(self: *Compiler, class_name: []const u8, member: Ast.Node, m
     }
     if (rule.no_return_type and m.return_type.len > 0) {
         return self.failFmt(token, "Method {s}::{s}() cannot declare a return type", .{ class, name });
+    }
+    // zend_check_magic_method_no_return_type and a void return type: no
+    // #[\NoDiscard]
+    if ((rule.no_return_type or rule.returns == php_types.VOID) and try hasNoDiscard(self, token)) {
+        return self.failFmt(token, "Method {s}::{s} cannot be #[\\NoDiscard]", .{ class, name });
     }
     if (rule.returns != 0 and m.return_type.len > 0) {
         const declared = php_types.parse(self.allocator, m.return_type, class_name, null) catch return error.OutOfMemory;
