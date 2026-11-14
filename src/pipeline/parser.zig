@@ -1216,6 +1216,24 @@ const Parser = struct {
         return self.addNode(.{ .tag = .try_catch, .main_token = try_tok, .data = .{ .lhs = try_body, .rhs = rhs_extra } });
     }
 
+    // php's grammar takes an enum case in any class-like body, and the
+    // compiler refuses it outside enums
+    fn skipMisplacedCase(self: *Parser) void {
+        const tok = self.advance();
+        self.deferCompileError(tok, "Case can only be used in enums", .{});
+        while (self.peek() != .semicolon and self.peek() != .eof and self.peek() != .r_brace) _ = self.advance();
+        if (self.peek() == .semicolon) _ = self.advance();
+    }
+
+    // php's grammar takes `static` as a class name here, and the compiler
+    // refuses it
+    fn parseCatchType(self: *Parser) Error!u32 {
+        if (self.peek() != .kw_static) return self.parseQualifiedName();
+        const tok = self.advance();
+        self.deferCompileError(tok, "Bad class name in the catch statement", .{});
+        return self.addNode(.{ .tag = .identifier, .main_token = tok, .data = .{} });
+    }
+
     fn parseCatchClause(self: *Parser) Error!u32 {
         _ = self.advance(); // catch
         _ = try self.expect(.l_paren);
@@ -1223,12 +1241,12 @@ const Parser = struct {
         var types = std.ArrayListUnmanaged(u32).empty;
         defer types.deinit(self.allocator);
 
-        if (self.peek() == .identifier or self.peek() == .backslash or (self.peek() == .kw_namespace and self.peekAt(1) == .backslash)) {
-            try types.append(self.allocator, try self.parseQualifiedName());
+        if (self.peek() == .identifier or self.peek() == .backslash or self.peek() == .kw_static or (self.peek() == .kw_namespace and self.peekAt(1) == .backslash)) {
+            try types.append(self.allocator, try self.parseCatchType());
 
             while (self.peek() == .pipe) {
                 _ = self.advance();
-                try types.append(self.allocator, try self.parseQualifiedName());
+                try types.append(self.allocator, try self.parseCatchType());
             }
         }
 
@@ -1572,6 +1590,10 @@ const Parser = struct {
             const members_before = members.items.len;
             defer self.shareGroupAttributes(ranges_before, members.items[@min(members_before + 1, members.items.len)..]) catch {};
             try self.parseAttributes();
+            if (self.peek() == .kw_case) {
+                self.skipMisplacedCase();
+                continue;
+            }
             var is_static = false;
             var is_abstract = false;
             var is_final = false;
@@ -1901,6 +1923,9 @@ const Parser = struct {
     fn parseTraitDecl(self: *Parser) Error!u32 {
         _ = self.advance(); // trait
         const name_tok = try self.expectName();
+        const outer_class = self.current_class_name;
+        self.current_class_name = self.tokenText(name_tok);
+        defer self.current_class_name = outer_class;
         _ = try self.expect(.l_brace);
 
         var members = std.ArrayListUnmanaged(u32).empty;
@@ -1908,6 +1933,10 @@ const Parser = struct {
 
         while (self.peek() != .r_brace and self.peek() != .eof) {
             try self.parseAttributes();
+            if (self.peek() == .kw_case) {
+                self.skipMisplacedCase();
+                continue;
+            }
 
             var is_static = false;
             var is_abstract = false;
@@ -2077,6 +2106,9 @@ const Parser = struct {
     fn parseEnumDecl(self: *Parser) Error!u32 {
         _ = self.advance(); // enum
         const name_tok = try self.expectName();
+        const outer_class = self.current_class_name;
+        self.current_class_name = self.tokenText(name_tok);
+        defer self.current_class_name = outer_class;
 
         // the backing type's first token; the compiler reads the whole type
         // to refuse anything but int and string
@@ -2299,7 +2331,12 @@ const Parser = struct {
 
         const prev_yield = self.found_yield;
         self.found_yield = false;
-        const body = try self.parseBlock();
+        // a method without a body parses, and the compiler refuses it
+        const body = if (self.peek() == .semicolon) blk: {
+            const semi = self.advance();
+            self.deferCompileError(name_tok, "Non-abstract method {s}::{s}() must contain body", .{ self.current_class_name, self.tokenText(name_tok) });
+            break :blk try self.addNode(.{ .tag = .block, .main_token = semi, .data = .{ .lhs = try self.addExtraList(&.{}) } });
+        } else try self.parseBlock();
         const is_gen = self.found_yield;
         self.found_yield = prev_yield;
 
@@ -2811,6 +2848,13 @@ const Parser = struct {
             if (tag == .kw_final) {
                 param_final = true;
                 _ = self.advance();
+                continue;
+            }
+            // php's grammar reads any member modifier here, and
+            // zend_modifier_token_to_flag refuses these on a parameter
+            if (tag == .kw_static or tag == .kw_abstract) {
+                const tok = self.advance();
+                self.deferModifierError(tok, "Cannot use the {s} modifier on a parameter", .{if (tag == .kw_static) "static" else "abstract"});
                 continue;
             }
             if (tag == .kw_public or tag == .kw_protected or tag == .kw_private) {

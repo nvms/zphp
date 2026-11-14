@@ -32,6 +32,16 @@ $cases = [
     'var_dump(1 ?: 2 ? 3 : 4);',
     'var_dump(1 ? 2 : 3 ?: 4);',
     'var_dump(0 ?: 0 ?: 3, (1 ? 2 : 3) ? 4 : 5);',
+    'class A { function f(); }',
+    'trait T { public static function f(): int; }',
+    'enum E { case A; function f(); }',
+    'class A { case B; }',
+    'trait T { case B = 1; }',
+    'try {} catch (static $e) {}',
+    'try {} catch (Exception|static $e) {}',
+    'class A { function __construct(public static $x) {} }',
+    'class A { function __construct(abstract $x) {} }',
+    'function f(static $x) {}',
 ];
 foreach ($cases as $code) {
     echo $code, "\n";
