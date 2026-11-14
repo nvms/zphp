@@ -164,7 +164,7 @@ const error_levels = [_]struct { name: []const u8, value: i64 }{
     .{ .name = "E_ALL", .value = 30719 },
 };
 
-// grammar: expr = term (('|' | '&' | '^') term)*; term = '~' term | '(' expr ')' | E_NAME | integer
+// grammar: expr = term (('|' | '&' | '^') term)*; term = '~' term | '!' term | '(' expr ')' | E_NAME | integer
 const LevelParser = struct {
     src: []const u8,
     pos: usize = 0,
@@ -205,6 +205,11 @@ const LevelParser = struct {
         if (ch == '~') {
             self.pos += 1;
             return ~self.term();
+        }
+        // zend_ini_parser's logical not
+        if (ch == '!') {
+            self.pos += 1;
+            return @intFromBool(self.term() == 0);
         }
         if (ch == '(') {
             self.pos += 1;
@@ -347,6 +352,7 @@ test "ini values are cooked the way php cooks them" {
     try std.testing.expectEqualStrings("22519", cook("E_ALL & ~(E_NOTICE | E_DEPRECATED)"));
     try std.testing.expectEqualStrings("E_ALL &", cook("E_ALL &"));
     try std.testing.expectEqualStrings("E_ALL)", cook("E_ALL)"));
+    try std.testing.expectEqualStrings("8204", cook("E_ALL & E_NOTICE | E_PARSE ^ E_DEPRECATED & ~E_WARNING | !E_ERROR"));
     try std.testing.expectEqualStrings("(E_ALL", cook("(E_ALL"));
     try std.testing.expectEqualStrings("256M", cook("256M"));
 }
