@@ -2977,7 +2977,10 @@ const Parser = struct {
             if (is_ref_assign) {
                 ref_amp_tok = self.advance();
             }
-            const right_inner = try self.parseExprPrec(right_min);
+            // `= &` takes only a variable in php's grammar, so an operator
+            // after it applies to the whole assignment: `$a = &$b + 1` adds
+            // to the result of `$a = &$b`
+            const right_inner = try self.parseExprPrec(if (is_ref_assign) 20 else right_min);
             const right = if (is_ref_assign)
                 try self.addNode(.{ .tag = .ref_target, .main_token = ref_amp_tok, .data = .{ .lhs = right_inner } })
             else
