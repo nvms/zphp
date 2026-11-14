@@ -541,6 +541,8 @@ pub const OpCode = enum(u8) {
     verify_return,
     // unset($$name): pops the name and unsets the variable it names
     unset_var_var,
+    // unset($GLOBALS[name]): pops the name and unsets that global variable
+    unset_global_var,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {

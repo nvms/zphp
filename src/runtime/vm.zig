@@ -8721,6 +8721,23 @@ pub const VM = struct {
                         return error.RuntimeError;
                     }
                 },
+                .unset_global_var => {
+                    const name_val = self.pop();
+                    defer self.stackRelease(name_val);
+                    var text_buf: [32]u8 = undefined;
+                    const raw_name = varVarText(name_val, &text_buf);
+                    var buf: [256]u8 = undefined;
+                    const name = try self.internName(varVarName(raw_name, &buf));
+                    if (self.frame_count > 0) {
+                        if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
+                        if (self.currentFrame().func == null and self.frameInGlobalScope(self.currentFrame())) self.unsetVariableNamed(name) else self.unsetIncludeVar(0, name);
+                    }
+                    if (self.hasPendingReleases()) self.drainPendingDestruct();
+                    if (self.drainRaised()) {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    }
+                },
                 .unset_var_var => {
                     // unset($$name): the name as a variable-variable read takes it
                     const name_val = self.pop();
@@ -21080,13 +21097,18 @@ pub const VM = struct {
             self.unbindRefSlot(&frame.ref_slots, name);
             self.revertUncapturedCell(cell);
         }
-        const slot_names = if (frame.func) |func| func.slot_names else frame.slot_names;
+        const slot_names = if (frame.func) |func| func.slot_names else if (frame.slot_names.len == 0 and frame_idx == 0) self.global_slot_names else frame.slot_names;
         for (slot_names, 0..) |slot_name, slot| {
             if (std.mem.eql(u8, slot_name, name) and slot < frame.locals.len) {
                 if (!had_var) self.releaseValue(frame.locals[slot]);
-                frame.locals[slot] = .null;
+                frame.locals[slot] = .undef;
                 break;
             }
+        }
+        // the script's own frame mirrors its variables into $GLOBALS
+        if (frame.func == null and frame.include_parent == null and name.len > 1 and name[0] == '$') {
+            self.unbindRefSlot(&self.globals_cells, name);
+            if (self.globals_array) |ga| ga.remove(.{ .string = Value.String.borrowed(name[1..]) });
         }
         if (frame.include_parent) |parent_idx| self.unsetIncludeVar(parent_idx, name);
     }

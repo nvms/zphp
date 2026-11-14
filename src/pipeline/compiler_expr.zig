@@ -1831,6 +1831,10 @@ fn compileUnset(self: *Compiler, args: []const u32) Error!void {
                 try self.emitOp(.unset_prop);
                 try self.emitU16(prop_idx);
             }
+        } else if (arg.tag == .array_access and arg.data.rhs != 0 and isGlobalsFetch(self, arg.data.lhs)) {
+            // $GLOBALS[name] is the global variable itself
+            try self.compileNode(arg.data.rhs);
+            try self.emitOp(.unset_global_var);
         } else if (arg.tag == .array_access) {
             // COW: removing an element mutates the array in place, so the root
             // variable of the dimension chain must be separated first if it
