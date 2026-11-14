@@ -8256,6 +8256,14 @@ pub const VM = struct {
                     try self.resolveStaticDefaults(class_name);
                     _ = try self.staticPropTarget(class_name, prop_name, .write);
                     try self.bindStaticPropToCell(class_name, prop_name, cell);
+                    // php frees what the destination held before it reads the
+                    // result, so a destructor's writes through the reference
+                    // show (GH-10168)
+                    if (self.hasPendingReleases()) self.drainPendingDestruct();
+                    if (self.drainRaised()) {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    }
                     self.push(cell.*);
                 },
 
@@ -8375,6 +8383,14 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
                         try self.bindPropToCell(obj_val.object.storage(), prop_name, cell);
+                    }
+                    // php frees what the destination held before it reads the
+                    // result, so a destructor's writes through the reference
+                    // show (GH-10168)
+                    if (self.hasPendingReleases()) self.drainPendingDestruct();
+                    if (self.drainRaised()) {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
                     }
                     self.push(cell.*);
                 },

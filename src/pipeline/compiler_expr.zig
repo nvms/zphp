@@ -265,6 +265,8 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                     try self.emitU16(prop_idx);
                 }
                 try self.emitU16(source_idx);
+                // what the property held is freed before the result is read
+                try self.emitOp(.statement_end);
                 try self.compileNode(self.ast.nodes[node.data.rhs].data.lhs);
                 return;
             }
