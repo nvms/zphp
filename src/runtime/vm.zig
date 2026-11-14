@@ -300,12 +300,20 @@ pub const NativeContext = struct {
             }
             return;
         }
+        // a closure's __invoke called as a method is named as that method
+        var invoke_shown: ?[]const u8 = null;
         const name: []const u8 = switch (callee) {
             .function => |n| n,
             .closure => |obj| blk: {
                 if (obj.closureName()) |instance| break :blk instance;
                 const inner = obj.fakeCallable();
                 break :blk if (inner == .string) inner.string.bytes() else return;
+            },
+            .method => |m| blk: {
+                if (!std.ascii.eqlIgnoreCase(m.name, "__invoke")) return;
+                const instance = m.object.closureName() orelse return;
+                invoke_shown = "Closure::__invoke";
+                break :blk instance;
             },
             else => return,
         };
@@ -314,7 +322,7 @@ pub const NativeContext = struct {
         for (0..@min(count, func.ref_params.len)) |i| {
             if (i < is_ref.len and is_ref[i]) continue;
             if (!func.ref_params[i] or i >= func.params.len) continue;
-            const shown = try self.vm.callableDisplayName(name, func);
+            const shown = invoke_shown orelse try self.vm.callableDisplayName(name, func);
             const param = func.params[i];
             const param_name = if (param.len > 0 and param[0] == '$') param[1..] else param;
             const msg = try std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} (${s}) must be passed by reference, value given", .{ shown, i + 1, param_name });
