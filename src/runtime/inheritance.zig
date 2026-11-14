@@ -516,6 +516,22 @@ fn ancestorDeclaring(p: *const Pending, start: ?[]const u8, name: []const u8) ?[
     return null;
 }
 
+// the interface of the class start or its ancestors that declares a method
+fn interfaceDeclaring(p: *const Pending, arena: std.mem.Allocator, start: ?[]const u8, name: []const u8) !?[]const u8 {
+    var current = start;
+    while (current) |class| {
+        const def = defOf(p, class) orelse return null;
+        for (def.interfaces.items) |iface| {
+            var wanted: std.ArrayListUnmanaged([2][]const u8) = .empty;
+            var seen: std.StringHashMapUnmanaged(void) = .{};
+            try interfaceMethods(p, iface, &wanted, arena, &seen);
+            for (wanted.items) |entry| if (std.ascii.eqlIgnoreCase(entry[1], name)) return entry[0];
+        }
+        current = def.parent;
+    }
+    return null;
+}
+
 fn interfaceMethods(p: *const Pending, iface: []const u8, out: *std.ArrayListUnmanaged([2][]const u8), arena: std.mem.Allocator, seen: *std.StringHashMapUnmanaged(void)) !void {
     if (seen.contains(iface)) return;
     try seen.put(arena, iface, {});
@@ -653,10 +669,19 @@ pub fn checkClass(vm: *VM, class_name: []const u8, def: *const ClassDef) Runtime
     if (def.parent) |parent_name| {
         for (def.method_order.items) |name| {
             if (std.mem.indexOf(u8, name, "$hook_") != null) continue;
-            const owner = ancestorDeclaring(p, parent_name, name) orelse continue;
+            const is_ctor = std.ascii.eqlIgnoreCase(name, "__construct");
+            const owner = ancestorDeclaring(p, parent_name, name) orelse {
+                // a constructor no parent declares still has the prototype
+                // an interface of theirs gives
+                if (!is_ctor) continue;
+                const iface = (interfaceDeclaring(p, arena, parent_name, name) catch return error.OutOfMemory) orelse continue;
+                const proto = (methodOf(p, arena, iface, name, true) catch return error.OutOfMemory) orelse continue;
+                const child = (methodOf(p, arena, class_name, name, false) catch return error.OutOfMemory) orelse continue;
+                try checkMethod(p, arena, child, proto, true);
+                continue;
+            };
             var parent = (methodOf(p, arena, owner, name, false) catch return error.OutOfMemory) orelse continue;
             const child = (methodOf(p, arena, class_name, name, false) catch return error.OutOfMemory) orelse continue;
-            const is_ctor = std.ascii.eqlIgnoreCase(name, "__construct");
             // a constructor that isn't abstract is checked against the
             // abstract one it implements, its prototype
             if (is_ctor and !parent.is_abstract and !parent.is_final) proto: {
@@ -664,6 +689,11 @@ pub fn checkClass(vm: *VM, class_name: []const u8, def: *const ClassDef) Runtime
                 const proto_owner = ancestorDeclaring(p, def_parent.parent, name) orelse break :proto;
                 const proto = (methodOf(p, arena, proto_owner, name, false) catch return error.OutOfMemory) orelse break :proto;
                 if (proto.is_abstract) parent = proto;
+            }
+            // or the one an interface of the parent's declares
+            if (is_ctor and !parent.is_abstract and !parent.is_final) proto: {
+                const iface = (interfaceDeclaring(p, arena, parent_name, name) catch return error.OutOfMemory) orelse break :proto;
+                parent = (methodOf(p, arena, iface, name, true) catch return error.OutOfMemory) orelse break :proto;
             }
             try checkMethod(p, arena, child, parent, is_ctor);
         }
