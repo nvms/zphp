@@ -2159,6 +2159,8 @@ pub const constants = Map.initComptime(.{
     .{ "STREAM_IPPROTO_IP", "standard" },
     .{ "STREAM_IPPROTO_TCP", "standard" },
     .{ "STREAM_IPPROTO_UDP", "standard" },
+    .{ "STREAM_OOB", "standard" },
+    .{ "STREAM_PEEK", "standard" },
     .{ "STREAM_PF_INET", "standard" },
     .{ "STREAM_PF_INET6", "standard" },
     .{ "STREAM_PF_UNIX", "standard" },

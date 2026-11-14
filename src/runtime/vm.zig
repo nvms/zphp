@@ -3051,6 +3051,8 @@ pub const VM = struct {
         try c.put(a, "STREAM_SHUT_RD", .{ .int = 0 });
         try c.put(a, "STREAM_SHUT_WR", .{ .int = 1 });
         try c.put(a, "STREAM_SHUT_RDWR", .{ .int = 2 });
+        try c.put(a, "STREAM_OOB", .{ .int = 1 });
+        try c.put(a, "STREAM_PEEK", .{ .int = 2 });
         // socket address families / types (the OS values, so they pass straight
         // to socketpair()/socket()) - for stream_socket_pair etc.
         try c.put(a, "STREAM_PF_INET", .{ .int = if (platform.is_windows) 2 else @as(i64, std.posix.AF.INET) });

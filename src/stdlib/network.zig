@@ -43,7 +43,73 @@ pub const entries = .{
     .{ "stream_socket_accept", native_stream_socket_accept },
     .{ "stream_socket_get_name", native_stream_socket_get_name },
     .{ "stream_socket_shutdown", native_stream_socket_shutdown },
+    .{ "stream_socket_recvfrom", native_stream_socket_recvfrom },
+    .{ "stream_socket_sendto", native_stream_socket_sendto },
 };
+
+// stream_socket_recvfrom($socket, $length, $flags = 0, &$address = null):
+// php's php_stream_xport_recvfrom, one recvfrom() on the socket with the
+// sender's address
+fn native_stream_socket_recvfrom(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const stream = try filesystem.streamArg(ctx, args, .{ .func = "stream_socket_recvfrom", .param = "socket" });
+    const length = Value.toInt(if (args.len > 1) args[1] else Value{ .int = 0 });
+    const flags = if (args.len > 2) Value.toInt(args[2]) else 0;
+    if (args.len > 3) ctx.setCallerVar(3, args.len, .null);
+    if (length <= 0) {
+        try ctx.vm.setPendingException("ValueError", "stream_socket_recvfrom(): Argument #2 ($length) must be greater than 0");
+        return error.RuntimeError;
+    }
+    const buf = try ctx.allocator.alloc(u8, @intCast(@min(length, 1 << 30)));
+    defer ctx.allocator.free(buf);
+    // php's buffered peek is compiled out: the read always goes to the
+    // socket, past the stream's buffer
+    const got: usize = 0;
+    const sock = (if (isNetStream(.{ .resource = stream })) platform.socketFromInt(objectFd(stream) orelse -1) else null) orelse return NativeResult.scalar(.{ .bool = false });
+    var from: net.Address = undefined;
+    var from_len: std.posix.socklen_t = @sizeOf(net.Address);
+    ctx.vm.flushOutputToStdout();
+    const rc = std.c.recvfrom(sock, buf[got..].ptr, buf.len - got, @intCast(flags & 3), &from.any, &from_len);
+    if (rc < 0) {
+        if (got > 0) return NativeResult.copyString(ctx.allocator, buf[0..got]);
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    if (args.len > 3 and from_len > 0) {
+        var name_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const name = addressName(&name_buf, from, from_len);
+        if (name.len > 0) {
+            const text = try Value.String.create(ctx.allocator, name);
+            defer text.release();
+            ctx.setCallerVar(3, args.len, .{ .string = text });
+        }
+    }
+    return NativeResult.copyString(ctx.allocator, buf[0 .. got + @as(usize, @intCast(rc))]);
+}
+
+// stream_socket_sendto($socket, $data, $flags = 0, $address = ""): the
+// bytes sent, or -1, to the address given ("host:port") or the peer
+fn native_stream_socket_sendto(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const stream = try filesystem.streamArg(ctx, args, .{ .func = "stream_socket_sendto", .param = "socket" });
+    const data = try @import("strings.zig").stringParam(ctx, "stream_socket_sendto", args, 1, "data");
+    const flags = if (args.len > 2) Value.toInt(args[2]) else 0;
+    const target = if (args.len > 3) try @import("strings.zig").stringParam(ctx, "stream_socket_sendto", args, 3, "address") else "";
+    var dest: ?net.Address = null;
+    if (target.len > 0) {
+        const endpoint = parseEndpoint(ctx.allocator, target) catch null;
+        dest = if (endpoint) |e| (if (e == .tcp or e == .udp) endpointAddress(e) catch null else null) else null;
+        if (dest == null) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "stream_socket_sendto(): Failed to parse `{s}' into a valid network address", .{target});
+            defer ctx.allocator.free(msg);
+            try ctx.vm.emitWarning(msg);
+            return NativeResult.scalar(.{ .bool = false });
+        }
+    }
+    const sock = (if (isNetStream(.{ .resource = stream })) platform.socketFromInt(objectFd(stream) orelse -1) else null) orelse return NativeResult.scalar(.{ .int = -1 });
+    const rc = if (dest) |addr|
+        std.c.sendto(sock, data.ptr, data.len, @intCast(flags & 3), &addr.any, addr.getOsSockLen())
+    else
+        std.c.send(sock, data.ptr, data.len, @intCast(flags & 3));
+    return NativeResult.scalar(.{ .int = if (rc < 0) -1 else @intCast(rc) });
+}
 
 fn streamFd(v: Value) ?i64 {
     if (v != .resource) return null;
@@ -681,6 +747,13 @@ fn native_long2ip(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
 const Endpoint = union(enum) {
     tcp: net.Address,
     unix: []const u8,
+    // the datagram transports
+    udp: net.Address,
+    udg: []const u8,
+
+    fn datagram(self: Endpoint) bool {
+        return self == .udp or self == .udg;
+    }
 };
 
 const SocketError = struct { code: i64, message: []const u8 };
@@ -697,6 +770,7 @@ fn socketError(err: anyerror) SocketError {
         error.AddressNotAvailable => .{ .code = @intFromEnum(E.ADDRNOTAVAIL), .message = "Can't assign requested address" },
         error.ConnectionTimedOut, error.Timeout => .{ .code = @intFromEnum(E.TIMEDOUT), .message = if (mac) "Operation timed out" else "Connection timed out" },
         error.FileNotFound => .{ .code = @intFromEnum(E.NOENT), .message = "No such file or directory" },
+        error.OperationUnsupported, error.OperationNotSupported => .{ .code = @intFromEnum(E.OPNOTSUPP), .message = "Operation not supported" },
         error.UnknownHostName, error.HostNotFound => .{ .code = 0, .message = "php_network_getaddresses: getaddrinfo failed" },
         else => .{ .code = 0, .message = @errorName(err) },
     };
@@ -712,7 +786,9 @@ fn parseEndpoint(allocator: std.mem.Allocator, target: []const u8) !Endpoint {
         rest = target[idx + 3 ..];
     }
     if (std.ascii.eqlIgnoreCase(scheme, "unix")) return .{ .unix = rest };
-    if (!std.ascii.eqlIgnoreCase(scheme, "tcp")) return error.UnsupportedTransport;
+    if (std.ascii.eqlIgnoreCase(scheme, "udg")) return .{ .udg = rest };
+    const udp = std.ascii.eqlIgnoreCase(scheme, "udp");
+    if (!udp and !std.ascii.eqlIgnoreCase(scheme, "tcp")) return error.UnsupportedTransport;
     if (std.mem.indexOfScalar(u8, rest, 0) != null) return error.NulInHostname;
     var host: []const u8 = undefined;
     var port_text: []const u8 = undefined;
@@ -729,11 +805,13 @@ fn parseEndpoint(allocator: std.mem.Allocator, target: []const u8) !Endpoint {
         port_text = rest[c + 1 ..];
     }
     const port: u16 = @truncate(@as(u64, @bitCast(atoi(port_text))));
-    if (net.Address.parseIp(host, port)) |addr| return .{ .tcp = addr } else |_| {}
-    const list = try net.getAddressList(allocator, host, port);
-    defer list.deinit();
-    if (list.addrs.len == 0) return error.UnknownHostName;
-    return .{ .tcp = list.addrs[0] };
+    const addr = net.Address.parseIp(host, port) catch resolved: {
+        const list = try net.getAddressList(allocator, host, port);
+        defer list.deinit();
+        if (list.addrs.len == 0) return error.UnknownHostName;
+        break :resolved list.addrs[0];
+    };
+    return if (udp) .{ .udp = addr } else .{ .tcp = addr };
 }
 
 fn atoi(s: []const u8) i64 {
@@ -751,14 +829,31 @@ fn atoi(s: []const u8) i64 {
 
 fn endpointAddress(endpoint: Endpoint) !net.Address {
     return switch (endpoint) {
-        .tcp => |addr| addr,
-        .unix => |path| net.Address.initUnix(path),
+        .tcp, .udp => |addr| addr,
+        .unix, .udg => |path| net.Address.initUnix(path),
     };
 }
 
 fn newSocket(family: u32) !std.posix.socket_t {
     if (family == std.posix.AF.UNIX) return sys.socket(family, if (platform.is_windows) std.posix.SOCK.STREAM else std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, 0);
     return platform.tcpSocket(family);
+}
+
+fn datagramSocket(family: u32) !std.posix.socket_t {
+    return sys.socket(family, if (platform.is_windows) std.posix.SOCK.DGRAM else std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC, 0);
+}
+
+fn endpointSocket(endpoint: Endpoint, addr: net.Address) !std.posix.socket_t {
+    return if (endpoint.datagram()) datagramSocket(addr.any.family) else newSocket(addr.any.family);
+}
+
+// a datagram client only names its peer: connect() sends nothing
+fn connectEndpoint(endpoint: Endpoint, addr: net.Address, timeout_ms: ?i32, async_connect: bool) !std.posix.socket_t {
+    if (!endpoint.datagram()) return connectSocket(addr, timeout_ms, async_connect);
+    const sock = try datagramSocket(addr.any.family);
+    errdefer platform.closeSocket(platform.socketToInt(sock));
+    try sys.connect(sock, &addr.any, addr.getOsSockLen());
+    return sock;
 }
 
 // connects, waiting at most timeout_ms (null blocks); async leaves the
@@ -806,7 +901,7 @@ pub fn connectTransport(ctx: *NativeContext, target: []const u8, timeout_s: f64,
         try user_streams.logError(ctx, options, "{s}", .{socketError(err).message});
         return null;
     };
-    const sock = connectSocket(addr, timeout_ms, false) catch |err| {
+    const sock = connectEndpoint(endpoint, addr, timeout_ms, false) catch |err| {
         // php made the stream before the connect failed
         ctx.vm.skipResourceId();
         try user_streams.logError(ctx, options, "{s}", .{socketError(err).message});
@@ -844,6 +939,7 @@ fn failConnect(ctx: *NativeContext, args: []const Value, code_index: usize, comp
         else => {},
     }
     if (owned) |o| e = .{ .code = 0, .message = o };
+    if (err == error.ListenWithoutText) e = .{ .code = 0, .message = "" };
     try reportSocketError(ctx, args, code_index, e);
     // php had already made the stream when the connect failed, so its id is gone
     ctx.vm.skipResourceId();
@@ -863,7 +959,7 @@ fn failConnect(ctx: *NativeContext, args: []const Value, code_index: usize, comp
         try quoted.print(ctx.allocator, "{s}:{d}", .{ host[0 .. std.mem.indexOfScalar(u8, host, 0) orelse host.len], port });
     } else try quoted.appendSlice(ctx.allocator, target);
     const name = if (comptime std.mem.eql(u8, func, "fsockopen")) ctx.call_name orelse func else func;
-    const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Unable to connect to {s} ({s})", .{ name, quoted.items, e.message });
+    const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Unable to connect to {s} ({s})", .{ name, quoted.items, if (err == error.ListenWithoutText) "Unknown error" else e.message });
     defer ctx.allocator.free(msg);
     try ctx.vm.emitWarning(msg);
     return NativeResult.scalar(.{ .bool = false });
@@ -872,7 +968,12 @@ fn failConnect(ctx: *NativeContext, args: []const Value, code_index: usize, comp
 fn endpointStream(ctx: *NativeContext, sock: std.posix.socket_t, endpoint: Endpoint, blocking: bool, uri: ?[]const u8) !*PhpObject {
     const obj = try socketStream(ctx, sock);
     if (uri) |u| try obj.setCopiedString(ctx.allocator, "__path", u);
-    try obj.set(ctx.allocator, "__sock_type", .{ .string = Value.String.borrowed(if (endpoint == .unix) "unix_socket" else "tcp_socket/ssl") });
+    try obj.set(ctx.allocator, "__sock_type", .{ .string = Value.String.borrowed(switch (endpoint) {
+        .unix => "unix_socket",
+        .udp => "udp_socket",
+        .udg => "udg_socket",
+        .tcp => "tcp_socket/ssl",
+    }) });
     if (!blocking) try obj.set(ctx.allocator, "__blocking", .{ .bool = false });
     return obj;
 }
@@ -911,7 +1012,7 @@ fn native_stream_socket_client(ctx: *NativeContext, args: []const Value) Runtime
 fn connectStream(ctx: *NativeContext, args: []const Value, code_index: usize, target: []const u8, timeout: ?Value, async_connect: bool, comptime func: []const u8) RuntimeError!NativeResult {
     const endpoint = parseEndpoint(ctx.allocator, target) catch |err| return failConnect(ctx, args, code_index, func, target, err);
     const addr = endpointAddress(endpoint) catch |err| return failConnect(ctx, args, code_index, func, target, err);
-    const sock = connectSocket(addr, timeoutMs(ctx, timeout), async_connect) catch |err| return failConnect(ctx, args, code_index, func, target, err);
+    const sock = connectEndpoint(endpoint, addr, timeoutMs(ctx, timeout), async_connect) catch |err| return failConnect(ctx, args, code_index, func, target, err);
     try reportSocketError(ctx, args, code_index, null);
     return NativeResult.borrowed(.{ .resource = try endpointStream(ctx, sock, endpoint, !async_connect, target) });
 }
@@ -932,13 +1033,17 @@ fn native_stream_socket_server(ctx: *NativeContext, args: []const Value) Runtime
 
 fn listenSocket(endpoint: Endpoint, flags: i64, backlog: u31) !std.posix.socket_t {
     const addr = try endpointAddress(endpoint);
-    const sock = try newSocket(addr.any.family);
+    const sock = try endpointSocket(endpoint, addr);
     errdefer platform.closeSocket(platform.socketToInt(sock));
     // php sets it on every platform; on windows that lets a second server
     // take a port that is already bound, which php allows there too
-    if (endpoint == .tcp) try sys.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
+    if (endpoint == .tcp or endpoint == .udp) try sys.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
     if ((flags & 4) != 0) try sys.bind(sock, &addr.any, addr.getOsSockLen());
-    if ((flags & 8) != 0) try sys.listen(sock, backlog);
+    // a datagram socket can't listen; php's listen op fails with no text
+    if ((flags & 8) != 0) {
+        if (endpoint.datagram()) return error.ListenWithoutText;
+        try sys.listen(sock, backlog);
+    }
     return sock;
 }
 

@@ -59,6 +59,7 @@ pub fn isByRef(name: []const u8, index: usize) bool {
         .{ .name = "stream_socket_server", .index = 1 },
         .{ .name = "stream_socket_server", .index = 2 },
         .{ .name = "stream_socket_accept", .index = 2 },
+        .{ .name = "stream_socket_recvfrom", .index = 3 },
         .{ .name = "fsockopen", .index = 2 },
         .{ .name = "fsockopen", .index = 3 },
         .{ .name = "pfsockopen", .index = 2 },
@@ -102,7 +103,7 @@ const by_ref_names = std.StaticStringMap(void).initComptime(.{
     .{"sscanf"},                .{"fscanf"},               .{"mb_convert_variables"},  .{"mb_parse_str"},                .{"stream_socket_client"},
     .{"stream_socket_server"},  .{"stream_socket_accept"}, .{"fsockopen"},             .{"pfsockopen"},                  .{"flock"},
     .{"splfileobject::fscanf"}, .{"splfileobject::flock"},  .{"getmxrr"},               .{"dns_get_mx"},                  .{"dns_get_record"},
-    .{"getimagesize"},          .{"getimagesizefromstring"},
+    .{"getimagesize"},          .{"getimagesizefromstring"}, .{"stream_socket_recvfrom"},
 });
 
 pub fn hasByRefParams(name: []const u8) bool {
