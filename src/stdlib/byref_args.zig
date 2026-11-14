@@ -29,6 +29,7 @@ pub fn isByRef(name: []const u8, index: usize) bool {
     const Output = struct { name: []const u8, index: usize };
     const outputs = [_]Output{
         .{ .name = "pcntl_wait", .index = 0 },
+        .{ .name = "settype", .index = 0 },
         .{ .name = "parse_str", .index = 1 },
         .{ .name = "mb_parse_str", .index = 1 },
         .{ .name = "system", .index = 1 },
@@ -104,6 +105,7 @@ const by_ref_names = std.StaticStringMap(void).initComptime(.{
     .{"stream_socket_server"},  .{"stream_socket_accept"}, .{"fsockopen"},             .{"pfsockopen"},                  .{"flock"},
     .{"splfileobject::fscanf"}, .{"splfileobject::flock"},  .{"getmxrr"},               .{"dns_get_mx"},                  .{"dns_get_record"},
     .{"getimagesize"},          .{"getimagesizefromstring"}, .{"stream_socket_recvfrom"},
+    .{"settype"},
 });
 
 pub fn hasByRefParams(name: []const u8) bool {

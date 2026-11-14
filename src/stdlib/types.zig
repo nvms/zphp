@@ -930,8 +930,17 @@ fn native_ignore_user_abort(ctx: *NativeContext, args: []const Value) RuntimeErr
     return NativeResult.scalar(.{ .int = previous });
 }
 
+// settype converts its by-reference argument in place: a property or a
+// typed reference keeps its own type rules (zend_try_assign_typed_ref)
 fn native_settype(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.null);
+    if (args.len < 2) return NativeResult.scalar(.null);
+    const converted = try settypeValue(ctx, args);
+    defer if (converted.value == .string) converted.value.string.release();
+    ctx.setCallerVar(0, args.len, converted.value);
+    return NativeResult.scalar(.{ .bool = true });
+}
+
+fn settypeValue(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 2 or args[1] != .string) return NativeResult.share(args[0]);
     const type_name = args[1].string.bytes();
     const val = args[0];

@@ -1473,11 +1473,6 @@ fn compileCallPlain(self: *Compiler, node: Ast.Node) Error!void {
         return;
     }
 
-    if (callee.tag == .identifier and std.mem.eql(u8, self.ast.tokenSlice(callee.main_token), "settype")) {
-        try compileSettype(self, args);
-        return;
-    }
-
     if (callee.tag == .identifier and std.mem.eql(u8, self.ast.tokenSlice(callee.main_token), "empty")) {
         // empty() uses isset semantics for the read so undefined keys/props
         // don't warn; the result is "not truthy" rather than "isset"
@@ -1910,34 +1905,6 @@ fn compileUnset(self: *Compiler, args: []const u32) Error!void {
         }
     }
     try self.emitOp(.op_null);
-}
-
-fn compileSettype(self: *Compiler, args: []const u32) Error!void {
-    if (args.len < 2) {
-        try self.emitOp(.op_false);
-        return;
-    }
-    const target = self.ast.nodes[args[0]];
-    if (target.tag != .variable) {
-        try self.emitOp(.op_false);
-        return;
-    }
-    const var_name = self.ast.tokenSlice(target.main_token);
-
-    // settype returns the converted value, we store it back and push true.
-    // the variable is passed by reference, so reading it doesn't warn
-    const saved = self.quiet_reads;
-    self.quiet_reads = true;
-    try self.emitGetVar(var_name);
-    self.quiet_reads = saved;
-    try self.compileNode(args[1]);
-    const fn_idx = try self.addConstant(.{ .string = Value.String.borrowed("settype") });
-    try self.emitOp(.call);
-    try self.emitU16(fn_idx);
-    try self.emitByte(2);
-    try self.emitSetVar(var_name);
-    try self.emitOp(.pop);
-    try self.emitOp(.op_true);
 }
 
 pub fn compileCallableRef(self: *Compiler, node: Ast.Node) Error!void {
