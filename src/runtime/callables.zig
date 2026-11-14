@@ -391,7 +391,8 @@ fn findMethod(vm: *VM, class: []const u8, method: []const u8) RuntimeError!?Meth
         .registered = registered,
         .visibility = if (info) |i| i.visibility else .public,
         .is_static = if (info) |i| i.is_static else null,
-        .is_abstract = if (info) |i| i.is_abstract else false,
+        // an interface's methods are all abstract
+        .is_abstract = if (info) |i| i.is_abstract else vm.interfaces.contains(declaring),
     };
 }
 
