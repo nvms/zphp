@@ -453,7 +453,7 @@ fn findEntityForCharBasic(k: u32, table: []const CodePointEntity) ?[]const u8 {
 
 // php_escape_html_entities_ex; null where php returns an empty string for
 // ill-formed input
-fn escapeHtmlEntities(ctx: *NativeContext, func: []const u8, old: []const u8, all_requested: bool, flags: i32, hint: ?[]const u8, double_encode: bool, out: *std.ArrayListUnmanaged(u8)) RuntimeError!bool {
+pub fn escapeHtmlEntities(ctx: *NativeContext, func: []const u8, old: []const u8, all_requested: bool, flags: i32, hint: ?[]const u8, double_encode: bool, out: *std.ArrayListUnmanaged(u8)) RuntimeError!bool {
     const allocator = ctx.allocator;
     const charset = try determineCharset(ctx, func, hint, false);
     const doctype = flags & doc_type_mask;

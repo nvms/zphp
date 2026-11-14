@@ -1711,6 +1711,17 @@ fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "session.cookie_httponly")) return "";
     if (std.mem.eql(u8, name, "session.cookie_secure")) return "";
     if (std.mem.eql(u8, name, "session.cookie_samesite")) return "";
+    if (std.mem.eql(u8, name, "session.name")) return "PHPSESSID";
+    if (std.mem.eql(u8, name, "session.use_only_cookies")) return "1";
+    if (std.mem.eql(u8, name, "session.use_strict_mode")) return "0";
+    if (std.mem.eql(u8, name, "session.use_trans_sid")) return "0";
+    if (std.mem.eql(u8, name, "session.referer_check")) return "";
+    if (std.mem.eql(u8, name, "session.trans_sid_tags")) return "a=href,area=href,frame=src,form=";
+    if (std.mem.eql(u8, name, "session.trans_sid_hosts")) return "";
+    if (std.mem.eql(u8, name, "url_rewriter.tags")) return "form=";
+    if (std.mem.eql(u8, name, "url_rewriter.hosts")) return "";
+    if (std.mem.eql(u8, name, "arg_separator.output")) return "&";
+    if (std.mem.eql(u8, name, "arg_separator.input")) return "&";
     if (std.mem.eql(u8, name, "date.default_latitude")) return "31.7667";
     if (std.mem.eql(u8, name, "date.default_longitude")) return "35.2333";
     if (std.mem.eql(u8, name, "precision")) return "14";
@@ -1833,6 +1844,23 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         }
     }
     if (std.mem.eql(u8, name, "assert.callback") and (buf.items.len > 0 or ctx.vm.ini_callbacks.contains("assert.callback"))) try ctx.vm.raiseError(8192, "ini_set(): assert.callback INI setting is deprecated");
+    if (std.mem.startsWith(u8, name, "session.")) {
+        // the session's handlers refuse changes while a session runs
+        // (SESSION_CHECK_ACTIVE_STATE), and deprecate the transparent
+        // session id settings
+        const session = @import("session.zig");
+        if (session.isActive(ctx) and session.isSessionIni(name)) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "ini_set(): Session ini settings cannot be changed when a session is active (started from {s})", .{session.startedAt(ctx)});
+            defer ctx.allocator.free(msg);
+            try ctx.vm.emitWarning(msg);
+            return NativeResult.scalar(Value{ .bool = false });
+        }
+        if (session.iniDeprecation(name, buf.items)) |what| {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "ini_set(): {s} INI setting is deprecated", .{what});
+            defer ctx.allocator.free(msg);
+            try ctx.vm.raiseError(8192, msg);
+        }
+    }
     // php's OnUpdateFiberStackSize
     if (std.mem.eql(u8, name, "fiber.stack_size") and @import("../runtime/memory.zig").parseQuantity(buf.items).value < 0) {
         try ctx.vm.emitWarning("fiber.stack_size must be a positive number");

@@ -111,6 +111,8 @@ pub const OutputBufferLevel = struct {
     id: u64 = 0,
     // zlib's ob_gzhandler, an internal handler
     gzip: bool = false,
+    // the url rewriter's handler (url_scanner.Kind), 0 for none
+    rewriter: u2 = 0,
 };
 
 pub const ErrorHandlerEntry = struct { handler: Value, mask: i64 };
@@ -1181,6 +1183,9 @@ pub const VM = struct {
     // some level has a chunk size, so an echo checks whether it filled
     ob_chunk_watch: bool = false,
     ob_next_id: u64 = 0,
+    // the url rewriter's state for output_add_rewrite_var and the session's
+    // transparent ids
+    url_scanners: [2]@import("../stdlib/url_scanner.zig").Ctx = .{ .{}, .{} },
     request_vars: std.StringHashMapUnmanaged(Value) = .{},
     profile_calls: std.StringHashMapUnmanaged(u64) = .{},
     // ZPHP_DBG_PROFILE env check cached at init. previously each native and
@@ -3636,6 +3641,7 @@ pub const VM = struct {
         }
         self.compile_results.deinit(self.allocator);
         self.ob_stack.deinit(self.allocator);
+        for (&self.url_scanners) |*scanner| scanner.deinit(self.allocator);
         self.request_vars.deinit(self.allocator);
         self.autoload_callbacks.deinit(self.allocator);
         if (self.spl_autoload_extensions) |exts| self.allocator.free(exts);
@@ -3821,6 +3827,7 @@ pub const VM = struct {
         }
         self.clearRealDirCache();
         self.clearStreamWrappers();
+        for (&self.url_scanners) |*scanner| scanner.deinit(self.allocator);
         self.magic_guards.clearRetainingCapacity();
         self.magic_call_guard.clearRetainingCapacity();
         if (self.serve_mode) {

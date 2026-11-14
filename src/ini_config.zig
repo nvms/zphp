@@ -312,6 +312,16 @@ fn iniBool(v: []const u8) bool {
 // ext/standard/assert.c's handlers deprecate the assert.* settings set away
 // from their defaults, in the order the module declares them
 fn reportStartupDeprecations(vm: *VM) RuntimeError!void {
+    // the session module's handlers, in the order it registers them, then
+    // the url rewriter's in ext/standard
+    const session = @import("stdlib/session.zig");
+    for ([_][]const u8{ "session.use_only_cookies", "session.referer_check", "session.use_trans_sid", "session.trans_sid_tags", "session.trans_sid_hosts" }) |name| {
+        const value = get(name) orelse continue;
+        const what = session.iniDeprecation(name, value) orelse continue;
+        const msg = try std.fmt.allocPrint(vm.allocator, "PHP Startup: {s} INI setting is deprecated", .{what});
+        defer vm.allocator.free(msg);
+        try vm.raiseErrorAt(8192, msg, .{ .file = "Unknown", .line = 0 });
+    }
     const checks = [_]struct { []const u8, ?bool }{
         .{ "assert.active", false },
         .{ "assert.bail", true },

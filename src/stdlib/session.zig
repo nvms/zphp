@@ -148,6 +148,61 @@ fn setSessionCookie(ctx: *NativeContext, sid: []const u8) !void {
     try @import("http.zig").appendResponseHeader(ctx, cookie);
 }
 
+// where the running session started, as php's messages name it
+pub fn startedAt(ctx: *NativeContext) []const u8 {
+    const at = getSessionVar(ctx, "__session_started_at") orelse return "";
+    return if (at == .string) at.string.bytes() else "";
+}
+
+pub fn isActive(ctx: *NativeContext) bool {
+    const active = getSessionVar(ctx, "__session_active") orelse return false;
+    return active == .bool and active.bool;
+}
+
+// the directives the session module registers (the trans sid tags and hosts
+// are the url rewriter's)
+pub fn isSessionIni(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "session.") and !std.mem.eql(u8, name, "session.trans_sid_tags") and !std.mem.eql(u8, name, "session.trans_sid_hosts");
+}
+
+fn iniBool(v: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(v, "true") or std.ascii.eqlIgnoreCase(v, "yes") or std.ascii.eqlIgnoreCase(v, "on")) return true;
+    return (std.fmt.parseInt(i64, std.mem.trim(u8, v, " "), 10) catch 0) != 0;
+}
+
+// what php's handlers say is deprecated about a session setting's value:
+// "Disabling session.use_only_cookies" and the like, or null
+pub fn iniDeprecation(name: []const u8, value: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, "session.use_only_cookies") and !iniBool(value)) return "Disabling session.use_only_cookies";
+    if (std.mem.eql(u8, name, "session.use_trans_sid") and iniBool(value)) return "Enabling session.use_trans_sid";
+    if (std.mem.eql(u8, name, "session.referer_check") and value.len > 0) return "Usage of session.referer_check";
+    if (std.mem.eql(u8, name, "session.trans_sid_tags") and !std.mem.startsWith(u8, value, "a=href,area=href,frame=src,form=")) return "Usage of session.trans_sid_tags";
+    if (std.mem.eql(u8, name, "session.trans_sid_hosts") and value.len > 0) return "Usage of session.trans_sid_hosts";
+    return null;
+}
+
+fn iniValue(ctx: *NativeContext, name: []const u8, default: []const u8) []const u8 {
+    return ctx.vm.ini_settings.get(name) orelse @import("../ini_config.zig").get(name) orelse default;
+}
+
+fn sessionName(ctx: *NativeContext) []const u8 {
+    return iniValue(ctx, "session.name", default_name);
+}
+
+// php_session_reset_id's transparent session id: with use_trans_sid on and
+// use_only_cookies off, urls in the output carry the id, unless the
+// request's cookie already does
+fn applyTransSid(ctx: *NativeContext, sid: []const u8) !void {
+    if (!iniBool(iniValue(ctx, "session.use_trans_sid", "0")) or iniBool(iniValue(ctx, "session.use_only_cookies", "1"))) return;
+    const name = sessionName(ctx);
+    if (iniBool(iniValue(ctx, "session.use_cookies", "1"))) {
+        if (ctx.vm.request_vars.get("$_COOKIE")) |cookies| if (cookies == .array and cookies.array.get(.{ .string = Value.String.borrowed(name) }) != .null) return;
+    }
+    const scanner = @import("url_scanner.zig");
+    try scanner.resetVar(ctx, .session, name);
+    try scanner.addVar(ctx, .session, name, sid, true);
+}
+
 fn native_session_start(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // already active? (do not short-circuit on __session_id alone so that
     // a session reopened after session_write_close correctly re-loads data)
@@ -196,11 +251,18 @@ fn native_session_start(ctx: *NativeContext, _: []const Value) RuntimeError!Nati
     sid = stored_sid.bytes();
     try setSessionVar(ctx, "__session_id", .{ .string = stored_sid });
     try setSessionVar(ctx, "__session_active", .{ .bool = true });
+    const pos = ctx.vm.currentSourcePosition();
+    const at = try std.fmt.allocPrint(ctx.allocator, "{s} on line {d}", .{ pos.file, pos.line });
+    defer ctx.allocator.free(at);
+    const at_str = try Value.String.create(ctx.allocator, at);
+    defer at_str.release();
+    try setSessionVar(ctx, "__session_started_at", .{ .string = at_str });
 
     const arr = try loadSessionData(ctx, sid);
     try ctx.vm.putRequestVar("$_SESSION", .{ .array = arr });
 
-    if (is_new) try setSessionCookie(ctx, sid);
+    if (is_new and iniBool(iniValue(ctx, "session.use_cookies", "1"))) try setSessionCookie(ctx, sid);
+    try applyTransSid(ctx, sid);
 
     return NativeResult.scalar(.{ .bool = true });
 }

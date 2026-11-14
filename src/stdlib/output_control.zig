@@ -224,6 +224,13 @@ fn handlerOp(vm: *VM, ctx: *NativeContext, index: usize, op_in: i64, comptime fu
             try passed.appendSlice(vm.allocator, echoed);
             outcome.out = try passed.toOwnedSlice(vm.allocator);
         }
+    } else if (level.rewriter != 0) {
+        // the url rewriter scans what it has; a flush or the final call
+        // hands over what it held back too
+        const kind: @import("url_scanner.zig").Kind = @enumFromInt(level.rewriter);
+        outcome.out = try @import("url_scanner.zig").handle(vm, kind, vm.output.items[start..], op & (op_flush | op_final) != 0);
+        vm.output.shrinkRetainingCapacity(start);
+        outcome.status = if (outcome.out.?.len > 0) .success else .no_data;
     } else {
         // the default handler passes its input along; ob_gzhandler, with no
         // request asking for compression, fails and so passes it along too
@@ -418,6 +425,25 @@ fn native_ob_start(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     };
     if (level.chunk_size > 0) vm.ob_chunk_watch = true;
     return NativeResult.scalar(.{ .bool = true });
+}
+
+// php_output_start_internal for the url rewriter: a level named
+// URL-Rewriter on top of the stack
+pub fn startRewriter(vm: *VM, kind: @import("url_scanner.zig").Kind) RuntimeError!void {
+    if (vm.ob_deactivated) return;
+    var level: Level = .{
+        .start = vm.output.items.len,
+        .flags = std_flags,
+        .name = try vm.allocator.dupe(u8, "URL-Rewriter"),
+        .rewriter = @intFromEnum(kind),
+    };
+    level.buffer_size = initialSize(0);
+    vm.ob_next_id += 1;
+    level.id = vm.ob_next_id;
+    vm.ob_stack.append(vm.allocator, level) catch |err| {
+        freeLevel(vm, &level);
+        return err;
+    };
 }
 
 fn native_ob_flush(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
