@@ -11015,7 +11015,9 @@ pub const VM = struct {
                                 return error.RuntimeError;
                             }
                             if (if (op == .get_prop) self.ic else null) |ic| {
-                                if (vr.visibility == .public and !static_notice) {
+                                // a hooked property read its backing value here only inside its
+                                // own hook, which the cache can't tell apart
+                                if (vr.visibility == .public and !static_notice and !self.propertyHooked(obj.class_name, prop_name)) {
                                     const gp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), gp_ip);
                                     const si = if (obj.slot_layout != null) obj.getSlotIndex(prop_name) orelse @as(u16, 0xFFFF) else @as(u16, 0xFFFF);
                                     ic.prop[gp_idx] = .{ .key = gp_ip, .chunk_key = @intFromPtr(self.currentChunk()), .class_ptr = @intFromPtr(obj.class_name.ptr), .slot_index = si };
@@ -11199,7 +11201,7 @@ pub const VM = struct {
                                 // properties are cached too - the fast path runs
                                 // checkPropertyType when prop_type is set
                                 if (if (op == .set_prop) self.ic else null) |ic| {
-                                    if (vr.visibility == .public and vr.set_visibility == .public and !vr.is_readonly) {
+                                    if (vr.visibility == .public and vr.set_visibility == .public and !vr.is_readonly and !self.propertyHooked(obj.class_name, prop_name)) {
                                         const sp_idx = InlineCache.propIndex(@intFromPtr(self.currentChunk()), sp_ip);
                                         const si = if (obj.slot_layout != null) obj.getSlotIndex(prop_name) orelse @as(u16, 0xFFFF) else @as(u16, 0xFFFF);
                                         ic.prop[sp_idx] = .{ .key = sp_ip, .chunk_key = @intFromPtr(self.currentChunk()), .class_ptr = @intFromPtr(obj.class_name.ptr), .slot_index = si, .prop_type = vr.type_str, .decl_class = vr.defining_class };
@@ -22850,19 +22852,20 @@ pub const VM = struct {
             // property is "backed" (a default was declared, in which case
             // there's storage to write to). purely virtual properties with no
             // default are read-only
-            const has_default = blk: {
+            // a hooked property is backed when a hook uses $this->prop
+            const backed = blk: {
                 var current: ?[]const u8 = obj.class_name;
                 while (current) |cn| {
                     if (self.classes.get(cn)) |cls_def| {
                         for (cls_def.properties.items) |p| {
-                            if (std.mem.eql(u8, p.name, prop_name)) break :blk p.has_default;
+                            if (std.mem.eql(u8, p.name, prop_name)) break :blk !p.is_virtual or p.has_default;
                         }
                         current = cls_def.parent;
                     } else break;
                 }
                 break :blk false;
             };
-            if (!has_default) {
+            if (!backed) {
                 const msg = std.fmt.allocPrint(self.allocator, "Property {s}::${s} is read-only", .{ obj.class_name, prop_name }) catch return error.RuntimeError;
                 defer self.allocator.free(msg);
                 if (try self.throwBuiltinException("Error", msg)) return .{ .step = .dispatched };
@@ -23715,8 +23718,15 @@ pub const VM = struct {
         if (self.frame_count > 0) if (self.currentFrame().func) |func| {
             if (std.mem.lastIndexOf(u8, func.name, "::")) |sep| {
                 const method = func.name[sep + 2 ..];
+                // zend_should_call_hook: only for the object the hook runs on
+                // (or the instance of the lazy proxy it runs on)
                 if (method.len > prop_name.len and std.mem.startsWith(u8, method, prop_name) and
-                    (std.mem.eql(u8, method[prop_name.len..], "$hook_get") or std.mem.eql(u8, method[prop_name.len..], "$hook_set"))) return true;
+                    (std.mem.eql(u8, method[prop_name.len..], "$hook_get") or std.mem.eql(u8, method[prop_name.len..], "$hook_set")))
+                {
+                    const this = self.currentThis() orelse return true;
+                    if (this != .object) return true;
+                    if (this.object == obj or this.object.storage() == obj) return true;
+                }
             }
         };
         const obj_id = @intFromPtr(obj);

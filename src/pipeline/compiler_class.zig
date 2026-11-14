@@ -2914,11 +2914,11 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
             var prop_name = self.ast.tokenSlice(member.main_token);
             if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
             if (get_body != 0 or (self.ast.extra_data[ext + 4] & 8) != 0) {
-                try compilePropertyHook(self, class_name, prop_name, get_body, .get, get_short, 0, member);
+                try compilePropertyHook(self, class_name, prop_name, get_body, .get, get_short, 0, member, null);
                 method_count += 1;
             }
             if (set_body != 0 or (self.ast.extra_data[ext + 5] & 8) != 0) {
-                try compilePropertyHook(self, class_name, prop_name, set_body, .set, set_short, set_param_tok, member);
+                try compilePropertyHook(self, class_name, prop_name, set_body, .set, set_short, set_param_tok, member, null);
                 method_count += 1;
             }
         }
@@ -2944,20 +2944,26 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
     defer trait_prop_members.deinit(self.allocator);
     var trait_hook_members = std.ArrayListUnmanaged(u32).empty;
     defer trait_hook_members.deinit(self.allocator);
+    // the trait each of trait_prop_members came from
+    var trait_names = std.ArrayListUnmanaged([]const u8).empty;
+    defer trait_names.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .trait_use) {
             for (self.ast.extraSlice(member.data.lhs)) |tn| {
                 const tname = self.ast.tokenSlice(self.ast.nodes[tn].main_token);
                 if (self.trait_properties.get(tname)) |props| {
-                    for (props) |pi| try trait_prop_members.append(self.allocator, pi);
+                    for (props) |pi| {
+                        try trait_prop_members.append(self.allocator, pi);
+                        try trait_names.append(self.allocator, tname);
+                    }
                 }
             }
         }
     }
     // emit hook bodies for trait properties as methods on the using class.
     // mirrors the regular class-property-hook codepath above
-    for (trait_prop_members.items) |tpi| {
+    for (trait_prop_members.items, 0..) |tpi, ti| {
         const tmember = self.ast.nodes[tpi];
         if (tmember.tag != .class_property_hooks) continue;
         const ext = tmember.data.lhs;
@@ -2969,12 +2975,12 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
         var prop_name = self.ast.tokenSlice(tmember.main_token);
         if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
         if (get_body != 0 or (self.ast.extra_data[ext + 4] & 8) != 0) {
-            try compilePropertyHook(self, class_name, prop_name, get_body, .get, get_short, 0, tmember);
+            try compilePropertyHook(self, class_name, prop_name, get_body, .get, get_short, 0, tmember, trait_names.items[ti]);
             method_count += 1;
             try trait_hook_members.append(self.allocator, tpi);
         }
         if (set_body != 0 or (self.ast.extra_data[ext + 5] & 8) != 0) {
-            try compilePropertyHook(self, class_name, prop_name, set_body, .set, set_short, set_param_tok, tmember);
+            try compilePropertyHook(self, class_name, prop_name, set_body, .set, set_short, set_param_tok, tmember, trait_names.items[ti]);
             method_count += 1;
             // mark second slot for emitting set-method metadata too
             try trait_hook_members.append(self.allocator, tpi | 0x80000000);
@@ -3710,8 +3716,8 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
         } else if (member.tag == .class_property_hooks) {
             const ext = member.data.lhs;
             const prop_name = self.ast.tokenSlice(member.main_token)[1..];
-            if ((self.ast.extra_data[ext + 4] & 8) != 0) try compilePropertyHook(self, iface_name, prop_name, 0, .get, self.ast.extra_data[ext + 4], 0, member);
-            if ((self.ast.extra_data[ext + 5] & 8) != 0) try compilePropertyHook(self, iface_name, prop_name, 0, .set, self.ast.extra_data[ext + 5], self.ast.extra_data[ext + 3], member);
+            if ((self.ast.extra_data[ext + 4] & 8) != 0) try compilePropertyHook(self, iface_name, prop_name, 0, .get, self.ast.extra_data[ext + 4], 0, member, null);
+            if ((self.ast.extra_data[ext + 5] & 8) != 0) try compilePropertyHook(self, iface_name, prop_name, 0, .set, self.ast.extra_data[ext + 5], self.ast.extra_data[ext + 3], member, null);
         }
     }
 }
@@ -4678,7 +4684,7 @@ fn propertyVirtualFlag(self: *Compiler, member: Ast.Node) u8 {
 
 const HookKind = enum { get, set };
 
-fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []const u8, body_idx: u32, kind: HookKind, hook_flags: u32, set_param_tok: u32, member: Ast.Node) Error!void {
+fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []const u8, body_idx: u32, kind: HookKind, hook_flags: u32, set_param_tok: u32, member: Ast.Node, trait_name: ?[]const u8) Error!void {
     const is_short = (hook_flags & 1) != 0;
     const is_generator = (hook_flags & 2) != 0;
     const suffix = if (kind == .get) "$hook_get" else "$hook_set";
@@ -4746,7 +4752,10 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
         .is_generator = is_generator,
         .function_token = member.main_token,
         .returns_ref = (hook_flags & 4) != 0,
-        .current_class = class_name,
+        // a trait's hook is compiled into the using class, but its magic
+        // constants and self/parent are the trait's
+        .current_class = trait_name orelse class_name,
+        .in_trait = trait_name != null,
         .current_function = php_name,
         .hook_property = prop_name,
         .hook_is_set = kind == .set,
