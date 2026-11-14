@@ -29887,6 +29887,17 @@ pub const VM = struct {
             if (range.object) |obj| self.cycleVisit(obj, &visited_objs, &visited_arrs);
         }
 
+        // roots added from here on (by destructors this pass runs) are the
+        // next run's, as php's root buffer keeps them. the lists may be
+        // reordered as freed values leave them, so the pass's own roots are
+        // remembered by address
+        var own_objects: std.AutoHashMapUnmanaged(*PhpObject, void) = .{};
+        defer own_objects.deinit(self.allocator);
+        var own_arrays: std.AutoHashMapUnmanaged(*PhpArray, void) = .{};
+        defer own_arrays.deinit(self.allocator);
+        for (self.cycle_candidates.items) |c| own_objects.put(self.allocator, c, {}) catch {};
+        for (self.cycle_array_candidates.items) |c| own_arrays.put(self.allocator, c, {}) catch {};
+
         // pass 1: BFS from candidates, init scratch_rc on first visit
         for (self.cycle_candidates.items) |c| {
             if (c.destructed) continue;
@@ -30021,7 +30032,9 @@ pub const VM = struct {
             obj.destructor_called = true;
             objRetain(obj);
             self.callGarbageDestructor(obj);
-            self.objRelease(obj);
+            // gc_call_destructors drops its hold without freeing: an object
+            // nothing else holds now is the rerun's garbage, counted there
+            if (obj.refcount > 0) obj.refcount -= 1;
         }
         const freeing = dtor_objs.items.len == 0;
         var coll_it = visited_objs.iterator();
@@ -30063,16 +30076,41 @@ pub const VM = struct {
             self.pending_fiber_release.append(self.allocator, f) catch {};
             collected += 1;
         }
-        for (self.cycle_candidates.items) |obj| obj.cycle_queued = false;
-        for (self.cycle_array_candidates.items) |arr| arr.cycle_queued = false;
-        self.cycle_candidates.clearRetainingCapacity();
-        self.cycle_array_candidates.clearRetainingCapacity();
+        if (dtor_objs.items.len > 0) {
+            var kept_objects: usize = 0;
+            for (self.cycle_candidates.items) |obj| {
+                if (own_objects.contains(obj)) {
+                    obj.cycle_queued = false;
+                    continue;
+                }
+                self.cycle_candidates.items[kept_objects] = obj;
+                kept_objects += 1;
+            }
+            self.cycle_candidates.shrinkRetainingCapacity(kept_objects);
+            var kept_arrays: usize = 0;
+            for (self.cycle_array_candidates.items) |arr| {
+                if (own_arrays.contains(arr)) {
+                    arr.cycle_queued = false;
+                    continue;
+                }
+                self.cycle_array_candidates.items[kept_arrays] = arr;
+                kept_arrays += 1;
+            }
+            self.cycle_array_candidates.shrinkRetainingCapacity(kept_arrays);
+        } else {
+            for (self.cycle_candidates.items) |obj| obj.cycle_queued = false;
+            for (self.cycle_array_candidates.items) |arr| arr.cycle_queued = false;
+            self.cycle_candidates.clearRetainingCapacity();
+            self.cycle_array_candidates.clearRetainingCapacity();
+        }
         // what the destructors left is the second run's to free
         if (!freeing) {
             var keep_it = visited_objs.iterator();
             while (keep_it.next()) |kv| {
                 const obj = kv.key_ptr.*;
-                if (obj.refcount == 0 or obj.destructed or obj.cycle_queued) continue;
+                if (obj.destructed or obj.cycle_queued) continue;
+                // freed by refcounting while the destructors ran
+                if (obj.refcount == 0 and !obj.destructor_called) continue;
                 obj.cycle_queued = true;
                 self.cycle_candidates.append(self.allocator, obj) catch {
                     obj.cycle_queued = false;
