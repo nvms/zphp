@@ -5316,7 +5316,16 @@ ext/date/tests/oo_001.phpt
 ext/date/tests/oo_002.phpt
 ext/date/tests/oom_date_create.phpt
 ext/date/tests/oom_date_create_immutable.phpt
+ext/date/tests/oom_date_interval_create_from_date_string.phpt
+ext/date/tests/oom_date_modify.phpt
 ext/date/tests/oom_date_parse.phpt
+ext/date/tests/oom_dateinterval_construct.phpt
+ext/date/tests/oom_dateinterval_createfromdatestring.phpt
+ext/date/tests/oom_dateperiod_construct.phpt
+ext/date/tests/oom_datetime_construct.phpt
+ext/date/tests/oom_datetime_modify.phpt
+ext/date/tests/oom_datetimeimmutable_construct.phpt
+ext/date/tests/oom_datetimeimmutable_modify.phpt
 ext/date/tests/oom_strtotime.phpt
 ext/date/tests/rfc-datetime_and_daylight_saving_time-type1.phpt
 ext/date/tests/rfc-datetime_and_daylight_saving_time-type2.phpt
@@ -9384,6 +9393,7 @@ ext/standard/tests/streams/oom_stream_copy_to_stream_memory.phpt
 ext/standard/tests/streams/oom_stream_get_contents.phpt
 ext/standard/tests/streams/persistent_stream_context_shutdown.phpt
 ext/standard/tests/streams/proc_open_bug51800_right.phpt
+ext/standard/tests/streams/proc_open_bug51800_right2.phpt
 ext/standard/tests/streams/proc_open_bug60120.phpt
 ext/standard/tests/streams/proc_open_bug64438.phpt
 ext/standard/tests/streams/proc_open_bug69900.phpt
