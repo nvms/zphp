@@ -4038,7 +4038,17 @@ pub const VM = struct {
         // shutdown guarantee), then drain - on success or error
         defer if (!self.destructors_after_shutdown) self.runShutdownDestructors();
         try self.raiseCompileWarnings(result);
+        // what setting up the request let go of is no possible root: php's
+        // root buffer is empty when the script starts
+        self.forgetCycleCandidates();
         self.run() catch |err| return self.reportMemoryExhausted(err);
+    }
+
+    fn forgetCycleCandidates(self: *VM) void {
+        for (self.cycle_array_candidates.items) |arr| arr.cycle_queued = false;
+        self.cycle_array_candidates.clearRetainingCapacity();
+        for (self.cycle_candidates.items) |obj| obj.cycle_queued = false;
+        self.cycle_candidates.clearRetainingCapacity();
     }
 
     // an allocation memory_limit refused surfaces as OutOfMemory wherever it
