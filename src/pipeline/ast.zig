@@ -39,6 +39,9 @@ pub const Ast = struct {
     extra_data: []const u32,
     errors: []const Error,
     attr_ranges: []const AttrRange = &.{},
+    // the `;` tokens that end a case or default label, which php's grammar
+    // deprecates
+    case_semicolons: []const u32 = &.{},
     allocator: std.mem.Allocator,
     halt_offset: ?u32 = null,
     // the first error php's compiler raises for code the grammar accepts
@@ -64,6 +67,7 @@ pub const Ast = struct {
         self.allocator.free(self.extra_data);
         self.allocator.free(self.errors);
         if (self.attr_ranges.len > 0) self.allocator.free(self.attr_ranges);
+        if (self.case_semicolons.len > 0) self.allocator.free(self.case_semicolons);
     }
 
     pub fn tokenSlice(self: *const Ast, index: u32) []const u8 {

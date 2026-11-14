@@ -40,6 +40,7 @@ pub fn parse(allocator: Allocator, source: []const u8) Allocator.Error!Ast {
         p.extra_data.deinit(allocator);
         p.errors.deinit(allocator);
         p.attr_ranges.deinit(allocator);
+        p.case_semicolons.deinit(allocator);
     }
 
     p.parseRoot() catch |err| switch (err) {
@@ -56,6 +57,8 @@ pub fn parse(allocator: Allocator, source: []const u8) Allocator.Error!Ast {
     const errors_slice = try p.errors.toOwnedSlice(allocator);
     errdefer allocator.free(errors_slice);
     const attr_slice = try p.attr_ranges.toOwnedSlice(allocator);
+    errdefer allocator.free(attr_slice);
+    const case_slice = try p.case_semicolons.toOwnedSlice(allocator);
 
     return .{
         .halt_offset = if (lexer.halt_offset) |o| @intCast(o) else null,
@@ -65,6 +68,7 @@ pub fn parse(allocator: Allocator, source: []const u8) Allocator.Error!Ast {
         .extra_data = extra_slice,
         .errors = errors_slice,
         .attr_ranges = attr_slice,
+        .case_semicolons = case_slice,
         .allocator = allocator,
         .compile_error = p.compile_error,
     };
@@ -84,6 +88,7 @@ const Parser = struct {
     extra_data: std.ArrayListUnmanaged(u32),
     errors: std.ArrayListUnmanaged(Ast.Error),
     attr_ranges: std.ArrayListUnmanaged(AttrRange) = .empty,
+    case_semicolons: std.ArrayListUnmanaged(u32) = .empty,
     allocator: Allocator,
     found_yield: bool = false,
     // a property declaration ended in a comma: another property follows
@@ -1004,7 +1009,7 @@ const Parser = struct {
     // php accepts `case 1;` and `default;` as well as the colon (deprecated in 8.5)
     fn expectCaseSeparator(self: *Parser) Error!void {
         if (self.peek() == .semicolon) {
-            _ = self.advance();
+            try self.case_semicolons.append(self.allocator, self.advance());
             return;
         }
         _ = try self.expect(.colon);

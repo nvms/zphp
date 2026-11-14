@@ -289,6 +289,15 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
         }
     }
 
+    // php's grammar deprecates `case x;` and `default;` as it reads them (a
+    // label the parser read twice has its token twice)
+    var case_tokens: std.AutoHashMapUnmanaged(u32, void) = .{};
+    defer case_tokens.deinit(allocator);
+    for (ast.case_semicolons) |tok| {
+        if ((try case_tokens.getOrPut(allocator, tok)).found_existing) continue;
+        try c.warn(tok, 8192, "Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead", .{});
+    }
+
     // php compiles a file top to bottom; zphp compiles early-bound classes
     // first, so its warnings are put back in source order
     std.sort.insertion(CompileWarning, c.warnings.items, {}, struct {
