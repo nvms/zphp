@@ -37,6 +37,7 @@ pub fn syntaxError(alloc: std.mem.Allocator, ast: *const Ast) !SyntaxError {
         .heredoc_mixed_indentation => return .{ .message = try alloc.dupe(u8, "Invalid indentation - tabs and spaces cannot be mixed"), .line = line },
         .heredoc_body_indentation => return .{ .message = try std.fmt.allocPrint(alloc, "Invalid body indentation level (expecting an indentation level of at least {d})", .{err.detail}), .line = line },
         .real_cast_removed => return .{ .message = try alloc.dupe(u8, "The (real) cast has been removed, use (float) instead"), .line = line },
+        .invalid_numeric_literal => return .{ .message = try alloc.dupe(u8, "Invalid numeric literal"), .line = line },
         .unicode_escape_invalid => return .{ .message = try alloc.dupe(u8, "Invalid UTF-8 codepoint escape sequence"), .line = line },
         .unicode_escape_too_large => return .{ .message = try alloc.dupe(u8, "Invalid UTF-8 codepoint escape sequence: Codepoint too large"), .line = line },
         else => {},

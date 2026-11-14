@@ -901,6 +901,20 @@ test "real cast is removed" {
     try expectErrorTag("<?php $a = (REAL) 1;", .real_cast_removed);
 }
 
+test "octal literal with 8 or 9 is invalid" {
+    try expectErrorTag("<?php $a = 08;", .invalid_numeric_literal);
+    try expectErrorTag("<?php $a = 0_9;", .invalid_numeric_literal);
+    try expectNoErrors("<?php $a = 017 + 0_17 + 0x19 + 0b1 + 0 + 00;");
+}
+
+test "only variables are assigned or referenced" {
+    try expectErrorTag("<?php A::B = 1;", .unexpected_token);
+    try expectErrorTag("<?php FOO = 1;", .unexpected_token);
+    try expectErrorTag("<?php $a = &A::B;", .unexpected_token);
+    try expectErrorTag("<?php $a = &1;", .unexpected_token);
+    try expectNoErrors("<?php A::$b = 1; $a = &A::$b; $a = &f(); $a = &$o->m(); [$x, $y] = $z; list($x) = $z; $a[] = 1; $$n = 2; ${'v'} .= 3; $o?->p;");
+}
+
 test "void cast only where the value is discarded" {
     try expectNoErrors("<?php (void) f(); (VOID) $o->m(); for ((void) f(), $i = 0; $i < 3; (void) $i++) {}");
     try expectErrorTag("<?php $x = (void) f();", .void_cast_misplaced);

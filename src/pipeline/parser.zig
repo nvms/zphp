@@ -3107,7 +3107,17 @@ const Parser = struct {
 
     fn parsePrimaryExpr(self: *Parser) Error!u32 {
         return switch (self.peek()) {
-            .integer => self.addLiteral(.integer_literal),
+            .integer => blk: {
+                // php's scanner refuses an octal literal it can't read whole
+                const text = self.tokens[self.pos].lexeme(self.source);
+                if (text.len > 1 and text[0] == '0' and (std.ascii.isDigit(text[1]) or text[1] == '_') and
+                    std.mem.indexOfAny(u8, text, "89") != null)
+                {
+                    try self.addError(.invalid_numeric_literal);
+                    return error.ParseError;
+                }
+                break :blk self.addLiteral(.integer_literal);
+            },
             .float => self.addLiteral(.float_literal),
             .string => blk: {
                 try self.checkUnicodeEscapes(self.pos);

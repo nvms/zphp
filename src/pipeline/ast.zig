@@ -256,6 +256,8 @@ pub const Ast = struct {
             expected_colon,
             unexpected_token,
             real_cast_removed,
+            // an octal literal with an 8 or 9 in it
+            invalid_numeric_literal,
             void_cast_misplaced,
             heredoc_mixed_indentation,
             heredoc_body_indentation,
