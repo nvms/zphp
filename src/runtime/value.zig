@@ -879,6 +879,14 @@ pub const Generator = struct {
     // generator waiting in it (backtraces show the chain, as php's do)
     delegator: ?*Generator = null,
     pending_throw: ?Value = null,
+    // throw() stops a yield from over an array or iterator: the delegate is
+    // released once the exception is in the generator's frame, so the
+    // destructors it runs see that frame, as zend_generator_throw_exception
+    drop_delegate_on_throw: bool = false,
+    // a delegate generator whose exception is thrown into this one: freed
+    // once the exception is in this generator's frame (php frees it while
+    // unwinding the yield from)
+    release_after_throw: ?*Generator = null,
     // the delegate it waits on in yield from was aborted without returning:
     // its next resume throws php's ClosedGeneratorException at the yield from
     pending_closed_delegate: bool = false,

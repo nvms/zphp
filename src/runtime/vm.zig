@@ -16893,7 +16893,7 @@ pub const VM = struct {
 
             var step = leaf.state != .completed;
             leaf.delegate_pending = false;
-            if (step and leaf.delegate != null) {
+            if (step and leaf.delegate != null and !leaf.drop_delegate_on_throw) {
                 // php's zend_generator_get_next_delegated_value
                 if (try self.nextDelegatedValue(leaf)) step = false else sent = .null;
             }
@@ -16907,7 +16907,8 @@ pub const VM = struct {
                 leaf.delegator = null;
                 const parent = path.items[path.items.len - 1];
                 parent.delegate = null;
-                self.genRelease(leaf);
+                if (parent.release_after_throw) |old| self.genRelease(old);
+                parent.release_after_throw = leaf;
                 parent.pending_throw = ex;
                 sent = .null;
                 continue;
@@ -17159,7 +17160,9 @@ pub const VM = struct {
                 }
                 // the exception reaches the generator at its yield; one
                 // delegating to an array or iterator stops doing so
-                if (root.delegate) |delegate| if (delegate != .gen) self.dropGeneratorDelegate(root);
+                if (root.delegate) |delegate| if (delegate != .gen) {
+                    root.drop_delegate_on_throw = true;
+                };
                 stackRetain(ex);
                 if (root.pending_throw) |old| self.stackRelease(old);
                 root.pending_throw = ex;
@@ -17277,6 +17280,16 @@ pub const VM = struct {
         if (gen.pending_throw) |ex| {
             gen.pending_throw = null;
             self.setPendingOwned(ex);
+            if (gen.drop_delegate_on_throw) {
+                gen.drop_delegate_on_throw = false;
+                self.dropGeneratorDelegate(gen);
+                self.drainPendingDestruct();
+            }
+            if (gen.release_after_throw) |inner| {
+                gen.release_after_throw = null;
+                self.genRelease(inner);
+                self.drainPendingDestruct();
+            }
             // try to dispatch within the generator's frame; if no handler, the exception
             // will propagate when runUntilFrame catches the eventual error
             if (self.dispatchPendingException(return_frame)) {
@@ -29586,6 +29599,11 @@ pub const VM = struct {
             self.genRelease(inner);
             if (inner.refcount == 0) self.destroyReleasedGenerator(inner, deferred_stack_arrays);
         };
+        if (gen.release_after_throw) |inner| {
+            gen.release_after_throw = null;
+            self.genRelease(inner);
+            if (inner.refcount == 0) self.destroyReleasedGenerator(inner, deferred_stack_arrays);
+        }
         // closeGenerator early-returns on .completed; releaseGeneratorVars
         // is idempotent. closing a suspended gen may queue more work
         self.closeGenerator(gen, self.frame_count) catch {};
@@ -30833,6 +30851,7 @@ pub const VM = struct {
         if (g.closure) |closure| changed = self.cycleEdge(.{ .object = closure }, true, action, vo, va) or changed;
         if (g.state == .running or g.state == .completed) return changed;
         if (g.pending_throw) |ex| changed = self.cycleEdge(ex, true, action, vo, va) or changed;
+        if (g.release_after_throw) |inner| changed = self.cycleEdge(.{ .generator = inner }, true, action, vo, va) or changed;
         if (g.delegate) |delegate| switch (delegate) {
             .gen => |inner| changed = self.cycleEdge(.{ .generator = inner }, true, action, vo, va) or changed,
             .array => |state| changed = self.cycleEdge(.{ .array = state.arr }, true, action, vo, va) or changed,
