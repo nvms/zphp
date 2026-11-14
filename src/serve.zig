@@ -16,6 +16,7 @@ const platform = @import("platform.zig");
 const tls = @import("tls.zig");
 const h2 = @import("h2.zig");
 const env = @import("env.zig");
+const observe = @import("observe.zig");
 
 const Allocator = std.mem.Allocator;
 const posix = std.posix;
@@ -77,7 +78,16 @@ pub const ServeConfig = struct {
     // being read is closed; 0 disables. keeps stalled and slow-drip clients
     // from holding the per-worker connection table forever
     idle_timeout_seconds: u32 = 60,
+    // observability, all off by default. the admin listener serves /health,
+    // /ready and /metrics, and metrics are only collected while it is on
+    admin_address: ?net.Address = null,
+    log_format: LogFormat = .text,
+    log_file: ?[]const u8 = null,
+    access_log: bool = false,
+    request_id: bool = false,
 };
+
+pub const LogFormat = enum { text, json };
 
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
@@ -117,6 +127,7 @@ const Connection = struct {
     ws_obj: ?*PhpObject,
     h2_session: ?*h2.H2Session,
     last_activity_ms: i64,
+    bytes_out: u64 = 0,
 
     fn init(allocator: Allocator, server_conn: net.Server.Connection, ssl_ptr: ?*tls.SSL) !Connection {
         return .{
@@ -140,8 +151,9 @@ const Connection = struct {
     }
 
     fn ioWrite(self: *Connection, data: []const u8) !usize {
-        if (self.ssl) |s| return tls.write(s, data);
-        return platform.send(self.fd, data);
+        const n = if (self.ssl) |s| try tls.write(s, data) else try platform.send(self.fd, data);
+        self.bytes_out +%= n;
+        return n;
     }
 
     pub fn write(self: *Connection, data: []const u8) !usize {
@@ -248,7 +260,104 @@ const Worker = struct {
     // the process umask a request may change with umask(); restored before
     // the next request runs, as php_request_shutdown does
     umask: Umask.Mask,
+    // observability: `tracing` is false unless some feature needs per-request
+    // timing or an id, so with everything off each hook is one branch
+    id: u16,
+    tracing: bool,
+    stats: ?*observe.WorkerStats,
+    prng: std.Random.DefaultPrng,
+    request_id: observe.RequestId,
 };
+
+// per-request observability state, inert when tracing is off
+const Trace = struct {
+    start_ns: i128 = 0,
+    bytes_before: u64 = 0,
+    id_header: []const u8 = "",
+};
+
+fn beginTrace(w: *Worker, req: *const Request, bytes_before: u64) Trace {
+    if (!w.tracing) return .{};
+    if (w.stats) |s| s.requestStarted();
+    var t: Trace = .{ .start_ns = platform.monotonicNanos(), .bytes_before = bytes_before };
+    if (observe.request_ids) {
+        w.request_id.assign(req.getHeader("X-Request-Id"), &w.prng);
+        t.id_header = w.request_id.header();
+    }
+    return t;
+}
+
+// every request that began a trace ends it exactly once, whatever the outcome
+fn endTrace(w: *Worker, t: *const Trace, req: *const Request, protocol: []const u8, addr_bytes: u32, status: i64, bytes_after: u64) void {
+    if (!w.tracing) return;
+    const elapsed: u64 = @intCast(@max(platform.monotonicNanos() - t.start_ns, 0));
+    if (w.stats) |s| s.requestFinished(status, elapsed, if (w.vm.memory) |m| m.usage() else 0);
+    if (!observe.access_log) return;
+    var r = observe.Record.init("info", "access", "request");
+    r.str("request_id", w.request_id.id());
+    r.int("worker", w.id);
+    r.str("method", req.method);
+    r.str("path", req.path);
+    r.str("protocol", protocol);
+    r.int("status", status);
+    r.int("bytes", bytes_after -% t.bytes_before);
+    r.millis("duration_ms", elapsed);
+    var addr_buf: [16]u8 = undefined;
+    r.str("remote_addr", formatIp4(addr_bytes, &addr_buf));
+    r.emit();
+}
+
+fn formatIp4(addr_bytes: u32, buf: *[16]u8) []const u8 {
+    return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{
+        @as(u8, @truncate(addr_bytes)),
+        @as(u8, @truncate(addr_bytes >> 8)),
+        @as(u8, @truncate(addr_bytes >> 16)),
+        @as(u8, @truncate(addr_bytes >> 24)),
+    }) catch "0.0.0.0";
+}
+
+// a request that failed inside the server rather than in PHP code; the
+// details stay in the log and never reach the client
+fn logRequestError(w: *Worker, msg: []const u8, err_name: []const u8) void {
+    if (!observe.log_json) return;
+    var r = observe.Record.init("error", "php", msg);
+    if (observe.request_ids) r.str("request_id", w.request_id.id());
+    r.int("worker", w.id);
+    r.str("error", err_name);
+    if (w.vm.error_msg) |m| r.str("detail", m[0..@min(m.len, 1024)]);
+    r.emit();
+}
+
+fn logUncaught(w: *Worker) void {
+    if (!observe.log_json) return;
+    const ex = w.vm.pending_exception orelse return;
+    var r = observe.Record.init("error", "php", "uncaught exception");
+    if (observe.request_ids) r.str("request_id", w.request_id.id());
+    r.int("worker", w.id);
+    if (ex == .object) {
+        r.str("exception", ex.object.class_name);
+        const message = ex.object.get("message");
+        if (message == .string) {
+            const text = message.string.bytes();
+            r.str("message", text[0..@min(text.len, 1024)]);
+        }
+        const file = ex.object.get("file");
+        if (file == .string) r.str("file", file.string.bytes());
+        const line = ex.object.get("line");
+        if (line == .int) r.int("line", line.int);
+    }
+    r.emit();
+}
+
+// a server lifecycle message: the existing text on stderr, or a JSON line
+fn logEvent(level: []const u8, msg: []const u8, text: []const u8) void {
+    if (observe.log_json) {
+        var r = observe.Record.init(level, "server", msg);
+        r.emit();
+    } else {
+        writeStderr(text) catch {};
+    }
+}
 
 // what to run for a request, and how to shape $_SERVER for it
 const Dispatch = struct {
@@ -312,7 +421,8 @@ fn loadFile(path: []const u8, allocator: Allocator, vm: *@import("runtime/vm.zig
     return heap_result;
 }
 
-fn initWorker(allocator: Allocator, result: *const CompileResult, doc_root: []const u8, port: u16, ws_enabled: bool, tls_ctx: ?*tls.SSL_CTX, idle_timeout_ms: i64) !Worker {
+fn initWorker(allocator: Allocator, slot: usize, result: *const CompileResult, doc_root: []const u8, port: u16, ws_enabled: bool, tls_ctx: ?*tls.SSL_CTX, idle_timeout_ms: i64) !Worker {
+    const stats = if (observe.metrics_enabled) observe.statsFor(slot) else null;
     var vm = try VM.init(allocator);
     errdefer vm.deinit();
     vm.file_loader = &loadFile;
@@ -336,6 +446,11 @@ fn initWorker(allocator: Allocator, result: *const CompileResult, doc_root: []co
         .n_fds = 1,
         .script_cache = .{},
         .umask = Umask.current(),
+        .id = @intCast(slot),
+        .tracing = stats != null or observe.access_log or observe.request_ids,
+        .stats = stats,
+        .prng = if (observe.request_ids) observe.seededPrng() else .init(0),
+        .request_id = .{},
     };
 }
 
@@ -363,7 +478,7 @@ fn startWorkers(allocator: Allocator, workers: []Worker, threads: []std.Thread, 
     errdefer stopWorkers(workers[0..active], threads[0..active]);
     for (0..workers.len) |_| {
         const wd = &workers[active];
-        wd.* = initWorker(allocator, result, doc_root, port, ws_enabled, tls_ctx, idle_timeout_ms) catch |err| {
+        wd.* = initWorker(allocator, active, result, doc_root, port, ws_enabled, tls_ctx, idle_timeout_ms) catch |err| {
             reportWorkerFailure(err);
             continue;
         };
@@ -387,12 +502,20 @@ fn stopWorkers(workers: []Worker, threads: []std.Thread) void {
 }
 
 fn reportWorkerFailure(err: anyerror) void {
+    observe.global.workerStartFailed();
+    if (observe.log_json) {
+        var r = observe.Record.init("warn", "server", "worker failed to start");
+        r.str("error", @errorName(err));
+        r.emit();
+        return;
+    }
     writeStderr("warning: worker failed to start: ") catch {};
     writeStderr(@errorName(err)) catch {};
     writeStderr("\n") catch {};
 }
 
 fn deinitWorker(w: *Worker) void {
+    if (w.stats) |s| s.stopped();
     var i: usize = 1;
     while (i < w.n_fds) : (i += 1) {
         if (w.conns[i]) |*conn| {
@@ -481,6 +604,23 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
         break :blk @max(cpus, 1);
     };
 
+    observe.global = .{ .start_ms = platform.milliTimestamp() };
+    observe.log_json = config.log_format == .json;
+    observe.access_log = config.access_log;
+    observe.request_ids = config.request_id or config.access_log;
+    observe.metrics_enabled = config.admin_address != null;
+    if (observe.log_json) {
+        observe.openLog(config.log_file) catch |err| {
+            try writeStderr("error: could not open log file '");
+            try writeStderr(config.log_file orelse "");
+            try writeStderr("': ");
+            try writeStderr(@errorName(err));
+            try writeStderr("\n");
+            std.process.exit(1);
+        };
+    }
+    defer observe.closeLog();
+
     signal_socket = try platform.socketPair();
     defer closeWakePair(signal_socket);
     try platform.installShutdownHandler(requestShutdown);
@@ -510,6 +650,33 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
     const addr = net.Address.parseIp4("0.0.0.0", config.port) catch unreachable;
     var server = try platform.tcpListen(addr, true);
     defer server.deinit();
+
+    // the admin listener comes up before the application compiles, so /ready
+    // answers 503 until workers are actually serving
+    if (observe.metrics_enabled) {
+        observe.worker_stats = try allocator.alloc(observe.WorkerStats, worker_count);
+        @memset(observe.worker_stats, .{});
+        observe.global.workers_configured.set(worker_count);
+    }
+    defer if (observe.metrics_enabled) {
+        allocator.free(observe.worker_stats);
+        observe.worker_stats = &.{};
+    };
+    var admin: observe.Admin = undefined;
+    var admin_text: [64]u8 = undefined;
+    var admin_str: []const u8 = "";
+    if (config.admin_address) |admin_addr| {
+        admin_str = std.fmt.bufPrint(&admin_text, "{f}", .{admin_addr}) catch "?";
+        admin.start(admin_addr) catch |err| {
+            try writeStderr("error: could not start the admin listener on ");
+            try writeStderr(admin_str);
+            try writeStderr(": ");
+            try writeStderr(@errorName(err));
+            try writeStderr("\n");
+            std.process.exit(1);
+        };
+    }
+    defer if (config.admin_address != null) admin.stop();
 
     const abs_path = platform.realpathAlloc(allocator, config.file) catch
         try allocator.dupe(u8, config.file);
@@ -585,7 +752,18 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
             break :blk false;
         };
 
-        if (first_run) {
+        if (first_run and observe.log_json) {
+            var r = observe.Record.init("info", "server", "server started");
+            r.str("file", config.file);
+            r.int("port", config.port);
+            r.boolean("tls", tls_ctx != null);
+            r.int("workers", worker_count);
+            r.boolean("watch", config.watch);
+            if (admin_str.len > 0) r.str("admin", admin_str);
+            r.int("pid", platform.getpid());
+            r.emit();
+            first_run = false;
+        } else if (first_run) {
             var port_buf: [8]u8 = undefined;
             const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{config.port}) catch "?";
             try writeStderr("zphp serving ");
@@ -604,13 +782,19 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
 
         queue.reset();
         const active = startWorkers(allocator, workers_data, threads, &result, doc_root, config.port, ws_enabled, tls_ctx, @as(i64, config.idle_timeout_seconds) * 1000) catch |err| {
-            try writeStderr("error: no worker could start\n");
+            logEvent("error", "no worker could start", "error: no worker could start\n");
             result.deinit();
             ast.deinit();
             allocator.free(source);
             return err;
         };
-        if (active < worker_count) {
+        observe.global.setWorkers(active, true);
+        if (active < worker_count and observe.log_json) {
+            var r = observe.Record.init("warn", "server", "running with fewer workers than configured");
+            r.int("workers", active);
+            r.int("configured", worker_count);
+            r.emit();
+        } else if (active < worker_count) {
             var active_buf: [8]u8 = undefined;
             try writeStderr("warning: running with ");
             try writeStderr(std.fmt.bufPrint(&active_buf, "{d}", .{active}) catch "?");
@@ -629,12 +813,13 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
             _ = sys.poll(&main_poll, poll_timeout) catch continue;
 
             if (main_poll[1].revents & sys.POLL.IN != 0) {
-                try writeStderr("\nshutting down...\n");
+                logEvent("info", "shutting down", "\nshutting down...\n");
                 break;
             }
 
             if (main_poll[0].revents & sys.POLL.IN != 0) {
                 const conn = server.accept() catch continue;
+                if (observe.metrics_enabled) observe.global.connectionAccepted();
                 queue.push(.{ .conn = conn });
                 wake(workers_data[robin].wake_socket);
                 robin = (robin + 1) % active;
@@ -647,7 +832,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
                         tls_ctx = new_ctx;
                         tls_cert_mtime = new_mtime;
                         for (workers_data) |*wd| wd.tls_ctx = new_ctx;
-                        try writeStderr("tls: certificate reloaded\n");
+                        logEvent("info", "tls certificate reloaded", "tls: certificate reloaded\n");
                     }
                 }
             }
@@ -657,20 +842,25 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
                 if (new_mtime != watch_mtime and new_mtime != 0) {
                     watch_mtime = new_mtime;
                     needs_restart = true;
-                    try writeStderr("file change detected, reloading...\n");
+                    logEvent("info", "file change detected, reloading", "file change detected, reloading...\n");
                     break;
                 }
             }
         }
 
+        // not ready from the moment workers start draining
+        observe.global.setWorkers(active, false);
         stopWorkers(workers_data[0..active], threads[0..active]);
+        observe.global.setWorkers(0, false);
 
         result.deinit();
         ast.deinit();
         allocator.free(source);
 
         if (!needs_restart) break;
+        observe.global.reloaded();
     }
+    if (observe.log_json) logEvent("info", "server stopped", "");
 }
 
 // event loop (runs on each worker thread)
@@ -712,6 +902,7 @@ fn eventLoop(w: *Worker) void {
 
         closeIdleConnections(w);
         compactConnections(w);
+        if (w.stats) |s| s.setConnections(w.n_fds - 1);
     }
 }
 
@@ -732,6 +923,7 @@ fn closeIdleConnections(w: *Worker) void {
 
 fn registerConnection(w: *Worker, server_conn: net.Server.Connection) void {
     if (w.n_fds >= MAX_CONNS + 1) {
+        if (w.stats) |s| s.connectionDropped();
         server_conn.stream.close();
         return;
     }
@@ -872,8 +1064,10 @@ fn contentLengthOf(req: *const Request) ContentLength {
     return if (found) |n| .{ .value = n } else .none;
 }
 
-fn rejectRequest(w: *Worker, c: *Connection, code: i64, body: []const u8) void {
-    writeResponse(c, code, "text/plain", null, body, false, false, w.allocator) catch {};
+fn rejectRequest(w: *Worker, c: *Connection, req: *const Request, code: i64, body: []const u8) void {
+    const trace = beginTrace(w, req, c.bytes_out);
+    writeResponse(c, code, "text/plain", null, body, false, false, w.allocator, trace.id_header) catch {};
+    endTrace(w, &trace, req, "HTTP/1.1", c.addr_bytes, code, c.bytes_out);
     c.state = .closing;
 }
 
@@ -945,7 +1139,7 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
         const body_start = raw[header_end..c.buffered];
         const decoded_len = switch (decodeChunkedBody(body_start)) {
             .need_more => return,
-            .malformed => return rejectRequest(w, c, 400, "Malformed chunked body"),
+            .malformed => return rejectRequest(w, c, &req, 400, "Malformed chunked body"),
             .done => |d| d,
         };
         body_len = decoded_len.body_len;
@@ -954,10 +1148,10 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
     } else {
         switch (contentLengthOf(&req)) {
             .none => {},
-            .invalid => return rejectRequest(w, c, 400, "Invalid Content-Length"),
+            .invalid => return rejectRequest(w, c, &req, 400, "Invalid Content-Length"),
             .value => |declared| body_len = declared,
         }
-        if (body_len > MAX_BODY_BYTES) return rejectRequest(w, c, 413, "Request body too large");
+        if (body_len > MAX_BODY_BYTES) return rejectRequest(w, c, &req, 413, "Request body too large");
         consumed = header_end + body_len;
         if (c.buffered < consumed) return;
     }
@@ -973,14 +1167,19 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
                 c.state = .closing;
                 return;
             };
-            handleWsUpgrade(w, c, ws_key);
+            const ws_trace = beginTrace(w, &req, c.bytes_out);
+            handleWsUpgrade(w, c, ws_key, ws_trace.id_header);
+            endTrace(w, &ws_trace, &req, "HTTP/1.1", c.addr_bytes, if (c.state == .ws_idle) 101 else 500, c.bytes_out);
             shiftBuffer(c, consumed);
             return;
         }
     }
 
+    const trace = beginTrace(w, &req, c.bytes_out);
+
     // static file
-    if (tryServeStatic(w.allocator, c, w.doc_root, &req, c.keep_alive)) {
+    if (tryServeStatic(w.allocator, c, w.doc_root, &req, c.keep_alive, trace.id_header)) |status| {
+        endTrace(w, &trace, &req, "HTTP/1.1", c.addr_bytes, status, c.bytes_out);
         shiftBuffer(c, consumed);
         if (!c.keep_alive) c.state = .closing;
         return;
@@ -995,7 +1194,9 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
         .stream = c.stream,
         .address = net.Address{ .in = .{ .sa = .{ .port = 0, .addr = c.addr_bytes, .zero = @as([8]u8, @splat(0)) } } },
     };
-    populateSuperglobals(&w.vm, &req, mock_conn, w.port, if (w.env_snapshot) |*s| s else null, w.doc_root, dispatch.script_filename, dispatch.front_controller) catch {
+    populateSuperglobals(&w.vm, &req, mock_conn, w.port, if (w.env_snapshot) |*s| s else null, w.doc_root, dispatch.script_filename, dispatch.front_controller, w.request_id.id()) catch |err| {
+        logRequestError(w, "could not set up the request", @errorName(err));
+        endTrace(w, &trace, &req, "HTTP/1.1", c.addr_bytes, 500, c.bytes_out);
         c.state = .closing;
         return;
     };
@@ -1027,7 +1228,9 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
                 exc_class orelse "(none)",
                 exc_msg orelse "(none)",
             }) catch "500 Internal Server Error";
-            writeResponse(c, 500, "text/plain", null, body, c.keep_alive, false, w.allocator) catch {};
+            logRequestError(w, "request failed", @errorName(interp_err));
+            writeResponse(c, 500, "text/plain", null, body, c.keep_alive, false, w.allocator, trace.id_header) catch {};
+            endTrace(w, &trace, &req, "HTTP/1.1", c.addr_bytes, 500, c.bytes_out);
             shiftBuffer(c, consumed);
             if (!c.keep_alive) c.state = .closing;
             return;
@@ -1053,7 +1256,8 @@ fn processHttpRead(w: *Worker, c: *Connection) void {
     const code = w.vm.response_code;
     const extra_headers = w.vm.response_headers;
 
-    writeResponse(c, code, ct, extra_headers, w.vm.output.items, c.keep_alive, acceptsGzip(&req), w.allocator) catch {};
+    writeResponse(c, code, ct, extra_headers, w.vm.output.items, c.keep_alive, acceptsGzip(&req), w.allocator, trace.id_header) catch {};
+    endTrace(w, &trace, &req, "HTTP/1.1", c.addr_bytes, code, c.bytes_out);
     shiftBuffer(c, consumed);
     if (!c.keep_alive) c.state = .closing;
 }
@@ -1062,6 +1266,7 @@ fn reportUncaught(w: *Worker) void {
     const vm = &w.vm;
     vm.dispatchUncaught();
     if (vm.pending_exception == null) return;
+    logUncaught(w);
     if ((vm.error_reporting_level & 1) != 0) {
         const description = @import("stdlib/exceptions.zig").uncaughtDescription(vm, w.allocator);
         defer if (description) |text| w.allocator.free(text);
@@ -1151,10 +1356,16 @@ fn handleH2Request(w: *Worker, conn: *Connection, session: *h2.H2Session, stream
     req.header_count = stream.header_count;
     req.body = stream.body.items;
 
+    const trace = beginTrace(w, &req, 0);
+    const rid = w.request_id.id();
+
     // try static file
-    if (w.doc_root.len > 0 and tryServeStaticH2(w.allocator, session, stream_id, w.doc_root, &req)) {
-        stream.resetRequest(w.allocator);
-        return;
+    if (w.doc_root.len > 0) {
+        if (tryServeStaticH2(w.allocator, session, stream_id, w.doc_root, &req, rid)) |sent| {
+            endTrace(w, &trace, &req, "HTTP/2.0", conn.addr_bytes, 200, sent);
+            stream.resetRequest(w.allocator);
+            return;
+        }
     }
 
     // PHP execution - php-fpm dispatch (see HTTP/1.1 path)
@@ -1165,8 +1376,10 @@ fn handleH2Request(w: *Worker, conn: *Connection, session: *h2.H2Session, stream
         .stream = conn.stream,
         .address = net.Address{ .in = .{ .sa = .{ .port = 0, .addr = conn.addr_bytes, .zero = @as([8]u8, @splat(0)) } } },
     };
-    populateSuperglobals(&w.vm, &req, mock_conn, w.port, if (w.env_snapshot) |*s| s else null, w.doc_root, dispatch.script_filename, dispatch.front_controller) catch {
-        session.submitResponse(stream_id, 500, "text/plain", "Internal Server Error");
+    populateSuperglobals(&w.vm, &req, mock_conn, w.port, if (w.env_snapshot) |*s| s else null, w.doc_root, dispatch.script_filename, dispatch.front_controller, rid) catch |err| {
+        logRequestError(w, "could not set up the request", @errorName(err));
+        session.submitResponse(stream_id, 500, "text/plain", "Internal Server Error", rid);
+        endTrace(w, &trace, &req, "HTTP/2.0", conn.addr_bytes, 500, "Internal Server Error".len);
         stream.resetRequest(w.allocator);
         return;
     };
@@ -1181,11 +1394,13 @@ fn handleH2Request(w: *Worker, conn: *Connection, session: *h2.H2Session, stream
         }
     }
 
-    w.vm.interpret(dispatch.result) catch {
+    w.vm.interpret(dispatch.result) catch |interp_err| {
         if (w.vm.pending_exception != null) {
             reportUncaught(w);
         } else if (!w.vm.exit_requested) {
-            session.submitResponse(stream_id, 500, "text/plain", "Internal Server Error");
+            logRequestError(w, "request failed", @errorName(interp_err));
+            session.submitResponse(stream_id, 500, "text/plain", "Internal Server Error", rid);
+            endTrace(w, &trace, &req, "HTTP/2.0", conn.addr_bytes, 500, "Internal Server Error".len);
             stream.resetRequest(w.allocator);
             return;
         }
@@ -1198,43 +1413,45 @@ fn handleH2Request(w: *Worker, conn: *Connection, session: *h2.H2Session, stream
     const ct = http.responseContentType(&w.vm);
     const code: u16 = std.math.cast(u16, w.vm.response_code) orelse 200;
 
-    session.submitResponse(stream_id, code, ct, w.vm.output.items);
+    session.submitResponse(stream_id, code, ct, w.vm.output.items, rid);
+    endTrace(w, &trace, &req, "HTTP/2.0", conn.addr_bytes, code, w.vm.output.items.len);
     stream.resetRequest(w.allocator);
 }
 
-fn tryServeStaticH2(allocator: Allocator, session: *h2.H2Session, stream_id: i32, doc_root: []const u8, req: *const Request) bool {
+// the body size when the file was served, null when it is not a static file
+fn tryServeStaticH2(allocator: Allocator, session: *h2.H2Session, stream_id: i32, doc_root: []const u8, req: *const Request, request_id: []const u8) ?usize {
     const path = req.path;
-    if (std.mem.endsWith(u8, path, ".php")) return false;
-    if (path.len <= 1) return false;
+    if (std.mem.endsWith(u8, path, ".php")) return null;
+    if (path.len <= 1) return null;
     const rel = if (path[0] == '/') path[1..] else path;
-    if (rel.len == 0) return false;
-    if (std.mem.indexOf(u8, rel, "..") != null) return false;
+    if (rel.len == 0) return null;
+    if (std.mem.indexOf(u8, rel, "..") != null) return null;
 
-    const file_path = std.fs.path.join(allocator, &.{ doc_root, rel }) catch return false;
+    const file_path = std.fs.path.join(allocator, &.{ doc_root, rel }) catch return null;
     defer allocator.free(file_path);
-    const file = std.Io.Dir.cwd().openFile(platform.io, file_path, .{}) catch return false;
+    const file = std.Io.Dir.cwd().openFile(platform.io, file_path, .{}) catch return null;
     defer file.close(platform.io);
-    const stat = file.stat(platform.io) catch return false;
-    if (stat.kind != .file) return false;
+    const stat = file.stat(platform.io) catch return null;
+    if (stat.kind != .file) return null;
 
     const size: usize = @intCast(stat.size);
-    if (size > 10 * 1024 * 1024) return false;
+    if (size > 10 * 1024 * 1024) return null;
 
-    const body = allocator.alloc(u8, size) catch return false;
+    const body = allocator.alloc(u8, size) catch return null;
     defer allocator.free(body);
-    const bytes_read = platform.readAll(file, body) catch return false;
+    const bytes_read = platform.readAll(file, body) catch return null;
 
     const mime = mimeType(rel);
-    session.submitResponse(stream_id, 200, mime, body[0..bytes_read]);
-    return true;
+    session.submitResponse(stream_id, 200, mime, body[0..bytes_read], request_id);
+    return bytes_read;
 }
 
 // WebSocket processing
 
-fn handleWsUpgrade(w: *Worker, c: *Connection, ws_key: []const u8) void {
+fn handleWsUpgrade(w: *Worker, c: *Connection, ws_key: []const u8, id_header: []const u8) void {
     var accept_buf: [28]u8 = undefined;
     const accept = ws_proto.computeAcceptKey(ws_key, &accept_buf);
-    ws_proto.writeHandshakeResponse(c, accept) catch {
+    ws_proto.writeHandshakeResponse(c, accept, id_header) catch {
         c.state = .closing;
         return;
     };
@@ -1371,7 +1588,7 @@ fn parseRequest(raw: []const u8) Request {
     return req;
 }
 
-fn populateSuperglobals(vm: *VM, req: *const Request, conn: net.Server.Connection, port: u16, env_snapshot: ?*const env.EnvSnapshot, doc_root: []const u8, script_filename: []const u8, front_controller: bool) !void {
+fn populateSuperglobals(vm: *VM, req: *const Request, conn: net.Server.Connection, port: u16, env_snapshot: ?*const env.EnvSnapshot, doc_root: []const u8, script_filename: []const u8, front_controller: bool, request_id: []const u8) !void {
     const a = vm.allocator;
     const server_arr = try vm.allocArray();
 
@@ -1441,6 +1658,9 @@ fn populateSuperglobals(vm: *VM, req: *const Request, conn: net.Server.Connectio
     const addr_owned = try a.dupe(u8, addr_str);
     try vm.strings.append(a, addr_owned);
     try server_arr.set(a, .{ .string = Value.String.borrowed("REMOTE_ADDR") }, .{ .string = Value.String.borrowed(addr_owned) });
+    // the worker owns the id's bytes until its next request, like the
+    // connection buffer the other borrowed values point into
+    if (request_id.len > 0) try server_arr.set(a, .{ .string = Value.String.borrowed("REQUEST_ID") }, .{ .string = Value.String.borrowed(request_id) });
 
     try vm.putRequestVar("$_SERVER", .{ .array = server_arr });
 
@@ -1683,35 +1903,36 @@ fn urlDecode(a: Allocator, input: []const u8) ![]const u8 {
     return buf.toOwnedSlice(a);
 }
 
-fn tryServeStatic(allocator: Allocator, conn: *Connection, doc_root: []const u8, req: *const Request, keep_alive: bool) bool {
+// the status sent when the path was a static file, null when it was not
+fn tryServeStatic(allocator: Allocator, conn: *Connection, doc_root: []const u8, req: *const Request, keep_alive: bool, id_header: []const u8) ?u16 {
     const path = req.path;
-    if (std.mem.endsWith(u8, path, ".php")) return false;
-    if (path.len <= 1) return false;
+    if (std.mem.endsWith(u8, path, ".php")) return null;
+    if (path.len <= 1) return null;
     const rel = if (path.len > 0 and path[0] == '/') path[1..] else path;
-    if (rel.len == 0) return false;
-    if (std.mem.indexOf(u8, rel, "..") != null) return false;
+    if (rel.len == 0) return null;
+    if (std.mem.indexOf(u8, rel, "..") != null) return null;
 
-    const file_path = std.fs.path.join(allocator, &.{ doc_root, rel }) catch return false;
+    const file_path = std.fs.path.join(allocator, &.{ doc_root, rel }) catch return null;
     defer allocator.free(file_path);
-    const file = std.Io.Dir.cwd().openFile(platform.io, file_path, .{}) catch return false;
+    const file = std.Io.Dir.cwd().openFile(platform.io, file_path, .{}) catch return null;
     defer file.close(platform.io);
-    const stat = file.stat(platform.io) catch return false;
-    if (stat.kind != .file) return false;
+    const stat = file.stat(platform.io) catch return null;
+    if (stat.kind != .file) return null;
 
     const size = stat.size;
     const mime = mimeType(rel);
 
     var etag_buf: [64]u8 = undefined;
     const mtime_s: u64 = @intCast(@divFloor(stat.mtime.nanoseconds, 1_000_000_000));
-    const etag = std.fmt.bufPrint(&etag_buf, "\"{x}-{x}\"", .{ size, mtime_s }) catch return false;
+    const etag = std.fmt.bufPrint(&etag_buf, "\"{x}-{x}\"", .{ size, mtime_s }) catch return null;
 
     if (req.getHeader("If-None-Match")) |inm| {
         if (std.mem.eql(u8, inm, etag)) {
             const conn_val = if (keep_alive) "keep-alive" else "close";
             var hdr_buf: [512]u8 = undefined;
-            const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 304 Not Modified\r\nETag: {s}\r\nConnection: {s}\r\n\r\n", .{ etag, conn_val }) catch return false;
-            _ = conn.ioWrite(hdr) catch return false;
-            return true;
+            const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 304 Not Modified\r\nETag: {s}\r\n{s}Connection: {s}\r\n\r\n", .{ etag, id_header, conn_val }) catch return null;
+            _ = conn.ioWrite(hdr) catch return null;
+            return 304;
         }
     }
 
@@ -1719,33 +1940,33 @@ fn tryServeStatic(allocator: Allocator, conn: *Connection, doc_root: []const u8,
     const use_gzip = acceptsGzip(req) and isCompressible(mime) and size <= 1024 * 1024;
 
     if (use_gzip) {
-        const raw = allocator.alloc(u8, size) catch return false;
+        const raw = allocator.alloc(u8, size) catch return null;
         defer allocator.free(raw);
-        const bytes_read = platform.readAll(file, raw) catch return false;
+        const bytes_read = platform.readAll(file, raw) catch return null;
         if (gzipCompress(allocator, raw[0..bytes_read])) |compressed| {
             defer allocator.free(compressed);
             var hdr_buf: [512]u8 = undefined;
-            const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nContent-Encoding: gzip\r\nETag: {s}\r\nCache-Control: public, max-age=3600\r\nVary: Accept-Encoding\r\nConnection: {s}\r\n\r\n", .{ mime, compressed.len, etag, conn_val }) catch return false;
-            _ = conn.ioWrite(hdr) catch return false;
-            _ = conn.ioWrite(compressed) catch return true;
-            return true;
+            const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nContent-Encoding: gzip\r\nETag: {s}\r\nCache-Control: public, max-age=3600\r\nVary: Accept-Encoding\r\n{s}Connection: {s}\r\n\r\n", .{ mime, compressed.len, etag, id_header, conn_val }) catch return null;
+            _ = conn.ioWrite(hdr) catch return null;
+            _ = conn.ioWrite(compressed) catch return 200;
+            return 200;
         }
     }
 
     var hdr_buf: [512]u8 = undefined;
-    const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nETag: {s}\r\nCache-Control: public, max-age=3600\r\nConnection: {s}\r\n\r\n", .{ mime, size, etag, conn_val }) catch return false;
-    _ = conn.ioWrite(hdr) catch return false;
+    const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nETag: {s}\r\nCache-Control: public, max-age=3600\r\n{s}Connection: {s}\r\n\r\n", .{ mime, size, etag, id_header, conn_val }) catch return null;
+    _ = conn.ioWrite(hdr) catch return null;
 
     var fbuf: [32768]u8 = undefined;
     var remaining: u64 = size;
     while (remaining > 0) {
         const to_read = @min(remaining, fbuf.len);
-        const nr = platform.read(file, fbuf[0..to_read]) catch return true;
+        const nr = platform.read(file, fbuf[0..to_read]) catch return 200;
         if (nr == 0) break;
-        _ = conn.ioWrite(fbuf[0..nr]) catch return true;
+        _ = conn.ioWrite(fbuf[0..nr]) catch return 200;
         remaining -= nr;
     }
-    return true;
+    return 200;
 }
 
 fn mimeType(path: []const u8) []const u8 {
@@ -1805,7 +2026,10 @@ fn statusText(code: i64, buf: *[32]u8) []const u8 {
     };
 }
 
-fn writeResponse(conn: *Connection, code: i64, content_type: []const u8, extra_headers: ?*PhpArray, body: []const u8, keep_alive: bool, use_gzip: bool, allocator: Allocator) !void {
+// id_header is the server's X-Request-Id line, or empty; a request id the
+// application sets with header() takes its place
+fn writeResponse(conn: *Connection, code: i64, content_type: []const u8, extra_headers: ?*PhpArray, body: []const u8, keep_alive: bool, use_gzip: bool, allocator: Allocator, id_header: []const u8) !void {
+    var app_set_id = false;
     var status_buf: [32]u8 = undefined;
     const status_text = statusText(code, &status_buf);
 
@@ -1841,6 +2065,7 @@ fn writeResponse(conn: *Connection, code: i64, content_type: []const u8, extra_h
                 // (curl truncates the rest of the headers at that point)
                 if (std.mem.startsWith(u8, hdr, "HTTP/")) continue;
                 if (std.mem.indexOfScalar(u8, hdr, '\r') != null or std.mem.indexOfScalar(u8, hdr, '\n') != null) continue;
+                if (id_header.len > 0 and std.ascii.startsWithIgnoreCase(hdr, "x-request-id:")) app_set_id = true;
                 if (pos + hdr.len + 2 < hdr_buf.len) {
                     @memcpy(hdr_buf[pos .. pos + hdr.len], hdr);
                     pos += hdr.len;
@@ -1850,6 +2075,11 @@ fn writeResponse(conn: *Connection, code: i64, content_type: []const u8, extra_h
                 }
             }
         }
+    }
+
+    if (id_header.len > 0 and !app_set_id and pos + id_header.len < hdr_buf.len) {
+        @memcpy(hdr_buf[pos .. pos + id_header.len], id_header);
+        pos += id_header.len;
     }
 
     if (pos + 2 <= hdr_buf.len) {
