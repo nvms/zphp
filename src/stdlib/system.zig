@@ -1292,6 +1292,23 @@ fn native_get_defined_vars(ctx: *NativeContext, _: []const Value) RuntimeError!N
 
     if (vm.frame_count == 0) return NativeResult.borrowed(.{ .array = result });
     const frame = &vm.frames[vm.frame_count - 1];
+    const global_scope = frame.func == null;
+
+    // the global symbol table starts with what php-cli registers before the
+    // script runs (php_build_argv, then the auto globals), in that order;
+    // the script's own variables follow
+    if (global_scope) {
+        for ([_][]const u8{ "argv", "argc" }) |name| {
+            var buf: [8]u8 = undefined;
+            const key = std.fmt.bufPrint(&buf, "${s}", .{name}) catch unreachable;
+            if (frame.vars.get(key)) |v| if (v != .undef and v != .null) try result.set(alloc, .{ .string = Value.String.borrowed(name) }, v);
+        }
+        for ([_][]const u8{ "_GET", "_POST", "_COOKIE", "_FILES", "_SERVER" }) |name| {
+            var buf: [16]u8 = undefined;
+            const key = std.fmt.bufPrint(&buf, "${s}", .{name}) catch unreachable;
+            if (vm.globals_cells.get(key)) |cell| if (cell.* != .undef) try result.set(alloc, .{ .string = Value.String.borrowed(name) }, cell.*);
+        }
+    }
 
     // slot-based locals first (compile-time named slots). PHP excludes $this
     // from get_defined_vars() even inside instance methods. code that
@@ -1319,6 +1336,8 @@ fn native_get_defined_vars(ctx: *NativeContext, _: []const Value) RuntimeError!N
         if (name.len == 0) continue;
         if (entry.value_ptr.* == .null) continue;
         if (std.mem.eql(u8, name, "this")) continue;
+        // php 8.1's $GLOBALS is no variable of the symbol table
+        if (global_scope and std.mem.eql(u8, name, "GLOBALS")) continue;
         try result.set(alloc, .{ .string = Value.String.borrowed(name) }, entry.value_ptr.*);
     }
     return NativeResult.borrowed(.{ .array = result });
