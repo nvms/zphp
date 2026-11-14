@@ -2969,6 +2969,16 @@ const Parser = struct {
                 else => {},
             };
 
+            // php's grammar assigns only to a variable (calls included; the
+            // compiler refuses those), or destructures into a list
+            if (prec == 4) {
+                const left_tag = self.nodes.items[left].tag;
+                const destructure = (left_tag == .array_literal or left_tag == .list_destructure) and self.peek() == .equal;
+                if (!destructure and !self.isVariableNode(left)) {
+                    try self.addError(.unexpected_token);
+                    return error.ParseError;
+                }
+            }
             const op_tok = self.advance();
             const op_tag = self.tokens[op_tok].tag;
             const right_min = if (isRightAssoc(op_tag)) prec - 1 else prec;
@@ -2981,6 +2991,11 @@ const Parser = struct {
             // after it applies to the whole assignment: `$a = &$b + 1` adds
             // to the result of `$a = &$b`
             const right_inner = try self.parseExprPrec(if (is_ref_assign) 20 else right_min);
+            // and makes a reference only of a variable
+            if (is_ref_assign and !self.isVariableNode(right_inner)) {
+                try self.addError(.unexpected_token);
+                return error.ParseError;
+            }
             const right = if (is_ref_assign)
                 try self.addNode(.{ .tag = .ref_target, .main_token = ref_amp_tok, .data = .{ .lhs = right_inner } })
             else
@@ -3676,6 +3691,18 @@ const Parser = struct {
             .kw_instanceof => 18,
             .star_star => 20,
             else => 0,
+        };
+    }
+
+    // php's `variable` (callable_variable, static_member and property
+    // fetches), what an assignment may write and `= &` may reference
+    fn isVariableNode(self: *Parser, idx: u32) bool {
+        const node = self.nodes.items[idx];
+        // A::B, a class constant, shares the static property node
+        if (node.tag == .static_prop_access) return node.main_token == 0 or self.tokens[node.main_token].tag == .variable;
+        return isAssignTarget(node.tag) or switch (node.tag) {
+            .array_push_target, .call, .method_call, .static_call, .dynamic_static_call, .nullsafe_method_call => true,
+            else => false,
         };
     }
 
