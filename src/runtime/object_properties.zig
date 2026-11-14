@@ -66,7 +66,7 @@ pub fn releaseHolder(vm: *VM, holder: ?*PhpArray) void {
     if (holder) |h| vm.releaseUnheldArray(h);
 }
 
-fn classHasHooks(vm: *VM, class_name: []const u8) bool {
+pub fn classHasHooks(vm: *VM, class_name: []const u8) bool {
     if (!vm.any_prop_hooks) return false;
     var current: ?[]const u8 = class_name;
     while (current) |cn| {
@@ -77,19 +77,14 @@ fn classHasHooks(vm: *VM, class_name: []const u8) bool {
     return false;
 }
 
-// php's zend_hooked_object_build_properties, read as json_encode,
-// var_export, get_object_vars and foreach read it: declared properties in
-// declaration order from the topmost class down, a hooked one's value from
-// its get hook (a virtual one without a get hook left out), then dynamic
-// properties. access: the scope whose access is checked, when it is
-pub fn applyHooks(vm: *VM, obj: *PhpObject, listing: *Listing, allocator: std.mem.Allocator, access: ?struct { scope: ?[]const u8 }) RuntimeError!void {
-    if (!classHasHooks(vm, obj.class_name)) return;
-    const Entry = struct { name: []const u8, visibility: ClassDef.Visibility, declaring: []const u8 };
-    var order: std.ArrayListUnmanaged(Entry) = .empty;
-    defer order.deinit(allocator);
+pub const Declared = struct { name: []const u8, visibility: ClassDef.Visibility, declaring: []const u8 };
+
+// the properties a class chain declares in php's table order: from the
+// topmost class down, a redeclared non-private one where it first appeared
+pub fn declaredOrder(vm: *VM, class_name: []const u8, allocator: std.mem.Allocator, order: *std.ArrayListUnmanaged(Declared)) RuntimeError!void {
     var chain: std.ArrayListUnmanaged([]const u8) = .empty;
     defer chain.deinit(allocator);
-    var current: ?[]const u8 = obj.class_name;
+    var current: ?[]const u8 = class_name;
     while (current) |cn| {
         const def = vm.classes.get(cn) orelse break;
         try chain.append(allocator, def.name);
@@ -110,6 +105,18 @@ pub fn applyHooks(vm: *VM, obj: *PhpObject, listing: *Listing, allocator: std.me
             try order.append(allocator, .{ .name = prop.name, .visibility = prop.visibility, .declaring = def.name });
         }
     }
+}
+
+// php's zend_hooked_object_build_properties, read as json_encode,
+// var_export, get_object_vars and foreach read it: declared properties in
+// declaration order from the topmost class down, a hooked one's value from
+// its get hook (a virtual one without a get hook left out), then dynamic
+// properties. access: the scope whose access is checked, when it is
+pub fn applyHooks(vm: *VM, obj: *PhpObject, listing: *Listing, allocator: std.mem.Allocator, access: ?struct { scope: ?[]const u8 }) RuntimeError!void {
+    if (!classHasHooks(vm, obj.class_name)) return;
+    var order: std.ArrayListUnmanaged(Declared) = .empty;
+    defer order.deinit(allocator);
+    try declaredOrder(vm, obj.class_name, allocator, &order);
 
     var out: std.ArrayListUnmanaged(Property) = .empty;
     errdefer out.deinit(allocator);
@@ -141,7 +148,7 @@ pub fn applyHooks(vm: *VM, obj: *PhpObject, listing: *Listing, allocator: std.me
     listing.items = out;
 }
 
-fn accessible(vm: *VM, scope: ?[]const u8, visibility: ClassDef.Visibility, declaring: []const u8) bool {
+pub fn accessible(vm: *VM, scope: ?[]const u8, visibility: ClassDef.Visibility, declaring: []const u8) bool {
     if (visibility == .public) return true;
     const sc = scope orelse return false;
     if (visibility == .private) return std.mem.eql(u8, sc, declaring);
@@ -306,7 +313,7 @@ pub fn setMangled(vm: *VM, arr: *PhpArray, name: []const u8, visibility: ClassDe
     try arr.setCopiedKey(vm.allocator, key, value);
 }
 
-fn unmangle(key: []const u8, value: Value) Property {
+pub fn unmangle(key: []const u8, value: Value) Property {
     if (key.len > 0 and key[0] == 0) {
         // an anonymous class's name holds a NUL of its own; the name follows the last
         if (std.mem.lastIndexOfScalar(u8, key[1..], 0)) |last| {
@@ -322,14 +329,14 @@ fn unmangle(key: []const u8, value: Value) Property {
 
 // every slot of the name is some class's private, so a property stored by
 // name beside them is a separate one
-fn shadowsPrivate(layout: *const PhpObject.SlotLayout, name: []const u8) bool {
+pub fn shadowsPrivate(layout: *const PhpObject.SlotLayout, name: []const u8) bool {
     for (layout.names, 0..) |slot_name, i| {
         if (std.mem.eql(u8, slot_name, name) and !layout.is_private[i]) return false;
     }
     return true;
 }
 
-fn inSlots(layout: *const PhpObject.SlotLayout, name: []const u8) bool {
+pub fn inSlots(layout: *const PhpObject.SlotLayout, name: []const u8) bool {
     for (layout.names) |slot_name| if (std.mem.eql(u8, slot_name, name)) return true;
     return false;
 }

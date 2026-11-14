@@ -39,6 +39,7 @@ const compiler_mod = @import("../pipeline/compiler.zig");
 const enums = @import("../stdlib/enums.zig");
 const callables = @import("callables.zig");
 const object_properties = @import("object_properties.zig");
+const object_iter = @import("object_iter.zig");
 const spl_iterator_classes = @import("../stdlib/spl_iterator_classes.zig");
 const inheritance = @import("inheritance.zig");
 
@@ -2020,6 +2021,9 @@ pub const VM = struct {
         ini_values: std.StringHashMapUnmanaged([]u8) = .{},
         // the object a foreach snapshot stands in for, released with the snapshot
         foreach_pins: std.AutoHashMapUnmanaged(*PhpArray, Value) = .{},
+        // the state of each foreach over an object's properties, by the
+        // array that stands in the loop's iterable slot
+        object_iters: std.AutoHashMapUnmanaged(*PhpArray, *object_iter.ObjectIter) = .{},
         // canonical paths of files include resolution found, owned here
         include_paths: std.StringHashMapUnmanaged(void) = .{},
         // the files this run included, main script first, keyed by canonical
@@ -3520,6 +3524,8 @@ pub const VM = struct {
             self.dropIncludeError(&ic_ptr.include_parse_error);
             self.dropIncludeError(&ic_ptr.include_compile_error);
             ic_ptr.foreach_pins.deinit(self.allocator);
+            self.freeObjectIters(ic_ptr);
+            ic_ptr.object_iters.deinit(self.allocator);
             self.freeIniValues(ic_ptr);
             ic_ptr.ini_values.deinit(self.allocator);
             freeOwnedKeys(self.allocator, &ic_ptr.include_paths);
@@ -3872,6 +3878,7 @@ pub const VM = struct {
             self.dropIncludeError(&ic_ptr.include_parse_error);
             self.dropIncludeError(&ic_ptr.include_compile_error);
             ic_ptr.foreach_pins.clearRetainingCapacity();
+            self.freeObjectIters(ic_ptr);
         }
         self.clearRealDirCache();
         self.clearStreamWrappers();
@@ -7797,52 +7804,34 @@ pub const VM = struct {
                         } else if (iterable == .array) {
                             self.push(.{ .int = 0 });
                         } else if (iterable == .object) {
+                            // a lazy object, and the instance of a proxy if it
+                            // is lazy too, initialize as the loop starts
                             var obj = iterable.object;
-                            self.triggerLazyInit(obj) catch {
+                            const init_failed = while (true) {
+                                self.triggerLazyInit(obj) catch break true;
+                                if (obj.storage() == obj) break false;
+                                obj = obj.storage();
+                            };
+                            if (init_failed) {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
-                            };
-                            obj = obj.storage();
-                            const arr = try self.allocArray();
-                            // when foreach runs inside a class method whose
-                            // scope can see private/protected on this object,
-                            // include those too (PHP's foreach($this as ...)
-                            // sees the full property set). private requires
-                            // exact class match; protected requires inheritance
-                            const scope_class: ?[]const u8 = if (self.frame_count > 0)
-                                self.frames[self.frame_count - 1].called_class orelse self.currentDefiningClass()
-                            else
-                                null;
-                            const includeProp = struct {
-                                fn check(vm: *VM, scope: ?[]const u8, vis: ClassDef.Visibility, declaring: []const u8) bool {
-                                    if (vis == .public) return true;
-                                    const sc = scope orelse return false;
-                                    if (vis == .private) return std.mem.eql(u8, sc, declaring);
-                                    return vm.isInstanceOf(sc, declaring) or vm.isInstanceOf(declaring, sc);
-                                }
-                            }.check;
-                            // the object's own properties: never uninitialized typed
-                            // ones (reading them would throw), nor unset ones
-                            var listing: object_properties.Listing = .{};
-                            defer listing.deinit(self.allocator);
-                            try object_properties.appendOwn(self, obj, .array_cast, &listing, self.allocator);
-                            // a hooked property is read through its get hook
-                            object_properties.applyHooks(self, obj, &listing, self.allocator, .{ .scope = scope_class }) catch {
-                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
-                                return error.RuntimeError;
-                            };
-                            defer object_properties.releaseHolder(self, listing.takeHolder());
-                            for (listing.items.items) |prop| {
-                                if (!includeProp(self, scope_class, prop.visibility, prop.declaring)) continue;
-                                if (prop.declared) {
-                                    try arr.set(self.allocator, .{ .string = Value.String.borrowed(prop.key.name) }, prop.value);
-                                } else {
-                                    try arr.setCopiedKey(self.allocator, prop.key.name, prop.value);
-                                }
                             }
-                            // the snapshot takes the object's stack slot; the object's
-                            // reference moves to the snapshot, so it lives as long as the
-                            // loop does, as php's iterated object does
+                            // php's FE_RESET over the property table: the loop
+                            // holds the object and reads it as it goes; the
+                            // slot gets an empty array that carries the state
+                            const state = try object_iter.create(self, obj, self.currentDefiningClass(), by_ref);
+                            const arr = self.allocArray() catch |err| {
+                                state.destroy(self);
+                                return err;
+                            };
+                            arr.object_iter = true;
+                            self.ic.?.object_iters.put(self.allocator, arr, state) catch |err| {
+                                arr.object_iter = false;
+                                state.destroy(self);
+                                return err;
+                            };
+                            // the object's reference moves to the carrier, so it
+                            // lives as long as the loop does
                             try self.ic.?.foreach_pins.put(self.allocator, arr, self.stack[self.sp - 1]);
                             self.stack[self.sp - 1] = .{ .array = arr };
                             self.push(.{ .int = 0 });
@@ -7910,6 +7899,28 @@ pub const VM = struct {
                             const held = self.popTransfer();
                             self.push(key);
                             self.pushTransfer(held);
+                        }
+                    } else if (iterable == .array and iterable.array.object_iter) {
+                        const carrier = iterable.array;
+                        const state = self.ic.?.object_iters.get(carrier) orelse {
+                            self.currentFrame().ip += offset;
+                            continue;
+                        };
+                        const pinned = self.ic.?.foreach_pins.get(carrier) orelse Value.null;
+                        if (pinned != .object) {
+                            self.currentFrame().ip += offset;
+                            continue;
+                        }
+                        const step = object_iter.fetch(self, state, object_iter.innermost(pinned.object), @intCast(@max(0, Value.toInt(idx_val)))) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        if (step) |found| {
+                            self.stack[self.sp - 1] = .{ .int = @intCast(found.index) };
+                            self.push(found.key);
+                            self.push(found.value);
+                        } else {
+                            self.currentFrame().ip += offset;
                         }
                     } else if (iterable == .array) {
                         const idx = Value.toInt(idx_val);
@@ -8061,6 +8072,40 @@ pub const VM = struct {
                             self.array_ref_active = true;
                         }
                     } else if (src_val == .object and key_val == .string) {
+                        // a hooked property (zho_declared_it_fetch_current with
+                        // by_ref): only a get hook that returns by reference
+                        // gives the loop a reference
+                        const hooked = src_val.object.storage();
+                        const pname = key_val.string.bytes();
+                        if ((self.hasPropHook(hooked.class_name, pname, .get) or self.hasPropHook(hooked.class_name, pname, .set)) and !self.inPropHook(hooked, pname)) {
+                            if (!self.hasPropHook(hooked.class_name, pname, .get) or !try self.propGetReturnsRef(hooked, pname)) {
+                                const msg = try std.fmt.allocPrint(self.allocator, "Cannot create reference to property {s}::${s}", .{ hooked.class_name, pname });
+                                defer self.allocator.free(msg);
+                                if (try self.throwBuiltinException("Error", msg)) continue;
+                                return error.RuntimeError;
+                            }
+                            hooked.refcount +%= 1;
+                            defer self.releaseValue(.{ .object = hooked });
+                            self.setReturnRef(null);
+                            _ = self.callPropHook(hooked, pname, .get, .null) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            const frame = self.currentFrame();
+                            if (self.last_return_ref) |cell| {
+                                try self.bindRefSlot(&frame.ref_slots, name, cell);
+                                try self.mirrorBoundName(frame, name, cell.*);
+                                const owner = try self.ensureRefOwner(frame);
+                                if (self.last_return_ref_owner != 0) {
+                                    const ri = try self.refIndex();
+                                    try ri.transferCell(self.allocator, self.last_return_ref_owner, owner, cell);
+                                    ri.releaseOwner(self.allocator, self.last_return_ref_owner);
+                                    self.last_return_ref_owner = 0;
+                                }
+                                self.setReturnRef(null);
+                            }
+                            continue;
+                        }
                         // FE_FETCH_RW refuses a readonly property
                         const ro = self.findPropertyVisibility(src_val.object.class_name, key_val.string.bytes());
                         if (ro.declared and ro.is_readonly) {
@@ -20193,6 +20238,15 @@ pub const VM = struct {
         return true;
     }
 
+    fn freeObjectIters(self: *VM, ic_ptr: *InlineCache) void {
+        var it = ic_ptr.object_iters.iterator();
+        while (it.next()) |entry| {
+            entry.key_ptr.*.object_iter = false;
+            entry.value_ptr.*.destroy(self);
+        }
+        ic_ptr.object_iters.clearRetainingCapacity();
+    }
+
     fn endForeach(self: *VM) void {
         const position = self.stack[self.sp - 1];
         self.stack[self.sp - 1] = .null;
@@ -30860,6 +30914,10 @@ pub const VM = struct {
     // arrays cascade. clearing prevents any later walk from double-releasing
     fn releaseArrayElements(self: *VM, arr: *PhpArray) void {
         self.clearArgArraySources(arr);
+        if (arr.object_iter) {
+            arr.object_iter = false;
+            if (self.ic.?.object_iters.fetchRemove(arr)) |state| state.value.destroy(self);
+        }
         if (self.ic.?.foreach_pins.count() > 0) {
             if (self.ic.?.foreach_pins.fetchRemove(arr)) |pin| self.stackRelease(pin.value);
         }

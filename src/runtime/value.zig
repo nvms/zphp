@@ -151,6 +151,9 @@ pub const PhpArray = struct {
     byref_pins: u8 = 0,
     // Recursion flags
     recursion: u8 = 0,
+    // the position carrier of a foreach over an object's properties: the
+    // loop's state is in the vm's object_iters, keyed by this array
+    object_iter: bool = false,
     // set while a by-reference foreach iterates the array live (php's
     // HashTable iterators): what it needs to keep its place as entries are
     // removed. allocated with the c allocator, freed with the array
