@@ -2012,6 +2012,8 @@ pub const Compiler = struct {
                 // `;` alone is no statement to php
                 const nop = node.tag == .block and self.ast.tokens[node.main_token].tag == .semicolon;
                 if (nop) continue;
+                // neither is __halt_compiler() (zend_compile_top_stmt)
+                if (node.tag == .empty_stmt and std.ascii.eqlIgnoreCase(self.ast.tokenSlice(node.main_token), "__halt_compiler")) continue;
                 if (node.tag != .declare_stmt) code_before = true;
                 if (has_bracketed and !in_namespace) {
                     const at = if (node.main_token == 0 and node.tag == .expression_stmt) self.ast.nodes[node.data.lhs].main_token else node.main_token;

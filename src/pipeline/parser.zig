@@ -110,6 +110,12 @@ const Parser = struct {
     promoted_hooks: std.ArrayListUnmanaged(u32) = .empty,
     // inside a bracketed namespace's body
     in_namespace_block: bool = false,
+    // statements being parsed around the current one: 0 for one of the
+    // file's (or a bracketed namespace's) own statements, php's
+    // top_statement
+    stmt_depth: u32 = 0,
+    // a __halt_compiler() inside a block ended the tokens
+    halted_inside: bool = false,
 
     // root
 
@@ -168,6 +174,9 @@ const Parser = struct {
     }
 
     fn parseStatement(self: *Parser) Error!u32 {
+        const outer_depth = self.stmt_depth;
+        self.stmt_depth = outer_depth + 1;
+        defer self.stmt_depth = outer_depth;
         if (self.peek() == .hash_bracket) {
             try self.parseAttributes();
             return self.parseStatement();
@@ -182,11 +191,21 @@ const Parser = struct {
         // __HALT_COMPILER(); — stops compilation. PHAR files use it to mark
         // the boundary between the loader stub and the embedded archive.
         // consume the syntactic form and skip everything else to EOF
-        if (self.peek() == .identifier and std.mem.eql(u8, self.lexemeAt(0), "__HALT_COMPILER")) {
+        if (self.peek() == .identifier and std.ascii.eqlIgnoreCase(self.lexemeAt(0), "__HALT_COMPILER") and
+            (self.peekAt(1) == .eof or self.peekAt(1) == .l_paren))
+        {
             const tok = self.advance();
             if (self.peek() == .l_paren) _ = self.advance();
             if (self.peek() == .r_paren) _ = self.advance();
             if (self.peek() == .semicolon) _ = self.advance();
+            // php's grammar takes it only as a top statement; inside a block
+            // or a function its parser throws there, so nothing after it
+            // (the unclosed blocks around it) is an error of its own
+            if (outer_depth != 0) {
+                self.deferModifierError(tok, "__HALT_COMPILER() can only be used from the outermost scope", .{});
+                if (self.peek() == .eof) self.halted_inside = true;
+                return self.addNode(.{ .tag = .empty_stmt, .main_token = tok, .data = .{} });
+            }
             while (self.peek() != .eof) _ = self.advance();
             return self.addNode(.{ .tag = .empty_stmt, .main_token = tok, .data = .{} });
         }
@@ -437,6 +456,10 @@ const Parser = struct {
             // a closing reset when we hit `}`
             const ns_node = try self.addNode(.{ .tag = .namespace_decl, .main_token = tok, .data = .{ .lhs = extra, .rhs = 1 } });
             try self.pending_top_stmts.append(self.allocator, ns_node);
+            // the body's statements are top statements
+            const outer_depth = self.stmt_depth;
+            self.stmt_depth = 0;
+            defer self.stmt_depth = outer_depth;
             // body statements: drain pending then loop
             while (self.peek() != .r_brace and self.peek() != .eof) {
                 const node = self.parseStatement() catch |err| switch (err) {
@@ -4122,6 +4145,7 @@ const Parser = struct {
     }
 
     fn addErrorAt(self: *Parser, token: u32, tag: Ast.Error.Tag) Error!void {
+        if (self.halted_inside) return;
         // advance() can step past the eof token; an error there is at eof
         const last: u32 = @intCast(self.tokens.len - 1);
         try self.errors.append(self.allocator, .{ .token = @min(token, last), .tag = tag });

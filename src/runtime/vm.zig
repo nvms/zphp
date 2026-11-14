@@ -4669,7 +4669,12 @@ pub const VM = struct {
                     self.native_call = n.outer;
                 };
                 const raised = self.raiseCompileFatal(d.message(), .{ .file = where, .line = line });
-                if (!d.trace) if (self.pending_exception) |exc| if (exc == .object) try exc.object.set(self.allocator, "__no_trace", .{ .bool = true });
+                if (!d.trace) {
+                    if (self.pending_exception) |exc| if (exc == .object) try exc.object.set(self.allocator, "__no_trace", .{ .bool = true });
+                    // php's parser throws these as a CompileError the code
+                    // around eval can catch
+                    self.uncatchable_fatal = false;
+                }
                 return raised;
             }
             self.setErrorMsg("eval(): compile error", .{});
@@ -10108,7 +10113,13 @@ pub const VM = struct {
                             } else if (self.ic.?.include_compile_error) |compile_error| {
                                 defer self.dropIncludeError(&self.ic.?.include_compile_error);
                                 const raised = self.raiseCompileFatal(compile_error.message, compile_error.at);
-                                if (!compile_error.trace) if (self.pending_exception) |exc| if (exc == .object) try exc.object.set(self.allocator, "__no_trace", .{ .bool = true });
+                                if (!compile_error.trace) {
+                                    if (self.pending_exception) |exc| if (exc == .object) try exc.object.set(self.allocator, "__no_trace", .{ .bool = true });
+                                    // a CompileError from php's parser is an
+                                    // exception the includer can catch
+                                    self.uncatchable_fatal = false;
+                                    if (try self.resumeRaised()) continue;
+                                }
                                 return raised;
                             } else if (self.pending_exception != null) {
                                 // the stream that was to supply the source threw

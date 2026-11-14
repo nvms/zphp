@@ -14,6 +14,8 @@ pub const Lexer = struct {
     halt_offset: ?usize = null,
     // where a block comment that never ends starts
     unterminated_comment: ?usize = null,
+    // past `__halt_compiler();`: every token from here is eof
+    halted: bool = false,
 
     const State = enum { html, php };
 
@@ -28,6 +30,7 @@ pub const Lexer = struct {
     }
 
     pub fn next(self: *Lexer) Token {
+        if (self.halted) return self.makeEof();
         return switch (self.state) {
             .html => self.lexHtml(),
             .php => self.lexPhp(),
@@ -359,7 +362,12 @@ pub const Lexer = struct {
     fn lexIdentifier(self: *Lexer, start: usize) Token {
         while (self.pos < self.source.len and isIdentChar(self.source[self.pos])) self.pos += 1;
         const ident = self.source[start..self.pos];
-        if (std.ascii.eqlIgnoreCase(ident, "__halt_compiler") and self.haltCompiler()) return self.makeEof();
+        // the parser still sees the name, so it can refuse one inside a
+        // block as php's grammar does; what follows it is data
+        if (std.ascii.eqlIgnoreCase(ident, "__halt_compiler") and self.haltCompiler()) {
+            self.halted = true;
+            return .{ .tag = .identifier, .start = @intCast(start), .end = @intCast(start + ident.len) };
+        }
         if (Tag.keyword(ident)) |kw| return self.makeToken(kw, start);
         return self.makeToken(.identifier, start);
     }
