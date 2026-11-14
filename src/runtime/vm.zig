@@ -229,6 +229,7 @@ pub const NativeContext = struct {
                 } else if (old_local) |old| {
                     vm.releaseValue(old);
                 }
+                vm.syncGlobalView(caller, var_name, value) catch {};
             },
             .none => {},
         }
@@ -17726,6 +17727,12 @@ pub const VM = struct {
             }
         }
         try self.putFrameVar(&frame.vars, name, val);
+        try self.syncGlobalView(frame, name, val);
+    }
+
+    // the views of a global-scope variable other than the frame's own:
+    // $GLOBALS and the cell `global $name` binds in functions
+    pub fn syncGlobalView(self: *VM, frame: *CallFrame, name: []const u8, val: Value) !void {
         if (!self.frameInGlobalScope(frame)) return;
         // $GLOBALS is a live view of top-frame variables. mirror writes
         // back so $GLOBALS[$key] picks up the new value
