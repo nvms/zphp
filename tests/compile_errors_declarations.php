@@ -52,6 +52,14 @@ $cases = [
     'namespace Bazzle { use const Bazzle\\BAR; const BAR = 2; echo BAR; }',
     'foreach ([] as list($k) => $v) {}',
     'foreach ([] as [$k] => list(, $a)) {}',
+    'readonly enum E {}',
+    'readonly interface I {}',
+    'final trait T {}',
+    'readonly final class A {} echo "ok";',
+    'namespace NAMEspace\\xyz;',
+    'use const Foo\\Bar\\{A, const B};',
+    'use function Foo\\{a, function b};',
+    'use Foo\\{function a, const B}; echo "ok";',
 ];
 foreach ($cases as $code) {
     echo $code, "\n";

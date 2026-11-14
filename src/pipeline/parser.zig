@@ -388,6 +388,12 @@ const Parser = struct {
 
         // namespace App\Models\User;  or  namespace App\Models { ... }
         // or unnamed:  namespace { ... }
+        // `namespace\x` is a namespace-relative name to php's scanner, which
+        // no declaration takes
+        if (self.peek() == .kw_namespace and self.peekAt(1) == .backslash) {
+            try self.addError(.unexpected_token);
+            return error.ParseError;
+        }
         if (self.peek() == .identifier or isSemiReserved(self.peek())) {
             try parts.append(self.allocator, self.pos);
             _ = self.advance();
@@ -501,6 +507,11 @@ const Parser = struct {
             while (self.peek() != .r_brace and self.peek() != .eof) {
                 var item_is_fn = outer_is_fn;
                 var item_is_const = outer_is_const;
+                // a typed group (`use const X\{...}`) lists bare names
+                if ((outer_is_fn or outer_is_const) and (self.peek() == .kw_function or self.peek() == .kw_const)) {
+                    try self.addError(.unexpected_token);
+                    return error.ParseError;
+                }
                 if (self.peek() == .kw_function) {
                     _ = self.advance();
                     item_is_fn = true;
@@ -1746,7 +1757,8 @@ const Parser = struct {
             if (class_modifiers & 3 == 3) self.deferModifierError(self.pos, "Cannot use the final modifier on an abstract class", .{});
             _ = self.advance();
         }
-        _ = self.advance(); // class
+        // modifiers go on a class only (readonly enum is a syntax error)
+        _ = try self.expect(.kw_class);
         const name_tok = if (self.peek() == .kw_enum) self.advance() else try self.expectName();
 
         var parent: u32 = 0;

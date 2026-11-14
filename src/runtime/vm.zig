@@ -26877,8 +26877,11 @@ pub const VM = struct {
         const ti = self.typeInfoFor(func.name) orelse return false;
         if (ti.return_type.len == 0) return false;
         const shown = if (func.display_name.len > 0) func.display_name else try self.callableDisplayName(func.name, func);
+        // zend_verify_never_error: a function with a class scope is a method
+        const scoped = std.mem.indexOf(u8, func.name, "::") != null or
+            (if (frame.call_name) |cn| self.closureScopeByName(cn) != null else false);
         const msg = if (std.ascii.eqlIgnoreCase(ti.return_type, "never"))
-            try std.fmt.allocPrint(self.allocator, "{s}(): never-returning function must not implicitly return", .{shown})
+            try std.fmt.allocPrint(self.allocator, "{s}(): never-returning {s} must not implicitly return", .{ shown, if (scoped) "method" else "function" })
         else
             try std.fmt.allocPrint(self.allocator, "{s}(): Return value must be of type {s}, none returned", .{ shown, try self.resolvedTypeText(ti.return_type, self.functionScope(func.name)) });
         defer self.allocator.free(msg);
