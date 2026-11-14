@@ -5,6 +5,7 @@ const phpTypeName = @import("types.zig").phpTypeName;
 const html = @import("html.zig");
 const PhpArray = @import("../runtime/value.zig").PhpArray;
 const PhpObject = @import("../runtime/value.zig").PhpObject;
+const value_mod = @import("../runtime/value.zig");
 const vm_mod = @import("../runtime/vm.zig");
 const NativeContext = vm_mod.NativeContext;
 const VM = vm_mod.VM;
@@ -1747,7 +1748,7 @@ fn native_extract(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
                 } else if (!defined(ctx, frame, slot_names, key)) continue;
                 if (target != null) {
                     const var_name = try internVarName(ctx, "${s}", .{key});
-                    if (flags & extr_refs != 0) try ctx.vm.bindVariableToElement(frame, var_name, arr, entry.key) else try ctx.vm.setVariableByName(frame, var_name, try ctx.vm.copyValue(value));
+                    if (flags & extr_refs != 0) try ctx.vm.bindVariableToElement(frame, var_name, arr, entry.key) else try extractStore(ctx, frame, var_name, value);
                     count += 1;
                     continue;
                 }
@@ -1771,10 +1772,23 @@ fn native_extract(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         const name = target.?;
         if (std.mem.eql(u8, name, "this")) return extractError(ctx, "Error", "Cannot re-assign $this");
         const var_name = try internVarName(ctx, "${s}", .{name});
-        if (flags & extr_refs != 0) try ctx.vm.bindVariableToElement(frame, var_name, arr, entry.key) else try ctx.vm.setVariableByName(frame, var_name, try ctx.vm.copyValue(value));
+        if (flags & extr_refs != 0) try ctx.vm.bindVariableToElement(frame, var_name, arr, entry.key) else try extractStore(ctx, frame, var_name, value);
         count += 1;
     }
     return NativeResult.scalar(.{ .int = count });
+}
+
+// ZEND_TRY_ASSIGN_COPY_EX: a variable that is a reference held by a typed
+// property takes only what the property's type allows
+fn extractStore(ctx: *NativeContext, frame: anytype, var_name: []const u8, value: Value) RuntimeError!void {
+    var stored = try ctx.vm.copyValue(value);
+    if (frame.ref_slots.get(var_name)) |cell| if (value_mod.cellOf(cell).typed) {
+        stored = ctx.vm.verifyRefAssignable(cell, stored) catch |err| {
+            ctx.vm.releaseValue(stored);
+            return err;
+        };
+    };
+    try ctx.vm.setVariableByName(frame, var_name, stored);
 }
 
 fn extractError(ctx: *NativeContext, class: []const u8, msg: []const u8) RuntimeError!NativeResult {
