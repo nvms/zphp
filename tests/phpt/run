@@ -51,9 +51,10 @@ cat > "$work/zphp" <<WRAP
 ulimit -t 60
 echo 1000 > /proc/self/oom_score_adj 2>/dev/null
 # run-tests.php keeps every failing test's output until the run ends; past
-# 1 MB a test has failed anyway, and the pipe closing stops it. a test
-# blocked on a socket uses no cpu, so wall time is capped too
-timeout -k 5 120 "$ZPHP" "\$@" | head -c 1048576
+# 8 MB (a few memory-limit tests print 4 MB) a test has failed anyway, and
+# the pipe closing stops it. a test blocked on a socket uses no cpu, so wall
+# time is capped too
+timeout -k 5 120 "$ZPHP" "\$@" | head -c 8388608
 exit \${PIPESTATUS[0]}
 WRAP
 chmod +x "$work/zphp"
