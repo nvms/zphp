@@ -17,7 +17,11 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
         if (isGlobalsFetch(self, self.ast.nodes[node.data.rhs].data.lhs)) return self.fail(node.main_token, "Cannot acquire reference to $GLOBALS");
     }
     // a list binding references takes them from its source
-    if ((target.tag == .list_destructure or target.tag == .array_literal) and listHasRef(self, node.data.lhs)) try assertNotShortCircuited(self, node.data.rhs, node.main_token);
+    if ((target.tag == .list_destructure or target.tag == .array_literal) and listHasRef(self, node.data.lhs)) {
+        // zend_compile_list_assign: references need a place to take them from
+        if (!isVariableOrCall(self, node.data.rhs)) return self.fail(node.main_token, "Cannot assign reference to non referenceable value");
+        try assertNotShortCircuited(self, node.data.rhs, node.main_token);
+    }
     // zend_try_compile_cv: $this is never written
     if (target.tag == .variable and std.mem.eql(u8, self.ast.tokenSlice(target.main_token), "$this"))
         return self.fail(target.main_token, "Cannot re-assign $this");
@@ -922,6 +926,28 @@ pub fn isShortCircuited(self: *Compiler, target_idx: u32) bool {
         }
     }
     return false;
+}
+
+// zend_is_variable_or_call
+pub fn isVariableOrCall(self: *Compiler, idx: u32) bool {
+    var n = self.ast.nodes[idx];
+    while (n.tag == .grouped_expr) n = self.ast.nodes[n.data.lhs];
+    return switch (n.tag) {
+        .variable, .variable_variable, .array_access, .array_push_target, .property_access, .nullsafe_property_access, .call, .method_call, .nullsafe_method_call, .static_call, .dynamic_static_call => true,
+        .static_prop_access => n.main_token == 0 or self.ast.tokens[n.main_token].tag == .variable,
+        else => false,
+    };
+}
+
+// zend_can_write_to_variable: what a list() element may write to
+pub fn canWriteToVariable(self: *Compiler, idx: u32) bool {
+    var base = idx;
+    while (true) {
+        const n = self.ast.nodes[base];
+        if (n.tag != .array_access and n.tag != .array_push_target and n.tag != .property_access) break;
+        base = n.data.lhs;
+    }
+    return isVariableOrCall(self, base) and !isShortCircuited(self, base);
 }
 
 fn listHasRef(self: *Compiler, idx: u32) bool {

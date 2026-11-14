@@ -1414,9 +1414,13 @@ pub const Compiler = struct {
                 if (entry.tag == .array_spread) return self.fail(target.main_token, "Spread operator is not supported in assignments");
                 const has_key = entry.tag == .array_element and entry.data.rhs != 0;
                 if (keyed != has_key) return self.fail(target.main_token, "Cannot mix keyed and unkeyed array entries in assignments");
-                var inner = if (entry.tag == .array_element) self.ast.nodes[entry.data.lhs] else entry;
-                if (inner.tag == .ref_target) inner = self.ast.nodes[inner.data.lhs];
+                var inner_idx = if (entry.tag == .array_element) entry.data.lhs else slot;
+                if (self.ast.nodes[inner_idx].tag == .ref_target) inner_idx = self.ast.nodes[inner_idx].data.lhs;
+                const inner = self.ast.nodes[inner_idx];
                 if (inner.tag == .array_literal and self.ast.tokens[inner.main_token].tag == .kw_array) return self.fail(inner.main_token, "Cannot assign to array(), use [] instead");
+                // zend_verify_list_assign_target
+                if (inner.tag != .array_literal and inner.tag != .list_destructure and !compiler_expr.canWriteToVariable(self, inner_idx))
+                    return self.fail(target.main_token, "Assignments can only happen to writable values");
             }
         }
         // a nested list must be written the way the outer one is
