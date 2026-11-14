@@ -628,7 +628,7 @@ OBS_PID=$!
 if wait_ready $OBS_ADMIN; then pass "admin ready with text logs"; else fail "admin ready with text logs" "/ready never answered 200"; fi
 check "request id reaches php" "plain-1" "$(curl -s -H 'X-Request-Id: plain-1' http://localhost:$OBS_PORT/request-id)"
 check_contains "request id echoed" "X-Request-Id: plain-1" "$(curl -si -H 'X-Request-Id: plain-1' http://localhost:$OBS_PORT/health | tr -d '\r')"
-kill $OBS_PID 2>/dev/null; wait $OBS_PID 2>/dev/null || true
+kill $OBS_PID 2>/dev/null || true; wait $OBS_PID 2>/dev/null || true
 OBS_PID=
 check "text mode writes nothing to stdout" "" "$(cat "$OBS_DIR/plain.out")"
 check_contains "text mode keeps the startup line" "zphp serving" "$(cat "$OBS_DIR/plain.err")"
@@ -724,7 +724,7 @@ hist=$(curl -s http://127.0.0.1:$OBS_ADMIN/metrics | awk '
 check "histogram matches the request counters" "ok" "$hist"
 check "connections all closed" "0" "$(wait_metric zphp_connections_active 0)"
 
-kill -TERM $OBS_PID 2>/dev/null
+kill -TERM $OBS_PID 2>/dev/null || true
 obs_exit=0
 wait $OBS_PID 2>/dev/null || obs_exit=$?
 OBS_PID=
@@ -776,7 +776,7 @@ for i in 1 2 3; do
     OBS_PID=$!
     wait_ready $OBS_ADMIN || { cycle_ok=0; echo "cycle $i: never ready"; }
     [ "$(curl -s http://localhost:$OBS_PORT/health)" = '{"status":"ok"}' ] || { cycle_ok=0; echo "cycle $i: request failed"; }
-    kill -TERM $OBS_PID 2>/dev/null
+    kill -TERM $OBS_PID 2>/dev/null || true
     st=0; wait $OBS_PID 2>/dev/null || st=$?
     OBS_PID=
     [ $st -eq 0 ] || [ $st -eq 143 ] || { cycle_ok=0; echo "cycle $i: exit $st"; }
@@ -789,17 +789,18 @@ fi
 
 # a second server cannot take an admin port that is in use. windows lets
 # SO_REUSEADDR bind over a listener, so the check only holds elsewhere
-[ $is_windows -eq 0 ] && python3 -c "
+if [ $is_windows -eq 0 ]; then
+    python3 -c "
 import socket, time
 s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(('127.0.0.1', $OBS_ADMIN)); s.listen(1); time.sleep(8)
 " &
-HOLD_PID=$!
-if [ $is_windows -eq 0 ]; then
+    HOLD_PID=$!
     sleep 0.5
     config_error "admin port conflict reported" "could not start the admin listener" --admin-port $OBS_ADMIN
+    kill $HOLD_PID 2>/dev/null || true
+    wait $HOLD_PID 2>/dev/null || true
 fi
-kill $HOLD_PID 2>/dev/null; wait $HOLD_PID 2>/dev/null || true
 rm -rf "$OBS_DIR"
 OBS_DIR=
 
