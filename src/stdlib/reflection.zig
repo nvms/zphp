@@ -1313,7 +1313,10 @@ pub fn canonicalUnion(ctx: *NativeContext, text: []const u8, self_class: ?[]cons
     return formatted;
 }
 
-fn createTypeObj(ctx: *NativeContext, type_name: []const u8, nullable: bool, self_class: ?[]const u8) !*PhpObject {
+fn createTypeObj(ctx: *NativeContext, type_name: []const u8, nullable: bool, declared_in: ?[]const u8) !*PhpObject {
+    // an anonymous class's self stays self: php resolves it only for a
+    // class with a name
+    const self_class = if (declared_in) |sc| (if (class_names.isAnonymous(sc)) null else sc) else null;
     var clean = type_name;
     var is_nullable = nullable;
     if (clean.len > 0 and clean[0] == '?') {

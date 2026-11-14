@@ -11175,6 +11175,23 @@ pub const VM = struct {
                         container = try self.vivifyArgContainer(base_source);
                     } else if (container == .array) {
                         container = .{ .array = try self.separateArgContainer(base_source, container.array) };
+                    } else if (container == .object and self.hasMethod(container.object.class_name, "offsetGet")) {
+                        // php's read_dimension for a write fetch with no
+                        // offset: offsetGet(null), which SplFixedArray refuses
+                        const saved_append = self.dim_append_depth;
+                        self.dim_append_depth = self.frame_count + 1;
+                        defer self.dim_append_depth = saved_append;
+                        const got = self.callMethod(container.object, "offsetGet", &.{.null}) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        if (got != .object) {
+                            const msg = try std.fmt.allocPrint(self.allocator, "Indirect modification of overloaded element of {s} has no effect", .{container.object.class_name});
+                            defer self.allocator.free(msg);
+                            self.raiseError(8, msg) catch if (try self.resumeRaised()) continue;
+                        }
+                        self.push(got);
+                        continue;
                     } else {
                         const msg = switch (container) {
                             .string => try self.allocator.dupe(u8, "[] operator not supported for strings"),
