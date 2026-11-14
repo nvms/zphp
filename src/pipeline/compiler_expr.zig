@@ -1809,6 +1809,7 @@ pub fn emitSpreadArgs(self: *Compiler, args: []const u32) Error!ArgGuards {
         if (arg_node.tag == .splat_expr) {
             try self.compileNode(arg_node.data.lhs);
             try self.emitOp(.array_spread);
+            try self.emitByte(1);
         } else if (arg_node.tag == .named_arg) {
             const name = self.ast.tokenSlice(arg_node.main_token);
             const name_const = try self.addConstant(.{ .string = Value.String.borrowed(name) });
@@ -2235,6 +2236,7 @@ pub fn compileArrayLiteral(self: *Compiler, node: Ast.Node) Error!void {
         if (elem.tag == .array_spread) {
             try self.compileNode(elem.data.lhs);
             try self.emitOp(.array_spread);
+            try self.emitByte(0);
             continue;
         }
         const value = self.ast.nodes[elem.data.lhs];

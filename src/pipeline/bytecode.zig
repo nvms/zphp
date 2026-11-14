@@ -135,7 +135,7 @@ pub const OpCode = enum(u8) {
     set_static, // u16: var name constant, u16: func name constant (save persistent static)
 
     // variadic
-    array_spread, // pop array, push each element onto the array below it
+    array_spread, // u8: 1 for a call's arguments (ZEND_SEND_UNPACK), 0 for an array literal. pop array, push each element onto the array below it
     splat_call, // pop array, spread as args to function call
 
     // file inclusion
@@ -550,7 +550,7 @@ pub const OpCode = enum(u8) {
     pub fn width(self: OpCode) usize {
         return switch (self) {
             .arg_variable => 6,
-            .return_ref_value, .array_get_w, .const_expr_fcc_check => 2,
+            .return_ref_value, .array_get_w, .const_expr_fcc_check, .array_spread => 2,
             .tick => 3,
             .jump_if_class_declared, .bind_const_attributes => 5,
             .parent_hook_call => 7,

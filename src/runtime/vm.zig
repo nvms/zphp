@@ -10032,6 +10032,9 @@ pub const VM = struct {
                 },
 
                 .array_spread => {
+                    // 1: a call's ZEND_SEND_UNPACK, 0: an array literal's
+                    // ZEND_ADD_ARRAY_UNPACK
+                    const call_args = self.readByte() != 0;
                     var src = self.pop();
                     const target = self.peek();
                     if (target != .array) continue;
@@ -10043,15 +10046,33 @@ pub const VM = struct {
                         };
                     }
 
+                    // ZEND_SEND_UNPACK / ZEND_ADD_ARRAY_UNPACK take only an
+                    // array or a Traversable
+                    const unpackable = src == .array or src == .generator or (src == .object and self.isInstanceOf(src.object.class_name, "Traversable"));
+                    if (!unpackable) {
+                        const msg = try std.fmt.allocPrint(self.allocator, "Only arrays and Traversables can be unpacked, {s} given", .{src.valueName()});
+                        defer self.allocator.free(msg);
+                        if (try self.throwBuiltinException(if (call_args) "TypeError" else "Error", msg)) continue;
+                        return error.RuntimeError;
+                    }
+                    // a call takes no position after a name within one
+                    // unpacking (ZEND_SEND_UNPACK's have_named_params)
+                    var named = false;
+                    var spread_error: ?[]const u8 = null;
                     // an integer-keyed element appended past maxInt is php's
                     // "next element is already occupied" Error
                     var occupied = false;
                     if (src == .array) {
                         for (src.array.entries.items) |entry| {
+                            if (call_args and entry.key == .int and named) {
+                                spread_error = "Cannot use positional argument after named argument during unpacking";
+                                break;
+                            }
                             if (entry.key == .int and target.array.nextElementOccupied()) {
                                 occupied = true;
                                 break;
                             }
+                            if (entry.key == .string) named = true;
                             if (entry.key == .string) {
                                 try self.arraySetOwned(target.array, entry.key, if (entry.ref) |ref| ref.* else entry.value);
                             } else if (entry.ref) |ref| {
@@ -10076,11 +10097,20 @@ pub const VM = struct {
                             };
                         }
                         while (gen.state != .completed) {
-                            if (gen.current_key == .string) {
-                                try self.arraySetOwned(target.array, .{ .string = gen.current_key.string }, gen.current_value);
-                            } else if (!try target.array.appendNew(self.allocator, gen.current_value)) {
-                                occupied = true;
-                                break;
+                            switch (try self.unpackEntry(target.array, gen.current_key, gen.current_value, call_args, &named)) {
+                                .stored => {},
+                                .occupied => {
+                                    occupied = true;
+                                    break;
+                                },
+                                .positional_after_named => {
+                                    spread_error = "Cannot use positional argument after named argument during unpacking";
+                                    break;
+                                },
+                                .bad_key => {
+                                    spread_error = if (call_args) "Keys must be of type int|string during argument unpacking" else "Keys must be of type int|string during array unpacking";
+                                    break;
+                                },
                             }
                             self.resumeGenerator(gen, .null) catch {
                                 if (self.dispatchPendingException(base_frame)) continue;
@@ -10096,13 +10126,22 @@ pub const VM = struct {
                             while (true) {
                                 const valid = self.callMethod(src.object, "valid", &.{}) catch break :iterate true;
                                 if (!valid.isTruthy()) break;
-                                const key = self.callMethod(src.object, "key", &.{}) catch break :iterate true;
                                 const val = self.callMethod(src.object, "current", &.{}) catch break :iterate true;
-                                if (key == .string) {
-                                    try self.arraySetOwned(target.array, .{ .string = key.string }, val);
-                                } else if (!try target.array.appendNew(self.allocator, val)) {
-                                    occupied = true;
-                                    break;
+                                const key = self.callMethod(src.object, "key", &.{}) catch break :iterate true;
+                                switch (try self.unpackEntry(target.array, key, val, call_args, &named)) {
+                                    .stored => {},
+                                    .occupied => {
+                                        occupied = true;
+                                        break;
+                                    },
+                                    .positional_after_named => {
+                                        spread_error = "Cannot use positional argument after named argument during unpacking";
+                                        break;
+                                    },
+                                    .bad_key => {
+                                        spread_error = if (call_args) "Keys must be of type int|string during argument unpacking" else "Keys must be of type int|string during array unpacking";
+                                        break;
+                                    },
                                 }
                                 _ = self.callMethod(src.object, "next", &.{}) catch break :iterate true;
                             }
@@ -10112,6 +10151,10 @@ pub const VM = struct {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         }
+                    }
+                    if (spread_error) |msg| {
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
                     }
                     if (occupied) {
                         if (try self.throwNextElementOccupied()) continue;
@@ -14938,6 +14981,28 @@ pub const VM = struct {
         const msg = std.fmt.allocPrint(self.allocator, "Resource ID#{d} used as offset, casting to integer ({d})", .{ key.resource.id, key.resource.id }) catch return error.OutOfMemory;
         defer self.allocator.free(msg);
         try self.emitWarning(msg);
+    }
+
+    const UnpackStep = enum { stored, occupied, positional_after_named, bad_key };
+
+    // one element a Traversable gives an unpacking: a string key that reads
+    // as an integer is a position in an array literal, and a name in a call
+    fn unpackEntry(self: *VM, target: *PhpArray, key: Value, value: Value, call_args: bool, named: *bool) RuntimeError!UnpackStep {
+        switch (key) {
+            .int => {},
+            .string => |k| {
+                const positional = !call_args and PhpArray.normalizeKey(.{ .string = k }) == .int;
+                if (!positional) {
+                    named.* = true;
+                    try self.arraySetOwned(target, .{ .string = k }, value);
+                    return .stored;
+                }
+            },
+            else => return .bad_key,
+        }
+        if (call_args and named.*) return .positional_after_named;
+        if (!try target.appendNew(self.allocator, value)) return .occupied;
+        return .stored;
     }
 
     pub const OffsetOp = enum { access, isset_or_empty, unset };
