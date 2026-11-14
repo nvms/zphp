@@ -1315,8 +1315,10 @@ pub fn canonicalUnion(ctx: *NativeContext, text: []const u8, self_class: ?[]cons
 
 fn createTypeObj(ctx: *NativeContext, type_name: []const u8, nullable: bool, declared_in: ?[]const u8) !*PhpObject {
     // an anonymous class's self stays self: php resolves it only for a
-    // class with a name
-    const self_class = if (declared_in) |sc| (if (class_names.isAnonymous(sc)) null else sc) else null;
+    // class with a name. the type borrows the class name, and the caller's
+    // copy can belong to a reflector that dies first (a parameter read off
+    // a temporary getParameters() array), so take the class table's own
+    const self_class = if (declared_in) |sc| (if (class_names.isAnonymous(sc)) null else try ctx.vm.stableClassName(sc)) else null;
     var clean = type_name;
     var is_nullable = nullable;
     if (clean.len > 0 and clean[0] == '?') {
@@ -1364,7 +1366,7 @@ fn createTypeObj(ctx: *NativeContext, type_name: []const u8, nullable: bool, dec
     }
     if (std.mem.indexOfScalar(u8, clean, '&') != null) {
         const obj = try ctx.createObject("ReflectionIntersectionType");
-        try obj.set(ctx.allocator, "__type_str", .{ .string = Value.String.borrowed(clean) });
+        try obj.set(ctx.allocator, "__type_str", .{ .string = Value.String.borrowed(try ctx.vm.internName(clean)) });
         return obj;
     }
     return createNamedTypeObj(ctx, clean, is_nullable);
