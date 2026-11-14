@@ -2674,6 +2674,13 @@ fn compileStaticPropRead(self: *Compiler, node: Ast.Node, quiet: bool) Error!voi
     {
         return self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(written_class) }));
     }
+    // a global constant's expression has no class of its own
+    if (self.const_expr and self.current_class.len == 0 and std.mem.eql(u8, prop_name, "class") and
+        (std.ascii.eqlIgnoreCase(written_class, "self") or std.ascii.eqlIgnoreCase(written_class, "parent") or std.ascii.eqlIgnoreCase(written_class, "static")))
+    {
+        try self.emitOp(.class_name_const_expr);
+        return self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(written_class) }));
+    }
     const class_idx = try self.addConstant(.{ .string = Value.String.borrowed(class_name) });
     const prop_idx = try self.addConstant(.{ .string = Value.String.borrowed(prop_name) });
     // a bare-identifier member (not $prop, not ::class) is a class constant or

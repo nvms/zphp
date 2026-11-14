@@ -12959,6 +12959,20 @@ pub const VM = struct {
                     try self.callStaticFunction(full_name, ac, target.called_class);
                 },
 
+                .class_name_const_expr => {
+                    const written = self.currentChunk().constants.items[self.readU16()].string.bytes();
+                    const resolved = self.resolveStaticClassName(written);
+                    if (std.mem.eql(u8, resolved, written)) {
+                        // zend_ast_evaluate names self whatever was written
+                        const msg = if (std.ascii.eqlIgnoreCase(written, "parent") and self.currentDefiningClass() != null)
+                            "Cannot use \"parent\" when current class scope has no parent"
+                        else
+                            "Cannot use \"self\" when no class scope is active";
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    }
+                    self.push(.{ .string = Value.String.borrowed(resolved) });
+                },
                 .get_static_prop, .get_static_prop_quiet => {
                     const quiet = op == .get_static_prop_quiet;
                     const class_idx = self.readU16();

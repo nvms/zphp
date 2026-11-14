@@ -551,6 +551,10 @@ pub const OpCode = enum(u16) {
     // becomes the separated one (php separates a temporary on its first
     // write fetch)
     separate_var_top,
+    // u16 written class: `self::class` (parent, static) in a constant
+    // expression, which zend_ast_evaluate resolves against the running
+    // scope and refuses without one
+    class_name_const_expr,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -624,6 +628,7 @@ pub const OpCode = enum(u16) {
             .get_class_const_dynamic,
             .get_class_const_dyn_name,
             .separate_var_top,
+            .class_name_const_expr,
             => 4,
             .ensure_array_var, .call, .call_spread, .new_obj, .method_call, .method_call_spread, .static_call_dyn_method => 5,
             .make_var_ref, .make_var_prop_ref => 6,
@@ -686,6 +691,7 @@ pub const OpCode = enum(u16) {
             .get_static_prop,
             .get_static_prop_quiet,
             .get_class_const,
+            .class_name_const_expr,
             .array_new,
             .clone_obj,
             .isset_prop,
