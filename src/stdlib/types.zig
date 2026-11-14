@@ -4,6 +4,7 @@ const error_format = @import("../error_format.zig");
 const class_names = @import("../runtime/class_names.zig");
 const callables = @import("../runtime/callables.zig");
 const object_properties = @import("../runtime/object_properties.zig");
+const object_iter = @import("../runtime/object_iter.zig");
 const paths = @import("../paths.zig");
 const php_version = @import("../php_version.zig");
 const bundle = @import("../bundle.zig");
@@ -1131,26 +1132,19 @@ pub fn getObjectVars(ctx: *NativeContext, object: *PhpObject) RuntimeError!*PhpA
     try ctx.vm.triggerLazyInit(object);
     const obj = object.storage();
     var arr = try ctx.createArray();
-
-    // the caller's class scope, bound closures included; natives run inline,
+    // php walks the property table as foreach does, keeping what the
+    // caller's scope (bound closures included) may see; natives run inline,
     // so the caller is the current frame
-    const caller_class: ?[]const u8 = ctx.vm.currentDefiningClass();
-    const can_see_protected = caller_class != null and isInClassHierarchy(ctx.vm, caller_class.?, obj.class_name);
-
-    // the object's own properties, as php's get_properties gives them: never
-    // unset or uninitialized ones
-    var listing: object_properties.Listing = .{};
-    defer listing.deinit(ctx.allocator);
-    try object_properties.appendOwn(ctx.vm, obj, .array_cast, &listing, ctx.allocator);
-    try object_properties.applyHooks(ctx.vm, obj, &listing, ctx.allocator, .{ .scope = caller_class });
-    defer object_properties.releaseHolder(ctx.vm, listing.takeHolder());
-    for (listing.items.items) |prop| {
-        if (prop.visibility == .private and (caller_class == null or !std.mem.eql(u8, caller_class.?, prop.declaring))) continue;
-        if (prop.visibility == .protected and !can_see_protected) continue;
-        if (prop.declared) {
-            try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(prop.key.name) }, prop.value);
+    const it = try object_iter.create(ctx.vm, obj, ctx.vm.currentDefiningClass(), false);
+    defer it.destroy(ctx.vm);
+    var from: usize = 0;
+    while (try object_iter.fetch(ctx.vm, it, obj, from)) |step| {
+        from = step.index + 1;
+        const name = step.key.string;
+        if (name.owner == null) {
+            try arr.set(ctx.allocator, .{ .string = name }, step.value);
         } else {
-            try arr.setCopiedKey(ctx.allocator, prop.key.name, prop.value);
+            try arr.setCopiedKey(ctx.allocator, name.bytes(), step.value);
         }
     }
     return arr;
