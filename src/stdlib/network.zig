@@ -827,6 +827,25 @@ fn atoi(s: []const u8) i64 {
     return if (neg) -n else n;
 }
 
+// parse_unix_address: a path longer than sun_path holds (less its nul,
+// unless it names linux's abstract namespace) is cut to fit, with a notice
+fn fitUnixPath(ctx: *NativeContext, endpoint: Endpoint, comptime func: []const u8) RuntimeError!Endpoint {
+    const path = switch (endpoint) {
+        .unix, .udg => |p| p,
+        else => return endpoint,
+    };
+    const room: usize = @typeInfo(@FieldType(std.posix.sockaddr.un, "path")).array.len;
+    const max = if (path.len > 0 and path[0] == 0) room else room - 1;
+    if (path.len <= max) return endpoint;
+    const msg = try std.fmt.allocPrint(ctx.allocator, func ++ "(): socket path exceeded the maximum allowed length of {d} bytes and was truncated", .{max});
+    defer ctx.allocator.free(msg);
+    try ctx.vm.raiseError(8, msg);
+    return switch (endpoint) {
+        .unix => .{ .unix = path[0..max] },
+        else => .{ .udg = path[0..max] },
+    };
+}
+
 fn endpointAddress(endpoint: Endpoint) !net.Address {
     return switch (endpoint) {
         .tcp, .udp => |addr| addr,
@@ -1010,7 +1029,7 @@ fn native_stream_socket_client(ctx: *NativeContext, args: []const Value) Runtime
 }
 
 fn connectStream(ctx: *NativeContext, args: []const Value, code_index: usize, target: []const u8, timeout: ?Value, async_connect: bool, comptime func: []const u8) RuntimeError!NativeResult {
-    const endpoint = parseEndpoint(ctx.allocator, target) catch |err| return failConnect(ctx, args, code_index, func, target, err);
+    const endpoint = try fitUnixPath(ctx, parseEndpoint(ctx.allocator, target) catch |err| return failConnect(ctx, args, code_index, func, target, err), func);
     const addr = endpointAddress(endpoint) catch |err| return failConnect(ctx, args, code_index, func, target, err);
     const sock = connectEndpoint(endpoint, addr, timeoutMs(ctx, timeout), async_connect) catch |err| return failConnect(ctx, args, code_index, func, target, err);
     try reportSocketError(ctx, args, code_index, null);
@@ -1023,7 +1042,7 @@ fn native_stream_socket_server(ctx: *NativeContext, args: []const Value) Runtime
     const target = args[0].string.bytes();
     const flags: i64 = if (args.len > 3) Value.toInt(args[3]) else 12;
     const context = try streamContext(ctx, if (args.len > 4) args[4] else null);
-    const endpoint = parseEndpoint(ctx.allocator, target) catch |err| return failConnect(ctx, args, 1, "stream_socket_server", target, err);
+    const endpoint = try fitUnixPath(ctx, parseEndpoint(ctx.allocator, target) catch |err| return failConnect(ctx, args, 1, "stream_socket_server", target, err), "stream_socket_server");
     const sock = listenSocket(endpoint, flags, contextBacklog(context)) catch |err| return failConnect(ctx, args, 1, "stream_socket_server", target, err);
     try reportSocketError(ctx, args, 1, null);
     const obj = try endpointStream(ctx, sock, endpoint, true, target);
@@ -1038,7 +1057,12 @@ fn listenSocket(endpoint: Endpoint, flags: i64, backlog: u31) !std.posix.socket_
     // php sets it on every platform; on windows that lets a second server
     // take a port that is already bound, which php allows there too
     if (endpoint == .tcp or endpoint == .udp) try sys.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
-    if ((flags & 4) != 0) try sys.bind(sock, &addr.any, addr.getOsSockLen());
+    if ((flags & 4) != 0) sys.bind(sock, &addr.any, addr.getOsSockLen()) catch |err| {
+        // php's unix bind returns bind()'s result and records no error, so
+        // the failure has no code or text
+        if (endpoint == .unix or endpoint == .udg) return error.ListenWithoutText;
+        return err;
+    };
     // a datagram socket can't listen; php's listen op fails with no text
     if ((flags & 8) != 0) {
         if (endpoint.datagram()) return error.ListenWithoutText;
