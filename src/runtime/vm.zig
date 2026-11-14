@@ -22974,6 +22974,23 @@ pub const VM = struct {
         if (a == .object and b == .object) {
             if (a.object == b.object) return 0;
             if (self.isEnumObject(a.object) or self.isEnumObject(b.object)) return 1;
+            // zend_std_compare_objects reads a lazy object's property table,
+            // which initializes it: the second operand's first, as php's
+            // build evaluates the two reads; a proxy compares as its instance
+            if ((a.object.lazy != null or b.object.lazy != null) and std.mem.eql(u8, a.object.class_name, b.object.class_name)) {
+                // the operands were popped: an initializer's drain must not
+                // free a temporary one
+                objRetain(a.object);
+                defer self.objRelease(a.object);
+                objRetain(b.object);
+                defer self.objRelease(b.object);
+                try self.triggerLazyInit(b.object);
+                try self.triggerLazyInit(a.object);
+                const sa = object_iter.innermost(a.object);
+                const sb = object_iter.innermost(b.object);
+                if (sa == sb) return 0;
+                return Value.compare(.{ .object = sa }, .{ .object = sb });
+            }
             return null;
         }
         const object_lhs = a == .object;
