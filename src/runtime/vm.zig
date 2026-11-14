@@ -24762,7 +24762,7 @@ pub const VM = struct {
 
     fn undeclaredStaticProp(self: *VM, class_name: []const u8, prop_name: []const u8) RuntimeError {
         const msg = if (self.classes.contains(class_name) or self.interfaces.contains(class_name))
-            try std.fmt.allocPrint(self.allocator, "Access to undeclared static property {s}::${s}", .{ class_name, prop_name })
+            try std.fmt.allocPrint(self.allocator, "Access to undeclared static property {s}::${s}", .{ self.declaredClassName(class_name), prop_name })
         else
             try self.classNotFoundMessage(class_name);
         defer self.allocator.free(msg);
