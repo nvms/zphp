@@ -95,6 +95,9 @@ const Parser = struct {
     // of an array element or a foreach target. anywhere else php's grammar
     // has list() only as the left side of an assignment
     bare_list_at: u32 = std.math.maxInt(u32),
+    // the last `new C` parsed without an argument list: php's grammar has no
+    // dereference of it (new_dereferenceable needs ctor_arguments)
+    bare_new: u32 = 0,
     pending_top_stmts: std.ArrayListUnmanaged(u32) = .empty,
     // the hooked properties promoted parameters of the method just parsed
     // declare: class members after it (the compiler knows a hooked promoted
@@ -1242,6 +1245,12 @@ const Parser = struct {
         return self.addNode(.{ .tag = .catch_clause, .main_token = var_tok, .data = .{ .lhs = lhs, .rhs = body } });
     }
 
+    // a `new` whose class isn't followed by an argument list
+    fn markBareNew(self: *Parser, node: u32) u32 {
+        if (self.tokens[self.pos - 1].tag != .r_paren) self.bare_new = node;
+        return node;
+    }
+
     fn parseNewExpr(self: *Parser) Error!u32 {
         const new_tok = self.advance(); // new
 
@@ -1330,7 +1339,7 @@ const Parser = struct {
             }
 
             const extra = try self.addExtraList(args.items);
-            return self.addNode(.{ .tag = .new_expr_dynamic, .main_token = new_tok, .data = .{ .lhs = class_expr, .rhs = extra } });
+            return self.markBareNew(try self.addNode(.{ .tag = .new_expr_dynamic, .main_token = new_tok, .data = .{ .lhs = class_expr, .rhs = extra } }));
         }
 
         // `new namespace\Cls` - class name relative to the current namespace
@@ -1376,7 +1385,7 @@ const Parser = struct {
                 _ = try self.expect(.r_paren);
             }
             const dyn_extra = try self.addExtraList(dyn_args.items);
-            return self.addNode(.{ .tag = .new_expr_dynamic, .main_token = new_tok, .data = .{ .lhs = class_expr, .rhs = dyn_extra } });
+            return self.markBareNew(try self.addNode(.{ .tag = .new_expr_dynamic, .main_token = new_tok, .data = .{ .lhs = class_expr, .rhs = dyn_extra } }));
         }
 
         // consume qualified name parts: \Identifier\Identifier...
@@ -1417,7 +1426,7 @@ const Parser = struct {
             @as(u32, 0);
         if (is_absolute) name_extra |= (1 << 31);
         if (ns_relative) name_extra |= (1 << 30);
-        return self.addNode(.{ .tag = .new_expr, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = name_extra } });
+        return self.markBareNew(try self.addNode(.{ .tag = .new_expr, .main_token = name_tok, .data = .{ .lhs = extra, .rhs = name_extra } }));
     }
 
     // Property metadata stored in the low byte of class_property rhs.
@@ -2892,6 +2901,13 @@ const Parser = struct {
 
     fn parseExprPrec(self: *Parser, min_prec: u8) Error!u32 {
         var left = try self.parsePrefixExpr();
+        if (left == self.bare_new and left != 0) switch (self.peek()) {
+            .l_bracket, .arrow, .question_arrow, .colon_colon => {
+                try self.addError(.unexpected_token);
+                return error.ParseError;
+            },
+            else => {},
+        };
 
         while (true) {
             switch (self.peek()) {
@@ -2939,6 +2955,14 @@ const Parser = struct {
                     // fall through to parse the assignment
                 } else break;
             }
+            // a new expression is no variable php's grammar can assign to
+            if (prec == 4) switch (self.nodes.items[left].tag) {
+                .new_expr, .new_expr_dynamic, .anonymous_class => {
+                    try self.addError(.unexpected_token);
+                    return error.ParseError;
+                },
+                else => {},
+            };
 
             const op_tok = self.advance();
             const op_tag = self.tokens[op_tok].tag;
