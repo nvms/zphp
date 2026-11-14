@@ -149,6 +149,14 @@ pub const PhpArray = struct {
     // (array_walk, sort): counted in refcount but not a value copy, so a
     // write through the reference set must not separate because of them
     byref_pins: u8 = 0,
+    // set when the array is pushed onto the operand stack, which holds it
+    // without counting it; an in-place write then looks for it there
+    // (VM.stackHoldsArray) and separates, as php's operands hold their own
+    // reference. cleared by a look that finds no slot. stack_low is the
+    // lowest slot it may be in while stack_held is set, so the look starts
+    // there instead of at the bottom of a deep stack
+    stack_held: bool = false,
+    stack_low: u32 = 0,
     // Recursion flags
     recursion: u8 = 0,
     // the position carrier of a foreach over an object's properties: the

@@ -1965,6 +1965,12 @@ pub const VM = struct {
         intent: []IntentIC = &.{},
         arg_stack: []RefSource = &.{},
         arg_stack_room: Region(RefSource) = .{},
+        // per operand slot: true when an array there was pushed by a write
+        // fetch (the container an in-place write goes into), which is not a
+        // holder of the array as a value (stackHoldsArray). value pushes of
+        // arrays clear it
+        stack_fetch: []bool = &.{},
+        stack_fetch_room: Region(bool) = .{},
         // third-party extension state lives here, off the VM struct, so the
         // VM's field offsets stay put (see GOTCHAS on codegen perturbation):
         // one slot per loaded extension, an arena for the value handles a
@@ -3528,6 +3534,7 @@ pub const VM = struct {
             ic_ptr.bound_arg_sources.deinit(self.allocator);
             ic_ptr.saved_sources.deinit(self.allocator);
             ic_ptr.arg_stack_room.deinit();
+            ic_ptr.stack_fetch_room.deinit();
             ic_ptr.sp_save_room.deinit();
             ic_ptr.arg_counts_room.deinit();
             ic_ptr.fga_room.deinit();
@@ -4981,10 +4988,19 @@ pub const VM = struct {
                         if (try self.resumeFastLoop(base_frame)) return;
                     }
                 },
-                .dup => self.push(self.stack[self.sp - 1]),
+                .dup => {
+                    const marks = self.ic.?.stack_fetch;
+                    const fetched = marks[self.sp - 1];
+                    self.push(self.stack[self.sp - 1]);
+                    marks[self.sp - 1] = fetched;
+                },
                 .dup2 => {
+                    const marks = self.ic.?.stack_fetch;
+                    const fetched = .{ marks[self.sp - 2], marks[self.sp - 1] };
                     self.push(self.stack[self.sp - 2]);
                     self.push(self.stack[self.sp - 2]);
+                    marks[self.sp - 2] = fetched[0];
+                    marks[self.sp - 1] = fetched[1];
                 },
                 .bury => {
                     const n = self.readByte();
@@ -4992,11 +5008,13 @@ pub const VM = struct {
                     const dest = self.sp - 1 - n;
                     std.mem.copyBackwards(Value, self.stack[dest + 1 .. self.sp], self.stack[dest .. self.sp - 1]);
                     self.stack[dest] = top;
+                    self.buryMarks(dest);
                 },
                 .swap => {
                     const tmp = self.stack[self.sp - 1];
                     self.stack[self.sp - 1] = self.stack[self.sp - 2];
                     self.stack[self.sp - 2] = tmp;
+                    self.buryMarks(self.sp - 2);
                 },
 
                 .get_var, .get_var_quiet => {
@@ -5151,18 +5169,18 @@ pub const VM = struct {
                         else
                             try self.cowSeparate(cur.array);
                         if (sep != cur.array and cell == null) try self.setVariableByName(frame, try self.internName(dollar_name), .{ .array = sep });
-                        self.push(.{ .array = sep });
+                        self.pushFetched(.{ .array = sep });
                         continue;
                     }
                     if (cur != .null and !(cur == .bool and !cur.bool)) {
-                        self.push(cur);
+                        self.pushFetched(cur);
                         continue;
                     }
                     if (cur == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
                     const arr: Value = .{ .array = try self.allocArray() };
                     retainValue(arr);
                     try self.setVariableByName(frame, try self.internName(dollar_name), arr);
-                    self.push(arr);
+                    self.pushFetched(arr);
                 },
                 .set_var_var => {
                     const name_val = self.pop();
@@ -6382,7 +6400,7 @@ pub const VM = struct {
                                 try self.arraySetOwned(arr_val.array, arr_key, .{ .array = inner });
                                 inner.refcount -= 1;
                             }
-                            self.push(.{ .array = inner });
+                            self.pushFetched(.{ .array = inner });
                             continue;
                         }
                         self.push(existing);
@@ -6466,7 +6484,7 @@ pub const VM = struct {
                             }
                             const new_arr = try self.allocArray();
                             try self.arrayAppendOwned(arr, .{ .array = new_arr });
-                            self.push(.{ .array = new_arr });
+                            self.pushFetched(.{ .array = new_arr });
                         },
                         .object => |obj| if (self.hasMethod(obj.class_name, "offsetGet")) {
                             const saved_append = self.dim_append_depth;
@@ -6504,7 +6522,7 @@ pub const VM = struct {
                                     return error.RuntimeError;
                                 }
                                 try self.arrayAppendOwned(arr, .null);
-                                self.push(.null);
+                                self.pushFetched(.null);
                                 continue;
                             }
                             if (key == .array or key == .object) {
@@ -6515,7 +6533,7 @@ pub const VM = struct {
                                 _ = try self.resumeRaised();
                                 continue;
                             })) {
-                                self.push(.null);
+                                self.pushFetched(.null);
                                 continue;
                             } }
                             const arr_key = Value.toArrayKey(key);
@@ -6529,12 +6547,12 @@ pub const VM = struct {
                                         try self.arraySetOwned(arr, arr_key, .{ .array = inner });
                                         inner.refcount -= 1;
                                     }
-                                    self.push(.{ .array = inner });
-                                } else self.push(existing);
+                                    self.pushFetched(.{ .array = inner });
+                                } else self.pushFetched(existing);
                             } else {
                                 if (rw) self.emitUndefinedKeyWarning(PhpArray.normalizeKey(arr_key)) catch if (try self.resumeRaised()) continue;
                                 try self.arraySetOwned(arr, arr_key, .null);
-                                self.push(.null);
+                                self.pushFetched(.null);
                             }
                         },
                         .object => |obj| if (self.hasMethod(obj.class_name, "offsetGet")) {
@@ -6575,7 +6593,7 @@ pub const VM = struct {
                             _ = try self.resumeRaised();
                             continue;
                         })) {
-                            self.push(.null);
+                            self.pushFetched(.null);
                             continue;
                         } }
                         const arr_key = Value.toArrayKey(key);
@@ -6598,9 +6616,9 @@ pub const VM = struct {
                                 if (inner != existing.array) {
                                     try self.arraySetOwned(arr_val.array, arr_key, .{ .array = inner });
                                     inner.refcount -= 1;
-                                    self.push(.{ .array = inner });
+                                    self.pushFetched(.{ .array = inner });
                                 } else {
-                                    self.push(existing);
+                                    self.pushFetched(existing);
                                 }
                             } else if (existing == .string) {
                                 // never clobber a string element: push it through
@@ -6608,7 +6626,7 @@ pub const VM = struct {
                                 // array_push throws "[] operator not supported for
                                 // strings", a deeper vivify throws "Cannot use
                                 // string offset as an array"
-                                self.push(existing);
+                                self.pushFetched(existing);
                             } else if (existing == .int or existing == .float or (existing == .bool and existing.bool)) {
                                 if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
                                 return error.RuntimeError;
@@ -6617,13 +6635,13 @@ pub const VM = struct {
                                 const new_arr = try self.allocArray();
                                 const new_val = Value{ .array = new_arr };
                                 try self.arraySetOwned(arr_val.array, arr_key, new_val);
-                                self.push(new_val);
+                                self.pushFetched(new_val);
                             }
                         } else {
                             const new_arr = try self.allocArray();
                             const new_val = Value{ .array = new_arr };
                             try self.arraySetOwned(arr_val.array, arr_key, new_val);
-                            self.push(new_val);
+                            self.pushFetched(new_val);
                         }
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetGet")) {
                         const result = self.offsetGetForWrite(arr_val.object, key) catch {
@@ -6636,7 +6654,7 @@ pub const VM = struct {
                         if (try self.throwBuiltinException("Error", "Cannot use string offset as an array")) continue;
                         return error.RuntimeError;
                     } else {
-                        self.push(.null);
+                        self.pushFetched(.null);
                     }
                 },
                 .prop_set_chain => {
@@ -7257,7 +7275,7 @@ pub const VM = struct {
                         (if (slot < self.global_slot_names.len) self.global_slot_names[slot] else "");
                     if (std.mem.eql(u8, ea_slot_name, "$GLOBALS")) {
                         if (self.globals_array) |ga| {
-                            self.push(.{ .array = ga });
+                            self.pushFetched(.{ .array = ga });
                             continue;
                         }
                     }
@@ -7280,11 +7298,11 @@ pub const VM = struct {
                                 try self.cowSeparate(cur.array);
                             if (sep != cur.array) {
                                 if (!from_ref) try self.storeLocalSlot(frame, slot, .{ .array = sep });
-                                self.push(.{ .array = sep });
+                                self.pushFetched(.{ .array = sep });
                                 continue;
                             }
                         }
-                        self.push(cur);
+                        self.pushFetched(cur);
                         continue;
                     }
                     if (cur == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
@@ -7292,7 +7310,7 @@ pub const VM = struct {
                     const new_val = Value{ .array = new_arr };
                     retainValue(new_val);
                     try self.storeLocalSlot(frame, slot, new_val);
-                    self.push(new_val);
+                    self.pushFetched(new_val);
                 },
 
                 .ensure_array_var => {
@@ -7319,14 +7337,14 @@ pub const VM = struct {
                             if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
                             return error.RuntimeError;
                         }
-                        self.push(c.*);
+                        self.pushFetched(c.*);
                         continue;
                     }
                     // $GLOBALS resolves to the VM-wide superglobal array
                     if (std.mem.eql(u8, name, "$GLOBALS")) {
                         if (separate_only) continue;
                         if (self.globals_array) |ga| {
-                            self.push(.{ .array = ga });
+                            self.pushFetched(.{ .array = ga });
                             continue;
                         }
                     }
@@ -7376,11 +7394,11 @@ pub const VM = struct {
                                         }
                                     }
                                 }
-                                if (!separate_only) self.push(sv);
+                                if (!separate_only) self.pushFetched(sv);
                                 continue;
                             }
                         }
-                        if (!separate_only) self.push(cur);
+                        if (!separate_only) self.pushFetched(cur);
                         continue;
                     }
                     if (cur == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
@@ -7392,7 +7410,7 @@ pub const VM = struct {
                         retainValue(new_val);
                         try self.setVariableByName(frame, name, new_val);
                     }
-                    self.push(new_val);
+                    self.pushFetched(new_val);
                 },
 
                 .prepare_prop_w => {
@@ -7499,7 +7517,7 @@ pub const VM = struct {
                                 };
                             });
                             if (result == .object) {
-                                self.push(result);
+                                self.pushFetched(result);
                                 continue;
                             }
                             const msg = try std.fmt.allocPrint(self.allocator, "Indirect modification of overloaded property {s}::${s} has no effect", .{ eap_obj.class_name, prop_name });
@@ -7507,7 +7525,7 @@ pub const VM = struct {
                             self.raiseError(8, msg) catch if (try self.resumeRaised()) continue;
                             const temp = if (result == .array) try self.shallowCloneCow(result.array) else try self.allocArray();
                             self.stackRelease(result);
-                            self.push(.{ .array = temp });
+                            self.pushFetched(.{ .array = temp });
                             // nothing holds the copy: it goes when the statement ends
                             self.discardOrphan(.{ .array = temp });
                             continue;
@@ -7525,7 +7543,7 @@ pub const VM = struct {
                         // a referenced property (`$r=&$obj->prop`) is shared on
                         // purpose - write through it in place, never separate
                         if (hook_cell != null or self.propIsReferenced(eap_obj, prop_name)) {
-                            self.push(cur);
+                            self.pushFetched(cur);
                             continue;
                         }
                         const sep = try self.cowSeparate(cur.array);
@@ -7533,7 +7551,7 @@ pub const VM = struct {
                             try eap_obj.set(self.allocator, prop_name, .{ .array = sep });
                             sep.refcount -= 1;
                         }
-                        self.push(.{ .array = sep });
+                        self.pushFetched(.{ .array = sep });
                         continue;
                     }
                     // an ArrayAccess object property ($this->repo[$k][$j]=v where
@@ -7542,14 +7560,14 @@ pub const VM = struct {
                     // a fresh array would clobber the object (replacing a config
                     // repository / container with an empty array)
                     if (cur == .object) {
-                        self.push(cur);
+                        self.pushFetched(cur);
                         continue;
                     }
                     // a string prop passes through unchanged - the consumer
                     // throws PHP's error (array_push: "[] operator not supported
                     // for strings"; deeper vivify: string-offset-as-array)
                     if (cur == .string) {
-                        self.push(cur);
+                        self.pushFetched(cur);
                         continue;
                     }
                     // vivifying a property nothing declares creates it
@@ -7565,7 +7583,7 @@ pub const VM = struct {
                         self.setCell(cell, .{ .array = new_arr });
                         try self.propagateCellWrite(cell, cell.*);
                     } else try eap_obj.set(self.allocator, prop_name, .{ .array = new_arr });
-                    self.push(.{ .array = new_arr });
+                    self.pushFetched(.{ .array = new_arr });
                 },
 
                 .ensure_array_static_prop, .ensure_array_static_prop_dyn => {
@@ -7583,7 +7601,7 @@ pub const VM = struct {
                         prop_name = self.currentChunk().constants.items[self.readU16()].string.bytes();
                         class_name = classNameOf(self.pop());
                         if (class_name.len == 0) {
-                            self.push(.null);
+                            self.pushFetched(.null);
                             continue;
                         }
                     }
@@ -7610,29 +7628,29 @@ pub const VM = struct {
                                 slot.* = .{ .array = sep };
                                 self.releaseValue(old);
                             }
-                            self.push(slot.*);
+                            self.pushFetched(slot.*);
                             continue;
                         }
                         // an ArrayAccess object static prop passes through (the
                         // chained write routes via offsetGet/offsetSet); vivifying
                         // it to an array would clobber the object
                         if (cur == .object) {
-                            self.push(cur);
+                            self.pushFetched(cur);
                             continue;
                         }
                         // string static prop passes through - consumer throws
                         if (cur == .string) {
-                            self.push(cur);
+                            self.pushFetched(cur);
                             continue;
                         }
                         if (cur == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
                         const new_arr = try self.allocArray();
                         arrayRetain(new_arr); // the static slot owns it
                         slot.* = .{ .array = new_arr };
-                        self.push(.{ .array = new_arr });
+                        self.pushFetched(.{ .array = new_arr });
                         continue;
                     }
-                    self.push(.null);
+                    self.pushFetched(.null);
                 },
 
                 .separate_var_top => {
@@ -7646,7 +7664,12 @@ pub const VM = struct {
                         self.return_ref_fresh = false;
                         continue;
                     };
+                    // the top is this variable's own array, not another
+                    // holder: only a real co-holder makes it separate
+                    const fetched = &self.ic.?.stack_fetch[self.sp - 1];
+                    fetched.* = true;
                     const sep = try self.cowSeparate(held.array);
+                    fetched.* = false;
                     if (sep == held.array) continue;
                     const old = held.*;
                     held.* = .{ .array = sep };
@@ -17497,7 +17520,7 @@ pub const VM = struct {
     // the cell, every mirror follows through propagation, and this frame's
     // own binding (slot + vars mirror, one owner) takes its own reference
     fn separateReferencedArray(self: *VM, frame: *CallFrame, name: []const u8, cell: *Value, arr: *PhpArray) RuntimeError!?*PhpArray {
-        if (arr.refcount - arr.byref_pins <= self.referenceAliasCount(cell)) return null;
+        if (arr.refcount - arr.byref_pins <= self.referenceAliasCount(cell) and !self.stackHoldsArray(arr)) return null;
         const clone = try self.shallowCloneCow(arr);
         const sv = Value{ .array = clone };
         self.setCell(cell, sv);
@@ -22704,6 +22727,10 @@ pub const VM = struct {
 
     pub fn setArgSource(self: *VM, slot: usize, source: RefSource) void {
         const ic = self.ic orelse return;
+        // an argument passed by reference is the variable itself, as php's
+        // SEND_REF makes it a reference: not a copy that a write to the
+        // variable has to leave alone (stackHoldsArray)
+        ic.stack_fetch[slot] = source != .none;
         if (source == .none and slot >= self.arg_source_end) return;
         const owned = self.retainArgSource(source);
         if (ic.arg_stack[slot] != .none) self.releaseArgSource(&ic.arg_stack[slot]);
@@ -25483,7 +25510,7 @@ pub const VM = struct {
         if (self.globals_array) |ga| {
             if (arr == ga) return arr;
         }
-        if (arr.refcount <= 1) return arr;
+        if (arr.refcount == 0 or (arr.refcount == 1 and !self.stackHoldsArray(arr))) return arr;
         // the clone starts with one reference for the slot that will take it;
         // storing it into that slot releases the original through the normal
         // overwrite-release path
@@ -29181,6 +29208,8 @@ pub const VM = struct {
         self.stack = self.stack_room.items;
         ic.arg_stack_room = Region(RefSource).reserve(max_stack_slots) catch return error.OutOfMemory;
         ic.arg_stack = ic.arg_stack_room.items;
+        ic.stack_fetch_room = Region(bool).reserve(max_stack_slots) catch return error.OutOfMemory;
+        ic.stack_fetch = ic.stack_fetch_room.items;
         ic.sp_save_room = Region(usize).reserve(max_frames) catch return error.OutOfMemory;
         ic.sp_save = ic.sp_save_room.items;
         ic.arg_counts_room = Region(u32).reserve(max_frames) catch return error.OutOfMemory;
@@ -29240,7 +29269,8 @@ pub const VM = struct {
         const before = self.callRegionBytes();
         if (want <= max_stack_slots and
             (self.stack_room.ensure(target) catch return error.OutOfMemory) and
-            (self.ic.?.arg_stack_room.ensureFilled(target, .none) catch return error.OutOfMemory)) return self.chargeRegionGrowth(before);
+            (self.ic.?.arg_stack_room.ensureFilled(target, .none) catch return error.OutOfMemory) and
+            (self.ic.?.stack_fetch_room.ensureFilled(target, false) catch return error.OutOfMemory)) return self.chargeRegionGrowth(before);
         self.setErrorMsg("Fatal error: Maximum function nesting level of {d} reached\n", .{max_frames});
         return error.RuntimeError;
     }
@@ -29253,6 +29283,7 @@ pub const VM = struct {
             self.stack_room.committed * @sizeOf(Value) +
             self.handler_room.committed * @sizeOf(ExceptionHandler) +
             ic.arg_stack_room.committed * @sizeOf(RefSource) +
+            ic.stack_fetch_room.committed * @sizeOf(bool) +
             ic.sp_save_room.committed * @sizeOf(usize) +
             ic.arg_counts_room.committed * @sizeOf(u32) +
             ic.fga_offsets_room.committed * @sizeOf(u32) +
@@ -29288,6 +29319,7 @@ pub const VM = struct {
             (ic.fga_offsets_room.ensureFilled(frame_target, 0) catch return error.OutOfMemory) and
             (self.stack_room.ensure(slot_target) catch return error.OutOfMemory) and
             (ic.arg_stack_room.ensureFilled(slot_target, .none) catch return error.OutOfMemory) and
+            (ic.stack_fetch_room.ensureFilled(slot_target, false) catch return error.OutOfMemory) and
             (ic.fga_room.ensureFilled(fga_target, .null) catch return error.OutOfMemory);
         try self.chargeRegionGrowth(before);
         return ok;
@@ -29438,6 +29470,21 @@ pub const VM = struct {
         // it cycle 0->1->0 and be freed while still live. arrays are freed
         // only when their durable container releases them (refcounting Stage 2)
         stackRetain(value);
+        if (value == .array) {
+            markStackValue(value.array, self.sp);
+            self.ic.?.stack_fetch[self.sp] = false;
+        }
+        if (self.sp < self.arg_source_end) self.releaseStaleArgSource(self.sp);
+        self.stack[self.sp] = value;
+        self.sp += 1;
+    }
+
+    // the container a write fetch hands to the write after it: the slot
+    // borrows the array to write into, it doesn't hold it as a value, so it
+    // never makes the write separate (stackHoldsArray)
+    inline fn pushFetched(self: *VM, value: Value) void {
+        if (value != .array) return self.push(value);
+        self.ic.?.stack_fetch[self.sp] = true;
         if (self.sp < self.arg_source_end) self.releaseStaleArgSource(self.sp);
         self.stack[self.sp] = value;
         self.sp += 1;
@@ -31537,6 +31584,47 @@ pub const VM = struct {
             .fiber => fiberRetain(v.fiber),
             else => {},
         }
+    }
+
+    // an array pushed as a value into operand slot `slot`
+    pub inline fn markStackValue(arr: *PhpArray, slot: usize) void {
+        const s: u32 = @intCast(slot);
+        if (!arr.stack_held or s < arr.stack_low) arr.stack_low = s;
+        arr.stack_held = true;
+    }
+
+    // an operand slot below sp holds the array as a value. php's operands
+    // own a reference, so an argument already sent keeps what it was when a
+    // later argument writes to the variable it came from: zphp's operands
+    // borrow arrays, and an in-place write asks this instead. a native
+    // holding its first argument by reference (sort, array_walk) has that
+    // array in an argument slot, which is the variable itself
+    pub inline fn stackHoldsArray(self: *VM, arr: *PhpArray) bool {
+        if (!arr.stack_held or arr.byref_pins != 0) return false;
+        return self.stackHoldsArraySlow(arr);
+    }
+
+    // the top operand moved down to `dest` (bury, swap) and the ones from
+    // dest up moved one slot up: their fetch marks move with them, and an
+    // array value now below where it was pushed is marked there
+    pub fn buryMarks(self: *VM, dest: usize) void {
+        const marks = self.ic.?.stack_fetch;
+        const top_mark = marks[self.sp - 1];
+        std.mem.copyBackwards(bool, marks[dest + 1 .. self.sp], marks[dest .. self.sp - 1]);
+        marks[dest] = top_mark;
+        const moved = self.stack[dest];
+        if (moved == .array and !top_mark) markStackValue(moved.array, dest);
+    }
+
+    fn stackHoldsArraySlow(self: *VM, arr: *PhpArray) bool {
+        const fetched = self.ic.?.stack_fetch;
+        var i: usize = arr.stack_low;
+        while (i < self.sp) : (i += 1) {
+            const v = self.stack[i];
+            if (v == .array and v.array == arr and !fetched[i]) return true;
+        }
+        arr.stack_held = false;
+        return false;
     }
 
     pub inline fn stackRelease(self: *VM, v: Value) void {

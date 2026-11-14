@@ -27,6 +27,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
     // the operand stack is a fixed reservation, so its base never moves;
     // a local keeps it in a register across stores through it
     const stack = self.stack;
+    // which slots hold an array a write fetch pushed (VM.pushFetched); an
+    // array pushed as a value clears its slot's mark
+    const fetch_marks = ic.stack_fetch;
     const entry_fc = self.frame_count;
 
     reenter: while (true) {
@@ -99,6 +102,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     // (Stage 1); arrays are not stack-owned (refcounting Stage 2)
                     if (!copyScalar(&stack[sp], &locals[slot])) {
                         VM.stackRetain(locals[slot]);
+                        valueSlot(fetch_marks, locals[slot], sp);
                         stack[sp] = locals[slot];
                     }
                     sp += 1;
@@ -513,6 +517,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .dup => {
                     // a duplicated object is a new operand-stack reference (Stage 1)
                     VM.stackRetain(stack[sp - 1]);
+                    fetch_marks[sp] = fetch_marks[sp - 1];
                     stack[sp] = stack[sp - 1];
                     sp += 1;
                     const _next = readOp(code, ip);
@@ -543,6 +548,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .dup2 => {
                     VM.stackRetain(stack[sp - 2]);
                     VM.stackRetain(stack[sp - 1]);
+                    fetch_marks[sp] = fetch_marks[sp - 2];
+                    fetch_marks[sp + 1] = fetch_marks[sp - 1];
                     stack[sp] = stack[sp - 2];
                     stack[sp + 1] = stack[sp - 1];
                     sp += 2;
@@ -557,6 +564,10 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const dest = sp - 1 - n;
                     std.mem.copyBackwards(Value, stack[dest + 1 .. sp], stack[dest .. sp - 1]);
                     stack[dest] = top;
+                    const top_mark = fetch_marks[sp - 1];
+                    std.mem.copyBackwards(bool, fetch_marks[dest + 1 .. sp], fetch_marks[dest .. sp - 1]);
+                    fetch_marks[dest] = top_mark;
+                    if (top == .array and !top_mark) VM.markStackValue(top.array, dest);
                     const _next = readOp(code, ip);
                     ip += op_bytes;
                     continue :dispatch _next;
@@ -646,6 +657,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const gc_entry = &ic.class_const[InlineCache.propIndex(@intFromPtr(frame.chunk), gc_site)];
                     if (gc_class_ptr != 0 and gc_entry.key == gc_site and gc_entry.chunk_key == @intFromPtr(frame.chunk) and gc_entry.class_ptr == gc_class_ptr) {
                         VM.stackRetain(gc_entry.value);
+                        valueSlot(fetch_marks, gc_entry.value, sp);
                         stack[sp] = gc_entry.value;
                         sp += 1;
                         const _next = readOp(code, ip);
@@ -721,6 +733,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         // an element pushed onto the operand stack takes a
                         // reference (Stage 1); arrays are not stack-owned
                         VM.stackRetain(elem);
+                        valueSlot(fetch_marks, elem, sp);
                     }
                     stack[sp] = elem;
                     sp += 1;
@@ -737,6 +750,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         const agv_existing = agv_arr.array.get(agv_arr_key);
                         if (agv_existing == .array) {
                             self.stackRelease(agv_key);
+                            fetch_marks[sp] = true;
                             stack[sp] = agv_existing;
                             sp += 1;
                             const _next = readOp(code, ip);
@@ -1048,6 +1062,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                                     // receiver it overwrites (Stage 1)
                                     const gp_recv = stack[sp - 1];
                                     VM.stackRetain(gp_v);
+                                    valueSlot(fetch_marks, gp_v, sp - 1);
                                     stack[sp - 1] = gp_v;
                                     self.stackRelease(gp_recv);
                                     const _next_gp = readOp(code, ip);
@@ -1113,6 +1128,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                                 self.stackRelease(stack[sp]);
                                 self.stackRelease(stack[sp - 1]);
                                 VM.stackRetain(copied);
+                                valueSlot(fetch_marks, copied, sp - 1);
                                 stack[sp - 1] = copied;
                                 const _next_sp = readOp(code, ip);
                                 ip += op_bytes;
@@ -1768,6 +1784,15 @@ inline fn checkParamTypes(self: *VM, ic: *InlineCache, name: []const u8, arg_cou
     var dispatched = false;
     try status(ic.slow.check_param_types(self, name, arg_count, &dispatched));
     return dispatched;
+}
+
+// a value pushed into operand slot `slot`: an array there is a value the
+// slot holds, not a write fetch's container (VM.stackHoldsArray)
+inline fn valueSlot(marks: []bool, v: Value, slot: usize) void {
+    if (v == .array) {
+        VM.markStackValue(v.array, slot);
+        marks[slot] = false;
+    }
 }
 
 inline fn arraySetOwned(self: *VM, ic: *InlineCache, array: *PhpArray, key: PhpArray.Key, value: Value) RuntimeError!void {
