@@ -650,6 +650,26 @@ config_error "unknown log format rejected" "text or json" --log-format xml
 config_error "access log needs json" "drop --log-format text" --log-format text --access-log
 config_error "unwritable log file rejected" "could not open log file" --log-file "$(native_path "$OBS_DIR")/missing/dir/x.log"
 
+# --log-format json alone: server and error lines on stdout, no access lines
+"$ZPHP" serve "$APP" --port $OBS_PORT --workers 1 --log-format json > "$OBS_DIR/json.out" 2> "$OBS_DIR/json.err" &
+OBS_PID=$!
+for i in $(seq 1 50); do curl -s -o /dev/null "http://localhost:$OBS_PORT/health" && break; sleep 0.1; done
+check "json mode keeps php errors" "500" "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:$OBS_PORT/uncaught)"
+check_absent "json mode alone sends no request id" "^X-Request-Id:" "$(curl -si http://localhost:$OBS_PORT/health | tr -d '\r')"
+sleep 0.2
+kill $OBS_PID 2>/dev/null || true; wait $OBS_PID 2>/dev/null || true
+OBS_PID=
+json_out=$(python3 - "$(native_path "$OBS_DIR/json.out")" <<'PY'
+import json, sys
+lines = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8")]
+comps = [l["component"] for l in lines]
+ok = bool(lines) and lines[0]["msg"] == "server started" and "php" in comps and "access" not in comps
+print("ok" if ok else repr(lines))
+PY
+)
+check "json mode writes server and error lines to stdout" "ok" "$json_out"
+check_absent "json mode drops the text banner" "zphp serving" "$(cat "$OBS_DIR/json.err")"
+
 # everything on, four workers, logging to a file
 OBS_LOG="$OBS_DIR/access.log"
 "$ZPHP" serve "$APP" --port $OBS_PORT --workers 4 --admin-port $OBS_ADMIN --access-log --log-file "$(native_path "$OBS_LOG")" > "$OBS_DIR/obs.out" 2> "$OBS_DIR/obs.err" &
@@ -788,20 +808,19 @@ if [ $is_windows -eq 0 ]; then
     check "every cycle logged its shutdown" "3" "$(grep -c '"server stopped"' "$OBS_DIR/cycle.log")"
 fi
 
-# a second server cannot take an admin port that is in use. windows lets
-# SO_REUSEADDR bind over a listener, so the check only holds elsewhere
-if [ $is_windows -eq 0 ]; then
-    python3 -c "
-import socket, time
-s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+# a second server cannot take an admin port that is in use. the holder needs
+# SO_REUSEADDR past earlier TIME_WAITs, but on windows that would let zphp share
+python3 -c "
+import os, socket, time
+s = socket.socket()
+if os.name != 'nt': s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(('127.0.0.1', $OBS_ADMIN)); s.listen(1); time.sleep(8)
 " &
-    HOLD_PID=$!
-    sleep 0.5
-    config_error "admin port conflict reported" "could not start the admin listener" --admin-port $OBS_ADMIN
-    kill $HOLD_PID 2>/dev/null || true
-    wait $HOLD_PID 2>/dev/null || true
-fi
+HOLD_PID=$!
+sleep 0.5
+config_error "admin port conflict reported" "could not start the admin listener" --admin-port $OBS_ADMIN
+kill $HOLD_PID 2>/dev/null || true
+wait $HOLD_PID 2>/dev/null || true
 rm -rf "$OBS_DIR"
 OBS_DIR=
 
