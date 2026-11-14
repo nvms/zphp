@@ -165,11 +165,51 @@ pub const PhpArray = struct {
         // the array this one was copied from while a loop iterated it
         // (zend_array_dup copies the iterators): the loop goes on here
         copied_from: ?*const PhpArray = null,
-        // the index of every entry removed since the log was made, in order
-        removed: std.ArrayListUnmanaged(u32) = .empty,
+        // what moved the entries since the log was made, in order
+        changes: std.ArrayListUnmanaged(Change) = .empty,
+
+        pub const Change = struct {
+            kind: enum { remove, unshift, splice },
+            // the removed entry, or where a splice starts
+            at: u32,
+            // a splice's removed and inserted runs and the length before it;
+            // the entries array_unshift put in front
+            removed: u32 = 0,
+            inserted: u32 = 0,
+            old_len: u32 = 0,
+
+            // php_splice's walk over the old entries: a place inside the
+            // removed run goes to the entry after it, and a place the walk
+            // reaches moves with its entry, again if that lands it further
+            // on (zend_hash_iterators_update finds it at each step)
+            fn splicedPlace(c: Change, next: usize) usize {
+                var p = next;
+                if (p < c.at or p >= c.old_len) return p;
+                if (p < c.at + c.removed) p = c.at + c.removed;
+                while (p >= c.at + c.removed and p < c.old_len) {
+                    const moved = p - c.removed + c.inserted;
+                    if (moved == p) break;
+                    const further = moved > p;
+                    p = moved;
+                    if (!further) break;
+                }
+                return p;
+            }
+
+            // the place of a loop about to read entry `next` once the
+            // change is made
+            pub fn apply(c: Change, next: usize) usize {
+                return switch (c.kind) {
+                    .remove => if (c.at < next) next - 1 else next,
+                    // zend_hash_iterators_advance moves every iterator
+                    .unshift => next + c.inserted,
+                    .splice => splicedPlace(c, next),
+                };
+            }
+        };
 
         pub fn destroy(log: *IterLog) void {
-            log.removed.deinit(std.heap.c_allocator);
+            log.changes.deinit(std.heap.c_allocator);
             std.heap.c_allocator.destroy(log);
         }
     };
@@ -499,7 +539,7 @@ pub const PhpArray = struct {
             // keep naming the same elements: the internal pointer and live
             // iterators move back with the entries that shift
             if (idx < self.cursor and self.cursor != std.math.maxInt(usize)) self.cursor -= 1;
-            if (self.iter_log) |log| log.removed.append(std.heap.c_allocator, @intCast(idx)) catch {};
+            if (self.iter_log) |log| log.changes.append(std.heap.c_allocator, .{ .kind = .remove, .at = @intCast(idx) }) catch {};
             if (removed.ref) |cell| unbindCell(cell);
             if (removed.key == .string) removed.key.string.release();
             // rebuild string index for shifted entries

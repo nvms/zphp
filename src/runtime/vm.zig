@@ -7699,7 +7699,7 @@ pub const VM = struct {
                         log.loops += 1;
                         self.stack[self.sp - 1] = .{ .int = @intCast(@intFromPtr(arr)) };
                         self.stackRelease(iterable);
-                        self.push(.{ .int = liveIterState(0, log.removed.items.len) });
+                        self.push(.{ .int = liveIterState(0, log.changes.items.len) });
                         continue;
                     }
                     if (iterable == .array) {
@@ -20297,17 +20297,16 @@ pub const VM = struct {
                 // zend_hash_iterator_pos_ex on another array: its internal
                 // pointer
                 next = @min(arr.cursor, arr.entries.items.len);
-                seen = log.removed.items.len;
+                seen = log.changes.items.len;
             }
             self.stack[self.sp - 2] = .{ .int = @intCast(@intFromPtr(arr)) };
         }
         const log = arr.iter_log.?;
-        // an entry removed before the loop's place moved the rest back
-        if (seen < log.removed.items.len) {
-            for (log.removed.items[seen..]) |idx| {
-                if (idx < next) next -= 1;
-            }
-            seen = log.removed.items.len;
+        // an entry removed before the loop's place moved the rest back,
+        // entries put in front moved them on
+        if (seen < log.changes.items.len) {
+            for (log.changes.items[seen..]) |change| next = change.apply(next);
+            seen = log.changes.items.len;
         }
         if (next >= arr.entries.items.len) {
             self.stack[self.sp - 1] = .{ .int = liveIterState(next, seen) };
@@ -25249,7 +25248,7 @@ pub const VM = struct {
         // the copy keeps the removals the loop hasn't seen yet
         if (src.iter_log) |log| if (log.loops > 0) if (copy.iterLog()) |copy_log| {
             copy_log.copied_from = src;
-            copy_log.removed.appendSlice(std.heap.c_allocator, log.removed.items) catch {};
+            copy_log.changes.appendSlice(std.heap.c_allocator, log.changes.items) catch {};
         };
         return copy;
     }

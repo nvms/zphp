@@ -567,7 +567,14 @@ fn array_splice(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     for (arr.entries.items[uoffset..][0..length]) |entry| {
         try ctx.vm.arrayAddEntry(removed, if (entry.key == .string) entry.key else null, entry, entry.ref);
     }
+    const old_len = arr.entries.items.len;
+    const logged = if (arr.iter_log) |log| log.changes.items.len else 0;
     for (0..length) |_| ctx.vm.arrayRemoveOwned(arr, arr.entries.items[uoffset].key);
+    // a by-reference foreach over the array moves as php_splice moves it
+    if (arr.iter_log) |log| {
+        log.changes.shrinkRetainingCapacity(logged);
+        log.changes.append(std.heap.c_allocator, .{ .kind = .splice, .at = @intCast(uoffset), .removed = @intCast(length), .inserted = @intCast(replacement_values.len), .old_len = @intCast(old_len) }) catch {};
+    }
     const replacement_refs: []const PhpArray.Entry = if (args.len >= 4 and args[3] == .array) args[3].array.entries.items else &.{};
     for (replacement_values, 0..) |value, i| {
         VM.retainValue(value);
@@ -952,6 +959,8 @@ fn array_unshift(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     arr.next_int_key = next_int;
     arr.has_int_keys = next_int > 0;
     arr.rebuildStringIndexAssumeCapacity();
+    // a by-reference foreach iterating the array keeps its element
+    if (arr.iter_log) |log| log.changes.append(std.heap.c_allocator, .{ .kind = .unshift, .at = 0, .inserted = @intCast(args.len - 1) }) catch {};
     return NativeResult.scalar(.{ .int = arr.length() });
 }
 
