@@ -131,10 +131,6 @@ fn debugZvalDump(ctx: *NativeContext, val: Value, level: usize, top: bool) Runti
             obj.recursion |= flag;
             defer obj.recursion &= ~flag;
             const rc = if (top) obj.refcount -| call_holds_scalar else obj.refcount;
-            if (ctx.vm.classes.get(obj.class_name)) |cls_def| if (cls_def.is_enum) {
-                try out.print(a, "enum({s}::{s})\n", .{ obj.class_name, obj.get("name").string.bytes() });
-                return;
-            };
             var listing = try object_properties.list(ctx.vm, obj, .debug, a);
             defer listing.deinit(a);
             const holder = listing.takeHolder();
