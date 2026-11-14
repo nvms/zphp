@@ -13,6 +13,7 @@
 - [TLS and HTTP/2](./server/tls.md)
 - [Static Files](./server/static-files.md)
 - [WebSockets](./server/websockets.md)
+- [Observability](./server/observability.md)
 
 # Parallelism
 
