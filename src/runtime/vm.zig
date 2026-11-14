@@ -8019,6 +8019,14 @@ pub const VM = struct {
                             self.array_ref_active = true;
                         }
                     } else if (src_val == .object and key_val == .string) {
+                        // FE_FETCH_RW refuses a readonly property
+                        const ro = self.findPropertyVisibility(src_val.object.class_name, key_val.string.bytes());
+                        if (ro.declared and ro.is_readonly) {
+                            const msg = try std.fmt.allocPrint(self.allocator, "Cannot acquire reference to readonly property {s}::${s}", .{ ro.defining_class, key_val.string.bytes() });
+                            defer self.allocator.free(msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        }
                         const cell = try self.newRefCell();
                         self.setCell(cell, src_val.object.get(key_val.string.bytes()));
 
@@ -8228,6 +8236,7 @@ pub const VM = struct {
                             if (try self.throwBuiltinException("Error", "Cannot assign by reference to overloaded object")) continue;
                             return error.RuntimeError;
                         }
+                        if (try self.refuseReadonlyRefTarget(target, prop_name)) continue;
                         try self.bindPropToCell(target, prop_name, cell);
                     } else {
                         // ZEND_ASSIGN_OBJ_REF: the source is fetched for
@@ -8382,6 +8391,7 @@ pub const VM = struct {
                             if (try self.throwBuiltinException("Error", "Cannot assign by reference to overloaded object")) continue;
                             return error.RuntimeError;
                         }
+                        if (try self.refuseReadonlyRefTarget(obj_val.object.storage(), prop_name)) continue;
                         try self.bindPropToCell(obj_val.object.storage(), prop_name, cell);
                     }
                     // php frees what the destination held before it reads the
@@ -21317,6 +21327,23 @@ pub const VM = struct {
     // reference it held and joins the cell. the cell's bindings the running
     // frame made to reach its source outlive the frame now that a property
     // holds the reference
+    // zend_assign_to_property_reference over a readonly property: its write
+    // fetch refuses it, or hands out a copy of its object, which can't be
+    // bound. true when the error was thrown and dispatched
+    fn refuseReadonlyRefTarget(self: *VM, obj: *PhpObject, prop_name: []const u8) RuntimeError!bool {
+        const vr = self.findPropertyVisibility(obj.class_name, prop_name);
+        if (!vr.declared or !vr.is_readonly) return false;
+        if (self.reinit_windows.items.len > 0 and self.readonlyReinitable(obj, prop_name)) return false;
+        if (obj.rawForScope(prop_name, vr.defining_class) == .object) {
+            if (try self.throwBuiltinException("Error", "Cannot assign by reference to overloaded object")) return true;
+            return error.RuntimeError;
+        }
+        const msg = try std.fmt.allocPrint(self.allocator, "Cannot indirectly modify readonly property {s}::${s}", .{ vr.defining_class, prop_name });
+        defer self.allocator.free(msg);
+        if (try self.throwBuiltinException("Error", msg)) return true;
+        return error.RuntimeError;
+    }
+
     fn bindPropToCell(self: *VM, obj: *PhpObject, prop_name: []const u8, cell: *Value) RuntimeError!void {
         const vr = self.findPropertyVisibility(obj.class_name, prop_name);
         if (vr.declared and vr.type_str.len > 0) try self.verifyPropAssignableByRef(vr, prop_name, cell);
@@ -22205,14 +22232,23 @@ pub const VM = struct {
     fn capturePropertyCell(self: *VM, slot: usize, obj: *PhpObject, name: []const u8) RuntimeError!void {
         const vr = self.findPropertyVisibility(obj.class_name, name);
         var denial: ?[]const u8 = null;
-        if (vr.set_visibility != vr.visibility and !self.propVisible(vr, name, vr.set_visibility)) {
+        if (vr.is_readonly and !(self.reinit_windows.items.len > 0 and self.readonlyReinitable(obj, name))) {
+            // zend_fetch_property_address for writing: a readonly property's
+            // object is handed out as a copy, anything else is refused
+            const current = obj.rawForScope(name, vr.defining_class);
+            if (current == .object) {
+                const copy = try self.newRefCell();
+                self.setCell(copy, current);
+                self.setArgSource(slot, .{ .cell = .{ .value = copy, .denial = null } });
+                return;
+            }
+            denial = try std.fmt.allocPrint(self.allocator, "Cannot indirectly modify readonly property {s}::${s}", .{ vr.defining_class, name });
+        } else if (vr.set_visibility != vr.visibility and !self.propVisible(vr, name, vr.set_visibility)) {
             const ro: []const u8 = if (vr.is_readonly and vr.set_visibility == .protected) " readonly" else "";
             denial = if (self.currentDefiningClass()) |sc|
                 try std.fmt.allocPrint(self.allocator, "Cannot indirectly modify {s}(set){s} property {s}::${s} from scope {s}", .{ @tagName(vr.set_visibility), ro, vr.defining_class, name, sc })
             else
                 try std.fmt.allocPrint(self.allocator, "Cannot indirectly modify {s}(set){s} property {s}::${s} from global scope", .{ @tagName(vr.set_visibility), ro, vr.defining_class, name });
-        } else if (vr.is_readonly) {
-            denial = try std.fmt.allocPrint(self.allocator, "Cannot indirectly modify readonly property {s}::${s}", .{ vr.defining_class, name });
         }
         // the denial rides along with the argument's source until a write
         // raises it, so it is interned rather than owned by one copy
