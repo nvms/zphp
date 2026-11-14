@@ -1393,7 +1393,9 @@ Zend/tests/exceptions/bug76025.phpt
 Zend/tests/exceptions/exception_001.phpt
 Zend/tests/exceptions/exception_002.phpt
 Zend/tests/exceptions/exception_003.phpt
+Zend/tests/exceptions/exception_004.phpt
 Zend/tests/exceptions/exception_005.phpt
+Zend/tests/exceptions/exception_006.phpt
 Zend/tests/exceptions/exception_007.phpt
 Zend/tests/exceptions/exception_008.phpt
 Zend/tests/exceptions/exception_014.phpt
@@ -3665,6 +3667,7 @@ Zend/tests/this-reserved/this_in_extract.phpt
 Zend/tests/this_in_eval.phpt
 Zend/tests/throw/001.phpt
 Zend/tests/throw/002.phpt
+Zend/tests/throw/bug33318.phpt
 Zend/tests/throw/exit_in_finally.phpt
 Zend/tests/throw/leaks.phpt
 Zend/tests/throw_reference.phpt
