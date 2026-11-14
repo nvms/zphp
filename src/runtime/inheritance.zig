@@ -720,6 +720,7 @@ pub fn checkInterface(vm: *VM, name: []const u8, def: *const ClassDef, idef: *co
 // without a get hook may widen it), and an untyped one stays untyped
 fn checkProperties(p: *Pending, arena: std.mem.Allocator) (RuntimeError || error{OutOfMemory})!void {
     const def = p.def;
+    for (def.properties.items) |prop| try checkSetHookVariance(p, arena, prop);
     const parent_name = def.parent orelse return;
     for (def.properties.items) |child| {
         const found = inheritedProperty(p, parent_name, child.name) orelse continue;
@@ -758,6 +759,25 @@ fn checkPropertyHook(p: *Pending, arena: std.mem.Allocator, prop: []const u8, pa
     child.name = shown;
     if (parent.is_final) return fatal(p.vm, child, "Cannot override final property hook {s}::{s}()", .{ parent.class, shown });
     try checkMethod(p, arena, child, parent, false);
+}
+
+// zend_verify_property_hook_variance for the checks the compiler could not
+// settle without the classes: the property's type must fit the set hook's
+// parameter type. still unresolved once the classes are looked up, it fails
+// as php's obligation does at the end of linking
+fn checkSetHookVariance(p: *Pending, arena: std.mem.Allocator, prop: ClassDef.PropertyDef) (RuntimeError || error{OutOfMemory})!void {
+    if (prop.type_str.len == 0) return;
+    const hook = try std.fmt.allocPrint(arena, "{s}$hook_set", .{prop.name});
+    if (!p.def.methods.contains(hook)) return;
+    const m = (try methodOf(p, arena, p.name, hook, false)) orelse return;
+    // the class that declares the hook checked it when it was declared
+    if (!std.ascii.eqlIgnoreCase(m.origin, p.name)) return;
+    if (m.params.len == 0 or m.params[0].type_text.len == 0) return;
+    const prop_type = try canonicalType(p, arena, prop.type_str, p.name);
+    const param_type = try canonicalType(p, arena, m.params[0].type_text, p.name);
+    const status = php_types.covariant(classes(p), p.name, prop_type, param_type);
+    if (p.failure) |err| return err;
+    if (status != .success) return constantFatal(p, "Type of parameter ${s} of hook {s}::${s}::set must be compatible with property type", .{ m.params[0].name, p.name, prop.name });
 }
 
 const PropVariance = enum { invariant, covariant, contravariant };

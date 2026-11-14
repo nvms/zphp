@@ -300,7 +300,10 @@ fn classSubtypeOfType(classes: Classes, fe_scope: []const u8, fe_name: []const u
     }
     for (proto.names) |name| {
         if (std.ascii.eqlIgnoreCase(fe_name, name)) return .success;
-        if (!classes.has(fe_name) or !classes.has(name)) {
+        // both are looked up (and autoloaded) even when the first is missing
+        const fe_known = classes.has(fe_name);
+        const proto_known = classes.has(name);
+        if (!fe_known or !proto_known) {
             unresolved = true;
             continue;
         }
