@@ -40,6 +40,7 @@ pub fn register(map: *@import("../runtime/vm.zig").NativeTable, allocator: std.m
         @import("serialize.zig").entries,
         @import("pack.zig").entries,
         @import("ini.zig").entries,
+        @import("browscap.zig").entries,
         @import("openssl.zig").entries,
         @import("curl.zig").entries,
         @import("network.zig").entries,
@@ -100,5 +101,6 @@ test {
     _ = @import("serialize.zig");
     _ = @import("pack.zig");
     _ = @import("ini.zig");
+    _ = @import("browscap.zig");
     _ = @import("phar_class.zig");
 }

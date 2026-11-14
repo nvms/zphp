@@ -598,6 +598,8 @@ const Parser = struct {
     result: *PhpArray,
     sections: bool,
     active: ?*PhpArray = null,
+    // get_browser's reader (php_browscap_parser_cb) instead of an array
+    browscap: ?*@import("browscap.zig").Reader = null,
 
     fn str(self: *Parser, v: Val) ![]const u8 {
         return switch (v.kind) {
@@ -723,6 +725,7 @@ const Parser = struct {
 
     // php_simple_ini_parser_cb and php_ini_parser_cb_with_sections
     fn section(self: *Parser, name: Val) !void {
+        if (self.browscap) |reader| return reader.section(try self.str(name));
         if (!self.sections) return;
         const arr = try self.ctx.createArray();
         try self.set(self.result, keyOf(try self.str(name)), .{ .array = arr });
@@ -731,11 +734,13 @@ const Parser = struct {
 
     fn entry(self: *Parser, name: Val, value: ?Val) !void {
         const v = value orelse return;
+        if (self.browscap) |reader| return reader.entry(try self.str(name), try self.str(v));
         try self.set(self.target(), keyOf(name.s), try self.phpValue(v));
     }
 
     fn popEntry(self: *Parser, name: Val, value: ?Val, offset: ?Val) !void {
         const v = value orelse return;
+        if (self.browscap != null) return;
         const arr = self.target();
         const key: PhpArray.Key = blk: {
             const s = name.s;
@@ -809,12 +814,22 @@ const Parser = struct {
 };
 
 fn parse(ctx: *NativeContext, src: []const u8, filename: ?[]const u8, sections: bool, mode: Mode) RuntimeError!NativeResult {
+    return parseInto(ctx, src, filename, sections, mode, null);
+}
+
+// zend_parse_ini_file in raw mode with browscap's callback
+pub fn parseBrowscap(ctx: *NativeContext, src: []const u8, filename: []const u8, reader: *@import("browscap.zig").Reader) RuntimeError!void {
+    const result = try parseInto(ctx, src, filename, true, .raw, reader);
+    if (result.value == .array) ctx.vm.releaseUnheldArray(result.value.array);
+}
+
+fn parseInto(ctx: *NativeContext, src: []const u8, filename: ?[]const u8, sections: bool, mode: Mode, browscap: ?*@import("browscap.zig").Reader) RuntimeError!NativeResult {
     var arena = std.heap.ArenaAllocator.init(ctx.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var sc: Scanner = .{ .a = a, .src = src, .mode = mode };
     const result = try ctx.createArray();
-    var parser: Parser = .{ .ctx = ctx, .a = a, .mode = mode, .result = result, .sections = sections };
+    var parser: Parser = .{ .ctx = ctx, .a = a, .mode = mode, .result = result, .sections = sections, .browscap = browscap };
 
     var states: std.ArrayListUnmanaged(i32) = .empty;
     var values: std.ArrayListUnmanaged(Val) = .empty;

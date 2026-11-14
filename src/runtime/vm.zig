@@ -1051,6 +1051,8 @@ pub const VM = struct {
     ticks_count: u32 = 0,
     tick_function_ids: u64 = 0,
     strtok_state: ?[]const u8 = null,
+    // get_browser's parsed browscap file (browscap.Data)
+    browscap: ?*anyopaque = null,
     strtok_pos: usize = 0,
     classes: class_names.AliasMap(ClassDef) = .{},
     interfaces: class_names.AliasMap(InterfaceDef) = .{},
@@ -3410,6 +3412,7 @@ pub const VM = struct {
             self.unwind_marker = null;
         }
         self.setStrtokState(null);
+        @import("../stdlib/browscap.zig").deinit(self);
         self.clearLastError();
         extension.vmDeinit(self);
         if (self.ic) |ic| for (ic.arg_stack[0..ic.arg_stack_room.committed]) |*source| self.releaseArgSource(source);
