@@ -2917,6 +2917,8 @@ fn compileYieldRef(self: *Compiler, value_node: u32, has_key: bool) Error!void {
     while (target != 0 and self.ast.nodes[target].tag == .grouped_expr) target = self.ast.nodes[target].data.lhs;
     const tag = if (target != 0) self.ast.nodes[target].tag else .grouped_expr;
     if (target != 0 and (tag == .call or tag == .method_call or tag == .static_call)) flags |= 2;
+    // a by-reference generator yields its value fetched for writing
+    if (target != 0 and isVariableOrCall(self, target) and isShortCircuited(self, target)) return self.fail(self.ast.nodes[target].main_token, "Cannot take reference of a nullsafe chain");
     if (target == 0 or !try compileReferenceBinding(self, target, name)) {
         if (value_node != 0) try self.compileNode(value_node) else try self.emitOp(.op_null);
         // a bare yield gives null without the notice
