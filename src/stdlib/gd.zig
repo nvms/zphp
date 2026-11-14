@@ -543,95 +543,8 @@ fn imgInterlace(_: *NativeContext, args: []const Value) RuntimeError!NativeResul
 
 // ---------------- info ----------------
 
-fn imgGetSize(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const data = readImageFile(ctx, args[0].string.bytes()) orelse return NativeResult.scalar(.{ .bool = false });
-    defer ctx.allocator.free(data);
-    if (data.len < 4) return NativeResult.scalar(.{ .bool = false });
-    const header = data[0..@min(data.len, 12)];
-    const read = header.len;
-    var im: ?*c.gdImageStruct = null;
-    var mime: []const u8 = "";
-    var typ: i64 = 0;
-    const size: c_int = @intCast(data.len);
 
-    if (read >= 4 and header[0] == 0x89 and header[1] == 'P' and header[2] == 'N' and header[3] == 'G') {
-        im = c.gdImageCreateFromPngPtr(size, data.ptr);
-        mime = "image/png";
-        typ = 3;
-    } else if (read >= 3 and header[0] == 0xff and header[1] == 0xd8 and header[2] == 0xff) {
-        im = c.gdImageCreateFromJpegPtr(size, data.ptr);
-        mime = "image/jpeg";
-        typ = 2;
-    } else if (read >= 6 and (std.mem.eql(u8, header[0..6], "GIF89a") or std.mem.eql(u8, header[0..6], "GIF87a"))) {
-        im = c.gdImageCreateFromGifPtr(size, data.ptr);
-        mime = "image/gif";
-        typ = 1;
-    } else return NativeResult.scalar(.{ .bool = false });
 
-    if (im == null) return NativeResult.scalar(.{ .bool = false });
-    defer c.gdImageDestroy(im);
-
-    const arr = try ctx.createArray();
-    try arr.set(ctx.allocator, .{ .int = 0 }, .{ .int = @intCast(im.?.sx) });
-    try arr.set(ctx.allocator, .{ .int = 1 }, .{ .int = @intCast(im.?.sy) });
-    try arr.set(ctx.allocator, .{ .int = 2 }, .{ .int = typ });
-    try arr.set(ctx.allocator, .{ .int = 3 }, .{ .string = Value.String.borrowed("") });
-    try arr.setCopiedString(ctx.allocator, .{ .string = Value.String.borrowed("mime") }, mime);
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("bits") }, .{ .int = 8 });
-    return NativeResult.borrowed(.{ .array = arr });
-}
-
-// PHP IMAGETYPE_* constants -> mime/extension mappings
-fn imageTypeToMimeType(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.literal("application/octet-stream");
-    const t = Value.toInt(args[0]);
-    return try NativeResult.copyString(ctx.allocator, switch (t) {
-        1 => "image/gif",
-        2 => "image/jpeg",
-        3 => "image/png",
-        4 => "application/x-shockwave-flash",
-        5 => "image/psd",
-        6 => "image/bmp",
-        7, 8 => "image/tiff",
-        9 => "application/octet-stream", // JPC
-        10 => "image/jp2",
-        11, 12 => "application/octet-stream",
-        13 => "application/x-shockwave-flash",
-        14 => "image/iff",
-        15 => "image/vnd.wap.wbmp",
-        16 => "image/xbm",
-        17 => "image/x-icon",
-        18 => "image/webp",
-        19 => "image/avif",
-        else => "application/octet-stream",
-    });
-}
-
-fn imageTypeToExtension(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len == 0) return NativeResult.scalar(.{ .bool = false });
-    const t = Value.toInt(args[0]);
-    const include_dot = args.len < 2 or args[1].isTruthy();
-    const ext: []const u8 = switch (t) {
-        1 => "gif",
-        2 => "jpeg",
-        3 => "png",
-        4 => "swf",
-        5 => "psd",
-        6 => "bmp",
-        7, 8 => "tiff",
-        14 => "iff",
-        15 => "wbmp",
-        16 => "xbm",
-        17 => "ico",
-        18 => "webp",
-        19 => "avif",
-        else => return NativeResult.scalar(.{ .bool = false }),
-    };
-    if (!include_dot) return try NativeResult.copyString(ctx.allocator, ext);
-    const out = try std.fmt.allocPrint(ctx.allocator, ".{s}", .{ext});
-    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
-}
 
 fn gdInfo(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
@@ -655,8 +568,6 @@ fn gdInfo(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
 // ---------------- registration ----------------
 
 pub const entries = .{
-    .{ "image_type_to_mime_type", imageTypeToMimeType },
-    .{ "image_type_to_extension", imageTypeToExtension },
     .{ "gd_info", gdInfo },
     .{ "imagecreate", imgCreate },
     .{ "imagecreatetruecolor", imgCreateTrueColor },
@@ -695,7 +606,6 @@ pub const entries = .{
     .{ "imagealphablending", imgAlphaBlending },
     .{ "imagesavealpha", imgSaveAlpha },
     .{ "imageinterlace", imgInterlace },
-    .{ "getimagesize", imgGetSize },
 };
 
 fn cleanupImage(obj: *PhpObject) bool {

@@ -1306,7 +1306,7 @@ fn isPlainPath(path: []const u8) bool {
 
 // php's php_check_open_basedir on a plain path, with its warning; true when
 // open_basedir refuses it
-fn basedirDenies(ctx: *NativeContext, comptime func: []const u8, path: []const u8) RuntimeError!bool {
+pub fn basedirDenies(ctx: *NativeContext, comptime func: []const u8, path: []const u8) RuntimeError!bool {
     if (open_basedir.setting(ctx.vm) == null or !isPlainPath(path)) return false;
     return !try open_basedir.allows(ctx.vm, func, path);
 }

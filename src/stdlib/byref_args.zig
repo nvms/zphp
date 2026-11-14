@@ -71,6 +71,8 @@ pub fn isByRef(name: []const u8, index: usize) bool {
         .{ .name = "dns_get_mx", .index = 2 },
         .{ .name = "dns_get_record", .index = 2 },
         .{ .name = "dns_get_record", .index = 3 },
+        .{ .name = "getimagesize", .index = 1 },
+        .{ .name = "getimagesizefromstring", .index = 1 },
     };
     for (outputs) |output| {
         if (index == output.index and std.ascii.eqlIgnoreCase(base, output.name)) return true;
@@ -100,6 +102,7 @@ const by_ref_names = std.StaticStringMap(void).initComptime(.{
     .{"sscanf"},                .{"fscanf"},               .{"mb_convert_variables"},  .{"mb_parse_str"},                .{"stream_socket_client"},
     .{"stream_socket_server"},  .{"stream_socket_accept"}, .{"fsockopen"},             .{"pfsockopen"},                  .{"flock"},
     .{"splfileobject::fscanf"}, .{"splfileobject::flock"},  .{"getmxrr"},               .{"dns_get_mx"},                  .{"dns_get_record"},
+    .{"getimagesize"},          .{"getimagesizefromstring"},
 });
 
 pub fn hasByRefParams(name: []const u8) bool {

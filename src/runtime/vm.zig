@@ -2941,6 +2941,7 @@ pub const VM = struct {
         try c.put(a, "CRYPT_BLOWFISH", .{ .int = 1 });
         try c.put(a, "CRYPT_SHA256", .{ .int = 1 });
         try c.put(a, "CRYPT_SHA512", .{ .int = 1 });
+        inline for (@import("../stdlib/image.zig").constants) |k| try c.put(a, k[0], .{ .int = k[1] });
         try c.put(a, "PATHINFO_DIRNAME", .{ .int = 1 });
         try c.put(a, "PATHINFO_BASENAME", .{ .int = 2 });
         try c.put(a, "PATHINFO_EXTENSION", .{ .int = 4 });

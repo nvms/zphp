@@ -58,6 +58,7 @@ pub fn register(map: *@import("../runtime/vm.zig").NativeTable, allocator: std.m
         @import("mail.zig").entries,
         @import("syslog.zig").entries,
         @import("highlight.zig").entries,
+        @import("image.zig").entries,
     };
     @setEvalBranchQuota(10000);
     inline for (modules) |entries| {
