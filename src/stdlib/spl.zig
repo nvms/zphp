@@ -179,10 +179,11 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     // ArrayIterator
     var ai_def = ClassDef{ .name = "ArrayIterator", .native_properties = arrayStorageProperties, .native_clone = splArrayClone };
-    try ai_def.interfaces.append(a, "Serializable");
+    // the stub's order: SeekableIterator, ArrayAccess, Serializable, Countable
     try ai_def.interfaces.append(a, "SeekableIterator");
-    try ai_def.interfaces.append(a, "Countable");
     try ai_def.interfaces.append(a, "ArrayAccess");
+    try ai_def.interfaces.append(a, "Serializable");
+    try ai_def.interfaces.append(a, "Countable");
     try ai_def.constants.put(a, "STD_PROP_LIST", .{ .int = 1 });
     try ai_def.constant_order.append(a, "STD_PROP_LIST");
     try ai_def.constants.put(a, "ARRAY_AS_PROPS", .{ .int = 2 });

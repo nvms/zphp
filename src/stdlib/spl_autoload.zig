@@ -402,7 +402,7 @@ fn classUses(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
 // takes its parent's table reversed. an internal class starts from its
 // parent's reversed table and adds each interface followed by its reversed
 // table (zend_class_implements)
-fn ceInterfaces(vm: *VM, name: []const u8, out: *std.ArrayListUnmanaged([]const u8), a: std.mem.Allocator, depth: usize) RuntimeError!void {
+pub fn ceInterfaces(vm: *VM, name: []const u8, out: *std.ArrayListUnmanaged([]const u8), a: std.mem.Allocator, depth: usize) RuntimeError!void {
     if (depth > 64) return;
     var parent: ?[]const u8 = null;
     var names: []const []const u8 = &.{};
@@ -424,6 +424,9 @@ fn ceInterfaces(vm: *VM, name: []const u8, out: *std.ArrayListUnmanaged([]const 
     defer inherited.deinit(a);
     if (parent) |p| try ceInterfaces(vm, p, &inherited, a, depth + 1);
     if (internal) {
+        // registering an internal class's own __toString implements
+        // Stringable before it inherits or names anything
+        if (vm.classes.get(name)) |def| if (def.methods.contains("__tostring")) try addUnique(vm, out, a, "Stringable");
         try inheritReversed(vm, out, a, inherited.items);
         for (names) |iface| {
             if (contains(vm, out.items, iface)) continue;

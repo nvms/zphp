@@ -2122,31 +2122,14 @@ fn rcIsAnonymous(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
 fn rcGetInterfaces(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
-
+    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer list.deinit(ctx.allocator);
+    try @import("spl_autoload.zig").ceInterfaces(ctx.vm, class_name, &list, ctx.allocator, 0);
     const arr = try ctx.createArray();
-    var seen = std.StringHashMapUnmanaged(void){};
-    defer seen.deinit(ctx.allocator);
-    var queue = std.ArrayListUnmanaged([]const u8).empty;
-    defer queue.deinit(ctx.allocator);
-
-    var current: ?[]const u8 = class_name;
-    while (current) |cn| {
-        const cls = ctx.vm.classes.get(cn) orelse break;
-        for (cls.interfaces.items) |iface| try queue.append(ctx.allocator, iface);
-        current = cls.parent;
-    }
-    var i: usize = 0;
-    while (i < queue.items.len) : (i += 1) {
-        const iface = queue.items[i];
-        if (seen.contains(iface)) continue;
-        try seen.put(ctx.allocator, iface, {});
-
-        const refobj = try classObject(ctx, iface);
-        try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(iface) }, .{ .object = refobj });
-
-        if (ctx.vm.classes.get(iface)) |idef| {
-            for (idef.interfaces.items) |sub| try queue.append(ctx.allocator, sub);
-        }
+    for (list.items) |iface| {
+        const shown = ctx.vm.declaredClassName(iface);
+        const refobj = try classObject(ctx, shown);
+        try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(shown) }, .{ .object = refobj });
     }
     return NativeResult.borrowed(.{ .array = arr });
 }
@@ -2178,44 +2161,13 @@ fn rcGetTraits(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult 
 fn rcGetInterfaceNames(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
-
+    // php's ce->interfaces table (zend_do_implement_interfaces)
+    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer list.deinit(ctx.allocator);
+    try @import("spl_autoload.zig").ceInterfaces(ctx.vm, class_name, &list, ctx.allocator, 0);
     const arr = try ctx.createArray();
-    var seen = std.StringHashMapUnmanaged(void){};
-    defer seen.deinit(ctx.allocator);
-    var queue = std.ArrayListUnmanaged([]const u8).empty;
-    defer queue.deinit(ctx.allocator);
-
-    // PHP's order: parent class interfaces first, then own, with each interface
-    // immediately followed by its transitively-extended parents
-    // (IteratorAggregate -> Traversable). collect parent->child chain first
-    var chain = std.ArrayListUnmanaged([]const u8).empty;
-    defer chain.deinit(ctx.allocator);
-    var current: ?[]const u8 = class_name;
-    while (current) |cn| {
-        try chain.append(ctx.allocator, cn);
-        const cls = ctx.vm.classes.get(cn) orelse break;
-        current = cls.parent;
-    }
-    var ci: usize = chain.items.len;
-    while (ci > 0) {
-        ci -= 1;
-        const cls = ctx.vm.classes.get(chain.items[ci]) orelse continue;
-        for (cls.interfaces.items) |iface| try emitInterfaceDeep(ctx, arr, &seen, iface);
-    }
+    for (list.items) |iface| try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(ctx.vm.declaredClassName(iface)) });
     return NativeResult.borrowed(.{ .array = arr });
-}
-
-fn emitInterfaceDeep(ctx: *NativeContext, arr: *PhpArray, seen: *std.StringHashMapUnmanaged(void), name: []const u8) RuntimeError!void {
-    if (seen.contains(name)) return;
-    try seen.put(ctx.allocator, name, {});
-    try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(name) });
-    if (ctx.vm.interfaces.get(name)) |idef| {
-        if (idef.parent) |p| try emitInterfaceDeep(ctx, arr, seen, p);
-        for (idef.parents.items) |p| try emitInterfaceDeep(ctx, arr, seen, p);
-    }
-    if (ctx.vm.classes.get(name)) |idef| {
-        for (idef.interfaces.items) |sub| try emitInterfaceDeep(ctx, arr, seen, sub);
-    }
 }
 
 // scope: the class the arguments are evaluated in ("" for none)

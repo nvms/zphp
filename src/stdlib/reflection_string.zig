@@ -911,48 +911,12 @@ fn appendEnumCase(w: *Writer, declaring: []const u8, name: []const u8, value: Va
 
 // ---------------------------------------------------------------- classes
 
-// a class's interfaces in php's order (zend_do_implement_interfaces): its
-// parent's, then the ones it declares, then what each of those extends,
-// which zend_do_inherit_interfaces appends last first
+// a class's interfaces in php's order: its ce->interfaces table
 fn interfaceList(ctx: *NativeContext, class_name: []const u8, out: *std.ArrayListUnmanaged([]const u8)) RuntimeError!void {
-    return interfaceListDepth(ctx, class_name, out, 0);
-}
-
-fn declaredInterfaces(vm: *VM, class_name: []const u8, out: *std.ArrayListUnmanaged([]const u8), a: Allocator) !void {
-    if (vm.interfaces.get(class_name)) |iface| {
-        if (iface.parents.items.len > 0) {
-            for (iface.parents.items) |p| if (!containsName(out.items, p)) try out.append(a, p);
-        } else if (iface.parent) |p| try out.append(a, p);
-    }
-    if (vm.classes.get(class_name)) |cls| for (cls.interfaces.items) |p| if (!containsName(out.items, p)) try out.append(a, p);
-}
-
-fn interfaceListDepth(ctx: *NativeContext, class_name: []const u8, out: *std.ArrayListUnmanaged([]const u8), depth: usize) RuntimeError!void {
-    if (depth > 64) return;
-    const vm = ctx.vm;
-    const a = ctx.allocator;
-    if (!vm.interfaces.contains(class_name)) {
-        if (vm.classes.get(class_name)) |cls| if (cls.parent) |p| try interfaceListDepth(ctx, p, out, depth + 1);
-    }
-    const inherited = out.items.len;
-    var declared: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer declared.deinit(a);
-    try declaredInterfaces(vm, class_name, &declared, a);
-    for (declared.items) |name| {
-        const canonical = vm.declaredClassName(name);
-        if (!containsName(out.items, canonical)) try out.append(a, canonical);
-    }
-    const own_end = out.items.len;
-    for (inherited..own_end) |i| {
-        var extended: std.ArrayListUnmanaged([]const u8) = .empty;
-        defer extended.deinit(a);
-        try interfaceListDepth(ctx, out.items[i], &extended, depth + 1);
-        var j = extended.items.len;
-        while (j > 0) {
-            j -= 1;
-            if (!containsName(out.items, extended.items[j])) try out.append(a, extended.items[j]);
-        }
-    }
+    var list: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer list.deinit(ctx.allocator);
+    try @import("spl_autoload.zig").ceInterfaces(ctx.vm, class_name, &list, ctx.allocator, 0);
+    for (list.items) |iface| try out.append(ctx.allocator, ctx.vm.declaredClassName(iface));
 }
 
 const MethodEntry = struct { declaring: []const u8, name: []const u8, info: MethodInfo };
