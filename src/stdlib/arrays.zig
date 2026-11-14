@@ -1783,10 +1783,16 @@ fn native_extract(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
 fn extractStore(ctx: *NativeContext, frame: anytype, var_name: []const u8, value: Value) RuntimeError!void {
     var stored = try ctx.vm.copyValue(value);
     if (frame.ref_slots.get(var_name)) |cell| if (value_mod.cellOf(cell).typed) {
-        stored = ctx.vm.verifyRefAssignable(cell, stored) catch |err| {
+        const checked = ctx.vm.verifyRefAssignable(cell, stored) catch |err| {
             ctx.vm.releaseValue(stored);
             return err;
         };
+        // a coerced value is a temporary: the variable takes its own hold
+        if (!std.meta.eql(checked, stored)) {
+            ctx.vm.releaseValue(stored);
+            VM.retainValue(checked);
+            stored = checked;
+        }
     };
     try ctx.vm.setVariableByName(frame, var_name, stored);
 }
