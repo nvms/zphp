@@ -2633,7 +2633,9 @@ pub const Compiler = struct {
     // ==================================================================
 
     pub fn emitOp(self: *Compiler, op: OpCode) Error!void {
-        try self.chunk.write(self.allocator, @intFromEnum(op), self.current_source_offset);
+        const code: u16 = @backingInt(op);
+        try self.chunk.write(self.allocator, @truncate(code), self.current_source_offset);
+        try self.chunk.write(self.allocator, @truncate(code >> 8), self.current_source_offset);
     }
 
     pub fn emitByte(self: *Compiler, byte: u8) Error!void {

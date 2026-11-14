@@ -2470,7 +2470,8 @@ fn compileParentHookCall(self: *Compiler, node: Ast.Node) Error!bool {
     try self.emitU16(prop_idx);
     try self.emitByte(@intFromBool(is_set));
     try self.emitByte(@intCast(args.len));
-    try self.emitU16(3);
+    // the skip over the plain property access that follows
+    try self.emitU16(@intCast(OpCode.get_prop.width()));
     try self.emitOp(if (is_set) .set_prop else .get_prop);
     try self.emitU16(prop_idx);
     return true;

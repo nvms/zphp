@@ -4418,16 +4418,17 @@ pub const VM = struct {
     fn callSiteNamesNoRef(self: *VM, chunk: *const Chunk, call_ip: usize) bool {
         const code = chunk.code.items;
         const consts = chunk.constants.items;
-        const call_op = std.enums.fromInt(OpCode, code[call_ip]) orelse return false;
+        const call_op = bytecode.opAt(code, call_ip) orelse return false;
+        const first = call_ip + bytecode.op_bytes;
         return switch (call_op) {
-            .call, .call_spread => self.nameTakesNoRef(consts[callOpU16(code, call_ip + 1)].string.bytes()),
+            .call, .call_spread => self.nameTakesNoRef(consts[callOpU16(code, first)].string.bytes()),
             .method_call, .method_call_spread => blk: {
                 // a closure's __invoke is registered under the closure's name
-                const name = consts[callOpU16(code, call_ip + 1)].string.bytes();
+                const name = consts[callOpU16(code, first)].string.bytes();
                 if (std.ascii.eqlIgnoreCase(name, "__invoke")) break :blk false;
                 break :blk self.nameTakesNoRef(name);
             },
-            .static_call, .static_call_spread => self.nameTakesNoRef(consts[callOpU16(code, call_ip + 3)].string.bytes()),
+            .static_call, .static_call_spread => self.nameTakesNoRef(consts[callOpU16(code, first + 2)].string.bytes()),
             .new_obj, .new_obj_dynamic => self.nameTakesNoRef("__construct"),
             else => false,
         };
@@ -4882,7 +4883,7 @@ pub const VM = struct {
         self.run_base_frame = base_frame;
         defer self.run_base_frame = prev_base_frame;
         while (true) {
-            const op: OpCode = @enumFromInt(self.readByte());
+            const op = self.readOp();
             switch (op) {
                 .constant => {
                     const idx = self.readU16();
@@ -6187,7 +6188,7 @@ pub const VM = struct {
                         const name: Value = if (access >= 4) self.stack[self.sp - 1] else blk: {
                             const code = self.currentChunk().code.items;
                             const ip = self.currentFrame().ip;
-                            break :blk self.currentChunk().constants.items[(@as(u16, code[ip + 1]) << 8) | code[ip + 2]];
+                            break :blk self.currentChunk().constants.items[(@as(u16, code[ip + bytecode.op_bytes]) << 8) | code[ip + bytecode.op_bytes + 1]];
                         };
                         var name_buf: std.ArrayListUnmanaged(u8) = .empty;
                         defer name_buf.deinit(self.allocator);
@@ -8694,7 +8695,7 @@ pub const VM = struct {
                 },
                 .reset_return_ref => self.return_ref_fresh = false,
                 .bind_ref_from_return => {
-                    const by_ref_function = self.returnedRefValueHere(self.currentFrame().ip - 1);
+                    const by_ref_function = self.returnedRefValueHere(self.currentFrame().ip - bytecode.op_bytes);
                     const dst_idx = self.readU16();
                     const dst_name = self.currentChunk().constants.items[dst_idx].string.bytes();
                     const frame = self.currentFrame();
@@ -9058,7 +9059,7 @@ pub const VM = struct {
                         const native_caller = if (self.native_call) |nc| nc.depth + 1 == self.frame_count else false;
                         const caller = &self.frames[self.frame_count - 2];
                         const code = caller.chunk.code.items;
-                        if (!native_caller and caller.ip < code.len and code[caller.ip] == @intFromEnum(OpCode.pop_boundary)) {
+                        if (!native_caller and bytecode.opIs(code, caller.ip, .pop_boundary)) {
                             const func = self.currentFrame().func.?;
                             const declared = self.functionAttributesOf(func);
                             const outer_hidden = self.hidden_trace_frame;
@@ -9597,7 +9598,7 @@ pub const VM = struct {
                         // the declaration that lost
                         const frame = self.currentFrame();
                         while (true) {
-                            const next: OpCode = @enumFromInt(frame.chunk.code.items[frame.ip]);
+                            const next = bytecode.opAt(frame.chunk.code.items, frame.ip) orelse break;
                             if (next != .bind_const_attributes and next != .deprecate_const) break;
                             frame.ip += next.width();
                         }
@@ -11640,7 +11641,7 @@ pub const VM = struct {
 
                     // IC: skip visibility + resolve on cache hit
                     if (self.ic) |ic| {
-                        const mc_ip = self.currentFrame().ip - 4;
+                        const mc_ip = self.currentFrame().ip - 3 - bytecode.op_bytes;
                         const mc_chunk_key = @intFromPtr(self.currentChunk());
                         const mc_idx = InlineCache.methodIndex(mc_chunk_key, mc_ip);
                         const mc_entry = &ic.method[mc_idx];
@@ -11775,7 +11776,7 @@ pub const VM = struct {
                     };
                     if (self.native_fns.get(full_name)) |native| {
                         if (self.ic) |ic| {
-                            const mc_ip2 = self.currentFrame().ip - 4;
+                            const mc_ip2 = self.currentFrame().ip - 3 - bytecode.op_bytes;
                             const mc_chunk_key2 = @intFromPtr(self.currentChunk());
                             const mc_idx2 = InlineCache.methodIndex(mc_chunk_key2, mc_ip2);
                             if (mvr.visibility == .public and scope_private == null) {
@@ -11844,7 +11845,7 @@ pub const VM = struct {
                             if (try self.checkParamTypes(full_name, arg_count)) continue;
                         }
                         if (self.ic) |ic| {
-                            const mc_ip2 = self.currentFrame().ip - 4;
+                            const mc_ip2 = self.currentFrame().ip - 3 - bytecode.op_bytes;
                             const mc_chunk_key2 = @intFromPtr(self.currentChunk());
                             const mc_idx2 = InlineCache.methodIndex(mc_chunk_key2, mc_ip2);
                             if (mvr.visibility == .public and scope_private == null) {
@@ -12569,7 +12570,7 @@ pub const VM = struct {
                     }
 
                     const target = self.dynamicStaticTarget(class_name);
-                    const sc_ic_key = self.currentFrame().ip - 6;
+                    const sc_ic_key = self.currentFrame().ip - 5 - bytecode.op_bytes;
                     const sc_chunk_key = @intFromPtr(self.currentChunk());
                     const sc_ic: ?StaticCallSite = if (self.ic) |ic| .{ .entry = &ic.method[InlineCache.methodIndex(sc_chunk_key, sc_ic_key)], .key = sc_ic_key, .chunk_key = sc_chunk_key } else null;
                     try self.callStaticMethod(target.class_name, method_name, arg_count, target.called_class, sc_ic);
@@ -14134,7 +14135,7 @@ pub const VM = struct {
 
     fn rememberClassConstant(self: *VM, class_name: []const u8, value: Value) void {
         const ic = self.ic orelse return;
-        const site = self.currentFrame().ip - 5;
+        const site = self.currentFrame().ip - 4 - bytecode.op_bytes;
         const chunk_key = @intFromPtr(self.currentChunk());
         ic.class_const[InlineCache.propIndex(chunk_key, site)] = .{ .key = site, .chunk_key = chunk_key, .class_ptr = @intFromPtr(class_name.ptr), .value = value };
     }
@@ -14277,9 +14278,8 @@ pub const VM = struct {
         if (frame.func != null) return;
         if (frame.script_path.len == 0) return;
         const requirer = self.frames[frame_idx - 1];
-        if (requirer.ip < 2) return;
-        const op_byte = requirer.chunk.code.items[requirer.ip - 2];
-        if (op_byte != @intFromEnum(OpCode.require)) return;
+        if (requirer.ip < 1 + bytecode.op_bytes) return;
+        if (!bytecode.opIs(requirer.chunk.code.items, requirer.ip - 1 - bytecode.op_bytes, .require)) return;
         const variant = requirer.chunk.code.items[requirer.ip - 1];
         const fn_name: []const u8 = switch (variant) {
             1 => "require_once",
@@ -14290,7 +14290,7 @@ pub const VM = struct {
         const entry = try self.allocArray();
         try entry.set(self.allocator, .{ .string = Value.String.borrowed("function") }, .{ .string = Value.String.borrowed(fn_name) });
         try entry.set(self.allocator, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(self.frameFile(frame_idx - 1)) });
-        if (self.sourceLocation(requirer.chunk, requirer.ip - 2)) |loc| {
+        if (self.sourceLocation(requirer.chunk, requirer.ip - 1 - bytecode.op_bytes)) |loc| {
             try entry.set(self.allocator, .{ .string = Value.String.borrowed("line") }, .{ .int = @as(i64, @intCast(loc.line)) });
         }
         // php names the included file only when the trace has an entry from
@@ -15667,7 +15667,7 @@ pub const VM = struct {
             if (self.frame_count == 0 or self.calledFromNative()) return;
             const frame = self.currentFrame();
             const code = frame.chunk.code.items;
-            if (frame.ip >= code.len or code[frame.ip] != @intFromEnum(OpCode.pop_boundary)) return;
+            if (!bytecode.opIs(code, frame.ip, .pop_boundary)) return;
             const msg = try std.fmt.allocPrint(self.allocator, "The return value of {s} {s}() should either be used or intentionally ignored by casting it as (void){s}{s}", .{ if (is_method) "method" else "function", shown, if (reason.len > 0) ", " else "", reason });
             defer self.allocator.free(msg);
             try self.raiseError(512, msg);
@@ -17433,8 +17433,8 @@ pub const VM = struct {
     fn nextArgIsByRef(self: *VM) bool {
         const frame = self.currentFrame();
         const code = frame.chunk.code.items;
-        if (frame.ip >= code.len or code[frame.ip] != @intFromEnum(OpCode.arg_variable)) return false;
-        const field = frame.ip + 3;
+        if (!bytecode.opIs(code, frame.ip, .arg_variable)) return false;
+        const field = frame.ip + bytecode.op_bytes + 2;
         if (field + 2 >= code.len) return false;
         const delta = (@as(u16, code[field]) << 8) | code[field + 1];
         // the value isn't on the stack yet
@@ -17772,9 +17772,8 @@ pub const VM = struct {
         if (frame.ip == rec.ip) return up;
         const code = frame.chunk.code.items;
         var at = rec.ip;
-        if (at < code.len and code[at] == @intFromEnum(OpCode.swap)) at += 1;
-        if (at >= code.len) return null;
-        const next: OpCode = @enumFromInt(code[at]);
+        if (bytecode.opIs(code, at, .swap)) at += bytecode.op_bytes;
+        const next = bytecode.opAt(code, at) orelse return null;
         return if (at + next.width() == frame.ip) up else null;
     }
 
@@ -20651,13 +20650,13 @@ pub const VM = struct {
         const code = func.chunk.code.items;
         var ip: usize = 0;
         while (ip < code.len) {
-            const op: OpCode = @enumFromInt(code[ip]);
+            const op = bytecode.opAt(code, ip) orelse break;
             switch (op) {
                 .get_local, .get_local_quiet => if (this_slot) |slot| {
-                    if (std.mem.readInt(u16, code[ip + 1 ..][0..2], .big) == slot) return true;
+                    if (std.mem.readInt(u16, code[ip + bytecode.op_bytes ..][0..2], .big) == slot) return true;
                 },
                 .get_var, .get_var_quiet => {
-                    const name = func.chunk.constants.items[std.mem.readInt(u16, code[ip + 1 ..][0..2], .big)];
+                    const name = func.chunk.constants.items[std.mem.readInt(u16, code[ip + bytecode.op_bytes ..][0..2], .big)];
                     if (name == .string and std.mem.eql(u8, name.string.bytes(), "$this")) return true;
                 },
                 else => {},
@@ -21952,38 +21951,35 @@ pub const VM = struct {
         var arg_vars: [16]?[]const u8 = @splat(null);
         const chunk = self.currentChunk();
         const ip = self.currentFrame().ip;
-        if (ip < 4) return arg_vars;
-        // scan backwards from just before the call instruction
-        // each arg is a single value-producing instruction
-        var scan_end = ip - 4; // points to call opcode
+        const code = chunk.code.items;
+        const ob = bytecode.op_bytes;
+        if (ip < 3 + ob) return arg_vars;
+        // scan backwards from just before the call instruction (op, u16
+        // name, u8 count); each arg is a single value-producing instruction
+        var scan_end = ip - 3 - ob;
         var idx: usize = ac;
-        while (idx > 0 and scan_end >= 3) {
+        while (idx > 0 and scan_end >= ob) {
             idx -= 1;
-            const op = chunk.code.items[scan_end - 3];
-            if (op == @intFromEnum(OpCode.get_var)) {
-                const hi = chunk.code.items[scan_end - 2];
-                const lo = chunk.code.items[scan_end - 1];
-                const ci = (@as(u16, hi) << 8) | lo;
-                if (ci < chunk.constants.items.len) {
-                    arg_vars[idx] = chunk.constants.items[ci].string;
+            const with_u16 = scan_end >= ob + 2;
+            const operand: u16 = if (with_u16) (@as(u16, code[scan_end - 2]) << 8) | code[scan_end - 1] else 0;
+            if (with_u16 and bytecode.opIs(code, scan_end - ob - 2, .get_var)) {
+                if (operand < chunk.constants.items.len) {
+                    arg_vars[idx] = chunk.constants.items[operand].string;
                 }
-                scan_end -= 3;
-            } else if (op == @intFromEnum(OpCode.get_local)) {
-                const hi = chunk.code.items[scan_end - 2];
-                const lo = chunk.code.items[scan_end - 1];
-                const slot = (@as(u16, hi) << 8) | lo;
+                scan_end -= ob + 2;
+            } else if (with_u16 and bytecode.opIs(code, scan_end - ob - 2, .get_local)) {
                 const sn = if (self.currentFrame().func) |func| func.slot_names else self.global_slot_names;
-                if (slot < sn.len) {
-                    arg_vars[idx] = sn[slot];
+                if (operand < sn.len) {
+                    arg_vars[idx] = sn[operand];
                 }
-                scan_end -= 3;
-            } else if (op == @intFromEnum(OpCode.constant)) {
-                scan_end -= 3;
-            } else if (scan_end >= 1 and (chunk.code.items[scan_end - 1] == @intFromEnum(OpCode.op_null) or
-                chunk.code.items[scan_end - 1] == @intFromEnum(OpCode.op_true) or
-                chunk.code.items[scan_end - 1] == @intFromEnum(OpCode.op_false)))
+                scan_end -= ob + 2;
+            } else if (with_u16 and bytecode.opIs(code, scan_end - ob - 2, .constant)) {
+                scan_end -= ob + 2;
+            } else if (bytecode.opIs(code, scan_end - ob, .op_null) or
+                bytecode.opIs(code, scan_end - ob, .op_true) or
+                bytecode.opIs(code, scan_end - ob, .op_false))
             {
-                scan_end -= 1;
+                scan_end -= ob;
             } else {
                 break;
             }
@@ -22051,7 +22047,7 @@ pub const VM = struct {
     // receiver or callable (1), a receiver plus a name (2), or the calling
     // class for static:: dispatch (3)
     fn guardSlots(code: []const u8, call_ip: usize) u8 {
-        const call_op = std.enums.fromInt(OpCode, code[call_ip]) orelse return 0;
+        const call_op = bytecode.opAt(code, call_ip) orelse return 0;
         return switch (call_op) {
             .method_call, .method_call_spread, .static_call_dynamic, .new_obj_dynamic, .call_indirect, .static_call_dyn_method => 1,
             .method_call_dynamic, .method_call_dynamic_spread, .static_call_dyn_both, .static_call_dyn_both_spread => 2,
@@ -22111,29 +22107,29 @@ pub const VM = struct {
     fn callSiteByValue(self: *VM, chunk: *const Chunk, call_ip: usize, pos: u8, args_base: usize) ?bool {
         const code = chunk.code.items;
         const consts = chunk.constants.items;
-        const call_op = std.enums.fromInt(OpCode, code[call_ip]) orelse return null;
+        const call_op = bytecode.opAt(code, call_ip) orelse return null;
         return switch (call_op) {
-            .call, .call_spread => self.functionByValue(consts[callOpU16(code, call_ip + 1)].string.bytes(), pos),
+            .call, .call_spread => self.functionByValue(consts[callOpU16(code, call_ip + bytecode.op_bytes)].string.bytes(), pos),
             .call_indirect => self.callableByValue(self.stack[args_base - 1], pos),
-            .method_call, .method_call_spread => self.methodByValue(self.stack[args_base - 1], consts[callOpU16(code, call_ip + 1)].string.bytes(), pos),
+            .method_call, .method_call_spread => self.methodByValue(self.stack[args_base - 1], consts[callOpU16(code, call_ip + bytecode.op_bytes)].string.bytes(), pos),
             .method_call_dynamic, .method_call_dynamic_spread => blk: {
                 const name = self.stack[args_base - 1];
                 if (name != .string) break :blk null;
                 break :blk self.methodByValue(self.stack[args_base - 2], name.string.bytes(), pos);
             },
-            .static_call, .static_call_spread => self.staticByValue(consts[callOpU16(code, call_ip + 1)].string.bytes(), consts[callOpU16(code, call_ip + 3)].string.bytes(), pos),
-            .static_call_dynamic => self.classValueStaticByValue(self.stack[args_base - 1], consts[callOpU16(code, call_ip + 1)].string.bytes(), pos),
+            .static_call, .static_call_spread => self.staticByValue(consts[callOpU16(code, call_ip + bytecode.op_bytes)].string.bytes(), consts[callOpU16(code, call_ip + bytecode.op_bytes + 2)].string.bytes(), pos),
+            .static_call_dynamic => self.classValueStaticByValue(self.stack[args_base - 1], consts[callOpU16(code, call_ip + bytecode.op_bytes)].string.bytes(), pos),
             .static_call_dyn_method => blk: {
                 const method = self.stack[args_base - 1];
                 if (method != .string) break :blk null;
-                break :blk self.staticByValue(consts[callOpU16(code, call_ip + 1)].string.bytes(), method.string.bytes(), pos);
+                break :blk self.staticByValue(consts[callOpU16(code, call_ip + bytecode.op_bytes)].string.bytes(), method.string.bytes(), pos);
             },
             .static_call_dyn_both, .static_call_dyn_both_spread => blk: {
                 const method = self.stack[args_base - 1];
                 if (method != .string) break :blk null;
                 break :blk self.classValueStaticByValue(self.stack[args_base - 2], method.string.bytes(), pos);
             },
-            .new_obj => self.constructorByValue(consts[callOpU16(code, call_ip + 1)].string.bytes(), pos),
+            .new_obj => self.constructorByValue(consts[callOpU16(code, call_ip + bytecode.op_bytes)].string.bytes(), pos),
             .new_obj_dynamic => blk: {
                 const class_val = self.stack[args_base - 1];
                 break :blk switch (class_val) {
@@ -22152,10 +22148,10 @@ pub const VM = struct {
         const code = chunk.code.items;
         const consts = chunk.constants.items;
         if (call_ip >= code.len) return null;
-        const call_op = std.enums.fromInt(OpCode, code[call_ip]) orelse return null;
+        const call_op = bytecode.opAt(code, call_ip) orelse return null;
         switch (call_op) {
             .call, .call_spread => {
-                const raw = consts[callOpU16(code, call_ip + 1)].string.bytes();
+                const raw = consts[callOpU16(code, call_ip + bytecode.op_bytes)].string.bytes();
                 const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
                 if (self.functions.getKey(name)) |key| return key;
                 if (self.native_fns.getKey(name)) |key| return key;
@@ -22166,14 +22162,14 @@ pub const VM = struct {
             .method_call, .method_call_spread => {
                 const receiver = self.stack[args_base - 1];
                 if (receiver != .object) return null;
-                return self.resolveMethod(receiver.object.class_name, consts[callOpU16(code, call_ip + 1)].string.bytes()) catch null;
+                return self.resolveMethod(receiver.object.class_name, consts[callOpU16(code, call_ip + bytecode.op_bytes)].string.bytes()) catch null;
             },
             .static_call, .static_call_spread => {
-                const class_name = self.intentClassName(consts[callOpU16(code, call_ip + 1)].string.bytes()) orelse return null;
-                return self.resolveMethod(class_name, consts[callOpU16(code, call_ip + 3)].string.bytes()) catch null;
+                const class_name = self.intentClassName(consts[callOpU16(code, call_ip + bytecode.op_bytes)].string.bytes()) orelse return null;
+                return self.resolveMethod(class_name, consts[callOpU16(code, call_ip + bytecode.op_bytes + 2)].string.bytes()) catch null;
             },
             .new_obj => {
-                const class_name = self.intentClassName(consts[callOpU16(code, call_ip + 1)].string.bytes()) orelse return null;
+                const class_name = self.intentClassName(consts[callOpU16(code, call_ip + bytecode.op_bytes)].string.bytes()) orelse return null;
                 return self.resolveMethod(class_name, "__construct") catch null;
             },
             else => return null,
@@ -25057,10 +25053,10 @@ pub const VM = struct {
     fn isBareConstantInitializer(f: *const ObjFunction) bool {
         const code = f.chunk.code.items;
         var i: usize = 0;
-        if (code.len > 3 and code[0] == @intFromEnum(OpCode.enter_class_scope)) i = 3;
-        if (i + 3 >= code.len or code[i] != @intFromEnum(OpCode.get_var)) return false;
-        const next = code[i + 3];
-        return next == @intFromEnum(OpCode.leave_class_scope) or next == @intFromEnum(OpCode.return_val);
+        if (bytecode.opIs(code, 0, .enter_class_scope)) i = OpCode.enter_class_scope.width();
+        if (!bytecode.opIs(code, i, .get_var)) return false;
+        const next = i + OpCode.get_var.width();
+        return bytecode.opIs(code, next, .leave_class_scope) or bytecode.opIs(code, next, .return_val);
     }
 
     // a property defaults initializer reading a default that is only a
@@ -25071,12 +25067,13 @@ pub const VM = struct {
         if (!std.mem.startsWith(u8, func.name, "\x00propdefaults\x00")) return false;
         const code = frame.chunk.code.items;
         const ip = frame.ip;
-        if (ip < 3 or ip >= code.len) return false;
-        const next = code[ip];
-        if (next != @intFromEnum(OpCode.set_prop_default) and next != @intFromEnum(OpCode.set_static_prop_default)) return false;
-        if (code[ip - 3] != @intFromEnum(OpCode.get_var)) return false;
-        if (ip - 3 == 3 and code[0] == @intFromEnum(OpCode.enter_class_scope)) return true;
-        return ip >= 4 and code[ip - 4] == @intFromEnum(OpCode.pop);
+        const get_var_w = OpCode.get_var.width();
+        if (ip < get_var_w) return false;
+        if (!bytecode.opIs(code, ip, .set_prop_default) and !bytecode.opIs(code, ip, .set_static_prop_default)) return false;
+        const get_var_at = ip - get_var_w;
+        if (!bytecode.opIs(code, get_var_at, .get_var)) return false;
+        if (get_var_at == OpCode.enter_class_scope.width() and bytecode.opIs(code, 0, .enter_class_scope)) return true;
+        return get_var_at >= bytecode.op_bytes and bytecode.opIs(code, get_var_at - bytecode.op_bytes, .pop);
     }
 
     fn isScopedConstExpr(name: []const u8) bool {
@@ -28075,7 +28072,7 @@ pub const VM = struct {
         if (outer) |o| if (o.depth + own_frames == self.frame_count) return;
         const frame = self.currentFrame();
         const code = frame.chunk.code.items;
-        if (frame.ip >= code.len or code[frame.ip] != @intFromEnum(OpCode.pop_boundary)) return;
+        if (!bytecode.opIs(code, frame.ip, .pop_boundary)) return;
         const kind: []const u8 = if (std.mem.indexOf(u8, name, "::") != null) "method" else "function";
         const msg = try std.fmt.allocPrint(self.allocator, "The return value of {s} {s}() should either be used or intentionally ignored by casting it as (void), {s}", .{ kind, name, reason });
         defer self.allocator.free(msg);
@@ -28954,6 +28951,13 @@ pub const VM = struct {
             self.handler_count += 1;
         }
         fiber.saved_handlers.clearRetainingCapacity();
+    }
+
+    inline fn readOp(self: *VM) OpCode {
+        const frame = &self.frames[self.frame_count - 1];
+        const op = bytecode.readOp(frame.chunk.code.items, frame.ip);
+        frame.ip += bytecode.op_bytes;
+        return op;
     }
 
     inline fn readByte(self: *VM) u8 {

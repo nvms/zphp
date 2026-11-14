@@ -1,7 +1,7 @@
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 
-pub const OpCode = enum(u8) {
+pub const OpCode = enum(u16) {
     constant, // u16: constant pool index
     op_null,
     op_true,
@@ -549,12 +549,12 @@ pub const OpCode = enum(u8) {
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
-            .arg_variable => 6,
-            .return_ref_value, .array_get_w, .const_expr_fcc_check, .array_spread => 2,
-            .tick => 3,
-            .jump_if_class_declared, .bind_const_attributes => 5,
-            .parent_hook_call => 7,
-            .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim, .arg_append, .arg_value, .arg_call_result => 4,
+            .arg_variable => 7,
+            .return_ref_value, .array_get_w, .const_expr_fcc_check, .array_spread => 3,
+            .tick => 4,
+            .jump_if_class_declared, .bind_const_attributes => 6,
+            .parent_hook_call => 8,
+            .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim, .arg_append, .arg_value, .arg_call_result => 5,
             .reference_source,
             .enter_class_scope,
             .constant,
@@ -618,9 +618,9 @@ pub const OpCode = enum(u8) {
             .defer_prop_defaults,
             .get_class_const_dynamic,
             .get_class_const_dyn_name,
-            => 3,
-            .ensure_array_var, .call, .call_spread, .new_obj, .method_call, .method_call_spread, .static_call_dyn_method => 4,
-            .make_var_ref, .make_var_prop_ref => 5,
+            => 4,
+            .ensure_array_var, .call, .call_spread, .new_obj, .method_call, .method_call_spread, .static_call_dyn_method => 5,
+            .make_var_ref, .make_var_prop_ref => 6,
             .get_static_prop,
             .get_static_prop_quiet,
             .get_class_const,
@@ -638,23 +638,26 @@ pub const OpCode = enum(u8) {
             .sub_local_to_local,
             .mul_local_to_local,
             .ensure_array_static_prop,
-            => 5,
-            .make_var_static_prop_ref => 7,
-            .static_prop_bind_ref_source => 5,
-            .yield_ref => 4,
-            .arg_guard_static_prop => 8,
-            .check_rw_container => 2,
-            .defer_class_const => 5,
-            .static_call => 6,
-            .less_local_local_jif => 7,
-            .require, .call_indirect, .call_indirect_spread, .method_call_dynamic, .static_call_dyn_both, .bury => 2,
-            .class_decl, .interface_decl, .enum_decl, .trait_decl => 1,
-            else => 1,
+            => 6,
+            .make_var_static_prop_ref => 8,
+            .static_prop_bind_ref_source => 6,
+            .yield_ref => 5,
+            .arg_guard_static_prop => 9,
+            .check_rw_container => 3,
+            .defer_class_const => 6,
+            .static_call => 7,
+            .less_local_local_jif => 8,
+            .require, .call_indirect, .call_indirect_spread, .method_call_dynamic, .static_call_dyn_both, .bury => 3,
+            .class_decl, .interface_decl, .enum_decl, .trait_decl => 2,
+            else => 2,
         };
     }
 
-    pub fn widthFromByte(b: u8) usize {
-        const op: OpCode = std.enums.fromInt(OpCode, b) orelse return 1;
+    // the width of the instruction at `at`: an unknown opcode or one cut
+    // off by the end of the code counts as a bare opcode, so scanners
+    // always move forward
+    pub fn widthAt(code: []const u8, at: usize) usize {
+        const op = opAt(code, at) orelse return op_bytes;
         return op.width();
     }
 
@@ -755,6 +758,26 @@ pub const OpCode = enum(u8) {
         };
     }
 };
+
+// an opcode takes two bytes, little-endian, so the dispatch reads it with
+// one 16-bit load; operands that follow keep their big-endian encoding
+pub const op_bytes = 2;
+
+// the opcode at `at`, which must be an instruction start the compiler emitted
+pub inline fn readOp(code: []const u8, at: usize) OpCode {
+    return @fromBackingInt(@intCast(std.mem.readInt(u16, code[at..][0..2], .little)));
+}
+
+// the opcode at `at`, or null past the end or for bytes no opcode has
+pub fn opAt(code: []const u8, at: usize) ?OpCode {
+    if (at + op_bytes > code.len) return null;
+    return std.enums.fromInt(OpCode, std.mem.readInt(u16, code[at..][0..2], .little));
+}
+
+// whether the instruction at `at` is `op`
+pub inline fn opIs(code: []const u8, at: usize, op: OpCode) bool {
+    return at + op_bytes <= code.len and std.mem.readInt(u16, code[at..][0..2], .little) == @backingInt(op);
+}
 
 pub const SourceLocation = struct {
     line: u32,

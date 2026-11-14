@@ -5,7 +5,10 @@ const RuntimeError = vm_mod.RuntimeError;
 const Value = @import("runtime/value.zig").Value;
 const PhpArray = @import("runtime/value.zig").PhpArray;
 const PhpObject = @import("runtime/value.zig").PhpObject;
-const OpCode = @import("pipeline/bytecode.zig").OpCode;
+const bytecode = @import("pipeline/bytecode.zig");
+const OpCode = bytecode.OpCode;
+const op_bytes = bytecode.op_bytes;
+const readOp = bytecode.readOp;
 const ObjFunction = @import("pipeline/bytecode.zig").ObjFunction;
 
 const InlineCache = VM.InlineCache;
@@ -42,8 +45,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
         const names_local = namesOnlyInLocals(frame);
 
         while (true) {
-            const byte: OpCode = @enumFromInt(code[ip]);
-            ip += 1;
+            const byte = readOp(code, ip);
+            ip += op_bytes;
 
             dispatch: switch (byte) {
                 .get_local => {
@@ -52,25 +55,28 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     // runLoop can resolve the cell - common after calling a function
                     // with `&$var` from inside a locals_only closure or fiber body
                     if (!no_ref_cells) {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         self.sp = sp;
                         return;
                     }
                     const slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     // a variable that holds nothing warns in runLoop
                     if (locals[slot] == .undef) {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         self.sp = sp;
                         return;
                     }
                     // `$x op= number`: get_local, bury 1, the operator, set_local of
                     // the same slot, done in place without moving the operands
-                    if (code[ip + 2] == @intFromEnum(OpCode.bury) and code[ip + 3] == 1 and
-                        code[ip + 5] == @intFromEnum(OpCode.set_local) and code[ip + 6] == code[ip] and code[ip + 7] == code[ip + 1])
+                    const bury_at = ip + 2;
+                    const arith_at = bury_at + op_bytes + 1;
+                    const store_at = arith_at + op_bytes;
+                    if (isOpAt(code, bury_at, .bury) and code[bury_at + op_bytes] == 1 and
+                        isOpAt(code, store_at, .set_local) and code[store_at + op_bytes] == code[ip] and code[store_at + op_bytes + 1] == code[ip + 1])
                     {
                         const a = &locals[slot];
                         const b = &stack[sp - 1];
-                        const op: OpCode = @enumFromInt(code[ip + 4]);
+                        const op = readOp(code, arith_at);
                         const both_int = a.* == .int and b.* == .int;
                         if ((both_int or (a.* == .float and b.* == .float)) and (op == .add or op == .subtract or op == .multiply)) {
                             if (both_int) {
@@ -84,7 +90,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                                     else => x * y,
                                 } };
                             }
-                            ip += 6;
+                            ip = store_at + op_bytes;
                             continue :dispatch .set_local;
                         }
                     }
@@ -96,16 +102,16 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         stack[sp] = locals[slot];
                     }
                     sp += 1;
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .set_local => {
                     // bail to runLoop when the frame has ref bindings — those need
                     // propagation through ref_slots / array bindings which fast_loop
                     // doesn't implement
                     if (!plain_writes) {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         self.sp = sp;
                         return;
                     }
@@ -133,8 +139,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     }
                     self.sp = sp;
                     if (!names_local) try syncLocalWrite(self, ic, frame, slot, locals[slot]);
-                    if (code[ip] == @intFromEnum(OpCode.pop) or code[ip] == @intFromEnum(OpCode.pop_boundary)) {
-                        ip += 1;
+                    if (isOpAt(code, ip, .pop) or isOpAt(code, ip, .pop_boundary)) {
+                        ip += op_bytes;
                         sp -= 1;
                         if (!isScalar(&stack[sp])) self.stackRelease(stack[sp]);
                         // the fused pop is still a statement boundary: free
@@ -148,9 +154,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                             if (self.drain_raised) return raiseDrained(self, frame, ip);
                         }
                     }
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 inline .add, .subtract, .multiply => |arith_op| {
                     // operands are read in place: a whole copy of a value the
@@ -175,7 +181,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         // arrays (union, TypeError) and strings (numeric warnings) take
                         // runLoop's arithmetic
                         if (!isNumber(x) or !isNumber(y)) {
-                            frame.ip = ip - 1;
+                            frame.ip = ip - op_bytes;
                             self.sp = sp;
                             return;
                         }
@@ -186,9 +192,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         };
                     }
                     sp -= 1;
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 inline .less, .less_equal, .greater, .greater_equal => |cmp_op| {
                     const bp = &stack[sp - 1];
@@ -207,7 +213,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         const x = ap.*;
                         const y = bp.*;
                         if (x == .object or y == .object or x == .resource or y == .resource or x == .array or y == .array) {
-                            frame.ip = ip - 1;
+                            frame.ip = ip - op_bytes;
                             self.sp = sp;
                             return;
                         }
@@ -225,10 +231,10 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     };
                     sp -= 1;
                     stack[sp - 1] = .{ .bool = compared };
-                    if (code[ip] == @intFromEnum(OpCode.jump_if_false)) fuseJumpIfFalse(self, ic, code, &ip, &sp, compared);
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    if (isOpAt(code, ip, .jump_if_false)) fuseJumpIfFalse(self, ic, code, &ip, &sp, compared);
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .equal, .not_equal => |byte_eq| {
                     // operands of one scalar type compare by value; the rest
@@ -242,24 +248,24 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         .null => if (b_eq.* == .null) true else null,
                         else => null,
                     } orelse {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         self.sp = sp;
                         return;
                     };
                     sp -= 1;
                     const compared = if (byte_eq == .equal) same else !same;
                     stack[sp - 1] = .{ .bool = compared };
-                    if (code[ip] == @intFromEnum(OpCode.jump_if_false)) fuseJumpIfFalse(self, ic, code, &ip, &sp, compared);
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    if (isOpAt(code, ip, .jump_if_false)) fuseJumpIfFalse(self, ic, code, &ip, &sp, compared);
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .identical => {
                     const b_id = stack[sp - 1];
                     const a_id = stack[sp - 2];
                     // comparing two arrays may throw (recursion), which runLoop does
                     if (a_id == .array and b_id == .array) {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         self.sp = sp;
                         return;
                     }
@@ -269,17 +275,17 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const compared = Value.identical(a_id, b_id);
                     stack[sp] = .{ .bool = compared };
                     sp += 1;
-                    if (code[ip] == @intFromEnum(OpCode.jump_if_false)) fuseJumpIfFalse(self, ic, code, &ip, &sp, compared);
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    if (isOpAt(code, ip, .jump_if_false)) fuseJumpIfFalse(self, ic, code, &ip, &sp, compared);
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .not_identical => {
                     const b_ni = stack[sp - 1];
                     const a_ni = stack[sp - 2];
                     // comparing two arrays may throw (recursion), which runLoop does
                     if (a_ni == .array and b_ni == .array) {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         self.sp = sp;
                         return;
                     }
@@ -289,10 +295,10 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const compared = !Value.identical(a_ni, b_ni);
                     stack[sp] = .{ .bool = compared };
                     sp += 1;
-                    if (code[ip] == @intFromEnum(OpCode.jump_if_false)) fuseJumpIfFalse(self, ic, code, &ip, &sp, compared);
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    if (isOpAt(code, ip, .jump_if_false)) fuseJumpIfFalse(self, ic, code, &ip, &sp, compared);
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .modulo => {
                     const b_mod = stack[sp - 1];
@@ -300,7 +306,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     // ints only: runLoop has the float and string operands'
                     // diagnostics and the division by zero
                     if (a_mod != .int or b_mod != .int or b_mod.int == 0) {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         self.sp = sp;
                         return;
                     }
@@ -309,9 +315,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     self.stackRelease(b_mod);
                     stack[sp] = Value.modulo(a_mod, b_mod);
                     sp += 1;
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .bit_and => {
                     const b_ba = stack[sp - 1];
@@ -319,11 +325,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     if (a_ba == .int and b_ba == .int) {
                         sp -= 1;
                         stack[sp - 1] = .{ .int = a_ba.int & b_ba.int };
-                        const _next = code[ip];
-                        ip += 1;
-                        continue :dispatch @as(OpCode, @enumFromInt(_next));
+                        const _next = readOp(code, ip);
+                        ip += op_bytes;
+                        continue :dispatch _next;
                     }
-                    frame.ip = ip - 1;
+                    frame.ip = ip - op_bytes;
                     self.sp = sp;
                     return;
                 },
@@ -333,11 +339,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     if (a_bo == .int and b_bo == .int) {
                         sp -= 1;
                         stack[sp - 1] = .{ .int = a_bo.int | b_bo.int };
-                        const _next = code[ip];
-                        ip += 1;
-                        continue :dispatch @as(OpCode, @enumFromInt(_next));
+                        const _next = readOp(code, ip);
+                        ip += op_bytes;
+                        continue :dispatch _next;
                     }
-                    frame.ip = ip - 1;
+                    frame.ip = ip - op_bytes;
                     self.sp = sp;
                     return;
                 },
@@ -347,11 +353,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     if (a_bx == .int and b_bx == .int) {
                         sp -= 1;
                         stack[sp - 1] = .{ .int = a_bx.int ^ b_bx.int };
-                        const _next = code[ip];
-                        ip += 1;
-                        continue :dispatch @as(OpCode, @enumFromInt(_next));
+                        const _next = readOp(code, ip);
+                        ip += op_bytes;
+                        continue :dispatch _next;
                     }
-                    frame.ip = ip - 1;
+                    frame.ip = ip - op_bytes;
                     self.sp = sp;
                     return;
                 },
@@ -361,11 +367,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     if (a_sl == .int and b_sl == .int and b_sl.int >= 0 and b_sl.int < 64) {
                         sp -= 1;
                         stack[sp - 1] = .{ .int = a_sl.int << @intCast(b_sl.int) };
-                        const _next = code[ip];
-                        ip += 1;
-                        continue :dispatch @as(OpCode, @enumFromInt(_next));
+                        const _next = readOp(code, ip);
+                        ip += op_bytes;
+                        continue :dispatch _next;
                     }
-                    frame.ip = ip - 1;
+                    frame.ip = ip - op_bytes;
                     self.sp = sp;
                     return;
                 },
@@ -375,25 +381,25 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     if (a_sr == .int and b_sr == .int and b_sr.int >= 0 and b_sr.int < 64) {
                         sp -= 1;
                         stack[sp - 1] = .{ .int = a_sr.int >> @intCast(b_sr.int) };
-                        const _next = code[ip];
-                        ip += 1;
-                        continue :dispatch @as(OpCode, @enumFromInt(_next));
+                        const _next = readOp(code, ip);
+                        ip += op_bytes;
+                        continue :dispatch _next;
                     }
-                    frame.ip = ip - 1;
+                    frame.ip = ip - op_bytes;
                     self.sp = sp;
                     return;
                 },
                 .negate => {
                     const operand = stack[sp - 1];
                     if (operand != .int and operand != .float) {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         self.sp = sp;
                         return;
                     }
                     stack[sp - 1] = operand.negate();
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .not => {
                     // a NAN warns as it becomes a bool, in runLoop
@@ -404,9 +410,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const not_result = !not_operand.isTruthy();
                     self.stackRelease(not_operand);
                     stack[sp - 1] = .{ .bool = not_result };
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .jump_back => {
                     const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
@@ -419,18 +425,18 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     }
                     ip -= offset;
                     self.frames[self.frame_count - 1].ip = ip;
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .constant => {
                     const idx = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     ip += 2;
                     stack[sp] = consts[idx];
                     sp += 1;
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .jump_if_false => {
                     if (isNanAt(&stack[sp - 1])) return bailOut(self, frame, ip, sp);
@@ -438,8 +444,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     ip += 2;
                     if (!isTruthyAt(&stack[sp - 1])) {
                         ip += offset;
-                    } else if (code[ip] == @intFromEnum(OpCode.pop) or code[ip] == @intFromEnum(OpCode.pop_boundary)) {
-                        ip += 1;
+                    } else if (isOpAt(code, ip, .pop) or isOpAt(code, ip, .pop_boundary)) {
+                        ip += op_bytes;
                         sp -= 1;
                         self.stackRelease(stack[sp]);
                         if (self.hasPendingReleases()) {
@@ -451,9 +457,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                             if (self.drain_raised) return raiseDrained(self, frame, ip);
                         }
                     }
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .jump_if_true => {
                     if (isNanAt(&stack[sp - 1])) return bailOut(self, frame, ip, sp);
@@ -461,8 +467,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     ip += 2;
                     if (isTruthyAt(&stack[sp - 1])) {
                         ip += offset;
-                    } else if (code[ip] == @intFromEnum(OpCode.pop) or code[ip] == @intFromEnum(OpCode.pop_boundary)) {
-                        ip += 1;
+                    } else if (isOpAt(code, ip, .pop) or isOpAt(code, ip, .pop_boundary)) {
+                        ip += op_bytes;
                         sp -= 1;
                         self.stackRelease(stack[sp]);
                         if (self.hasPendingReleases()) {
@@ -474,17 +480,17 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                             if (self.drain_raised) return raiseDrained(self, frame, ip);
                         }
                     }
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .jump => {
                     const offset = (@as(u16, code[ip]) << 8) | code[ip + 1];
                     ip += 2;
                     ip += offset;
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .pop, .pop_boundary => {
                     sp -= 1;
@@ -500,18 +506,18 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         sp = self.sp;
                         if (self.drain_raised) return raiseDrained(self, frame, ip);
                     }
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .dup => {
                     // a duplicated object is a new operand-stack reference (Stage 1)
                     VM.stackRetain(stack[sp - 1]);
                     stack[sp] = stack[sp - 1];
                     sp += 1;
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .check_rw_container => {
                     // the common cases pass through: an object under a
@@ -525,14 +531,14 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         else => false,
                     };
                     if (!passes) {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         self.sp = sp;
                         return;
                     }
                     ip += 1;
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .dup2 => {
                     VM.stackRetain(stack[sp - 2]);
@@ -540,9 +546,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     stack[sp] = stack[sp - 2];
                     stack[sp + 1] = stack[sp - 1];
                     sp += 2;
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .bury => {
                     const n = code[ip];
@@ -551,45 +557,45 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const dest = sp - 1 - n;
                     std.mem.copyBackwards(Value, stack[dest + 1 .. sp], stack[dest .. sp - 1]);
                     stack[dest] = top;
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .op_null => {
                     stack[sp] = .null;
                     sp += 1;
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .op_true => {
                     stack[sp] = .{ .bool = true };
                     sp += 1;
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .op_false => {
                     stack[sp] = .{ .bool = false };
                     sp += 1;
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .cast_int => {
                     const v = stack[sp - 1];
                     // objects and floats past the int range can warn: the slow path has them
                     if (v == .object or (v == .float and !(v.float >= -9.2233720368547758e18 and v.float < 9.2233720368547758e18))) {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         self.sp = sp;
                         return;
                     }
                     const as_int = Value.toInt(v);
                     self.stackRelease(v);
                     stack[sp - 1] = .{ .int = as_int };
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .concat_assign_local => {
                     const ca_slot = (@as(u16, code[ip]) << 8) | code[ip + 1];
@@ -597,7 +603,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const ca_append = stack[sp - 1];
                     const ca_current = locals[ca_slot];
                     if (!direct_slots or ca_append != .string or ca_current != .string) {
-                        frame.ip = ip - 3;
+                        frame.ip = ip - op_bytes - 2;
                         self.sp = sp;
                         return;
                     }
@@ -628,12 +634,12 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         self.sp = sp;
                         try syncLocalWrite(self, ic, frame, ca_slot, ca_result);
                     }
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .get_class_const => {
-                    const gc_site = ip - 1;
+                    const gc_site = ip - op_bytes;
                     const gc_class = consts[(@as(u16, code[ip]) << 8) | code[ip + 1]].string.bytes();
                     ip += 4;
                     const gc_class_ptr = classConstReceiver(frame, locals, gc_class);
@@ -642,9 +648,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         VM.stackRetain(gc_entry.value);
                         stack[sp] = gc_entry.value;
                         sp += 1;
-                        const _next = code[ip];
-                        ip += 1;
-                        continue :dispatch @as(OpCode, @enumFromInt(_next));
+                        const _next = readOp(code, ip);
+                        ip += op_bytes;
+                        continue :dispatch _next;
                     }
                     frame.ip = gc_site;
                     self.sp = sp;
@@ -656,9 +662,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const truthy = v.isTruthy();
                     self.stackRelease(v);
                     stack[sp - 1] = .{ .bool = truthy };
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .inc_value, .dec_value => |step_op| {
                     // ints and floats step in place; anything else (strings,
@@ -668,7 +674,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     if (v == .int) {
                         const r = @addWithOverflow(v.int, delta);
                         if (r[1] != 0) {
-                            frame.ip = ip - 1;
+                            frame.ip = ip - op_bytes;
                             self.sp = sp;
                             return;
                         }
@@ -676,13 +682,13 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     } else if (v == .float) {
                         stack[sp - 1] = .{ .float = v.float + @as(f64, @floatFromInt(delta)) };
                     } else {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         self.sp = sp;
                         return;
                     }
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .array_get, .array_get_list => {
                     // missing keys (a warning), non-scalar keys (a TypeError),
@@ -695,14 +701,14 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         .array => |arr| if (ag_key == .resource or ag_key == .float or ag_key == .null or ag_key == .array or ag_key == .object or arr == self.globals_array)
                             null
                         else if (arr.getPtr(Value.toArrayKey(ag_key))) |entry| entry.value else null,
-                        .string => |str| if (code[ip - 1] == @intFromEnum(OpCode.array_get) and ag_key == .int and ag_key.int >= 0 and @as(usize, @intCast(ag_key.int)) < str.len) blk: {
+                        .string => |str| if (isOpAt(code, ip - op_bytes, .array_get) and ag_key == .int and ag_key.int >= 0 and @as(usize, @intCast(ag_key.int)) < str.len) blk: {
                             const at: usize = @intCast(ag_key.int);
                             break :blk .{ .string = str.retainedSlice(at, at + 1) };
                         } else null,
                         else => null,
                     };
                     const elem = ag_elem orelse {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         self.sp = sp;
                         return;
                     };
@@ -718,9 +724,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     }
                     stack[sp] = elem;
                     sp += 1;
-                    const _next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(_next));
+                    const _next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch _next;
                 },
                 .array_get_vivify => {
                     const agv_key = stack[sp - 1];
@@ -733,16 +739,16 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                             self.stackRelease(agv_key);
                             stack[sp] = agv_existing;
                             sp += 1;
-                            const _next = code[ip];
-                            ip += 1;
-                            continue :dispatch @as(OpCode, @enumFromInt(_next));
+                            const _next = readOp(code, ip);
+                            ip += op_bytes;
+                            continue :dispatch _next;
                         } else {
-                            frame.ip = ip - 1;
+                            frame.ip = ip - op_bytes;
                             self.sp = sp + 2;
                             return;
                         }
                     } else {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         self.sp = sp + 2;
                         return;
                     }
@@ -755,19 +761,19 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         const old = aei_arr.array.get(ak);
                         if (old == .int) {
                             aei_arr.array.set(self.allocator, ak, .{ .int = old.int + 1 }) catch {
-                                frame.ip = ip - 1;
+                                frame.ip = ip - op_bytes;
                                 self.sp = sp;
                                 return;
                             };
                             self.stackRelease(aei_key);
                             sp -= 1;
                             stack[sp - 1] = old;
-                            const _next = code[ip];
-                            ip += 1;
-                            continue :dispatch @as(OpCode, @enumFromInt(_next));
+                            const _next = readOp(code, ip);
+                            ip += op_bytes;
+                            continue :dispatch _next;
                         }
                     }
-                    frame.ip = ip - 1;
+                    frame.ip = ip - op_bytes;
                     self.sp = sp;
                     return;
                 },
@@ -779,26 +785,26 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         const old = aei_arr.array.get(ak);
                         if (old == .int) {
                             aei_arr.array.set(self.allocator, ak, .{ .int = old.int - 1 }) catch {
-                                frame.ip = ip - 1;
+                                frame.ip = ip - op_bytes;
                                 self.sp = sp;
                                 return;
                             };
                             self.stackRelease(aei_key);
                             sp -= 1;
                             stack[sp - 1] = old;
-                            const _next = code[ip];
-                            ip += 1;
-                            continue :dispatch @as(OpCode, @enumFromInt(_next));
+                            const _next = readOp(code, ip);
+                            ip += op_bytes;
+                            continue :dispatch _next;
                         }
                     }
-                    frame.ip = ip - 1;
+                    frame.ip = ip - op_bytes;
                     self.sp = sp;
                     return;
                 },
                 .echo => {
                     // a buffer with a chunk size runs its handler as it fills
                     if (self.ob_chunk_watch) {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         self.sp = sp;
                         return;
                     }
@@ -806,31 +812,31 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     sp -= 1;
                     if (echo_val == .string) {
                         self.output.appendSlice(self.allocator, echo_val.string.bytes()) catch {
-                            frame.ip = ip - 1;
+                            frame.ip = ip - op_bytes;
                             self.sp = sp + 1;
                             return;
                         };
                         self.stackRelease(echo_val);
-                        const _next = code[ip];
-                        ip += 1;
-                        continue :dispatch @as(OpCode, @enumFromInt(_next));
+                        const _next = readOp(code, ip);
+                        ip += op_bytes;
+                        continue :dispatch _next;
                     } else if (echo_val == .int) {
                         var tmp: [20]u8 = undefined;
                         const s = std.fmt.bufPrint(&tmp, "{d}", .{echo_val.int}) catch {
-                            frame.ip = ip - 1;
+                            frame.ip = ip - op_bytes;
                             self.sp = sp + 1;
                             return;
                         };
                         self.output.appendSlice(self.allocator, s) catch {
-                            frame.ip = ip - 1;
+                            frame.ip = ip - op_bytes;
                             self.sp = sp + 1;
                             return;
                         };
-                        const _next = code[ip];
-                        ip += 1;
-                        continue :dispatch @as(OpCode, @enumFromInt(_next));
+                        const _next = readOp(code, ip);
+                        ip += op_bytes;
+                        continue :dispatch _next;
                     }
-                    frame.ip = ip - 1;
+                    frame.ip = ip - op_bytes;
                     self.sp = sp + 1;
                     return;
                 },
@@ -841,24 +847,24 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     // an object stored into an array element - bail to runLoop's
                     // array_set so the element holder refcounts it (Stage 1)
                     if (as_val == .object or as_val == .resource) {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         self.sp = sp;
                         return;
                     }
                     if (as_arr == .array and as_key != .resource and as_key != .float and as_key != .null) {
                         arraySetOwned(self, ic, as_arr.array, Value.toArrayKey(as_key), as_val) catch {
-                            frame.ip = ip - 1;
+                            frame.ip = ip - op_bytes;
                             self.sp = sp;
                             return;
                         };
                         self.stackRelease(as_key);
                         sp -= 2;
                         stack[sp - 1] = as_val;
-                        const _next = code[ip];
-                        ip += 1;
-                        continue :dispatch @as(OpCode, @enumFromInt(_next));
+                        const _next = readOp(code, ip);
+                        ip += op_bytes;
+                        continue :dispatch _next;
                     }
-                    frame.ip = ip - 1;
+                    frame.ip = ip - op_bytes;
                     self.sp = sp;
                     return;
                 },
@@ -866,23 +872,23 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const ap_val = stack[sp - 1];
                     const ap_arr = stack[sp - 2];
                     if (ap_val == .object or ap_val == .resource) {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         self.sp = sp;
                         return;
                     }
                     if (ap_arr == .array) {
                         ap_arr.array.append(self.allocator, ap_val) catch {
-                            frame.ip = ip - 1;
+                            frame.ip = ip - op_bytes;
                             self.sp = sp;
                             return;
                         };
                         self.stackRelease(ap_val);
                         sp -= 1;
-                        const _next = code[ip];
-                        ip += 1;
-                        continue :dispatch @as(OpCode, @enumFromInt(_next));
+                        const _next = readOp(code, ip);
+                        ip += op_bytes;
+                        continue :dispatch _next;
                     }
-                    frame.ip = ip - 1;
+                    frame.ip = ip - op_bytes;
                     self.sp = sp;
                     return;
                 },
@@ -891,24 +897,24 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const ase_key = stack[sp - 2];
                     const ase_arr = stack[sp - 3];
                     if (ase_val == .object or ase_val == .resource) {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         self.sp = sp;
                         return;
                     }
                     if (ase_arr == .array and ase_key != .resource and ase_key != .float and ase_key != .null) {
                         arraySetOwned(self, ic, ase_arr.array, Value.toArrayKey(ase_key), ase_val) catch {
-                            frame.ip = ip - 1;
+                            frame.ip = ip - op_bytes;
                             self.sp = sp;
                             return;
                         };
                         self.stackRelease(ase_val);
                         self.stackRelease(ase_key);
                         sp -= 2;
-                        const _next = code[ip];
-                        ip += 1;
-                        continue :dispatch @as(OpCode, @enumFromInt(_next));
+                        const _next = readOp(code, ip);
+                        ip += op_bytes;
+                        continue :dispatch _next;
                     }
-                    frame.ip = ip - 1;
+                    frame.ip = ip - op_bytes;
                     self.sp = sp;
                     return;
                 },
@@ -919,36 +925,36 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const ci_name_val = stack[sp - ci_acn - 1];
                     // a closure by its instance name, or a plain function name
                     const ci_name: []const u8 = if (ci_name_val.closureName()) |closure| closure else if (ci_name_val == .string) ci_name_val.string.bytes() else {
-                        frame.ip = ip - 2;
+                        frame.ip = ip - op_bytes - 1;
                         self.sp = sp;
                         return;
                     };
                     // a "Class::method" string is a static call, with its checks, in runLoop
                     if (ci_name_val == .string and std.mem.indexOf(u8, ci_name, "::") != null) {
-                        frame.ip = ip - 2;
+                        frame.ip = ip - op_bytes - 1;
                         self.sp = sp;
                         return;
                     }
                     const ci_func = self.functions.get(ci_name) orelse {
-                        frame.ip = ip - 2;
+                        frame.ip = ip - op_bytes - 1;
                         self.sp = sp;
                         return;
                     };
                     // too few arguments is runLoop's to report
                     if (!ci_func.locals_only or !try hasCallRoom(self, sp, sp - ci_acn - 1) or ci_ac < ci_func.required_params) {
-                        frame.ip = ip - 2;
+                        frame.ip = ip - op_bytes - 1;
                         self.sp = sp;
                         return;
                     }
                     const ci_cap_range = self.getCaptureRange(ci_name);
                     if (ci_cap_range != null and ci_name_val != .object) {
-                        frame.ip = ip - 2;
+                        frame.ip = ip - op_bytes - 1;
                         self.sp = sp;
                         return;
                     }
                     if (ci_cap_range) |cr| {
                         if (cr.has_refs) {
-                            frame.ip = ip - 2;
+                            frame.ip = ip - op_bytes - 1;
                             self.sp = sp;
                             return;
                         }
@@ -964,7 +970,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const ci_lc: usize = ci_func.local_count;
                     const ci_lbase = ic.locals_sp;
                     if (ci_lbase + ci_lc > ic.locals_cap) {
-                        frame.ip = ip - 2;
+                        frame.ip = ip - op_bytes - 1;
                         self.sp = sp;
                         return;
                     }
@@ -1044,14 +1050,14 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                                     VM.stackRetain(gp_v);
                                     stack[sp - 1] = gp_v;
                                     self.stackRelease(gp_recv);
-                                    const _next_gp = code[ip];
-                                    ip += 1;
-                                    continue :dispatch @as(OpCode, @enumFromInt(_next_gp));
+                                    const _next_gp = readOp(code, ip);
+                                    ip += op_bytes;
+                                    continue :dispatch _next_gp;
                                 }
                             }
                         }
                     }
-                    frame.ip = ip - 3;
+                    frame.ip = ip - op_bytes - 2;
                     self.sp = sp;
                     return;
                 },
@@ -1081,7 +1087,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                             if (sp_obj.slots) |s| {
                                 // every bail comes before the copy takes its reference
                                 if (self.obj_ref_active) {
-                                    frame.ip = ip - 3;
+                                    frame.ip = ip - op_bytes - 2;
                                     self.sp = sp;
                                     return;
                                 }
@@ -1108,13 +1114,13 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                                 self.stackRelease(stack[sp - 1]);
                                 VM.stackRetain(copied);
                                 stack[sp - 1] = copied;
-                                const _next_sp = code[ip];
-                                ip += 1;
-                                continue :dispatch @as(OpCode, @enumFromInt(_next_sp));
+                                const _next_sp = readOp(code, ip);
+                                ip += op_bytes;
+                                continue :dispatch _next_sp;
                             }
                         }
                     }
-                    frame.ip = ip - 3;
+                    frame.ip = ip - op_bytes - 2;
                     self.sp = sp;
                     return;
                 },
@@ -1124,12 +1130,12 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const mc_ac: usize = mc_arg_count;
                     const mc_obj_val = stack[sp - mc_ac - 1];
                     if (mc_obj_val != .object) {
-                        frame.ip = ip - 4;
+                        frame.ip = ip - op_bytes - 3;
                         self.sp = sp;
                         return;
                     }
                     const mc_obj = mc_obj_val.object;
-                    const mc_ip = ip - 4;
+                    const mc_ip = ip - 3 - op_bytes;
                     const mc_chunk_key = @intFromPtr(frame.chunk);
                     const mc_idx = InlineCache.methodIndex(mc_chunk_key, mc_ip);
                     const mc_entry = &ic.method[mc_idx];
@@ -1148,7 +1154,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                                 const mc_lc: usize = mc_func.local_count;
                                 const mc_lbase = ic.locals_sp;
                                 if (mc_lbase + mc_lc > ic.locals_cap) {
-                                    frame.ip = ip - 4;
+                                    frame.ip = ip - op_bytes - 3;
                                     self.sp = sp;
                                     return;
                                 }
@@ -1192,13 +1198,13 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                             }
                         }
                     }
-                    frame.ip = ip - 4;
+                    frame.ip = ip - op_bytes - 3;
                     self.sp = sp;
                     return;
                 },
                 .new_obj => {
                     // bail to runLoop for all object construction
-                    frame.ip = ip - 1;
+                    frame.ip = ip - op_bytes;
                     self.sp = sp;
                     return;
                 },
@@ -1221,11 +1227,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         if (inlineNativeCall(self, name, arg_count, &sp)) {
                             self.sp = native_sp;
                             self.clearArgStackFrom(native_sp - arg_count);
-                            const _next = code[ip];
-                            ip += 1;
-                            continue :dispatch @as(OpCode, @enumFromInt(_next));
+                            const _next = readOp(code, ip);
+                            ip += op_bytes;
+                            continue :dispatch _next;
                         }
-                        frame.ip = ip - 4;
+                        frame.ip = ip - op_bytes - 3;
                         self.sp = sp;
                         return;
                     };
@@ -1233,7 +1239,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     // a declared function is never a closure instance, so it has no captures.
                     // too few arguments is runLoop's to report
                     if (!func.locals_only or !try hasCallRoom(self, sp, sp - arg_count) or arg_count < func.required_params) {
-                        frame.ip = ip - 4;
+                        frame.ip = ip - op_bytes - 3;
                         self.sp = sp;
                         return;
                     }
@@ -1251,7 +1257,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const lbase = ic.locals_sp;
 
                     if (lbase + lc > ic.locals_cap) {
-                        frame.ip = ip - 4;
+                        frame.ip = ip - op_bytes - 3;
                         self.sp = sp;
                         return;
                     }
@@ -1312,7 +1318,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         .other => true,
                     } else false;
                     if (!ownsTeardown(self, frame) or ret_bail) {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         self.sp = sp;
                         return;
                     }
@@ -1361,7 +1367,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 },
                 .return_void => {
                     if (!ownsTeardown(self, frame)) {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         self.sp = sp;
                         return;
                     }
@@ -1406,9 +1412,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                                     self.sp = sp;
                                     try syncLocalWrite(self, ic, frame, slot, locals[slot]);
                                 }
-                                const _next = code[ip];
-                                ip += 1;
-                                continue :dispatch @as(OpCode, @enumFromInt(_next));
+                                const _next = readOp(code, ip);
+                                ip += op_bytes;
+                                continue :dispatch _next;
                             }
                         } else if (v == .float) {
                             locals[slot] = .{ .float = v.float + 1.0 };
@@ -1416,12 +1422,12 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                                 self.sp = sp;
                                 try syncLocalWrite(self, ic, frame, slot, locals[slot]);
                             }
-                            const _next = code[ip];
-                            ip += 1;
-                            continue :dispatch @as(OpCode, @enumFromInt(_next));
+                            const _next = readOp(code, ip);
+                            ip += op_bytes;
+                            continue :dispatch _next;
                         }
                     }
-                    frame.ip = ip - 3;
+                    frame.ip = ip - op_bytes - 2;
                     self.sp = sp;
                     return;
                 },
@@ -1438,9 +1444,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                                     self.sp = sp;
                                     try syncLocalWrite(self, ic, frame, slot, locals[slot]);
                                 }
-                                const _next = code[ip];
-                                ip += 1;
-                                continue :dispatch @as(OpCode, @enumFromInt(_next));
+                                const _next = readOp(code, ip);
+                                ip += op_bytes;
+                                continue :dispatch _next;
                             }
                         } else if (v == .float) {
                             locals[slot] = .{ .float = v.float - 1.0 };
@@ -1448,12 +1454,12 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                                 self.sp = sp;
                                 try syncLocalWrite(self, ic, frame, slot, locals[slot]);
                             }
-                            const _next = code[ip];
-                            ip += 1;
-                            continue :dispatch @as(OpCode, @enumFromInt(_next));
+                            const _next = readOp(code, ip);
+                            ip += op_bytes;
+                            continue :dispatch _next;
                         }
                     }
-                    frame.ip = ip - 3;
+                    frame.ip = ip - op_bytes - 2;
                     self.sp = sp;
                     return;
                 },
@@ -1479,12 +1485,12 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                                 self.sp = sp;
                                 try syncLocalWrite(self, ic, frame, dst_slot, locals[dst_slot]);
                             }
-                            const _next = code[ip];
-                            ip += 1;
-                            continue :dispatch @as(OpCode, @enumFromInt(_next));
+                            const _next = readOp(code, ip);
+                            ip += op_bytes;
+                            continue :dispatch _next;
                         }
                     }
-                    frame.ip = ip - 5;
+                    frame.ip = ip - op_bytes - 4;
                     self.sp = sp;
                     return;
                 },
@@ -1510,12 +1516,12 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                                 self.sp = sp;
                                 try syncLocalWrite(self, ic, frame, dst_slot, locals[dst_slot]);
                             }
-                            const _next = code[ip];
-                            ip += 1;
-                            continue :dispatch @as(OpCode, @enumFromInt(_next));
+                            const _next = readOp(code, ip);
+                            ip += op_bytes;
+                            continue :dispatch _next;
                         }
                     }
-                    frame.ip = ip - 5;
+                    frame.ip = ip - op_bytes - 4;
                     self.sp = sp;
                     return;
                 },
@@ -1541,18 +1547,18 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                                 self.sp = sp;
                                 try syncLocalWrite(self, ic, frame, dst_slot, locals[dst_slot]);
                             }
-                            const _next = code[ip];
-                            ip += 1;
-                            continue :dispatch @as(OpCode, @enumFromInt(_next));
+                            const _next = readOp(code, ip);
+                            ip += op_bytes;
+                            continue :dispatch _next;
                         }
                     }
-                    frame.ip = ip - 5;
+                    frame.ip = ip - op_bytes - 4;
                     self.sp = sp;
                     return;
                 },
                 .less_local_local_jif => {
                     if (!no_ref_cells) {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         self.sp = sp;
                         return;
                     }
@@ -1564,16 +1570,16 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const b = locals[slot_b];
                     if (a == .int and b == .int) {
                         if (a.int >= b.int) ip += offset;
-                        const _next = code[ip];
-                        ip += 1;
-                        continue :dispatch @as(OpCode, @enumFromInt(_next));
+                        const _next = readOp(code, ip);
+                        ip += op_bytes;
+                        continue :dispatch _next;
                     } else if (a == .float and b == .float) {
                         if (a.float >= b.float) ip += offset;
-                        const _next = code[ip];
-                        ip += 1;
-                        continue :dispatch @as(OpCode, @enumFromInt(_next));
+                        const _next = readOp(code, ip);
+                        ip += op_bytes;
+                        continue :dispatch _next;
                     } else {
-                        frame.ip = ip - 7;
+                        frame.ip = ip - op_bytes - 6;
                         self.sp = sp;
                         return;
                     }
@@ -1592,13 +1598,13 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         self.stackRelease(b);
                         sp -= 1;
                         stack[sp - 1] = .{ .string = result };
-                        const _next = code[ip];
-                        ip += 1;
-                        continue :dispatch @as(OpCode, @enumFromInt(_next));
+                        const _next = readOp(code, ip);
+                        ip += op_bytes;
+                        continue :dispatch _next;
                     } else if (a == .string and b == .int) {
                         var tmp: [20]u8 = undefined;
                         const bs = std.fmt.bufPrint(&tmp, "{d}", .{b.int}) catch {
-                            frame.ip = ip - 1;
+                            frame.ip = ip - op_bytes;
                             self.sp = sp;
                             return;
                         };
@@ -1610,13 +1616,13 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         self.stackRelease(b);
                         sp -= 1;
                         stack[sp - 1] = .{ .string = result };
-                        const _next = code[ip];
-                        ip += 1;
-                        continue :dispatch @as(OpCode, @enumFromInt(_next));
+                        const _next = readOp(code, ip);
+                        ip += op_bytes;
+                        continue :dispatch _next;
                     } else if (a == .int and b == .string) {
                         var tmp: [20]u8 = undefined;
                         const as = std.fmt.bufPrint(&tmp, "{d}", .{a.int}) catch {
-                            frame.ip = ip - 1;
+                            frame.ip = ip - op_bytes;
                             self.sp = sp;
                             return;
                         };
@@ -1628,11 +1634,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         self.stackRelease(b);
                         sp -= 1;
                         stack[sp - 1] = .{ .string = result };
-                        const _next = code[ip];
-                        ip += 1;
-                        continue :dispatch @as(OpCode, @enumFromInt(_next));
+                        const _next = readOp(code, ip);
+                        ip += op_bytes;
+                        continue :dispatch _next;
                     } else {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         self.sp = sp;
                         return;
                     }
@@ -1644,14 +1650,14 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const pos = code[ip + 4];
                     self.sp = sp;
                     const capture = self.argCaptureCached(frame.chunk, field, delta, pos, 1) orelse {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         return;
                     };
                     ip += 5;
                     if (capture) self.setArgSource(sp - 1, .{ .simple = consts[idx].string.bytes() });
-                    const next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(next));
+                    const next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch next;
                 },
                 // by value: the plain fetch that follows runs here untouched.
                 // capture: runLoop re-executes the guard and the fetch. `byte`
@@ -1664,13 +1670,13 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     self.sp = sp;
                     const capture = self.argCaptureCached(frame.chunk, field, delta, pos, 1) orelse true;
                     if (capture) {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         return;
                     }
                     ip += 3;
-                    const next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(next));
+                    const next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch next;
                 },
                 // a value or call result sent where the callee might take a
                 // reference: by value there is nothing to do
@@ -1681,13 +1687,13 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     self.sp = sp;
                     const capture = self.argCaptureCached(frame.chunk, field, delta, pos, 1) orelse true;
                     if (capture) {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         return;
                     }
                     ip += 3;
-                    const next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(next));
+                    const next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch next;
                 },
                 .arg_guard_prop_dynamic, .arg_guard_dim => {
                     const field = ip;
@@ -1696,16 +1702,16 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     self.sp = sp;
                     const capture = self.argCaptureCached(frame.chunk, field, delta, pos, 2) orelse true;
                     if (capture) {
-                        frame.ip = ip - 1;
+                        frame.ip = ip - op_bytes;
                         return;
                     }
                     ip += 3;
-                    const next = code[ip];
-                    ip += 1;
-                    continue :dispatch @as(OpCode, @enumFromInt(next));
+                    const next = readOp(code, ip);
+                    ip += op_bytes;
+                    continue :dispatch next;
                 },
                 else => {
-                    frame.ip = ip - 1;
+                    frame.ip = ip - op_bytes;
                     self.sp = sp;
                     return;
                 },
@@ -1920,15 +1926,22 @@ inline fn hasCallRoom(self: *VM, sp: usize, entry_sp: usize) RuntimeError!bool {
     return grown;
 }
 
+// the opcode at an instruction start, compared without decoding: the
+// compiler always ends code with an instruction, so a lookahead right after
+// one stays inside the code
+inline fn isOpAt(code: []const u8, at: usize, op: OpCode) bool {
+    return std.mem.readInt(u16, code[at..][0..2], .little) == @backingInt(op);
+}
+
 // a comparison followed by jump_if_false branches on the result it holds,
 // as jump_if_false would, without reading the bool back from the stack
 inline fn fuseJumpIfFalse(self: *VM, ic: *InlineCache, code: []const u8, ip: *usize, sp: *usize, result: bool) void {
-    const offset = (@as(u16, code[ip.* + 1]) << 8) | code[ip.* + 2];
-    ip.* += 3;
+    const offset = (@as(u16, code[ip.* + op_bytes]) << 8) | code[ip.* + op_bytes + 1];
+    ip.* += op_bytes + 2;
     if (!result) {
         ip.* += offset;
-    } else if (code[ip.*] == @intFromEnum(OpCode.pop) or code[ip.*] == @intFromEnum(OpCode.pop_boundary)) {
-        ip.* += 1;
+    } else if (isOpAt(code, ip.*, .pop) or isOpAt(code, ip.*, .pop_boundary)) {
+        ip.* += op_bytes;
         sp.* -= 1;
         if (self.hasPendingReleases()) {
             self.sp = sp.*;
@@ -1988,7 +2001,7 @@ inline fn isNanAt(v: *const Value) bool {
 // hand the instruction that was just dispatched (ip is past its opcode) to
 // runLoop
 inline fn bailOut(self: anytype, frame: anytype, ip: usize, sp: usize) void {
-    frame.ip = ip - 1;
+    frame.ip = ip - op_bytes;
     self.sp = sp;
 }
 

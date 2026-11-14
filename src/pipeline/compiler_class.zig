@@ -8,6 +8,7 @@ const FunctionAttrEntry = @import("compiler.zig").FunctionAttrEntry;
 const AttributeDef = @import("../runtime/vm.zig").AttributeDef;
 const Ast = @import("ast.zig").Ast;
 const Token = @import("token.zig").Token;
+const bytecode = @import("bytecode.zig");
 const Chunk = @import("bytecode.zig").Chunk;
 const OpCode = @import("bytecode.zig").OpCode;
 const ObjFunction = @import("bytecode.zig").ObjFunction;
@@ -5024,10 +5025,11 @@ fn needsVarSync(chunk: *const Chunk) bool {
     var i: usize = 0;
     const code = chunk.code.items;
     while (i < code.len) {
-        const b = code[i];
-        if (b == @backingInt(OpCode.concat_assign) or b == @backingInt(OpCode.get_global) or b == @backingInt(OpCode.get_static) or b == @backingInt(OpCode.closure_bind_ref))
-            return true;
-        i += opcodeWidth(b);
+        if (bytecode.opAt(code, i)) |op| switch (op) {
+            .concat_assign, .get_global, .get_static, .closure_bind_ref => return true,
+            else => {},
+        };
+        i += OpCode.widthAt(code, i);
     }
     return false;
 }
@@ -5036,14 +5038,10 @@ fn hasOp(chunk: *const Chunk, op: OpCode) bool {
     var i: usize = 0;
     const code = chunk.code.items;
     while (i < code.len) {
-        if (code[i] == @backingInt(op)) return true;
-        i += opcodeWidth(code[i]);
+        if (bytecode.opIs(code, i, op)) return true;
+        i += OpCode.widthAt(code, i);
     }
     return false;
-}
-
-fn opcodeWidth(b: u8) usize {
-    return OpCode.widthFromByte(b);
 }
 
 // php names a closure after where it is written: `{closure:<scope>:<line>}`,
