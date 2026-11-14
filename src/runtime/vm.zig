@@ -7606,6 +7606,24 @@ pub const VM = struct {
                     self.push(.null);
                 },
 
+                .separate_var_top => {
+                    const name = self.currentChunk().constants.items[self.readU16()].string.bytes();
+                    const frame = self.currentFrame();
+                    const held = frame.vars.getPtr(name) orelse continue;
+                    if (held.* != .array or frame.ref_slots.get(name) != null) continue;
+                    // a call that returned a reference gave the referenced
+                    // variable's array itself
+                    if (self.return_ref_fresh) if (self.last_return_ref) |cell| if (sameReferent(cell.*, held.*)) {
+                        self.return_ref_fresh = false;
+                        continue;
+                    };
+                    const sep = try self.cowSeparate(held.array);
+                    if (sep == held.array) continue;
+                    const old = held.*;
+                    held.* = .{ .array = sep };
+                    self.stack[self.sp - 1] = held.*;
+                    self.releaseValue(old);
+                },
                 .cow_separate_local => {
                     // separate a shared array held by a local IN PLACE, with no
                     // vivify and no scalar error - used before a by-ref native

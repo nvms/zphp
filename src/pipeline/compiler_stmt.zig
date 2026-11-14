@@ -280,8 +280,12 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
         const synth = try std.fmt.allocPrint(self.allocator, "__foreach_iterable_{d}", .{self.loop_depth});
         try self.string_allocs.append(self.allocator, synth);
         iter_temp = synth;
+        // a call returning by reference hands over its variable's array
+        try self.emitOp(.reset_return_ref);
         try self.compileNode(iter_n);
         try self.emitSetVar(synth);
+        try self.emitOp(.separate_var_top);
+        try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(synth) }));
     } else {
         try self.compileNode(iter_n);
     }

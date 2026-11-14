@@ -546,6 +546,11 @@ pub const OpCode = enum(u16) {
     // array_get_coalesce for the element empty() tests: an illegal key is
     // "Cannot access offset of type T in isset or empty"
     array_get_empty,
+    // u16 name: the hidden variable a by-reference foreach keeps its
+    // iterable in separates a shared array, and the copy on the stack top
+    // becomes the separated one (php separates a temporary on its first
+    // write fetch)
+    separate_var_top,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -618,6 +623,7 @@ pub const OpCode = enum(u16) {
             .defer_prop_defaults,
             .get_class_const_dynamic,
             .get_class_const_dyn_name,
+            .separate_var_top,
             => 4,
             .ensure_array_var, .call, .call_spread, .new_obj, .method_call, .method_call_spread, .static_call_dyn_method => 5,
             .make_var_ref, .make_var_prop_ref => 6,
