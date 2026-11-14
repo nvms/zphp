@@ -783,6 +783,7 @@ for i in 1 2 3; do
     if grep -q "leaked" "$OBS_DIR/cycle.err"; then cycle_ok=0; echo "cycle $i: leak"; head -5 "$OBS_DIR/cycle.err"; fi
 done
 check "repeated start and stop" "1" "$cycle_ok"
+check "a reopened log file is appended to" "3" "$(grep -c '"server started"' "$OBS_DIR/cycle.log")"
 if [ $is_windows -eq 0 ]; then
     check "every cycle logged its shutdown" "3" "$(grep -c '"server stopped"' "$OBS_DIR/cycle.log")"
 fi

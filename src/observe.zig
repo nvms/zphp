@@ -76,7 +76,11 @@ var log_file_owned = false;
 
 pub fn openLog(path: ?[]const u8) !void {
     if (path) |p| {
-        log_file = try platform.openAppend(p, false);
+        const file = try platform.openAppend(p, false);
+        // windows' crt emulates O_APPEND by seeking inside its own write,
+        // which these direct handle writes bypass, so start at the end
+        if (platform.is_windows) platform.seekFromEnd(file, 0) catch {};
+        log_file = file;
         log_file_owned = true;
     } else {
         log_file = platform.stdout();
