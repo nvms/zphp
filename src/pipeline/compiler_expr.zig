@@ -553,8 +553,15 @@ pub fn compileBinaryOp(self: *Compiler, node: Ast.Node) Error!void {
         return;
     }
 
-    try self.compileNode(node.data.lhs);
-    try self.compileNode(node.data.rhs);
+    // php's vm specializes the equality comparisons as commutative and puts
+    // a constant operand second, which decides which array the recursion
+    // check protects
+    const swap = switch (op_tag) {
+        .equal_equal, .bang_equal, .equal_equal_equal, .bang_equal_equal, .lt_gt => isCompileConst(self, node.data.lhs) and !isCompileConst(self, node.data.rhs),
+        else => false,
+    };
+    try self.compileNode(if (swap) node.data.rhs else node.data.lhs);
+    try self.compileNode(if (swap) node.data.lhs else node.data.rhs);
     try self.emitOp(switch (op_tag) {
         .plus => .add,
         .minus => .subtract,
@@ -581,6 +588,25 @@ pub fn compileBinaryOp(self: *Compiler, node: Ast.Node) Error!void {
         .kw_xor => .logical_xor,
         else => unreachable,
     });
+}
+
+// a literal php's compiler makes an IS_CONST operand of
+fn isCompileConst(self: *Compiler, idx: u32) bool {
+    const node = self.ast.nodes[idx];
+    return switch (node.tag) {
+        .integer_literal, .float_literal, .string_literal, .true_literal, .false_literal, .null_literal => true,
+        .array_literal => {
+            for (self.ast.extraSlice(node.data.lhs)) |elem_idx| {
+                if (elem_idx == 0) return false;
+                const elem = self.ast.nodes[elem_idx];
+                if (elem.tag == .array_spread) return false;
+                if (elem.data.rhs != 0 and !isCompileConst(self, elem.data.rhs)) return false;
+                if (!isCompileConst(self, elem.data.lhs)) return false;
+            }
+            return true;
+        },
+        else => false,
+    };
 }
 
 // a writable location whose operands (object, name, class) are evaluated once
