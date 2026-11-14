@@ -59,8 +59,8 @@ pub const entries = .{
     .{ "settype", native_settype },
     .{ "call_user_func", native_call_user_func },
     .{ "clone", native_clone },
-    .{ "forward_static_call", native_call_user_func },
-    .{ "forward_static_call_array", native_call_user_func_array },
+    .{ "forward_static_call", native_forward_static_call },
+    .{ "forward_static_call_array", native_forward_static_call_array },
     .{ "call_user_func_array", native_call_user_func_array },
     .{ "function_exists", native_function_exists },
     .{ "get_object_vars", native_get_object_vars },
@@ -1027,6 +1027,42 @@ fn native_call_user_func(ctx: *NativeContext, args: []const Value) RuntimeError!
     if (args.len == 0) return NativeResult.scalar(.null);
     if (ctx.named_args) |named| return NativeResult.share(try ctx.invokeCallableNamed(args[0], args[1..], named));
     return NativeResult.share(try ctx.invokeCallable(args[0], args[1..]));
+}
+
+// php's forward_static_call(_array): forward_static_call only from code with
+// a class scope, and a static method of a class the caller's static:: extends is called with
+// that called class
+fn forwardStaticCallee(ctx: *NativeContext, comptime name: []const u8, callable: Value) RuntimeError!callables.Callee {
+    // forward_static_call_array has no scope check
+    if (comptime std.mem.eql(u8, name, "forward_static_call")) if (ctx.vm.currentDefiningClass() == null) {
+        try ctx.vm.setPendingException("Error", "Cannot call " ++ name ++ "() when no class scope is active");
+        return error.RuntimeError;
+    };
+    var callee = try ctx.vm.callbackCallee(callable);
+    if (callee == .static_method) if (callables.calledScope(ctx.vm)) |called| {
+        const registered = callee.static_method.registered;
+        const sep = std.mem.indexOf(u8, registered, "::") orelse registered.len;
+        if (ctx.vm.isInstanceOf(called, registered[0..sep])) callee.static_method.called_class = called;
+    };
+    return callee;
+}
+
+fn native_forward_static_call(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len == 0) return NativeResult.scalar(.null);
+    const callee = try forwardStaticCallee(ctx, "forward_static_call", args[0]);
+    const outer = ctx.vm.native_caller;
+    ctx.vm.native_caller = .{ .name = ctx.call_name, .frames = ctx.vm.frame_count };
+    defer ctx.vm.native_caller = outer;
+    return NativeResult.share(try callables.invoke(ctx.vm, callee, args[1..]));
+}
+
+fn native_forward_static_call_array(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (args.len < 2 or args[1] != .array) return NativeResult.scalar(.null);
+    const callee = try forwardStaticCallee(ctx, "forward_static_call_array", args[0]);
+    const outer = ctx.vm.native_caller;
+    ctx.vm.native_caller = .{ .name = ctx.call_name, .frames = ctx.vm.frame_count };
+    defer ctx.vm.native_caller = outer;
+    return NativeResult.share(try callables.invokeArgArrayFrom(ctx.vm, callee, args[1].array, true));
 }
 
 fn native_call_user_func_array(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

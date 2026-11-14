@@ -252,7 +252,7 @@ fn deprecateScopeWord(vm: *VM, word: []const u8, rules: CallbackRules) RuntimeEr
     try vm.raiseError(VM.E_DEPRECATED, msg);
 }
 
-fn calledScope(vm: *VM) ?[]const u8 {
+pub fn calledScope(vm: *VM) ?[]const u8 {
     if (vm.frame_count > 0) if (vm.currentFrame().called_class) |c| return c;
     return vm.currentDefiningClass();
 }
