@@ -1311,40 +1311,71 @@ fn isInClassChain(vm: *@import("../runtime/vm.zig").VM, a: []const u8, b: []cons
     return false;
 }
 
+// php's get_class_vars: the class's property table as add_class_vars walks
+// it, instance properties then static ones, the class's own declarations
+// before the ones it inherits, each visible from the calling scope (a
+// private one only to its declaring class)
 fn native_get_class_vars(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(Value{ .bool = false });
     const raw = args[0].string.bytes();
     const class_name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
+    // Z_PARAM_CLASS: the name is looked up (autoloading) or refused
+    if (!ctx.vm.classes.contains(class_name) and !ctx.vm.interfaces.contains(class_name) and !ctx.vm.traits.contains(class_name)) try ctx.vm.tryAutoload(class_name);
+    if (ctx.vm.pending_exception != null) return error.RuntimeError;
+    if (!ctx.vm.classes.contains(class_name)) {
+        if (ctx.vm.interfaces.contains(class_name) or ctx.vm.traits.contains(class_name)) return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+        const msg = try std.fmt.allocPrint(ctx.allocator, "get_class_vars(): Argument #1 ($class) must be a valid class name, {s} given", .{raw});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.setPendingException("TypeError", msg);
+        return error.RuntimeError;
+    }
     try ctx.vm.resolveClassDefaults(class_name);
-    const cls = ctx.vm.classes.get(class_name) orelse return NativeResult.scalar(Value{ .bool = false });
     const caller = ctx.vm.currentDefiningClass();
     var arr = try ctx.createArray();
-    for (cls.properties.items) |prop| {
-        const visible = switch (prop.visibility) {
-            .public => true,
-            .protected => caller != null and isInClassChain(ctx.vm, caller.?, class_name),
-            .private => caller != null and std.mem.eql(u8, caller.?, class_name),
-        };
-        if (!visible) continue;
-        // a virtual property has no default to list
-        if (prop.is_virtual and ctx.vm.propertyIsVirtual(class_name, prop.name)) continue;
-        try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(prop.name) }, prop.default);
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(ctx.allocator);
+    // instance properties
+    var current: ?[]const u8 = class_name;
+    while (current) |name| {
+        const cls = ctx.vm.classes.get(name) orelse break;
+        for (cls.properties.items) |prop| {
+            if ((try seen.getOrPut(ctx.allocator, prop.name)).found_existing) continue;
+            if (!classVarVisible(ctx, caller, name, prop.visibility)) continue;
+            // a virtual property has no default to list
+            if (prop.is_virtual and ctx.vm.propertyIsVirtual(class_name, prop.name)) continue;
+            try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(prop.name) }, if (prop.default == .undef) .null else prop.default);
+        }
+        current = cls.parent;
     }
-    // PHP's get_class_vars also includes static properties
-    var sit = cls.static_props.iterator();
-    while (sit.next()) |e| {
-        // class constants are also stored in static_props; skip them
-        if (cls.constants.contains(e.key_ptr.*)) continue;
-        const static_visible = switch (cls.static_prop_visibility.get(e.key_ptr.*) orelse .public) {
-            .public => true,
-            .protected => caller != null and isInClassChain(ctx.vm, caller.?, class_name),
-            .private => caller != null and std.mem.eql(u8, caller.?, class_name),
-        };
-        if (!static_visible) continue;
-        // an uninitialized typed static property lists as null
-        try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(e.key_ptr.*) }, if (e.value_ptr.* == .undef) .null else e.value_ptr.*);
+    // static properties, each from the class that declares it
+    seen.clearRetainingCapacity();
+    current = class_name;
+    while (current) |name| {
+        const cls = ctx.vm.classes.get(name) orelse break;
+        var sit = cls.static_props.iterator();
+        while (sit.next()) |e| {
+            // class constants are also stored in static_props; skip them
+            if (cls.constants.contains(e.key_ptr.*)) continue;
+            const declaring = ctx.vm.staticPropDeclaringClass(name, e.key_ptr.*) orelse name;
+            if (!std.mem.eql(u8, declaring, name)) continue;
+            if ((try seen.getOrPut(ctx.allocator, e.key_ptr.*)).found_existing) continue;
+            if (!classVarVisible(ctx, caller, name, cls.static_prop_visibility.get(e.key_ptr.*) orelse .public)) continue;
+            // an uninitialized typed static property lists as null
+            try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(e.key_ptr.*) }, if (e.value_ptr.* == .undef) .null else e.value_ptr.*);
+        }
+        current = cls.parent;
     }
     return NativeResult.borrowed(.{ .array = arr });
+}
+
+// zend_check_protected for a protected property, the declaring class itself
+// for a private one
+fn classVarVisible(ctx: *NativeContext, caller: ?[]const u8, declaring: []const u8, visibility: @import("../runtime/vm.zig").ClassDef.Visibility) bool {
+    return switch (visibility) {
+        .public => true,
+        .protected => caller != null and isInClassChain(ctx.vm, caller.?, declaring),
+        .private => caller != null and std.ascii.eqlIgnoreCase(caller.?, declaring),
+    };
 }
 
 // Z_PARAM_OBJ_OR_CLASS_NAME's TypeError

@@ -26841,7 +26841,7 @@ pub const VM = struct {
     // a typed property a reference is bound to (php's ZEND_REF_HAS_TYPE_SOURCES)
     pub const TypeSource = struct { class: []const u8, prop: []const u8, type_str: []const u8 };
 
-    fn staticPropDeclaringClass(self: *VM, class_name: []const u8, prop_name: []const u8) ?[]const u8 {
+    pub fn staticPropDeclaringClass(self: *VM, class_name: []const u8, prop_name: []const u8) ?[]const u8 {
         var current: ?[]const u8 = class_name;
         while (current) |cn| {
             const entry = self.classes.getEntry(cn) orelse return null;
