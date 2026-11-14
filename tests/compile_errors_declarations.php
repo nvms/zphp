@@ -42,6 +42,16 @@ $cases = [
     'class A { function __construct(public static $x) {} }',
     'class A { function __construct(abstract $x) {} }',
     'function f(static $x) {}',
+    'class A { const CLASS = 1; }',
+    'interface I { const Class = 1, B = 2; }',
+    'use Baz\\{};',
+    'class A { private (set) mixed $v; }',
+    'class A { public function __construct(protected (set) int $v) {} }',
+    'class A { private(set) int $v; } echo "ok";',
+    'namespace Foo { const BAR = 1; } namespace Bazzle { use const Foo\\BAR; const BAR = 2; }',
+    'namespace Bazzle { use const Bazzle\\BAR; const BAR = 2; echo BAR; }',
+    'foreach ([] as list($k) => $v) {}',
+    'foreach ([] as [$k] => list(, $a)) {}',
 ];
 foreach ($cases as $code) {
     echo $code, "\n";

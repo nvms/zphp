@@ -980,6 +980,11 @@ pub const Compiler = struct {
                 else
                     raw;
                 if (self.namespace.len > 0) try self.string_allocs.append(self.allocator, name);
+                // a `use const` of another constant took the name
+                if (self.use_const_aliases.get(raw)) |imported| {
+                    const bare = if (imported.len > 0 and imported[0] == '\\') imported[1..] else imported;
+                    if (!std.mem.eql(u8, bare, name)) return self.failFmt(node.main_token, "Cannot declare const {s} because the name is already in use", .{name});
+                }
                 const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });
                 try self.emitOp(.define_const);
                 try self.emitU16(name_idx);

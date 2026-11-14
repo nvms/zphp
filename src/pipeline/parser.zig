@@ -490,6 +490,11 @@ const Parser = struct {
         // group use: use Prefix\{Name [as Alias], ...};
         if (self.peek() == .l_brace) {
             _ = self.advance();
+            // a group lists at least one name
+            if (self.peek() == .r_brace) {
+                try self.addError(.unexpected_token);
+                return error.ParseError;
+            }
             var stmts = std.ArrayListUnmanaged(u32).empty;
             defer stmts.deinit(self.allocator);
 
@@ -956,6 +961,8 @@ const Parser = struct {
         const first = members.items.len;
         try self.parseConstList(members);
         for (members.items[first..]) |cd| {
+            const name_tok = self.nodes.items[cd].main_token;
+            if (std.ascii.eqlIgnoreCase(self.tokenText(name_tok), "class")) self.deferCompileError(name_tok, "A class constant must not be called 'class'; it is reserved for class name fetching", .{});
             const kept = self.nodes.items[cd].data.rhs & (~@as(u32, 0xffff) | const_continuation);
             self.nodes.items[cd].data.rhs = flags | kept;
         }
@@ -1635,7 +1642,7 @@ const Parser = struct {
                 var recorded = kind;
                 if (kind.isVisibility()) {
                     const vis_val: u32 = @intFromEnum(kind) - @intFromEnum(MemberModifier.public);
-                    if (self.peek() == .l_paren and self.peekAt(1) == .identifier and std.mem.eql(u8, self.lexemeAt(1), "set") and self.peekAt(2) == .r_paren) {
+                    if (self.peek() == .l_paren and self.peekAt(1) == .identifier and std.mem.eql(u8, self.lexemeAt(1), "set") and self.peekAt(2) == .r_paren and self.setVisibilityAdjacent()) {
                         _ = self.advance();
                         _ = self.advance();
                         _ = self.advance();
@@ -1987,7 +1994,7 @@ const Parser = struct {
                 if (self.peek() == .l_paren and
                     self.peekAt(1) == .identifier and
                     std.mem.eql(u8, self.lexemeAt(1), "set") and
-                    self.peekAt(2) == .r_paren)
+                    self.peekAt(2) == .r_paren and self.setVisibilityAdjacent())
                 {
                     _ = self.advance();
                     _ = self.advance();
@@ -2860,7 +2867,7 @@ const Parser = struct {
             if (tag == .kw_public or tag == .kw_protected or tag == .kw_private) {
                 const vis_val: u32 = if (tag == .kw_public) 1 else if (tag == .kw_protected) 2 else 3;
                 _ = self.advance();
-                if (self.peek() == .l_paren and self.peekAt(1) == .identifier and std.mem.eql(u8, self.lexemeAt(1), "set") and self.peekAt(2) == .r_paren) {
+                if (self.peek() == .l_paren and self.peekAt(1) == .identifier and std.mem.eql(u8, self.lexemeAt(1), "set") and self.peekAt(2) == .r_paren and self.setVisibilityAdjacent()) {
                     _ = self.advance();
                     _ = self.advance();
                     _ = self.advance();
@@ -3824,6 +3831,14 @@ const Parser = struct {
             }
             i += 1;
         }
+    }
+
+    // `private(set)` is one token in php's scanner: written apart it is a
+    // visibility and a parenthesized type
+    fn setVisibilityAdjacent(self: *const Parser) bool {
+        if (self.pos == 0 or self.pos + 2 >= self.tokens.len) return false;
+        const t = self.tokens;
+        return t[self.pos - 1].end == t[self.pos].start and t[self.pos].end == t[self.pos + 1].start and t[self.pos + 1].end == t[self.pos + 2].start;
     }
 
     fn lexemeAt(self: *const Parser, offset: u32) []const u8 {

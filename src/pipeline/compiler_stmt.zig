@@ -231,6 +231,10 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     const val_n = self.ast.extra_data[node.data.lhs + 1];
     const key_n = self.ast.extra_data[node.data.lhs + 2];
     const val_by_ref = self.ast.extra_data[node.data.lhs + 3] != 0;
+    if (key_n != 0) switch (self.ast.nodes[key_n].tag) {
+        .list_destructure, .array_literal => return self.fail(node.main_token, "Cannot use list as key element"),
+        else => {},
+    };
     try refuseThisTarget(self, val_n);
     if (key_n != 0) try refuseThisTarget(self, key_n);
     // zend_compile_foreach: the loop variables are written
