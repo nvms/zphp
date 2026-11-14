@@ -6551,11 +6551,27 @@ pub const VM = struct {
                         const s = existing.string.bytes();
                         var idx: i64 = switch (ik) {
                             .int => |n| n,
-                            // a non-numeric string key on a string offset is a
-                            // TypeError in PHP, not offset 0
-                            .string => |str| std.fmt.parseInt(i64, str.bytes(), 10) catch {
-                                if (try self.throwBuiltinException("TypeError", "Cannot access offset of type string on string")) continue;
-                                return error.RuntimeError;
+                            // zend_check_string_offset: a leading-numeric
+                            // string warns and names its number, any other
+                            // is a TypeError
+                            .string => |str| str_idx: {
+                                const parsed = offsetStringKey(str.bytes());
+                                switch (parsed.kind) {
+                                    .integer => break :str_idx parsed.value,
+                                    .trailing => {
+                                        const msg = try std.fmt.allocPrint(self.allocator, "Illegal string offset \"{s}\"", .{str.bytes()});
+                                        defer self.allocator.free(msg);
+                                        self.emitWarning(msg) catch {
+                                            if (try self.resumeRaised()) continue;
+                                            return error.RuntimeError;
+                                        };
+                                        break :str_idx parsed.value;
+                                    },
+                                    .other => {
+                                        if (try self.throwBuiltinException("TypeError", "Cannot access offset of type string on string")) continue;
+                                        return error.RuntimeError;
+                                    },
+                                }
                             },
                         };
                         if (idx < 0) idx = @as(i64, @intCast(s.len)) + idx;
@@ -6723,11 +6739,27 @@ pub const VM = struct {
                         const s = existing.string.bytes();
                         var idx: i64 = switch (ik) {
                             .int => |n| n,
-                            // a non-numeric string key on a string offset is a
-                            // TypeError in PHP, not offset 0
-                            .string => |str| std.fmt.parseInt(i64, str.bytes(), 10) catch {
-                                if (try self.throwBuiltinException("TypeError", "Cannot access offset of type string on string")) continue;
-                                return error.RuntimeError;
+                            // zend_check_string_offset: a leading-numeric
+                            // string warns and names its number, any other
+                            // is a TypeError
+                            .string => |str| str_idx: {
+                                const parsed = offsetStringKey(str.bytes());
+                                switch (parsed.kind) {
+                                    .integer => break :str_idx parsed.value,
+                                    .trailing => {
+                                        const msg = try std.fmt.allocPrint(self.allocator, "Illegal string offset \"{s}\"", .{str.bytes()});
+                                        defer self.allocator.free(msg);
+                                        self.emitWarning(msg) catch {
+                                            if (try self.resumeRaised()) continue;
+                                            return error.RuntimeError;
+                                        };
+                                        break :str_idx parsed.value;
+                                    },
+                                    .other => {
+                                        if (try self.throwBuiltinException("TypeError", "Cannot access offset of type string on string")) continue;
+                                        return error.RuntimeError;
+                                    },
+                                }
                             },
                         };
                         if (idx < 0) idx = @as(i64, @intCast(s.len)) + idx;
