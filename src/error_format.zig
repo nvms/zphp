@@ -192,7 +192,10 @@ fn formatUncaughtException(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM
     if (exc == .object) {
         const file_v = exc.object.get("file");
         const line_v = exc.object.get("line");
-        const where = displayPath(if (file_v == .string) file_v.string.bytes() else "");
+        // zend_exception_error passes no file for an empty one, which the
+        // error callback names "Unknown"
+        const where_raw: []const u8 = if (file_v == .string) file_v.string.bytes() else "";
+        const where = if (where_raw.len == 0) "Unknown" else where_raw;
         const line: i64 = if (line_v == .int) line_v.int else 0;
         const description = report.description orelse "";
         // the log formats the description with %s, which ends at a NUL, the
