@@ -1067,6 +1067,12 @@ pub fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bo
             count -%= 1;
             continue;
         }
+        // nor is the frame of included or evaluated code: php lists the
+        // include or eval() that runs it (eval is among the natives above)
+        if (vm.frames[i].include_parent != null and (vm.frames[i].func == null or vm.frames[i].func.?.name.len == 0)) {
+            if (try includeEntry(ctx, i, result.entries.items.len > 0)) |inc| try result.append(alloc, .{ .array = inc }) else count -%= 1;
+            continue;
+        }
         const called_by_native = (next_native < native_count and natives[next_native].depth == i) or i == vm.trace_floor;
         var entry = try ctx.createArray();
         const frame = &vm.frames[i];
@@ -1182,6 +1188,38 @@ pub fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bo
     return result;
 }
 
+// zend_fetch_debug_backtrace's entry for an include frame: where the
+// include ran, the file as its argument, and the construct as the function
+fn includeEntry(ctx: *NativeContext, i: usize, named: bool) RuntimeError!?*PhpArray {
+    const vm = ctx.vm;
+    const alloc = ctx.allocator;
+    const frame = &vm.frames[i];
+    if (i == 0 or frame.script_path.len == 0) return null;
+    const requirer = &vm.frames[i - 1];
+    const bytecode = @import("../pipeline/bytecode.zig");
+    if (requirer.ip < 1 + bytecode.op_bytes) return null;
+    const at = requirer.ip - 1 - bytecode.op_bytes;
+    if (!bytecode.opIs(requirer.chunk.code.items, at, .require)) return null;
+    const name: []const u8 = switch (requirer.chunk.code.items[requirer.ip - 1]) {
+        1 => "require_once",
+        2 => "include",
+        3 => "include_once",
+        else => "require",
+    };
+    const entry = try ctx.createArray();
+    try entry.set(alloc, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(vm.frameFile(i - 1)) });
+    if (vm.sourceLocation(requirer.chunk, at)) |loc| try entry.set(alloc, .{ .string = Value.String.borrowed("line") }, .{ .int = @intCast(loc.line) });
+    // the file is named once the trace has an entry from inside it, with or
+    // without DEBUG_BACKTRACE_IGNORE_ARGS
+    if (named) {
+        const args_arr = try ctx.createArray();
+        try args_arr.append(alloc, .{ .string = Value.String.borrowed(frame.script_path) });
+        try entry.set(alloc, .{ .string = Value.String.borrowed("args") }, .{ .array = args_arr });
+    }
+    try entry.set(alloc, .{ .string = Value.String.borrowed("function") }, .{ .string = Value.String.borrowed(name) });
+    return entry;
+}
+
 // the natives frame i called, innermost first: the outermost of them was
 // called from frame i's code, each other one by the native outside it
 fn appendNativeEntries(vm: *VM, result: *PhpArray, natives: []const *const @import("../runtime/vm.zig").NativeCall, next: *usize, i: usize, ignore_args: bool, provide_object: bool, limit: usize) RuntimeError!void {
@@ -1196,7 +1234,9 @@ fn appendNativeEntries(vm: *VM, result: *PhpArray, natives: []const *const @impo
             if (VM.frameThis(&vm.frames[depth - 1])) |t| (if (t == .object) t else null) else null
         else
             null;
-        const native_entry = try vm.nativeTraceEntryWith(natives[next.*], site, !ignore_args, object);
+        // eval() is a construct: its entry has no arguments
+        const with_args = !ignore_args and !std.mem.eql(u8, natives[next.*].label, "eval");
+        const native_entry = try vm.nativeTraceEntryWith(natives[next.*], site, with_args, object);
         try result.append(vm.allocator, .{ .array = native_entry });
     }
 }
