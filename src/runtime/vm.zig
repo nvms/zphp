@@ -1397,6 +1397,8 @@ pub const VM = struct {
     response_headers: ?*PhpArray = null,
     last_http_response_headers: ?*PhpArray = null,
     headers_sent: bool = false,
+    // where the output that sent the headers came from, for headers_sent()
+    output_start: ?SourcePosition = null,
     default_tz_name: []const u8 = "UTC",
     // backing for a zone set by date_default_timezone_set(); zone ids are short
     default_tz_buf: [64]u8 = undefined,
@@ -3939,6 +3941,7 @@ pub const VM = struct {
         self.response_headers = null;
         self.last_http_response_headers = null;
         self.headers_sent = false;
+        self.output_start = null;
         self.default_tz_name = "UTC";
         self.default_tz_offset = 0;
         // per-request runtime settings and last-error state; the strings
@@ -6158,7 +6161,10 @@ pub const VM = struct {
                         if (v == .array) self.emitWarning("Array to string conversion") catch if (try self.resumeRaised()) continue;
                         try v.format(&self.output, self.allocator);
                     }
-                    if (self.ob_stack.items.len == 0) self.headers_sent = true;
+                    if (self.ob_stack.items.len == 0 and !self.headers_sent) {
+                        self.headers_sent = true;
+                        self.output_start = self.currentSourcePosition();
+                    }
                     if (self.ob_chunk_watch) output_control.checkChunks(self) catch if (try self.resumeRaised()) continue;
                 },
                 .halt => return,

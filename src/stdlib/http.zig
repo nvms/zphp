@@ -213,7 +213,19 @@ fn native_header_remove(ctx: *NativeContext, args: []const Value) RuntimeError!N
     return NativeResult.scalar(.null);
 }
 
-fn native_headers_sent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+// headers_sent(&$filename, &$line): where output started, or "" and 0
+fn native_headers_sent(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const start: ?@TypeOf(ctx.vm.output_start.?) = if (ctx.vm.headers_sent) ctx.vm.output_start else null;
+    if (args.len >= 1) {
+        const file = try Value.String.create(ctx.allocator, if (start) |at| at.file else "");
+        defer file.release();
+        ctx.setCallerVar(0, args.len, .{ .string = file });
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+    }
+    if (args.len >= 2) {
+        ctx.setCallerVar(1, args.len, .{ .int = if (start) |at| at.line else 0 });
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+    }
     return NativeResult.scalar(.{ .bool = ctx.vm.headers_sent });
 }
 
