@@ -607,6 +607,9 @@ pub const ClassDef = struct {
     deprecated_constants: std.StringHashMapUnmanaged([]const u8) = .{},
     slot_layout: ?*PhpObject.SlotLayout = null,
     used_traits: std.ArrayListUnmanaged([]const u8) = .empty,
+    // the `as` rules of its trait uses that give a method a new name, for
+    // ReflectionClass::getTraitAliases: alias, the trait and the method
+    trait_aliases: std.ArrayListUnmanaged(TraitAlias) = .empty,
     attributes: std.ArrayListUnmanaged(AttributeDef) = .empty,
     method_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
     property_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
@@ -630,6 +633,8 @@ pub const ClassDef = struct {
     constant_attributes: std.StringHashMapUnmanaged([]const AttributeDef) = .{},
 
     pub const Visibility = enum(u8) { public = 0, protected = 1, private = 2 };
+
+    pub const TraitAlias = struct { alias: []const u8, trait: []const u8, method: []const u8 };
 
     pub const MethodInfo = struct {
         name: []const u8,
@@ -708,6 +713,7 @@ pub const ClassDef = struct {
         self.static_prop_types.deinit(allocator);
         self.interfaces.deinit(allocator);
         self.used_traits.deinit(allocator);
+        self.trait_aliases.deinit(allocator);
         self.case_order.deinit(allocator);
         self.deprecated_constants.deinit(allocator);
         for (self.attributes.items) |a| {
@@ -19584,6 +19590,19 @@ pub const VM = struct {
         for (trait_names[0..trait_count]) |trait_name| try self.warnDeprecatedTraitUse(trait_name, class_name);
         try self.bindClassTraits(&def, class_name, trait_names[0..trait_count], rules);
         for (trait_names[0..trait_count]) |trait_name| try def.used_traits.append(self.allocator, self.declaredClassName(trait_name));
+        for (rules.aliases) |rule| {
+            if (rule.alias.len == 0) continue;
+            // an alias that names no trait belongs to the first used trait
+            // with the method (ReflectionClass::getTraitAliases)
+            const trait = if (rule.trait.len > 0) rule.trait else for (trait_names[0..trait_count]) |tn| {
+                const methods = self.traitMethods(self.declaredClassName(tn)) catch continue;
+                for (methods) |m| {
+                    if (std.ascii.eqlIgnoreCase(m.name, rule.method)) break;
+                } else continue;
+                break self.declaredClassName(tn);
+            } else "";
+            try def.trait_aliases.append(self.allocator, .{ .alias = rule.alias, .trait = trait, .method = rule.method });
+        }
 
         const class_attrs = try self.readAttributeDefs();
         for (class_attrs) |a| try def.attributes.append(self.allocator, a);

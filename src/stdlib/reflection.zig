@@ -206,6 +206,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "getInterfaceNames", .{ .name = "getInterfaceNames", .arity = 0 });
     try rc_def.methods.put(a, "getInterfaces", .{ .name = "getInterfaces", .arity = 0 });
     try rc_def.methods.put(a, "getTraits", .{ .name = "getTraits", .arity = 0 });
+    try rc_def.methods.put(a, "getTraitAliases", .{ .name = "getTraitAliases", .arity = 0 });
     try rc_def.methods.put(a, "getTraitNames", .{ .name = "getTraitNames", .arity = 0 });
     try rc_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
     try rc_def.methods.put(a, "getDocComment", .{ .name = "getDocComment", .arity = 0 });
@@ -287,6 +288,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionClass::getConstants", rcGetConstants);
     try vm.native_fns.put(a, "ReflectionClass::getReflectionConstants", rcGetReflectionConstants);
     try vm.native_fns.put(a, "ReflectionClass::getReflectionConstant", rcGetReflectionConstant);
+    try vm.native_fns.put(a, "ReflectionClass::getTraitAliases", rcGetTraitAliases);
     try vm.native_fns.put(a, "ReflectionClass::hasConstant", rcHasConstant);
     try vm.native_fns.put(a, "ReflectionClass::getConstant", rcGetConstant);
     try vm.native_fns.put(a, "ReflectionClass::isInternal", rcIsInternal);
@@ -2623,6 +2625,20 @@ fn rcGetTraitNames(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
     const arr = try ctx.createArray();
     for (cls.used_traits.items) |name| {
         try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(name) });
+    }
+    return NativeResult.borrowed(.{ .array = arr });
+}
+
+// alias => "Trait::method" for each `as` rule that renames a method
+fn rcGetTraitAliases(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
+    const arr = try ctx.createArray();
+    const cls = ctx.vm.classes.get(class_name) orelse return NativeResult.borrowed(.{ .array = arr });
+    for (cls.trait_aliases.items) |entry| {
+        const text = try std.fmt.allocPrint(ctx.allocator, "{s}::{s}", .{ entry.trait, entry.method });
+        defer ctx.allocator.free(text);
+        try arr.setCopiedString(ctx.allocator, .{ .string = Value.String.borrowed(entry.alias) }, text);
     }
     return NativeResult.borrowed(.{ .array = arr });
 }
