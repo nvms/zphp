@@ -1,7 +1,8 @@
 <?php
 // the collector marks a deep live graph in time linear in its size: an
 // exception whose trace holds a deeply nested argument, and a cycle that
-// reaches a deep chain, are collected in well under a second
+// reaches a deep chain, are collected quickly (the quadratic marking took
+// over 30 seconds; a debug build on ci takes about 2)
 
 function fail($a) { throw new Exception("x"); }
 
@@ -45,4 +46,4 @@ unset($o);
 var_dump(gc_collect_cycles() > 40000);
 
 $elapsed = microtime(true) - $start;
-echo $elapsed < 2.0 ? "linear\n" : "slow: $elapsed\n";
+echo $elapsed < 10.0 ? "linear\n" : "slow: $elapsed\n";
