@@ -16980,7 +16980,9 @@ pub const VM = struct {
             try self.bindRefSlot(&self.globals_cells, try self.internName(name), c);
             cell = c;
         }
-        if (self.frame_count > 1) {
+        // the global scope's own variable is the cell from now on, at the
+        // top level too (`$r = &$GLOBALS['x']` in the main script)
+        if (self.frame_count > 0 and self.frames[0].ref_slots.get(name) != cell.?) {
             try self.bindRefSlot(&self.frames[0].ref_slots, name, cell.?);
         }
         return cell.?;
