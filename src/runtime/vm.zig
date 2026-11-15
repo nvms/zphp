@@ -6495,6 +6495,14 @@ pub const VM = struct {
                                 self.push(.null);
                                 continue;
                             }
+                            // spl_fixedarray_object_has_dimension: an
+                            // offsetExists() of its own answers empty() alone
+                            if (op == .array_get_empty and self.isInstanceOf(arr_val.object.class_name, "SplFixedArray") and
+                                !std.mem.eql(u8, self.resolveMethod(arr_val.object.class_name, "offsetExists") catch "", "SplFixedArray::offsetExists"))
+                            {
+                                self.push(.{ .bool = true });
+                                continue;
+                            }
                         }
                         const result = self.callMethod(arr_val.object, "offsetGet", &.{key}) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
