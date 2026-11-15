@@ -60,3 +60,4 @@ proc_open_descriptor_spec.php: the windows proc_open (proc_win.zig) parses its d
 proc_open_resource_release.php: the test runs sh, and the windows proc_open still has its pipes hold the process resource
 stream_udp_transports.php: udg:// (unix datagram sockets) doesn't exist on windows
 unix_socket_path_truncated.php: the test needs php's unix socket transport and linux's 108-byte sun_path; the windows build's unix sockets differ
+parse_str_separators_and_names.php: the test passes -d through a posix shell (the backslash-escaped ;) to a child php

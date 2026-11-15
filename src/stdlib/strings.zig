@@ -3087,10 +3087,12 @@ fn native_parse_str(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     const s = args[0].string.bytes();
 
     const arr = try ctx.createArray();
+    // php_default_treat_data splits at any character of arg_separator.input
+    const separators = ctx.vm.ini_settings.get("arg_separator.input") orelse @import("../ini_config.zig").get("arg_separator.input") orelse "&";
     var rest = s;
     while (rest.len > 0) {
         var pair: []const u8 = undefined;
-        if (std.mem.indexOf(u8, rest, "&")) |pos| {
+        if (std.mem.indexOfAny(u8, rest, separators)) |pos| {
             pair = rest[0..pos];
             rest = rest[pos + 1 ..];
         } else {
@@ -3145,6 +3147,14 @@ fn insertParsedKey(ctx: *NativeContext, root: *PhpArray, key: []const u8, value:
     const raw_base = if (open) |o| key[0..o] else key;
     // PHP drops keys with empty base name when bracket segments follow (e.g. "[a]=1")
     if (raw_base.len == 0 and open != null) return;
+    // php_register_variable_ex: a first `[` without its `]` is no index; it
+    // and every later `[` become `_` in a plain name
+    if (open) |o| if (std.mem.indexOfScalarPos(u8, key, o + 1, ']') == null) {
+        const plain = try sanitizeParseStrKey(ctx, key);
+        defer plain.release();
+        try setParsedEntry(ctx, root, .{ .string = plain }, value);
+        return;
+    };
     const base_name = try sanitizeParseStrKey(ctx, raw_base);
     defer base_name.release();
     if (open == null) {
