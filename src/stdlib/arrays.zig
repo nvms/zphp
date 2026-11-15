@@ -926,11 +926,20 @@ fn keyValue(key: PhpArray.Key) Value {
     };
 }
 
+// zend_call_stack_size_error where php's recursive array functions check
+// the native stack
+fn checkStackLimit(ctx: *NativeContext) RuntimeError!void {
+    if (!vm_mod.stack_limit.overflowed()) return;
+    try ctx.vm.raiseStackLimit();
+    return error.RuntimeError;
+}
+
 // php_array_walk: each element goes to the callback as a reference, its key
 // and the user data as values (a callback taking those by reference warns).
 // the walk follows the array as the callback changes it, as foreach by
 // reference does: a removed element is skipped and an added one visited
 fn walk(ctx: *NativeContext, target: Value, callback: Value, userdata: ?Value, recursive: bool) RuntimeError!void {
+    try checkStackLimit(ctx);
     if (target == .object) return walkObject(ctx, target.object, callback, userdata, recursive);
     const arr = target.array;
     const by_ref = try ctx.callableParamIsRef(callback, 0);
@@ -1447,6 +1456,7 @@ fn objectMove(ctx: *NativeContext, comptime func: []const u8, obj: *PhpObject) R
 }
 
 fn deepReplace(ctx: *NativeContext, base: *PhpArray, overlay: *PhpArray) RuntimeError!*PhpArray {
+    try checkStackLimit(ctx);
     const result = try ctx.createArray();
     for (base.entries.items) |entry| {
         try ctx.vm.arraySetOwned(result, entry.key, entry.value);
@@ -1927,6 +1937,7 @@ fn compactValue(ctx: *NativeContext, arg_in: Value, arr: *PhpArray, frame: anyty
         defer ctx.allocator.free(w);
         try ctx.vm.emitWarning(w);
     } else if (arg == .array) {
+        try checkStackLimit(ctx);
         // an array of names that contains itself is php's "Recursion detected"
         const names = arg.array;
         const Recursion = @import("../runtime/value.zig").Recursion;

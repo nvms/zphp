@@ -3584,6 +3584,10 @@ fn native_spl_object_hash(ctx: *NativeContext, args: []const Value) RuntimeError
 // and counts as nothing
 fn countRecursive(ctx: *NativeContext, func: []const u8, a: *PhpArray) RuntimeError!i64 {
     const Recursion = @import("../runtime/value.zig").Recursion;
+    if (@import("../runtime/vm.zig").stack_limit.overflowed()) {
+        try ctx.vm.raiseStackLimit();
+        return error.RuntimeError;
+    }
     if (a.recursion & Recursion.gc != 0) {
         const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Recursion detected", .{func});
         defer ctx.allocator.free(msg);

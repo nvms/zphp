@@ -2879,6 +2879,11 @@ const QueryBuilder = struct {
         };
         // a container already being encoded is skipped, as php's recursion guard does
         for (self.visited.items) |v| if (v == id) return;
+        // php_url_encode_hash_ex: very deep data could overflow the stack
+        if (@import("../runtime/stack_limit.zig").overflowed()) {
+            try self.ctx.vm.setPendingException("Error", "Maximum call stack size reached.");
+            return error.RuntimeError;
+        }
         try self.visited.append(a, id);
         defer _ = self.visited.pop();
         var owned: ?*PhpArray = null;

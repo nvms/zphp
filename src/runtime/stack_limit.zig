@@ -19,8 +19,19 @@ threadlocal var usable: usize = 0;
 
 // the first address below which the thread is out of stack
 pub inline fn overflowed() bool {
+    // the fast loop's object has its own copy of this file; the limits are
+    // the main object's
+    if (@import("build_role").fast_loop_object) return zphp_stack_limit() > @frameAddress();
     if (limit == 0) init();
     return @frameAddress() < limit;
+}
+
+extern fn zphp_stack_limit() callconv(.c) usize;
+
+// the running thread's limit, for the fast loop's object
+pub fn current() usize {
+    if (limit == 0) init();
+    return limit;
 }
 
 // the size php reports: zend.max_allowed_stack_size - zend.reserved_stack_size
@@ -63,7 +74,34 @@ fn init() void {
         usable = 0;
         return;
     };
+    // zend_call_stack_init: zend.max_allowed_stack_size 0 detects the
+    // stack, -1 checks nothing, and a size counts down from the stack's
+    // base, less zend.reserved_stack_size. a size the real stack can't hold
+    // with zphp's own reserve below it falls back to the detected one
+    const max = configuredSize("zend.max_allowed_stack_size");
+    if (max == -1) {
+        limit = 1;
+        usable = 0;
+        return;
+    }
+    if (max > 0) {
+        const size: usize = @intCast(max);
+        const reserved: usize = @max(@as(usize, @intCast(@max(configuredSize("zend.reserved_stack_size"), 0))), min_reserved);
+        if (size + reserve < bounds.high - bounds.low) {
+            limit = bounds.high - size + reserved;
+            usable = size -| reserved;
+            return;
+        }
+    }
     setFrom(bounds);
+}
+
+// OnUpdateReservedStackSize's minimum: ZEND_ALLOCA_MAX_SIZE plus 16K
+const min_reserved: usize = 32 * 1024 + 16 * 1024;
+
+fn configuredSize(name: []const u8) i64 {
+    const text = @import("../ini_config.zig").get(name) orelse return 0;
+    return @import("memory.zig").parseQuantity(text).value;
 }
 
 fn setFrom(bounds: Bounds) void {

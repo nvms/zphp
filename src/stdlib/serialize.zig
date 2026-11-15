@@ -320,6 +320,8 @@ fn serializeArrayBody(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sct
 fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *SerCtx, val_in: Value, via: Via, in_rcn_array: bool, is_root: bool) RuntimeError!void {
     const a = ctx.allocator;
     if (ctx.vm.pending_exception != null) return;
+    // php_serialize_check_stack_limit
+    if (@import("../runtime/stack_limit.zig").overflowed()) return ctx.vm.raiseStackLimit();
     var val = val_in;
     if (val == .object and val.object.lazy != null) {
         // __serialize runs on the lazy object as it is: only what it reads

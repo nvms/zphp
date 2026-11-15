@@ -53,9 +53,10 @@ threadlocal var hooks_record: Hooks = .{};
 
 // why php's zend_compare gave up: an array or object met again while it was
 // being compared ("Nesting level too deep"), or object comparison out of
-// native stack. compare returns php's ZEND_UNCOMPARABLE (1) and leaves the
-// failure for the vm to throw
-pub const CompareFailure = enum(u8) { none, nesting, stack };
+// native stack (array comparison too, zend_hash_compare's check). compare
+// returns php's ZEND_UNCOMPARABLE (1) and leaves the failure for the vm to
+// throw
+pub const CompareFailure = enum(u8) { none, nesting, stack, array_stack };
 
 fn compareFailed(kind: CompareFailure) void {
     const h = hooks();
@@ -1748,6 +1749,10 @@ pub const Value = union(enum) {
 
     fn arrayEqual(a: *PhpArray, b: *PhpArray, strict: bool) bool {
         if (a == b) return true;
+        if (stack_limit.overflowed()) {
+            compareFailed(.array_stack);
+            return false;
+        }
         // php's zend_hash_compare protects the first array only: the second
         // may be reached from the first without being recursive
         if (a.recursion & Recursion.gc != 0) {
@@ -1977,6 +1982,10 @@ pub const Value = union(enum) {
         }
         if (a == .array and b == .array) {
             if (a.array == b.array) return 0;
+            if (stack_limit.overflowed()) {
+                compareFailed(.array_stack);
+                return 1;
+            }
             if (a.array.recursion & Recursion.gc != 0) {
                 compareFailed(.nesting);
                 return 1;

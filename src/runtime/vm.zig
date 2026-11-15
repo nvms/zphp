@@ -23914,6 +23914,7 @@ pub const VM = struct {
         try self.setPendingException("Error", switch (failure) {
             .nesting => "Nesting level too deep - recursive dependency?",
             .stack => "Maximum call stack size reached during object comparison",
+            .array_stack => "Maximum call stack size reached during comparison",
             .none => unreachable,
         });
         return error.RuntimeError;

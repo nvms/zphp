@@ -14,6 +14,7 @@ const RuntimeError = error{ RuntimeError, OutOfMemory };
 // flag per kind of walk; any other object, like an array, has the one flag
 // every walk shares
 const Recursion = value_mod.Recursion;
+const stack_limit = @import("../runtime/stack_limit.zig");
 
 fn objectFlag(vm: ?*@import("../runtime/vm.zig").VM, obj: *value_mod.PhpObject, kind: u8) u8 {
     if (vm) |v| if (v.usesRecursionGuards(obj)) return kind;
@@ -104,6 +105,12 @@ fn debugZvalDump(ctx: *NativeContext, val: Value, level: usize, top: bool) Runti
             arr.recursion |= Recursion.gc;
             defer arr.recursion &= ~Recursion.gc;
             for (arr.entries.items) |entry| {
+                // php_array_element_dump / php_object_property_dump
+                if (stack_limit.overflowed()) {
+                    try appendIndent(out, a, level + 1);
+                    try out.appendSlice(a, "nesting level too deep");
+                    continue;
+                }
                 try appendIndent(out, a, level + 1);
                 switch (entry.key) {
                     .int => |ki| try out.print(a, "[{d}]=>\n", .{ki}),
@@ -140,6 +147,12 @@ fn debugZvalDump(ctx: *NativeContext, val: Value, level: usize, top: bool) Runti
             try out.appendSlice(a, object_properties.lazyPrefix(obj));
             try out.print(a, "object({s})#{d} ({d}) refcount({d}){{\n", .{ class_names.display(obj.class_name), obj.id, shown, @max(rc, 1) });
             for (listing.items.items) |prop| {
+                // php_array_element_dump / php_object_property_dump
+                if (stack_limit.overflowed()) {
+                    try appendIndent(out, a, level + 1);
+                    try out.appendSlice(a, "nesting level too deep");
+                    continue;
+                }
                 try appendIndent(out, a, level + 1);
                 switch (prop.key) {
                     .int => |ki| try out.print(a, "[{d}]=>\n", .{ki}),
@@ -268,6 +281,12 @@ fn varDumpMarked(ctx: *NativeContext, val: Value, depth: usize, marker: []const 
             try out.appendSlice(a, len_s);
             try out.appendSlice(a, ") {\n");
             for (arr.entries.items) |entry| {
+                // php_array_element_dump / php_object_property_dump
+                if (stack_limit.overflowed()) {
+                    try appendIndent(out, a, indent + 2);
+                    try out.appendSlice(a, "nesting level too deep");
+                    continue;
+                }
                 try appendIndent(out, a, indent + 2);
                 switch (entry.key) {
                     .int => |ki| {
@@ -327,6 +346,12 @@ fn varDumpMarked(ctx: *NativeContext, val: Value, depth: usize, marker: []const 
             for (listing.items.items) |prop| initialized += @intFromBool(prop.uninitialized == null);
             try out.print(a, ")#{d} ({d}) {{\n", .{ obj.id, initialized });
             for (listing.items.items) |prop| {
+                // php_array_element_dump / php_object_property_dump
+                if (stack_limit.overflowed()) {
+                    try appendIndent(out, a, indent + 2);
+                    try out.appendSlice(a, "nesting level too deep");
+                    continue;
+                }
                 try appendIndent(out, a, indent + 2);
                 switch (prop.key) {
                     .int => |ki| try out.print(a, "[{d}]=>\n", .{ki}),
