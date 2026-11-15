@@ -196,6 +196,13 @@ fn compileInterpolatedString(self: *Compiler, s: []const u8, quote: u8) (Allocat
                 i += 2;
                 continue;
             }
+            // "\{" is no escape, but its brace can't open "{$": php's scanner
+            // reads the backslash and the brace as text, and a "$" after
+            // them as a simple variable
+            if (s[i + 1] == '{') {
+                i += 2;
+                continue;
+            }
         }
 
         if (s[i] == '{' and i + 1 < s.len and s[i + 1] == '$') {
