@@ -461,6 +461,16 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     if (target.tag == .variable_variable) {
+        // zend_compile_simple_var_no_cv: a name that is an expression is
+        // evaluated before the value, a variable holding the name is read
+        // when the assignment runs
+        if (op_tag == .equal and self.ast.nodes[target.data.lhs].tag != .variable) {
+            try self.compileNode(target.data.lhs);
+            try self.compileNode(node.data.rhs);
+            try self.emitOp(.swap);
+            try self.emitOp(.set_var_var);
+            return;
+        }
         if (op_tag != .equal) {
             try self.compileVariableVariable(target);
         }
