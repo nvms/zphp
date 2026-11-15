@@ -1007,6 +1007,8 @@ pub const VM = struct {
     // last_return_ref is what the call whose reference is being bound handed
     // back: a return_ref set it since reset_return_ref ran before the call
     return_ref_fresh: bool = false,
+    // the last include or eval run handed out (CallFrame.include_serial)
+    include_serial: u32 = 0,
     // the encoding mb_internal_encoding() set for the request (a name from
     // the generated table), null for the ini settings'
     mb_internal_encoding: ?[]const u8 = null,
@@ -2190,6 +2192,9 @@ pub const VM = struct {
         // frame remains separate for bytecode and return handling, while this
         // index identifies the scope whose bindings receive include changes.
         include_parent: ?usize = null,
+        // an include or eval frame's run: the statics its code declares are
+        // its own, as php compiles the code again for each run
+        include_serial: u32 = 0,
         // the frame a native method runs in: no code of its own, only $this
         native: bool = false,
         // a __call or __callStatic run for a missing method: php's call
@@ -4770,6 +4775,7 @@ pub const VM = struct {
             .script_path = heap_result.file_path,
             .slot_names = heap_result.slot_names,
             .include_parent = caller_idx,
+            .include_serial = self.nextIncludeSerial(),
         };
         self.frames[self.frame_count].entry_sp = self.sp;
         self.frame_count += 1;
@@ -10238,7 +10244,13 @@ pub const VM = struct {
                     // share a heap cell across all frames running the same function so
                     // recursive calls and across-call state stay in sync (matches PHP's
                     // static variable semantics).
-                    const func_name = self.currentFuncName() orelse "__main__";
+                    const st_frame = self.currentFrame();
+                    var run_buf: [32]u8 = undefined;
+                    const in_include = st_frame.include_parent != null and st_frame.func == null;
+                    const func_name = if (in_include)
+                        std.fmt.bufPrint(&run_buf, "\x00include{d}", .{st_frame.include_serial}) catch unreachable
+                    else
+                        self.currentFuncName() orelse "__main__";
                     if (self.capture_index.getPtr(func_name)) |range| range.has_statics = true;
                     var key_buf: [256]u8 = undefined;
                     const key = class_names.memberKey(&key_buf, func_name, var_name);
@@ -10251,7 +10263,13 @@ pub const VM = struct {
                     }
                     self.push(cell.?.*);
                     // bind var_name as a true reference to the shared cell
-                    try self.bindRefSlot(&self.currentFrame().ref_slots, var_name, cell.?);
+                    try self.bindRefSlot(&st_frame.ref_slots, var_name, cell.?);
+                    // the variable is the one of the scope the code runs in
+                    if (in_include) {
+                        const parent = &self.frames[st_frame.include_parent.?];
+                        try self.bindRefSlot(&parent.ref_slots, var_name, cell.?);
+                        try self.mirrorBoundName(parent, var_name, cell.?.*);
+                    }
                 },
 
                 .set_static => {},
@@ -10363,6 +10381,7 @@ pub const VM = struct {
                                     .script_path = r.file_path,
                                     .slot_names = r.slot_names,
                                     .include_parent = caller_idx,
+                                    .include_serial = self.nextIncludeSerial(),
                                 };
                                 self.frames[self.frame_count].entry_sp = self.sp;
                                 self.frame_count += 1;
@@ -23531,6 +23550,11 @@ pub const VM = struct {
             const key = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ func_name, var_name });
             try self.statics.put(self.allocator, key, val);
         }
+    }
+
+    fn nextIncludeSerial(self: *VM) u32 {
+        self.include_serial +%= 1;
+        return self.include_serial;
     }
 
     fn currentFuncName(self: *VM) ?[]const u8 {
