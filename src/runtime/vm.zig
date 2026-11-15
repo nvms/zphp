@@ -1075,7 +1075,7 @@ pub const VM = struct {
     // obligations the trait method checks of the class being declared began
     trait_deferred: std.ArrayListUnmanaged(*inheritance.Deferred) = .empty,
     free_closure_names: std.ArrayListUnmanaged(struct { compile_name: []const u8, name: []const u8 }) = .empty,
-    php_constants: std.StringHashMapUnmanaged(Value) = .{},
+    php_constants: std.StringArrayHashMapUnmanaged(Value) = .{},
     user_constants: std.StringHashMapUnmanaged(void) = .{},
     // traits declared #[\Deprecated], with what the warning adds after
     // "is deprecated"
@@ -2532,7 +2532,7 @@ pub const VM = struct {
         }
     }
 
-    fn initConstants(c: *std.StringHashMapUnmanaged(Value), a: Allocator) !void {
+    fn initConstants(c: *std.StringArrayHashMapUnmanaged(Value), a: Allocator) !void {
         try c.put(a, "TRUE", .{ .bool = true });
         try c.put(a, "FALSE", .{ .bool = false });
         try c.put(a, "NULL", .null);
@@ -3273,8 +3273,7 @@ pub const VM = struct {
         defer self.heap_teardown = false;
         // static state (class static props, function statics, superglobals)
         // holds owned values that no frame releases
-        var constant_it = self.php_constants.valueIterator();
-        while (constant_it.next()) |value| {
+        for (self.php_constants.values()) |*value| {
             if (value.* == .string) {
                 self.releaseValue(value.*);
                 value.* = .null;
@@ -10004,7 +10003,7 @@ pub const VM = struct {
                             if (next != .bind_const_attributes and next != .deprecate_const) break;
                             frame.ip += next.width();
                         }
-                    }
+                    } else try self.user_constants.put(self.allocator, name, {});
                 },
                 .parent_hook_call => {
                     const prop = self.currentChunk().constants.items[self.readU16()].string.bytes();
