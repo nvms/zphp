@@ -2818,6 +2818,7 @@ Zend/tests/magic_methods/bug37667.phpt
 Zend/tests/magic_methods/bug37707.phpt
 Zend/tests/magic_methods/bug38146.phpt
 Zend/tests/magic_methods/bug38234.phpt
+Zend/tests/magic_methods/bug38461.phpt
 Zend/tests/magic_methods/bug38624.phpt
 Zend/tests/magic_methods/bug39449.phpt
 Zend/tests/magic_methods/bug39775.phpt
@@ -2832,6 +2833,7 @@ Zend/tests/magic_methods/bug45186_2.phpt
 Zend/tests/magic_methods/bug46409.phpt
 Zend/tests/magic_methods/bug47353.phpt
 Zend/tests/magic_methods/bug47801.phpt
+Zend/tests/magic_methods/bug48248.phpt
 Zend/tests/magic_methods/bug51421.phpt
 Zend/tests/magic_methods/bug52361.phpt
 Zend/tests/magic_methods/bug52484.phpt

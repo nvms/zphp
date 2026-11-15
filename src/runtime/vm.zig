@@ -24146,11 +24146,12 @@ pub const VM = struct {
         if (vis == .private) {
             // for private, check defining class first so parent::__construct()
             // can access its own private properties
+            // only the scope counts: a parent's method running on a child's
+            // object can't reach the child's private property
+            // (zend_get_property_offset's "wrong" case)
             const defining = self.currentDefiningClass();
-            if (defining) |dc| {
-                if (std.mem.eql(u8, dc, target_class)) return true;
-            }
-            const caller_class = self.currentFrame().called_class orelse defining orelse return false;
+            if (defining) |dc| return std.mem.eql(u8, dc, target_class);
+            const caller_class = self.currentFrame().called_class orelse return false;
             return std.mem.eql(u8, caller_class, target_class);
         }
         // protected: caller must be same class or in inheritance chain
