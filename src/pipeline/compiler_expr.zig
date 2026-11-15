@@ -2227,8 +2227,12 @@ pub fn compileReferenceBinding(self: *Compiler, source: u32, dst: u16) Error!boo
                 return true;
             }
             try compileVivifyChain(self, node.data.lhs);
-            if (node.tag == .array_push_target) try self.emitOp(.op_null) else try self.compileNode(node.data.rhs);
-            try self.emitOp(.make_var_array_elem_ref);
+            if (node.tag == .array_push_target) {
+                try self.emitOp(.make_var_array_append_ref);
+            } else {
+                try self.compileNode(node.data.rhs);
+                try self.emitOp(.make_var_array_elem_ref);
+            }
             try self.emitU16(dst);
         },
         .property_access => {

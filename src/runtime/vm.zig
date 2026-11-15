@@ -5167,7 +5167,7 @@ pub const VM = struct {
                     const dollar_name = varVarName(if (name_val == .string) name_val.string.bytes() else "", &buf);
                     const frame = self.currentFrame();
                     const cur = self.frameVariable(frame, dollar_name) orelse .null;
-                    if (cur == .int or cur == .float or (cur == .bool and cur.bool)) {
+                    if (cur == .int or cur == .float or cur == .resource or (cur == .bool and cur.bool)) {
                         if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
                         return error.RuntimeError;
                     }
@@ -6128,6 +6128,9 @@ pub const VM = struct {
                     } else if (arr_val == .string) {
                         if (try self.throwBuiltinException("Error", "[] operator not supported for strings")) continue;
                         return error.RuntimeError;
+                    } else if (try self.refuseDimWrite(arr_val)) |handled| {
+                        if (handled) continue;
+                        return error.RuntimeError;
                     }
                     self.push(val);
                 },
@@ -6260,7 +6263,7 @@ pub const VM = struct {
                         return error.RuntimeError;
                     }
                     if (self.stack[self.sp - 2] == .string) {
-                        if (try self.throwBuiltinException("Error", if (access == 1) "Cannot increment/decrement string offsets" else "Cannot use assign-op operators with string offsets")) continue;
+                        if (self.throwWrongStringOffset(self.stack[self.sp - 1], if (access == 1) "Cannot increment/decrement string offsets" else "Cannot use assign-op operators with string offsets") catch try self.resumeRaised()) continue;
                         return error.RuntimeError;
                     }
                     // php converts the key of a read-modify-write once, with
@@ -6494,11 +6497,17 @@ pub const VM = struct {
                         return error.RuntimeError;
                     } else if (arr_val == .string) {
                         const string = arr_val.string;
-                        switch (try self.stringOffset(string.len, key, .coalesce)) {
+                        // empty() reads the offset as zend_isempty_dim_slow
+                        // does, like isset
+                        switch (try self.stringOffset(string.len, key, if (op == .array_get_empty) .isset else .coalesce)) {
                             .at => |ri| self.pushTransfer(.{ .string = string.retainedSlice(ri, ri + 1) }),
                             .none => self.push(.null),
                             .resumed => continue,
                         }
+                    } else if (arr_val == .object) {
+                        // zend_std_read_dimension without ArrayAccess
+                        if (try self.throwBadArrayAccess(arr_val.object.class_name)) continue;
+                        return error.RuntimeError;
                     } else {
                         self.push(.null);
                     }
@@ -6525,7 +6534,7 @@ pub const VM = struct {
                             };
                             try self.pushOverloadedElement(obj, result) orelse continue;
                         } else {
-                            if (try self.throwBuiltinException("Error", "Cannot use object as array")) continue;
+                            if (try self.throwBadArrayAccess(obj.class_name)) continue;
                             return error.RuntimeError;
                         },
                         .string => {
@@ -6594,12 +6603,15 @@ pub const VM = struct {
                             };
                             try self.pushOverloadedElement(obj, result) orelse continue;
                         } else {
-                            if (try self.throwBuiltinException("Error", "Cannot use object as array")) continue;
+                            if (try self.throwBadArrayAccess(obj.class_name)) continue;
                             return error.RuntimeError;
                         },
                         .string => {
-                            const msg = if (append) "[] operator not supported for strings" else "Cannot use string offset as an object";
-                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            if (append) {
+                                if (try self.throwBuiltinException("Error", "[] operator not supported for strings")) continue;
+                                return error.RuntimeError;
+                            }
+                            if (self.throwWrongStringOffset(key, "Cannot use string offset as an object") catch try self.resumeRaised()) continue;
                             return error.RuntimeError;
                         },
                         // the vivify chain made a null or false root an array;
@@ -6656,7 +6668,7 @@ pub const VM = struct {
                                 // strings", a deeper vivify throws "Cannot use
                                 // string offset as an array"
                                 self.pushFetched(existing);
-                            } else if (existing == .int or existing == .float or (existing == .bool and existing.bool)) {
+                            } else if (existing == .int or existing == .float or existing == .resource or (existing == .bool and existing.bool)) {
                                 if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
                                 return error.RuntimeError;
                             } else {
@@ -6680,7 +6692,10 @@ pub const VM = struct {
                         try self.pushOverloadedElement(arr_val.object, result) orelse continue;
                     } else if (arr_val == .string) {
                         // descending through a string offset as a container
-                        if (try self.throwBuiltinException("Error", "Cannot use string offset as an array")) continue;
+                        if (self.throwWrongStringOffset(key, "Cannot use string offset as an array") catch try self.resumeRaised()) continue;
+                        return error.RuntimeError;
+                    } else if (try self.refuseDimWrite(arr_val)) |handled| {
+                        if (handled) continue;
                         return error.RuntimeError;
                     } else {
                         self.pushFetched(.null);
@@ -6857,6 +6872,10 @@ pub const VM = struct {
                         self.push(v);
                         continue;
                     }
+                    if (try self.refuseDimWrite(existing)) |handled| {
+                        if (handled) continue;
+                        return error.RuntimeError;
+                    }
                     self.push(v);
                 },
 
@@ -6872,7 +6891,7 @@ pub const VM = struct {
                     const inner_key = self.pop();
                     const outer_key = self.pop();
                     const base = self.pop();
-                    if (base != .array and (inner_key == .resource or inner_key == .null)) self.warnOffsetKey(inner_key) catch if (try self.resumeRaised()) continue;
+                    if (base == .object and self.hasMethod(base.object.class_name, "offsetGet") and (inner_key == .resource or inner_key == .null)) self.warnOffsetKey(inner_key) catch if (try self.resumeRaised()) continue;
                     const ik = Value.toArrayKey(inner_key);
                     var existing: Value = .null;
                     var base_is_array_access_obj = false;
@@ -6880,6 +6899,10 @@ pub const VM = struct {
                     if (base == .array) {
                         // the outer offset is fetched first, then the inner; an
                         // error handler for either may free the array
+                        if (outer_key == .array or outer_key == .object) {
+                            if (try self.throwOffsetKeyType(outer_key, .access)) continue;
+                            return error.RuntimeError;
+                        }
                         if (outer_key == .resource or outer_key == .float or outer_key == .null) {
                             if (!(self.warnOffsetKeyOn(outer_key, base.array, v) catch {
                                 _ = try self.resumeRaised();
@@ -6889,7 +6912,20 @@ pub const VM = struct {
                                 continue;
                             }
                         }
-                        if (inner_key == .resource or inner_key == .null) {
+                        existing = base.array.get(Value.toArrayKey(outer_key));
+                        // ZEND_ASSIGN_DIM on the fetched element: an array (or
+                        // null and false, made one) checks the inner offset
+                        const writes_array = existing == .array or existing == .null or (existing == .bool and !existing.bool);
+                        if (writes_array and (inner_key == .array or inner_key == .object)) {
+                            if (existing != .array) {
+                                if (existing == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
+                                const made = try self.allocArray();
+                                try self.arraySetOwned(base.array, Value.toArrayKey(outer_key), .{ .array = made });
+                            }
+                            if (try self.throwOffsetKeyType(inner_key, .access)) continue;
+                            return error.RuntimeError;
+                        }
+                        if (writes_array and (inner_key == .resource or inner_key == .float or inner_key == .null)) {
                             if (!(self.warnOffsetKeyOn(inner_key, base.array, v) catch {
                                 _ = try self.resumeRaised();
                                 continue;
@@ -6897,8 +6933,8 @@ pub const VM = struct {
                                 self.push(v);
                                 continue;
                             }
+                            existing = base.array.get(Value.toArrayKey(outer_key));
                         }
-                        existing = base.array.get(Value.toArrayKey(outer_key));
                     } else if (base == .object and self.hasMethod(base.object.class_name, "offsetGet")) {
                         // ArrayObject / WeakMap / custom ArrayAccess: fetch the
                         // inner element via offsetGet so the write is on the
@@ -6931,12 +6967,12 @@ pub const VM = struct {
                             continue;
                         }
                         base_is_array_access_obj = true;
-                    } else if (base == .object and outer_key == .string) {
-                        self.triggerLazyAccess(base.object, outer_key.string.bytes()) catch {
-                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
-                            return error.RuntimeError;
-                        };
-                        existing = base.object.get(outer_key.string.bytes());
+                    } else if (base == .string) {
+                        if (self.throwWrongStringOffset(outer_key, "Cannot use string offset as an array") catch try self.resumeRaised()) continue;
+                        return error.RuntimeError;
+                    } else if (try self.refuseDimWrite(base)) |handled| {
+                        if (handled) continue;
+                        return error.RuntimeError;
                     } else {
                         self.push(v);
                         continue;
@@ -6998,8 +7034,6 @@ pub const VM = struct {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
-                        } else if (outer_key == .string) {
-                            try base.object.set(self.allocator, outer_key.string.bytes(), .{ .string = written });
                         }
                         self.push(v);
                         continue;
@@ -7027,9 +7061,6 @@ pub const VM = struct {
                                     return error.RuntimeError;
                                 };
                                 inner.refcount -= 1;
-                            } else if (outer_key == .string) {
-                                try base.object.set(self.allocator, outer_key.string.bytes(), .{ .array = inner });
-                                inner.refcount -= 1;
                             }
                             ea = .{ .array = inner };
                         }
@@ -7050,13 +7081,11 @@ pub const VM = struct {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
-                        } else if (outer_key == .string) {
-                            try base.object.set(self.allocator, outer_key.string.bytes(), .{ .array = new_arr });
                         }
                         self.push(v);
                         continue;
                     }
-                    if (existing == .int or existing == .float or (existing == .bool and existing.bool)) {
+                    if (existing == .int or existing == .float or existing == .resource or (existing == .bool and existing.bool)) {
                         if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
                         return error.RuntimeError;
                     }
@@ -7069,6 +7098,10 @@ pub const VM = struct {
                             self.push(v);
                             continue;
                         }
+                    }
+                    if (try self.refuseDimWrite(existing)) |handled| {
+                        if (handled) continue;
+                        return error.RuntimeError;
                     }
                     self.push(v);
                 },
@@ -7131,8 +7164,8 @@ pub const VM = struct {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
-                    } else if (arr_val == .int or arr_val == .float or (arr_val == .bool and arr_val.bool)) {
-                        if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
+                    } else if (try self.refuseDimWrite(arr_val)) |handled| {
+                        if (handled) continue;
                         return error.RuntimeError;
                     } else if (arr_val == .string and key == .string) {
                         if (try self.throwBuiltinException("TypeError", "Cannot access offset of type string on string")) continue;
@@ -7206,21 +7239,23 @@ pub const VM = struct {
                         continue;
                     }
 
-                    if (cur == .int or cur == .float or (cur == .bool and cur.bool)) {
+                    if (cur == .int or cur == .float or cur == .resource or (cur == .bool and cur.bool)) {
                         if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
                         return error.RuntimeError;
                     }
 
                     if (cur == .null or (cur == .bool and !cur.bool)) {
                         if (cur == .bool) self.falseToArrayDeprecated() catch if (try self.resumeRaised()) continue;
-                        if (key == .array or key == .object) {
-                            if (try self.throwOffsetKeyType(key, .access)) continue;
-                            return error.RuntimeError;
-                        }
                         const new_arr = try self.allocArray();
                         const arr_val = Value{ .array = new_arr };
                         retainValue(arr_val);
                         try self.storeLocalSlot(frame, slot, arr_val);
+                        // ZEND_ASSIGN_DIM makes the variable an array before
+                        // it looks at the offset
+                        if (key == .array or key == .object) {
+                            if (try self.throwOffsetKeyType(key, .access)) continue;
+                            return error.RuntimeError;
+                        }
                         if (key == .resource or key == .float or key == .null) {
                             // an error handler may replace the variable and free
                             // the new array: php's GC_TRY_ADDREF around the
@@ -7290,6 +7325,10 @@ pub const VM = struct {
                         self.push(val);
                         continue;
                     }
+                    if (try self.refuseDimWrite(cur)) |handled| {
+                        if (handled) continue;
+                        return error.RuntimeError;
+                    }
 
                     self.push(val);
                 },
@@ -7310,7 +7349,7 @@ pub const VM = struct {
                     }
                     const from_ref = self.slotRefCell(frame, slot) != null;
                     const cur = self.loadLocalSlot(frame, slot, self.slotRefCell(frame, slot));
-                    if (cur == .int or cur == .float or (cur == .bool and cur.bool)) {
+                    if (cur == .int or cur == .float or cur == .resource or (cur == .bool and cur.bool)) {
                         if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
                         return error.RuntimeError;
                     }
@@ -7393,7 +7432,7 @@ pub const VM = struct {
                     // an unset's base (separate_only): a shared array is
                     // separated, anything else is left for the unset to judge
                     if (separate_only and cur != .array) continue;
-                    if (cur == .int or cur == .float or (cur == .bool and cur.bool)) {
+                    if (cur == .int or cur == .float or cur == .resource or (cur == .bool and cur.bool)) {
                         if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
                         return error.RuntimeError;
                     }
@@ -7564,7 +7603,7 @@ pub const VM = struct {
                         if (try self.checkPropertyMutation(eap_obj, prop_name, .indirect)) continue;
                     }
                     if (hook_cell) |cell| cur = try self.prepareHookArray(cell);
-                    if (cur == .int or cur == .float or (cur == .bool and cur.bool)) {
+                    if (cur == .int or cur == .float or cur == .resource or (cur == .bool and cur.bool)) {
                         if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
                         return error.RuntimeError;
                     }
@@ -7644,7 +7683,7 @@ pub const VM = struct {
                     };
                     if (self.getStaticPropPtr(class_name, prop_name)) |slot| {
                         const cur = slot.*;
-                        if (cur == .int or cur == .float or (cur == .bool and cur.bool)) {
+                        if (cur == .int or cur == .float or cur == .resource or (cur == .bool and cur.bool)) {
                             if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
                             return error.RuntimeError;
                         }
@@ -7728,7 +7767,7 @@ pub const VM = struct {
                     const aei_key = self.pop();
                     const aei_arr = self.pop();
                     if (aei_arr == .string) {
-                        if (try self.throwBuiltinException("Error", "Cannot increment/decrement string offsets")) continue;
+                        if (self.throwWrongStringOffset(aei_key, "Cannot increment/decrement string offsets") catch try self.resumeRaised()) continue;
                         return error.RuntimeError;
                     }
                     var elem_arr: ?*PhpArray = if (aei_arr == .array) aei_arr.array else null;
@@ -7770,6 +7809,9 @@ pub const VM = struct {
                             return error.RuntimeError;
                         };
                         try self.pushOverloadedElement(aei_arr.object, result) orelse continue;
+                    } else if (try self.refuseDimWrite(aei_arr)) |handled| {
+                        if (handled) continue;
+                        return error.RuntimeError;
                     } else {
                         self.push(.null);
                     }
@@ -8241,6 +8283,12 @@ pub const VM = struct {
                         if (self.dispatchPendingException(base_frame)) continue;
                         return error.RuntimeError;
                     }
+                    if (arr_val != .array) {
+                        if (try self.refuseDimRefBind(arr_val, key_val)) |handled| {
+                            if (handled) continue;
+                            return error.RuntimeError;
+                        }
+                    }
                     if (key_val == .resource or key_val == .float or key_val == .null) self.warnOffsetKey(key_val) catch if (try self.resumeRaised()) continue;
                     const key = PhpArray.normalizeKey(Value.toArrayKey(key_val));
                     self.push(try self.bindArrayElementRef(arr_val, key, var_name));
@@ -8262,6 +8310,12 @@ pub const VM = struct {
                         self.raiseError(8, msg) catch if (try self.resumeRaised()) continue;
                         if (try self.throwBuiltinException("Error", "Cannot assign by reference to an array dimension of an object")) continue;
                         return error.RuntimeError;
+                    }
+                    if (arr_val != .array) {
+                        if (try self.refuseDimRefBind(arr_val, null)) |handled| {
+                            if (handled) continue;
+                            return error.RuntimeError;
+                        }
                     }
                     if (arr_val == .array and arr_val.array.nextElementOccupied()) {
                         if (try self.throwNextElementOccupied()) continue;
@@ -8321,7 +8375,7 @@ pub const VM = struct {
                     try self.bindRefSlot(&self.currentFrame().ref_slots, dst_name, cell);
                 },
 
-                .make_var_array_elem_ref => {
+                .make_var_array_elem_ref, .make_var_array_append_ref => |ref_op| {
                     const dst_idx = self.readU16();
                     const dst_name = self.currentChunk().constants.items[dst_idx].string.bytes();
                     if (platform.getenv("ZPHP_DBG_REF") != null) {
@@ -8338,10 +8392,15 @@ pub const VM = struct {
                         _ = platform.write(sfe, m) catch {};
                         self.allocator.free(m);
                     }
-                    const key_val = self.pop();
+                    const append_ref = ref_op == .make_var_array_append_ref;
+                    const key_val: Value = if (append_ref) .null else self.pop();
                     const arr_val = self.pop();
                     if (arr_val == .string) {
-                        if (try self.throwBuiltinException("Error", "Cannot create references to/from string offsets")) continue;
+                        if (append_ref) {
+                            if (try self.throwBuiltinException("Error", "[] operator not supported for strings")) continue;
+                            return error.RuntimeError;
+                        }
+                        if (self.throwWrongStringOffset(key_val, "Cannot create references to/from string offsets") catch try self.resumeRaised()) continue;
                         return error.RuntimeError;
                     }
                     const frame = self.currentFrame();
@@ -8350,7 +8409,7 @@ pub const VM = struct {
                         // spl_array_get_dimension_ptr for BP_VAR_W: the
                         // element of the storage array itself
                         var ctx = self.makeContext(null);
-                        const target = @import("../stdlib/spl.zig").arrayStorageRefTarget(&ctx, arr_val.object, key_val) catch {
+                        const target = @import("../stdlib/spl.zig").arrayStorageRefTarget(&ctx, arr_val.object, if (append_ref) null else key_val) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
@@ -8358,19 +8417,23 @@ pub const VM = struct {
                             try self.bindSlotToElement(frame, dst_name, t.arr, t.key);
                         } else try self.bindRefSlot(&frame.ref_slots, dst_name, try self.newRefCell());
                     } else if (arr_val != .array) {
-                        try self.bindRefSlot(&frame.ref_slots, dst_name, blk: {
-                            const c = try self.newRefCell();
-
-                            break :blk c;
-                        });
+                        if (try self.refuseDimWrite(arr_val)) |handled| {
+                            if (handled) continue;
+                            return error.RuntimeError;
+                        }
+                        try self.bindRefSlot(&frame.ref_slots, dst_name, try self.newRefCell());
                     } else {
-                        if (key_val == .resource or key_val == .float) self.warnOffsetKey(key_val) catch if (try self.resumeRaised()) continue;
+                        if (key_val == .array or key_val == .object) {
+                            if (try self.throwOffsetKeyType(key_val, .access)) continue;
+                            return error.RuntimeError;
+                        }
+                        if (!append_ref and (key_val == .resource or key_val == .float or key_val == .null)) self.warnOffsetKey(key_val) catch if (try self.resumeRaised()) continue;
                         const arr_ptr = arr_val.array;
-                        const append_ref = key_val == .null;
                         const key: PhpArray.Key = if (append_ref)
                             .{ .int = if (arr_ptr.has_int_keys) arr_ptr.next_int_key else 0 }
                         else switch (key_val) {
                             .int => |i| .{ .int = i },
+                            .null => .{ .string = Value.String.borrowed("") },
                             .string => |s| PhpArray.normalizeKey(.{ .string = s }),
                             else => .{ .int = Value.toInt(key_val) },
                         };
@@ -9621,6 +9684,10 @@ pub const VM = struct {
                             .none => self.push(.{ .bool = false }),
                             .resumed => continue,
                         }
+                    } else if (arr_val == .object) {
+                        // zend_std_has_dimension without ArrayAccess
+                        if (try self.throwBadArrayAccess(arr_val.object.class_name)) continue;
+                        return error.RuntimeError;
                     } else {
                         self.push(.{ .bool = false });
                     }
@@ -14437,6 +14504,9 @@ pub const VM = struct {
         const frame = self.frames[frame_idx];
         if (frame.func) |f| if (f.file_path.len > 0) return f.file_path;
         if (frame.script_path.len > 0) return frame.script_path;
+        // a native method's frame runs the caller's chunk: an include's code
+        // names the included file
+        if (frame.native and frame_idx > 0) return self.frameFile(frame_idx - 1);
         return self.file_path;
     }
 
@@ -15058,6 +15128,19 @@ pub const VM = struct {
             },
             .null, .undef, .bool, .float => blk: {
                 if (mode == .read) self.emitWarning("String offset cast occurred") catch return if (try self.resumeRaised()) .resumed else error.RuntimeError;
+                // isset converts with zval_get_long_ex(strict): the
+                // out-of-range warning, then the precision deprecation
+                if (mode == .isset and key == .float) {
+                    const f = key.float;
+                    const n = Value.toInt(key);
+                    if (!(f >= -9.2233720368547758e18 and f < 9.2233720368547758e18)) {
+                        var tmp: [64]u8 = undefined;
+                        const m = try std.fmt.allocPrint(self.allocator, "The float {s} is not representable as an int, cast occurred", .{formatted_print.gcvt(f, -1, '.', 'E', &tmp)});
+                        defer self.allocator.free(m);
+                        self.emitWarning(m) catch return if (try self.resumeRaised()) .resumed else error.RuntimeError;
+                    }
+                    if (@as(f64, @floatFromInt(n)) != f) self.warnLossyIntConversion(f, null) catch return if (try self.resumeRaised()) .resumed else error.RuntimeError;
+                }
                 break :blk Value.toInt(key);
             },
             else => {
@@ -15132,7 +15215,11 @@ pub const VM = struct {
                     var tmp: [64]u8 = undefined;
                     const m = try std.fmt.allocPrint(self.allocator, "The float {s} is not representable as an int, cast occurred", .{formatted_print.gcvt(f, -1, '.', 'E', &tmp)});
                     defer self.allocator.free(m);
-                    return self.emitWarning(m);
+                    try self.emitWarning(m);
+                    // zend_dval_to_lval_safe: NAN also passes its fits-long
+                    // test, so it is deprecated on top
+                    if (std.math.isNan(f)) try self.warnLossyIntConversion(f, null);
+                    return;
                 }
                 if (f != @trunc(f)) try self.warnLossyIntConversion(f, null);
             },
@@ -15194,6 +15281,87 @@ pub const VM = struct {
         if (call_args and named.*) return .positional_after_named;
         if (!try target.appendNew(self.allocator, value)) return .occupied;
         return .stored;
+    }
+
+    // zend_check_string_offset, then zend_wrong_string_offset_error: a
+    // write fetch on a string converts the offset (its warnings, an illegal
+    // offset's TypeError) before refusing with msg. returns as
+    // throwBuiltinException does
+    pub fn throwWrongStringOffset(self: *VM, key: Value, msg: []const u8) RuntimeError!bool {
+        switch (key) {
+            .int => {},
+            .string => |str| switch (offsetStringKey(str.bytes()).kind) {
+                .integer => {},
+                .trailing => {
+                    const w = try std.fmt.allocPrint(self.allocator, "Illegal string offset \"{s}\"", .{str.bytes()});
+                    defer self.allocator.free(w);
+                    try self.emitWarning(w);
+                },
+                .other => return self.throwBuiltinException("TypeError", "Cannot access offset of type string on string"),
+            },
+            .float, .null, .undef, .bool => try self.emitWarning("String offset cast occurred"),
+            else => {
+                const m = try std.fmt.allocPrint(self.allocator, "Cannot access offset of type {s} on string", .{key.valueName()});
+                defer self.allocator.free(m);
+                return self.throwBuiltinException("TypeError", m);
+            },
+        }
+        return self.throwBuiltinException("Error", msg);
+    }
+
+    // a container php's dimension write refuses: a scalar other than null
+    // and false (zend_use_scalar_as_array) or an object without dimension
+    // handlers (zend_bad_array_access). null when the container is
+    // acceptable, else as throwBuiltinException returns
+    pub fn refuseDimWrite(self: *VM, container: Value) RuntimeError!?bool {
+        switch (container) {
+            .int, .float, .resource => {},
+            .bool => |b| if (!b) return null,
+            .object => |o| {
+                if (self.hasMethod(o.class_name, "offsetGet")) return null;
+                return try self.throwBadArrayAccess(o.class_name);
+            },
+            .generator => return try self.throwBadArrayAccess("Generator"),
+            .fiber => return try self.throwBadArrayAccess("Fiber"),
+            else => return null,
+        }
+        return try self.throwBuiltinException("Error", "Cannot use a scalar value as an array");
+    }
+
+    // `$c[k] = &$v` (key null: `$c[] = &$v`) on a container that isn't an
+    // array: FETCH_DIM_W then ASSIGN_REF. a string refuses the fetch, an
+    // ArrayAccess object hands out offsetGet's value, which can't be bound
+    // to. null when the binding goes ahead (null and false containers)
+    fn refuseDimRefBind(self: *VM, container: Value, key: ?Value) RuntimeError!?bool {
+        switch (container) {
+            .string => {
+                if (key) |k| return self.throwWrongStringOffset(k, "Cannot create references to/from string offsets") catch try self.resumeRaised();
+                return try self.throwBuiltinException("Error", "[] operator not supported for strings");
+            },
+            .object => |obj| if (self.hasMethod(obj.class_name, "offsetGet") and !self.offsetGetReturnsRef(obj)) {
+                const saved_append = self.dim_append_depth;
+                if (key == null) self.dim_append_depth = self.frame_count + 1;
+                const result = self.callMethod(obj, "offsetGet", &.{key orelse .null}) catch {
+                    self.dim_append_depth = saved_append;
+                    return try self.resumeRaised();
+                };
+                self.dim_append_depth = saved_append;
+                _ = result;
+                const msg = try std.fmt.allocPrint(self.allocator, "Indirect modification of overloaded element of {s} has no effect", .{obj.class_name});
+                defer self.allocator.free(msg);
+                self.raiseError(8, msg) catch return try self.resumeRaised();
+                return try self.throwBuiltinException("Error", "Cannot assign by reference to an array dimension of an object");
+            },
+            else => {},
+        }
+        return self.refuseDimWrite(container);
+    }
+
+    // zend_bad_array_access: an object without dimension handlers
+    pub fn throwBadArrayAccess(self: *VM, class_name: []const u8) RuntimeError!bool {
+        const msg = try std.fmt.allocPrint(self.allocator, "Cannot use object of type {s} as array", .{class_name});
+        defer self.allocator.free(msg);
+        return self.throwBuiltinException("Error", msg);
     }
 
     pub const OffsetOp = enum { access, isset_or_empty, unset };
@@ -15513,7 +15681,9 @@ pub const VM = struct {
         return self.emitWarning("A non-numeric value encountered");
     }
 
-    pub fn emitUndefinedKeyWarning(self: *VM, key: PhpArray.Key) RuntimeError!void {
+    pub fn emitUndefinedKeyWarning(self: *VM, raw_key: PhpArray.Key) RuntimeError!void {
+        // a numeric string names the integer key it is
+        const key = PhpArray.normalizeKey(raw_key);
         const msg = switch (key) {
             .int => |n| try std.fmt.allocPrint(self.allocator, "Undefined array key {d}", .{n}),
             .string => |s| try std.fmt.allocPrint(self.allocator, "Undefined array key \"{s}\"", .{s.bytes()}),

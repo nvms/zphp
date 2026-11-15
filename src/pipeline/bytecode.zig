@@ -560,6 +560,9 @@ pub const OpCode = enum(u16) {
     // argument by reference makes it php's "Cannot use temporary expression
     // in write context" (FETCH_DIM_FUNC_ARG on a TMP)
     arg_temp_container,
+    // u16: dst name const. `$r = &$a[]`: binds dst to a new appended
+    // element (make_var_array_elem_ref takes a key, null being "")
+    make_var_array_append_ref,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -616,6 +619,7 @@ pub const OpCode = enum(u16) {
             .array_set_var,
             .cow_separate_local,
             .make_var_array_elem_ref,
+            .make_var_array_append_ref,
             .break_var_ref,
             .make_var_prop_ref_dyn,
             .prop_bind_ref,

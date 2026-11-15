@@ -817,11 +817,12 @@ pub fn arrayStorageFetch(ctx: *NativeContext, obj: *PhpObject, offset: Value) Ru
 // null when missing; null for a storage that is an object's property table
 pub const RefTarget = struct { arr: *PhpArray, key: PhpArray.Key };
 
-pub fn arrayStorageRefTarget(ctx: *NativeContext, obj: *PhpObject, offset: Value) RuntimeError!?RefTarget {
+// a null offset is `$o[]`, an append
+pub fn arrayStorageRefTarget(ctx: *NativeContext, obj: *PhpObject, offset: ?Value) RuntimeError!?RefTarget {
     try forbidDuringSort(ctx, obj);
     switch (try splStorage(ctx, obj)) {
         .array => |s| {
-            const key: PhpArray.Key = if (offset == .null) .{ .int = if (s.arr.has_int_keys) s.arr.next_int_key else 0 } else try splKey(ctx, obj, offset, .write);
+            const key: PhpArray.Key = if (offset) |o| try splKey(ctx, obj, o, .write) else .{ .int = if (s.arr.has_int_keys) s.arr.next_int_key else 0 };
             const arr = try writableArray(ctx, s.holder, s.arr);
             if (arr.getPtr(key) == null) try arr.set(ctx.allocator, key, .null);
             return .{ .arr = arr, .key = key };
