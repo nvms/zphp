@@ -831,7 +831,14 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try generator_def.interfaces.append(a, "Iterator");
     try generator_def.interfaces.append(a, "Traversable");
     try vm.classes.put(a, "Generator", generator_def);
-    try vm.classes.put(a, "Fiber", ClassDef{ .name = "Fiber" });
+    // Fiber's static methods as callables ([Fiber::class, 'suspend'],
+    // Fiber::suspend(...)); a direct Fiber::suspend() call is an opcode's
+    var fiber_def = ClassDef{ .name = "Fiber", .is_final = true };
+    try fiber_def.methods.put(a, "suspend", .{ .name = "suspend", .arity = 1, .is_static = true });
+    try fiber_def.methods.put(a, "getCurrent", .{ .name = "getCurrent", .arity = 0, .is_static = true });
+    try vm.classes.put(a, "Fiber", fiber_def);
+    try vm.native_fns.put(a, "Fiber::suspend", fiberSuspend);
+    try vm.native_fns.put(a, "Fiber::getCurrent", fiberGetCurrent);
 
     var rref_def = ClassDef{ .name = "ReflectionReference", .is_final = true };
     try rref_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0, .visibility = .private });
@@ -6517,11 +6524,12 @@ fn fiberPosition(ctx: *NativeContext, fib: *Fiber) ?FiberPosition {
         const loc = ctx.vm.sourceLocation(frame.chunk, ip) orelse return null;
         return .{ .file = ctx.vm.frameFile(ctx.vm.frame_count - 1), .line = @intCast(loc.line) };
     }
-    if (fib.saved_frames.items.len == 0) return null;
-    return savedFramePosition(ctx, &fib.saved_frames.items[fib.saved_frames.items.len - 1]);
+    const frames = VM.suspendedFiberFrames(fib);
+    if (frames.len == 0) return null;
+    return savedFramePosition(ctx, &frames[frames.len - 1]);
 }
 
-fn savedFramePosition(ctx: *NativeContext, frame: *const Fiber.SavedFrame) ?FiberPosition {
+fn savedFramePosition(ctx: *NativeContext, frame: *const VM.CallFrame) ?FiberPosition {
     const ip = if (frame.ip > 0) frame.ip - 1 else 0;
     const loc = ctx.vm.sourceLocation(frame.chunk, ip) orelse return null;
     const file = if (frame.func) |f| (if (f.file_path.len > 0) f.file_path else ctx.vm.file_path) else ctx.vm.file_path;
@@ -6538,6 +6546,15 @@ fn rfibGetExecutingFile(ctx: *NativeContext, _: []const Value) RuntimeError!Nati
     const fib = try startedFiber(ctx);
     const pos = fiberPosition(ctx, fib) orelse return NativeResult.scalar(.null);
     return try NativeResult.copyString(ctx.allocator, pos.file);
+}
+
+fn fiberSuspend(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    return NativeResult.share(try ctx.vm.suspendFiber(if (args.len > 0) args[0] else .null, args.len > 0));
+}
+
+fn fiberGetCurrent(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const fiber = ctx.vm.current_fiber orelse return NativeResult.scalar(.null);
+    return NativeResult.share(.{ .fiber = fiber });
 }
 
 fn rfibGetCallable(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -6566,46 +6583,46 @@ fn rfibGetTrace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     const options: i64 = if (args.len > 0) (try zpp.long(ctx, "ReflectionFiber::getTrace", args, 0, "options", false)) orelse 1 else 1;
     const fib = try startedFiber(ctx);
     if (ctx.vm.current_fiber == fib) {
-        // within the fiber the trace is debug_backtrace's
-        const all = try ctx.vm.callByName("debug_backtrace", &.{.{ .int = if (options & 1 != 0) 0 else 1 }});
+        // within the fiber the trace is debug_backtrace's, down to the
+        // fiber's first frame
+        var cut = ctx.vm.cutTraceAtFiber(fib);
+        defer ctx.vm.endTraceCut(&cut);
+        const all = try ctx.vm.callByName("debug_backtrace", &.{.{ .int = options & 3 }});
         return NativeResult.share(all);
     }
+    // its frames go back where they ran while debug_backtrace's walk lists
+    // them, below php's Fiber::suspend() entry
+    const frames = VM.suspendedFiberFrames(fib);
+    // Fiber::suspend() a native called has no file or line
+    const top_pos = if (frames.len > 0 and !VM.suspendedByNative(fib)) savedFramePosition(ctx, &frames[frames.len - 1]) else null;
+    var view = (try ctx.vm.viewSuspendedFiber(fib)) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+    const listed = blk: {
+        defer ctx.vm.endSuspendedView(&view);
+        // the walk passes over the innermost call as debug_backtrace's own
+        var own: vm_mod.NativeCall = .{ .label = "", .args = &.{}, .depth = ctx.vm.frame_count, .instance = false, .outer = ctx.vm.native_call };
+        ctx.vm.native_call = &own;
+        defer ctx.vm.native_call = own.outer;
+        break :blk try @import("system.zig").buildBacktrace(ctx, options & 2 != 0, options & 1 != 0, 0);
+    };
     const arr = try ctx.createArray();
-    const frames = fib.saved_frames.items;
-    if (frames.len > 0) {
-        const entry = try ctx.createArray();
-        if (savedFramePosition(ctx, &frames[frames.len - 1])) |pos| {
-            try traceSet(ctx, entry, "file", .{ .string = Value.String.borrowed(pos.file) });
-            try traceSet(ctx, entry, "line", .{ .int = pos.line });
-        }
-        try traceSet(ctx, entry, "function", .{ .string = Value.String.borrowed("suspend") });
-        try traceSet(ctx, entry, "class", .{ .string = Value.String.borrowed("Fiber") });
-        try traceSet(ctx, entry, "type", .{ .string = Value.String.borrowed("::") });
-        if (options & 2 == 0) try traceSet(ctx, entry, "args", .{ .array = try ctx.createArray() });
-        try arr.append(ctx.allocator, .{ .array = entry });
+    const entry = try ctx.createArray();
+    if (top_pos) |pos| {
+        try traceSet(ctx, entry, "file", .{ .string = Value.String.borrowed(pos.file) });
+        try traceSet(ctx, entry, "line", .{ .int = pos.line });
     }
-    var k = frames.len;
-    while (k > 0) {
-        k -= 1;
-        const frame = &frames[k];
-        const func = frame.func orelse continue;
-        const entry = try ctx.createArray();
-        if (k > 0) if (savedFramePosition(ctx, &frames[k - 1])) |pos| {
-            try traceSet(ctx, entry, "file", .{ .string = Value.String.borrowed(pos.file) });
-            try traceSet(ctx, entry, "line", .{ .int = pos.line });
-        };
-        if (std.mem.indexOf(u8, func.name, "::")) |sep| {
-            try traceSet(ctx, entry, "function", .{ .string = Value.String.borrowed(try ctx.vm.phpMethodName(func.name[sep + 2 ..])) });
-            try traceSet(ctx, entry, "class", .{ .string = Value.String.borrowed(func.name[0..sep]) });
-            const this_v = frame.vars.get("$this");
-            if (this_v != null and this_v.? == .object and options & 1 != 0) try traceSet(ctx, entry, "object", this_v.?);
-            try traceSet(ctx, entry, "type", .{ .string = Value.String.borrowed(if (func.is_static) "::" else "->") });
-        } else {
-            try traceSet(ctx, entry, "function", .{ .string = Value.String.borrowed(try ctx.vm.funcDisplayName(func)) });
+    try traceSet(ctx, entry, "function", .{ .string = Value.String.borrowed("suspend") });
+    try traceSet(ctx, entry, "class", .{ .string = Value.String.borrowed("Fiber") });
+    try traceSet(ctx, entry, "type", .{ .string = Value.String.borrowed("::") });
+    if (options & 2 == 0) {
+        const suspend_args = try ctx.createArray();
+        if (VM.suspendedWithArg(fib)) {
+            try suspend_args.append(ctx.allocator, fib.suspend_value);
         }
-        if (options & 2 == 0) try traceSet(ctx, entry, "args", .{ .array = try ctx.createArray() });
-        try arr.append(ctx.allocator, .{ .array = entry });
+        try traceSet(ctx, entry, "args", .{ .array = suspend_args });
     }
+    try arr.append(ctx.allocator, .{ .array = entry });
+    for (listed.entries.items) |e| try arr.append(ctx.allocator, e.value);
+    listed.entries.clearRetainingCapacity();
     return NativeResult.borrowed(.{ .array = arr });
 }
 

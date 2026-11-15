@@ -1022,14 +1022,19 @@ fn createTempFile(ctx: *NativeContext, dir: []const u8, prefix: []const u8) Runt
     return null;
 }
 
-fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bool, limit: usize) RuntimeError!*PhpArray {
+pub fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bool, limit: usize) RuntimeError!*PhpArray {
     const vm = ctx.vm;
     const alloc = ctx.allocator;
     var result = try ctx.createArray();
 
     if (vm.frame_count <= 1) return result;
+    // frames in the order calls were made, for a fiber suspended inside
+    // native code and resumed from elsewhere
+    var layout = try vm.layOutForTrace();
+    defer vm.undoTraceLayout(&layout);
+    const floor = @max(1, vm.trace_floor);
 
-    const max = if (limit > 0) @min(limit, vm.frame_count - 1) else vm.frame_count - 1;
+    const max = if (limit > 0) @min(limit, vm.frame_count - floor) else vm.frame_count - floor;
     var count: usize = 0;
     var i: usize = vm.frame_count - 1;
 
@@ -1050,9 +1055,9 @@ fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bool, 
     }
     var next_native: usize = 0;
 
-    while (i >= 1 and count < max) : ({
+    while (i >= floor and count < max) : ({
         i -= 1;
-        count += 1;
+        count +%= 1;
     }) {
         try appendNativeEntries(vm, result, natives[0..native_count], &next_native, i, ignore_args, provide_object, limit);
         if (limit > 0 and result.entries.items.len >= limit) break;
@@ -1061,7 +1066,7 @@ fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bool, 
             count -%= 1;
             continue;
         }
-        const called_by_native = next_native < native_count and natives[next_native].depth == i;
+        const called_by_native = (next_native < native_count and natives[next_native].depth == i) or i == vm.trace_floor;
         var entry = try ctx.createArray();
         const frame = &vm.frames[i];
         // a generator running as a yield from delegate is listed as called
@@ -1172,7 +1177,7 @@ fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bool, 
     }
 
     // natives the main script's code called
-    if (i == 0) try appendNativeEntries(vm, result, natives[0..native_count], &next_native, 0, ignore_args, provide_object, limit);
+    if (i == 0 and vm.trace_floor == 0) try appendNativeEntries(vm, result, natives[0..native_count], &next_native, 0, ignore_args, provide_object, limit);
     return result;
 }
 

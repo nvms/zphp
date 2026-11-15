@@ -949,6 +949,9 @@ pub const Generator = struct {
     // php's ZEND_GENERATOR_FORCED_CLOSE: destroyed while suspended, it runs
     // its finally blocks and may not yield again
     forced_close: bool = false,
+    // php's ZEND_GENERATOR_IN_FIBER: resumed (or resumed through) inside a
+    // fiber, and not back from that resume yet
+    in_fiber: bool = false,
     pooled: bool = false,
     // how often it has been resumed
     resumes: u32 = 0,
@@ -998,17 +1001,13 @@ pub const Generator = struct {
 
 pub const Fiber = struct {
     // refcount Stage 2: every live Value handle bumps this. 0 means
-    // unreachable; the VM runs cleanupFiberFrames + drops saved state at
+    // unreachable; the VM runs releaseFiberNative + drops saved state at
     // that point. starts at 0; new_fiber + push retain to 1
     refcount: u32 = 0,
     // the Fiber object's handle
     handle: u32 = 0,
     state: State = .created,
     callable: Value = .null,
-
-    saved_frames: std.ArrayListUnmanaged(SavedFrame) = .empty,
-    saved_stack: std.ArrayListUnmanaged(Value) = .empty,
-    saved_handlers: std.ArrayListUnmanaged(SavedHandler) = .empty,
 
     suspend_value: Value = .null,
     return_value: Value = .null,
@@ -1022,43 +1021,13 @@ pub const Fiber = struct {
     // its own @ depth and error_reporting while it is suspended
     saved_silence: u32 = 0,
     saved_level: ?i64 = null,
+    // the machine stack its code runs on and what a suspension in place
+    // keeps (the vm's FiberNative), from its start until it ends
+    native: ?*anyopaque = null,
 
     pub const State = enum { created, running, suspended, terminated };
 
-    pub const SavedFrame = struct {
-        chunk: *const Chunk,
-        ip: usize,
-        vars: std.StringHashMapUnmanaged(Value),
-        locals: []Value = &.{},
-        func: ?*const ObjFunction = null,
-        called_class: ?[]const u8 = null,
-        generator: ?*Generator = null,
-        ref_slots: std.StringHashMapUnmanaged(*Value),
-        ref_owner: RefIndex.OwnerId = 0,
-        call_name: ?[]const u8 = null,
-    };
-
-    pub const SavedHandler = struct {
-        catch_ip: usize,
-        frame_count_offset: usize,
-        sp_offset: usize,
-        chunk: *const Chunk,
-    };
-
-    pub fn deinit(self: *Fiber, allocator: std.mem.Allocator) void {
-        for (self.saved_frames.items) |*f| {
-            f.vars.deinit(allocator);
-            var refs = f.ref_slots;
-            f.ref_slots = .{};
-            var rit = refs.valueIterator();
-            while (rit.next()) |cell| unbindCell(cell.*);
-            refs.deinit(allocator);
-            if (f.locals.len > 0) allocator.free(f.locals);
-        }
-        self.saved_frames.deinit(allocator);
-        self.saved_stack.deinit(allocator);
-        self.saved_handlers.deinit(allocator);
-    }
+    pub fn deinit(_: *Fiber, _: std.mem.Allocator) void {}
 
     pub fn retain(self: *Fiber) void {
         self.refcount +%= 1;

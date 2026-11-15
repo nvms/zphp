@@ -29,6 +29,31 @@ pub fn allowedSize() usize {
     return usable;
 }
 
+// the limits in force on the running stack, kept by whoever switches to
+// another stack (a fiber's) and put back when it switches back
+pub const Saved = struct { limit: usize, usable: usize };
+
+pub fn save() Saved {
+    if (limit == 0) init();
+    return .{ .limit = limit, .usable = usable };
+}
+
+pub fn restore(saved: Saved) void {
+    limit = saved.limit;
+    usable = saved.usable;
+}
+
+// the limits of a stack about to run, from its bounds (a fiber's stack);
+// with none known (windows keeps them in the teb) the running thread's are
+// read again on the next check
+pub fn enter(low: usize, high: usize) void {
+    if (high <= low) {
+        limit = 0;
+        return;
+    }
+    setFrom(.{ .low = low, .high = high });
+}
+
 pub const message_format = "Maximum call stack size of {d} bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?";
 
 fn init() void {
@@ -38,6 +63,10 @@ fn init() void {
         usable = 0;
         return;
     };
+    setFrom(bounds);
+}
+
+fn setFrom(bounds: Bounds) void {
     const size = bounds.high - bounds.low;
     usable = size -| reserve;
     // a stack too small for the reserve still gets half of itself

@@ -12,6 +12,7 @@ const output_control = @import("../stdlib/output_control.zig");
 const php_types = @import("../pipeline/php_types.zig");
 const formatted_print = @import("../stdlib/formatted_print.zig");
 pub const stack_limit = @import("stack_limit.zig");
+const coro = @import("coro.zig");
 const Value = @import("value.zig").Value;
 const value_mod = @import("value.zig");
 const Region = @import("region.zig").Region;
@@ -921,7 +922,7 @@ pub const VM = struct {
     pending_string_release: std.ArrayListUnmanaged(*Value.String.Owner) = .empty,
     // Stage 2 finer generator/fiber lifetime: gen/fiber handles dropped to
     // refcount 0 are queued for closeGenerator + releaseGeneratorVars /
-    // cleanupFiberFrames at the next drain. queueing (not inline close) lets
+    // releaseFiberNative at the next drain. queueing (not inline close) lets
     // a transient drop-then-re-retain through a pop-then-store pattern
     // survive - the drain re-checks refcount before closing
     pending_gen_release: std.ArrayListUnmanaged(*@import("value.zig").Generator) = .empty,
@@ -972,12 +973,9 @@ pub const VM = struct {
     ref_cells: std.ArrayListUnmanaged(*RefCell) = .empty,
     free_cells: std.ArrayListUnmanaged(*RefCell) = .empty,
     current_fiber: ?*Fiber = null,
-    fiber_suspend_pending: bool = false,
-    // destructors run from the release drain, a zig call that can't be
-    // suspended across: a Fiber::suspend in one would lose the drain and
-    // resume in the destructor's frame, so it throws instead (php can).
-    // a fiber started inside the destructor suspends within itself, so
-    // each fiber run starts unblocked
+    // php's zend_fiber_switch_block: no Fiber::suspend inside a tick
+    // function. a fiber started inside one suspends within itself, so each
+    // fiber run starts unblocked
     fiber_switch_blocked: u32 = 0,
     // php's GC_G(dtor_fiber): garbage found while a fiber runs has its
     // destructors called in a fiber of their own, so one may suspend. the
@@ -986,7 +984,13 @@ pub const VM = struct {
     gc_dtors_in_fiber: bool = false,
     // objects the destructors of the current collection revived
     gc_revived: usize = 0,
-    fiber_suspend_value: Value = .null,
+    // traces stop at this frame (a suspended fiber's first, while
+    // ReflectionFiber::getTrace lists its frames)
+    trace_floor: usize = 0,
+    // the operands calls keep counted while they run php code (holdCallOperands)
+    native_holds: std.ArrayListUnmanaged(NativeHold) = .empty,
+    // machine stacks of finished fibers, kept for the next ones
+    free_fiber_natives: std.ArrayListUnmanaged(*FiberNative) = .empty,
     // what unwinds a destroyed generator through its finally blocks: no
     // catch matches it and nothing chains it, as php jumps straight to the
     // finally blocks (zend_generator_dtor_storage). never a script value
@@ -1566,7 +1570,12 @@ pub const VM = struct {
             holders += countCellMap(&g.ref_slots, cell);
         };
         for (self.fibers.items) |f| if (!f.pooled) {
-            for (f.saved_frames.items) |*frame| holders += countCellMap(&frame.ref_slots, cell);
+            if (f.native) |p| {
+                const nat: *FiberNative = @ptrCast(@alignCast(p));
+                if (nat.pinned) for (nat.saved.frames.items) |*frame| {
+                    holders += countCellMap(&frame.ref_slots, cell);
+                };
+            }
         };
         holders += countCellMap(&self.globals_cells, cell);
         holders += countCellMap(&self.statics_cells, cell);
@@ -2159,7 +2168,7 @@ pub const VM = struct {
         silenced_depth: u32,
     };
 
-    const CallFrame = struct {
+    pub const CallFrame = struct {
         chunk: *const Chunk,
         ip: usize,
         vars: std.StringHashMapUnmanaged(Value),
@@ -3333,9 +3342,7 @@ pub const VM = struct {
             self.releaseGeneratorClosure(g);
         };
         for (self.fibers.items) |f| if (!f.pooled) {
-            self.cleanupFiberFrames(f);
-            for (f.saved_stack.items) |value| self.stackRelease(value);
-            f.saved_stack.clearRetainingCapacity();
+            self.releaseFiberNative(f);
             self.releaseValue(f.callable);
             self.releaseValue(f.suspend_value);
             self.releaseValue(f.return_value);
@@ -3367,7 +3374,7 @@ pub const VM = struct {
         @import("../stdlib/mysqli.zig").cleanupConnections(self.objects);
         // clean up fiber frames before strings/arrays/objects since fiber frames
         // may reference values that get freed by those passes
-        for (self.fibers.items) |f| if (!f.pooled) self.cleanupFiberFrames(f);
+        for (self.fibers.items) |f| if (!f.pooled) self.releaseFiberNative(f);
         for (self.strings.items[str_start..]) |s| self.allocator.free(s);
         for (self.arrays.items[arr_start..]) |a| {
             if (!a.pooled) {
@@ -3630,6 +3637,9 @@ pub const VM = struct {
         self.objects.deinit(self.allocator);
         self.free_generators.deinit(self.allocator);
         self.free_fibers.deinit(self.allocator);
+        for (self.free_fiber_natives.items) |nat| self.destroyFiberNative(nat);
+        self.free_fiber_natives.deinit(self.allocator);
+        self.native_holds.deinit(self.allocator);
         self.free_objects.deinit(self.allocator);
         self.free_handles.deinit(self.allocator);
         self.released_objects.deinit(self.allocator);
@@ -3810,8 +3820,6 @@ pub const VM = struct {
         self.exception_handler_stack.clearRetainingCapacity();
         self.clearPharAliases();
         self.current_fiber = null;
-        self.fiber_suspend_pending = false;
-        self.fiber_suspend_value = .null;
         self.error_msg = null;
         self.exit_requested = false;
         self.output.clearRetainingCapacity();
@@ -4181,7 +4189,8 @@ pub const VM = struct {
         var waiting: std.ArrayListUnmanaged(Value) = .empty;
         defer waiting.deinit(self.allocator);
         for (self.generators.items) |g| {
-            if (g.pooled or g.refcount == 0 or g.state != .suspended) continue;
+            if (g.pooled or g.refcount == 0) continue;
+            if (g.state != .suspended and !(g.state == .running and g.in_fiber)) continue;
             waiting.append(self.allocator, .{ .generator = g }) catch return;
         }
         for (self.fibers.items) |f| {
@@ -4292,6 +4301,9 @@ pub const VM = struct {
     fn destroyAtShutdown(self: *VM, v: Value) void {
         switch (v) {
             .generator => |g| {
+                // running in a suspended fiber: its finally blocks run when
+                // the fiber is destroyed, and may not yield then
+                if (!g.pooled and g.state == .running and generatorRunningInFiber(g)) g.forced_close = true;
                 if (g.pooled or g.refcount == 0 or g.state != .suspended) return;
                 genRetain(g);
                 defer self.genRelease(g);
@@ -4848,7 +4860,7 @@ pub const VM = struct {
     // it fails. a suspending fiber keeps its frames to resume later, and
     // exit() unwinds by itself
     fn unwindFailedCall(self: *VM, base_frame: usize) void {
-        if (self.fiber_suspend_pending or self.exit_requested) return;
+        if (self.exit_requested) return;
         if (self.frame_count <= base_frame) return;
         const entry_sp = self.frames[base_frame].entry_sp;
         if (self.pending_exception) |exc| self.chainHeldExceptions(exc, base_frame, entry_sp);
@@ -13060,11 +13072,13 @@ pub const VM = struct {
                             break :blk v;
                         } else .null;
 
+                        // a fiber without a machine stack of its own can't wait
+                        const nat: ?*FiberNative = if (self.current_fiber) |fiber| if (fiber.native) |p| @ptrCast(@alignCast(p)) else null else null;
                         const refusal: ?[]const u8 = if (self.current_fiber == null)
                             "Cannot suspend outside of a fiber"
                         else if (self.current_fiber.?.destroyed)
                             "Cannot suspend in a force-closed fiber"
-                        else if (self.fiber_switch_blocked > 0)
+                        else if (self.fiber_switch_blocked > 0 or nat == null)
                             "Cannot switch fibers in current execution context"
                         else
                             null;
@@ -13080,9 +13094,13 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
 
-                        self.fiber_suspend_pending = true;
-                        self.fiber_suspend_value = suspend_val;
-                        return error.RuntimeError;
+                        nat.?.suspend_with_arg = ac > 0;
+                        const resumed = self.suspendPinned(self.current_fiber.?, nat.?, suspend_val) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        self.push(resumed);
+                        continue;
                     }
 
                     if (std.mem.eql(u8, class_name, "Fiber") and std.mem.eql(u8, method_name, "getCurrent")) {
@@ -14860,9 +14878,13 @@ pub const VM = struct {
     }
 
     // the trace of the frames below `top`
-    fn traceBelow(self: *VM, top: usize) !*PhpArray {
+    fn traceBelow(self: *VM, top_physical: usize) !*PhpArray {
         const arr = try self.allocArray();
-        if (top == 0) return arr;
+        if (top_physical == 0) return arr;
+        const before = self.frame_count;
+        var layout = try self.layOutForTrace();
+        defer self.undoTraceLayout(&layout);
+        const top = top_physical + self.frame_count - before;
         // the running natives called from frames below top, innermost first
         var natives: [64]*const NativeCall = undefined;
         var native_count: usize = 0;
@@ -14897,7 +14919,7 @@ pub const VM = struct {
                 const called_by_native = next_native < native_count and natives[next_native].depth == i;
                 const call_site: ?SourcePosition = if (self.attributeSiteAt(i)) |s|
                     .{ .file = s.file, .line = s.line }
-                else if (i > 0 and !called_by_native) self.framePosition(i - 1) else null;
+                else if (i > 0 and !called_by_native and i != self.trace_floor) self.framePosition(i - 1) else null;
                 // a generator running as a delegate was reached through the
                 // generators waiting in yield from, which php lists between
                 // it and the frame that resumed them
@@ -14929,7 +14951,7 @@ pub const VM = struct {
                 }
             };
             try self.tryAppendRequireFrame(arr, i);
-            if (i == 0) break;
+            if (i == 0 or i <= self.trace_floor) break;
         }
         return arr;
     }
@@ -15739,9 +15761,28 @@ pub const VM = struct {
     // in one is an Error. an exception one throws reaches the code that
     // destroyed the generator, taking an exception already in flight as its
     // previous
+    fn generatorRunningInFiber(gen: *Generator) bool {
+        var current = gen;
+        while (current.delegate) |d| {
+            if (d != .gen) break;
+            current = d.gen;
+        }
+        if (!current.in_fiber) return false;
+        var node: ?*Generator = gen;
+        while (node) |n| : (node = n.delegator) if (n.in_fiber) return true;
+        return false;
+    }
+
     pub fn closeGenerator(self: *VM, gen: *Generator, base_frame: usize) RuntimeError!void {
         _ = base_frame;
         if (gen.state == .completed or gen.state == .running) return;
+        // php's zend_generator_dtor_storage: one whose running delegate waits
+        // in a suspended fiber, with it on the path, is closed when the
+        // fiber is destroyed
+        if (generatorRunningInFiber(gen)) {
+            gen.forced_close = true;
+            return;
+        }
         self.dropGeneratorDelegate(gen);
         // no try block around where it waits: nothing to run
         if (gen.state == .created or gen.saved_handlers.items.len == 0) return;
@@ -17568,6 +17609,11 @@ pub const VM = struct {
         }
         gen.resumes +|= 1;
         gen.at_first_yield = false;
+        const in_fiber = self.current_fiber != null and !gen.in_fiber;
+        if (in_fiber) gen.in_fiber = true;
+        defer if (in_fiber) {
+            gen.in_fiber = false;
+        };
         // the path lives on the stack until a chain outgrows it
         var inline_path: [16]*Generator = undefined;
         var path: std.ArrayListUnmanaged(*Generator) = .initBuffer(&inline_path);
@@ -17605,7 +17651,7 @@ pub const VM = struct {
                 if (try self.nextDelegatedValue(leaf)) step = false else sent = .null;
             }
             if (step) self.resumeGeneratorWithValue(leaf, sent) catch |err| {
-                if (path.items.len == 1 or self.pending_exception == null or self.exit_requested or self.fiber_suspend_pending) return err;
+                if (path.items.len == 1 or self.pending_exception == null or self.exit_requested) return err;
                 // the delegate's exception leaves it and is thrown into its
                 // parent where the parent waits in yield from
                 const ex = self.pending_exception.?;
@@ -17926,6 +17972,11 @@ pub const VM = struct {
 
     fn resumeGeneratorWithValue(self: *VM, gen: *Generator, sent_value: Value) RuntimeError!void {
         if (gen.state == .completed) return;
+        const in_fiber = self.current_fiber != null and !gen.in_fiber;
+        if (in_fiber) gen.in_fiber = true;
+        defer if (in_fiber) {
+            gen.in_fiber = false;
+        };
 
         gen.state = .running;
         const saved_sp = self.sp;
@@ -20974,22 +21025,31 @@ pub const VM = struct {
         gen.closure = closure;
     }
 
-    const HeldOperands = struct { values: [17]Value = undefined, len: usize = 0 };
+    const HeldOperands = struct { len: usize = 0 };
+    pub const NativeHold = struct { value: Value, frame: usize };
 
     // the top `count` operands, counted until releaseHeld: a call that pops
-    // its receiver and arguments before running php code keeps them alive
+    // its receiver and arguments before running php code keeps them alive.
+    // they are listed in native_holds, so a fiber suspended inside the call
+    // still shows them to the cycle collector, as php's call frames do
     fn holdCallOperands(self: *VM, count: usize) HeldOperands {
-        var held: HeldOperands = .{};
-        held.len = @min(count, held.values.len);
-        for (0..held.len) |i| {
-            held.values[i] = self.stack[self.sp - held.len + i];
-            retainValue(held.values[i]);
+        const len = @min(count, 17);
+        // with no memory to list them they go unheld, as before the hold
+        self.native_holds.ensureUnusedCapacity(self.allocator, len) catch return .{};
+        for (self.stack[self.sp - len .. self.sp]) |v| {
+            retainValue(v);
+            self.native_holds.appendAssumeCapacity(.{ .value = v, .frame = self.frame_count -| 1 });
         }
-        return held;
+        return .{ .len = len };
     }
 
     fn releaseHeld(self: *VM, held: HeldOperands) void {
-        for (held.values[0..held.len]) |value| self.releaseValue(value);
+        const items = self.native_holds.items;
+        const from = items.len - held.len;
+        var vals: [17]Value = undefined;
+        for (items[from..], 0..) |h, i| vals[i] = h.value;
+        self.native_holds.shrinkRetainingCapacity(from);
+        for (vals[0..held.len]) |v| self.releaseValue(v);
     }
 
     // php's FE_FREE drops the iterated value, then the iterator
@@ -22205,32 +22265,6 @@ pub const VM = struct {
             }
         }
         self.allocator.free(locals);
-    }
-
-    fn cleanupFiberFrames(self: *VM, fiber: *Fiber) void {
-        for (fiber.saved_frames.items) |*f| {
-            // Stage 2 finer fiber lifetime: release every value the saved
-            // frame holds before freeing the metadata. mirrors
-            // releaseFrameObjects but operates on Fiber.SavedFrame (which
-            // shares the same shape as CallFrame for vars/locals/slot_names)
-            const snames = if (f.func) |fn_| fn_.slot_names else &[_][]const u8{};
-            if (f.generator == null) if (f.call_name) |name| self.releaseClosureByName(name);
-            const vars_populated = f.vars.count() > 0;
-            if (vars_populated) {
-                var vit = f.vars.valueIterator();
-                while (vit.next()) |v| self.releaseValue(v.*);
-            }
-            for (f.locals, 0..) |lv, i| {
-                if (vars_populated and i < snames.len and snames[i].len > 0 and f.vars.contains(snames[i])) continue;
-                self.releaseValue(lv);
-            }
-            f.vars.deinit(self.allocator);
-            self.deinitRefSlots(&f.ref_slots);
-            self.unregFrameBindings(f);
-            if (f.locals.len > 0) self.freeLocals(f.locals);
-        }
-        fiber.saved_frames.clearRetainingCapacity();
-        if (self.hasPendingReleases()) self.drainPendingDestruct();
     }
 
     // the reverse of propagateCellWrite for object/static props: when $obj->prop
@@ -29352,16 +29386,6 @@ pub const VM = struct {
         self.runUntilFrame(base_frame) catch |err| {
             self.current_fiber = prev_fiber;
             self.handler_floor = prev_floor;
-            if (self.fiber_suspend_pending) {
-                self.fiber_suspend_pending = false;
-                try self.saveFiberState(fiber, base_frame, base_sp, base_handler);
-                fiber.state = .suspended;
-                const result = self.fiber_suspend_value;
-                self.fiber_suspend_value = .null;
-                self.releaseValue(fiber.suspend_value);
-                fiber.suspend_value = result;
-                return result;
-            }
             fiber.state = .terminated;
             // clean up any frames left on the stack
             while (self.frame_count > base_frame) {
@@ -29487,12 +29511,25 @@ pub const VM = struct {
         return error.RuntimeError;
     }
 
-    // Fiber::start(): the callable's frame becomes the fiber's first, and
-    // runs until it suspends or ends
+    // Fiber::start(): the fiber's machine stack starts, and on it the
+    // callable's frame becomes the fiber's first and runs until it suspends
+    // or ends
     fn startFiber(self: *VM, fiber: *Fiber, args: []const Value) RuntimeError!Value {
         self.releaseValue(fiber.suspend_value);
         fiber.suspend_value = .null;
         fiber.state = .running;
+        const nat = self.fiberNative(fiber) catch |err| {
+            fiber.state = .terminated;
+            return err;
+        };
+        nat.request = .start;
+        nat.start_args = args;
+        nat.base = self.laneMarks();
+        return self.runOnFiber(fiber, nat, false);
+    }
+
+    // the body of a fiber's first run, on its own stack
+    fn fiberStartBody(self: *VM, fiber: *Fiber, args: []const Value) RuntimeError!Value {
         const fb = self.frame_count;
         const sb = self.sp;
         const hb = self.handler_count;
@@ -29524,42 +29561,795 @@ pub const VM = struct {
         return self.runFiber(fiber, fb, sb, hb);
     }
 
-    // Fiber::resume() and Fiber::throw(): the fiber's frames go back on the
-    // stack, and the suspended Fiber::suspend() returns the value or throws
+    // Fiber::resume() and Fiber::throw(): the suspended Fiber::suspend()
+    // returns the value or throws, its frames back where they were
     fn resumeFiber(self: *VM, fiber: *Fiber, value: Value, throw: bool) RuntimeError!Value {
         self.releaseValue(fiber.suspend_value);
         fiber.suspend_value = .null;
         fiber.state = .running;
-        const fb = self.frame_count;
-        const sb = self.sp;
-        const hb = self.handler_count;
-        try self.restoreFiberState(fiber, fb, sb);
-        if (!throw) {
-            self.push(value);
-            return self.runFiber(fiber, fb, sb, hb);
-        }
-        self.push(.null);
-        const prev_fiber = self.current_fiber;
-        const prev_floor = self.handler_floor;
-        self.current_fiber = fiber;
-        self.handler_floor = hb;
-        self.raise(value);
-        const dispatched = self.dispatchPendingException(fb);
-        self.current_fiber = prev_fiber;
-        self.handler_floor = prev_floor;
-        if (!dispatched) {
+        const nat = self.fiberNative(fiber) catch |err| {
             fiber.state = .terminated;
-            fiber.threw = true;
-            while (self.frame_count > fb) {
-                self.frame_count -= 1;
-                self.deinitFrameSlot(self.frame_count);
+            return err;
+        };
+        nat.resume_value = value;
+        nat.resume_throw = throw;
+        try self.enterPinnedLanes(nat);
+        return self.runOnFiber(fiber, nat, true);
+    }
+
+    // where each of the vm's stacks stands: the frames (with the arrays kept
+    // per frame), the operand stack (with its per-slot arrays), the
+    // exception handlers, and the saved arguments of func_get_args
+    pub const LaneMarks = struct { frame: usize, sp: usize, handler: usize, fga: usize };
+
+    pub fn laneMarks(self: *const VM) LaneMarks {
+        return .{ .frame = self.frame_count, .sp = self.sp, .handler = self.handler_count, .fga = if (self.ic) |ic| ic.fga_sp else 0 };
+    }
+
+    // a region of the vm's stacks moved out: a fiber's while it waits
+    // suspended in place, or its resumer's part above the fiber's base while
+    // the fiber runs
+    pub const LaneSnapshot = struct {
+        frames: std.ArrayListUnmanaged(CallFrame) = .empty,
+        arg_counts: std.ArrayListUnmanaged(u32) = .empty,
+        fga_offsets: std.ArrayListUnmanaged(u32) = .empty,
+        sp_save: std.ArrayListUnmanaged(usize) = .empty,
+        stack: std.ArrayListUnmanaged(Value) = .empty,
+        arg_stack: std.ArrayListUnmanaged(RefSource) = .empty,
+        stack_fetch: std.ArrayListUnmanaged(bool) = .empty,
+        handlers: std.ArrayListUnmanaged(ExceptionHandler) = .empty,
+        fga: std.ArrayListUnmanaged(Value) = .empty,
+        held: std.ArrayListUnmanaged(HeldException) = .empty,
+        defaults: std.ArrayListUnmanaged(DefaultHold) = .empty,
+        scopes: std.ArrayListUnmanaged(InitializerScope) = .empty,
+        holds: std.ArrayListUnmanaged(NativeHold) = .empty,
+
+        fn clear(s: *LaneSnapshot) void {
+            inline for (@typeInfo(LaneSnapshot).@"struct".field_names) |name| @field(s, name).clearRetainingCapacity();
+        }
+
+        fn deinit(s: *LaneSnapshot, a: Allocator) void {
+            inline for (@typeInfo(LaneSnapshot).@"struct".field_names) |name| @field(s, name).deinit(a);
+        }
+    };
+
+    // the vm's fields a running machine stack scopes (set by a native and put
+    // back when it returns): each stack keeps its own across a switch
+    const ContextFields = struct {
+        native_call: @FieldType(VM, "native_call"),
+        handler_floor: usize,
+        current_fiber: ?*Fiber,
+        error_silenced_depth: u32,
+        error_reporting_level: i64,
+        dim_append_depth: usize,
+        native_caller: @FieldType(VM, "native_caller"),
+        pending_trampoline: bool,
+        pending_invoke_args: @FieldType(VM, "pending_invoke_args"),
+        static_native_outer_called: ?[]const u8,
+        run_base_frame: usize,
+        resolving_quietly: bool,
+        release_log: @FieldType(VM, "release_log"),
+        release_depth: u32,
+        // a drain a destructor suspended in keeps its pass; others run theirs
+        draining_destructors: bool,
+        pending_ref_args: @FieldType(VM, "pending_ref_args"),
+        forwarding_depth: usize,
+        finished_frames: usize,
+        fiber_switch_blocked: u32,
+        drain_raised: bool,
+        eh_throw: @FieldType(VM, "eh_throw"),
+        pending_named_extras: @FieldType(VM, "pending_named_extras"),
+        lazy_proxy_request: bool,
+        attribute_call_site: @FieldType(VM, "attribute_call_site"),
+        hidden_trace_frame: usize,
+        gc_dtors_in_fiber: bool,
+    };
+
+    fn captureFields(self: *const VM) ContextFields {
+        var f: ContextFields = undefined;
+        inline for (@typeInfo(ContextFields).@"struct".field_names) |name| @field(f, name) = @field(self, name);
+        return f;
+    }
+
+    fn loadFields(self: *VM, f: ContextFields) void {
+        inline for (@typeInfo(ContextFields).@"struct".field_names) |name| @field(self, name) = @field(f, name);
+    }
+
+    // a resumed fiber gets back the fields its own natives set; one it took
+    // over from whoever resumed it last (a release log on that stack, the
+    // native call chain) comes from whoever resumes it now
+    fn loadOwnFields(self: *VM, f: ContextFields, took: ContextFields) void {
+        inline for (@typeInfo(ContextFields).@"struct".field_names) |name| {
+            if (!std.meta.eql(@field(f, name), @field(took, name))) @field(self, name) = @field(f, name);
+        }
+    }
+
+    // a fiber's machine stack and the state of its runs
+    pub const FiberNative = struct {
+        co: coro.Coroutine = .{},
+        // the machine state of whoever resumed it, while it runs
+        resumer: coro.Context = coro.empty_context,
+        vm: *VM,
+        fiber: *Fiber = undefined,
+        // start: push the callable's frame and run it; destructor: the gc's
+        // destructor fiber runs a destructor
+        request: enum { start, destructor } = .start,
+        dtor_object: *PhpObject = undefined,
+        dtor_func: *const ObjFunction = undefined,
+        start_args: []const Value = &.{},
+        resume_value: Value = .null,
+        resume_throw: bool = false,
+        result: RuntimeError!Value = .null,
+        // where its region of the vm's stacks begins
+        base: LaneMarks = .{ .frame = 0, .sp = 0, .handler = 0, .fga = 0 },
+        // suspended: its native code waits on its stack, and its region of
+        // the vm's stacks is in `saved` until it is put back at `base`
+        pinned: bool = false,
+        saved: LaneSnapshot = .{},
+        fields: ContextFields = undefined,
+        // while it runs after a resume in place: what of the resumer's
+        // stacks lay above its base, and where they stood
+        displacing: bool = false,
+        displaced: LaneSnapshot = .{},
+        resumer_marks: LaneMarks = .{ .frame = 0, .sp = 0, .handler = 0, .fga = 0 },
+        resumer_fields: ContextFields = undefined,
+        locals: []Value = &.{},
+        locals_sp: usize = 0,
+        // suspended by Fiber::suspend() called as a callable
+        by_native: bool = false,
+        // Fiber::suspend() was given its value (traces list it)
+        suspend_with_arg: bool = false,
+    };
+
+    // how much machine stack a fiber gets: fiber.stack_size (php's default
+    // 2M), at least 8M because zphp's interpreter frames are larger than
+    // php's, plus what the stack limit keeps free
+    fn fiberStackSize(self: *VM) usize {
+        var size: usize = 8 * 1024 * 1024;
+        if (self.ini_settings.get("fiber.stack_size")) |configured| {
+            const q = @import("memory.zig").parseQuantity(configured).value;
+            if (q > 0 and @as(usize, @intCast(q)) > size) size = @intCast(q);
+        }
+        return size + stack_limit.reserve;
+    }
+
+    // the fiber's machine stack, made (or taken from the ones finished
+    // fibers left) when it starts
+    fn fiberNative(self: *VM, fiber: *Fiber) RuntimeError!*FiberNative {
+        if (fiber.native) |p| return @ptrCast(@alignCast(p));
+        const nat = self.free_fiber_natives.pop() orelse blk: {
+            const created = try self.allocator.create(FiberNative);
+            errdefer self.allocator.destroy(created);
+            created.* = .{ .vm = self };
+            errdefer self.allocator.free(created.locals);
+            created.locals = try self.allocator.alloc(Value, 1024);
+            coro.create(&created.co, self.fiberStackSize(), &fiberEntry, created) catch return error.OutOfMemory;
+            break :blk created;
+        };
+        nat.fiber = fiber;
+        nat.request = .start;
+        nat.pinned = false;
+        nat.displacing = false;
+        nat.result = .null;
+        nat.locals_sp = 0;
+        fiber.native = nat;
+        return nat;
+    }
+
+    // a fiber that ended gives its machine stack back
+    fn releaseFiberNative(self: *VM, fiber: *Fiber) void {
+        const p = fiber.native orelse return;
+        const nat: *FiberNative = @ptrCast(@alignCast(p));
+        fiber.native = null;
+        if (nat.pinned) {
+            // never resumed: what its region held goes, its native code never
+            // runs on
+            self.releaseLaneSnapshot(&nat.saved, nat.locals);
+            nat.pinned = false;
+            self.destroyFiberNative(nat);
+            return;
+        }
+        nat.saved.clear();
+        nat.displaced.clear();
+        if (self.free_fiber_natives.items.len >= 8) {
+            self.destroyFiberNative(nat);
+            return;
+        }
+        self.free_fiber_natives.append(self.allocator, nat) catch self.destroyFiberNative(nat);
+    }
+
+    fn destroyFiberNative(self: *VM, nat: *FiberNative) void {
+        coro.destroy(&nat.co);
+        self.allocator.free(nat.locals);
+        nat.saved.deinit(self.allocator);
+        nat.displaced.deinit(self.allocator);
+        self.allocator.destroy(nat);
+    }
+
+    // a pinned fiber's region that will never run again: the values its
+    // frames and operand slots hold are released
+    fn releaseLaneSnapshot(self: *VM, s: *LaneSnapshot, pool: []Value) void {
+        for (s.frames.items) |*f| {
+            const snames = if (f.func) |fn_| fn_.slot_names else &[_][]const u8{};
+            if (f.generator == null) if (f.call_name) |name| self.releaseClosureByName(name);
+            const vars_populated = f.vars.count() > 0;
+            if (vars_populated) {
+                var vit = f.vars.valueIterator();
+                while (vit.next()) |v| self.releaseValue(v.*);
             }
-            self.clearArgStackFrom(sb);
-            self.sp = sb;
-            self.handler_count = hb;
+            for (f.locals, 0..) |lv, i| {
+                if (vars_populated and i < snames.len and snames[i].len > 0 and f.vars.contains(snames[i])) continue;
+                self.releaseValue(lv);
+            }
+            f.vars.deinit(self.allocator);
+            self.deinitRefSlots(&f.ref_slots);
+            self.unregFrameBindings(f);
+            if (f.locals.len > 0 and !inPool(pool, f.locals)) self.freeLocals(f.locals);
+        }
+        for (s.stack.items) |v| self.stackRelease(v);
+        for (s.holds.items) |h| self.releaseValue(h.value);
+        for (s.arg_stack.items) |*source| if (source.* != .none) self.releaseArgSource(source);
+        s.clear();
+    }
+
+    fn inPool(pool: []Value, slice: []Value) bool {
+        const p = @intFromPtr(slice.ptr);
+        return p >= @intFromPtr(pool.ptr) and p < @intFromPtr(pool.ptr) + pool.len * @sizeOf(Value);
+    }
+
+    // the gc destructor fiber's run: the destructor's frame, on the fiber's
+    // stack so its locals come from the fiber's pool
+    fn gcDestructorBody(self: *VM, nat: *FiberNative) RuntimeError!Value {
+        const obj = nat.dtor_object;
+        const func = nat.dtor_func;
+        // php's gc_destructor_fiber calls it, from the fiber's own stack so
+        // it stays below the destructor's frame wherever it is resumed
+        var record: NativeCall = undefined;
+        self.enterEngineMethod(&record, "gc_destructor_fiber", &.{}, false);
+        record.depth = nat.base.frame;
+        record.from_native = true;
+        defer self.native_call = record.outer;
+        var vars = self.acquireFrameVars();
+        try vars.put(self.allocator, "$this", .{ .object = obj });
+        const locals = try self.allocLocals(func, &vars);
+        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = locals, .func = func, .called_class = obj.class_name };
+        self.frames[self.frame_count].entry_sp = self.sp;
+        self.markArgsUnsaved();
+        self.frame_count += 1;
+        self.retainFrameObjects(self.frame_count - 1);
+        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
+        return self.executeFiber(nat.fiber, nat.base.frame, nat.base.sp, nat.base.handler);
+    }
+
+    fn fiberEntry(arg: *anyopaque) noreturn {
+        const nat: *FiberNative = @ptrCast(@alignCast(arg));
+        while (true) {
+            const vm = nat.vm;
+            nat.result = switch (nat.request) {
+                .start => vm.fiberStartBody(nat.fiber, nat.start_args),
+                .destructor => vm.gcDestructorBody(nat),
+            };
+            vm.leaveFiber(nat);
+        }
+    }
+
+    // runs the fiber on its stack until it suspends or ends. its result is
+    // the value it suspended with (borrowed from the fiber) or null when it
+    // ended
+    fn runOnFiber(self: *VM, fiber: *Fiber, nat: *FiberNative, in_place: bool) RuntimeError!Value {
+        const took = nat.resumer_fields;
+        nat.resumer_fields = self.captureFields();
+        if (in_place) {
+            self.loadOwnFields(nat.fields, took);
+            // the natives waiting on its stack were called by whoever
+            // resumed it this time
+            self.relinkNativeCalls(nat);
+        }
+        const limits = stack_limit.save();
+        const bounds = nat.co.bounds();
+        stack_limit.enter(bounds.low, bounds.high);
+        // frames' locals come from a pool used last in first out; the
+        // fiber's frames wait while others run, so it has a pool of its own
+        const ic = self.ic.?;
+        const pool = .{ ic.locals_buf, ic.locals_sp, ic.locals_cap };
+        ic.locals_buf = nat.locals.ptr;
+        ic.locals_sp = nat.locals_sp;
+        ic.locals_cap = nat.locals.len;
+        coro.switchTo(&nat.resumer, &nat.co.context);
+        nat.locals_sp = ic.locals_sp;
+        ic.locals_buf, ic.locals_sp, ic.locals_cap = pool;
+        stack_limit.restore(limits);
+        if (nat.pinned) return fiber.suspend_value;
+        const result = nat.result;
+        nat.result = .null;
+        if (fiber.state == .terminated) self.releaseFiberNative(fiber);
+        return result;
+    }
+
+    // back to the resumer, its stacks as it left them
+    fn leaveFiber(self: *VM, nat: *FiberNative) void {
+        if (nat.displacing) self.restoreDisplaced(nat);
+        self.loadFields(nat.resumer_fields);
+        coro.switchTo(&nat.co.context, &nat.resumer);
+    }
+
+    // the innermost of the native calls waiting on the fiber's stack
+    // continues into the resumer's
+    fn relinkNativeCalls(self: *VM, nat: *FiberNative) void {
+        const bounds = nat.co.bounds();
+        var last: ?*NativeCall = null;
+        var call = self.native_call;
+        while (call) |c| {
+            const addr = @intFromPtr(c);
+            if (addr < bounds.low or addr >= bounds.high) break;
+            last = @constCast(c);
+            call = c.outer;
+        }
+        if (last) |c| c.outer = nat.resumer_fields.native_call else self.native_call = nat.resumer_fields.native_call;
+    }
+
+    // Fiber::suspend() inside native code the fiber's own loop called: the
+    // fiber's region of the vm's stacks moves out and its machine stack waits
+    // here until it is resumed in place
+    fn suspendPinned(self: *VM, fiber: *Fiber, nat: *FiberNative, value: Value) RuntimeError!Value {
+        nat.fields = self.captureFields();
+        try self.takeLanes(&nat.saved, nat.base, self.laneMarks());
+        self.setLaneCounts(nat.base);
+        self.releaseValue(fiber.suspend_value);
+        fiber.suspend_value = value;
+        fiber.state = .suspended;
+        nat.pinned = true;
+        self.leaveFiber(nat);
+        // resumed: the region is back where it was
+        if (nat.resume_throw) {
+            self.raise(nat.resume_value);
             return error.RuntimeError;
         }
-        return self.runFiber(fiber, fb, sb, hb);
+        return nat.resume_value;
+    }
+
+    // Fiber::suspend() called as a callable: the native waits on the
+    // fiber's stack like any other. the value it resumes with is borrowed
+    pub fn suspendFiber(self: *VM, value: Value, with_arg: bool) RuntimeError!Value {
+        const fiber = self.current_fiber orelse return self.fiberError("Cannot suspend outside of a fiber");
+        if (fiber.destroyed) return self.fiberError("Cannot suspend in a force-closed fiber");
+        const p = fiber.native orelse return self.fiberError("Cannot switch fibers in current execution context");
+        if (self.fiber_switch_blocked > 0) return self.fiberError("Cannot switch fibers in current execution context");
+        retainValue(value);
+        const nat: *FiberNative = @ptrCast(@alignCast(p));
+        nat.by_native = true;
+        defer nat.by_native = false;
+        nat.suspend_with_arg = with_arg;
+        return self.suspendPinned(fiber, nat, value);
+    }
+
+    // the resumer's side of a resume in place: whatever of its stacks lies
+    // above the fiber's base moves aside (or the gap below it is filled),
+    // and the fiber's region goes back
+    fn enterPinnedLanes(self: *VM, nat: *FiberNative) RuntimeError!void {
+        const cur = self.laneMarks();
+        nat.resumer_marks = cur;
+        try self.takeLanes(&nat.displaced, nat.base, cur);
+        self.fillLaneGap(cur, nat.base);
+        try self.putLanes(&nat.saved, nat.base);
+        nat.displacing = true;
+        nat.pinned = false;
+    }
+
+    // after the fiber's region left (suspended again, or its frames all
+    // returned), the resumer's stacks come back
+    fn restoreDisplaced(self: *VM, nat: *FiberNative) void {
+        self.putLanes(&nat.displaced, nat.base) catch {};
+        self.setLaneCounts(nat.resumer_marks);
+        nat.displacing = false;
+    }
+
+    fn setLaneCounts(self: *VM, m: LaneMarks) void {
+        self.frame_count = m.frame;
+        self.sp = m.sp;
+        self.handler_count = m.handler;
+        if (self.ic) |ic| ic.fga_sp = @intCast(m.fga);
+    }
+
+    // moves [base, top) of each stack into the snapshot. the moved frames'
+    // slots no longer own what they held
+    fn takeLanes(self: *VM, s: *LaneSnapshot, base: LaneMarks, top: LaneMarks) RuntimeError!void {
+        const a = self.allocator;
+        s.clear();
+        if (top.frame > base.frame) {
+            const r = self.frames[base.frame..top.frame];
+            try s.frames.appendSlice(a, r);
+            for (r) |*f| {
+                f.vars = .{};
+                f.ref_slots = .{};
+                f.ref_owner = 0;
+                f.locals = &.{};
+                f.generator = null;
+            }
+            if (self.ic) |ic| {
+                try s.arg_counts.appendSlice(a, ic.arg_counts[base.frame..top.frame]);
+                try s.fga_offsets.appendSlice(a, ic.fga_offsets[base.frame..top.frame]);
+                try s.sp_save.appendSlice(a, ic.sp_save[base.frame..top.frame]);
+            }
+        }
+        if (top.sp > base.sp) {
+            try s.stack.appendSlice(a, self.stack[base.sp..top.sp]);
+            if (self.ic) |ic| {
+                try s.arg_stack.appendSlice(a, ic.arg_stack[base.sp..top.sp]);
+                try s.stack_fetch.appendSlice(a, ic.stack_fetch[base.sp..top.sp]);
+                // the snapshot owns their sources now
+                @memset(ic.arg_stack[base.sp..top.sp], .none);
+                @memset(ic.stack_fetch[base.sp..top.sp], false);
+            }
+        }
+        if (top.handler > base.handler) try s.handlers.appendSlice(a, self.exception_handlers[base.handler..top.handler]);
+        if (top.fga > base.fga) if (self.ic) |ic| try s.fga.appendSlice(a, ic.fga_buf[base.fga..top.fga]);
+        // the lists that name frames of the region
+        try moveEntries(HeldException, a, &self.held_exceptions, &s.held, base.frame, "frame");
+        try moveEntries(DefaultHold, a, &self.default_holds, &s.defaults, base.frame, "depth");
+        try moveEntries(InitializerScope, a, &self.initializer_scopes, &s.scopes, base.frame, "frame");
+        try moveEntries(NativeHold, a, &self.native_holds, &s.holds, base.frame, "frame");
+    }
+
+    fn moveEntries(comptime T: type, a: Allocator, from: *std.ArrayListUnmanaged(T), to: *std.ArrayListUnmanaged(T), floor: usize, comptime field: []const u8) RuntimeError!void {
+        var i: usize = 0;
+        while (i < from.items.len) {
+            if (@field(from.items[i], field) >= floor) {
+                try to.append(a, from.orderedRemove(i));
+            } else i += 1;
+        }
+    }
+
+    // puts a snapshot back with its region starting at base; the counts
+    // end at the region's top
+    fn putLanes(self: *VM, s: *LaneSnapshot, base: LaneMarks) RuntimeError!void {
+        const a = self.allocator;
+        const nf = s.frames.items.len;
+        const ns = s.stack.items.len;
+        const nh = s.handlers.items.len;
+        const ng = s.fga.items.len;
+        // the regions only grow, so what the snapshot left is committed,
+        // but the headroom a frame keeps above its top must be too
+        self.setLaneCounts(base);
+        try self.ensureCallRoomFor(nf + 1);
+        try self.ensureStackSlots(ns);
+        try self.ensureHandlerRoom(nh);
+        if (ng > 0 and !self.fgaRoomFor(ng)) return error.OutOfMemory;
+        if (nf > 0) {
+            @memcpy(self.frames[base.frame..][0..nf], s.frames.items);
+            if (self.ic) |ic| {
+                @memcpy(ic.arg_counts[base.frame..][0..nf], s.arg_counts.items);
+                @memcpy(ic.fga_offsets[base.frame..][0..nf], s.fga_offsets.items);
+                @memcpy(ic.sp_save[base.frame..][0..nf], s.sp_save.items);
+            }
+        }
+        if (ns > 0) {
+            @memcpy(self.stack[base.sp..][0..ns], s.stack.items);
+            if (self.ic) |ic| {
+                @memcpy(ic.arg_stack[base.sp..][0..ns], s.arg_stack.items);
+                @memcpy(ic.stack_fetch[base.sp..][0..ns], s.stack_fetch.items);
+                if (base.sp + ns > self.arg_source_end) self.arg_source_end = base.sp + ns;
+            }
+        }
+        if (nh > 0) @memcpy(self.exception_handlers[base.handler..][0..nh], s.handlers.items);
+        if (ng > 0) if (self.ic) |ic| @memcpy(ic.fga_buf[base.fga..][0..ng], s.fga.items);
+        try self.held_exceptions.appendSlice(a, s.held.items);
+        try self.default_holds.appendSlice(a, s.defaults.items);
+        try self.initializer_scopes.appendSlice(a, s.scopes.items);
+        try self.native_holds.appendSlice(a, s.holds.items);
+        self.setLaneCounts(.{ .frame = base.frame + nf, .sp = base.sp + ns, .handler = base.handler + nh, .fga = base.fga + ng });
+        s.clear();
+    }
+
+
+    // a trace lists the frames in the order calls were made: a fiber's,
+    // then those of whoever resumed it. a fiber suspended inside native code
+    // gets its frames back where it was started, not above its resumer's
+    // (whose frames past that point wait in the fiber's `displaced`), so
+    // while a trace is built the frames are laid out in call order and put
+    // back after
+    pub const TraceLayout = struct {
+        levels: [max_levels]Level = undefined,
+        count: usize = 0,
+        hidden_trace_frame: usize = 0,
+        attribute_frame: usize = 0,
+
+        const max_levels = 16;
+
+        const Level = struct {
+            nat: *FiberNative,
+            frames: std.ArrayListUnmanaged(CallFrame) = .empty,
+            arg_counts: std.ArrayListUnmanaged(u32) = .empty,
+            fga_offsets: std.ArrayListUnmanaged(u32) = .empty,
+            fga: std.ArrayListUnmanaged(Value) = .empty,
+        };
+    };
+
+    // the fibers whose resumer stands elsewhere than where they started,
+    // innermost first
+    fn displacedFibers(self: *VM, out: *[TraceLayout.max_levels]*FiberNative) usize {
+        var n: usize = 0;
+        var fiber = self.current_fiber;
+        while (fiber) |f| {
+            const p = f.native orelse break;
+            const nat: *FiberNative = @ptrCast(@alignCast(p));
+            if (nat.displacing) {
+                if (n == out.len) break;
+                out[n] = nat;
+                n += 1;
+            }
+            fiber = nat.resumer_fields.current_fiber;
+        }
+        return n;
+    }
+
+    pub fn layOutForTrace(self: *VM) RuntimeError!TraceLayout {
+        var layout: TraceLayout = .{};
+        // a trace cut at a fiber's first frame lists only where it stands
+        if (self.trace_floor > 0) return layout;
+        var nats: [TraceLayout.max_levels]*FiberNative = undefined;
+        const n = self.displacedFibers(&nats);
+        var moved = false;
+        for (nats[0..n]) |nat| {
+            if (nat.resumer_marks.frame != nat.base.frame or nat.resumer_marks.fga != nat.base.fga) moved = true;
+        }
+        if (!moved) return layout;
+        const ic = self.ic.?;
+        layout.hidden_trace_frame = self.hidden_trace_frame;
+        layout.attribute_frame = if (self.attribute_call_site) |s| s.frame else 0;
+        const a = self.allocator;
+        for (nats[0..n]) |nat| {
+            const lvl = &layout.levels[layout.count];
+            lvl.* = .{ .nat = nat };
+            layout.count += 1;
+            const b = nat.base;
+            const r = nat.resumer_marks;
+            const nf = self.frame_count - b.frame;
+            const ng = ic.fga_sp - b.fga;
+            try lvl.frames.appendSlice(a, self.frames[b.frame..][0..nf]);
+            try lvl.arg_counts.appendSlice(a, ic.arg_counts[b.frame..][0..nf]);
+            try lvl.fga_offsets.appendSlice(a, ic.fga_offsets[b.frame..][0..nf]);
+            try lvl.fga.appendSlice(a, ic.fga_buf[b.fga..][0..ng]);
+            // room for the frames where they go
+            self.setLaneCounts(.{ .frame = r.frame, .sp = self.sp, .handler = self.handler_count, .fga = r.fga });
+            try self.ensureCallRoomFor(nf + 1);
+            if (ng > 0 and !self.fgaRoomFor(ng)) return error.OutOfMemory;
+            // the resumer's frames past the fiber's base, back in place
+            const d = &nat.displaced;
+            if (d.frames.items.len > 0) {
+                @memcpy(self.frames[b.frame..][0..d.frames.items.len], d.frames.items);
+                @memcpy(ic.arg_counts[b.frame..][0..d.frames.items.len], d.arg_counts.items);
+                @memcpy(ic.fga_offsets[b.frame..][0..d.frames.items.len], d.fga_offsets.items);
+            }
+            if (d.fga.items.len > 0) @memcpy(ic.fga_buf[b.fga..][0..d.fga.items.len], d.fga.items);
+            // the fiber's above them
+            @memcpy(self.frames[r.frame..][0..nf], lvl.frames.items);
+            @memcpy(ic.arg_counts[r.frame..][0..nf], lvl.arg_counts.items);
+            for (lvl.fga_offsets.items, 0..) |off, i| {
+                ic.fga_offsets[r.frame + i] = if (off == fga_unsaved) off else @intCast(@as(isize, off) + @as(isize, @intCast(r.fga)) - @as(isize, @intCast(b.fga)));
+            }
+            if (ng > 0) @memcpy(ic.fga_buf[r.fga..][0..ng], lvl.fga.items);
+            self.frame_count = r.frame + nf;
+            ic.fga_sp = @intCast(r.fga + ng);
+            self.shiftTraceDepths(nat, @as(isize, @intCast(r.frame)) - @as(isize, @intCast(b.frame)));
+        }
+        return layout;
+    }
+
+    // the native calls made on the fiber's stack (and those it resumed)
+    // count their depth from where its frames are now
+    fn shiftTraceDepths(self: *VM, nat: *FiberNative, delta: isize) void {
+        const stop = nat.resumer_fields.native_call;
+        var call = self.native_call;
+        while (call) |c| : (call = c.outer) {
+            if (c == stop) break;
+            @constCast(c).depth = @intCast(@as(isize, @intCast(c.depth)) + delta);
+        }
+        const b = nat.base.frame;
+        if (self.hidden_trace_frame != std.math.maxInt(usize) and self.hidden_trace_frame >= b) self.hidden_trace_frame = @intCast(@as(isize, @intCast(self.hidden_trace_frame)) + delta);
+        if (self.attribute_call_site) |*s| if (s.frame >= b) {
+            s.frame = @intCast(@as(isize, @intCast(s.frame)) + delta);
+        };
+    }
+
+    pub fn undoTraceLayout(self: *VM, layout: *TraceLayout) void {
+        if (layout.count == 0) return;
+        const ic = self.ic.?;
+        var i = layout.count;
+        while (i > 0) {
+            i -= 1;
+            const lvl = &layout.levels[i];
+            const nat = lvl.nat;
+            const b = nat.base;
+            const r = nat.resumer_marks;
+            const nf = lvl.frames.items.len;
+            const ng = lvl.fga.items.len;
+            const delta = @as(isize, @intCast(r.frame)) - @as(isize, @intCast(b.frame));
+            // the depths first, while the chain is as the layout left it
+            var call = self.native_call;
+            while (call) |c| : (call = c.outer) {
+                if (c == nat.resumer_fields.native_call) break;
+                @constCast(c).depth = @intCast(@as(isize, @intCast(c.depth)) - delta);
+            }
+            // slots the fiber's frames no longer use hold no one's state
+            const hole_end = @max(r.frame + nf, b.frame);
+            var k = @min(r.frame, b.frame);
+            while (k < hole_end) : (k += 1) {
+                self.frames[k] = .{ .chunk = self.frames[0].chunk, .ip = 0, .vars = .{}, .native = true };
+                ic.arg_counts[k] = unknown_arg_count;
+                ic.fga_offsets[k] = fga_unsaved;
+            }
+            @memcpy(self.frames[b.frame..][0..nf], lvl.frames.items);
+            @memcpy(ic.arg_counts[b.frame..][0..nf], lvl.arg_counts.items);
+            @memcpy(ic.fga_offsets[b.frame..][0..nf], lvl.fga_offsets.items);
+            if (ng > 0) @memcpy(ic.fga_buf[b.fga..][0..ng], lvl.fga.items);
+            self.frame_count = b.frame + nf;
+            ic.fga_sp = @intCast(b.fga + ng);
+            lvl.frames.deinit(self.allocator);
+            lvl.arg_counts.deinit(self.allocator);
+            lvl.fga_offsets.deinit(self.allocator);
+            lvl.fga.deinit(self.allocator);
+        }
+        self.hidden_trace_frame = layout.hidden_trace_frame;
+        if (self.attribute_call_site) |*s| s.frame = layout.attribute_frame;
+        layout.count = 0;
+    }
+
+    // a suspended fiber's frames, back where they ran while its trace is
+    // built (ReflectionFiber::getTrace); traces stop at its first frame
+    pub const SuspendedView = struct {
+        nat: *FiberNative,
+        marks: LaneMarks,
+        native_call: @FieldType(VM, "native_call"),
+        trace_floor: usize,
+        bottom: ?*NativeCall = null,
+        bottom_outer: ?*const NativeCall = null,
+        frames: std.ArrayListUnmanaged(CallFrame) = .empty,
+        arg_counts: std.ArrayListUnmanaged(u32) = .empty,
+        fga_offsets: std.ArrayListUnmanaged(u32) = .empty,
+        fga: std.ArrayListUnmanaged(Value) = .empty,
+    };
+
+    pub fn suspendedWithArg(fiber: *const Fiber) bool {
+        const p = fiber.native orelse return false;
+        const nat: *FiberNative = @ptrCast(@alignCast(p));
+        return nat.pinned and nat.suspend_with_arg;
+    }
+
+    pub fn suspendedByNative(fiber: *const Fiber) bool {
+        const p = fiber.native orelse return false;
+        const nat: *FiberNative = @ptrCast(@alignCast(p));
+        return nat.pinned and nat.by_native;
+    }
+
+    pub const TraceCut = struct { floor: usize, bottom: ?*NativeCall = null, outer: ?*const NativeCall = null };
+
+    // traces inside the running fiber stop at its first frame and its own
+    // native calls
+    pub fn cutTraceAtFiber(self: *VM, fiber: *Fiber) TraceCut {
+        var cut: TraceCut = .{ .floor = self.trace_floor };
+        const p = fiber.native orelse return cut;
+        const nat: *FiberNative = @ptrCast(@alignCast(p));
+        const bounds = nat.co.bounds();
+        var call = self.native_call;
+        while (call) |c| : (call = c.outer) {
+            const addr = @intFromPtr(c);
+            if (addr < bounds.low or addr >= bounds.high) break;
+            cut.bottom = @constCast(c);
+        }
+        if (cut.bottom) |c| {
+            cut.outer = c.outer;
+            c.outer = null;
+        }
+        self.trace_floor = nat.base.frame;
+        return cut;
+    }
+
+    pub fn endTraceCut(self: *VM, cut: *TraceCut) void {
+        if (cut.bottom) |c| c.outer = cut.outer;
+        self.trace_floor = cut.floor;
+    }
+
+    pub fn suspendedFiberFrames(fiber: *const Fiber) []CallFrame {
+        const p = fiber.native orelse return &.{};
+        const nat: *FiberNative = @ptrCast(@alignCast(p));
+        if (!nat.pinned) return &.{};
+        return nat.saved.frames.items;
+    }
+
+    pub fn viewSuspendedFiber(self: *VM, fiber: *Fiber) RuntimeError!?SuspendedView {
+        const p = fiber.native orelse return null;
+        const nat: *FiberNative = @ptrCast(@alignCast(p));
+        if (!nat.pinned) return null;
+        const ic = self.ic.?;
+        const a = self.allocator;
+        const cur = self.laneMarks();
+        const b = nat.base;
+        var view: SuspendedView = .{ .nat = nat, .marks = cur, .native_call = self.native_call, .trace_floor = self.trace_floor };
+        errdefer self.endSuspendedView(&view);
+        // what of the running frames lies where the fiber's go
+        if (cur.frame > b.frame) {
+            try view.frames.appendSlice(a, self.frames[b.frame..cur.frame]);
+            try view.arg_counts.appendSlice(a, ic.arg_counts[b.frame..cur.frame]);
+            try view.fga_offsets.appendSlice(a, ic.fga_offsets[b.frame..cur.frame]);
+        }
+        if (cur.fga > b.fga) try view.fga.appendSlice(a, ic.fga_buf[b.fga..cur.fga]);
+        const s = &nat.saved;
+        const nf = s.frames.items.len;
+        const ng = s.fga.items.len;
+        self.setLaneCounts(.{ .frame = b.frame, .sp = cur.sp, .handler = cur.handler, .fga = b.fga });
+        try self.ensureCallRoomFor(nf + 1);
+        if (ng > 0 and !self.fgaRoomFor(ng)) return error.OutOfMemory;
+        self.fillLaneGap(.{ .frame = cur.frame, .sp = cur.sp, .handler = cur.handler, .fga = cur.fga }, .{ .frame = b.frame, .sp = cur.sp, .handler = cur.handler, .fga = b.fga });
+        @memcpy(self.frames[b.frame..][0..nf], s.frames.items);
+        @memcpy(ic.arg_counts[b.frame..][0..nf], s.arg_counts.items);
+        @memcpy(ic.fga_offsets[b.frame..][0..nf], s.fga_offsets.items);
+        if (ng > 0) @memcpy(ic.fga_buf[b.fga..][0..ng], s.fga.items);
+        self.frame_count = b.frame + nf;
+        ic.fga_sp = @intCast(b.fga + ng);
+        // its native calls, ending where it began
+        const bounds = nat.co.bounds();
+        var call = nat.fields.native_call;
+        while (call) |c| : (call = c.outer) {
+            const addr = @intFromPtr(c);
+            if (addr < bounds.low or addr >= bounds.high) break;
+            view.bottom = @constCast(c);
+        }
+        if (view.bottom) |c| {
+            view.bottom_outer = c.outer;
+            c.outer = null;
+            self.native_call = nat.fields.native_call;
+        } else self.native_call = null;
+        self.trace_floor = b.frame;
+        return view;
+    }
+
+    pub fn endSuspendedView(self: *VM, view: *SuspendedView) void {
+        const ic = self.ic.?;
+        const b = view.nat.base;
+        const cur = view.marks;
+        // the slots the fiber's frames took hold no one's state again
+        var k = b.frame;
+        while (k < self.frame_count) : (k += 1) self.frames[k] = .{ .chunk = self.frames[0].chunk, .ip = 0, .vars = .{}, .native = true };
+        if (view.frames.items.len > 0) {
+            @memcpy(self.frames[b.frame..][0..view.frames.items.len], view.frames.items);
+            @memcpy(ic.arg_counts[b.frame..][0..view.frames.items.len], view.arg_counts.items);
+            @memcpy(ic.fga_offsets[b.frame..][0..view.frames.items.len], view.fga_offsets.items);
+        }
+        if (view.fga.items.len > 0) @memcpy(ic.fga_buf[b.fga..][0..view.fga.items.len], view.fga.items);
+        self.setLaneCounts(cur);
+        if (view.bottom) |c| c.outer = view.bottom_outer;
+        self.native_call = view.native_call;
+        self.trace_floor = view.trace_floor;
+        view.frames.deinit(self.allocator);
+        view.arg_counts.deinit(self.allocator);
+        view.fga_offsets.deinit(self.allocator);
+        view.fga.deinit(self.allocator);
+    }
+
+    // the part of each stack between where the resumer stands and the
+    // fiber's base, when the resumer stands lower: frames no one runs or
+    // lists, null operands, handlers no one enters
+    fn fillLaneGap(self: *VM, cur: LaneMarks, base: LaneMarks) void {
+        var i = cur.frame;
+        while (i < base.frame) : (i += 1) {
+            self.frames[i] = .{ .chunk = self.frames[0].chunk, .ip = 0, .vars = .{}, .native = true };
+            if (self.ic) |ic| {
+                ic.arg_counts[i] = unknown_arg_count;
+                ic.fga_offsets[i] = fga_unsaved;
+                ic.sp_save[i] = 0;
+            }
+        }
+        if (cur.sp < base.sp) {
+            @memset(self.stack[cur.sp..base.sp], .null);
+            if (self.ic) |ic| {
+                @memset(ic.arg_stack[cur.sp..base.sp], .none);
+                @memset(ic.stack_fetch[cur.sp..base.sp], false);
+            }
+        }
+        i = cur.handler;
+        while (i < base.handler) : (i += 1) self.exception_handlers[i] = .{ .catch_ip = 0, .frame_count = 0, .sp = 0, .chunk = self.frames[0].chunk, .silenced_depth = 0 };
+        if (cur.fga < base.fga) if (self.ic) |ic| @memset(ic.fga_buf[cur.fga..base.fga], .null);
     }
 
     fn runFiber(self: *VM, fiber: *Fiber, fb: usize, sb: usize, hb: usize) RuntimeError!Value {
@@ -29642,99 +30432,6 @@ pub const VM = struct {
         self.retainFrameObjects(self.frame_count - 1);
         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
         return true;
-    }
-
-    fn saveFiberState(self: *VM, fiber: *Fiber, base_frame: usize, base_sp: usize, base_handler: usize) !void {
-        self.cleanupFiberFrames(fiber);
-        fiber.saved_frames.clearRetainingCapacity();
-        fiber.saved_stack.clearRetainingCapacity();
-        fiber.saved_handlers.clearRetainingCapacity();
-
-        // save frames (move ownership of vars/ref_bindings/locals to fiber)
-        for (self.frames[base_frame..self.frame_count]) |*frame| {
-            try fiber.saved_frames.append(self.allocator, .{
-                .chunk = frame.chunk,
-                .ip = frame.ip,
-                .vars = frame.vars,
-                .locals = frame.locals,
-                .func = frame.func,
-                .called_class = frame.called_class,
-                .generator = frame.generator,
-                .ref_slots = frame.ref_slots,
-                .ref_owner = frame.ref_owner,
-                .call_name = frame.call_name,
-            });
-            // null out the source's owned data so VM cleanup can't double-free
-            frame.vars = .{};
-            frame.ref_slots = .{};
-            frame.ref_owner = 0;
-            frame.locals = &.{};
-        }
-        self.frame_count = base_frame;
-
-        for (self.stack[base_sp..self.sp]) |val| {
-            try fiber.saved_stack.append(self.allocator, val);
-        }
-        self.clearArgStackFrom(base_sp);
-        self.sp = base_sp;
-
-        // save exception handlers as relative offsets
-        for (self.exception_handlers[base_handler..self.handler_count]) |h| {
-            try fiber.saved_handlers.append(self.allocator, .{
-                .catch_ip = h.catch_ip,
-                .frame_count_offset = h.frame_count - base_frame,
-                .sp_offset = h.sp - base_sp,
-                .chunk = h.chunk,
-            });
-        }
-        self.handler_count = base_handler;
-    }
-
-    fn restoreFiberState(self: *VM, fiber: *Fiber, base_frame: usize, base_sp: usize) RuntimeError!void {
-        try self.ensureCallRoomFor(fiber.saved_frames.items.len + 1);
-        try self.ensureStackSlots(fiber.saved_stack.items.len);
-        try self.ensureHandlerRoom(fiber.saved_handlers.items.len);
-        // restore frames (move ownership back to VM)
-        for (fiber.saved_frames.items, 0..) |*frame, i| {
-            self.frames[base_frame + i] = .{
-                .chunk = frame.chunk,
-                .ip = frame.ip,
-                .vars = frame.vars,
-                .locals = frame.locals,
-                .func = frame.func,
-                .called_class = frame.called_class,
-                .generator = frame.generator,
-                .ref_slots = frame.ref_slots,
-                .ref_owner = frame.ref_owner,
-                .call_name = frame.call_name,
-            };
-            // null out source to avoid double-free if cleanupFiberFrames runs later
-            frame.vars = .{};
-            frame.ref_slots = .{};
-            frame.ref_owner = 0;
-            frame.locals = &.{};
-        }
-        self.frame_count = base_frame + fiber.saved_frames.items.len;
-        fiber.saved_frames.clearRetainingCapacity();
-
-        for (fiber.saved_stack.items) |val| {
-            self.stack[self.sp] = val;
-            self.sp += 1;
-        }
-        fiber.saved_stack.clearRetainingCapacity();
-
-        // restore exception handlers with absolute values
-        for (fiber.saved_handlers.items) |h| {
-            self.exception_handlers[self.handler_count] = .{
-                .catch_ip = h.catch_ip,
-                .frame_count = base_frame + h.frame_count_offset,
-                .sp = base_sp + h.sp_offset,
-                .chunk = h.chunk,
-                .silenced_depth = self.error_silenced_depth,
-            };
-            self.handler_count += 1;
-        }
-        fiber.saved_handlers.clearRetainingCapacity();
     }
 
     inline fn readOp(self: *VM) OpCode {
@@ -30225,34 +30922,23 @@ pub const VM = struct {
             self.gc_dtor_fiber = created;
             break :blk created;
         };
-        var vars = self.acquireFrameVars();
-        vars.put(self.allocator, "$this", .{ .object = obj }) catch return false;
+        const nat = self.fiberNative(fiber) catch return false;
         self.ensureCallRoom() catch return false;
         const base_frame = self.frame_count;
-        const base_sp = self.sp;
-        const base_handler = self.handler_count;
-        const locals = self.allocLocals(func, &vars) catch return false;
-        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = vars, .locals = locals, .func = func, .called_class = obj.class_name };
-        self.frames[self.frame_count].entry_sp = self.sp;
-        self.markArgsUnsaved();
-        self.frame_count += 1;
-        self.retainFrameObjects(self.frame_count - 1);
-        if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
+        nat.base = self.laneMarks();
+        nat.dtor_object = obj;
+        nat.dtor_func = func;
         fiber.state = .running;
         // what the destructor releases is destructed as usual, not in this
         // fiber, which is busy
         const prev_in_fiber = self.gc_dtors_in_fiber;
         self.gc_dtors_in_fiber = false;
-        // php's gc_destructor_fiber calls it; an exception it throws goes on
-        // to the code that ran the collection, with one in flight as its
-        // previous
-        var record: NativeCall = undefined;
-        self.enterEngineMethod(&record, "gc_destructor_fiber", &.{}, false);
-        record.depth = base_frame;
-        record.from_native = true;
+        // an exception it throws goes on to the code that ran the
+        // collection, with one in flight as its previous
+        _ = base_frame;
         const in_flight = self.takePending();
-        _ = self.executeFiber(fiber, base_frame, base_sp, base_handler) catch Value.null;
-        self.native_call = record.outer;
+        nat.request = .destructor;
+        _ = self.runOnFiber(fiber, nat, false) catch Value.null;
         self.settleDrainException(in_flight);
         self.gc_dtors_in_fiber = prev_in_fiber;
         if (fiber.state == .suspended) {
@@ -30272,8 +30958,6 @@ pub const VM = struct {
         if (self.current_fiber != null) {
             if (self.callDestructorInGcFiber(obj)) return;
         }
-        self.fiber_switch_blocked += 1;
-        defer self.fiber_switch_blocked -= 1;
         const in_flight = self.takePending();
         _ = self.callMethod(obj, "__destruct", &.{}) catch {};
         self.settleDrainException(in_flight);
@@ -30326,8 +31010,6 @@ pub const VM = struct {
             if (self.gc_dtors_in_fiber) {
                 if (self.callDestructorInGcFiber(obj)) break :destruct;
             }
-            self.fiber_switch_blocked += 1;
-            defer self.fiber_switch_blocked -= 1;
             // an exception in flight waits while the destructor runs, and
             // becomes the previous of one the destructor throws
             const in_flight = self.takePending();
@@ -30574,8 +31256,8 @@ pub const VM = struct {
                     fiber.refcount -= 1;
                     if (fiber.refcount != 0) continue;
                 }
-                self.cleanupFiberFrames(fiber);
-                for (fiber.saved_stack.items) |value| self.stackRelease(value);
+                self.releaseFiberNative(fiber);
+                if (self.hasPendingReleases()) self.drainPendingDestruct();
                 self.releaseValue(fiber.callable);
                 self.releaseValue(fiber.suspend_value);
                 self.releaseValue(fiber.return_value);
@@ -30860,9 +31542,16 @@ pub const VM = struct {
         defer pending_gens.deinit(self.allocator);
         for (self.cycle_gens.keys(), self.cycle_gens.values()) |g, *scratch| {
             if (scratch.* != 0 or g.refcount == 0 or g.state == .completed or g.state == .running) continue;
-            pending_gens.append(self.allocator, g) catch continue;
             scratch.* = 1;
+            // one on the path of a delegate running in a suspended fiber
+            // is closed when the fiber is destroyed
+            if (generatorRunningInFiber(g)) {
+                g.forced_close = true;
+                continue;
+            }
+            pending_gens.append(self.allocator, g) catch continue;
         }
+        if (pending_gens.items.len > 0) self.cyclePropagateAlive(&visited_objs, &visited_arrs);
         var pending_fibers: std.ArrayListUnmanaged(*Fiber) = .empty;
         defer pending_fibers.deinit(self.allocator);
         for (self.cycle_fibers.keys(), self.cycle_fibers.values()) |f, *scratch| {
@@ -30870,7 +31559,22 @@ pub const VM = struct {
             pending_fibers.append(self.allocator, f) catch continue;
             scratch.* = 1;
         }
-        if (pending_gens.items.len > 0 or pending_fibers.items.len > 0) self.cyclePropagateAlive(&visited_objs, &visited_arrs);
+        // a garbage root a suspended fiber reaches has its destructor called
+        // before the fiber is destroyed, as php calls the destructors of all
+        // the garbage roots in one pass
+        var fiber_dtor_objs: std.ArrayListUnmanaged(*PhpObject) = .empty;
+        defer fiber_dtor_objs.deinit(self.allocator);
+        if (pending_fibers.items.len > 0) {
+            if (first and self.current_fiber == null) {
+                for (self.cycle_candidates.items) |obj| {
+                    if (!visited_objs.contains(obj)) continue;
+                    if (obj.scratch_rc != 0 or obj.destructed or obj.destructor_called or !obj.ownsDestructor()) continue;
+                    if (!self.hasMethod(obj.class_name, "__destruct")) continue;
+                    fiber_dtor_objs.append(self.allocator, obj) catch continue;
+                }
+            }
+            self.cyclePropagateAlive(&visited_objs, &visited_arrs);
+        }
 
         if (self.debug_gc_verify) self.gcVerifyCollected(&visited_objs, &visited_arrs);
 
@@ -30894,6 +31598,13 @@ pub const VM = struct {
                     g.cycle_queued = false;
                 };
             }
+        }
+        for (fiber_dtor_objs.items) |obj| {
+            if (obj.destructed or obj.destructor_called) continue;
+            obj.destructor_called = true;
+            objRetain(obj);
+            self.callGarbageDestructor(obj);
+            if (obj.refcount > 0) obj.refcount -= 1;
         }
         for (pending_fibers.items) |f| {
             f.refcount += 1;
@@ -31155,7 +31866,10 @@ pub const VM = struct {
             if (gcTargetMatches(t, f.callable)) gcNote(&c, false, "fiber callable", .{});
             if (gcTargetMatches(t, f.suspend_value)) gcNote(&c, false, "fiber suspend_value", .{});
             if (gcTargetMatches(t, f.return_value)) gcNote(&c, false, "fiber return_value", .{});
-            for (f.saved_stack.items) |v| if (gcTargetMatches(t, v)) gcNote(&c, false, "fiber saved_stack", .{});
+            if (f.native) |np| {
+                const nat: *FiberNative = @ptrCast(@alignCast(np));
+                if (nat.pinned) for (nat.saved.stack.items) |v| if (gcTargetMatches(t, v)) gcNote(&c, false, "fiber saved_stack", .{});
+            }
         }
         for (self.arrays.items) |arr| {
             if (arr.pooled or arr.elements_released or arr.weak) continue;
@@ -31617,6 +32331,18 @@ pub const VM = struct {
     }
 
     // a frame's variables: the vars map, and the slots it does not mirror
+    // a waiting frame of a suspended fiber: its variables, the generator it
+    // runs, or the closure it runs, which the frame holds
+    fn cycleSavedFrameEdges(self: *VM, frame: anytype, action: CycleEdgeAction, vo: anytype, va: anytype) bool {
+        var changed = self.cycleFrameEdges(&frame.vars, frame.locals, frame.func, &frame.ref_slots, action, vo, va);
+        if (frame.generator) |g| {
+            changed = self.cycleEdge(.{ .generator = g }, true, action, vo, va) or changed;
+        } else if (frame.call_name) |name| if (self.capture_index.getPtr(name)) |range| if (range.object) |obj| {
+            changed = self.cycleEdge(.{ .object = obj }, true, action, vo, va) or changed;
+        };
+        return changed;
+    }
+
     fn cycleFrameEdges(self: *VM, vars: *const std.StringHashMapUnmanaged(Value), locals: []const Value, func: ?*const ObjFunction, ref_slots: *const std.StringHashMapUnmanaged(*Value), action: CycleEdgeAction, vo: anytype, va: anytype) bool {
         var changed = false;
         var vit = vars.valueIterator();
@@ -31666,14 +32392,18 @@ pub const VM = struct {
         changed = self.cycleEdge(f.return_value, true, action, vo, va) or changed;
         if (f.state != .suspended) return changed;
         changed = self.cycleEdge(f.suspend_value, true, action, vo, va) or changed;
-        for (f.saved_frames.items) |*frame| {
-            changed = self.cycleFrameEdges(&frame.vars, frame.locals, frame.func, &frame.ref_slots, action, vo, va) or changed;
-            if (frame.generator) |g| changed = self.cycleEdge(.{ .generator = g }, true, action, vo, va) or changed;
-        }
-        for (f.saved_stack.items) |v| {
-            if (v == .array) {
-                changed = self.cycleEdge(v, false, action, vo, va) or changed;
-            } else changed = self.cycleEdge(v, true, action, vo, va) or changed;
+        // its region of the vm's stacks
+        if (f.native) |p| {
+            const nat: *FiberNative = @ptrCast(@alignCast(p));
+            if (nat.pinned) {
+                for (nat.saved.frames.items) |*frame| changed = self.cycleSavedFrameEdges(frame, action, vo, va) or changed;
+                for (nat.saved.stack.items) |v| {
+                    if (v == .array) {
+                        changed = self.cycleEdge(v, false, action, vo, va) or changed;
+                    } else changed = self.cycleEdge(v, true, action, vo, va) or changed;
+                }
+                for (nat.saved.holds.items) |h| changed = self.cycleEdge(h.value, true, action, vo, va) or changed;
+            }
         }
         return changed;
     }
