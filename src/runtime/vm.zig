@@ -4009,6 +4009,7 @@ pub const VM = struct {
         }
         try self.registerResultFunctions(result);
         for (result.type_hints.items) |th| {
+            if (th.cond_id != 0) continue;
             try g_type_info.put(self.allocator, th.name, .{ .param_types = th.param_types, .return_type = th.return_type });
         }
         var vars: std.StringHashMapUnmanaged(Value) = .{};
@@ -4582,6 +4583,14 @@ pub const VM = struct {
         }
     }
 
+    // the declared types of the functions a conditional declaration binds
+    fn installCondTypeHints(self: *VM, result: *const CompileResult, cond_id: u16) RuntimeError!void {
+        for (result.type_hints.items) |th| {
+            if (th.cond_id != cond_id) continue;
+            try g_type_info.put(self.allocator, th.name, .{ .param_types = th.param_types, .return_type = th.return_type });
+        }
+    }
+
     pub fn indexFunctionByChunk(self: *VM, name: []const u8, chunk: *const Chunk) RuntimeError!void {
         const gop = try self.chunk_to_func_names.getOrPut(self.allocator, @intFromPtr(chunk));
         if (!gop.found_existing) gop.value_ptr.* = .empty;
@@ -4709,6 +4718,7 @@ pub const VM = struct {
 
         try self.registerResultFunctions(heap_result);
         for (heap_result.type_hints.items) |th| {
+            if (th.cond_id != 0) continue;
             try g_type_info.put(self.allocator, th.name, .{ .param_types = th.param_types, .return_type = th.return_type });
         }
         try self.raiseCompileWarnings(heap_result);
@@ -10039,6 +10049,24 @@ pub const VM = struct {
                         try self.indexFunctionByChunk(func.name, &func.chunk);
                         break;
                     }
+                    try self.installCondTypeHints(result, cond_id);
+                },
+
+                .declare_methods => {
+                    const cond_id = self.readU16();
+                    const result = self.chunk_to_result.get(@intFromPtr(self.currentFrame().chunk)) orelse {
+                        self.setErrorMsg("Fatal error: internal: declare_methods without owning compile result", .{});
+                        return error.RuntimeError;
+                    };
+                    // the declaration refuses a second run itself
+                    for (result.functions.items) |*func| {
+                        if (func.cond_id != cond_id) continue;
+                        try self.noteFunctionName(func.name);
+                        try self.functions.put(self.allocator, func.name, func);
+                        try self.noteRefParams(func.name, func);
+                        try self.indexFunctionByChunk(func.name, &func.chunk);
+                    }
+                    try self.installCondTypeHints(result, cond_id);
                 },
 
                 .closure_new => try self.newClosureFromTop(),
@@ -10315,6 +10343,7 @@ pub const VM = struct {
 
                                 try self.registerResultFunctions(r);
                                 for (r.type_hints.items) |th| {
+                                    if (th.cond_id != 0) continue;
                                     try g_type_info.put(self.allocator, th.name, .{ .param_types = th.param_types, .return_type = th.return_type });
                                 }
                                 self.raiseCompileWarnings(r) catch if (try self.resumeRaised()) continue;

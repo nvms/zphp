@@ -576,6 +576,10 @@ pub const OpCode = enum(u16) {
     // u16 class, u16 property: array_set into C::$p, whose string offset
     // write goes back into the property
     array_set_static,
+    // u16 cond id: a declaration that isn't bound at compile time (one in an
+    // if, a function) registers its methods, hooks and initializers as it
+    // runs, so the declaration that ran owns the names
+    declare_methods,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -646,6 +650,7 @@ pub const OpCode = enum(u16) {
             .array_push_bind_ref,
             .foreach_ref_bind,
             .declare_fn,
+            .declare_methods,
             .defer_prop_defaults,
             .get_class_const_dynamic,
             .get_class_const_dyn_name,

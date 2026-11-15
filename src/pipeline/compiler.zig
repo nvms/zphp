@@ -66,6 +66,9 @@ pub const TypeHint = struct {
     name: []const u8,
     param_types: []const []const u8 = &.{},
     return_type: []const u8 = "",
+    // the function's ObjFunction.cond_id: a conditional declaration's types
+    // are installed when it runs
+    cond_id: u16 = 0,
 };
 
 // a warning or deprecation php raises while compiling; the runtime raises it
@@ -393,6 +396,12 @@ pub const Compiler = struct {
     // namespace declarations but not through if/loops/try or another function
     // body. those compile to a declare_fn opcode and bind at runtime
     hoistable: bool = true,
+    // whether the class-like declaration being entered stands where php
+    // binds it at compile time (read by the declaration, set just before)
+    class_decl_hoistable: bool = true,
+    // the cond id the functions of a conditional class-like declaration
+    // take, 0 outside one (see declare_methods)
+    class_cond_id: u16 = 0,
     cond_fn_count: u16 = 0,
     // top-level class/interface declaration node indices that were emitted into
     // the early-binding prelude. compileNode skips them at their original site
@@ -904,6 +913,10 @@ pub const Compiler = struct {
         // loops, try, switch, match, ...) makes nested declarations
         // conditional. function_decl itself reads the flag before clearing
         const was_hoistable = self.hoistable;
+        switch (node.tag) {
+            .class_decl, .trait_decl, .interface_decl, .enum_decl => self.class_decl_hoistable = was_hoistable,
+            else => {},
+        }
         self.hoistable = switch (node.tag) {
             .block, .namespace_decl, .function_decl => was_hoistable,
             else => false,

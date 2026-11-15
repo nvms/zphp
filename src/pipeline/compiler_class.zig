@@ -2175,7 +2175,7 @@ pub fn compileFunction(self: *Compiler, node: Ast.Node) Error!void {
     const param_types = try extractParamTypes(self, param_nodes);
     const return_type = try extractReturnType(self, node.data.lhs, @intCast(param_nodes.len));
     if (param_types.len > 0 or return_type.len > 0) {
-        try self.type_hints.append(self.allocator, .{ .name = name, .param_types = param_types, .return_type = return_type });
+        try self.type_hints.append(self.allocator, .{ .name = name, .param_types = param_types, .return_type = return_type, .cond_id = cond_id });
     }
     if (self.functions.items.len > 0) {
         self.functions.items[self.functions.items.len - 1].has_param_types = param_types.len > 0;
@@ -2918,7 +2918,30 @@ const ClassShape = struct {
     attributes_at: u32,
 };
 
+// a class-like declaration that php doesn't bind while compiling: its
+// functions wait for declare_methods, run just before the declaration. returns
+// the cond id to restore
+fn enterClassCond(self: *Compiler) u16 {
+    const saved = self.class_cond_id;
+    if (self.class_decl_hoistable) {
+        self.class_cond_id = 0;
+    } else {
+        self.cond_fn_count += 1;
+        self.class_cond_id = self.cond_fn_count;
+    }
+    self.class_decl_hoistable = true;
+    return saved;
+}
+
+fn emitDeclareMethods(self: *Compiler) Error!void {
+    if (self.class_cond_id == 0) return;
+    try self.emitOp(.declare_methods);
+    try self.emitU16(self.class_cond_id);
+}
+
 pub fn compileClassDecl(self: *Compiler, node: Ast.Node) Error!void {
+    const saved_cond = enterClassCond(self);
+    defer self.class_cond_id = saved_cond;
     const unqualified = self.ast.tokenSlice(node.main_token);
     if (isReservedClassName(unqualified)) return self.failFmt(node.main_token, "Cannot use \"{s}\" as a class name as it is reserved", .{unqualified});
     if (!class_names.isAnonymous(unqualified)) try warnUnderscoreName(self, node.main_token, "a class name");
@@ -3139,6 +3162,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
         const parent_name = resolveNodeClassName(self, self.ast.nodes[parent_node]) catch break :blk 0;
         break :blk if (self.php_bound_names.contains(parent_name)) 0x80 else 0;
     } else 0;
+    try emitDeclareMethods(self);
     try self.emitOp(.class_decl);
     try self.emitByte(class_modifiers | lax_parent);
     try self.emitU16(name_idx);
@@ -3655,6 +3679,8 @@ fn warnUnderscoreName(self: *Compiler, token: u32, comptime kind: []const u8) Er
 }
 
 pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
+    const saved_cond = enterClassCond(self);
+    defer self.class_cond_id = saved_cond;
     const unqualified = self.ast.tokenSlice(node.main_token);
     if (isReservedClassName(unqualified)) return self.failFmt(node.main_token, "Cannot use \"{s}\" as an interface name as it is reserved", .{unqualified});
     try warnUnderscoreName(self, node.main_token, "an interface name");
@@ -3694,6 +3720,7 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(iface_name) });
+    try emitDeclareMethods(self);
     try self.emitOp(.interface_decl);
     try self.emitU16(name_idx);
     try self.emitU32(lineForToken(self, node.main_token));
@@ -3834,6 +3861,8 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
 }
 
 pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
+    const saved_cond = enterClassCond(self);
+    defer self.class_cond_id = saved_cond;
     const unqualified = self.ast.tokenSlice(node.main_token);
     if (isReservedClassName(unqualified)) return self.failFmt(node.main_token, "Cannot use \"{s}\" as a trait name as it is reserved", .{unqualified});
     try warnUnderscoreName(self, node.main_token, "a trait name");
@@ -3949,6 +3978,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(trait_name) });
+    try emitDeclareMethods(self);
     try self.emitOp(.trait_decl);
     try self.emitU16(name_idx);
     try self.emitU32(lineForToken(self, node.main_token));
@@ -4100,6 +4130,8 @@ fn checkEnumMembers(self: *Compiler, enum_name: []const u8, enum_tok: u32, backe
 }
 
 pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
+    const saved_cond = enterClassCond(self);
+    defer self.class_cond_id = saved_cond;
     try warnUnderscoreName(self, node.main_token, "an enum name");
     const enum_name = self.declaredName(self.ast.tokenSlice(node.main_token));
     const outer_class = self.current_class;
@@ -4146,6 +4178,7 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(enum_name) });
+    try emitDeclareMethods(self);
     try self.emitOp(.enum_decl);
     try self.emitU16(name_idx);
     try self.emitU32(lineForToken(self, node.main_token));
@@ -4432,6 +4465,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     const method_lo = !method_gen and !is_variadic and !hasRefParams(ref_flags) and !needsVarSync(&sub.chunk);
 
     self.functions.appendAssumeCapacity(.{
+        .cond_id = self.class_cond_id,
         .name = full_name,
         .arity = @intCast(param_nodes.len),
         .required_params = required,
@@ -4461,7 +4495,7 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
     const param_types = try extractParamTypes(self, param_nodes);
     const return_type = try extractMethodReturnType(self, member, @intCast(param_nodes.len));
     if (param_types.len > 0 or return_type.len > 0) {
-        try self.type_hints.append(self.allocator, .{ .name = full_name, .param_types = param_types, .return_type = return_type });
+        try self.type_hints.append(self.allocator, .{ .name = full_name, .param_types = param_types, .return_type = return_type, .cond_id = self.class_cond_id });
     }
     if (self.functions.items.len > 0) {
         self.functions.items[self.functions.items.len - 1].has_param_types = param_types.len > 0;
@@ -4709,6 +4743,7 @@ fn compileInitializer(self: *Compiler, name: []const u8, scope: InitializerScope
     const slot_names = try sub.buildSlotNames();
     const local_count = sub.next_slot;
     self.functions.appendAssumeCapacity(.{
+        .cond_id = self.class_cond_id,
         .name = name,
         .arity = if (scope == .argument) 1 else 0,
         .required_params = if (scope == .argument) 1 else 0,
@@ -4799,6 +4834,7 @@ fn compileDeferredPropDefaults(self: *Compiler, class_name: []const u8, members:
     const local_count = sub.next_slot;
 
     self.functions.appendAssumeCapacity(.{
+        .cond_id = self.class_cond_id,
         .name = name,
         .arity = 0,
         .required_params = 0,
@@ -4849,7 +4885,7 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
         const end = self.ast.extra_data[ext + 7];
         param_types[0] = if (end > start) try buildTypeString(self, start, end) else prop_type;
     }
-    try self.type_hints.append(self.allocator, .{ .name = full_name, .param_types = param_types, .return_type = if (kind == .get) prop_type else "void" });
+    try self.type_hints.append(self.allocator, .{ .name = full_name, .param_types = param_types, .return_type = if (kind == .get) prop_type else "void", .cond_id = self.class_cond_id });
 
     var param_names_list = std.ArrayListUnmanaged([]const u8).empty;
     defer param_names_list.deinit(self.allocator);
@@ -4940,6 +4976,7 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
     const method_lo = !is_generator and !needsVarSync(&sub.chunk);
 
     self.functions.appendAssumeCapacity(.{
+        .cond_id = self.class_cond_id,
         .name = full_name,
         .display_name = shown_name,
         .arity = @intCast(param_names.len),
@@ -4997,6 +5034,7 @@ fn compileInterfaceMethodStub(self: *Compiler, owner_name: []const u8, member: A
     @memcpy(defaults_owned, defaults.items);
 
     try self.functions.append(self.allocator, .{
+        .cond_id = self.class_cond_id,
         .name = full_name,
         .arity = @intCast(param_nodes.len),
         .required_params = required,
@@ -5015,7 +5053,7 @@ fn compileInterfaceMethodStub(self: *Compiler, owner_name: []const u8, member: A
     const param_types = try extractParamTypes(self, param_nodes);
     const return_type = try extractMethodReturnType(self, member, @intCast(param_nodes.len));
     if (param_types.len > 0 or return_type.len > 0) {
-        try self.type_hints.append(self.allocator, .{ .name = full_name, .param_types = param_types, .return_type = return_type });
+        try self.type_hints.append(self.allocator, .{ .name = full_name, .param_types = param_types, .return_type = return_type, .cond_id = self.class_cond_id });
     }
     if (self.functions.items.len > 0) {
         self.functions.items[self.functions.items.len - 1].has_param_types = param_types.len > 0;

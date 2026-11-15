@@ -18,7 +18,7 @@ const MAGIC = "ZPHPC\x00";
 // v18 adds defer_prop_defaults; v19 gives interface, trait and enum
 // declarations their start line, end line and doc comment. v20 gives class
 // constants their own opcodes.
-pub const FORMAT_VERSION: u16 = 80;
+pub const FORMAT_VERSION: u16 = 82;
 
 // tag bytes for serialized values
 const TAG_NULL: u8 = 0;
@@ -146,6 +146,7 @@ pub fn serialize(allocator: Allocator, result: *const CompileResult) ![]u8 {
         for (th.param_types) |pt| {
             try writeU32(&buf, allocator, try strtab.intern(allocator, pt));
         }
+        try writeU16(&buf, allocator, th.cond_id);
     }
 
     // function and closure attributes are registered directly from CompileResult.
@@ -582,10 +583,12 @@ pub fn deserializeRelocated(allocator: Allocator, data: []const u8, relocation: 
         const param_types = allocator.alloc([]const u8, th_param_count) catch return error.OutOfMemory;
         errdefer allocator.free(param_types);
         for (0..th_param_count) |pi| param_types[pi] = strings[try readStringIndex(&r, strings)];
+        const th_cond_id = r.readU16() catch return error.InvalidFormat;
         try type_hints.append(allocator, .{
             .name = strings[th_name_idx],
             .return_type = if (th_ret_idx == 0xFFFFFFFF) "" else strings[th_ret_idx],
             .param_types = param_types,
+            .cond_id = th_cond_id,
         });
     }
 
