@@ -2622,15 +2622,27 @@ fn typeNamesKnown(self: *Compiler, own: []const u8, start_tok: u32, end_tok: u32
 // conservatively refuse to hoist any declaration carrying attributes anywhere
 fn declHasAttributes(self: *Compiler, node: Ast.Node) bool {
     if (self.ast.attr_ranges.len == 0) return false;
-    if (findAttrRangeForToken(self.ast.attr_ranges, self.ast.tokens, node.main_token) != null) return true;
+    if (attributesTakeArguments(self, node.main_token)) return true;
     for (self.ast.extraSlice(node.data.lhs)) |m_idx| {
         const m = self.ast.nodes[m_idx];
-        if (findAttrRangeForToken(self.ast.attr_ranges, self.ast.tokens, m.main_token) != null) return true;
+        if (attributesTakeArguments(self, m.main_token)) return true;
         if (m.tag == .class_method or m.tag == .static_class_method) {
             for (self.ast.extraSlice(m.data.lhs)) |pn| {
-                if (findAttrRangeForToken(self.ast.attr_ranges, self.ast.tokens, self.ast.nodes[pn].main_token) != null) return true;
+                if (attributesTakeArguments(self, self.ast.nodes[pn].main_token)) return true;
             }
         }
+    }
+    return false;
+}
+
+// attributes written without arguments (#[\Override]) read nothing where
+// they stand, so they don't keep a declaration from moving
+fn attributesTakeArguments(self: *Compiler, token: u32) bool {
+    const ar = findAttrRangeForToken(self.ast.attr_ranges, self.ast.tokens, token) orelse return false;
+    const items = self.ast.extraSlice(ar.items);
+    var i: usize = 0;
+    while (i + 2 < items.len) : (i += 3) {
+        if (items[i + 2] != ast_mod.AttrRange.no_args and self.ast.extraSlice(items[i + 2]).len > 0) return true;
     }
     return false;
 }
@@ -3386,7 +3398,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
     defer props_with_attrs.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
-        if (member.tag == .class_property) {
+        if (member.tag == .class_property or member.tag == .static_class_property) {
             const pattrs = try extractAttributes(self, member.main_token, AttrTarget.property);
             if (pattrs.len > 0) {
                 var prop_name = self.ast.tokenSlice(member.main_token);
@@ -4026,7 +4038,7 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     defer props_with_attrs.deinit(self.allocator);
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
-        if (member.tag == .class_property) {
+        if (member.tag == .class_property or member.tag == .static_class_property) {
             const pattrs = try extractAttributes(self, member.main_token, AttrTarget.property);
             if (pattrs.len > 0) {
                 var prop_name = self.ast.tokenSlice(member.main_token);

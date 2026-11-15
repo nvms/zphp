@@ -10655,6 +10655,27 @@ pub const VM = struct {
                         idef.deinit(self.allocator);
                         return self.raiseCompileFatal(msg, .{ .file = iface_site.file, .line = iface_site.start_line });
                     }
+                    // a property marked #[\Override] needs a parent interface
+                    // declaring it
+                    var iface_pa = def.property_attributes.iterator();
+                    while (iface_pa.next()) |entry| {
+                        if (!hasOverrideAttribute(entry.value_ptr.*)) continue;
+                        var seen_ifaces: std.ArrayListUnmanaged([]const u8) = .empty;
+                        defer seen_ifaces.deinit(self.allocator);
+                        for (idef.parents.items) |parent| try self.collectInterface(&seen_ifaces, parent);
+                        const met = for (seen_ifaces.items) |parent| {
+                            const pdef = self.classes.getPtr(parent) orelse break true;
+                            if (for (pdef.properties.items) |prop| {
+                                if (std.mem.eql(u8, prop.name, entry.key_ptr.*)) break true;
+                            } else false) break true;
+                        } else false;
+                        if (met) continue;
+                        const msg = try std.fmt.allocPrint(self.allocator, "{s}::${s} has #[\\Override] attribute, but no matching parent property exists", .{ iface_name, entry.key_ptr.* });
+                        defer self.allocator.free(msg);
+                        def.deinit(self.allocator);
+                        idef.deinit(self.allocator);
+                        return self.raiseCompileFatal(msg, .{ .file = iface_site.file, .line = iface_site.start_line });
+                    }
                     try self.classes.put(self.allocator, iface_name, def);
                     try self.interfaces.put(self.allocator, iface_name, idef);
                 },
