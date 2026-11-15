@@ -3028,6 +3028,7 @@ pub const VM = struct {
         try c.put(a, "INFO_VARIABLES", .{ .int = 32 });
         try c.put(a, "INFO_LICENSE", .{ .int = 64 });
         try c.put(a, "INFO_ALL", .{ .int = 4294967295 });
+        inline for (.{ .{ "CREDITS_GROUP", 1 }, .{ "CREDITS_GENERAL", 2 }, .{ "CREDITS_SAPI", 4 }, .{ "CREDITS_MODULES", 8 }, .{ "CREDITS_DOCS", 16 }, .{ "CREDITS_FULLPAGE", 32 }, .{ "CREDITS_QA", 64 }, .{ "CREDITS_ALL", 4294967295 } }) |k| try c.put(a, k[0], .{ .int = k[1] });
         try c.put(a, "PHP_FLOAT_MAX", .{ .float = std.math.floatMax(f64) });
         try c.put(a, "PHP_FLOAT_MIN", .{ .float = std.math.floatMin(f64) });
         try c.put(a, "PHP_FLOAT_EPSILON", .{ .float = std.math.floatEps(f64) });

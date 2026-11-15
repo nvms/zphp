@@ -849,15 +849,16 @@ fn iniBool(v: []const u8) bool {
 }
 
 fn native_phpinfo(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    _ = args;
-    // minimal output: enough for callers to verify the function exists. real
-    // PHP prints a giant HTML/text dump of the environment
-    try ctx.vm.output.appendSlice(ctx.allocator, "PHP Version => " ++ php_version.string ++ "\n");
-    try @import("pcre.zig").writeInfo(ctx, &ctx.vm.output);
+    const p = @import("string_ports.zig").Args.init(ctx, "phpinfo", args);
+    const flag = if (p.has(0)) try p.longAs(0, "flags", "int") else @import("phpinfo.zig").INFO_ALL;
+    try @import("phpinfo.zig").printInfo(ctx, @as(i32, @truncate(flag)));
     return NativeResult.scalar(.{ .bool = true });
 }
 
-fn native_phpcredits(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+fn native_phpcredits(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = @import("string_ports.zig").Args.init(ctx, "phpcredits", args);
+    const flag = if (p.has(0)) try p.longAs(0, "flags", "int") else @import("phpinfo.zig").CREDITS_ALL;
+    try @import("phpinfo.zig").printCredits(ctx, @as(i32, @truncate(flag)));
     return NativeResult.scalar(.{ .bool = true });
 }
 

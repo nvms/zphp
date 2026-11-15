@@ -415,7 +415,7 @@ fn printRValue(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Valu
     return printRValueImpl(a, out, val, depth, null);
 }
 
-fn printRValueImpl(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Value, depth: usize, vm: ?*@import("../runtime/vm.zig").VM) !void {
+pub fn printRValueImpl(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), val: Value, depth: usize, vm: ?*@import("../runtime/vm.zig").VM) !void {
     switch (val) {
         .null, .undef => {},
         .bool => |b| if (b) try out.appendSlice(a, "1"),

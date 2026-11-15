@@ -111,6 +111,9 @@ fn loadStartupFlags(allocator: std.mem.Allocator, raw_args: []const []const u8) 
             skip_ini = true;
         } else if (std.mem.eql(u8, arg, "-q")) {
             // php's quiet mode drops cgi headers, which the cli never prints
+        } else if (std.mem.eql(u8, arg, "-e")) {
+            // php's extended information for debuggers changes nothing a
+            // script sees
         } else if (std.mem.eql(u8, arg, "-f")) {
             i += 1;
             try args.append(allocator, "run");
@@ -163,6 +166,13 @@ fn dispatch(allocator: std.mem.Allocator, args: []const []const u8) !void {
         // and leaves it out of $argv
         const rest = if (args.len > 3) args[3..] else &.{};
         try runCode(allocator, args[2], if (rest.len > 0 and std.mem.eql(u8, rest[0], "--")) rest[1..] else rest);
+    } else if (std.mem.eql(u8, cmd, "-i") or std.mem.eql(u8, cmd, "--info")) {
+        // php_print_info(PHP_INFO_ALL & ~PHP_INFO_CREDITS)
+        try runCode(allocator, "phpinfo(~INFO_CREDITS);", &.{});
+    } else if (std.mem.eql(u8, cmd, "-a") or std.mem.eql(u8, cmd, "--interactive")) {
+        // php's cli without the readline extension
+        try writeStdout("Interactive shell (-a) requires the readline extension.\n");
+        std.process.exit(1);
     } else if (std.mem.eql(u8, cmd, "serve")) {
         try serveCommand(allocator, args);
     } else if (std.mem.eql(u8, cmd, "test")) {

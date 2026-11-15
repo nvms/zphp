@@ -112,22 +112,18 @@ pub fn libVersion() []const u8 {
     return version_buf[0..@intCast(n - 1)]; // n includes the trailing nul
 }
 
-// pcre's section of phpinfo() in text mode (PHP_MINFO_FUNCTION(pcre))
-pub fn writeInfo(ctx: *NativeContext, out: *std.ArrayListUnmanaged(u8)) RuntimeError!void {
+// pcre's table in phpinfo() (PHP_MINFO_FUNCTION(pcre)); its directives come
+// from display_ini_entries
+pub fn writeInfoTable(ctx: *NativeContext, out: *std.ArrayListUnmanaged(u8)) RuntimeError!void {
     const a = ctx.allocator;
     var unicode_buf: [32]u8 = undefined;
     const ul = pcre2.pcre2_config_8(10, &unicode_buf);
     const unicode = if (ul > 1) unicode_buf[0..@intCast(ul - 1)] else "";
-    try out.print(a, "\npcre\n\nPCRE (Perl Compatible Regular Expressions) Support => enabled\nPCRE Library Version => {s}\nPCRE Unicode Version => {s}\n", .{ libVersion(), unicode });
+    try out.print(a, "\nPCRE (Perl Compatible Regular Expressions) Support => enabled\nPCRE Library Version => {s}\nPCRE Unicode Version => {s}\n", .{ libVersion(), unicode });
     try out.print(a, "PCRE JIT Support => {s}\n", .{if (jitSupported()) "enabled" else "disabled"});
     var target_buf: [128]u8 = undefined;
     const tl = pcre2.pcre2_config_8(2, &target_buf);
     if (tl > 1) try out.print(a, "PCRE JIT Target => {s}\n", .{target_buf[0..@intCast(tl - 1)]});
-    try out.appendSlice(a, "\nDirective => Local Value => Master Value\n");
-    inline for (.{ .{ "pcre.backtrack_limit", "1000000" }, .{ "pcre.jit", "1" }, .{ "pcre.recursion_limit", "100000" } }) |ini| {
-        const local = ctx.vm.ini_settings.get(ini[0]) orelse ini[1];
-        try out.print(a, "{s} => {s} => {s}\n", .{ ini[0], local, ini[1] });
-    }
 }
 
 // PCRE_JIT_SUPPORT
