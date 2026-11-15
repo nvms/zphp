@@ -2214,13 +2214,21 @@ fn array_column(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         const colval: Value = if (column == .none) data else (try columnFetch(ctx, data, column)) orelse continue;
         if (index != .none) {
             if (try columnFetch(ctx, data, index)) |keyval| {
-                // array_set_zval_key
+                // array_set_zval_key: a resource, a float and null convert
+                // with php's diagnostics
+                switch (keyval) {
+                    .resource, .float, .null => {
+                        try ctx.vm.warnOffsetKey(keyval);
+                        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+                    },
+                    else => {},
+                }
                 const key: ?PhpArray.Key = switch (keyval) {
                     .int => |n| .{ .int = n },
                     .string => |s| PhpArray.normalizeKey(.{ .string = s }),
                     .null => .{ .string = Value.String.borrowed("") },
                     .bool => |b| .{ .int = @intFromBool(b) },
-                    .float => |f| .{ .int = if (Value.floatFitsInt(f)) @intFromFloat(@trunc(f)) else 0 },
+                    .float, .resource => Value.toArrayKey(keyval),
                     else => null,
                 };
                 if (key) |k| {
