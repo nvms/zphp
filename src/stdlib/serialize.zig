@@ -1302,9 +1302,6 @@ fn instantiate(ctx: *NativeContext, class_name: []const u8) RuntimeError!?*PhpOb
         try ctx.vm.setPendingException("Error", msg);
         return null;
     }
-    if (std.mem.eql(u8, class_name, incomplete_class) and !ctx.vm.classes.contains(incomplete_class)) {
-        try ctx.vm.classes.put(ctx.allocator, incomplete_class, ClassDef{ .name = incomplete_class });
-    }
     const obj = try ctx.createObject(class_name);
     if (obj.slots == null) {
         if (ctx.vm.classes.get(class_name)) |cls| {

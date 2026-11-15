@@ -2516,6 +2516,11 @@ pub const VM = struct {
 
         try @import("../stdlib/hash.zig").register(vm, allocator);
 
+        // the class unserialize() gives objects of classes it can't load
+        // (ext/standard/incomplete_class.c); its accesses are refused in the
+        // property and method paths (isIncompleteObject)
+        try vm.classes.put(allocator, "__PHP_Incomplete_Class", ClassDef{ .name = "__PHP_Incomplete_Class", .is_final = true });
+
         // tidy and tidyNode - stub classes for the deprecated tidy ext. zphp
         // doesn't link libtidy but class_exists checks still need to pass
         const tidy_def = ClassDef{ .name = "tidy" };
@@ -6308,7 +6313,12 @@ pub const VM = struct {
                         // the property increments
                         const container = self.stack[self.sp - (if (access >= 4) @as(usize, 2) else 1)];
                         switch (container) {
-                            .object, .generator, .fiber => continue,
+                            .object => |o| {
+                                // get_property_ptr_ptr of an incomplete object
+                                if (isIncompleteObject(o) and try self.refuseIncompleteWrite(o)) continue;
+                                continue;
+                            },
+                            .generator, .fiber => continue,
                             else => {},
                         }
                         const name: Value = if (access >= 4) self.stack[self.sp - 1] else blk: {
@@ -9842,6 +9852,11 @@ pub const VM = struct {
                     const obj_val = self.pop();
                     if (obj_val == .object) {
                         var obj = obj_val.object;
+                        if (isIncompleteObject(obj)) {
+                            self.incompleteAccessWarning(obj) catch if (try self.resumeRaised()) continue;
+                            self.push(.{ .bool = false });
+                            continue;
+                        }
                         if (self.lazyMagicFirst(obj, prop_name, .isset)) {
                             const result = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicProperty(obj, .isset, prop_name, .null) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
                             self.push(.{ .bool = result.isTruthy() });
@@ -9885,6 +9900,11 @@ pub const VM = struct {
                     const obj_val = self.pop();
                     if (obj_val == .object and prop_name_val == .string) {
                         var obj = obj_val.object;
+                        if (isIncompleteObject(obj)) {
+                            self.incompleteAccessWarning(obj) catch if (try self.resumeRaised()) continue;
+                            self.push(.{ .bool = false });
+                            continue;
+                        }
                         if (self.lazyMagicFirst(obj, prop_name_val.string.bytes(), .isset)) {
                             const result = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicProperty(obj, .isset, prop_name_val.string.bytes(), .null) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
                             self.push(.{ .bool = result.isTruthy() });
@@ -11808,6 +11828,15 @@ pub const VM = struct {
                         obj.refcount +%= 1;
                         defer self.releaseValue(obj_val);
 
+                        if (isIncompleteObject(obj)) {
+                            if (capturing) {
+                                _ = self.refuseIncompleteWrite(obj) catch return error.RuntimeError;
+                                continue;
+                            }
+                            self.incompleteAccessWarning(obj) catch if (try self.resumeRaised()) continue;
+                            self.push(.null);
+                            continue;
+                        }
                         if (self.lazyMagicFirst(obj, prop_name, .get)) {
                             const result = (implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.callMagicGet(obj, prop_name) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; });
                             self.push(result);
@@ -11993,6 +12022,11 @@ pub const VM = struct {
                         var obj = obj_val.object;
                         obj.refcount +%= 1;
                         defer self.releaseValue(obj_val);
+                        if (isIncompleteObject(obj)) {
+                            self.incompleteAccessWarning(obj) catch if (try self.resumeRaised()) continue;
+                            self.push(.null);
+                            continue;
+                        }
                         if (self.lazyMagicFirst(obj, prop_name, .isset) or self.lazyMagicFirst(obj, prop_name, .get)) {
                             self.push((implicit_call: { const handlers_before = self.handler_count; break :implicit_call self.coalesceMagic(obj, prop_name, false) catch { if (self.resumeAfterThrow(base_frame, handlers_before)) continue; return error.RuntimeError; }; }));
                             continue;
@@ -12345,7 +12379,7 @@ pub const VM = struct {
                             }
                         }
                         self.dropN(ac + 1);
-                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch return error.OutOfMemory;
+                        const msg = self.undefinedMethodMessage(obj, method_name) catch return error.OutOfMemory;
                         defer self.allocator.free(msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
@@ -12501,7 +12535,7 @@ pub const VM = struct {
                         }
                     } else {
                         self.dropN(ac + 1);
-                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch return error.OutOfMemory;
+                        const msg = self.undefinedMethodMessage(obj, method_name) catch return error.OutOfMemory;
                         defer self.allocator.free(msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
@@ -12645,7 +12679,7 @@ pub const VM = struct {
                             continue;
                         }
                         self.dropN(ac + 1);
-                        const msg = try std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name });
+                        const msg = try self.undefinedMethodMessage(obj, method_name);
                         defer self.allocator.free(msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
@@ -12745,7 +12779,7 @@ pub const VM = struct {
                         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                     } else {
                         self.dropN(ac + 1);
-                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch return error.OutOfMemory;
+                        const msg = self.undefinedMethodMessage(obj, method_name) catch return error.OutOfMemory;
                         defer self.allocator.free(msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
@@ -12800,7 +12834,7 @@ pub const VM = struct {
                             continue;
                         }
                         self.dropN(ac + 1);
-                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch return error.OutOfMemory;
+                        const msg = self.undefinedMethodMessage(obj, method_name) catch return error.OutOfMemory;
                         defer self.allocator.free(msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
@@ -12899,7 +12933,7 @@ pub const VM = struct {
                         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                     } else {
                         self.dropN(ac + 1);
-                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch return error.OutOfMemory;
+                        const msg = self.undefinedMethodMessage(obj, method_name) catch return error.OutOfMemory;
                         defer self.allocator.free(msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
@@ -12987,7 +13021,7 @@ pub const VM = struct {
                             }
                         }
                         self.dropN(ac + 1);
-                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch return error.OutOfMemory;
+                        const msg = self.undefinedMethodMessage(obj, method_name) catch return error.OutOfMemory;
                         defer self.allocator.free(msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
@@ -13087,7 +13121,7 @@ pub const VM = struct {
                         if (self.frame_count > self.frame_high_water) self.frame_high_water = self.frame_count;
                     } else {
                         self.dropN(ac + 1);
-                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name }) catch return error.OutOfMemory;
+                        const msg = self.undefinedMethodMessage(obj, method_name) catch return error.OutOfMemory;
                         defer self.allocator.free(msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
@@ -22399,6 +22433,7 @@ pub const VM = struct {
     // fetch refuses it, or hands out a copy of its object, which can't be
     // bound. true when the error was thrown and dispatched
     fn refuseReadonlyRefTarget(self: *VM, obj: *PhpObject, prop_name: []const u8) RuntimeError!bool {
+        if (try self.refuseIncompleteWrite(obj)) return true;
         const vr = self.findPropertyVisibility(obj.class_name, prop_name);
         if (!vr.declared or !vr.is_readonly) return false;
         if (self.reinit_windows.items.len > 0 and self.readonlyReinitable(obj, prop_name)) return false;
@@ -24269,6 +24304,10 @@ pub const VM = struct {
     // dispatched: an exception was raised and dispatched, and the run loop
     // continues at its handler
     fn propertyWriteGate(self: *VM, obj_in: *PhpObject, prop_name: []const u8, val: Value, action: MutationAction, base_frame: usize) RuntimeError!PropWriteGate {
+        if (isIncompleteObject(obj_in)) {
+            _ = try self.refuseIncompleteWrite(obj_in);
+            return .{ .step = .dispatched };
+        }
         // zend_std_write_property runs a set hook or __set before a lazy
         // object is initialized: only a write to its storage initializes it
         const lazy_deferred = obj_in.lazy != null and
@@ -24520,7 +24559,44 @@ pub const VM = struct {
         return .written;
     }
 
+    // php's incomplete_class.c: an object unserialize() made for a class it
+    // couldn't load refuses every property and method access
+    pub inline fn isIncompleteObject(obj: *const PhpObject) bool {
+        return obj.class_name.len == "__PHP_Incomplete_Class".len and std.mem.eql(u8, obj.class_name, "__PHP_Incomplete_Class");
+    }
+
+    fn incompleteMessage(self: *VM, obj: *PhpObject, what: []const u8) ![]u8 {
+        const stored = obj.properties.get("__PHP_Incomplete_Class_Name");
+        const name = if (stored != null and stored.? == .string) stored.?.string.bytes() else "unknown";
+        return std.fmt.allocPrint(self.allocator, "The script tried to {s} on an incomplete object. Please ensure that the class definition \"{s}\" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition", .{ what, name });
+    }
+
+    // incomplete_class_message: php_error_docref names the running function
+    fn incompleteAccessWarning(self: *VM, obj: *PhpObject) RuntimeError!void {
+        const msg = try self.incompleteMessage(obj, "access a property");
+        defer self.allocator.free(msg);
+        const func: []const u8 = if (self.currentFrame().func) |f| f.name else "main";
+        const full = try std.fmt.allocPrint(self.allocator, "{s}(): {s}", .{ func, msg });
+        defer self.allocator.free(full);
+        try self.emitWarning(full);
+    }
+
+    // throws "modify a property" for an incomplete object; true when it threw
+    fn refuseIncompleteWrite(self: *VM, obj: *PhpObject) RuntimeError!bool {
+        if (!isIncompleteObject(obj)) return false;
+        const msg = try self.incompleteMessage(obj, "modify a property");
+        defer self.allocator.free(msg);
+        if (try self.throwBuiltinException("Error", msg)) return true;
+        return error.RuntimeError;
+    }
+
+    fn undefinedMethodMessage(self: *VM, obj: *PhpObject, method_name: []const u8) ![]u8 {
+        if (isIncompleteObject(obj)) return self.incompleteMessage(obj, "call a method");
+        return std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name });
+    }
+
     fn checkPropertyMutation(self: *VM, obj: *PhpObject, name: []const u8, action: MutationAction) RuntimeError!bool {
+        if (try self.refuseIncompleteWrite(obj)) return true;
         return self.checkPropertyMutationVis(obj, name, action, self.findPropertyVisibility(obj.class_name, name));
     }
 

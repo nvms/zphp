@@ -531,7 +531,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const access = code[ip];
                     const container = if (access >= 4) stack[sp - 2] else if (access >= 2) stack[sp - 1] else stack[sp - 2];
                     // a key the vm converts (with its warning) goes there too
-                    const passes = if (access >= 2) container == .object else container == .array and switch (stack[sp - 1]) {
+                    const passes = if (access >= 2) container == .object and !VM.isIncompleteObject(container.object) else container == .array and switch (stack[sp - 1]) {
                         .int, .string => true,
                         else => false,
                     };
