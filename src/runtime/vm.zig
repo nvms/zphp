@@ -24139,7 +24139,9 @@ pub const VM = struct {
             const callback = self.autoload_callbacks.items[i];
             retainValue(callback);
             defer self.releaseValue(callback);
-            if (callback == .string) {
+            // "Class::method" goes through the callable rules, which keep
+            // the class it names as the called scope
+            if (callback == .string and std.mem.indexOf(u8, callback.string.bytes(), "::") == null) {
                 _ = try self.callByName(callback.string.bytes(), &.{.{ .string = Value.String.borrowed(class_name) }});
             } else {
                 var ctx = self.makeContext(null);
