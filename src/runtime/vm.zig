@@ -7914,7 +7914,15 @@ pub const VM = struct {
                     }
                     var elem_arr: ?*PhpArray = if (aei_arr == .array) aei_arr.array else null;
                     var elem_key: ?PhpArray.Key = null;
-                    if (aei_arr == .object and try self.splOwnOffsetGet(aei_arr.object)) {
+                    if (aei_arr == .object and isWeakMap(aei_arr.object)) {
+                        var ctx = self.makeContext(null);
+                        const t = @import("../stdlib/spl.zig").weakMapRefTarget(&ctx, aei_arr.object, aei_key) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        elem_arr = t.arr;
+                        elem_key = t.key;
+                    } else if (aei_arr == .object and try self.splOwnOffsetGet(aei_arr.object)) {
                         // spl_array_get_dimension_ptr for BP_VAR_RW: the step
                         // happens on the storage's element
                         var ctx = self.makeContext(null);
@@ -8592,6 +8600,13 @@ pub const VM = struct {
                         // no element for an append: a reference to a temporary
                         if (try self.noticeIndirectOverloaded(arr_val.object)) continue;
                         try self.bindRefSlot(&frame.ref_slots, dst_name, try self.newRefCell());
+                    } else if (arr_val == .object and isWeakMap(arr_val.object)) {
+                        var ctx = self.makeContext(null);
+                        const t = @import("../stdlib/spl.zig").weakMapRefTarget(&ctx, arr_val.object, if (append_ref) null else key_val) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        try self.bindSlotToElement(frame, dst_name, t.arr, t.key);
                     } else if (arr_val == .object and try self.splOwnOffsetGet(arr_val.object)) {
                         // spl_array_get_dimension_ptr for BP_VAR_W: the
                         // element of the storage array itself
@@ -20948,6 +20963,13 @@ pub const VM = struct {
     // offsetGet binds the element of the storage array (read_dimension for
     // BP_VAR_W); null with an exception pending when the offset is refused
     fn splRefTarget(self: *VM, arr_val: Value, key_val: Value) RuntimeError!?@import("../stdlib/spl.zig").RefTarget {
+        if (arr_val == .object and isWeakMap(arr_val.object)) {
+            var ctx = self.makeContext(null);
+            return @import("../stdlib/spl.zig").weakMapRefTarget(&ctx, arr_val.object, key_val) catch |err| {
+                if (self.pending_exception != null) return null;
+                return err;
+            };
+        }
         if (arr_val != .object or !try self.splOwnOffsetGet(arr_val.object)) return null;
         var ctx = self.makeContext(null);
         return @import("../stdlib/spl.zig").arrayStorageRefTarget(&ctx, arr_val.object, key_val) catch |err| {
@@ -25383,6 +25405,8 @@ pub const VM = struct {
     fn overloadedElementWritable(self: *VM, obj: *PhpObject, result: Value) RuntimeError!bool {
         if (result == .object) return true;
         if (try self.splOwnOffsetGet(obj)) return true;
+        // a WeakMap hands out the element itself (zend_weakmap_read_dimension)
+        if (isWeakMap(obj)) return true;
         if (self.offsetGetReturnsRef(obj)) return true;
         const msg = try std.fmt.allocPrint(self.allocator, "Indirect modification of overloaded element of {s} has no effect", .{obj.class_name});
         defer self.allocator.free(msg);
@@ -25401,6 +25425,11 @@ pub const VM = struct {
             return @import("../stdlib/spl.zig").arrayStorageFetch(&ctx, obj, key);
         }
         return self.callMethod(obj, "offsetGet", &.{key});
+    }
+
+    // WeakMap is final: its dimension handlers are always its own
+    fn isWeakMap(obj: *const PhpObject) bool {
+        return std.mem.eql(u8, obj.class_name, "WeakMap");
     }
 
     // whether $obj[...] reaches ArrayObject's or ArrayIterator's own offsetGet

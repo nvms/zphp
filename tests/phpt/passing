@@ -4843,7 +4843,9 @@ Zend/tests/weakrefs/gh10043-014.phpt
 Zend/tests/weakrefs/gh10043-015.phpt
 Zend/tests/weakrefs/gh10043-016.phpt
 Zend/tests/weakrefs/gh13612.phpt
+Zend/tests/weakrefs/gh20073.phpt
 Zend/tests/weakrefs/notify.phpt
+Zend/tests/weakrefs/weakmap_basic_map_behavior.phpt
 Zend/tests/weakrefs/weakmap_dtor_exception.phpt
 Zend/tests/weakrefs/weakmap_error_conditions.phpt
 Zend/tests/weakrefs/weakmap_nested.phpt

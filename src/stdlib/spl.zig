@@ -1531,6 +1531,22 @@ fn wmOffsetGet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     return NativeResult.share(arr.?.get(.{ .int = key }));
 }
 
+// zend_weakmap_read_dimension for BP_VAR_W and BP_VAR_RW: the element itself,
+// which a reference or a nested write goes into
+pub fn weakMapRefTarget(ctx: *NativeContext, obj: *PhpObject, offset: ?Value) RuntimeError!RefTarget {
+    const args: []const Value = if (offset) |o| &.{o} else &.{};
+    const key = try wmKeyOf(ctx, args);
+    const arr = getData(obj);
+    if (arr == null or !arr.?.contains(.{ .int = key })) {
+        const o = offset.?.object;
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Object {s}#{d} not contained in WeakMap", .{ o.class_name, o.id });
+        defer ctx.allocator.free(msg);
+        try ctx.vm.setPendingException("Error", msg);
+        return error.RuntimeError;
+    }
+    return .{ .arr = arr.?, .key = .{ .int = key } };
+}
+
 fn wmOffsetSet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
     const arr = try ensureData(ctx, obj);
