@@ -572,8 +572,17 @@ pub fn compileBinaryOp(self: *Compiler, node: Ast.Node) Error!void {
         .equal_equal, .bang_equal, .equal_equal_equal, .bang_equal_equal, .lt_gt => isCompileConst(self, node.data.lhs) and !isCompileConst(self, node.data.rhs),
         else => false,
     };
-    try self.compileNode(if (swap) node.data.rhs else node.data.lhs);
-    try self.compileNode(if (swap) node.data.lhs else node.data.rhs);
+    // php's binary opcodes read a variable operand when they run, after the
+    // right side: one the right side writes is read with the new value
+    const late_lhs = !swap and lateVariableOperand(self, node.data.lhs, node.data.rhs);
+    if (late_lhs) {
+        try self.compileNode(node.data.rhs);
+        try self.compileNode(node.data.lhs);
+        try self.emitOp(.swap);
+    } else {
+        try self.compileNode(if (swap) node.data.rhs else node.data.lhs);
+        try self.compileNode(if (swap) node.data.lhs else node.data.rhs);
+    }
     try self.emitOp(switch (op_tag) {
         .plus => .add,
         .minus => .subtract,
@@ -600,6 +609,39 @@ pub fn compileBinaryOp(self: *Compiler, node: Ast.Node) Error!void {
         .kw_xor => .logical_xor,
         else => unreachable,
     });
+}
+
+// whether a binary operation's left operand is a variable its right side
+// may write: an assignment or increment of it, or (in code outside functions,
+// where any function can reach the variable through global) a call
+fn lateVariableOperand(self: *Compiler, lhs: u32, rhs: u32) bool {
+    const left = self.ast.nodes[lhs];
+    if (left.tag != .variable) return false;
+    const name = self.ast.tokenSlice(left.main_token);
+    if (std.mem.eql(u8, name, "$this")) return false;
+    return writesVariable(self, rhs, name, !self.inFunctionScope(), 0);
+}
+
+fn writesVariable(self: *Compiler, idx: u32, name: []const u8, calls: bool, depth: u8) bool {
+    if (idx == 0 or depth > 32) return false;
+    const node = self.ast.nodes[idx];
+    return switch (node.tag) {
+        .grouped_expr, .cast_expr, .print_expr => writesVariable(self, node.data.lhs, name, calls, depth + 1),
+        .assign => isNamedVariable(self, node.data.lhs, name) or writesVariable(self, node.data.rhs, name, calls, depth + 1),
+        .prefix_op, .postfix_op => blk: {
+            const t = self.ast.tokens[node.main_token].tag;
+            if ((t == .plus_plus or t == .minus_minus) and isNamedVariable(self, node.data.lhs, name)) break :blk true;
+            break :blk writesVariable(self, node.data.lhs, name, calls, depth + 1);
+        },
+        .binary_op, .logical_and, .logical_or, .null_coalesce => writesVariable(self, node.data.lhs, name, calls, depth + 1) or writesVariable(self, node.data.rhs, name, calls, depth + 1),
+        .call, .method_call, .static_call, .nullsafe_method_call, .dynamic_static_call => calls,
+        else => false,
+    };
+}
+
+fn isNamedVariable(self: *Compiler, idx: u32, name: []const u8) bool {
+    const node = self.ast.nodes[idx];
+    return node.tag == .variable and std.mem.eql(u8, self.ast.tokenSlice(node.main_token), name);
 }
 
 // a literal php's compiler makes an IS_CONST operand of
