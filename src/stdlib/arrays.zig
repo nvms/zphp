@@ -1400,7 +1400,12 @@ fn mergeRecursiveInto(ctx: *NativeContext, dest: *PhpArray, src: *PhpArray) Runt
                 };
                 const target = try ctx.vm.allocArray();
                 switch (existing) {
-                    .array => |arr| for (arr.entries.items) |e| try target.set(ctx.allocator, e.key, if (e.ref) |ref| ref.* else e.value),
+                    // a copy of the array, its next free index included
+                    .array => |arr| {
+                        for (arr.entries.items) |e| try target.set(ctx.allocator, e.key, if (e.ref) |ref| ref.* else e.value);
+                        if (arr.next_int_key > target.next_int_key) target.next_int_key = arr.next_int_key;
+                        if (arr.has_int_keys) target.has_int_keys = true;
+                    },
                     .null => try target.append(ctx.allocator, .null),
                     else => {
                         const converted = try ctx.vm.castToArray(existing);
