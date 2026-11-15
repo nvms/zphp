@@ -13452,16 +13452,21 @@ pub const VM = struct {
                         return error.RuntimeError;
                     }
                     const full_name = self.resolveMethod(class_name, method_name) catch {
-                        if (self.hasMethod(class_name, "__callStatic")) {
-                            var args_arr = try self.allocArray();
-                            for (0..ac) |i| try args_arr.append(self.allocator, self.stack[self.sp - ac + i]);
-                            self.dropN(ac + 1); // +1 for class name on stack
-                            const cs_name = try self.resolveMethod(class_name, "__callStatic");
-                            self.push(.{ .string = Value.String.borrowed(method_name) });
-                            self.push(.{ .array = args_arr });
-                            try self.callStaticTrampoline(cs_name, class_name);
-                            continue;
+                        // zend_std_get_static_method: __call on a fitting
+                        // $this, else __callStatic. the class operand under
+                        // the arguments goes first
+                        retainValue(class_val);
+                        defer self.releaseValue(class_val);
+                        self.stackRelease(class_val);
+                        var i: usize = 0;
+                        while (i < ac) : (i += 1) {
+                            self.stack[self.sp - ac - 1 + i] = self.stack[self.sp - ac + i];
+                            self.setArgSource(self.sp - ac - 1 + i, self.ic.?.arg_stack[self.sp - ac + i]);
                         }
+                        self.clearArgStackFrom(self.sp - 1);
+                        self.sp -= 1;
+                        if (try self.staticCallFallback(class_name, method_name, arg_count, class_name)) continue;
+                        self.dropN(ac);
                         const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ self.declaredClassName(class_name), method_name }) catch return error.OutOfMemory;
                         defer self.allocator.free(msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
