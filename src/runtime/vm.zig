@@ -7996,6 +7996,10 @@ pub const VM = struct {
                             return error.RuntimeError;
                         };
                         try self.pushOverloadedElement(aei_arr.object, result) orelse continue;
+                        // POST_INC still steps the temporary: an array or an
+                        // object there is php's "Cannot increment" TypeError
+                        const stepped = try self.stepValue(self.stack[self.sp - 1], op == .array_elem_inc) orelse continue;
+                        self.releaseValue(stepped);
                     } else if (try self.refuseDimWrite(aei_arr)) |handled| {
                         if (handled) continue;
                         return error.RuntimeError;
