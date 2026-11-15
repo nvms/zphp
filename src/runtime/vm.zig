@@ -13355,7 +13355,7 @@ pub const VM = struct {
                     }
                     self.clearArgStackFrom(self.sp - 1);
                     self.sp -= 1;
-                    try self.callStaticFunction(full_name, arg_count, class_name);
+                    try self.callStaticFunction(full_name, arg_count, self.scopedCallClass(full_name, class_name));
                 },
 
                 .static_call_dyn_method => {
@@ -13434,7 +13434,7 @@ pub const VM = struct {
                     self.clearArgStackFrom(self.sp - 1);
                     self.sp -= 1;
                     defer self.stackRelease(method_val);
-                    try self.callStaticFunction(full_name, arg_count, effective_called);
+                    try self.callStaticFunction(full_name, arg_count, if (lsb_class == null) self.scopedCallClass(full_name, class_name) else effective_called);
                 },
 
                 .static_call_dyn_both => {
@@ -14232,9 +14232,13 @@ pub const VM = struct {
         }
         if (this_val) |tv| {
             if (tv == .object and !sc_target_is_static) {
+                // the call runs on $this, so static:: is $this's class
+                // (ZEND_INIT_STATIC_METHOD_CALL takes the object's class as
+                // the called scope)
+                const this_called: []const u8 = if (this_fits) tv.object.class_name else effective_called;
                 if (self.functions.get(full_name)) |func| {
                     if (func.is_generator) {
-                        try self.callStaticFunction(full_name, arg_count, effective_called);
+                        try self.callStaticFunction(full_name, arg_count, this_called);
                     } else {
                         const ac: usize = arg_count;
                         var new_vars = self.acquireFrameVars();
@@ -14273,7 +14277,7 @@ pub const VM = struct {
                         self.dropN(ac);
                         try self.fillDefaults(&new_vars, func, ac);
                         try self.ensureCallRoom();
-                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = effective_called };
+                        self.frames[self.frame_count] = .{ .chunk = &func.chunk, .ip = 0, .vars = new_vars, .locals = try self.allocLocals(func, &new_vars), .func = func, .called_class = this_called };
                         self.setFrameArgCount(arg_count);
                         self.frames[self.frame_count].entry_sp = self.sp;
                         self.frame_count += 1;
@@ -14290,7 +14294,7 @@ pub const VM = struct {
                     var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
                     try tmp_vars.put(self.allocator, "$this", tv);
                     try self.ensureCallRoom();
-                    self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .native = true, .called_class = effective_called };
+                    self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .native = true, .called_class = this_called };
                     self.setFrameArgCount(arg_count);
                     const sc_saved_fc = self.frame_count;
                     self.frames[self.frame_count].entry_sp = self.sp;
@@ -28179,6 +28183,17 @@ pub const VM = struct {
         return std.mem.eql(u8, name, "strlen") or
             std.mem.eql(u8, name, "count") or
             std.mem.eql(u8, name, "sizeof");
+    }
+
+    // ZEND_INIT_STATIC_METHOD_CALL's called scope for C::m(): an instance
+    // method that runs on a $this of class C (or a subclass) is called on
+    // that object, so static:: names its class
+    fn scopedCallClass(self: *VM, full_name: []const u8, class_name: []const u8) []const u8 {
+        const func = self.functions.get(full_name) orelse return class_name;
+        if (func.is_static) return class_name;
+        const this_val = self.currentThis() orelse return class_name;
+        if (this_val != .object or !self.isInstanceOf(this_val.object.class_name, class_name)) return class_name;
+        return this_val.object.class_name;
     }
 
     fn callStaticFunction(self: *VM, name: []const u8, arg_count: u32, class_name: []const u8) RuntimeError!void {
