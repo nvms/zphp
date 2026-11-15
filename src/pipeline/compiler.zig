@@ -2520,11 +2520,17 @@ pub const Compiler = struct {
     fn resolveArrowCapture(self: *Compiler, name: []const u8) bool {
         const parent = self.arrow_parent orelse return false;
         if (parent.local_slots.contains(name)) return true;
-        if (parent.arrow_parent != null and resolveArrowCapture(parent, name)) {
+        if (parent.arrow_parent != null) {
+            if (!resolveArrowCapture(parent, name)) return false;
             _ = parent.getOrCreateSlot(name);
             return true;
         }
-        return false;
+        // php binds every variable the body names that the enclosing scope
+        // has when the arrow is made (zend_compile_implicit_binds), so one
+        // the parent knows only by name (global, static, a reference
+        // binding) is captured too; the parent's slot mirrors it
+        _ = parent.getOrCreateSlot(name);
+        return true;
     }
 
     // resolve `name` to a local slot, lazily capturing it into an arrow

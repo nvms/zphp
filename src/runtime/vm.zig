@@ -9824,6 +9824,10 @@ pub const VM = struct {
                     // capturing a variable that holds nothing warns, as a read
                     // does; $this is bound implicitly and never does
                     if (val == .null and !std.mem.eql(u8, var_name, "$this") and self.currentFrame().ref_slots.get(var_name) == null and self.localHoldsNothing(var_name)) {
+                        // an arrow function's binds are implicit: one the
+                        // scope doesn't have is left out, and the arrow's own
+                        // read is what warns
+                        if (self.functions.get(self.getOrigClosureName(closure_name))) |func| if (func.is_arrow) continue;
                         self.undefinedVariableRead(var_name) catch if (try self.resumeRaised()) continue;
                     }
                     const cap_pos: u32 = @intCast(self.captures.items.len);
