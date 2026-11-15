@@ -470,7 +470,7 @@ fn array_filter(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     const flag: i64 = if (args.len >= 3) Value.toInt(args[2]) else 0;
 
     const result = try ctx.createArray();
-    if (args.len < 2) {
+    if (args.len < 2 or args[1] == .null) {
         for (src.entries.items) |entry| {
             if (entry.value.isTruthy()) try ctx.vm.arrayAddCarried(result, entry.key, entry, src);
         }
