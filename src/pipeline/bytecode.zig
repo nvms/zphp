@@ -92,7 +92,7 @@ pub const OpCode = enum(u16) {
     array_set_local, // u16: slot - pop value, pop key, set on local at slot (string char-write or array set with vivify), push value (value-assign: clones)
     array_set_local_ref, // same as array_set_local but does NOT clone
     ensure_array_local, // u16: slot - read local, vivify null/false to array, error on scalar, push result
-    ensure_array_var, // u16: name const, u8: separate only (no vivify or push)
+    ensure_array_var, // u16: name const, u8: 1 separate only (no vivify or push), 2 an RW fetch (warns for an undefined variable)
     ensure_array_prop, // u16: prop-name const - pop obj, read obj->prop, vivify null/false to array, COW-separate if shared and write back, push result (for $obj->prop[]=/[k] op= writes)
     cow_separate_local, // u16: slot - if the local holds a shared array, separate it in place (write unshared copy back to slot). non-vivifying, non-throwing, pushes NOTHING. emitted before by-ref native args / unset bases
     ensure_array_static_prop, // u16 class-name const, u16 prop-name const - read Class::$prop, vivify, COW-separate if shared + write back, push (for Class::$prop[]=/[k] op= writes)
@@ -584,6 +584,12 @@ pub const OpCode = enum(u16) {
     // (an ArrayAccess object's offsetGet value is stepped as a temporary)
     array_elem_pre_inc,
     array_elem_pre_dec,
+    // the read-write fetches of a read-modify-write's containers (php's
+    // FETCH_DIM_RW and an RW fetch of a CV): array_get_vivify and
+    // ensure_array_local that warn for a missing element or an undefined
+    // variable before creating it
+    array_get_vivify_rw,
+    ensure_array_local_rw, // u16: slot
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -634,6 +640,7 @@ pub const OpCode = enum(u16) {
             .get_static_prop_dyn_name,
             .get_static_prop_dyn_name_quiet,
             .ensure_array_local,
+            .ensure_array_local_rw,
             .ensure_array_prop,
             .ensure_array_static_prop_dyn,
             .prepare_prop_w,
@@ -730,6 +737,7 @@ pub const OpCode = enum(u16) {
             .isset_prop,
             .isset_index,
             .ensure_array_local,
+            .ensure_array_local_rw,
             .ensure_array_var,
             .ensure_array_prop,
             .cow_separate_local,
@@ -744,6 +752,7 @@ pub const OpCode = enum(u16) {
             .array_get_coalesce,
             .array_get_empty,
             .array_get_vivify,
+            .array_get_vivify_rw,
             .get_prop_dynamic,
             .ensure_array_prop_dynamic,
             .get_prop_coalesce_dynamic,

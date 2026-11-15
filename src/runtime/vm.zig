@@ -6785,7 +6785,7 @@ pub const VM = struct {
                         },
                     }
                 },
-                .array_get_vivify => {
+                .array_get_vivify, .array_get_vivify_rw => {
                     const key = self.pop();
                     const arr_val = self.pop();
                     if (arr_val == .array) {
@@ -6854,6 +6854,18 @@ pub const VM = struct {
                                 self.pushFetched(new_val);
                             }
                         } else {
+                            // FETCH_DIM_RW: a missing element warns, then is
+                            // created (zend_undefined_index_write)
+                            if (op == .array_get_vivify_rw and arr_val.array.getPtr(arr_key) == null) {
+                                const kept = self.warnUndefinedKeyPinned(arr_val.array, arr_key) catch {
+                                    _ = try self.resumeRaised();
+                                    continue;
+                                };
+                                if (!kept) {
+                                    self.pushFetched(.null);
+                                    continue;
+                                }
+                            }
                             const new_arr = try self.allocArray();
                             const new_val = Value{ .array = new_arr };
                             try self.arraySetOwned(arr_val.array, arr_key, new_val);
@@ -7546,9 +7558,15 @@ pub const VM = struct {
                     self.push(val);
                 },
 
-                .ensure_array_local => {
+                .ensure_array_local, .ensure_array_local_rw => {
                     const slot = self.readU16();
                     const frame = self.currentFrame();
+                    // an RW fetch of an undefined variable warns before it
+                    // becomes an array
+                    if (op == .ensure_array_local_rw and self.slotRefCell(frame, slot) == null) {
+                        const raw = if (frame.func == null) self.getLocalGlobal(slot, frame) else if (slot < frame.locals.len) frame.locals[slot] else Value.undef;
+                        if (raw == .undef) self.undefinedVariableRead(self.slotName(frame, slot)) catch if (try self.resumeRaised()) continue;
+                    }
                     // $GLOBALS resolves to the VM-wide superglobal array
                     const ea_slot_name = if (frame.func) |func|
                         (if (slot < func.slot_names.len) func.slot_names[slot] else "")
@@ -7596,7 +7614,9 @@ pub const VM = struct {
 
                 .ensure_array_var => {
                     const idx = self.readU16();
-                    const separate_only = self.readByte() != 0;
+                    // 1: an unset's base, only separated; 2: an RW fetch
+                    const mode = self.readByte();
+                    const separate_only = mode == 1;
                     const name = self.currentChunk().constants.items[idx].string.bytes();
                     if (isSuperglobal(name)) {
                         var cell = self.globals_cells.get(name);
@@ -7632,6 +7652,7 @@ pub const VM = struct {
                     const frame = self.currentFrame();
                     var cur: Value = .null;
                     var from_request = false;
+                    var found = true;
                     if (frame.ref_slots.get(name)) |cell| {
                         cur = cell.*;
                     } else if (frame.vars.get(name)) |v| {
@@ -7640,8 +7661,14 @@ pub const VM = struct {
                         if (self.request_vars.get(name)) |rv| {
                             cur = rv;
                             from_request = true;
-                        }
+                        } else found = false;
+                    } else found = false;
+                    if (cur == .undef) {
+                        cur = .null;
+                        found = false;
                     }
+                    // an RW fetch of an undefined variable warns first
+                    if (mode == 2 and !found) self.undefinedVariableRead(name) catch if (try self.resumeRaised()) continue;
                     // an unset's base (separate_only): a shared array is
                     // separated, anything else is left for the unset to judge
                     if (separate_only and cur != .array) continue;
@@ -15811,6 +15838,22 @@ pub const VM = struct {
     // when the handler left the array with other holders as well
     fn warnOffsetKeyOnW(self: *VM, key: Value, arr: *PhpArray, keep: Value) RuntimeError!bool {
         return self.warnOffsetKeyPinned(key, arr, keep, true);
+    }
+
+    // "Undefined array key" for a write fetch: false when the handler left
+    // the array with no holder but this fetch
+    fn warnUndefinedKeyPinned(self: *VM, arr: *PhpArray, key: PhpArray.Key) RuntimeError!bool {
+        const before = arr.refcount;
+        arrayRetain(arr);
+        self.emitUndefinedKeyWarning(PhpArray.normalizeKey(key)) catch |err| {
+            arrayUnpin(arr);
+            if (arr.refcount < before and arr.refcount == 0) self.queueArrayRelease(arr);
+            return err;
+        };
+        const kept = arr.refcount == before + 1;
+        arrayUnpin(arr);
+        if (!kept and arr.refcount == 0) self.queueArrayRelease(arr);
+        return kept;
     }
 
     fn warnOffsetKeyPinned(self: *VM, key: Value, arr: *PhpArray, keep: Value, write: bool) RuntimeError!bool {

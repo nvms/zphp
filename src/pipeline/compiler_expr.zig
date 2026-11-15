@@ -106,11 +106,11 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
         // only calls in the target run before it
         if (!chainHasCall(self, node.data.lhs)) {
             try self.compileNode(node.data.rhs);
-            const place = (try emitPlaceOperands(self, node.data.lhs)).?;
+            const place = (try emitPlaceOperands(self, node.data.lhs, true)).?;
             try emitPlaceCombine(self, place, op_tag);
             return;
         }
-        const place = (try emitPlaceOperands(self, node.data.lhs)).?;
+        const place = (try emitPlaceOperands(self, node.data.lhs, true)).?;
         try self.compileNode(node.data.rhs);
         // [operands, value] -> [value, operands]
         if (place.operandCount() > 0) {
@@ -708,7 +708,7 @@ const Place = union(enum) {
 };
 
 // pushes the place's operands; null when the target is not a place
-fn emitPlaceOperands(self: *Compiler, target_idx: u32) Error!?Place {
+fn emitPlaceOperands(self: *Compiler, target_idx: u32, rw: bool) Error!?Place {
     const target = self.ast.nodes[target_idx];
     switch (target.tag) {
         .variable_variable => {
@@ -717,7 +717,7 @@ fn emitPlaceOperands(self: *Compiler, target_idx: u32) Error!?Place {
         },
         .array_access => {
             if (target.data.rhs == 0) return null;
-            try compileVivifyChain(self, target.data.lhs);
+            if (rw) try compileVivifyChainRw(self, target.data.lhs) else try compileVivifyChain(self, target.data.lhs);
             try self.compileNode(target.data.rhs);
             return .array_elem;
         },
@@ -862,7 +862,7 @@ fn emitPlaceRead(self: *Compiler, place: Place, access: PlaceAccess) Error!void 
 // [value] -> []. the place's operands are evaluated after the value, as in
 // a foreach or destructuring target
 pub fn storeTopInPlace(self: *Compiler, target_idx: u32) Error!void {
-    const place = (try emitPlaceOperands(self, target_idx)) orelse unreachable;
+    const place = (try emitPlaceOperands(self, target_idx, false)) orelse unreachable;
     // [value, operands] -> [operands, value]
     for (0..place.operandCount()) |_| {
         try self.emitOp(.bury);
@@ -1055,12 +1055,12 @@ pub fn compilePrefixOp(self: *Compiler, node: Ast.Node) Error!void {
             // FETCH_DIM_RW then PRE_INC: the container is fetched for
             // writing once and its element stepped in place (an ArrayAccess
             // object's offsetGet value as a temporary, never offsetSet)
-            try compileVivifyChain(self, target.data.lhs);
+            try compileVivifyChainRw(self, target.data.lhs);
             try self.compileNode(target.data.rhs);
             try self.emitOp(if (op_tag == .plus_plus) .array_elem_pre_inc else .array_elem_pre_dec);
             return;
         }
-        if (try emitPlaceOperands(self, node.data.lhs)) |place| return compilePlaceIncDec(self, place, op_tag, false);
+        if (try emitPlaceOperands(self, node.data.lhs, true)) |place| return compilePlaceIncDec(self, place, op_tag, false);
         if (target.tag == .array_push_target) return compileAppendIncDec(self, target, op_tag, false);
         try self.compileNode(node.data.lhs);
         try self.emitOp(if (op_tag == .plus_plus) .inc_value else .dec_value);
@@ -1120,13 +1120,14 @@ pub fn compilePostfixOp(self: *Compiler, node: Ast.Node) Error!void {
     if (target.tag == .array_push_target) return compileAppendIncDec(self, target, op_tag, true);
     if (target.tag == .array_access) {
         // COW: vivify-load the base so a shared array is separated (and written
-        // back to its slot) before the in-place element inc/dec
-        try compileVivifyChain(self, target.data.lhs);
+        // back to its slot) before the in-place element inc/dec; the
+        // containers are fetched for RW
+        try compileVivifyChainRw(self, target.data.lhs);
         try self.compileNode(target.data.rhs);
         try self.emitOp(if (op_tag == .plus_plus) .array_elem_inc else .array_elem_dec);
         return;
     }
-    if (try emitPlaceOperands(self, node.data.lhs)) |place| return compilePlaceIncDec(self, place, op_tag, true);
+    if (try emitPlaceOperands(self, node.data.lhs, true)) |place| return compilePlaceIncDec(self, place, op_tag, true);
 
     // the variable is read once: the read is the expression's value and the
     // stepped copy goes back into the variable
@@ -2280,6 +2281,35 @@ fn dimWriteChainRoot(self: *Compiler, node_idx: u32) bool {
             else => return false,
         }
     }
+}
+
+// the containers of a read-modify-write (`$a[k][j] op= v`, `++$a[k][j]`):
+// php fetches them for RW, so an undefined root variable and a missing
+// intermediate element warn before they are created
+fn compileVivifyChainRw(self: *Compiler, node_idx: u32) Error!void {
+    const node = self.ast.nodes[node_idx];
+    if (node.tag == .array_access and node.data.rhs != 0) {
+        try compileVivifyChainRw(self, node.data.lhs);
+        try self.compileNode(node.data.rhs);
+        try self.emitOp(.array_get_vivify_rw);
+        return;
+    }
+    if (node.tag == .variable) {
+        const name = self.ast.tokenSlice(node.main_token);
+        if (!Compiler.isSuperglobal(name) and !std.mem.eql(u8, name, "$GLOBALS") and !std.mem.eql(u8, name, "$this")) {
+            const slot: ?u16 = if (self.local_slots.get(name)) |s| s else if (self.arrowCaptureSlot(name)) |s| s else if (!self.inFunctionScope() and name.len > 0 and name[0] == '$') self.getOrCreateSlot(name) else null;
+            if (slot) |s| {
+                try self.emitOp(.ensure_array_local_rw);
+                try self.emitU16(s);
+                return;
+            }
+            try self.emitOp(.ensure_array_var);
+            try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(name) }));
+            try self.emitByte(2);
+            return;
+        }
+    }
+    return compileVivifyChain(self, node_idx);
 }
 
 pub fn compileVivifyChain(self: *Compiler, node_idx: u32) Error!void {
