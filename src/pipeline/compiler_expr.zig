@@ -1051,20 +1051,17 @@ pub fn compilePrefixOp(self: *Compiler, node: Ast.Node) Error!void {
     if (op_tag == .plus_plus or op_tag == .minus_minus) {
         try checkIncDecTarget(self, node.data.lhs, node.main_token);
         const target = self.ast.nodes[node.data.lhs];
-        if (try emitPlaceOperands(self, node.data.lhs)) |place| return compilePlaceIncDec(self, place, op_tag, false);
-        if (target.tag == .array_push_target) return compileAppendIncDec(self, target, op_tag, false);
-        if (target.tag == .array_access) {
-            // COW: the base consumed by array_set (this first load) must be
-            // separated; the second load feeds the read-only array_get
+        if (target.tag == .array_access and target.data.rhs != 0) {
+            // FETCH_DIM_RW then PRE_INC: the container is fetched for
+            // writing once and its element stepped in place (an ArrayAccess
+            // object's offsetGet value as a temporary, never offsetSet)
             try compileVivifyChain(self, target.data.lhs);
             try self.compileNode(target.data.rhs);
-            try self.compileNode(target.data.lhs);
-            try self.compileNode(target.data.rhs);
-            try self.emitOp(.array_get);
-            try self.emitOp(if (op_tag == .plus_plus) .inc_value else .dec_value);
-            try self.emitOp(.array_set);
+            try self.emitOp(if (op_tag == .plus_plus) .array_elem_pre_inc else .array_elem_pre_dec);
             return;
         }
+        if (try emitPlaceOperands(self, node.data.lhs)) |place| return compilePlaceIncDec(self, place, op_tag, false);
+        if (target.tag == .array_push_target) return compileAppendIncDec(self, target, op_tag, false);
         try self.compileNode(node.data.lhs);
         try self.emitOp(if (op_tag == .plus_plus) .inc_value else .dec_value);
         if (target.tag == .variable) {

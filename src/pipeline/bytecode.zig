@@ -580,6 +580,10 @@ pub const OpCode = enum(u16) {
     // if, a function) registers its methods, hooks and initializers as it
     // runs, so the declaration that ran owns the names
     declare_methods,
+    // pop key, pop container, ++arr[key] / --arr[key], push the new value
+    // (an ArrayAccess object's offsetGet value is stepped as a temporary)
+    array_elem_pre_inc,
+    array_elem_pre_dec,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -746,6 +750,8 @@ pub const OpCode = enum(u16) {
             .isset_prop_dynamic,
             .array_elem_inc,
             .array_elem_dec,
+            .array_elem_pre_inc,
+            .array_elem_pre_dec,
             .add,
             .subtract,
             .multiply,

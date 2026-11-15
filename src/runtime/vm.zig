@@ -7970,7 +7970,9 @@ pub const VM = struct {
                     }
                 },
 
-                .array_elem_inc, .array_elem_dec => {
+                .array_elem_inc, .array_elem_dec, .array_elem_pre_inc, .array_elem_pre_dec => {
+                    const up = op == .array_elem_inc or op == .array_elem_pre_inc;
+                    const pre = op == .array_elem_pre_inc or op == .array_elem_pre_dec;
                     const aei_key = self.pop();
                     const aei_arr = self.pop();
                     if (aei_arr == .string) {
@@ -8003,19 +8005,53 @@ pub const VM = struct {
                     if (elem_arr) |arr| {
                         if (elem_key == null and (aei_key == .resource or aei_key == .float or aei_key == .null)) self.warnOffsetKey(aei_key) catch if (try self.resumeRaised()) continue;
                         const ak = elem_key orelse Value.toArrayKey(aei_key);
+                        // FETCH_DIM_RW of a missing element: php's warning,
+                        // then the step from null
+                        if (elem_key == null and !arr.contains(ak)) self.emitUndefinedKeyWarning(PhpArray.normalizeKey(ak)) catch if (try self.resumeRaised()) continue;
                         const old = arr.get(ak);
-                        const new_val = try self.stepValue(old, op == .array_elem_inc) orelse continue;
+                        const new_val = try self.stepValue(old, up) orelse continue;
                         // a referenced element steps the reference
                         if (try self.writeArrayElemRef(arr, PhpArray.normalizeKey(ak), new_val)) {
                             if (new_val == .string) self.releaseValue(new_val);
-                            self.push(old);
+                            self.push(if (pre) new_val else old);
                             continue;
                         }
                         // the element slot takes the new value and drops the old
                         // one; an adopted increment result is consumed here
                         try self.arraySetOwned(arr, ak, new_val);
                         if (new_val == .string) self.releaseValue(new_val);
-                        self.push(old);
+                        self.push(if (pre) new_val else old);
+                    } else if (aei_arr == .object and self.hasMethod(aei_arr.object.class_name, "offsetGet") and self.offsetGetReturnsRef(aei_arr.object)) {
+                        // &offsetGet: the step goes through the reference it
+                        // returns, without offsetSet
+                        const obj = aei_arr.object;
+                        obj.refcount +%= 1;
+                        defer self.releaseValue(.{ .object = obj });
+                        self.setReturnRef(null);
+                        const result = self.callMethod(obj, "offsetGet", &.{aei_key}) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        const cell = (try self.takeHookReturnCell()) orelse {
+                            try self.pushOverloadedElement(obj, result) orelse continue;
+                            const v = self.pop();
+                            const stepped = try self.stepValue(v, up) orelse continue;
+                            self.push(if (pre) stepped else v);
+                            if (stepped == .string and stepped.string.owner != null) self.releaseValue(stepped);
+                            continue;
+                        };
+                        defer self.unbindCell(cell);
+                        const old = cell.*;
+                        retainValue(old);
+                        defer self.releaseValue(old);
+                        const new_val = try self.stepValue(old, up) orelse continue;
+                        self.writeReference(cell, new_val) catch {
+                            if (new_val == .string) self.releaseValue(new_val);
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        self.push(if (pre) new_val else old);
+                        if (new_val == .string) self.releaseValue(new_val);
                     } else if (aei_arr == .object and self.hasMethod(aei_arr.object.class_name, "offsetGet") and !self.offsetGetReturnsRef(aei_arr.object)) {
                         // FETCH_DIM_RW on an ArrayAccess object: offsetGet's
                         // value is stepped as a temporary, with php's notice
@@ -8024,9 +8060,17 @@ pub const VM = struct {
                             return error.RuntimeError;
                         };
                         try self.pushOverloadedElement(aei_arr.object, result) orelse continue;
+                        if (pre) {
+                            // PRE_INC on the temporary: its stepped value
+                            const v = self.pop();
+                            const stepped = try self.stepValue(v, up) orelse continue;
+                            self.push(stepped);
+                            if (stepped == .string and stepped.string.owner != null) self.releaseValue(stepped);
+                            continue;
+                        }
                         // POST_INC still steps the temporary: an array or an
                         // object there is php's "Cannot increment" TypeError
-                        const stepped = try self.stepValue(self.stack[self.sp - 1], op == .array_elem_inc) orelse continue;
+                        const stepped = try self.stepValue(self.stack[self.sp - 1], up) orelse continue;
                         self.releaseValue(stepped);
                     } else if (try self.refuseDimWrite(aei_arr)) |handled| {
                         if (handled) continue;

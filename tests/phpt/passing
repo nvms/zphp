@@ -738,6 +738,7 @@ Zend/tests/bug79783.phpt
 Zend/tests/bug79784.phpt
 Zend/tests/bug79791.phpt
 Zend/tests/bug79792.phpt
+Zend/tests/bug79793.phpt
 Zend/tests/bug79818.phpt
 Zend/tests/bug79828.phpt
 Zend/tests/bug79919.phpt

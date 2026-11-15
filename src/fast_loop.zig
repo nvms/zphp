@@ -791,6 +791,56 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     self.sp = sp;
                     return;
                 },
+                .array_elem_pre_inc => {
+                    const aei_key = stack[sp - 1];
+                    const aei_arr = stack[sp - 2];
+                    if (aei_arr == .array and aei_key != .resource and aei_key != .float and aei_key != .null) {
+                        const ak = Value.toArrayKey(aei_key);
+                        const old = aei_arr.array.get(ak);
+                        // an int that doesn't overflow; anything else is runLoop's
+                        if (old == .int) if (std.math.add(i64, old.int, 1) catch null) |stepped| {
+                            aei_arr.array.set(self.allocator, ak, .{ .int = stepped }) catch {
+                                frame.ip = ip - op_bytes;
+                                self.sp = sp;
+                                return;
+                            };
+                            self.stackRelease(aei_key);
+                            sp -= 1;
+                            stack[sp - 1] = .{ .int = stepped };
+                            const _next = readOp(code, ip);
+                            ip += op_bytes;
+                            continue :dispatch _next;
+                        };
+                    }
+                    frame.ip = ip - op_bytes;
+                    self.sp = sp;
+                    return;
+                },
+                .array_elem_pre_dec => {
+                    const aei_key = stack[sp - 1];
+                    const aei_arr = stack[sp - 2];
+                    if (aei_arr == .array and aei_key != .resource and aei_key != .float and aei_key != .null) {
+                        const ak = Value.toArrayKey(aei_key);
+                        const old = aei_arr.array.get(ak);
+                        // an int that doesn't overflow; anything else is runLoop's
+                        if (old == .int) if (std.math.sub(i64, old.int, 1) catch null) |stepped| {
+                            aei_arr.array.set(self.allocator, ak, .{ .int = stepped }) catch {
+                                frame.ip = ip - op_bytes;
+                                self.sp = sp;
+                                return;
+                            };
+                            self.stackRelease(aei_key);
+                            sp -= 1;
+                            stack[sp - 1] = .{ .int = stepped };
+                            const _next = readOp(code, ip);
+                            ip += op_bytes;
+                            continue :dispatch _next;
+                        };
+                    }
+                    frame.ip = ip - op_bytes;
+                    self.sp = sp;
+                    return;
+                },
                 .array_elem_dec => {
                     const aei_key = stack[sp - 1];
                     const aei_arr = stack[sp - 2];
