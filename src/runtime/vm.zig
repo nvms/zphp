@@ -7192,12 +7192,38 @@ pub const VM = struct {
                     self.push(v);
                 },
 
-                .array_set, .array_set_ref, .array_set_var => {
+                .array_set, .array_set_ref, .array_set_var, .array_set_static => {
                     const is_ref = op == .array_set_ref;
                     const var_name_idx: ?u16 = if (op == .array_set_var) self.readU16() else null;
+                    const static_class_idx: ?u16 = if (op == .array_set_static) self.readU16() else null;
+                    const static_prop_idx: ?u16 = if (op == .array_set_static) self.readU16() else null;
                     const raw_val = self.pop();
                     const key = self.pop();
                     const arr_val = self.pop();
+                    if (static_class_idx) |class_idx| if (arr_val == .string) {
+                        const assigned = (self.assignStringOffset(arr_val.string.bytes(), key, raw_val) catch |err| {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return err;
+                        }) orelse {
+                            if (self.pending_exception != null) {
+                                if (self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            }
+                            self.push(.null);
+                            continue;
+                        };
+                        const class_name = self.resolveStaticClassName(self.currentChunk().constants.items[class_idx].string.bytes());
+                        const prop_name = self.currentChunk().constants.items[static_prop_idx.?].string.bytes();
+                        self.setStaticPropValue(class_name, prop_name, assigned.string) catch |err| {
+                            self.releaseValue(assigned.string);
+                            self.releaseValue(assigned.result);
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return err;
+                        };
+                        self.releaseValue(assigned.string);
+                        self.pushTransfer(assigned.result);
+                        continue;
+                    };
                     if (var_name_idx) |name_idx| if (arr_val == .string) {
                         const assigned = (self.assignStringOffset(arr_val.string.bytes(), key, raw_val) catch |err| {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;

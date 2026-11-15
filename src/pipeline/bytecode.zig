@@ -573,6 +573,9 @@ pub const OpCode = enum(u16) {
     // u16 class, u16 property: unset(C::$p), which php refuses once the
     // class is found
     unset_static_prop,
+    // u16 class, u16 property: array_set into C::$p, whose string offset
+    // write goes back into the property
+    array_set_static,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -662,6 +665,7 @@ pub const OpCode = enum(u16) {
             .deprecate_const,
             .separate_static_prop,
             .unset_static_prop,
+            .array_set_static,
             .get_static,
             .set_static,
             .static_call_spread,

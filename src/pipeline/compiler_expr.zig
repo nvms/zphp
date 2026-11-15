@@ -244,6 +244,20 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                 try self.emitOp(.prop_set_chain);
                 return;
             }
+            // a static property may hold a string, which takes the offset
+            // write back
+            if (!rhs_is_ref and target_lhs.tag == .static_prop_access and target_lhs.main_token != 0 and self.ast.nodes[target_lhs.data.lhs].tag != .variable) {
+                try compileVivifyChain(self, target.data.lhs);
+                try self.compileNode(target.data.rhs);
+                try self.compileNode(node.data.rhs);
+                const class_name = try staticClassOperand(self, self.ast.nodes[target_lhs.data.lhs]);
+                var prop_name = self.ast.tokenSlice(target_lhs.main_token);
+                if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+                try self.emitOp(.array_set_static);
+                try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(class_name) }));
+                try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(prop_name) }));
+                return;
+            }
             try compileVivifyChain(self, target.data.lhs);
             try self.compileNode(target.data.rhs);
             try self.compileNode(node.data.rhs);
