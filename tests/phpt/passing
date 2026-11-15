@@ -1204,6 +1204,7 @@ Zend/tests/div_by_zero_in_static.phpt
 Zend/tests/double_array_cast.phpt
 Zend/tests/double_to_string_64bit.phpt
 Zend/tests/duplicate_label_error.phpt
+Zend/tests/dynamic_call/bug46246.phpt
 Zend/tests/dynamic_call/bug47880.phpt
 Zend/tests/dynamic_call/bug48770.phpt
 Zend/tests/dynamic_call/bug48770_2.phpt

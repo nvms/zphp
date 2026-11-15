@@ -12893,7 +12893,11 @@ pub const VM = struct {
                     self.clearArgStackFrom(self.sp - 1);
                     self.sp -= 1;
                     // now stack is [object, arg1, ..., argN] - same layout as method_call
-                    const full_name = self.resolveMethod(obj.class_name, method_name) catch {
+                    // the calling class's own private method runs on its
+                    // instances, whatever a subclass redeclares
+                    const dyn_mvr = self.findMethodVisibility(obj.class_name, method_name);
+                    const dyn_scope_private = if (dyn_mvr.changed) self.scopePrivateMethod(obj.class_name, method_name, dyn_mvr.defining_class) else null;
+                    const full_name = if (dyn_scope_private) |registered| registered else self.resolveMethod(obj.class_name, method_name) catch {
                         if (self.hasMethod(obj.class_name, "__call")) {
                             var args_arr = try self.allocArray();
                             for (0..ac) |ai| try args_arr.append(self.allocator, self.stack[self.sp - ac + ai]);
@@ -24881,7 +24885,7 @@ pub const VM = struct {
     // private method of that name and the object is an instance of it, a
     // call through the object runs the scope's method, not the subclass's.
     // the method's registered "Class::method", or null
-    fn scopePrivateMethod(self: *VM, class_name: []const u8, method_name: []const u8, found_in: []const u8) ?[]const u8 {
+    pub fn scopePrivateMethod(self: *VM, class_name: []const u8, method_name: []const u8, found_in: []const u8) ?[]const u8 {
         const scope = self.currentDefiningClass() orelse return null;
         if (std.ascii.eqlIgnoreCase(scope, found_in)) return null;
         const entry = self.classes.getEntry(scope) orelse return null;

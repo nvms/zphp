@@ -163,6 +163,16 @@ fn resolveMethod(vm: *VM, site: *Site, method: []const u8, origin: ?[]const u8) 
         }
     } else via_handler = true;
 
+    // a method a subclass redeclares over the scope's own private one: the
+    // scope's runs on its instances (zend_is_callable_check_func)
+    if (found != null and !site.strict) if (site.object) |obj| {
+        const mvr = vm.findMethodVisibility(calling, method);
+        if (mvr.changed) if (vm.scopePrivateMethod(calling, method, mvr.defining_class)) |registered| {
+            const sep = std.mem.lastIndexOf(u8, registered, "::") orelse 0;
+            return .{ .callee = .{ .method = .{ .object = obj, .name = registered[sep + 2 ..], .registered = registered } } };
+        };
+    };
+
     if (via_handler) {
         const magic = magicFor(vm, site, origin) orelse {
             return .{ .failure = .{ .method_not_found = .{ .class = vm.declaredClassName(calling), .method = method } } };
@@ -337,6 +347,13 @@ fn staticFallback(vm: *VM, class: []const u8) ?Magic {
 // zend_std_get_method
 fn instanceCallee(vm: *VM, obj: *PhpObject, method: []const u8) RuntimeError!Resolution {
     const scope = vm.currentDefiningClass();
+    // zend_get_parent_private_method: the scope's own private method of the
+    // name runs on its instances, whatever a subclass redeclares
+    const mvr = vm.findMethodVisibility(obj.class_name, method);
+    if (mvr.changed) if (vm.scopePrivateMethod(obj.class_name, method, mvr.defining_class)) |registered| {
+        const sep = std.mem.lastIndexOf(u8, registered, "::") orelse 0;
+        return .{ .callee = .{ .method = .{ .object = obj, .name = registered[sep + 2 ..], .registered = registered } } };
+    };
     if (try findMethod(vm, obj.class_name, method)) |m| {
         if (m.visibility == .public or vm.checkVisibility(m.class, m.visibility)) {
             if (m.is_static == true) return .{ .callee = .{ .static_method = .{ .registered = m.registered, .called_class = obj.class_name } } };
