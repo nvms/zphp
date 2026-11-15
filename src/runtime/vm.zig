@@ -10764,8 +10764,12 @@ pub const VM = struct {
                     // a parent has to exist when the interface is declared,
                     // which is also what stops an interface extending itself
                     const missing_parent: ?[]const u8 = for (idef.parents.items) |parent| {
-                        if (!self.interfaces.contains(parent)) try self.tryAutoload(parent);
-                        if (!self.interfaces.contains(parent)) break parent;
+                        if (!self.interfaces.contains(parent) and !self.classes.contains(parent) and !self.traits.contains(parent)) self.tryAutoload(parent) catch |err| {
+                            idef.deinit(self.allocator);
+                            def.deinit(self.allocator);
+                            return err;
+                        };
+                        if (!self.interfaces.contains(parent) and !self.classes.contains(parent) and !self.traits.contains(parent)) break parent;
                     } else null;
                     if (missing_parent) |parent| {
                         idef.deinit(self.allocator);
@@ -10775,6 +10779,23 @@ pub const VM = struct {
                         defer self.allocator.free(msg);
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
+                    }
+                    // zend_do_implement_interfaces: every parent an interface,
+                    // each named once
+                    for (idef.parents.items, 0..) |parent, pi| {
+                        if (!self.interfaces.contains(parent)) {
+                            idef.deinit(self.allocator);
+                            def.deinit(self.allocator);
+                            return self.traitRuleFatal("{s} cannot implement {s} - it is not an interface", .{ iface_name, self.declaredClassName(parent) });
+                        }
+                        for (idef.parents.items[0..pi]) |earlier| if (std.ascii.eqlIgnoreCase(self.declaredClassName(earlier), self.declaredClassName(parent))) {
+                            const msg = try std.fmt.allocPrint(self.allocator, "Interface {s} cannot implement previously implemented interface {s}", .{ iface_name, self.declaredClassName(parent) });
+                            defer self.allocator.free(msg);
+                            const at: SourcePosition = .{ .file = def.file_path, .line = def.start_line };
+                            idef.deinit(self.allocator);
+                            def.deinit(self.allocator);
+                            return self.raiseCompileFatal(msg, at);
+                        };
                     }
                     for (idef.parents.items) |parent| {
                         if (self.classes.get(parent)) |base| {
@@ -19092,7 +19113,19 @@ pub const VM = struct {
         const iface_count = self.readByte();
         for (0..iface_count) |_| {
             const iname_idx = self.readU16();
-            const iface = self.declaredClassName(self.currentChunk().constants.items[iname_idx].string.bytes());
+            var iface = self.declaredClassName(self.currentChunk().constants.items[iname_idx].string.bytes());
+            // zend_do_link_class loads every interface a class lists
+            if (!self.interfaces.contains(iface) and !self.traits.contains(iface) and !self.classes.contains(iface) and self.linkingClass(iface) == null and !std.ascii.eqlIgnoreCase(iface, class_name)) {
+                try self.tryAutoload(iface);
+                if (self.pending_exception != null) return error.RuntimeError;
+                if (!self.interfaces.contains(iface) and !self.traits.contains(iface) and !self.classes.contains(iface)) {
+                    const msg = try std.fmt.allocPrint(self.allocator, "Interface \"{s}\" not found", .{iface});
+                    defer self.allocator.free(msg);
+                    try self.setPendingException("Error", msg);
+                    return error.RuntimeError;
+                }
+                iface = self.declaredClassName(iface);
+            }
             if (!self.interfaces.contains(iface) and (self.traits.contains(iface) or self.classes.contains(iface))) {
                 return self.traitRuleFatal("{s} cannot implement {s} - it is not an interface", .{ class_name, iface });
             }
