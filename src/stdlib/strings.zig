@@ -1037,10 +1037,19 @@ fn native_utf8_encode(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
 }
 
+// php_utf8_decode: each character php_next_utf8_char reads, '?' for an
+// ill-formed sequence or one past latin-1
 fn native_utf8_decode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const out = convertUtf8ToLatin1(ctx.allocator, args[0].string.bytes()) catch return NativeResult.scalar(.{ .bool = false });
-    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, out));
+    const input = args[0].string.bytes();
+    var out = try std.ArrayListUnmanaged(u8).initCapacity(ctx.allocator, input.len);
+    errdefer out.deinit(ctx.allocator);
+    var pos: usize = 0;
+    while (pos < input.len) {
+        const c = html.nextUtf8Char(input, &pos);
+        out.appendAssumeCapacity(if (c) |cp| (if (cp > 0xFF) '?' else @as(u8, @intCast(cp))) else '?');
+    }
+    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, try out.toOwnedSlice(ctx.allocator)));
 }
 
 fn convertVarEncoding(ctx: *NativeContext, val: Value, to: []const u8, from: []const u8) RuntimeError!NativeResult {
