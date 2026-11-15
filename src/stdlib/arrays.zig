@@ -612,28 +612,32 @@ fn array_combine(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
 
     const arr = try ctx.createArray();
     for (keys_arr.entries.items, vals_arr.entries.items) |k, v| {
-        if (k.value == .object or k.value == .array) {
-            try ctx.vm.setPendingException("TypeError", "array_combine(): Argument #1 ($keys) must contain only string and integer keys");
-            return error.RuntimeError;
-        }
-        // PHP array_combine casts each key to string first, then canonicalizes.
-        var temporary: ?Value.String = null;
-        defer if (temporary) |value| value.release();
-        const key: PhpArray.Key = switch (k.value) {
-            .int => |i| .{ .int = i },
-            .string => |s| PhpArray.normalizeKey(.{ .string = s }),
-            else => blk: {
-                var buf = std.ArrayListUnmanaged(u8).empty;
-                defer buf.deinit(ctx.allocator);
-                try k.value.format(&buf, ctx.allocator);
-                const owned = try buf.toOwnedSlice(ctx.allocator);
-                temporary = try Value.String.adopt(ctx.allocator, owned);
-                break :blk PhpArray.normalizeKey(.{ .string = temporary.? });
-            },
-        };
+        const key = try stringKey(ctx, if (k.ref) |ref| ref.* else k.value);
+        defer if (key == .string) key.string.release();
         try ctx.vm.arraySetOwned(arr, key, v.value);
     }
     return NativeResult.borrowed(.{ .array = arr });
+}
+
+// an integer key as it is, anything else through its string form
+// (zval_get_tmp_string, with its warnings and errors) as zend_symtable_update
+// reads it. a string key is owned by the caller
+fn stringKey(ctx: *NativeContext, v: Value) RuntimeError!PhpArray.Key {
+    switch (v) {
+        .int => |i| return .{ .int = i },
+        .string => |str| {
+            const key = PhpArray.normalizeKey(.{ .string = str });
+            if (key == .string) key.string.retain();
+            return key;
+        },
+        else => {
+            const text = try ctx.vm.valueToString(v);
+            const owned = try Value.String.create(ctx.allocator, text);
+            const key = PhpArray.normalizeKey(.{ .string = owned });
+            if (key == .int) owned.release();
+            return key;
+        },
+    }
 }
 
 fn array_chunk(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -759,34 +763,11 @@ fn array_fill_keys(ctx: *NativeContext, args: []const Value) RuntimeError!Native
 
     const result = try ctx.createArray();
     for (keys_arr.entries.items) |entry| {
-        const key = try arrayFillKeysKey(ctx, entry.value);
+        const key = try stringKey(ctx, if (entry.ref) |ref| ref.* else entry.value);
         defer if (key == .string) key.string.release();
         try ctx.vm.arraySetOwned(result, key, val);
     }
     return NativeResult.borrowed(.{ .array = result });
-}
-
-// PHP's array_fill_keys uses a different key conversion than normal array
-// assignment: floats become string "1.5" (instead of being truncated to 1),
-// and bool false / null both become the empty string "" (not 0).
-fn arrayFillKeysKey(ctx: *NativeContext, v: Value) !PhpArray.Key {
-    return switch (v) {
-        .int => |i| .{ .int = i },
-        .string => |value| blk: {
-            value.retain();
-            break :blk .{ .string = value };
-        },
-        .bool => |b| if (b) PhpArray.Key{ .int = 1 } else PhpArray.Key{ .string = Value.String.borrowed("") },
-        .null => .{ .string = Value.String.borrowed("") },
-        .float => |f| blk: {
-            var buf = std.ArrayListUnmanaged(u8).empty;
-            defer buf.deinit(ctx.allocator);
-            try (Value{ .float = f }).format(&buf, ctx.allocator);
-            const s = try buf.toOwnedSlice(ctx.allocator);
-            break :blk PhpArray.Key{ .string = try Value.String.adopt(ctx.allocator, s) };
-        },
-        else => .{ .int = 0 },
-    };
 }
 
 fn array_count_values(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

@@ -18654,7 +18654,7 @@ pub const VM = struct {
         return self.valueToString(hold.*);
     }
 
-    fn valueToString(self: *VM, v: Value) RuntimeError![]const u8 {
+    pub fn valueToString(self: *VM, v: Value) RuntimeError![]const u8 {
         if (v == .string) return v.string.bytes();
         if (v == .object) return self.objectToString(v.object);
         if (v == .array) try self.emitWarning("Array to string conversion");
