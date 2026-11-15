@@ -800,8 +800,110 @@ fn array_walk(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
         return error.RuntimeError;
     }
     const userdata: ?Value = if (args.len >= 3) args[2] else null;
-    try walk(ctx, args[0], args[1], userdata, false);
+    try walkTop(ctx, args, userdata, false);
     return NativeResult.scalar(.{ .bool = true });
+}
+
+// the walk over the variable itself, as php's php_array_walk: a hash
+// iterator on the array (the log a by-reference foreach keeps) follows
+// removals and insertions, and after each callback the variable is read
+// again. a copy made of the array while it is walked (a write that separated
+// it) goes on at the same place; another array is walked from its internal
+// pointer (zend_hash_iterator_pos_ex, which separates it); anything else
+// ends the walk
+fn walkTop(ctx: *NativeContext, args: []const Value, userdata: ?Value, recursive: bool) RuntimeError!void {
+    if (args[0] == .object) return walk(ctx, args[0], args[1], userdata, recursive);
+    const source = ctx.byRefArg(0, args.len) orelse return walk(ctx, args[0], args[1], userdata, recursive);
+    const vm = ctx.vm;
+    const callback = args[1];
+    const by_ref = try ctx.callableParamIsRef(callback, 0);
+    var arr = args[0].array;
+    const first = arr.iterLog() orelse return walk(ctx, args[0], callback, userdata, recursive);
+    first.loops += 1;
+    VM.retainValue(.{ .array = arr });
+    var next: usize = 0;
+    var seen: usize = first.changes.items.len;
+    defer {
+        // the array the walk ended on no longer logs for it; a copy made
+        // during a by-reference foreach keeps its log for that loop
+        if (arr.iter_log) |log| {
+            log.loops -|= 1;
+            if (log.loops == 0 and log.copied_from == null) {
+                log.destroy();
+                arr.iter_log = null;
+            }
+        }
+        vm.releaseValue(.{ .array = arr });
+    }
+    while (true) {
+        if (arr.iter_log) |log| if (seen < log.changes.items.len) {
+            for (log.changes.items[seen..]) |change| next = change.apply(next);
+            seen = log.changes.items.len;
+        };
+        if (next >= arr.entries.items.len) return;
+        const entry = arr.entries.items[next];
+        next += 1;
+        const key = entry.key;
+        if (key == .string) key.string.retain();
+        defer if (key == .string) key.string.release();
+        const value = if (entry.ref) |cell| cell.* else entry.value;
+        if (recursive and value == .array) {
+            var nested = value.array;
+            if (entry.ref == null and nested.refcount > 1) {
+                nested = try vm.cowSeparate(nested);
+                arr.entries.items[next - 1].value = .{ .array = nested };
+            }
+            const Recursion = @import("../runtime/value.zig").Recursion;
+            if (nested.recursion & Recursion.gc != 0) {
+                try vm.setPendingException("Error", "Recursion detected");
+                return error.RuntimeError;
+            }
+            nested.recursion |= Recursion.gc;
+            VM.retainValue(.{ .array = nested });
+            defer vm.releaseValue(.{ .array = nested });
+            defer nested.recursion &= ~Recursion.gc;
+            try walk(ctx, .{ .array = nested }, callback, userdata, recursive);
+        } else {
+            var call_args = [3]Value{ value, keyValue(key), userdata orelse .null };
+            const slice: []Value = if (userdata != null) call_args[0..3] else call_args[0..2];
+            _ = try ctx.invokeCallableRefWarned(callback, slice, 1);
+            // a by-reference parameter's change lands in the element, in the
+            // array the variable holds when that is the walked one or its copy
+            if (by_ref) {
+                const into = if (ctx.readByRefArg(source)) |now| if (now == .array and (now.array == arr or copiedFrom(now.array, arr))) now.array else arr else arr;
+                if (findEntryIndex(into, key) != null) try vm.arraySetOwned(into, key, call_args[0]);
+            }
+        }
+        if (vm.pending_exception != null) return error.RuntimeError;
+        const now = ctx.readByRefArg(source) orelse return;
+        if (now == .array) {
+            if (now.array == arr) continue;
+            var other = now.array;
+            if (!copiedFrom(other, arr)) {
+                if (other.refcount > 1) {
+                    other = try vm.cowSeparate(other);
+                    ctx.setCallerVar(0, args.len, .{ .array = other });
+                }
+                const log = other.iterLog() orelse return;
+                log.loops += 1;
+                next = @min(other.cursor, other.entries.items.len);
+                seen = log.changes.items.len;
+            } else if (other.iter_log) |log| log.loops += 1;
+            if (arr.iter_log) |log| log.loops -|= 1;
+            VM.retainValue(.{ .array = other });
+            vm.releaseValue(.{ .array = arr });
+            arr = other;
+            continue;
+        }
+        if (now == .object) return;
+        try vm.setPendingException("TypeError", "Iterated value is no longer an array or object");
+        return error.RuntimeError;
+    }
+}
+
+fn copiedFrom(copy: *PhpArray, original: *PhpArray) bool {
+    const log = copy.iter_log orelse return false;
+    return log.copied_from == original or log.copied_via == original;
 }
 
 fn array_walk_recursive(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -813,7 +915,7 @@ fn array_walk_recursive(ctx: *NativeContext, args: []const Value) RuntimeError!N
         return error.RuntimeError;
     }
     const userdata: ?Value = if (args.len >= 3) args[2] else null;
-    try walk(ctx, args[0], args[1], userdata, true);
+    try walkTop(ctx, args, userdata, true);
     return NativeResult.scalar(.{ .bool = true });
 }
 

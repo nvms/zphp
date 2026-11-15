@@ -7599,6 +7599,9 @@ ext/standard/tests/array/array_walk/bug52719.phpt
 ext/standard/tests/array/array_walk/bug61730.phpt
 ext/standard/tests/array/array_walk/bug61967.phpt
 ext/standard/tests/array/array_walk/bug62607.phpt
+ext/standard/tests/array/array_walk/bug69068.phpt
+ext/standard/tests/array/array_walk/bug69068_2.phpt
+ext/standard/tests/array/array_walk/bug70713.phpt
 ext/standard/tests/array/bug14580.phpt
 ext/standard/tests/array/bug20381.phpt
 ext/standard/tests/array/bug20865.phpt

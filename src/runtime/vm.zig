@@ -237,6 +237,32 @@ pub const NativeContext = struct {
         }
     }
 
+    // where a by-reference argument's variable is, to read it again after
+    // php code the native called may have changed it (array_walk)
+    pub const ByRefArg = struct { source: RefSource, frame: usize };
+
+    pub fn byRefArg(self: *NativeContext, arg_index: usize, arg_count: usize) ?ByRefArg {
+        const vm = self.vm;
+        if (vm.frame_count == 0) return null;
+        const sources = vm.callerArgSources(arg_count);
+        if (arg_index >= sources.len) return null;
+        const frame = if (vm.inNativeMethodFrame()) vm.frame_count - 2 else vm.frame_count - 1;
+        return switch (sources[arg_index]) {
+            .none => null,
+            else => |src| .{ .source = src, .frame = frame },
+        };
+    }
+
+    // the variable's value now; null when it can't be read
+    pub fn readByRefArg(self: *NativeContext, arg: ByRefArg) ?Value {
+        const vm = self.vm;
+        return switch (arg.source) {
+            .cell => |c| c.value.*,
+            .simple => |name| if (VM.isSuperglobal(name)) null else if (arg.frame < vm.frame_count) vm.frameVariable(&vm.frames[arg.frame], name) else null,
+            .none => null,
+        };
+    }
+
     // an array's values as call arguments: in buf when they fit, else in an
     // allocation freeArgs releases
     pub fn argsFromArray(self: *NativeContext, arr: *const PhpArray, buf: []Value) ![]Value {
@@ -26040,8 +26066,9 @@ pub const VM = struct {
         try self.registerCloneRefs(copy);
         // zend_array_dup copies the iterators of a live by-reference loop:
         // the copy keeps the removals the loop hasn't seen yet
-        if (src.iter_log) |log| if (log.loops > 0) if (copy.iterLog()) |copy_log| {
+        if (src.iter_log) |log| if (log.loops > 0 or log.copied_from != null) if (copy.iterLog()) |copy_log| {
             copy_log.copied_from = src;
+            copy_log.copied_via = log.copied_from;
             copy_log.changes.appendSlice(std.heap.c_allocator, log.changes.items) catch {};
         };
         return copy;

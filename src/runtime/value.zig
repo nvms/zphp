@@ -176,6 +176,9 @@ pub const PhpArray = struct {
         // the array this one was copied from while a loop iterated it
         // (zend_array_dup copies the iterators): the loop goes on here
         copied_from: ?*const PhpArray = null,
+        // and the one that array was copied from, when a write separated a
+        // copy again before the loop looked
+        copied_via: ?*const PhpArray = null,
         // what moved the entries since the log was made, in order
         changes: std.ArrayListUnmanaged(Change) = .empty,
 
