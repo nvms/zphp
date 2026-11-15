@@ -5196,6 +5196,12 @@ pub const VM = struct {
                     const name_val = self.pop();
                     var text_buf: [32]u8 = undefined;
                     const raw_name = varVarText(name_val, &text_buf);
+                    // zend_fetch_this_var for a write: $this is no variable
+                    if (std.mem.eql(u8, raw_name, "this")) {
+                        self.stackRelease(name_val);
+                        if (try self.throwBuiltinException("Error", "Cannot re-assign $this")) continue;
+                        return error.RuntimeError;
+                    }
                     if (raw_name.len > 0) {
                         var check_buf: [256]u8 = undefined;
                         try self.checkTypedNameWrite(self.currentFrame(), varVarName(raw_name, &check_buf));
@@ -6459,8 +6465,21 @@ pub const VM = struct {
                                 self.push(.null);
                                 continue;
                             },
+                            // a string on an unset's path: zend_check_string_offset
+                            // then zend_wrong_string_offset_error. an offset
+                            // that isn't an integer is "Cannot unset string
+                            // offsets"; one that is can't be descended into
                             .string => {
-                                if (try self.throwBuiltinException("Error", "Cannot use string offset as an array")) continue;
+                                const integral = switch (key) {
+                                    .int => true,
+                                    .string => |ks| leadingInteger(ks.bytes()),
+                                    .float, .null, .bool => blk: {
+                                        self.raiseError(E_WARNING, "String offset cast occurred") catch if (try self.resumeRaised()) continue;
+                                        break :blk true;
+                                    },
+                                    else => false,
+                                };
+                                if (try self.throwBuiltinException("Error", if (integral) "Cannot use string offset as an array" else "Cannot unset string offsets")) continue;
                                 return error.RuntimeError;
                             },
                             .object => |o| {
@@ -11249,6 +11268,14 @@ pub const VM = struct {
                     const arg_sp = self.sp;
                     self.push(.null);
                     try self.captureDimensionCell(arg_sp, arr, key, base_source);
+                },
+                .arg_temp_container => {
+                    const field = self.currentFrame().ip;
+                    const delta = self.readU16();
+                    const pos = self.readByte();
+                    if (!self.argNeedsCapture(self.currentChunk(), field, delta, pos, 1)) continue;
+                    if (try self.throwBuiltinException("Error", "Cannot use temporary expression in write context")) continue;
+                    return error.RuntimeError;
                 },
                 .arg_value, .arg_call_result => {
                     const field = self.currentFrame().ip;
@@ -26343,6 +26370,24 @@ pub const VM = struct {
                 if (self.globals_cells.get(name)) |cell| self.setCell(cell, .null);
             }
         }
+    }
+
+    // is_numeric_string_ex with errors allowed gives IS_LONG: whitespace, a
+    // sign and digits, followed by anything but what makes it a float
+    fn leadingInteger(s: []const u8) bool {
+        var i: usize = 0;
+        while (i < s.len and (s[i] == ' ' or s[i] == '\t' or s[i] == '\n' or s[i] == '\r' or s[i] == 0x0b or s[i] == 0x0c)) i += 1;
+        const number_at = i;
+        if (i < s.len and (s[i] == '+' or s[i] == '-')) i += 1;
+        const digits_at = i;
+        while (i < s.len and std.ascii.isDigit(s[i])) i += 1;
+        if (i == digits_at) return false;
+        // a fraction, or an exponent with digits, makes a float
+        if (i < s.len and s[i] == '.') return false;
+        if (i + 1 < s.len and (s[i] == 'e' or s[i] == 'E') and (std.ascii.isDigit(s[i + 1]) or ((s[i + 1] == '+' or s[i + 1] == '-') and i + 2 < s.len and std.ascii.isDigit(s[i + 2])))) return false;
+        // and so do too many digits for a long
+        _ = std.fmt.parseInt(i64, s[number_at..i], 10) catch return false;
+        return true;
     }
 
     fn varVarText(v: Value, buf: *[32]u8) []const u8 {

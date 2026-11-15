@@ -1508,6 +1508,8 @@ pub const Compiler = struct {
                 // zend_verify_list_assign_target
                 if (inner.tag != .array_literal and inner.tag != .list_destructure and !compiler_expr.canWriteToVariable(self, inner_idx))
                     return self.fail(target.main_token, "Assignments can only happen to writable values");
+                // the element's own assignment: zend_ensure_writable_variable
+                if (inner.tag != .array_literal and inner.tag != .list_destructure) try compiler_expr.ensureWritable(self, inner_idx, target.main_token);
             }
         }
         // a nested list must be written the way the outer one is

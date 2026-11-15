@@ -3544,18 +3544,33 @@ const Parser = struct {
         var args = std.ArrayListUnmanaged(u32).empty;
         defer args.deinit(self.allocator);
 
+        // unset()'s arguments are php's unset_variable: a `new` expression
+        // there is only the start of a dereference
+        const is_unset = self.nodes.items[callee].tag == .identifier and self.tokens[self.nodes.items[callee].main_token].tag == .kw_unset;
         if (self.peek() != .r_paren) {
             try args.append(self.allocator, try self.parseCallArg());
+            if (is_unset) try self.refuseUnsetNew(args.items[args.items.len - 1]);
             while (self.peek() == .comma) {
                 _ = self.advance();
                 if (self.peek() == .r_paren) break;
                 try args.append(self.allocator, try self.parseCallArg());
+                if (is_unset) try self.refuseUnsetNew(args.items[args.items.len - 1]);
             }
         }
         _ = try self.expect(.r_paren);
 
         const extra = try self.addExtraList(args.items);
         return self.addNode(.{ .tag = .call, .main_token = paren_tok, .data = .{ .lhs = callee, .rhs = extra } });
+    }
+
+    fn refuseUnsetNew(self: *Parser, arg: u32) Error!void {
+        switch (self.nodes.items[arg].tag) {
+            .new_expr, .new_expr_dynamic, .anonymous_class => {
+                try self.addError(.expected_expression);
+                return error.ParseError;
+            },
+            else => {},
+        }
     }
 
     fn parseCallArg(self: *Parser) Error!u32 {

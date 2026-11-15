@@ -555,6 +555,11 @@ pub const OpCode = enum(u16) {
     // expression, which zend_ast_evaluate resolves against the running
     // scope and refuses without one
     class_name_const_expr,
+    // u16 delta, u8 pos: an argument's container that is a temporary (a
+    // literal, a constant, a builtin's result): a callee taking the
+    // argument by reference makes it php's "Cannot use temporary expression
+    // in write context" (FETCH_DIM_FUNC_ARG on a TMP)
+    arg_temp_container,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -563,7 +568,7 @@ pub const OpCode = enum(u16) {
             .tick => 4,
             .jump_if_class_declared, .bind_const_attributes => 6,
             .parent_hook_call => 8,
-            .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim, .arg_append, .arg_value, .arg_call_result => 5,
+            .arg_guard_prop, .arg_guard_prop_dynamic, .arg_guard_dim, .arg_append, .arg_value, .arg_call_result, .arg_temp_container => 5,
             .reference_source,
             .enter_class_scope,
             .constant,

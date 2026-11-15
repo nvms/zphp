@@ -13,6 +13,8 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
     if (target.tag != .list_destructure and target.tag != .array_literal) try ensureWritable(self, node.data.lhs, node.main_token);
     if (target.tag == .list_destructure or target.tag == .array_literal) try ensureListWritable(self, node.data.lhs, node.main_token);
     if (self.ast.nodes[node.data.rhs].tag == .ref_target) {
+        const source = self.ast.nodes[self.ast.nodes[node.data.rhs].data.lhs];
+        if (source.tag == .call and builtinInstructionCall(self, source, true)) return self.fail(node.main_token, "Cannot use result of built-in function in write context");
         try assertNotShortCircuited(self, self.ast.nodes[node.data.rhs].data.lhs, node.main_token);
         if (isGlobalsFetch(self, self.ast.nodes[node.data.rhs].data.lhs)) return self.fail(node.main_token, "Cannot acquire reference to $GLOBALS");
     }
@@ -898,7 +900,10 @@ pub fn checkTemporaryBase(self: *Compiler, target_idx: u32, op_token: u32) Error
                 chained = true;
             },
             .grouped_expr => idx = n.data.lhs,
-            .variable, .variable_variable, .call, .method_call, .nullsafe_method_call, .static_call, .dynamic_static_call, .pipe_expr => return,
+            // zend_separate_if_call_and_write: a builtin compiled to an
+            // instruction gives a temporary, which can't be written into
+            .call => if (chained and builtinInstructionCall(self, n, true)) return self.fail(op_token, "Cannot use result of built-in function in write context") else return,
+            .variable, .variable_variable, .method_call, .nullsafe_method_call, .static_call, .dynamic_static_call, .pipe_expr => return,
             // Class::$p is a variable, Class::C (the same node) a constant
             .static_prop_access => {
                 const member = if (n.main_token != 0) self.ast.tokenSlice(n.main_token) else "$";
@@ -933,7 +938,7 @@ pub fn isVariableOrCall(self: *Compiler, idx: u32) bool {
     var n = self.ast.nodes[idx];
     while (n.tag == .grouped_expr) n = self.ast.nodes[n.data.lhs];
     return switch (n.tag) {
-        .variable, .variable_variable, .array_access, .array_push_target, .property_access, .nullsafe_property_access, .call, .method_call, .nullsafe_method_call, .static_call, .dynamic_static_call => true,
+        .variable, .variable_variable, .array_access, .array_push_target, .property_access, .nullsafe_property_access, .call, .method_call, .nullsafe_method_call, .static_call, .dynamic_static_call, .pipe_expr => true,
         .static_prop_access => n.main_token == 0 or self.ast.tokens[n.main_token].tag == .variable,
         else => false,
     };
@@ -1281,7 +1286,10 @@ fn compileArgLvalue(self: *Compiler, arg_idx: u32, guard: ArgGuard) Error!void {
     switch (arg.tag) {
         .property_access => try compilePropertyFetch(self, arg, guard),
         .array_access => {
-            try compileArgLvalue(self, arg.data.lhs, guard);
+            if (isTemporaryContainer(self, arg.data.lhs)) {
+                try self.compileNode(arg.data.lhs);
+                if (!guard.by_value) try emitArgGuard(self, guard, .arg_temp_container);
+            } else try compileArgLvalue(self, arg.data.lhs, guard);
             try self.compileNode(arg.data.rhs);
             try emitArgGuard(self, guard, .arg_guard_dim);
             try self.emitOp(.array_get);
@@ -1331,6 +1339,23 @@ fn compileArgLvalue(self: *Compiler, arg_idx: u32, guard: ArgGuard) Error!void {
     }
 }
 
+// a dimension or property fetch's container that php compiles to a
+// temporary: a fetch from it can't be passed by reference
+fn isTemporaryContainer(self: *Compiler, idx: u32) bool {
+    var n = self.ast.nodes[idx];
+    while (n.tag == .grouped_expr) n = self.ast.nodes[n.data.lhs];
+    return switch (n.tag) {
+        .variable, .variable_variable, .array_access, .array_push_target, .property_access, .nullsafe_property_access, .method_call, .nullsafe_method_call, .static_call, .dynamic_static_call, .pipe_expr, .new_expr, .new_expr_dynamic, .anonymous_class => false,
+        .call => builtinInstructionCall(self, n, true),
+        // Class::$p is a variable, Class::C a constant
+        .static_prop_access => blk: {
+            const member = if (n.main_token != 0) self.ast.tokenSlice(n.main_token) else "$";
+            break :blk !(member.len > 0 and member[0] == '$');
+        },
+        else => true,
+    };
+}
+
 // a guard for an argument that can't be a reference, unless the compiler
 // knows the callee takes it by value (php's SEND_VAL) or the position is
 // a spread or named one, which the guard can't place
@@ -1362,6 +1387,11 @@ fn argSendKind(self: *Compiler, idx: u32) SendKind {
 // zend_try_compile_special_func: a call to one of these builtins compiles
 // to an instruction whose result is a temporary, so it is sent as a value
 fn compilesToInstruction(self: *Compiler, node: Ast.Node) bool {
+    return builtinInstructionCall(self, node, false);
+}
+
+// the same for a call in a write context, where chr() and ord() stay calls
+pub fn builtinInstructionCall(self: *Compiler, node: Ast.Node, write: bool) bool {
     const callee = self.ast.nodes[node.data.lhs];
     if (callee.tag != .identifier) return false;
     const raw = self.ast.tokenSlice(callee.main_token);
@@ -1384,6 +1414,7 @@ fn compilesToInstruction(self: *Compiler, node: Ast.Node) bool {
         .{ .name = "get_called_class", .args = 0 }, .{ .name = "func_num_args", .args = 0 }, .{ .name = "func_get_args", .args = 0 },
         .{ .name = "array_key_exists", .args = 2 },
     };
+    if (write and (std.ascii.eqlIgnoreCase(name, "chr") or std.ascii.eqlIgnoreCase(name, "ord"))) return false;
     for (specials) |sp| if (args.len == sp.args and std.ascii.eqlIgnoreCase(name, sp.name)) return true;
     return std.ascii.eqlIgnoreCase(name, "get_class") and args.len <= 1;
 }
@@ -2309,6 +2340,7 @@ fn compilePropertyFetch(self: *Compiler, node: Ast.Node, guard: ?ArgGuard) Error
 
     try self.compileNode(node.data.lhs);
     if (self.const_expr) return constExprPropFetch(self, node);
+    if (guard) |g| if (!g.by_value and isTemporaryContainer(self, node.data.lhs)) try emitArgGuard(self, g, .arg_temp_container);
     if (self.isDynamicProp(node)) {
         if (node.main_token == 0) {
             // $obj->{expr}: compile the expression as property name
