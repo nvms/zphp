@@ -837,7 +837,7 @@ fn collectProperties(ctx: *NativeContext, class_name: []const u8, out: *std.Arra
         var it = cls.static_props.iterator();
         while (it.next()) |entry| {
             const sp_name = entry.key_ptr.*;
-            const def = reflection.staticPropertyDef(cls, sp_name, entry.value_ptr.*);
+            const def = reflection.staticPropertyDef(cls, sp_name, cls.static_prop_defaults.get(sp_name) orelse entry.value_ptr.*);
             if (!is_own and def.visibility == .private) continue;
             if (hasProp(out.items, sp_name)) continue;
             try out.append(ctx.allocator, .{ .name = sp_name, .declaring = name, .def = def, .is_static = true });

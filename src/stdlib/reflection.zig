@@ -1459,7 +1459,7 @@ pub fn findPropertyDef(vm: *VM, class_name: []const u8, prop_name: []const u8) ?
             if (std.mem.eql(u8, prop.name, prop_name)) return .{ .prop = prop, .declaring_class = name };
         }
         if (cls.static_props.get(prop_name)) |v| {
-            return .{ .prop = staticPropertyDef(&cls, prop_name, v), .declaring_class = name, .is_static = true };
+            return .{ .prop = staticPropertyDef(&cls, prop_name, cls.static_prop_defaults.get(prop_name) orelse v), .declaring_class = name, .is_static = true };
         }
         if (vm.interfaces.get(name)) |iface| {
             for (iface.parents.items) |parent| {
@@ -2342,7 +2342,7 @@ fn rcGetProperties(ctx: *NativeContext, args: []const Value) RuntimeError!Native
             if (!is_own and vis == .private) continue;
             if (!seen.contains(sp_name)) {
                 try seen.put(ctx.allocator, sp_name, {});
-                const def = staticPropertyDef(&cls, sp_name, entry.value_ptr.*);
+                const def = staticPropertyDef(&cls, sp_name, cls.static_prop_defaults.get(sp_name) orelse entry.value_ptr.*);
                 if (!matchPropFilter(filter, propertyFlags(def, true))) continue;
                 const obj = try buildPropertyObj(ctx, class_name, def, name);
                 try obj.set(ctx.allocator, "__is_static", .{ .bool = true });
@@ -3046,14 +3046,29 @@ fn rcGetDefaultProperties(ctx: *NativeContext, _: []const Value) RuntimeError!Na
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
     try ctx.vm.resolveClassDefaults(class_name);
-    // php's add_class_vars: the static properties (their current values)
-    // first, then the instance properties' defaults
-    const statics = (try rcGetStaticProperties(ctx, &.{})).value;
-    const arr = if (statics == .array) statics.array else try ctx.createArray();
+    // php's add_class_vars: the static properties' defaults first, then
+    // the instance properties'
+    const arr = try ctx.createArray();
+    var current: ?[]const u8 = class_name;
+    var is_own = true;
+    while (current) |name| {
+        const cls = ctx.vm.classes.get(name) orelse break;
+        var it = cls.static_props.iterator();
+        while (it.next()) |entry| {
+            const key: PhpArray.Key = .{ .string = Value.String.borrowed(entry.key_ptr.*) };
+            if (arr.contains(key)) continue;
+            const default = cls.static_prop_defaults.get(entry.key_ptr.*) orelse entry.value_ptr.*;
+            if (default == .undef) continue;
+            if (!is_own and (cls.static_prop_visibility.get(entry.key_ptr.*) orelse .public) == .private) continue;
+            try arr.set(ctx.allocator, key, default);
+        }
+        current = cls.parent;
+        is_own = false;
+    }
     var seen = std.StringHashMapUnmanaged(void){};
     defer seen.deinit(ctx.allocator);
-    var is_own = true;
-    var current: ?[]const u8 = class_name;
+    is_own = true;
+    current = class_name;
     while (current) |name| {
         const cls = ctx.vm.classes.get(name) orelse break;
         for (cls.properties.items) |prop| {

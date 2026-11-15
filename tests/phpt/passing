@@ -6315,6 +6315,8 @@ ext/reflection/tests/bug79683.phpt
 ext/reflection/tests/bug79820.phpt
 ext/reflection/tests/bug80299.phpt
 ext/reflection/tests/bug80370.phpt
+ext/reflection/tests/bug80564.phpt
+ext/reflection/tests/bug80821.phpt
 ext/reflection/tests/bug81208.phpt
 ext/reflection/tests/bug81457.phpt
 ext/reflection/tests/bug81611.phpt

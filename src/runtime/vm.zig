@@ -544,6 +544,9 @@ pub const ClassDef = struct {
     method_order: std.ArrayListUnmanaged([]const u8) = .empty,
     properties: std.ArrayListUnmanaged(PropertyDef) = .empty,
     static_props: std.StringArrayHashMapUnmanaged(Value) = .{},
+    // the declared defaults of the static properties, which writes to
+    // static_props leave alone (ReflectionProperty::getDefaultValue)
+    static_prop_defaults: std.StringHashMapUnmanaged(Value) = .{},
     static_prop_types: std.StringHashMapUnmanaged([]const u8) = .{},
     file_path: []const u8 = "",
     start_line: u32 = 0,
@@ -701,6 +704,7 @@ pub const ClassDef = struct {
         self.const_final.deinit(allocator);
         self.properties.deinit(allocator);
         self.static_props.deinit(allocator);
+        self.static_prop_defaults.deinit(allocator);
         self.static_prop_types.deinit(allocator);
         self.interfaces.deinit(allocator);
         self.used_traits.deinit(allocator);
@@ -3340,6 +3344,11 @@ pub const VM = struct {
                 }
             }
             for (class.static_props.values()) |*value| {
+                self.releaseValue(value.*);
+                value.* = .null;
+            }
+            var default_it = class.static_prop_defaults.valueIterator();
+            while (default_it.next()) |value| {
                 self.releaseValue(value.*);
                 value.* = .null;
             }
@@ -14003,6 +14012,7 @@ pub const VM = struct {
                             return err;
                         };
                     };
+                    if (op == .set_static_prop_default) try self.recordStaticDefault(cls, prop_name, val);
                     // Stage 2 overwrite-release for static prop set
                     const ssp_old = cls.static_props.get(prop_name) orelse Value.null;
                     try cls.static_props.put(self.allocator, prop_name, val);
@@ -17047,6 +17057,13 @@ pub const VM = struct {
         return error.RuntimeError;
     }
 
+    // a static property's declared default, kept apart from its value
+    fn recordStaticDefault(self: *VM, cls: *ClassDef, name: []const u8, value: Value) !void {
+        const copy = try self.copyDefault(value);
+        const old = try cls.static_prop_defaults.fetchPut(self.allocator, name, copy);
+        if (old) |o| self.releaseValue(o.value);
+    }
+
     // php's E_FATAL_ERRORS: what @ leaves reported
     pub const fatal_errors: i64 = 1 | 4 | 16 | 64 | 256 | 4096;
 
@@ -19313,6 +19330,7 @@ pub const VM = struct {
                 }
             } else {
                 try def.static_props.put(self.allocator, sprop_names[pi], try self.copyDefault(default_val));
+                try self.recordStaticDefault(&def, sprop_names[pi], default_val);
                 if (sprop_type[pi].len > 0) try def.static_prop_types.put(self.allocator, sprop_names[pi], sprop_type[pi]);
                 if (sprop_doc[pi].len > 0) try def.static_prop_docs.put(self.allocator, sprop_names[pi], sprop_doc[pi]);
                 if ((sprop_visibility[pi] & 0x80) != 0) try def.static_prop_final.put(self.allocator, sprop_names[pi], {});
@@ -20721,6 +20739,7 @@ pub const VM = struct {
                     // each using class gets its own copy of the trait's static
                     // property - deep-clone so array values are not shared
                     try def.static_props.put(self.allocator, sp.name, try self.copyDefault(sp.value));
+                    try self.recordStaticDefault(def, sp.name, sp.value);
                 }
             }
         }
