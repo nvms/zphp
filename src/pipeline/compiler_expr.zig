@@ -2189,14 +2189,17 @@ pub fn compileCallableRef(self: *Compiler, node: Ast.Node) Error!void {
 
 pub fn compileArrayAccess(self: *Compiler, node: Ast.Node) Error!void {
     try self.compileNode(node.data.lhs);
-    {
-        // a nullsafe chain in the index ends there
-        const chain = self.nullsafe_chain_jumps;
-        self.nullsafe_chain_jumps = null;
-        defer self.nullsafe_chain_jumps = chain;
-        try self.compileNode(node.data.rhs);
-    }
+    try compileOutsideChain(self, node.data.rhs);
     try self.emitOp(.array_get);
+}
+
+// an index, argument or name inside a nullsafe chain: a nullsafe chain of
+// its own ends within it
+pub fn compileOutsideChain(self: *Compiler, idx: u32) Error!void {
+    const chain = self.nullsafe_chain_jumps;
+    self.nullsafe_chain_jumps = null;
+    defer self.nullsafe_chain_jumps = chain;
+    try self.compileNode(idx);
 }
 
 // the object a property write goes to, fetched for writing as php's
@@ -2477,7 +2480,7 @@ fn compilePropertyFetch(self: *Compiler, node: Ast.Node, guard: ?ArgGuard) Error
     if (self.isDynamicProp(node)) {
         if (node.main_token == 0) {
             // $obj->{expr}: compile the expression as property name
-            try self.compileNode(node.data.rhs);
+            try compileOutsideChain(self, node.data.rhs);
         } else {
             // $obj->$field: load variable value as property name
             const prop_node = self.ast.nodes[node.data.rhs];

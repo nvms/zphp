@@ -13519,7 +13519,7 @@ pub const VM = struct {
                     const name_val = self.pop();
                     var name_text: [32]u8 = undefined;
                     const prop_name: []const u8 = varVarText(name_val, &name_text);
-                    if (prop_name.len == 0) {
+                    if (prop_name.len == 0 and quiet) {
                         self.push(.null);
                     } else if (std.mem.eql(u8, prop_name, "class")) {
                         // Class::{'class'} resolves to the class name string,
