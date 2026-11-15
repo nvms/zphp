@@ -1765,7 +1765,14 @@ fn native_get_current_user(ctx: *NativeContext, _: []const Value) RuntimeError!N
     return NativeResult.literal("");
 }
 
+// directives php's build for this platform doesn't have: windows builds lack
+// zend signals
+pub fn directiveMissingHere(name: []const u8) bool {
+    return platform.is_windows and std.mem.eql(u8, name, "zend.signal_check");
+}
+
 pub fn iniDefault(name: []const u8) ?[]const u8 {
+    if (directiveMissingHere(name)) return null;
     if (std.mem.eql(u8, name, "date.timezone")) return "UTC";
     if (std.mem.eql(u8, name, "date.default_latitude")) return "31.7667";
     if (std.mem.eql(u8, name, "date.default_longitude")) return "35.2333";
@@ -2552,6 +2559,7 @@ fn native_ini_get_all(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     defer names.deinit(ctx.allocator);
     for (generated.ini) |entry| {
         if (ext) |name| if (!std.ascii.eqlIgnoreCase(entry[1], name)) continue;
+        if (directiveMissingHere(entry[0])) continue;
         try names.append(ctx.allocator, entry[0]);
     }
     std.mem.sort([]const u8, names.items, {}, struct {
