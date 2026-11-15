@@ -6812,40 +6812,89 @@ fn rcResetAsLazy(ctx: *NativeContext, args: []const Value, proxy: bool) RuntimeE
         }
         try lazyPreconditions(ctx, class_name, if (args.len > 2) args[2] else null, obj, method);
     };
-    // the object is destructed first, unless asked not to or done already
-    const skip_destructor = args.len > 2 and args[2] == .int and (args[2].int & 16) != 0;
-    if (!skip_destructor and !obj.destructor_called and obj.lazy == null and ctx.vm.hasMethod(obj.class_name, "__destruct")) {
-        obj.destructor_called = true;
-        obj.refcount +%= 1;
-        defer obj.refcount -%= 1;
-        _ = try ctx.vm.callMethod(obj, "__destruct", &.{});
+    // zend_object_make_lazy on an existing object
+    const reflected = if (getThis(ctx)) |this| (if (this.get("name") == .string) this.get("name").string.bytes() else obj.class_name) else obj.class_name;
+    if (obj.lazy) |state| {
+        // an initialized proxy stops being one: what it held was its
+        // instance's, which goes now (its destructor sees a plain object)
+        obj.lazy = null;
+        if (state.initializer != .null) ctx.vm.releaseValue(state.initializer);
+        const instance = state.backing;
+        ctx.allocator.free(state.pending);
+        if (state.written) |w| ctx.allocator.free(w);
+        ctx.allocator.destroy(state);
+        if (obj.slots) |slots| for (slots) |*v| {
+            ctx.vm.releaseValue(v.*);
+            v.* = .undef;
+        };
+        if (instance) |inst| {
+            ctx.vm.releaseValue(.{ .object = inst });
+            if (ctx.vm.hasPendingReleases()) ctx.vm.drainPendingDestruct();
+        }
+    } else {
+        // the object is destructed first, unless asked not to or done already
+        const skip_destructor = args.len > 2 and args[2] == .int and (args[2].int & 16) != 0;
+        if (!skip_destructor and !obj.destructor_called and ctx.vm.hasMethod(obj.class_name, "__destruct")) {
+            obj.destructor_called = true;
+            obj.refcount +%= 1;
+            defer obj.refcount -%= 1;
+            _ = try ctx.vm.callMethod(obj, "__destruct", &.{});
+        }
     }
     obj.destructor_called = false;
-    if (obj.lazy) |state| {
-        if (state.initializer != .null) ctx.vm.releaseValue(state.initializer);
-        ctx.allocator.free(state.pending);
-        ctx.allocator.destroy(state);
-        obj.lazy = null;
-    }
-    if (obj.slots) |slots| {
-        for (slots) |v| ctx.vm.releaseValue(v);
-        ctx.allocator.free(slots);
-        obj.slots = null;
-    }
+    // dynamic properties go
     for (obj.properties.values()) |v| ctx.vm.releaseValue(v);
     obj.clearProperties(ctx.allocator);
-    try ctx.vm.initObjectProperties(obj, obj.class_name);
+    if (obj.slots == null) try ctx.vm.initObjectProperties(obj, obj.class_name);
+    const count = if (obj.slots) |slots| slots.len else 0;
+    const pending = try ctx.allocator.alloc(bool, count);
+    errdefer ctx.allocator.free(pending);
+    @memset(pending, false);
+    // the properties the reflected class declares become lazy again, at
+    // their defaults; a subclass's own keep their values, and so does an
+    // initialized readonly one that can't be written again (a final class
+    // or property)
+    var lazy_count: usize = 0;
+    const reflected_cls = ctx.vm.classes.get(reflected);
+    const reflected_count = if (reflected_cls) |c| (if (c.slot_layout) |l| l.names.len else 0) else 0;
+    const class_final = if (ctx.vm.classes.get(obj.class_name)) |c| c.is_final else false;
+    if (obj.slots) |slots| if (obj.slot_layout) |layout| {
+        for (0..@min(reflected_count, slots.len)) |i| {
+            if (slots[i] != .undef) {
+                if (declaredProperty(ctx.vm, obj.class_name, layout.names[i])) |prop| {
+                    if (prop.is_readonly and (class_final or prop.is_final)) continue;
+                }
+            }
+            // zend_object_dtor_property: a reference the property shared
+            // stops being one of its holders (and loses its type)
+            if (obj.ref_mirrored) ctx.vm.detachPropRefs(obj, layout.names[i], null);
+            ctx.vm.releaseValue(slots[i]);
+            slots[i] = try ctx.vm.copyDefault(layout.defaults[i]);
+            pending[i] = true;
+            lazy_count += 1;
+        }
+    };
+    // an object with nothing left to initialize isn't lazy
+    if (lazy_count == 0) {
+        ctx.allocator.free(pending);
+        return NativeResult.borrowed(.{ .object = obj });
+    }
     VM.retainValue(args[1]);
     const state = try ctx.allocator.create(PhpObject.LazyState);
-    const count = if (obj.slots) |slots| slots.len else 0;
-    state.* = .{ .initializer = args[1], .proxy = proxy, .pending = try ctx.allocator.alloc(bool, count), .skip_serialize = args.len > 2 and args[2] == .int and (args[2].int & 8) != 0 };
-    @memset(state.pending, true);
+    state.* = .{ .initializer = args[1], .proxy = proxy, .pending = pending, .skip_serialize = args.len > 2 and args[2] == .int and (args[2].int & 8) != 0 };
     obj.lazy = state;
-    if (count == 0) {
-        ctx.vm.releaseValue(state.initializer);
-        state.initializer = .null;
-    }
     return NativeResult.borrowed(.{ .object = obj });
+}
+
+// the nearest declaration of a property in a class or its ancestors
+fn declaredProperty(vm: *VM, class_name: []const u8, name: []const u8) ?ClassDef.PropertyDef {
+    var current: ?[]const u8 = class_name;
+    while (current) |cn| {
+        const cls = vm.classes.get(cn) orelse return null;
+        for (cls.properties.items) |prop| if (std.mem.eql(u8, prop.name, name)) return prop;
+        current = cls.parent;
+    }
+    return null;
 }
 
 fn rcResetAsLazyGhost(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

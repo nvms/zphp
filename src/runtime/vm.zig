@@ -21842,7 +21842,7 @@ pub const VM = struct {
     }
 
     // the property stops sharing whatever reference it held before
-    fn detachPropRefs(self: *VM, obj: *PhpObject, prop_name: []const u8, keep: ?*Value) void {
+    pub fn detachPropRefs(self: *VM, obj: *PhpObject, prop_name: []const u8, keep: ?*Value) void {
         const ri = self.ref_index orelse return;
         while (true) {
             const cells = ri.prop_rev.get(.{ .object = obj, .class_name = "", .prop_name = prop_name }) orelse return;
@@ -25341,7 +25341,7 @@ pub const VM = struct {
     // COW-shared. sharing it would let an instance's first-write separation
     // decrement the template to refcount 0 and free it while the layout still
     // points at it (use-after-free). other value kinds copy normally
-    fn copyDefault(self: *VM, val: Value) RuntimeError!Value {
+    pub fn copyDefault(self: *VM, val: Value) RuntimeError!Value {
         if (val == .array) {
             const c = try self.cloneArray(val.array);
             arrayRetain(c);

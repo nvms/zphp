@@ -263,6 +263,8 @@ pub fn appendOwn(vm: *VM, obj: *PhpObject, purpose: Purpose, listing: *Listing, 
             const declared = vm.propertyDeclaration(layout.declaring_classes[i], name);
             const uninitialized = slots[i] == .undef or (slots[i] == .null and declared.type_str.len > 0 and vm.typedPropForbidsNull(declared.type_str));
             if (uninitialized and purpose != .debug) continue;
+            // an untyped slot that holds nothing is no property php lists
+            if (slots[i] == .undef and declared.type_str.len == 0) continue;
             try listing.items.append(allocator, .{ .key = .{ .name = name }, .value = if (slots[i] == .undef) .null else slots[i], .visibility = declared.visibility, .declaring = declared.defining_class, .declared = true, .uninitialized = if (uninitialized) try vm.propertyTypeText(declared.type_str, declared.defining_class) else null });
         }
     };
