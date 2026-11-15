@@ -27139,6 +27139,10 @@ pub const VM = struct {
         defer self.native_call = engine.outer;
         var ctx = self.makeContext(null);
         _ = ctx.invokeCallable(handler, &.{exc}) catch {};
+        // what the handler threw leaves its frame with no frame below:
+        // zend_throw_exception_internal hands it to a handler the handler
+        // installed
+        if (self.pending_exception != null and self.user_exception_handler != null and !self.uncatchable_fatal) self.dispatchUncaught();
         if (self.user_exception_handler == null) {
             if (self.exception_handler_stack.pop()) |top| self.user_exception_handler = top;
         }
@@ -28523,7 +28527,9 @@ pub const VM = struct {
         const outer_finished = self.finished_frames;
         self.finished_frames = self.frame_count;
         defer self.finished_frames = outer_finished;
-        defer self.releaseCallbackRegistries();
+        // the exception handler outlives the shutdown functions: what the
+        // shutdown destructors and output handlers throw still reaches it
+        defer self.releaseCallbackRegistriesBut(.exception_handlers);
         var i: usize = 0;
         while (i < self.shutdown_callbacks.items.len) : (i += 1) {
             // the list can grow while the callback runs
@@ -28542,6 +28548,10 @@ pub const VM = struct {
     }
 
     pub fn releaseCallbackRegistries(self: *VM) void {
+        self.releaseCallbackRegistriesBut(.none);
+    }
+
+    fn releaseCallbackRegistriesBut(self: *VM, comptime kept: enum { none, exception_handlers }) void {
         for (self.shutdown_callbacks.items) |cb| {
             self.releaseValue(cb.callable);
             for (cb.args) |v| self.releaseValue(v);
@@ -28557,10 +28567,12 @@ pub const VM = struct {
         self.user_error_handler = null;
         for (self.error_handler_stack.items) |entry| self.releaseValue(entry.handler);
         self.error_handler_stack.clearRetainingCapacity();
-        if (self.user_exception_handler) |h| self.releaseValue(h);
-        self.user_exception_handler = null;
-        for (self.exception_handler_stack.items) |entry| if (entry) |h| self.releaseValue(h);
-        self.exception_handler_stack.clearRetainingCapacity();
+        if (kept != .exception_handlers) {
+            if (self.user_exception_handler) |h| self.releaseValue(h);
+            self.user_exception_handler = null;
+            for (self.exception_handler_stack.items) |entry| if (entry) |h| self.releaseValue(h);
+            self.exception_handler_stack.clearRetainingCapacity();
+        }
         var ini_it = self.ini_callbacks.valueIterator();
         while (ini_it.next()) |cb| self.releaseValue(cb.*);
         self.ini_callbacks.clearRetainingCapacity();

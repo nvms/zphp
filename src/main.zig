@@ -773,21 +773,28 @@ fn runShutdown(allocator: std.mem.Allocator, vm: *VM) !bool {
     vm.discardPending();
     if (!vm.unclean_shutdown) {
         vm.runShutdownDestructors();
-        if (vm.pending_exception != null) {
-            try reportRuntimeError(allocator, vm);
-            failed = true;
-        }
+        if (vm.pending_exception != null and try handleOrReport(allocator, vm)) failed = true;
     }
     // then every output buffer is flushed through its handler
     output_control.endAll(vm) catch {
-        if (vm.pending_exception != null) {
-            try reportRuntimeError(allocator, vm);
-            failed = true;
-        }
+        if (vm.pending_exception != null and try handleOrReport(allocator, vm)) failed = true;
     };
     // and the streams still open are closed, flushing their write filters
     @import("stdlib/streams.zig").closeAllAtShutdown(vm);
     return failed;
+}
+
+// a throwable that escapes code the engine runs with no frame below it (a
+// destructor or an output handler at shutdown) goes to the exception handler
+// when one is set, as zend_throw_exception_internal does; what is still
+// pending after that is reported. true when something was reported
+fn handleOrReport(allocator: std.mem.Allocator, vm: *VM) !bool {
+    if (vm.user_exception_handler != null and !vm.uncatchable_fatal) {
+        vm.dispatchUncaught();
+        if (vm.pending_exception == null) return false;
+    }
+    try reportRuntimeError(allocator, vm);
+    return true;
 }
 
 // the script stopped on an error: an uncaught exception is reported as php
