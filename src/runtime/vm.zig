@@ -13698,7 +13698,11 @@ pub const VM = struct {
                     const const_name = self.currentChunk().constants.items[const_idx].string.bytes();
                     const class_val = self.pop();
                     defer self.stackRelease(class_val);
-                    if (try self.pushClassConstant(classNameOf(class_val), const_name)) continue;
+                    const class_name = dynClassOperand(class_val) orelse {
+                        if (try self.throwBuiltinException("Error", "Class name must be a valid object or a string")) continue;
+                        return error.RuntimeError;
+                    };
+                    if (try self.pushClassConstant(class_name, const_name)) continue;
                 },
 
                 .get_class_const_dyn_name => {
@@ -13714,7 +13718,10 @@ pub const VM = struct {
                     defer self.stackRelease(name_val);
                     const class_val = self.pop();
                     defer self.stackRelease(class_val);
-                    const class_name = self.resolveStaticClassName(classNameOf(class_val));
+                    const class_name = self.resolveStaticClassName(dynClassOperand(class_val) orelse {
+                        if (try self.throwBuiltinException("Error", "Class name must be a valid object or a string")) continue;
+                        return error.RuntimeError;
+                    });
                     if (try self.pushClassConstant(class_name, classNameOf(name_val))) continue;
                 },
 
@@ -13761,7 +13768,10 @@ pub const VM = struct {
                     const class_val = self.pop();
                     var name_text: [32]u8 = undefined;
                     const prop_name: []const u8 = varVarText(name_val, &name_text);
-                    const class_name = self.resolveStaticClassName(classNameOf(class_val));
+                    const class_name = self.resolveStaticClassName(dynClassOperand(class_val) orelse {
+                        if (try self.throwBuiltinException("Error", "Class name must be a valid object or a string")) continue;
+                        return error.RuntimeError;
+                    });
                     if (class_name.len == 0 or prop_name.len == 0) {
                         self.push(.null);
                     } else if (std.mem.eql(u8, prop_name, "class")) {
@@ -13778,7 +13788,10 @@ pub const VM = struct {
                     const quiet = op == .get_static_prop_dynamic_quiet;
                     const prop_idx = self.readU16();
                     const prop_name = self.currentChunk().constants.items[prop_idx].string.bytes();
-                    const class_name = classNameOf(self.pop());
+                    const class_name = dynClassOperand(self.pop()) orelse {
+                        if (try self.throwBuiltinException("Error", "Class name must be a valid object or a string")) continue;
+                        return error.RuntimeError;
+                    };
                     if (class_name.len == 0) {
                         self.push(.null);
                     } else {
@@ -14913,6 +14926,16 @@ pub const VM = struct {
             .string => |str| str.bytes(),
             .object => |o| o.class_name,
             else => "",
+        };
+    }
+
+    // the class operand of `$c::X`, `$c::$p`: zend_fetch_class takes a string
+    // (zend_lookup_class drops one leading backslash) or an object
+    fn dynClassOperand(v: Value) ?[]const u8 {
+        return switch (v) {
+            .string => |str| if (str.len > 0 and str.bytes()[0] == '\\') str.bytes()[1..] else str.bytes(),
+            .object => |o| o.class_name,
+            else => null,
         };
     }
 

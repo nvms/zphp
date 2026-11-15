@@ -2535,6 +2535,20 @@ fn constExprPropFetch(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitOp(.get_prop_dynamic);
 }
 
+// a static property or method on a nullsafe chain (`$a?->b()::$c`,
+// `::c()`) is part of what the chain skips
+pub fn compileStaticMemberOnChain(self: *Compiler, node: Ast.Node, comptime compile: fn (*Compiler, Ast.Node) Error!void) Error!void {
+    var local_jumps: std.ArrayListUnmanaged(usize) = .empty;
+    const owns_chain = self.nullsafe_chain_jumps == null and lhsIsChainLink(self.ast, node);
+    if (owns_chain) self.nullsafe_chain_jumps = &local_jumps;
+    defer if (owns_chain) {
+        for (local_jumps.items) |j| self.patchJump(j);
+        self.nullsafe_chain_jumps = null;
+        local_jumps.deinit(self.allocator);
+    };
+    try compile(self, node);
+}
+
 fn lhsIsChainLink(ast: anytype, node: Ast.Node) bool {
     const lhs = ast.nodes[node.data.lhs];
     return switch (lhs.tag) {

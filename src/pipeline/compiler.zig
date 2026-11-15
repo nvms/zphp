@@ -1165,12 +1165,17 @@ pub const Compiler = struct {
             .dynamic_static_call => {
                 try compiler_expr.checkClassRef(self, node.data.lhs);
                 if (node.main_token == 0) try compiler_expr.checkMethodName(self, self.ast.extraSlice(node.data.rhs)[0]);
-                try compiler_expr.compileDynamicStaticCall(self, node);
+                try compiler_expr.compileStaticMemberOnChain(self, node, compiler_expr.compileDynamicStaticCall);
             },
             .static_prop_access => {
                 // ::class checks its operand itself
                 if (node.main_token == 0 or !std.ascii.eqlIgnoreCase(self.ast.tokenSlice(node.main_token), "class")) try compiler_expr.checkClassRef(self, node.data.lhs);
-                try compiler_expr.compileStaticPropAccess(self, node);
+                // a nullsafe chain skips a static property after it, not a
+                // class constant
+                const is_prop = node.main_token == 0 or std.mem.startsWith(u8, self.ast.tokenSlice(node.main_token), "$");
+                if (is_prop) {
+                    try compiler_expr.compileStaticMemberOnChain(self, node, compiler_expr.compileStaticPropAccess);
+                } else try compiler_expr.compileStaticPropAccess(self, node);
             },
             .dynamic_class_const => {
                 try compiler_expr.checkClassRef(self, node.data.lhs);
