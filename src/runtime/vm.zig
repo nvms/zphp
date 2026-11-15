@@ -17326,6 +17326,10 @@ pub const VM = struct {
                 const display_text = std.fmt.allocPrint(self.allocator, "\n{s}: {s} in {s} on line {d}\n", .{ label, msg, at.file, at.line }) catch return;
                 defer self.allocator.free(display_text);
                 self.output.appendSlice(self.allocator, display_text) catch {};
+                // php_printf goes through the output layer: a chunked
+                // buffer's handler runs for the message as for an echo. what
+                // the handler throws stays pending for the code that raised
+                if (self.ob_chunk_watch) output_control.checkChunks(self) catch {};
             },
             .stderr => {
                 const display_text = std.fmt.allocPrint(self.allocator, "{s}: {s} in {s} on line {d}\n", .{ label, msg, at.file, at.line }) catch return;
