@@ -6266,13 +6266,17 @@ pub const VM = struct {
                         if (self.throwWrongStringOffset(self.stack[self.sp - 1], if (access == 1) "Cannot increment/decrement string offsets" else "Cannot use assign-op operators with string offsets") catch try self.resumeRaised()) continue;
                         return error.RuntimeError;
                     }
+                    if (try self.refuseDimWrite(self.stack[self.sp - 2])) |handled| {
+                        if (handled) continue;
+                        return error.RuntimeError;
+                    }
                     // php converts the key of a read-modify-write once, with
                     // one warning, and both halves use the converted key: the
                     // place's operands were duplicated, [array, key, array, key]
                     const rw_key = self.stack[self.sp - 1];
                     if (self.stack[self.sp - 2] == .array) switch (rw_key) {
                         .float, .null, .resource, .bool => {
-                            _ = self.warnOffsetKeyOn(rw_key, self.stack[self.sp - 2].array, .null) catch {
+                            _ = self.warnOffsetKeyOnW(rw_key, self.stack[self.sp - 2].array, .null) catch {
                                 if (try self.resumeRaised()) continue;
                                 return error.RuntimeError;
                             };
@@ -6328,6 +6332,12 @@ pub const VM = struct {
                                     self.push(cell.*);
                                     continue;
                                 }
+                                // a global made a reference elsewhere (passed by
+                                // reference) is read through its cell
+                                if (self.frame_count > 0) if (self.frames[0].ref_slots.get(dollar_name)) |cell| {
+                                    self.push(cell.*);
+                                    continue;
+                                };
                             }
                         }
                         if (key == .array or key == .object) {
@@ -6423,6 +6433,38 @@ pub const VM = struct {
                             continue;
                         }
                         self.push(existing);
+                    } else if (arr_val == .object and op == .array_get_unset and try self.splOwnOffsetGet(arr_val.object)) {
+                        // spl_array_get_dimension_ptr for BP_VAR_UNSET: the
+                        // unset descends into the storage's element, or a
+                        // temporary when there is none
+                        var ctx = self.makeContext(null);
+                        const target = @import("../stdlib/spl.zig").arrayStorageUnsetTarget(&ctx, arr_val.object, key) catch {
+                            if (self.pending_exception == null) return error.RuntimeError;
+                            // an illegal offset still hands out the temporary
+                            const pending = self.pending_exception;
+                            self.pending_exception = null;
+                            const noticed = self.noticeIndirectOverloaded(arr_val.object);
+                            if (self.pending_exception == null) self.pending_exception = pending;
+                            _ = noticed catch {};
+                            if (self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        if (target) |t| {
+                            const elem = t.arr.get(t.key);
+                            if (elem == .array) {
+                                const is_ref = self.array_ref_active and
+                                    (if (t.arr.getPtr(t.key)) |ep| ep.ref != null else false);
+                                const inner = if (is_ref) elem.array else try self.cowSeparate(elem.array);
+                                if (inner != elem.array) {
+                                    try self.arraySetOwned(t.arr, t.key, .{ .array = inner });
+                                    inner.refcount -= 1;
+                                }
+                                self.pushFetched(.{ .array = inner });
+                            } else self.pushFetched(elem);
+                        } else {
+                            if (try self.noticeIndirectOverloaded(arr_val.object)) continue;
+                            self.pushFetched(.null);
+                        }
                     } else if (arr_val == .object and op != .array_get_unset and try self.splOwnMethod(arr_val.object, "offsetGet") and try self.splOwnMethod(arr_val.object, "offsetExists")) {
                         // spl_array_read_dimension for BP_VAR_IS: a quiet
                         // fetch, with no offsetExists() of its own
@@ -6433,7 +6475,8 @@ pub const VM = struct {
                         };
                         self.push(found);
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetGet")) {
-                        if (self.hasMethod(arr_val.object.class_name, "offsetExists")) {
+                        // an unset's fetch is offsetGet alone (BP_VAR_UNSET)
+                        if (op != .array_get_unset and self.hasMethod(arr_val.object.class_name, "offsetExists")) {
                             const exists = self.callMethod(arr_val.object, "offsetExists", &.{key}) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
@@ -6447,15 +6490,11 @@ pub const VM = struct {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
-                        // an unset can't reach into the array offsetGet returned:
-                        // php works on a copy and says so
-                        if (op == .array_get_unset and result == .array) {
-                            const msg = try std.fmt.allocPrint(self.allocator, "Indirect modification of overloaded element of {s} has no effect", .{arr_val.object.class_name});
-                            defer self.allocator.free(msg);
-                            self.raiseError(8, msg) catch if (try self.resumeRaised()) continue;
-                            // the result is borrowed: a temporary copy leaves the
-                            // object's array alone
-                            self.pushCallResult(.{ .array = try self.shallowCloneCow(result.array) });
+                        // an unset can't reach into what offsetGet returned
+                        // unless it is an object or a reference: php works on
+                        // a copy and says so
+                        if (op == .array_get_unset) {
+                            try self.pushOverloadedElement(arr_val.object, result) orelse continue;
                         } else self.pushCallResult(result);
                     } else if (op == .array_get_list and arr_val != .object) {
                         if (arr_val != .null) self.warnListFromScalar(arr_val) catch if (try self.resumeRaised()) continue;
@@ -6524,7 +6563,15 @@ pub const VM = struct {
                             try self.arrayAppendOwned(arr, .{ .array = new_arr });
                             self.pushFetched(.{ .array = new_arr });
                         },
-                        .object => |obj| if (self.hasMethod(obj.class_name, "offsetGet")) {
+                        .object => |obj| if (try self.splOwnOffsetGet(obj)) {
+                            // spl_array_get_dimension_ptr has no element for
+                            // an append: the write lands on a temporary
+                            if (try self.noticeIndirectOverloaded(obj)) continue;
+                            self.pushFetched(.null);
+                        } else if (try self.splSubclassAppendFetch(obj)) |handled| {
+                            if (handled) continue;
+                            return error.RuntimeError;
+                        } else if (self.hasMethod(obj.class_name, "offsetGet")) {
                             const saved_append = self.dim_append_depth;
                             self.dim_append_depth = self.frame_count + 1;
                             defer self.dim_append_depth = saved_append;
@@ -6567,7 +6614,7 @@ pub const VM = struct {
                                 if (try self.throwOffsetKeyType(key, .access)) continue;
                                 return error.RuntimeError;
                             }
-                            if (key == .resource or key == .float or key == .null) { if (!(self.warnOffsetKeyOn(key, arr, .null) catch {
+                            if (key == .resource or key == .float or key == .null) { if (!(self.warnOffsetKeyOnW(key, arr, .null) catch {
                                 _ = try self.resumeRaised();
                                 continue;
                             })) {
@@ -6630,7 +6677,7 @@ pub const VM = struct {
                             if (try self.throwOffsetKeyType(key, .access)) continue;
                             return error.RuntimeError;
                         }
-                        if (key == .resource or key == .float or key == .null) { if (!(self.warnOffsetKeyOn(key, arr_val.array, .null) catch {
+                        if (key == .resource or key == .float or key == .null) { if (!(self.warnOffsetKeyOnW(key, arr_val.array, .null) catch {
                             _ = try self.resumeRaised();
                             continue;
                         })) {
@@ -6891,7 +6938,6 @@ pub const VM = struct {
                     const inner_key = self.pop();
                     const outer_key = self.pop();
                     const base = self.pop();
-                    if (base == .object and self.hasMethod(base.object.class_name, "offsetGet") and (inner_key == .resource or inner_key == .null)) self.warnOffsetKey(inner_key) catch if (try self.resumeRaised()) continue;
                     const ik = Value.toArrayKey(inner_key);
                     var existing: Value = .null;
                     var base_is_array_access_obj = false;
@@ -6904,7 +6950,7 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
                         if (outer_key == .resource or outer_key == .float or outer_key == .null) {
-                            if (!(self.warnOffsetKeyOn(outer_key, base.array, v) catch {
+                            if (!(self.warnOffsetKeyOnW(outer_key, base.array, v) catch {
                                 _ = try self.resumeRaised();
                                 continue;
                             })) {
@@ -6926,7 +6972,7 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
                         if (writes_array and (inner_key == .resource or inner_key == .float or inner_key == .null)) {
-                            if (!(self.warnOffsetKeyOn(inner_key, base.array, v) catch {
+                            if (!(self.warnOffsetKeyOnW(inner_key, base.array, v) catch {
                                 _ = try self.resumeRaised();
                                 continue;
                             })) {
@@ -6963,10 +7009,20 @@ pub const VM = struct {
                             _ = try self.resumeRaised();
                             continue;
                         })) {
+                            // the write goes to a temporary copy, which still
+                            // refuses being a scalar
+                            if (try self.refuseDimWrite(existing)) |handled| {
+                                if (handled) continue;
+                                return error.RuntimeError;
+                            }
+                            if (existing != .string and (inner_key == .resource or inner_key == .float or inner_key == .null)) self.warnOffsetKey(inner_key) catch if (try self.resumeRaised()) continue;
                             self.push(v);
                             continue;
                         }
                         base_is_array_access_obj = true;
+                        // ZEND_ASSIGN_DIM on the element offsetGet handed out
+                        const into_array = existing == .array or existing == .null or (existing == .bool and !existing.bool);
+                        if (into_array and (inner_key == .resource or inner_key == .float or inner_key == .null)) self.warnOffsetKey(inner_key) catch if (try self.resumeRaised()) continue;
                     } else if (base == .string) {
                         if (self.throwWrongStringOffset(outer_key, "Cannot use string offset as an array") catch try self.resumeRaised()) continue;
                         return error.RuntimeError;
@@ -7140,7 +7196,7 @@ pub const VM = struct {
                             if (try self.throwOffsetKeyType(key, .access)) continue;
                             return error.RuntimeError;
                         }
-                        if (key == .resource or key == .float or key == .null) { if (!(self.warnOffsetKeyOn(key, arr_val.array, val) catch {
+                        if (key == .resource or key == .float or key == .null) { if (!(self.warnOffsetKeyOnW(key, arr_val.array, val) catch {
                             _ = try self.resumeRaised();
                             continue;
                         })) {
@@ -7260,6 +7316,7 @@ pub const VM = struct {
                             // an error handler may replace the variable and free
                             // the new array: php's GC_TRY_ADDREF around the
                             // warning, and the write is dropped
+                            const stored_rc = new_arr.refcount;
                             arrayRetain(new_arr);
                             retainValue(val);
                             defer self.releaseValue(val);
@@ -7268,7 +7325,9 @@ pub const VM = struct {
                                 if (new_arr.refcount == 0) self.queueArrayRelease(new_arr);
                                 if (try self.resumeRaised()) continue;
                             };
-                            const kept = new_arr.refcount > 1;
+                            // slow_index_convert_w: a write the handler left
+                            // other holders of the array to is dropped
+                            const kept = new_arr.refcount == stored_rc + 1;
                             arrayUnpin(new_arr);
                             if (!kept) {
                                 if (new_arr.refcount == 0) self.queueArrayRelease(new_arr);
@@ -7297,7 +7356,7 @@ pub const VM = struct {
                             if (ref_cell == null) try self.storeLocalSlot(frame, slot, .{ .array = dst });
                             cur = .{ .array = dst };
                         }
-                        if (key == .resource or key == .float or key == .null) { if (!(self.warnOffsetKeyOn(key, cur.array, val) catch {
+                        if (key == .resource or key == .float or key == .null) { if (!(self.warnOffsetKeyOnW(key, cur.array, val) catch {
                             _ = try self.resumeRaised();
                             continue;
                         })) {
@@ -8405,7 +8464,11 @@ pub const VM = struct {
                     }
                     const frame = self.currentFrame();
                     self.unbindRefSlot(&frame.ref_slots, dst_name);
-                    if (arr_val == .object and try self.splOwnOffsetGet(arr_val.object)) {
+                    if (append_ref and arr_val == .object and try self.splOwnOffsetGet(arr_val.object)) {
+                        // no element for an append: a reference to a temporary
+                        if (try self.noticeIndirectOverloaded(arr_val.object)) continue;
+                        try self.bindRefSlot(&frame.ref_slots, dst_name, try self.newRefCell());
+                    } else if (arr_val == .object and try self.splOwnOffsetGet(arr_val.object)) {
                         // spl_array_get_dimension_ptr for BP_VAR_W: the
                         // element of the storage array itself
                         var ctx = self.makeContext(null);
@@ -8416,6 +8479,32 @@ pub const VM = struct {
                         if (target) |t| {
                             try self.bindSlotToElement(frame, dst_name, t.arr, t.key);
                         } else try self.bindRefSlot(&frame.ref_slots, dst_name, try self.newRefCell());
+                    } else if (append_ref and arr_val == .object and (try self.splSubclassAppendFetch(arr_val.object)) != null) {
+                        // the exception is raised; a handler took it when
+                        // nothing is pending any more
+                        if (self.pending_exception == null) continue;
+                        return error.RuntimeError;
+                    } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetGet") and !self.offsetGetReturnsRef(arr_val.object)) {
+                        // FETCH_DIM_W on an ArrayAccess object: the reference
+                        // is to a copy of what offsetGet returned
+                        const obj = arr_val.object;
+                        const saved_append = self.dim_append_depth;
+                        if (append_ref) self.dim_append_depth = self.frame_count + 1;
+                        const result = self.callMethod(obj, "offsetGet", &.{key_val}) catch {
+                            self.dim_append_depth = saved_append;
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        self.dim_append_depth = saved_append;
+                        retainValue(result);
+                        defer self.releaseValue(result);
+                        _ = self.overloadedElementWritable(obj, result) catch {
+                            _ = try self.resumeRaised();
+                            continue;
+                        };
+                        const cell = try self.newRefCell();
+                        self.setCell(cell, result);
+                        try self.bindRefSlot(&frame.ref_slots, dst_name, cell);
                     } else if (arr_val != .array) {
                         if (try self.refuseDimWrite(arr_val)) |handled| {
                             if (handled) continue;
@@ -15236,6 +15325,16 @@ pub const VM = struct {
     // may drop the last reference to it (php's GC_TRY_ADDREF around the
     // notice). false when it did, and the access must leave the array alone
     fn warnOffsetKeyOn(self: *VM, key: Value, arr: *PhpArray, keep: Value) RuntimeError!bool {
+        return self.warnOffsetKeyPinned(key, arr, keep, false);
+    }
+
+    // the same for a write fetch (slow_index_convert_w): the write is dropped
+    // when the handler left the array with other holders as well
+    fn warnOffsetKeyOnW(self: *VM, key: Value, arr: *PhpArray, keep: Value) RuntimeError!bool {
+        return self.warnOffsetKeyPinned(key, arr, keep, true);
+    }
+
+    fn warnOffsetKeyPinned(self: *VM, key: Value, arr: *PhpArray, keep: Value, write: bool) RuntimeError!bool {
         const before = arr.refcount;
         arrayRetain(arr);
         // the value being written is off the stack and counted nowhere; the
@@ -15247,7 +15346,7 @@ pub const VM = struct {
             if (arr.refcount < before and arr.refcount == 0) self.queueArrayRelease(arr);
             return err;
         };
-        const kept = arr.refcount > before;
+        const kept = if (write) arr.refcount == before + 1 else arr.refcount > before;
         arrayUnpin(arr);
         // a temporary nothing counted stays as it was; one whose holders
         // went away goes now
@@ -15355,6 +15454,33 @@ pub const VM = struct {
             else => {},
         }
         return self.refuseDimWrite(container);
+    }
+
+    // an append fetch on an ArrayObject or ArrayIterator subclass with its
+    // own offsetGet calls it with an undefined argument
+    // (spl_array_read_dimension_ex), which fails as zend_handle_undef_args
+    // does. null when the call goes ahead, else as throwBuiltinException
+    fn splSubclassAppendFetch(self: *VM, obj: *PhpObject) RuntimeError!?bool {
+        if (!self.isInstanceOf(obj.class_name, "ArrayObject") and !self.isInstanceOf(obj.class_name, "ArrayIterator")) return null;
+        if (try self.splOwnOffsetGet(obj)) return null;
+        const method = self.resolveMethod(obj.class_name, "offsetGet") catch return null;
+        const func = self.functions.get(method) orelse return null;
+        if (func.params.len == 0 or func.required_params == 0) return null;
+        const param = func.params[0];
+        if (try self.noticeIndirectOverloaded(obj)) return true;
+        const msg = try std.fmt.allocPrint(self.allocator, "{s}(): Argument #1 (${s}) not passed", .{ method, if (param.len > 0 and param[0] == '$') param[1..] else param });
+        defer self.allocator.free(msg);
+        return try self.throwBuiltinException("ArgumentCountError", msg);
+    }
+
+    // a write fetch on an object that hands out no element: php writes to a
+    // temporary and says so. true when an error handler's exception was
+    // dispatched and the caller should continue
+    fn noticeIndirectOverloaded(self: *VM, obj: *PhpObject) RuntimeError!bool {
+        const msg = try std.fmt.allocPrint(self.allocator, "Indirect modification of overloaded element of {s} has no effect", .{obj.class_name});
+        defer self.allocator.free(msg);
+        self.raiseError(8, msg) catch return try self.resumeRaised();
+        return false;
     }
 
     // zend_bad_array_access: an object without dimension handlers

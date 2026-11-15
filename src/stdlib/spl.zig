@@ -685,15 +685,11 @@ fn splKey(ctx: *NativeContext, obj: *PhpObject, offset: Value, use: KeyUse) Runt
             if (ctx.vm.pending_exception != null) return error.RuntimeError;
             return .{ .int = offset.resource.id };
         },
-        .float => |f| {
-            const n = Value.toInt(offset);
-            if (Value.floatFitsInt(f) and @as(f64, @floatFromInt(n)) != f) {
-                const msg = try std.fmt.allocPrint(ctx.allocator, "Implicit conversion from float {s} to int loses precision", .{try @import("spl_iterator_classes.zig").floatText(ctx, f)});
-                defer ctx.allocator.free(msg);
-                try ctx.vm.raiseError(VM.E_DEPRECATED, msg);
-                if (ctx.vm.pending_exception != null) return error.RuntimeError;
-            }
-            return .{ .int = n };
+        .float => {
+            // zend_dval_to_lval_safe, as an array's offset
+            try ctx.vm.warnOffsetKey(offset);
+            if (ctx.vm.pending_exception != null) return error.RuntimeError;
+            return .{ .int = Value.toInt(offset) };
         },
         .bool => |b| return .{ .int = @intFromBool(b) },
         .int => |n| return .{ .int = n },
@@ -825,6 +821,20 @@ pub fn arrayStorageRefTarget(ctx: *NativeContext, obj: *PhpObject, offset: ?Valu
             const key: PhpArray.Key = if (offset) |o| try splKey(ctx, obj, o, .write) else .{ .int = if (s.arr.has_int_keys) s.arr.next_int_key else 0 };
             const arr = try writableArray(ctx, s.holder, s.arr);
             if (arr.getPtr(key) == null) try arr.set(ctx.allocator, key, .null);
+            return .{ .arr = arr, .key = key };
+        },
+        .object => return null,
+    }
+}
+
+// unset($o[$k][...]): the element the unset descends into
+// (spl_array_get_dimension_ptr for BP_VAR_UNSET), null when there is none
+pub fn arrayStorageUnsetTarget(ctx: *NativeContext, obj: *PhpObject, offset: Value) RuntimeError!?RefTarget {
+    const key = try splKey(ctx, obj, offset, .unset);
+    switch (try splStorage(ctx, obj)) {
+        .array => |s| {
+            if (s.arr.getPtr(key) == null) return null;
+            const arr = try writableArray(ctx, s.holder, s.arr);
             return .{ .arr = arr, .key = key };
         },
         .object => return null,
