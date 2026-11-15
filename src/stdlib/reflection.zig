@@ -2757,7 +2757,20 @@ fn rcGetReflectionConstant(ctx: *NativeContext, args: []const Value) RuntimeErro
         }
         current = cls.parent;
     }
+    // a trait's reflector sees the constants it declares
+    if (traitConstant(ctx.vm, class_name, target)) |tc| {
+        return NativeResult.borrowed(try buildReflectionClassConstant(ctx, ctx.vm.declaredClassName(class_name), target, tc.value));
+    }
     return NativeResult.scalar(.{ .bool = false });
+}
+
+fn traitConstant(vm: *VM, trait_name: []const u8, name: []const u8) ?*const @import("../runtime/vm.zig").TraitStaticProp {
+    if (!vm.traits.contains(trait_name)) return null;
+    const consts = vm.trait_constants.get(vm.declaredClassName(trait_name)) orelse return null;
+    for (consts) |*c| {
+        if (std.mem.eql(u8, c.name, name)) return c;
+    }
+    return null;
 }
 
 fn rcHasConstant(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -2775,6 +2788,7 @@ fn rcGetConstant(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     try ctx.vm.updateClassConstants(class_name);
     if (findConstantOwner(ctx, class_name, target, 0) != null) {
         if (ctx.vm.getClassConstant(class_name, target)) |val| return NativeResult.share(ctx.vm.enumCase(val));
+        if (traitConstant(ctx.vm, class_name, target)) |tc| return NativeResult.share(tc.value);
     }
     try ctx.vm.raiseError(VM.E_DEPRECATED, "ReflectionClass::getConstant() for a non-existent constant is deprecated, use ReflectionClass::hasConstant() to check if the constant exists");
     return NativeResult.scalar(.{ .bool = false });
@@ -2851,6 +2865,7 @@ fn rccGetValue(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult 
         }
         current = cls.parent;
     }
+    if (traitConstant(ctx.vm, class_name, const_name)) |tc| return NativeResult.share(tc.value);
     return NativeResult.scalar(.null);
 }
 

@@ -750,7 +750,7 @@ pub const ClassDef = struct {
     }
 };
 
-const TraitStaticProp = struct {
+pub const TraitStaticProp = struct {
     name: []const u8,
     value: Value,
     doc_comment: []const u8 = "",
