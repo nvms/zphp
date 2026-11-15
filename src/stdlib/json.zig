@@ -847,7 +847,12 @@ const Parser = struct {
                     defer if (v == .string) v.string.release();
                     // php makes the object once its first member's value is
                     // parsed, so objects nested there are numbered before it
-                    if (container == null) container = if (assoc) .{ .array = try self.ctx.createArray() } else .{ .object = try self.ctx.vm.allocObject(.{ .class_name = "stdClass" }) };
+                    if (container == null) {
+                        // made before it is stored: a failed allocation must
+                        // not leave the optional half written for the errdefer
+                        const made: Value = if (assoc) .{ .array = try self.ctx.createArray() } else .{ .object = try self.ctx.vm.allocObject(.{ .class_name = "stdClass" }) };
+                        container = made;
+                    }
                     if (!try self.update(container.?, key_value.string, v)) {
                         // a string is released by the defer above
                         if (v != .string) self.ctx.vm.discardOrphan(v);
