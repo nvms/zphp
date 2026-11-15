@@ -32,7 +32,7 @@ pub const Callee = union(enum) {
     static_method: struct { registered: []const u8, called_class: []const u8 },
     // a method the class lacks: __call on the object, else __callStatic on
     // the class
-    magic: struct { object: ?*PhpObject, class: []const u8, name: []const u8 },
+    magic: struct { object: ?*PhpObject, class: []const u8, name: []const u8, called: ?[]const u8 = null },
     // a method of a Generator or a Fiber, which the engine runs itself
     engine: struct { target: Value, name: []const u8 },
 };
@@ -197,9 +197,11 @@ fn resolveMethod(vm: *VM, site: *Site, method: []const u8, origin: ?[]const u8) 
 const Magic = struct {
     object: ?*PhpObject,
     class: []const u8,
+    // the called scope __callStatic runs with (parent:: and self:: forward it)
+    called: ?[]const u8 = null,
 
     fn callee(self: Magic, method: []const u8) Callee {
-        return .{ .magic = .{ .object = self.object, .class = self.class, .name = method } };
+        return .{ .magic = .{ .object = self.object, .class = self.class, .name = method, .called = self.called } };
     }
 };
 
@@ -218,7 +220,7 @@ fn magicFor(vm: *VM, site: *Site, origin: ?[]const u8) ?Magic {
             return .{ .object = this, .class = this.class_name };
         };
     }
-    if (vm.hasMethod(calling, "__callStatic")) return .{ .object = null, .class = calling };
+    if (vm.hasMethod(calling, "__callStatic")) return .{ .object = null, .class = calling, .called = site.called };
     return null;
 }
 
@@ -455,7 +457,7 @@ pub fn invoke(vm: *VM, callee: Callee, args: []const Value) RuntimeError!Value {
             const magic_args = [_]Value{ .{ .string = try vm.transientBytes(m.name) }, .{ .array = packed_args } };
             if (m.object) |obj| return vm.callTrampoline(obj, &magic_args);
             const registered = try vm.resolveMethod(m.class, "__callStatic");
-            return vm.callByNameAs(registered, &magic_args, m.class);
+            return vm.callByNameAs(registered, &magic_args, m.called orelse m.class);
         },
         .engine => |e| return invokeEngine(vm, e.target, e.name, args),
     }
@@ -509,7 +511,7 @@ pub fn invokeArgArrayFrom(vm: *VM, callee: Callee, arr: *PhpArray, from_native: 
             const magic_args = [_]Value{ .{ .string = try vm.transientBytes(m.name) }, .{ .array = packed_args } };
             if (m.object) |obj| return vm.callTrampoline(obj, &magic_args);
             const registered = try vm.resolveMethod(m.class, "__callStatic");
-            return vm.callByNameAs(registered, &magic_args, m.class);
+            return vm.callByNameAs(registered, &magic_args, m.called orelse m.class);
         },
         .closure => |obj| {
             if (obj.closureName() == null) {
