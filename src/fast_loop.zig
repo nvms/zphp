@@ -1230,10 +1230,13 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     ip += 3;
 
                     const name = consts[name_idx].string.bytes();
+                    // a qualified or imported name is marked with a leading
+                    // backslash (no global fallback)
+                    const declared = if (name.len > 0 and name[0] == '\\') name[1..] else name;
                     const func = blk: {
                         if (ic.fn_cache_name.len == name.len and std.mem.eql(u8, ic.fn_cache_name, name))
                             break :blk ic.fn_cache_func.?;
-                        if (self.functions.get(name)) |f| {
+                        if (self.functions.get(declared)) |f| {
                             ic.fn_cache_name = name;
                             ic.fn_cache_func = f;
                             break :blk f;
@@ -1260,9 +1263,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         return;
                     }
 
-                    if (func.has_param_types and !argsHoldDeclared(self, ic, func, name, stack[sp - arg_count .. sp])) {
+                    if (func.has_param_types and !argsHoldDeclared(self, ic, func, declared, stack[sp - arg_count .. sp])) {
                         self.sp = sp;
-                        if (try checkParamTypes(self, ic, name, arg_count)) {
+                        if (try checkParamTypes(self, ic, declared, arg_count)) {
                             frame.ip = ip;
                             return;
                         }

@@ -4576,9 +4576,14 @@ pub const VM = struct {
     // that name: php matches function names case-insensitively, and a call
     // inside a namespace falls back to the global function of the same name
     pub fn resolveFunctionName(self: *VM, name: []const u8) ?[]const u8 {
+        return self.resolveFunctionNameIn(name, true);
+    }
+
+    pub fn resolveFunctionNameIn(self: *VM, name: []const u8, global_fallback: bool) ?[]const u8 {
         const ic = self.ic.?;
-        if (ic.resolved_calls.get(name)) |hit| return hit;
+        if (global_fallback) if (ic.resolved_calls.get(name)) |hit| return hit;
         const target = self.functionNamedIgnoringCase(name) orelse fallback: {
+            if (!global_fallback) return null;
             const pos = std.mem.lastIndexOfScalar(u8, name, '\\') orelse return null;
             const base = name[pos + 1 ..];
             if (base.len == 0) return null;
@@ -5869,7 +5874,11 @@ pub const VM = struct {
                     defer self.leaveCallFamily(cf_scope);
                     if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
                     const name_idx = self.readU16();
-                    const name = self.currentChunk().constants.items[name_idx].string.bytes();
+                    // a qualified or imported name carries the compiler's
+                    // leading backslash (no global fallback), which
+                    // callNamedFunction reads; the other paths look it up as is
+                    const marked_name = self.currentChunk().constants.items[name_idx].string.bytes();
+                    const name = if (marked_name.len > 0 and marked_name[0] == '\\') marked_name[1..] else marked_name;
                     const args_val = self.pop();
                     if (args_val != .array) {
                         self.setErrorMsg("Fatal error: Uncaught TypeError: Argument unpacking requires an array", .{});
@@ -5918,7 +5927,7 @@ pub const VM = struct {
                             self.pushCallResult(result);
                         } else {
                             try self.pushArgEntries(arr, arr.entries.items);
-                            self.callNamedFunction(name, @intCast(arr.entries.items.len)) catch {
+                            self.callNamedFunction(marked_name, @intCast(arr.entries.items.len)) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
@@ -28360,8 +28369,11 @@ pub const VM = struct {
         const dynamic = self.pending_dynamic_call;
         self.pending_dynamic_call = false;
         self.captureArgSources(arg_count);
-        // PHP normalizes leading-backslash on function callable strings
-        const name = if (raw_name.len > 0 and raw_name[0] == '\\') raw_name[1..] else raw_name;
+        // PHP normalizes leading-backslash on function callable strings; the
+        // compiler marks a call to a qualified or imported name with one, a
+        // name that doesn't fall back to the global function
+        const qualified = raw_name.len > 0 and raw_name[0] == '\\';
+        const name = if (qualified) raw_name[1..] else raw_name;
         if (self.dbg_profile_enabled) {
             const e = self.profile_calls.getOrPut(self.allocator, name) catch null;
             if (e) |ee| {
@@ -28399,7 +28411,7 @@ pub const VM = struct {
         } else if (self.functions.get(name)) |func| {
             return self.enterUserFunction(func, name, arg_count, named_extras);
         } else {
-            if (self.resolveFunctionName(name)) |registered| {
+            if (self.resolveFunctionNameIn(name, !qualified and !dynamic)) |registered| {
                 self.pending_dynamic_call = dynamic;
                 return self.callNamedFunctionV(registered, arg_count, named_extras);
             }

@@ -262,7 +262,7 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
     {
         var imports: Compiler.ImportCheck = .{ .compiler = &c };
         defer imports.deinit();
-        try imports.walk(c.root_stmts);
+        try imports.walk(c.root_stmts, 0);
     }
     const outer_keys = anon_class_keys;
     anon_class_keys = .{};
@@ -2199,10 +2199,16 @@ pub const Compiler = struct {
             gop.value_ptr.* |= kind_bits[kind];
         }
 
-        fn walk(self: *ImportCheck, stmts: []const u32) Error!void {
+        // `lo` is the last node before the statements: the parser makes a
+        // statement's nodes after the one before it and the statement's own
+        // node last, so (lo, idx) holds what a statement declares inside it
+        fn walk(self: *ImportCheck, stmts: []const u32, lo: u32) Error!void {
             const c = self.compiler;
+            var prev = lo;
             for (stmts) |idx| {
                 const node = c.ast.nodes[idx];
+                defer prev = @max(prev, idx);
+                if (node.tag != .namespace_decl and node.tag != .block and idx > prev + 1) try self.declareNested(prev + 1, idx);
                 switch (node.tag) {
                     .namespace_decl => {
                         self.namespace = if (node.data.rhs == 2) "" else try c.buildQualifiedString(c.ast.extraSlice(node.data.lhs));
@@ -2210,7 +2216,7 @@ pub const Compiler = struct {
                         for (&self.imports) |*m| m.clearRetainingCapacity();
                         self.seen.clearRetainingCapacity();
                     },
-                    .block => try self.walk(c.ast.extraSlice(node.data.lhs)),
+                    .block => try self.walk(c.ast.extraSlice(node.data.lhs), prev),
                     .use_stmt => try self.use(node, 0),
                     .use_fn_stmt => try self.use(node, 1),
                     .use_const_stmt => try self.use(node, 2),
@@ -2229,6 +2235,24 @@ pub const Compiler = struct {
                     },
                     .function_decl => try self.declare(c.ast.tokenSlice(node.main_token), 1),
                     .const_decl => try self.declare(c.ast.tokenSlice(node.main_token), 2),
+                    else => {},
+                }
+            }
+        }
+
+        // functions and classes declared inside a statement (an `if`, a
+        // function body) are seen by the time php compiles what follows it
+        fn declareNested(self: *ImportCheck, from: u32, to: u32) Error!void {
+            const c = self.compiler;
+            var i = from;
+            while (i < to) : (i += 1) {
+                const n = c.ast.nodes[i];
+                switch (n.tag) {
+                    .function_decl => try self.declare(c.ast.tokenSlice(n.main_token), 1),
+                    .class_decl, .interface_decl, .trait_decl, .enum_decl => {
+                        const name = c.ast.tokenSlice(n.main_token);
+                        if (!class_names.isAnonymous(name)) try self.declare(name, 0);
+                    },
                     else => {},
                 }
             }
@@ -2288,6 +2312,20 @@ pub const Compiler = struct {
         const qualified = std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, name }) catch return name;
         self.string_allocs.append(self.allocator, qualified) catch return name;
         return qualified;
+    }
+
+    // the name a call op carries: only an unqualified name that no `use
+    // function` imports falls back to the global function (php's
+    // INIT_NS_FCALL_BY_NAME); any other namespaced name is marked with a
+    // leading backslash, which the vm reads as "no fallback" and strips
+    pub fn callTargetName(self: *Compiler, unqualified: ?[]const u8, resolved: []const u8) Error![]const u8 {
+        if (std.mem.indexOfScalar(u8, resolved, '\\') == null) return resolved;
+        if (unqualified) |raw| {
+            if (raw.len > 0 and raw[0] != '\\' and self.use_fn_aliases.get(raw) == null) return resolved;
+        }
+        const marked = try std.fmt.allocPrint(self.allocator, "\\{s}", .{resolved});
+        try self.string_allocs.append(self.allocator, marked);
+        return marked;
     }
 
     pub fn buildQualifiedString(self: *Compiler, parts: []const u32) Error![]const u8 {

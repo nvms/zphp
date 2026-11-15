@@ -1749,14 +1749,14 @@ fn compileCallPlain(self: *Compiler, node: Ast.Node) Error!void {
             try emitCallOp(self, &guards, .method_call_dynamic_spread, .{});
         } else if (callee.tag == .identifier) {
             const raw_name = self.ast.tokenSlice(callee.main_token);
-            const name = self.resolveFunctionName(raw_name);
+            const name = try self.callTargetName(raw_name, self.resolveFunctionName(raw_name));
             const idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });
             var guards = try emitSpreadArgs(self, args);
             try emitCallOp(self, &guards, .call_spread, .{ .a = idx });
         } else if (callee.tag == .qualified_name) {
             const parts = self.ast.extraSlice(callee.data.lhs);
             const fqn = try self.buildQualifiedString(parts);
-            const name = try self.resolveQualifiedNonClassName(fqn, callee.data.rhs);
+            const name = try self.callTargetName(null, try self.resolveQualifiedNonClassName(fqn, callee.data.rhs));
             const idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });
             var guards = try emitSpreadArgs(self, args);
             try emitCallOp(self, &guards, .call_spread, .{ .a = idx });
@@ -1784,7 +1784,7 @@ fn compileCallPlain(self: *Compiler, node: Ast.Node) Error!void {
     } else if (callee.tag == .identifier) {
         const call_offset = self.current_source_offset;
         const raw_name = self.ast.tokenSlice(callee.main_token);
-        const name = self.resolveFunctionName(raw_name);
+        const name = try self.callTargetName(raw_name, self.resolveFunctionName(raw_name));
         for (args, 0..) |arg, i| {
             const arg_node = self.ast.nodes[arg];
             if (arg_node.tag == .array_push_target and argKnownByValue(self, raw_name, i, callee.main_token))
@@ -1798,7 +1798,7 @@ fn compileCallPlain(self: *Compiler, node: Ast.Node) Error!void {
         const call_offset = self.current_source_offset;
         const parts = self.ast.extraSlice(callee.data.lhs);
         const fqn = try self.buildQualifiedString(parts);
-        const name = try self.resolveQualifiedNonClassName(fqn, callee.data.rhs);
+        const name = try self.callTargetName(null, try self.resolveQualifiedNonClassName(fqn, callee.data.rhs));
         var guards = try compileArgs(self, args);
         self.current_source_offset = call_offset;
         const idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });
