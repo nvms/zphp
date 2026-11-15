@@ -1629,7 +1629,7 @@ pub const Compiler = struct {
 
     fn compileDestructureRefSlot(self: *Compiler, ref_node: Ast.Node, key: RefSlotKey) Error!void {
         const inner = self.ast.nodes[ref_node.data.lhs];
-        if (inner.tag == .property_access or inner.tag == .static_prop_access) return self.compileDestructureRefPlace(inner, key);
+        if (inner.tag == .property_access or inner.tag == .static_prop_access or inner.tag == .array_access or inner.tag == .array_push_target) return self.compileDestructureRefPlace(inner, key);
         if (inner.tag != .variable) return;
         const name = self.ast.tokenSlice(inner.main_token);
         const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });
@@ -1661,7 +1661,18 @@ pub const Compiler = struct {
         }
         try self.emitOp(.bind_array_ref);
         try self.emitU16(tmp_idx);
-        if (inner.tag == .property_access) {
+        if (inner.tag == .array_access or inner.tag == .array_push_target) {
+            // the element is fetched for writing after the source, then
+            // bound to the hidden variable's reference
+            try compiler_expr.compileVivifyChain(self, inner.data.lhs);
+            if (inner.tag == .array_push_target) {
+                try self.emitOp(.array_push_bind_ref);
+            } else {
+                try self.compileNode(inner.data.rhs);
+                try self.emitOp(.array_bind_ref);
+            }
+            try self.emitU16(tmp_idx);
+        } else if (inner.tag == .property_access) {
             try self.compileNode(inner.data.lhs);
             const dynamic = self.isDynamicProp(inner);
             if (dynamic) try self.compileNode(inner.data.rhs);

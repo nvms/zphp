@@ -162,6 +162,9 @@ pub const PhpArray = struct {
     // the position carrier of a foreach over an object's properties: the
     // loop's state is in the vm's object_iters, keyed by this array
     object_iter: bool = false,
+    // the copy a by-reference list destructures from a call's result that
+    // wasn't a reference: binding into it draws php's notice
+    list_ref_copy: bool = false,
     // set while a by-reference foreach iterates the array live (php's
     // HashTable iterators): what it needs to keep its place as entries are
     // removed. allocated with the c allocator, freed with the array

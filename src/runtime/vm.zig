@@ -8202,20 +8202,61 @@ pub const VM = struct {
                     if (self.error_silenced_depth > 0) self.error_silenced_depth -= 1;
                 },
 
+                .list_ref_source => {
+                    const returned_ref = self.return_ref_fresh and self.last_return_ref != null;
+                    self.return_ref_fresh = false;
+                    const top = self.stack[self.sp - 1];
+                    if (!returned_ref and top == .array) {
+                        const copy = try self.shallowCloneCow(top.array);
+                        self.stack[self.sp - 1] = .{ .array = copy };
+                        self.stackRelease(top);
+                        copy.list_ref_copy = true;
+                    }
+                },
+
                 .bind_array_ref => {
                     const idx = self.readU16();
                     const name = self.currentChunk().constants.items[idx].string.bytes();
                     const key_val = self.pop();
                     const src_val = self.pop();
-                    if (src_val != .array) {
+                    if (src_val == .string) {
+                        // FETCH_LIST_W on a string
+                        if (self.throwWrongStringOffset(key_val, "Cannot create references to/from string offsets") catch try self.resumeRaised()) continue;
+                        return error.RuntimeError;
+                    } else if (src_val == .object and self.hasMethod(src_val.object.class_name, "offsetGet")) {
+                        // the write fetch on an ArrayAccess object: a returned
+                        // reference is bound, anything else is a temporary
+                        const obj = src_val.object;
+                        obj.refcount +%= 1;
+                        defer self.releaseValue(.{ .object = obj });
+                        self.setReturnRef(null);
+                        const result = self.callMethod(obj, "offsetGet", &.{key_val}) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        const frame = self.currentFrame();
+                        const returned = if (self.offsetGetReturnsRef(obj)) try self.takeHookReturnCell() else null;
+                        const cell = returned orelse fresh: {
+                            retainValue(result);
+                            defer self.releaseValue(result);
+                            if (result != .object) {
+                                if (try self.noticeIndirectOverloaded(obj)) continue;
+                            }
+                            const c = try self.newRefCell();
+                            self.setCell(c, result);
+                            break :fresh c;
+                        };
+                        self.unbindRefSlot(&frame.ref_slots, name);
+                        try self.bindRefSlot(&frame.ref_slots, name, cell);
+                        try self.mirrorBoundName(frame, name, cell.*);
+                    } else if (src_val != .array) {
                         self.push(.null);
                     } else {
                         const arr_ptr = src_val.array;
-                        const key: PhpArray.Key = switch (key_val) {
-                            .int => |i| .{ .int = i },
-                            .string => |s| .{ .string = s },
-                            else => .{ .int = Value.toInt(key_val) },
-                        };
+                        if (arr_ptr.list_ref_copy) self.raiseError(8, "Attempting to set reference to non referenceable value") catch if (try self.resumeRaised()) continue;
+                        const key = PhpArray.normalizeKey(Value.toArrayKey(key_val));
+                        // FETCH_LIST_W: a missing element is made null
+                        if (!arr_ptr.contains(key)) try self.arraySetOwned(arr_ptr, key, .null);
                         try self.bindSlotToElement(self.currentFrame(), name, arr_ptr, key);
                     }
                 },

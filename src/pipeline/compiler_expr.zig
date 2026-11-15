@@ -42,7 +42,13 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
     }
 
     if (target.tag == .list_destructure or (target.tag == .array_literal and op_tag == .equal)) {
+        const rhs_call = switch (self.ast.nodes[node.data.rhs].tag) {
+            .call, .method_call, .nullsafe_method_call, .static_call, .dynamic_static_call => true,
+            else => false,
+        };
+        if (rhs_call and listHasRef(self, node.data.lhs)) try self.emitOp(.reset_return_ref);
         try self.compileNode(node.data.rhs);
+        if (rhs_call and listHasRef(self, node.data.lhs)) try self.emitOp(.list_ref_source);
         try self.compileDestructure(target);
         return;
     }

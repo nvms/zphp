@@ -563,6 +563,10 @@ pub const OpCode = enum(u16) {
     // u16: dst name const. `$r = &$a[]`: binds dst to a new appended
     // element (make_var_array_elem_ref takes a key, null being "")
     make_var_array_append_ref,
+    // after a call a by-reference list destructures: a result that isn't a
+    // returned reference gives its references to a copy, each with php's
+    // notice (ZEND_FETCH_LIST_W on a VAR that isn't a reference)
+    list_ref_source,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
