@@ -2218,7 +2218,9 @@ pub const Value = union(enum) {
             .string => |s| parseLeadingFloat(s.bytes()),
             .object => |o| if (nativeCast(o, .float)) |n| n.float else 1.0,
             .resource => |r| @floatFromInt(r.id),
-            .array, .generator, .fiber => 0.0,
+            // zval_get_double: an array is 1.0 unless empty, an object 1.0
+            .array => |arr| if (arr.entries.items.len > 0) 1.0 else 0.0,
+            .generator, .fiber => 1.0,
         };
     }
 
