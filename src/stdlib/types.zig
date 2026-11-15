@@ -2147,6 +2147,7 @@ fn native_register_shutdown_function(ctx: *NativeContext, args: []const Value) R
             break :blk try callablePair(ctx, .{ .string = Value.String.borrowed(m.called_class) }, m.registered[sep + 2 ..]);
         },
         .magic => |m| try callablePair(ctx, if (m.object) |o| Value{ .object = o } else Value{ .string = Value.String.borrowed(m.class) }, m.name),
+        .engine => |e| try callablePair(ctx, e.target, e.name),
     };
     const extra = try ctx.allocator.alloc(Value, args.len - 1);
     errdefer ctx.allocator.free(extra);

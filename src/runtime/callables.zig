@@ -33,7 +33,21 @@ pub const Callee = union(enum) {
     // a method the class lacks: __call on the object, else __callStatic on
     // the class
     magic: struct { object: ?*PhpObject, class: []const u8, name: []const u8 },
+    // a method of a Generator or a Fiber, which the engine runs itself
+    engine: struct { target: Value, name: []const u8 },
 };
+
+const generator_methods = [_][]const u8{ "current", "key", "next", "rewind", "send", "throw", "getReturn", "valid" };
+const fiber_methods = [_][]const u8{ "start", "resume", "throw", "getReturn", "isStarted", "isSuspended", "isRunning", "isTerminated" };
+
+// [$generator, 'send'], [$fiber, 'resume'] and the like: the method, by its
+// declared name, or php's "class Generator does not have a method" failure
+fn engineCallee(target: Value, method: []const u8) Resolution {
+    const class: []const u8 = if (target == .generator) "Generator" else "Fiber";
+    const names: []const []const u8 = if (target == .generator) &generator_methods else &fiber_methods;
+    for (names) |n| if (std.ascii.eqlIgnoreCase(n, method)) return .{ .callee = .{ .engine = .{ .target = target, .name = n } } };
+    return .{ .failure = .{ .method_not_found = .{ .class = class, .method = method } } };
+}
 
 pub const Failure = union(enum) {
     not_callable: Value,
@@ -78,6 +92,7 @@ pub fn resolveCallback(vm: *VM, callable: Value, rules: CallbackRules) RuntimeEr
             if (!arr.contains(.{ .int = 0 }) or !arr.contains(.{ .int = 1 })) return .{ .failure = .array_indices };
             const target = arr.get(.{ .int = 0 });
             const method = arr.get(.{ .int = 1 });
+            if ((target == .generator or target == .fiber) and method == .string) return engineCallee(target, method.string.bytes());
             if (target != .string and target != .object) return .{ .failure = .first_member };
             if (method != .string) return .{ .failure = .second_member };
             var site: Site = .{};
@@ -275,6 +290,7 @@ pub fn resolveDynamic(vm: *VM, callable: Value) RuntimeError!Resolution {
             if (!arr.contains(.{ .int = 0 }) or !arr.contains(.{ .int = 1 })) return .{ .failure = .array_indices };
             const target = arr.get(.{ .int = 0 });
             const method = arr.get(.{ .int = 1 });
+            if ((target == .generator or target == .fiber) and method == .string) return engineCallee(target, method.string.bytes());
             if (target != .string and target != .object) return .{ .failure = .first_member };
             if (method != .string) return .{ .failure = .second_member };
             if (target == .string) {
@@ -424,7 +440,16 @@ pub fn invoke(vm: *VM, callee: Callee, args: []const Value) RuntimeError!Value {
             const registered = try vm.resolveMethod(m.class, "__callStatic");
             return vm.callByNameAs(registered, &magic_args, m.class);
         },
+        .engine => |e| return invokeEngine(vm, e.target, e.name, args),
     }
+}
+
+fn invokeEngine(vm: *VM, target: Value, name: []const u8, args: []const Value) RuntimeError!Value {
+    return switch (target) {
+        .generator => |g| vm.generatorMethod(g, name, args),
+        .fiber => |f| vm.fiberMethod(f, name, args),
+        else => .null,
+    };
 }
 
 // zend_call_function with named_params: an argument array whose integer keys
@@ -489,6 +514,14 @@ pub fn invokeArgArrayFrom(vm: *VM, callee: Callee, arr: *PhpArray, from_native: 
         .method => |m| m.registered orelse try vm.resolveMethod(m.object.class_name, m.name),
         .static_method => |m| m.registered,
         .magic => unreachable,
+        // the engine's methods take their arguments in order
+        .engine => |e| {
+            var buf: [16]Value = undefined;
+            const args = if (arr.entries.items.len <= buf.len) buf[0..arr.entries.items.len] else try vm.allocator.alloc(Value, arr.entries.items.len);
+            defer if (args.ptr != &buf) vm.allocator.free(args);
+            for (arr.entries.items, args) |entry, *arg| arg.* = if (entry.ref) |cell| cell.* else entry.value;
+            return invokeEngine(vm, e.target, e.name, args);
+        },
     };
     if (vm.functions.get(name)) |func| {
         const bound = try bindNamed(vm, name, func, arr) orelse return error.RuntimeError;
@@ -512,7 +545,7 @@ pub fn invokeArgArrayFrom(vm: *VM, callee: Callee, arr: *PhpArray, from_native: 
             .invoke => |obj| vm.callMethodAs(obj, "__invoke", name, values),
             .method => |m| vm.callMethodAs(m.object, m.name, m.registered, values),
             .static_method => |m| vm.callByNameAs(m.registered, values, m.called_class),
-            .magic => unreachable,
+            .magic, .engine => unreachable,
         };
     }
     const native_params = @import("../stdlib/native_params.zig");
@@ -670,7 +703,7 @@ pub fn invokeRef(vm: *VM, callee: Callee, args: []Value) RuntimeError!Value {
             if (obj.closureName()) |name| return vm.callByNameRef(name, args);
             return invoke(vm, callee, args);
         },
-        .magic => return invoke(vm, callee, args),
+        .magic, .engine => return invoke(vm, callee, args),
     }
 }
 

@@ -4836,6 +4836,7 @@ fn closureFromCallable(ctx: *NativeContext, args: []const Value) RuntimeError!Na
             const called: ?[]const u8 = if (std.ascii.eqlIgnoreCase(declaring, m.called_class)) null else m.called_class;
             return NativeResult.borrowed(.{ .object = try vm.newFakeClosure(.{ .string = Value.String.borrowed(m.registered) }, called) });
         },
+        .engine => |e| return NativeResult.borrowed(.{ .object = try vm.newFakeMethodClosure(e.target, .{ .string = Value.String.borrowed(e.name) }, null) }),
         .magic => |m| {
             const target: Value = if (m.object) |obj| .{ .object = obj } else .{ .string = Value.String.borrowed(m.class) };
             return NativeResult.borrowed(.{ .object = try vm.newFakeMethodClosure(target, .{ .string = try vm.transientBytes(m.name) }, null) });

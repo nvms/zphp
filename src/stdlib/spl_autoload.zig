@@ -86,6 +86,7 @@ fn identity(ctx: *NativeContext, callable: Value) RuntimeError!?Identity {
         .static_method => |sm| {
             return .{ .kind = .method, .name = methodPart(sm.registered), .class = sm.called_class, .key = try lower(ctx, sm.registered) };
         },
+        .engine => return null,
         .magic => |mg| {
             const key = try std.fmt.allocPrint(ctx.allocator, "{s}::{s}", .{ mg.class, mg.name });
             defer ctx.allocator.free(key);
