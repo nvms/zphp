@@ -40,7 +40,9 @@ jobs="${JOBS:-4}"
 
 # temp files go to disk next to the harness, never to a ram-backed /tmp
 work="$(mktemp -d -p "$SCRIPT_DIR" work.XXXXXX)"
-trap 'systemctl --user stop "$unit.scope" 2>/dev/null; rm -rf "$work"' EXIT
+# cleanup never decides the run's status: under set -e a failing command in
+# the trap (no user service manager, a test's read-only leftovers) would
+trap 'systemctl --user stop "$unit.scope" 2>/dev/null || true; chmod -R u+rwx "$work" 2>/dev/null || true; rm -rf "$work" || true' EXIT
 mkdir "$work/tmp"
 
 # every zphp a test starts, and every zphp those start, gets 60 cpu seconds,
