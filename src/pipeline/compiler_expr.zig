@@ -1052,6 +1052,7 @@ pub fn compilePrefixOp(self: *Compiler, node: Ast.Node) Error!void {
         try checkIncDecTarget(self, node.data.lhs, node.main_token);
         const target = self.ast.nodes[node.data.lhs];
         if (try emitPlaceOperands(self, node.data.lhs)) |place| return compilePlaceIncDec(self, place, op_tag, false);
+        if (target.tag == .array_push_target) return compileAppendIncDec(self, target, op_tag, false);
         if (target.tag == .array_access) {
             // COW: the base consumed by array_set (this first load) must be
             // separated; the second load feeds the read-only array_get
@@ -1101,11 +1102,25 @@ pub fn compilePrefixOp(self: *Compiler, node: Ast.Node) Error!void {
     }
 }
 
+// `++$a[]` / `$a[]++`: the element appended is null, stepped in place; the
+// postfix form's value is that null
+fn compileAppendIncDec(self: *Compiler, target: Ast.Node, op_tag: Token.Tag, postfix: bool) Error!void {
+    try compileVivifyChain(self, target.data.lhs);
+    try self.emitOp(.op_null);
+    try self.emitOp(if (op_tag == .plus_plus) .inc_value else .dec_value);
+    try self.emitOp(.array_push_assign);
+    if (postfix) {
+        try self.emitOp(.pop);
+        try self.emitOp(.op_null);
+    }
+}
+
 pub fn compilePostfixOp(self: *Compiler, node: Ast.Node) Error!void {
     try checkIncDecTarget(self, node.data.lhs, node.main_token);
     const target = self.ast.nodes[node.data.lhs];
     const op_tag = self.ast.tokens[node.main_token].tag;
 
+    if (target.tag == .array_push_target) return compileAppendIncDec(self, target, op_tag, true);
     if (target.tag == .array_access) {
         // COW: vivify-load the base so a shared array is separated (and written
         // back to its slot) before the in-place element inc/dec

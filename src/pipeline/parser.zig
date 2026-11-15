@@ -3831,6 +3831,8 @@ const Parser = struct {
     fn isIncDecOperand(tag: NodeTag) bool {
         return isAssignTarget(tag) or switch (tag) {
             .call, .method_call, .static_call, .dynamic_static_call, .nullsafe_method_call => true,
+            // `++$a[]` steps the null it appends
+            .array_push_target => true,
             else => false,
         };
     }
