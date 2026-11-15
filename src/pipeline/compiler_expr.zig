@@ -1400,6 +1400,17 @@ fn emitCallOp(self: *Compiler, guards: *ArgGuards, op: OpCode, operands: CallOpe
     patchArgGuards(self, guards, call_ip);
 }
 
+// one argument of a call. $GLOBALS itself is no variable since php 8.1 (a
+// read-only copy), so sent where the callee takes a reference it is a value
+fn compileArg(self: *Compiler, arg_idx: u32, guard: ArgGuard) Error!void {
+    const arg = self.ast.nodes[arg_idx];
+    if (arg.tag == .variable and std.mem.eql(u8, self.ast.tokenSlice(arg.main_token), "$GLOBALS")) {
+        try self.compileNode(arg_idx);
+        return emitValueGuard(self, guard, .arg_value);
+    }
+    return compileArgLvalue(self, arg_idx, guard);
+}
+
 fn compileArgLvalue(self: *Compiler, arg_idx: u32, guard: ArgGuard) Error!void {
     const arg = self.ast.nodes[arg_idx];
     switch (arg.tag) {
@@ -1584,7 +1595,7 @@ fn compileArgsFor(self: *Compiler, args: []const u32, callee: ?KnownCallee) Erro
     for (args, 0..) |arg, i| {
         const pos: u8 = if (i <= ArgPos.max) @intCast(i) else ArgPos.spread;
         const by_value = if (callee) |c| argKnownByValue(self, c.raw_name, i, c.token) else false;
-        try compileArgLvalue(self, arg, .{ .pos = pos, .guards = &guards, .by_value = by_value });
+        try compileArg(self, arg, .{ .pos = pos, .guards = &guards, .by_value = by_value });
     }
     return guards;
 }
@@ -1998,10 +2009,10 @@ pub fn emitSpreadArgs(self: *Compiler, args: []const u32) Error!ArgGuards {
             const name_const = try self.addConstant(.{ .string = Value.String.borrowed(name) });
             try self.emitOp(.constant);
             try self.emitU16(name_const);
-            try compileArgLvalue(self, arg_node.data.lhs, .{ .pos = ArgPos.named, .guards = &guards });
+            try compileArg(self, arg_node.data.lhs, .{ .pos = ArgPos.named, .guards = &guards });
             try self.emitOp(.arg_array_set);
         } else {
-            try compileArgLvalue(self, arg_idx, .{ .pos = ArgPos.spread, .guards = &guards });
+            try compileArg(self, arg_idx, .{ .pos = ArgPos.spread, .guards = &guards });
             try self.emitOp(.arg_array_push);
         }
     }

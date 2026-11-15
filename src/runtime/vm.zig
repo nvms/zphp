@@ -23205,6 +23205,15 @@ pub const VM = struct {
                 const class_name = self.intentClassName(consts[callOpU16(code, call_ip + bytecode.op_bytes)].string.bytes()) orelse return null;
                 return self.resolveMethod(class_name, "__construct") catch null;
             },
+            // $f(...): a closure by the function it runs, a function name
+            .call_indirect => {
+                const callee = self.stack[args_base - 1];
+                if (callee.closureName()) |name| return self.functions.getKey(name);
+                if (callee != .string or std.mem.indexOf(u8, callee.string.bytes(), "::") != null) return null;
+                const raw = callee.string.bytes();
+                const name = if (raw.len > 0 and raw[0] == '\\') raw[1..] else raw;
+                return self.functions.getKey(name) orelse self.native_fns.getKey(name) orelse self.functionNamedIgnoringCase(name);
+            },
             else => return null,
         }
     }

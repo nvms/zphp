@@ -889,6 +889,7 @@ Zend/tests/closures/closure_015.phpt
 Zend/tests/closures/closure_016.phpt
 Zend/tests/closures/closure_017.phpt
 Zend/tests/closures/closure_018.phpt
+Zend/tests/closures/closure_019.phpt
 Zend/tests/closures/closure_020.phpt
 Zend/tests/closures/closure_021.phpt
 Zend/tests/closures/closure_022.phpt
@@ -3732,6 +3733,7 @@ Zend/tests/restrict_globals/invalid_assign_ref_lhs.phpt
 Zend/tests/restrict_globals/invalid_assign_ref_rhs.phpt
 Zend/tests/restrict_globals/invalid_foreach.phpt
 Zend/tests/restrict_globals/invalid_foreach_ref.phpt
+Zend/tests/restrict_globals/invalid_pass_by_ref.phpt
 Zend/tests/restrict_globals/invalid_unset.phpt
 Zend/tests/result_unused.phpt
 Zend/tests/return_by_ref_from_void_function.phpt
@@ -7662,6 +7664,7 @@ ext/standard/tests/array/bug29253.phpt
 ext/standard/tests/array/bug29493.phpt
 ext/standard/tests/array/bug30074.phpt
 ext/standard/tests/array/bug30833.phpt
+ext/standard/tests/array/bug31158.phpt
 ext/standard/tests/array/bug31213.phpt
 ext/standard/tests/array/bug33989.phpt
 ext/standard/tests/array/bug34227.phpt
