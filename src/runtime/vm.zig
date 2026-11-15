@@ -14099,6 +14099,9 @@ pub const VM = struct {
 
         const full_name = self.resolveMethod(class_name, method_name) catch {
             if (try self.refuseInterfaceStaticCall(class_name, method_name, arg_count)) return;
+            if (!self.classes.contains(class_name) and self.traits.contains(class_name)) {
+                if (try self.callTraitStatic(class_name, method_name, arg_count)) return;
+            }
             // a class that isn't there (after the autoloaders) is "not found"
             if (!self.classes.contains(class_name) and !self.interfaces.contains(class_name)) {
                 if (self.pending_exception != null) return error.RuntimeError;
@@ -14118,6 +14121,10 @@ pub const VM = struct {
         // a method the calling scope can't see: $this's __call or the
         // class's __callStatic, else php's Error
         const found = self.methodInfoOf(full_name, class_name, method_name);
+        // a static method of a trait called on the trait itself
+        if (found == null and !self.classes.contains(class_name) and self.traits.contains(class_name)) {
+            if (try self.callTraitStatic(class_name, method_name, arg_count)) return;
+        }
         // an interface's method resolves to no class's declaration
         if (found == null and try self.refuseInterfaceStaticCall(class_name, method_name, arg_count)) return;
         // ZEND_INIT_STATIC_METHOD_CALL for a constructor: a private one runs
@@ -14410,6 +14417,43 @@ pub const VM = struct {
 
     // get_static_method_fallback: $this's __call when $this is an instance
     // of the class, else the class's __callStatic. false when neither exists
+    // T::m() on a trait itself (zend_std_get_static_method): deprecated, and
+    // run with the trait as its class; a missing method goes to the trait's
+    // __callStatic. false when neither is there
+    fn callTraitStatic(self: *VM, class_name: []const u8, method_name: []const u8, arg_count: u32) RuntimeError!bool {
+        const trait = self.traits.getKey(class_name) orelse return false;
+        var found: ?TraitMethodEntry = null;
+        var call_static: ?TraitMethodEntry = null;
+        for (try self.traitMethods(trait)) |e| {
+            if (std.ascii.eqlIgnoreCase(e.name, method_name)) found = e;
+            if (std.ascii.eqlIgnoreCase(e.name, "__callStatic")) call_static = e;
+        }
+        const entry = found orelse call_static orelse return false;
+        const shown = if (found) |f| f.name else method_name;
+        const msg = try std.fmt.allocPrint(self.allocator, "Calling static trait method {s}::{s} is deprecated, it should only be called on a class using the trait", .{ trait, shown });
+        defer self.allocator.free(msg);
+        self.raiseError(E_DEPRECATED, msg) catch {
+            self.dropN(arg_count);
+            _ = try self.resumeRaised();
+            return true;
+        };
+        const full = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ trait, entry.name });
+        defer self.allocator.free(full);
+        const name = try self.internName(full);
+        if (found) |f| {
+            try self.callStaticUserFunction(f.func, name, arg_count, trait);
+            return true;
+        }
+        const ac: usize = arg_count;
+        var args_arr = try self.allocArray();
+        for (0..ac) |i| try args_arr.append(self.allocator, self.stack[self.sp - ac + i]);
+        self.dropN(ac);
+        self.push(.{ .string = Value.String.borrowed(method_name) });
+        self.push(.{ .array = args_arr });
+        try self.callStaticTrampoline(name, trait);
+        return true;
+    }
+
     fn staticCallFallback(self: *VM, class_name: []const u8, method_name: []const u8, arg_count: u32, effective_called: []const u8) RuntimeError!bool {
         const ac: usize = arg_count;
         const this_val = self.currentThis();

@@ -4048,6 +4048,7 @@ Zend/tests/traits/gh16198_2.phpt
 Zend/tests/traits/gh17214.phpt
 Zend/tests/traits/gh17959.phpt
 Zend/tests/traits/gh18295.phpt
+Zend/tests/traits/gh_17728.phpt
 Zend/tests/traits/inheritance001.phpt
 Zend/tests/traits/inheritance002.phpt
 Zend/tests/traits/inheritance003.phpt
