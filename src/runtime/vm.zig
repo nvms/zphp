@@ -9758,7 +9758,6 @@ pub const VM = struct {
                     const slot = self.readU16();
                     const frame = self.currentFrame();
                     const append_val = self.pop();
-                    if (append_val == .array) self.emitWarning("Array to string conversion") catch if (try self.resumeRaised()) continue;
                     self.concatAssignLocal(frame, slot, append_val) catch |err| {
                         if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                         return err;
@@ -9769,19 +9768,24 @@ pub const VM = struct {
                     const name_idx = self.readU16();
                     const name = self.currentChunk().constants.items[name_idx].string.bytes();
                     const append_val = self.pop();
-                    if (append_val == .array) self.emitWarning("Array to string conversion") catch if (try self.resumeRaised()) continue;
                     const is_ref = self.currentFrame().ref_slots.get(name);
 
                     const frame = self.currentFrame();
                     var current = if (is_ref) |cell| cell.* else (frame.vars.get(name) orelse .null);
-                    // concat_function: an object operand is converted, the
-                    // variable first
+                    // concat_function: the operands are converted, the
+                    // variable first, and the variable's value is kept as
+                    // read while a warning's handler runs
+                    const warns = current == .array or append_val == .array;
+                    if (warns) retainValue(current);
+                    defer if (warns) self.releaseValue(current);
+                    if (current == .array) self.emitWarning("Array to string conversion") catch if (try self.resumeRaised()) continue;
                     const current_text = self.objectConcatOperand(current) catch |err| {
                         if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                         return err;
                     };
                     defer if (current_text) |t| t.release();
                     if (current_text) |t| current = .{ .string = t };
+                    if (append_val == .array) self.emitWarning("Array to string conversion") catch if (try self.resumeRaised()) continue;
                     var suffix_buf: [128]u8 = undefined;
                     var suffix_allocator: std.heap.BufferFirstAllocator = .init(&suffix_buf, self.allocator);
                     const temporary_allocator = suffix_allocator.allocator();
@@ -9796,6 +9800,15 @@ pub const VM = struct {
                         };
                         try suffix.appendSlice(temporary_allocator, text);
                     } else try append_val.format(&suffix, temporary_allocator);
+                    // an empty right side leaves a variable that holds a
+                    // string now as it is (concat_function)
+                    if (suffix.items.len == 0 and warns) {
+                        const now = if (is_ref) |cell| cell.* else (frame.vars.get(name) orelse .null);
+                        if (now == .string) {
+                            self.push(now);
+                            continue;
+                        }
+                    }
                     if (is_ref == null and current == .string and current_text == null) {
                         if (current.string.owner) |owner| {
                             if (owner.refcount == 1 and current.string.ptr == owner.bytes.ptr) {
@@ -18752,9 +18765,17 @@ pub const VM = struct {
 
     fn concatAssignLocal(self: *VM, frame: *CallFrame, slot: u16, append_val: Value) RuntimeError!void {
         var current = try self.fusedRead(frame, slot);
+        // concat_function converts the variable, then the value, and keeps
+        // the variable's value as it was read: a handler for the "Array to
+        // string conversion" warning may change or free the variable
+        const warns = current == .array or append_val == .array;
+        if (warns) retainValue(current);
+        defer if (warns) self.releaseValue(current);
+        if (current == .array) try self.emitWarning("Array to string conversion");
         const current_text = try self.objectConcatOperand(current);
         defer if (current_text) |t| t.release();
         if (current_text) |t| current = .{ .string = t };
+        if (append_val == .array) try self.emitWarning("Array to string conversion");
         var suffix_buf: [128]u8 = undefined;
         var suffix_allocator: std.heap.BufferFirstAllocator = .init(&suffix_buf, self.allocator);
         const temporary_allocator = suffix_allocator.allocator();
@@ -18765,6 +18786,12 @@ pub const VM = struct {
         } else if (append_val == .object) {
             try suffix.appendSlice(temporary_allocator, try self.objectToString(append_val.object));
         } else try append_val.format(&suffix, temporary_allocator);
+        // concat_function with an empty right side leaves a variable that
+        // holds a string now (a handler may have stored one) as it is
+        if (suffix.items.len == 0 and warns) {
+            const now = if (self.localCell(frame, slot)) |cell| cell.* else if (frame.func == null) self.getLocalGlobal(slot, frame) else if (slot < frame.locals.len) frame.locals[slot] else Value.undef;
+            if (now == .string) return self.push(now);
+        }
         if (current == .string and current_text == null and self.localCell(frame, slot) == null) {
             if (current.string.owner) |owner| {
                 if (owner.refcount == 1 and current.string.ptr == owner.bytes.ptr) {
