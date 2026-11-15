@@ -1022,16 +1022,20 @@ pub const Fiber = struct {
     destroyed: bool = false,
     // in the collector's candidate list
     cycle_queued: bool = false,
-    // its own @ depth and error_reporting while it is suspended
-    saved_silence: u32 = 0,
+    // its own error_reporting while it is suspended (php's fiber vm state),
+    // and the levels its open @ regions will restore
     saved_level: ?i64 = null,
+    silence_saved: std.ArrayListUnmanaged(i64) = .empty,
     // the machine stack its code runs on and what a suspension in place
     // keeps (the vm's FiberNative), from its start until it ends
     native: ?*anyopaque = null,
 
     pub const State = enum { created, running, suspended, terminated };
 
-    pub fn deinit(_: *Fiber, _: std.mem.Allocator) void {}
+    pub fn deinit(self: *Fiber, allocator: std.mem.Allocator) void {
+        self.silence_saved.deinit(allocator);
+        self.silence_saved = .empty;
+    }
 
     pub fn retain(self: *Fiber) void {
         self.refcount +%= 1;

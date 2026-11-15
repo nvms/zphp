@@ -1429,10 +1429,14 @@ Zend/tests/error_reporting/bug72162.phpt
 Zend/tests/error_reporting/bug81652.phpt
 Zend/tests/error_reporting/error_reporting01.phpt
 Zend/tests/error_reporting/error_reporting02.phpt
+Zend/tests/error_reporting/error_reporting03.phpt
 Zend/tests/error_reporting/error_reporting04.phpt
 Zend/tests/error_reporting/error_reporting05.phpt
 Zend/tests/error_reporting/error_reporting06.phpt
 Zend/tests/error_reporting/error_reporting07.phpt
+Zend/tests/error_reporting/error_reporting08.phpt
+Zend/tests/error_reporting/error_reporting09.phpt
+Zend/tests/error_reporting/error_reporting10.phpt
 Zend/tests/eval_constant_resolution.phpt
 Zend/tests/eval_parse_error_with_doc_comment.phpt
 Zend/tests/ex_func_null_during_property_write.phpt

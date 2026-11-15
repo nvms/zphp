@@ -148,8 +148,8 @@ pub const OpCode = enum(u16) {
     iter_end, // pop index, pop iterable
     iter_end_close, // pop index, pop iterable; if iterable is a suspended generator, close it (runs finally)
 
-    silence_begin, // increment vm.error_silenced_depth
-    silence_end, // decrement vm.error_silenced_depth
+    silence_begin, // php's BEGIN_SILENCE: keep the level, report only fatal errors
+    silence_end, // php's END_SILENCE: the kept level comes back
 
     // u16 name_idx: pops [src_array, key]. Allocates a heap Value cell initialized
     // to src_array[key]. Registers ref_slots[name] = cell and a writeback binding

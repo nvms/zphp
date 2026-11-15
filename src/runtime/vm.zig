@@ -1223,7 +1223,9 @@ pub const VM = struct {
     // mmap'd a fresh bucket array per call - this turns it into a pop()
     vars_pool: std.ArrayListUnmanaged(std.StringHashMapUnmanaged(Value)) = .empty,
     error_handler_stack: std.ArrayListUnmanaged(ErrorHandlerEntry) = .empty,
-    error_silenced_depth: u32 = 0,
+    // the error_reporting each open @ region of the main context restores
+    // (php keeps it in BEGIN_SILENCE's temporary); a fiber keeps its own
+    silence_saved: std.ArrayListUnmanaged(i64) = .empty,
     // php's EH_THROW error handling, which some internal methods switch on
     // while they run: a warning becomes an exception of this class instead
     // of being reported, and no user error handler sees any diagnostic.
@@ -2435,6 +2437,7 @@ pub const VM = struct {
         try initConstants(&vm.php_constants, allocator);
         try registerStdlibClasses(vm, allocator);
         vm.error_reporting_level = 30719;
+        vm.silence_saved.clearRetainingCapacity();
         vm.ic = try allocator.create(InlineCache);
         vm.ic.?.* = .{};
         vm.ic.?.slow = SlowPaths.main;
@@ -3710,6 +3713,7 @@ pub const VM = struct {
         self.cycle_fiber_candidates.deinit(self.allocator);
         self.cycle_work.deinit(self.allocator);
         self.cycle_alive.deinit(self.allocator);
+        self.silence_saved.deinit(self.allocator);
         self.array_ref_bindings.deinit(self.allocator);
         if (self.ref_index) |ri| {
             ri.deinit(self.allocator);
@@ -3931,6 +3935,7 @@ pub const VM = struct {
         // per-request runtime settings and last-error state; the strings
         // below live in the request arena that this reset frees
         self.error_reporting_level = 30719;
+        self.silence_saved.clearRetainingCapacity();
         // ini_set stores keys and values in the request arena freed below;
         // a stale entry would compare freed bytes on the next put
         self.ini_settings.clearRetainingCapacity();
@@ -8332,12 +8337,8 @@ pub const VM = struct {
                     }
                 },
 
-                .silence_begin => {
-                    self.error_silenced_depth += 1;
-                },
-                .silence_end => {
-                    if (self.error_silenced_depth > 0) self.error_silenced_depth -= 1;
-                },
+                .silence_begin => self.silenceBegin(),
+                .silence_end => self.silenceEnd(),
 
                 .list_ref_source => {
                     const returned_ref = self.return_ref_fresh and self.last_return_ref != null;
@@ -10320,7 +10321,7 @@ pub const VM = struct {
                         .frame_count = self.frame_count,
                         .sp = self.sp,
                         .chunk = self.currentChunk(),
-                        .silenced_depth = self.error_silenced_depth,
+                        .silenced_depth = @intCast(self.silenceDepth()),
                     };
                     self.handler_count += 1;
                 },
@@ -17028,13 +17029,64 @@ pub const VM = struct {
             std.mem.eql(u8, self.last_error_message, msg) and
             (self.iniFlagOn("ignore_repeated_source", "0") or (self.last_error_line == at.line and std.mem.eql(u8, self.last_error_file, at.file)));
         if (!repeated) self.recordLastError(level, msg, at);
-        const shown = !repeated and self.error_silenced_depth == 0 and (self.error_reporting_level & level) != 0;
+        const shown = !repeated and (self.error_reporting_level & level) != 0;
         if (shown) self.printError(level, msg, at);
         if (!isFatalLevel(level)) return;
         self.exit_code = 255;
         self.exit_requested = true;
         self.unclean_shutdown = true;
         return error.RuntimeError;
+    }
+
+    // php's E_FATAL_ERRORS: what @ leaves reported
+    pub const fatal_errors: i64 = 1 | 4 | 16 | 64 | 256 | 4096;
+
+    fn onlyFatalErrors(level: i64) bool {
+        return level & ~fatal_errors == 0;
+    }
+
+    // the levels the running context's open @ regions restore
+    fn silenceStack(self: *VM) *std.ArrayListUnmanaged(i64) {
+        if (self.current_fiber) |f| return &f.silence_saved;
+        return &self.silence_saved;
+    }
+
+    pub fn silenceDepth(self: *VM) usize {
+        return self.silenceStack().items.len;
+    }
+
+    // ZEND_BEGIN_SILENCE: the level is kept for the region's end and only
+    // fatal errors stay reported
+    pub fn silenceBegin(self: *VM) void {
+        self.silenceStack().append(self.allocator, self.error_reporting_level) catch return;
+        if (!onlyFatalErrors(self.error_reporting_level)) self.error_reporting_level &= fatal_errors;
+    }
+
+    // ZEND_END_SILENCE: the kept level comes back unless the region set a
+    // level of its own (error_reporting() inside it)
+    pub fn silenceEnd(self: *VM) void {
+        const saved = self.silenceStack().pop() orelse return;
+        if (onlyFatalErrors(self.error_reporting_level) and !onlyFatalErrors(saved)) self.error_reporting_level = saved;
+    }
+
+    // the @ regions an exception leaves end as they would (cleanup_live_vars'
+    // ZEND_LIVE_SILENCE), innermost first
+    pub fn unwindSilence(self: *VM, depth: usize) void {
+        while (self.silenceDepth() > depth) self.silenceEnd();
+    }
+
+    // INI_INT("error_reporting"), E_ALL when it was never set
+    pub fn iniErrorReporting(self: *VM) i64 {
+        const text = self.ini_settings.get("error_reporting") orelse return 30719;
+        const trimmed = std.mem.trim(u8, text, " \t");
+        return std.fmt.parseInt(i64, trimmed, 10) catch atoiPrefix(trimmed);
+    }
+
+    fn atoiPrefix(text: []const u8) i64 {
+        var end: usize = 0;
+        if (end < text.len and (text[end] == '-' or text[end] == '+')) end += 1;
+        while (end < text.len and std.ascii.isDigit(text[end])) end += 1;
+        return std.fmt.parseInt(i64, text[0..end], 10) catch 0;
     }
 
     fn isFatalLevel(level: i64) bool {
@@ -17670,7 +17722,7 @@ pub const VM = struct {
         // sits above slots the catch has since popped: nothing owns them
         if (handler.sp > self.sp) @memset(self.stack[self.sp..handler.sp], .null);
         self.sp = handler.sp;
-        self.error_silenced_depth = handler.silenced_depth;
+        self.unwindSilence(handler.silenced_depth);
         var thrown = exc;
         if (ownership == .borrowed) stackRetain(thrown);
         // what the unwound frames held is destroyed before the catch runs;
@@ -21722,7 +21774,7 @@ pub const VM = struct {
                 .frame_count = self.frame_count,
                 .sp = gen.base_sp + h.sp_offset,
                 .chunk = h.chunk,
-                .silenced_depth = self.error_silenced_depth,
+                .silenced_depth = @intCast(self.silenceDepth()),
             };
             self.handler_count += 1;
         }
@@ -27505,7 +27557,7 @@ pub const VM = struct {
         }
         self.handler_count = 0;
         self.handler_floor = 0;
-        self.error_silenced_depth = 0;
+        self.unwindSilence(0);
         // what the unwound frames and operands held is destroyed before the
         // exception is reported, as php frees them while it propagates; a
         // destructor's exception goes on with it as its previous
@@ -29824,7 +29876,6 @@ pub const VM = struct {
         native_call: @FieldType(VM, "native_call"),
         handler_floor: usize,
         current_fiber: ?*Fiber,
-        error_silenced_depth: u32,
         error_reporting_level: i64,
         dim_append_depth: usize,
         native_caller: @FieldType(VM, "native_caller"),
@@ -30559,17 +30610,14 @@ pub const VM = struct {
 
     fn runFiber(self: *VM, fiber: *Fiber, fb: usize, sb: usize, hb: usize) RuntimeError!Value {
         // each fiber has its own error_reporting, as php's fiber vm state:
-        // an @ outside doesn't reach in, nor one inside out
-        const outer_silence = self.error_silenced_depth;
+        // an @ outside doesn't reach in, nor one inside out. a new fiber
+        // starts at the ini's level (zend_fiber_execute)
         const outer_level = self.error_reporting_level;
-        self.error_silenced_depth = fiber.saved_silence;
-        if (fiber.saved_level) |level| self.error_reporting_level = level;
+        self.error_reporting_level = fiber.saved_level orelse self.iniErrorReporting();
         defer {
             if (fiber.state == .suspended) {
-                fiber.saved_silence = self.error_silenced_depth;
                 fiber.saved_level = self.error_reporting_level;
-            }
-            self.error_silenced_depth = outer_silence;
+            } else fiber.silence_saved.clearRetainingCapacity();
             self.error_reporting_level = outer_level;
         }
         _ = self.executeFiber(fiber, fb, sb, hb) catch |err| {

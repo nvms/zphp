@@ -814,9 +814,8 @@ fn statLink(ctx: *NativeContext, path: []const u8) RuntimeError!?u32 {
 }
 
 fn statCall(ctx: *NativeContext, comptime func: []const u8, path: []const u8) RuntimeError!Value {
-    const saved = ctx.vm.error_silenced_depth;
-    ctx.vm.error_silenced_depth += 1;
-    defer ctx.vm.error_silenced_depth = saved;
+    ctx.vm.silenceBegin();
+    defer ctx.vm.silenceEnd();
     return internalCall(ctx, func, &[_]Value{.{ .string = Value.String.borrowed(path) }});
 }
 

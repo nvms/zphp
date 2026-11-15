@@ -2075,6 +2075,8 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         ctx.vm.setExecutionLimit(seconds);
     }
     if (std.mem.eql(u8, name, "zend.enable_gc")) ctx.vm.syncGcEnabled();
+    // OnUpdateErrorReporting
+    if (std.mem.eql(u8, name, "error_reporting")) ctx.vm.error_reporting_level = ctx.vm.iniErrorReporting();
     // OnChangeCallback at run time: the setting replaces the callback
     // assert_options() set, and an empty one just drops it
     if (std.mem.eql(u8, name, "assert.callback")) {
@@ -2587,6 +2589,7 @@ fn native_ini_restore(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     try ctx.vm.restoreIni(name);
     if (std.mem.eql(u8, name, "memory_limit")) ctx.vm.applyConfiguredMemoryLimit(false);
     if (std.mem.eql(u8, name, "zend.enable_gc")) ctx.vm.syncGcEnabled();
+    if (std.mem.eql(u8, name, "error_reporting")) ctx.vm.error_reporting_level = ctx.vm.iniErrorReporting();
     // OnChangeCallback at run time: the setting replaces the callback
     // assert_options() set, and an empty one just drops it
     if (std.mem.eql(u8, name, "assert.callback")) {
@@ -2694,13 +2697,18 @@ fn native_set_include_path(ctx: *NativeContext, args: []const Value) RuntimeErro
     return previous;
 }
 
+// php's error_reporting(): EG(error_reporting), which inside @ has only the
+// fatal errors left (an error handler reads it to tell); a new level is the
+// ini value too
 fn native_error_reporting(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    // inside @ php's error_reporting is the level with only the fatal errors
-    // left (BEGIN_SILENCE), which an error handler reads to tell it apart
-    const fatal_only: i64 = 1 | 16 | 64 | 256 | 4096 | 4;
-    const prev = if (ctx.vm.error_silenced_depth > 0) ctx.vm.error_reporting_level & fatal_only else ctx.vm.error_reporting_level;
-    if (args.len > 0) {
-        ctx.vm.error_reporting_level = Value.toInt(args[0]);
+    const prev = ctx.vm.error_reporting_level;
+    if (args.len > 0 and args[0] != .null) {
+        const level = Value.toInt(args[0]);
+        if (level != prev) {
+            var buf: [24]u8 = undefined;
+            _ = try ctx.vm.setIni("error_reporting", std.fmt.bufPrint(&buf, "{d}", .{level}) catch unreachable);
+            ctx.vm.error_reporting_level = level;
+        }
     }
     return NativeResult.scalar(.{ .int = prev });
 }
