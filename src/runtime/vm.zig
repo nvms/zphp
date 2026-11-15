@@ -2589,6 +2589,14 @@ pub const VM = struct {
         }) |name| {
             if (vm.classes.getPtr(name)) |cls| cls.no_dynamic_properties = true;
         }
+        // the internal classes php gives no clone handler (clone_obj NULL,
+        // exceptions and errors included): cloning one, or an object of a
+        // subclass, is "Trying to clone an uncloneable object"
+        for ([_][]const u8{
+            "AddressInfo", "AppendIterator", "CachingIterator", "CallbackFilterIterator", "Collator", "CurlMultiHandle", "CurlShareHandle", "CurlSharePersistentHandle", "DOMNamedNodeMap", "DOMNodeList", "DOMXPath", "DeflateContext", "Directory", "Dom\\DtdNamedNodeMap", "Dom\\HTMLCollection", "Dom\\Implementation", "Dom\\NamedNodeMap", "Dom\\NodeList", "Dom\\TokenList", "Dom\\XPath", "Error", "Exception", "FFI", "FFI\\CType", "FTP\\Connection", "Fiber", "GdFont", "GdImage", "Generator", "GlobIterator", "InfiniteIterator", "InflateContext", "InternalIterator", "IntlIterator", "IntlListFormatter", "IntlPartsIterator", "IteratorIterator", "LimitIterator", "NoRewindIterator", "OpenSSLAsymmetricKey", "OpenSSLCertificate", "OpenSSLCertificateSigningRequest", "PDO", "PDORow", "PDOStatement", "ParentIterator", "PgSql\\Connection", "PgSql\\Lob", "PgSql\\Result", "Random\\Engine\\Secure", "Random\\Randomizer", "RecursiveCachingIterator", "RecursiveCallbackFilterIterator", "RecursiveIteratorIterator", "RecursiveRegexIterator", "RecursiveTreeIterator", "RegexIterator", "ResourceBundle", "SQLite3", "SQLite3Result", "SQLite3Stmt", "Shmop", "Socket", "SplFileObject", "SysvMessageQueue", "SysvSemaphore", "SysvSharedMemory", "WeakReference", "XMLParser", "XMLReader", "XMLWriter", "XSLTProcessor", "ZipArchive", "finfo", "mysqli", "mysqli_driver", "mysqli_result", "mysqli_stmt", "mysqli_warning",
+        }) |name| {
+            if (vm.classes.getPtr(name)) |cls| cls.uncloneable = true;
+        }
     }
 
     fn initConstants(c: *std.StringArrayHashMapUnmanaged(Value), a: Allocator) !void {
