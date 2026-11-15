@@ -13399,14 +13399,26 @@ pub const VM = struct {
                         class_val.object.class_name
                     else {
                         self.dropN(ac + 1);
-                        const msg = try std.fmt.allocPrint(self.allocator, "{s}::method() requires a class name string", .{method_name});
-                        defer self.allocator.free(msg);
-                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        if (try self.throwBuiltinException("Error", "Class name must be a valid object or a string")) continue;
                         return error.RuntimeError;
                     };
                     const class_name = if (raw_class_name.len > 0 and raw_class_name[0] == '\\') raw_class_name[1..] else raw_class_name;
                     if (!self.classes.contains(class_name)) {
                         try self.tryAutoload(class_name);
+                    }
+                    // zend_fetch_class: a class that doesn't exist is an Error
+                    // before any method lookup
+                    if (!self.classes.contains(class_name) and !self.interfaces.contains(class_name) and !self.traits.contains(class_name)) {
+                        if (self.pending_exception != null) {
+                            self.dropN(ac + 1);
+                            if (self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        }
+                        const msg = try self.classNotFoundMessage(class_name);
+                        defer self.allocator.free(msg);
+                        self.dropN(ac + 1);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
                     }
                     const full_name = self.resolveMethod(class_name, method_name) catch {
                         if (self.hasMethod(class_name, "__callStatic")) {
