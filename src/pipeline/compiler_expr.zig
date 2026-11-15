@@ -1563,6 +1563,10 @@ fn compileArgs(self: *Compiler, args: []const u32) Error!ArgGuards {
 const KnownCallee = struct { raw_name: []const u8, token: u32 };
 
 fn compileArgsFor(self: *Compiler, args: []const u32, callee: ?KnownCallee) Error!ArgGuards {
+    // a nullsafe chain in an argument ends there, not at the call's chain
+    const chain = self.nullsafe_chain_jumps;
+    self.nullsafe_chain_jumps = null;
+    defer self.nullsafe_chain_jumps = chain;
     var guards: ArgGuards = .empty;
     errdefer guards.deinit(self.allocator);
     for (args, 0..) |arg, i| {
@@ -1965,6 +1969,9 @@ fn checkArgOrder(self: *Compiler, args: []const u32) Error!void {
 
 pub fn emitSpreadArgs(self: *Compiler, args: []const u32) Error!ArgGuards {
     try checkArgOrder(self, args);
+    const chain = self.nullsafe_chain_jumps;
+    self.nullsafe_chain_jumps = null;
+    defer self.nullsafe_chain_jumps = chain;
     var guards: ArgGuards = .empty;
     errdefer guards.deinit(self.allocator);
     try self.emitOp(.array_new);
@@ -2182,7 +2189,13 @@ pub fn compileCallableRef(self: *Compiler, node: Ast.Node) Error!void {
 
 pub fn compileArrayAccess(self: *Compiler, node: Ast.Node) Error!void {
     try self.compileNode(node.data.lhs);
-    try self.compileNode(node.data.rhs);
+    {
+        // a nullsafe chain in the index ends there
+        const chain = self.nullsafe_chain_jumps;
+        self.nullsafe_chain_jumps = null;
+        defer self.nullsafe_chain_jumps = chain;
+        try self.compileNode(node.data.rhs);
+    }
     try self.emitOp(.array_get);
 }
 
@@ -2665,6 +2678,18 @@ pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
     // then emit static_call_dynamic
     switch (class_node.tag) {
         .new_expr, .new_expr_dynamic, .anonymous_class, .method_call, .nullsafe_method_call, .call, .property_access, .nullsafe_property_access, .array_access => {
+            // a nullsafe chain in the class short-circuits the call too
+            var local_jumps: std.ArrayListUnmanaged(usize) = .empty;
+            const owns_chain = self.nullsafe_chain_jumps == null and switch (class_node.tag) {
+                .method_call, .nullsafe_method_call, .property_access, .nullsafe_property_access => true,
+                else => false,
+            };
+            if (owns_chain) self.nullsafe_chain_jumps = &local_jumps;
+            defer if (owns_chain) {
+                for (local_jumps.items) |j| self.patchJump(j);
+                self.nullsafe_chain_jumps = null;
+                local_jumps.deinit(self.allocator);
+            };
             try self.compileNode(class_lhs_idx);
             try self.emitOp(.get_obj_class);
             const method_idx = try self.addConstant(.{ .string = Value.String.borrowed(method_name) });
