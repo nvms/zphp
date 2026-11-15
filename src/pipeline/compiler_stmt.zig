@@ -280,6 +280,9 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     var iter_temp: ?[]const u8 = null;
     if (val_by_ref and (iter_tag == .variable or iter_tag == .array_access)) {
         try compiler_expr.compileVivifyChain(self, iter_n);
+    } else if (val_by_ref and try compiler_expr.compileSeparatedFetch(self, iter_n)) {
+        // a property, static property or ${...} variable: its array is
+        // separated from co-holders before the loop binds into it
     } else if (val_by_ref and val_node_is_plain(self, val_n) and !isReadablePlace(iter_tag)) {
         const synth = try std.fmt.allocPrint(self.allocator, "__foreach_iterable_{d}", .{self.loop_depth});
         try self.string_allocs.append(self.allocator, synth);

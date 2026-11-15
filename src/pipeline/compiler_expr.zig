@@ -1160,6 +1160,41 @@ fn compileCoalesceFetch(self: *Compiler, node_idx: u32) Error!void {
     try self.compileNode(node_idx);
 }
 
+// a property, static property or ${...} variable fetched so that its array
+// is no longer shared with other holders (FE_RESET_RW's separation), without
+// creating anything. false for other expressions
+pub fn compileSeparatedFetch(self: *Compiler, node_idx: u32) Error!bool {
+    const node = self.ast.nodes[node_idx];
+    switch (node.tag) {
+        .property_access => {
+            try self.compileNode(node.data.lhs);
+            if (self.isDynamicProp(node)) {
+                try self.compileNode(node.data.rhs);
+            } else {
+                try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(self.propName(node)) }));
+            }
+            try self.emitOp(.separate_prop_array);
+            try self.emitOp(.get_prop_coalesce_dynamic);
+        },
+        .static_prop_access => {
+            if (node.main_token == 0 or self.ast.nodes[node.data.lhs].tag == .variable) return false;
+            const class_name = try staticClassOperand(self, self.ast.nodes[node.data.lhs]);
+            var prop_name = self.ast.tokenSlice(node.main_token);
+            if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+            try self.emitOp(.separate_static_prop);
+            try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(class_name) }));
+            try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(prop_name) }));
+            try self.compileNode(node_idx);
+        },
+        .variable_variable => {
+            try self.compileNode(node.data.lhs);
+            try self.emitOp(.separate_var_var);
+        },
+        else => return false,
+    }
+    return true;
+}
+
 // Descend through dimensions, but stop at object interiors: mutating
 // $o->restricted->field[k] does not mutate $o->restricted itself.
 // the container of an unset($c[..][k]): every array on the path is

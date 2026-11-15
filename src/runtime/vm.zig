@@ -5163,14 +5163,20 @@ pub const VM = struct {
                         }
                     }
                 },
-                .ensure_array_var_var => {
+                .ensure_array_var_var, .separate_var_var => |vv_op| {
                     // the variable a ${...}[k] write lands in: made an array when
-                    // it holds nothing, separated from co-holders, written back
+                    // it holds nothing, separated from co-holders, written back.
+                    // a by-reference foreach only separates
+                    const separate_only = vv_op == .separate_var_var;
                     const name_val = self.pop();
                     var buf: [256]u8 = undefined;
                     const dollar_name = varVarName(if (name_val == .string) name_val.string.bytes() else "", &buf);
                     const frame = self.currentFrame();
                     const cur = self.frameVariable(frame, dollar_name) orelse .null;
+                    if (separate_only and cur != .array) {
+                        self.push(cur);
+                        continue;
+                    }
                     if (cur == .int or cur == .float or cur == .resource or (cur == .bool and cur.bool)) {
                         if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
                         return error.RuntimeError;
@@ -6704,6 +6710,18 @@ pub const VM = struct {
                                 // alias sees it, never separate a copy
                                 const inner_is_ref = self.array_ref_active and
                                     (if (arr_val.array.getPtr(arr_key)) |ep| ep.ref != null else false);
+                                if (inner_is_ref) {
+                                    // SEPARATE_ARRAY inside the reference: an
+                                    // array a holder outside the reference
+                                    // shares is copied into the reference
+                                    const cell = arr_val.array.getPtr(arr_key).?.ref.?;
+                                    if (existing.array.refcount - existing.array.byref_pins > self.referenceAliasCount(cell) and !self.stackHoldsArray(existing.array)) {
+                                        const clone = try self.shallowCloneCow(existing.array);
+                                        try self.writeReference(cell, .{ .array = clone });
+                                        self.pushFetched(.{ .array = clone });
+                                        continue;
+                                    }
+                                }
                                 const inner = if (inner_is_ref) existing.array else try self.cowSeparate(existing.array);
                                 if (inner != existing.array) {
                                     try self.arraySetOwned(arr_val.array, arr_key, .{ .array = inner });
