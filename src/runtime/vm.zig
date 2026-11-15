@@ -12104,7 +12104,11 @@ pub const VM = struct {
                     // the calling class's own private method runs on its
                     // instances, whatever a subclass redeclares
                     const scope_private = if (mvr.changed) self.scopePrivateMethod(obj.class_name, method_name, mvr.defining_class) else null;
-                    if (scope_private == null and !self.checkVisibility(mvr.defining_class, mvr.visibility) and !self.protectedRootVisible(mvr.defining_class, method_name, mvr.visibility)) {
+                    const invisible = scope_private == null and !self.checkVisibility(mvr.defining_class, mvr.visibility) and !self.protectedRootVisible(mvr.defining_class, method_name, mvr.visibility);
+                    // zend_std_get_method: a method the scope can't see goes
+                    // to __call when the class has one
+                    const invisible_to_magic = invisible and self.hasMethod(obj.class_name, "__call");
+                    if (invisible and !invisible_to_magic) {
                         const suffix = self.visScopeSuffix();
                         const msg = try std.fmt.allocPrint(self.allocator, "Call to {s} method {s}::{s}(){s}", .{
                             @tagName(mvr.visibility), mvr.defining_class, method_name, suffix,
@@ -12116,7 +12120,7 @@ pub const VM = struct {
                     }
 
                     // look up method in class hierarchy
-                    const full_name = scope_private orelse self.resolveMethod(obj.class_name, method_name) catch {
+                    const full_name = scope_private orelse (if (invisible_to_magic) @as(RuntimeError![]const u8, error.RuntimeError) else self.resolveMethod(obj.class_name, method_name)) catch {
                         if (self.hasMethod(obj.class_name, "__call")) {
                             const obj_id = @intFromPtr(obj);
                             var in_call = false;
@@ -12439,15 +12443,18 @@ pub const VM = struct {
                     }
                     const obj = obj_val.object;
                     const mvr = self.findMethodVisibility(obj.class_name, method_name);
-                    if (!self.checkVisibility(mvr.defining_class, mvr.visibility) and !self.protectedRootVisible(mvr.defining_class, method_name, mvr.visibility)) {
+                    const invisible = !self.checkVisibility(mvr.defining_class, mvr.visibility) and !self.protectedRootVisible(mvr.defining_class, method_name, mvr.visibility);
+                    const invisible_to_magic = invisible and self.hasMethod(obj.class_name, "__call");
+                    if (invisible and !invisible_to_magic) {
                         self.dropN(ac + 1);
                         const suffix = self.visScopeSuffix();
-                        const msg = std.fmt.allocPrint(self.allocator, "Call to {s} method {s}::{s}(){s}", .{ @tagName(mvr.visibility), mvr.defining_class, method_name, suffix }) catch null;
-                        self.error_msg = msg;
+                        const msg = try std.fmt.allocPrint(self.allocator, "Call to {s} method {s}::{s}(){s}", .{ @tagName(mvr.visibility), mvr.defining_class, method_name, suffix });
+                        defer self.allocator.free(msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
                     }
                     const mcs_ac: u32 = @intCast(ac);
-                    const full_name = self.resolveMethod(obj.class_name, method_name) catch {
+                    const full_name = (if (invisible_to_magic) @as(RuntimeError![]const u8, error.RuntimeError) else self.resolveMethod(obj.class_name, method_name)) catch {
                         if (self.hasMethod(obj.class_name, "__call")) {
                             var args_arr = try self.allocArray();
                             for (0..ac) |ai| try args_arr.append(self.allocator, self.stack[self.sp - ac + ai]);
