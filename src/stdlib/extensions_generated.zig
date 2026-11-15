@@ -1193,6 +1193,7 @@ pub const functions = Map.initComptime(.{
     .{ "xmlwriter_write_element", "xmlwriter" },
     .{ "xmlwriter_write_pi", "xmlwriter" },
     .{ "xmlwriter_write_raw", "xmlwriter" },
+    .{ "zend_version", "Core" },
     .{ "stream_bucket_append", "standard" },
     .{ "stream_bucket_make_writeable", "standard" },
     .{ "stream_bucket_new", "standard" },

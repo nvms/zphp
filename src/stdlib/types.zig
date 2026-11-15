@@ -78,6 +78,7 @@ pub const entries = .{
     .{ "php_sapi_name", native_php_sapi_name },
     .{ "php_version", native_php_version },
     .{ "phpversion", native_php_version },
+    .{ "zend_version", native_zend_version },
     .{ "getmypid", native_getmypid },
     .{ "getmyuid", native_getmyuid },
     .{ "getmygid", native_getmygid },
@@ -1688,6 +1689,11 @@ fn native_php_sapi_name(_: *NativeContext, _: []const Value) RuntimeError!Native
 
 fn native_php_version(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     return NativeResult.literal(php_version.string);
+}
+
+// the Zend Engine's version: 4.x for php 8.x, sharing php's minor and release
+fn native_zend_version(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.literal(std.fmt.comptimePrint("4.{d}.{d}", .{ php_version.minor, php_version.release }));
 }
 
 fn native_getmypid(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {

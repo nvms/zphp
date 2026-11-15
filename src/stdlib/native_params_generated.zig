@@ -2614,4 +2614,5 @@ pub const map = std.StaticStringMap(Signature).initComptime(.{
     .{ "xmlwriter_write_element", Signature{ .params = &[_]Param{ .{ .name = "writer", .type = "XMLWriter" }, .{ .name = "name", .type = "string" }, .{ .name = "content", .default = .null, .type = "?string" } }, .returns = "bool" } },
     .{ "xmlwriter_write_pi", Signature{ .params = &[_]Param{ .{ .name = "writer", .type = "XMLWriter" }, .{ .name = "target", .type = "string" }, .{ .name = "content", .type = "string" } }, .returns = "bool" } },
     .{ "xmlwriter_write_raw", Signature{ .params = &[_]Param{ .{ .name = "writer", .type = "XMLWriter" }, .{ .name = "content", .type = "string" } }, .returns = "bool" } },
+    .{ "zend_version", Signature{ .params = &[_]Param{}, .returns = "string" } },
 });
