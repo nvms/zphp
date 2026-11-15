@@ -1941,6 +1941,15 @@ fn compileUnset(self: *Compiler, args: []const u32) Error!void {
         if (isGlobalsFetch(self, arg_idx)) return self.fail(arg.main_token, "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax");
         try checkTemporaryBase(self, arg_idx, arg.main_token);
         if (arg.tag == .variable and std.mem.eql(u8, self.ast.tokenSlice(arg.main_token), "$this")) return self.fail(arg.main_token, "Cannot unset $this");
+        if (arg.tag == .static_prop_access and arg.main_token != 0 and self.ast.nodes[arg.data.lhs].tag != .variable) {
+            const class_name = try staticClassOperand(self, self.ast.nodes[arg.data.lhs]);
+            var prop_name = self.ast.tokenSlice(arg.main_token);
+            if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
+            try self.emitOp(.unset_static_prop);
+            try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(class_name) }));
+            try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(prop_name) }));
+            continue;
+        }
         if (arg.tag == .variable) {
             const name = self.ast.tokenSlice(arg.main_token);
             const idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });

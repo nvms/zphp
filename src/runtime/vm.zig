@@ -9421,6 +9421,28 @@ pub const VM = struct {
                     }
                 },
 
+                .unset_static_prop => {
+                    const class_idx = self.readU16();
+                    const prop_idx = self.readU16();
+                    const class_name = self.resolveStaticClassName(self.currentChunk().constants.items[class_idx].string.bytes());
+                    const prop_name = self.currentChunk().constants.items[prop_idx].string.bytes();
+                    if (!self.classes.contains(class_name)) self.tryAutoload(class_name) catch {
+                        if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    };
+                    if (self.pending_exception != null) {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    }
+                    const msg = if (self.classes.contains(class_name))
+                        try std.fmt.allocPrint(self.allocator, "Attempt to unset static property {s}::${s}", .{ self.declaredClassName(class_name), prop_name })
+                    else
+                        try self.classNotFoundMessage(class_name);
+                    defer self.allocator.free(msg);
+                    if (try self.throwBuiltinException("Error", msg)) continue;
+                    return error.RuntimeError;
+                },
+
                 .separate_static_prop => {
                     const class_idx = self.readU16();
                     const prop_idx = self.readU16();

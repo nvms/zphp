@@ -570,6 +570,9 @@ pub const OpCode = enum(u16) {
     // [name] -> [value]: the ${...} variable fetched for a by-reference
     // foreach, its array separated from co-holders, nothing created
     separate_var_var,
+    // u16 class, u16 property: unset(C::$p), which php refuses once the
+    // class is found
+    unset_static_prop,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -658,6 +661,7 @@ pub const OpCode = enum(u16) {
             .set_static_prop_rw,
             .deprecate_const,
             .separate_static_prop,
+            .unset_static_prop,
             .get_static,
             .set_static,
             .static_call_spread,
