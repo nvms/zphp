@@ -194,6 +194,23 @@ fn native_define(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     return NativeResult.scalar(.{ .bool = true });
 }
 
+// zend_get_class_constant_ex's zend_fetch_class: self, parent and static name
+// the caller's class, its parent and its called class, and are an Error
+// where there is none
+fn relativeConstantClass(ctx: *NativeContext, written: []const u8) RuntimeError![]const u8 {
+    inline for (.{ "self", "parent", "static" }) |word| {
+        if (std.ascii.eqlIgnoreCase(written, word)) {
+            const resolved = ctx.vm.resolveStaticClassName(word);
+            if (!std.mem.eql(u8, resolved, word)) return resolved;
+            const msg = try ctx.vm.classNotFoundMessage(word);
+            defer ctx.allocator.free(msg);
+            try ctx.vm.setPendingException("Error", msg);
+            return error.RuntimeError;
+        }
+    }
+    return written;
+}
+
 fn native_defined(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const name = args[0].string.bytes();
@@ -204,7 +221,7 @@ fn native_defined(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         if (ctx.vm.php_constants.contains(name[1..])) return NativeResult.scalar(.{ .bool = true });
     }
     if (std.mem.indexOf(u8, name, "::")) |sep| {
-        const class_name = name[0..sep];
+        const class_name = try relativeConstantClass(ctx, name[0..sep]);
         const prop_name = name[sep + 2 ..];
         // ZEND_FETCH_CLASS_SILENT: a constant the scope can't see isn't defined
         if (ctx.vm.getClassConstant(class_name, prop_name) != null) return NativeResult.scalar(.{ .bool = !ctx.vm.classConstantVisibility(class_name, prop_name).denied });
@@ -223,7 +240,7 @@ fn native_constant(ctx: *NativeContext, args: []const Value) RuntimeError!Native
         return NativeResult.share(v);
     }
     if (std.mem.indexOf(u8, name, "::")) |sep| {
-        const class_name = name[0..sep];
+        const class_name = try relativeConstantClass(ctx, name[0..sep]);
         const prop_name = name[sep + 2 ..];
         if (ctx.vm.traits.contains(class_name)) {
             const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot access trait constant {s}::{s} directly", .{ ctx.vm.declaredClassName(class_name), prop_name });

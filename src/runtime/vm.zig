@@ -14576,7 +14576,7 @@ pub const VM = struct {
         return .{ .class_name = class_name, .called_class = lsb_class orelse class_name };
     }
 
-    fn resolveStaticClassName(self: *VM, name: []const u8) []const u8 {
+    pub fn resolveStaticClassName(self: *VM, name: []const u8) []const u8 {
         if (name.len > 0 and name[0] == '$') {
             const local_val = self.getLocalByName(name);
             if (local_val == .string) {
