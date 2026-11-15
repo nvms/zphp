@@ -1683,6 +1683,9 @@ fn endLineForBlockStartingAt(self: *Compiler, start_tok: u32) u32 {
         } else if (tag == .r_brace) {
             depth -= 1;
             if (depth == 0) return lineForToken(self, i);
+        } else if (tag == .semicolon and depth == 0) {
+            // a declaration without a body (abstract, interface) ends at its `;`
+            return lineForToken(self, i);
         }
     }
     return 0;
@@ -5048,6 +5051,7 @@ fn compileInterfaceMethodStub(self: *Compiler, owner_name: []const u8, member: A
         .ref_params = ref_flags,
         .file_path = self.file_path,
         .start_line = lineForToken(self, member.main_token),
+        .end_line = endLineForBlockStartingAt(self, member.main_token),
     });
 
     const param_types = try extractParamTypes(self, param_nodes);
