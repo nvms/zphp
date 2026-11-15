@@ -1326,8 +1326,45 @@ fn native_mb_substr_count(ctx: *NativeContext, args: []const Value) RuntimeError
     return NativeResult.scalar(.{ .int = count });
 }
 
-fn native_mb_internal_encoding(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return NativeResult.literal("UTF-8");
+// mbfl_name2encoding: an encoding by its name, then its MIME name, then
+// its aliases, each matched case-insensitively
+pub fn mbEncodingByName(name: []const u8) ?[]const u8 {
+    const table = @import("mb_encodings_generated.zig").encodings;
+    for (table) |e| if (std.ascii.eqlIgnoreCase(e.name, name)) return e.name;
+    for (table) |e| if (e.mime.len > 0 and std.ascii.eqlIgnoreCase(e.mime, name)) return e.name;
+    for (table) |e| for (e.aliases) |a| if (std.ascii.eqlIgnoreCase(a, name)) return e.name;
+    return null;
+}
+
+// MBSTRG(current_internal_encoding): what mb_internal_encoding() set, else
+// the ini settings php_get_internal_encoding reads, UTF-8 for an unknown name
+pub fn mbInternalEncoding(ctx: *NativeContext) []const u8 {
+    if (ctx.vm.mb_internal_encoding) |e| return e;
+    const ini = @import("../ini_config.zig");
+    const get = struct {
+        fn f(c: *NativeContext, key: []const u8) []const u8 {
+            return c.vm.ini_settings.get(key) orelse ini.get(key) orelse "";
+        }
+    }.f;
+    var name = get(ctx, "mbstring.internal_encoding");
+    if (name.len == 0) name = get(ctx, "internal_encoding");
+    if (name.len == 0) name = get(ctx, "default_charset");
+    if (name.len == 0) return "UTF-8";
+    return mbEncodingByName(name) orelse "UTF-8";
+}
+
+fn native_mb_internal_encoding(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    // the names are the generated table's, which live as long as the program
+    if (args.len == 0 or args[0] == .null) return .{ .value = .{ .string = Value.String.borrowed(mbInternalEncoding(ctx)) } };
+    const name = try coerceToString(ctx, args[0]);
+    const found = mbEncodingByName(name) orelse {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "mb_internal_encoding(): Argument #1 ($encoding) must be a valid encoding, \"{s}\" given", .{name});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.setPendingException("ValueError", msg);
+        return error.RuntimeError;
+    };
+    ctx.vm.mb_internal_encoding = found;
+    return NativeResult.scalar(.{ .bool = true });
 }
 
 fn native_mb_substitute_character(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {

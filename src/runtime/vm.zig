@@ -1007,6 +1007,9 @@ pub const VM = struct {
     // last_return_ref is what the call whose reference is being bound handed
     // back: a return_ref set it since reset_return_ref ran before the call
     return_ref_fresh: bool = false,
+    // the encoding mb_internal_encoding() set for the request (a name from
+    // the generated table), null for the ini settings'
+    mb_internal_encoding: ?[]const u8 = null,
     // where the caller of a function returning by reference resumes when
     // that function returned no variable (php still hands back a reference)
     return_ref_value_at: ?struct { frame: usize, ip: usize } = null,
@@ -3752,6 +3755,7 @@ pub const VM = struct {
     }
 
     pub fn reset(self: *VM) void {
+        self.mb_internal_encoding = null;
         self.sensitive_params.clearRetainingCapacity();
         self.iap_positions.clearRetainingCapacity();
         @import("../stdlib/locale.zig").resetAfterRequest();

@@ -1752,6 +1752,9 @@ fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "max_input_time")) return "-1";
     if (std.mem.eql(u8, name, "max_file_uploads")) return "20";
     if (std.mem.eql(u8, name, "default_charset")) return "UTF-8";
+    if (std.mem.eql(u8, name, "internal_encoding")) return "";
+    if (std.mem.eql(u8, name, "input_encoding")) return "";
+    if (std.mem.eql(u8, name, "output_encoding")) return "";
     if (std.mem.eql(u8, name, "default_mimetype")) return "text/html";
     if (std.mem.eql(u8, name, "session.save_handler")) return "files";
     if (std.mem.eql(u8, name, "session.save_path")) return "";
@@ -1980,6 +1983,21 @@ fn native_ini_set(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     }
     if (std.mem.eql(u8, name, "precision") or std.mem.eql(u8, name, "serialize_precision")) ctx.vm.syncFloatPrecision();
     if (std.mem.eql(u8, name, "zend.exception_string_param_max_len")) ctx.vm.syncStringParamMaxLen();
+    // php_internal_encoding_changed: mbstring takes the new encoding unless
+    // mb_internal_encoding() set one, and warns about a name it doesn't know
+    if ((std.mem.eql(u8, name, "internal_encoding") or std.mem.eql(u8, name, "default_charset")) and ctx.vm.mb_internal_encoding == null) {
+        const strings = @import("strings.zig");
+        const internal = ctx.vm.ini_settings.get("internal_encoding") orelse "";
+        const effective = if (internal.len > 0) internal else ctx.vm.ini_settings.get("default_charset") orelse "UTF-8";
+        if (effective.len > 0 and strings.mbEncodingByName(effective) == null) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "ini_set(): Unknown encoding \"{s}\" in ini setting", .{effective});
+            defer ctx.allocator.free(msg);
+            ctx.vm.emitWarning(msg) catch |err| {
+                result.value.string.release();
+                return err;
+            };
+        }
+    }
     return result;
 }
 
