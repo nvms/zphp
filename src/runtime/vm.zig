@@ -23785,6 +23785,8 @@ pub const VM = struct {
         // ObjFunction) are distinguished for static-var ownership
         if (self.frame_count > 0) {
             if (self.frames[self.frame_count - 1].call_name) |n| return n;
+            // a generator made by a closure runs with that closure's statics
+            if (self.frames[self.frame_count - 1].generator) |g| if (g.closure) |c| if (c.closureName()) |n| return n;
             // a class's copy of a trait method has statics of its own
             if (self.frames[self.frame_count - 1].func) |f| if (f.trait_origin.len > 0) return f.name;
         }
