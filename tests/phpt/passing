@@ -1437,6 +1437,7 @@ Zend/tests/eval_constant_resolution.phpt
 Zend/tests/eval_parse_error_with_doc_comment.phpt
 Zend/tests/ex_func_null_during_property_write.phpt
 Zend/tests/exception_ignore_args.phpt
+Zend/tests/exception_in_nested_rope.phpt
 Zend/tests/exception_in_rope_end.phpt
 Zend/tests/exception_set_previous_leak.phpt
 Zend/tests/exception_with_by_ref_message.phpt
@@ -2229,6 +2230,7 @@ Zend/tests/globals_004.phpt
 Zend/tests/globals_005.phpt
 Zend/tests/grammar/alternative_offset_syntax_compile_error_in_const_expr.phpt
 Zend/tests/grammar/alternative_offset_syntax_compile_error_outside_const_expr.phpt
+Zend/tests/grammar/alternative_offset_syntax_in_encaps_string.phpt
 Zend/tests/grammar/bug31341.phpt
 Zend/tests/grammar/bug35411.phpt
 Zend/tests/grammar/bug41401.phpt
@@ -2237,6 +2239,7 @@ Zend/tests/grammar/bug55445.phpt
 Zend/tests/grammar/bug60099.phpt
 Zend/tests/grammar/bug61095.phpt
 Zend/tests/grammar/bug61225.phpt
+Zend/tests/grammar/bug61681.phpt
 Zend/tests/grammar/bug77993.phpt
 Zend/tests/grammar/bug78363.phpt
 Zend/tests/grammar/bug78441.phpt
@@ -2274,8 +2277,14 @@ Zend/tests/group_use/ns_trailing_comma_error_08.phpt
 Zend/tests/heredoc_nowdoc/bug35655.phpt
 Zend/tests/heredoc_nowdoc/bug36037.phpt
 Zend/tests/heredoc_nowdoc/bug44830.phpt
+Zend/tests/heredoc_nowdoc/bug47516.phpt
 Zend/tests/heredoc_nowdoc/bug76439.phpt
 Zend/tests/heredoc_nowdoc/bug76439_2.phpt
+Zend/tests/heredoc_nowdoc/bug79934.phpt
+Zend/tests/heredoc_nowdoc/flexible-heredoc-complex-test1.phpt
+Zend/tests/heredoc_nowdoc/flexible-heredoc-complex-test2.phpt
+Zend/tests/heredoc_nowdoc/flexible-heredoc-complex-test3.phpt
+Zend/tests/heredoc_nowdoc/flexible-heredoc-complex-test4.phpt
 Zend/tests/heredoc_nowdoc/flexible-heredoc-error1.phpt
 Zend/tests/heredoc_nowdoc/flexible-heredoc-error10.phpt
 Zend/tests/heredoc_nowdoc/flexible-heredoc-error11.phpt
@@ -2329,6 +2338,7 @@ Zend/tests/heredoc_nowdoc/nowdoc_014.phpt
 Zend/tests/heredoc_nowdoc/nowdoc_015.phpt
 Zend/tests/heredoc_nowdoc/nowdoc_016.phpt
 Zend/tests/heredoc_nowdoc/nowdoc_017.phpt
+Zend/tests/heredoc_nowdoc/warning_during_heredoc_scan_ahead.phpt
 Zend/tests/iap_on_object_deprecated.phpt
 Zend/tests/ignore_repeated_errors.phpt
 Zend/tests/ignore_repeated_source.phpt
@@ -3202,6 +3212,7 @@ Zend/tests/nullsafe_operator/029.phpt
 Zend/tests/nullsafe_operator/030.phpt
 Zend/tests/nullsafe_operator/031.phpt
 Zend/tests/nullsafe_operator/032.phpt
+Zend/tests/nullsafe_operator/033.phpt
 Zend/tests/nullsafe_operator/034.phpt
 Zend/tests/nullsafe_operator/035.phpt
 Zend/tests/nullsafe_operator/036.phpt
@@ -3231,6 +3242,7 @@ Zend/tests/numeric_strings/array_offset.phpt
 Zend/tests/numeric_strings/explicit_cast_leading_numeric_must_work.phpt
 Zend/tests/numeric_strings/invalid_numeric_string_must_generate_warning_assign.phpt
 Zend/tests/numeric_strings/invalid_numeric_strings_must_generate_warning.phpt
+Zend/tests/numeric_strings/neg_num_string.phpt
 Zend/tests/numeric_strings/oss_fuzz_427814456.phpt
 Zend/tests/numeric_strings/string_offset.phpt
 Zend/tests/object-null.phpt
@@ -3883,6 +3895,7 @@ Zend/tests/temporary_cleaning/temporary_cleaning_011.phpt
 Zend/tests/temporary_cleaning/temporary_cleaning_012.phpt
 Zend/tests/temporary_cleaning/temporary_cleaning_014.phpt
 Zend/tests/temporary_cleaning/temporary_cleaning_015.phpt
+Zend/tests/temporary_cleaning/temporary_cleaning_016.phpt
 Zend/tests/temporary_cleaning/temporary_cleaning_017.phpt
 Zend/tests/tentative_type_early_binding.phpt
 Zend/tests/ternary_associativity.phpt

@@ -460,6 +460,8 @@ const Formatter = struct {
             .class_property, .class_property_hooks, .static_class_property => self.formatClassProperty(node),
             .interface_method => self.formatInterfaceMethod(node),
 
+            // a string's parts print with its token
+            .interp_literal, .interp_varname, .interp_offset, .interp_dollar_brace => {},
             .integer_literal, .float_literal, .string_literal => {
                 self.write(self.ast.tokens[node.main_token].lexeme(self.source));
             },

@@ -58,7 +58,17 @@ fn expectCompileError(source: []const u8) !void {
 fn renderNode(ast: *const Ast, idx: u32, buf: *Buf) !void {
     const node = ast.nodes[idx];
     switch (node.tag) {
-        .integer_literal, .float_literal, .string_literal, .variable, .identifier => try buf.appendSlice(ast.tokenSlice(node.main_token)),
+        .integer_literal, .float_literal, .string_literal, .variable, .identifier, .interp_varname => try buf.appendSlice(ast.tokenSlice(node.main_token)),
+        .interp_offset => {
+            if (node.data.lhs == 1) try buf.append('-');
+            try buf.appendSlice(ast.tokenSlice(node.main_token));
+        },
+        .interp_literal => try buf.appendSlice(ast.source[node.data.lhs..node.data.rhs]),
+        .interp_dollar_brace => {
+            try buf.appendSlice(if (node.data.rhs & Ast.dollar_brace_expr != 0) "(${expr " else "(${ ");
+            try renderNode(ast, node.data.lhs, buf);
+            try buf.append(')');
+        },
         .variable_variable => {
             try buf.appendSlice("($$");
             try renderNode(ast, node.data.lhs, buf);
@@ -937,4 +947,36 @@ test "php85 clone with an argument list" {
         if (node.tag == .clone_with) found = true;
     }
     try std.testing.expect(found);
+}
+
+// the parts of the first interpolating string, each followed by `|`
+fn expectParts(source: []const u8, expected: []const u8) !void {
+    var ast = try parse(std.testing.allocator, source);
+    defer ast.deinit();
+    try std.testing.expectEqual(@as(usize, 0), ast.errors.len);
+    var buf = Buf{ .gpa = std.testing.allocator };
+    defer buf.deinit();
+    for (ast.nodes) |node| {
+        if (node.tag != .string_literal or node.data.rhs != Ast.interpolated) continue;
+        for (ast.extraSlice(node.data.lhs)) |part| {
+            try renderNode(&ast, part, &buf);
+            try buf.append('|');
+        }
+        break;
+    }
+    errdefer std.debug.print("\nexpected: {s}\n  actual: {s}\n", .{ expected, buf.inner.items });
+    try std.testing.expectEqualStrings(expected, buf.inner.items);
+}
+
+test "interpolated string parts" {
+    try expectParts("<?php \"a{$b[\"}\"]}c\";", "a|(idx $b \"}\")|c|");
+    try expectParts("<?php \"x $a[k] $a[-1] $o->p\";", "x |(idx $a k)| |(idx $a -1)| |(-> $o p)|");
+    try expectParts("<?php \"${name}${f('}')}\";", "(${ name)|(${expr (call f '}'))|");
+    try expectParts("<?php <<<A\n  {$s(<<<A\n    in\n    A)}\n  A;", "  |(call $s <<<A\n    in\n    A)|");
+}
+
+test "interpolation syntax errors" {
+    try expectError("<?php \"{$g{'h'}}\";");
+    try expectError("<?php \"{$a + 1}\";");
+    try expectError("<?php \"{$a\";");
 }

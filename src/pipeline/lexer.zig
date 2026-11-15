@@ -278,14 +278,13 @@ pub const Lexer = struct {
             }
         }
 
-        // skip to end of line
-        while (self.pos < self.source.len and self.source[self.pos] != '\n') self.pos += 1;
-        if (self.pos < self.source.len) self.pos += 1; // skip \n
+        // skip to end of line (\r\n, \n or \r)
+        while (self.pos < self.source.len and !isNewlineChar(self.source[self.pos])) self.pos += 1;
+        self.skipNewline();
 
-        // scan for closing label
+        // scan for closing label at each line start; a heredoc's embedded
+        // code may span lines and hold the label without ending the body
         while (self.pos < self.source.len) {
-            const line_start = self.pos;
-
             // skip leading whitespace
             while (self.pos < self.source.len and (self.source[self.pos] == ' ' or self.source[self.pos] == '\t')) {
                 self.pos += 1;
@@ -294,11 +293,8 @@ pub const Lexer = struct {
             // check if this line starts with the label
             if (self.pos + label.len <= self.source.len and std.mem.eql(u8, self.source[self.pos .. self.pos + label.len], label)) {
                 const after_label = self.pos + label.len;
-                // closing label must be followed by ; or newline or EOF
-                const terminates = after_label >= self.source.len or switch (self.source[after_label]) {
-                    '\n', '\r', ';', ')', ',', ']' => true,
-                    else => false,
-                };
+                // the label ends where a label character can't follow
+                const terminates = after_label >= self.source.len or !isIdentChar(self.source[after_label]);
                 if (terminates) {
                     self.pos = after_label;
                     return self.makeToken(if (is_nowdoc) .nowdoc else .heredoc, start);
@@ -306,12 +302,35 @@ pub const Lexer = struct {
             }
 
             // skip to next line
-            _ = line_start;
-            while (self.pos < self.source.len and self.source[self.pos] != '\n') self.pos += 1;
-            if (self.pos < self.source.len) self.pos += 1;
+            while (self.pos < self.source.len and !isNewlineChar(self.source[self.pos])) {
+                if (!is_nowdoc) {
+                    if (self.source[self.pos] == '\\' and self.pos + 1 < self.source.len and !isNewlineChar(self.source[self.pos + 1])) {
+                        self.pos += 2;
+                        continue;
+                    }
+                    if (self.skipInterpolation()) {
+                        if (self.pos > self.source.len) {
+                            self.pos = self.source.len;
+                            return self.makeToken(.invalid, start);
+                        }
+                        continue;
+                    }
+                }
+                self.pos += 1;
+            }
+            self.skipNewline();
         }
 
         return self.makeToken(.invalid, start);
+    }
+
+    fn isNewlineChar(c: u8) bool {
+        return c == '\n' or c == '\r';
+    }
+
+    fn skipNewline(self: *Lexer) void {
+        if (self.pos < self.source.len and self.source[self.pos] == '\r') self.pos += 1;
+        if (self.pos < self.source.len and self.source[self.pos] == '\n') self.pos += 1;
     }
 
     fn lexGt(self: *Lexer, start: usize) Token {
@@ -492,39 +511,15 @@ pub const Lexer = struct {
     // -- strings -----------------------------------------------------------
 
     fn lexStringBody(self: *Lexer, quote: u8, start: usize) Token {
-        var brace_depth: u32 = 0;
         while (self.pos < self.source.len) {
             const ch = self.source[self.pos];
             if (ch == '\\') {
                 self.pos += 1;
                 if (self.pos < self.source.len) self.pos += 1;
-            } else if (quote != '\'' and brace_depth == 0 and ch == '{' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '$') {
-                brace_depth += 1;
-                self.pos += 2;
-            } else if (quote != '\'' and brace_depth > 0) {
-                if (ch == '"' or ch == '\'') {
-                    const inner_quote = ch;
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const c2 = self.source[self.pos];
-                        if (c2 == '\\') {
-                            self.pos += 1;
-                            if (self.pos < self.source.len) self.pos += 1;
-                        } else if (c2 == inner_quote) {
-                            self.pos += 1;
-                            break;
-                        } else {
-                            self.pos += 1;
-                        }
-                    }
-                } else if (ch == '{') {
-                    brace_depth += 1;
-                    self.pos += 1;
-                } else if (ch == '}') {
-                    brace_depth -= 1;
-                    self.pos += 1;
-                } else {
-                    self.pos += 1;
+            } else if (quote != '\'' and self.skipInterpolation()) {
+                if (self.pos > self.source.len) {
+                    self.pos = self.source.len;
+                    return self.makeToken(.invalid, start);
                 }
             } else if (ch == quote) {
                 self.pos += 1;
@@ -534,6 +529,39 @@ pub const Lexer = struct {
             }
         }
         return self.makeToken(.invalid, start);
+    }
+
+    // at "{$" or "${" in an interpolating string, moves past the code to
+    // the brace that closes it (php's scanner reads it in ST_IN_SCRIPTING,
+    // strings and their own interpolation included). past the end of the
+    // source when the code never closes
+    fn skipInterpolation(self: *Lexer) bool {
+        const s = self.source;
+        const p = self.pos;
+        if (p + 1 >= s.len) return false;
+        const from = if (s[p] == '{' and s[p + 1] == '$') p + 1 else if (s[p] == '$' and s[p + 1] == '{') p + 2 else return false;
+        self.pos = if (skipEmbeddedCode(s, from)) |close| close + 1 else s.len + 1;
+        return true;
+    }
+
+    // the offset of the `}` that closes the code starting at `from`, or
+    // null when the code ends first
+    pub fn skipEmbeddedCode(source: []const u8, from: usize) ?usize {
+        var inner = Lexer{ .source = source, .pos = from, .state = .php };
+        var depth: u32 = 0;
+        while (true) {
+            const tok = inner.next();
+            if (inner.state != .php or inner.halted) return null;
+            switch (tok.tag) {
+                .eof, .invalid => return null,
+                .l_brace => depth += 1,
+                .r_brace => {
+                    if (depth == 0) return tok.start;
+                    depth -= 1;
+                },
+                else => {},
+            }
+        }
     }
 
     // -- trivia (whitespace / comments) ------------------------------------

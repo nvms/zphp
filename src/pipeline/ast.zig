@@ -33,6 +33,11 @@ pub const PropertyHooks = struct {
 };
 
 pub const Ast = struct {
+    // a string_literal node's rhs when its lhs lists its interpolation parts
+    pub const interpolated: u32 = 1;
+    // an interp_dollar_brace node's rhs bit for "${expr}"
+    pub const dollar_brace_expr: u32 = 1 << 31;
+
     source: []const u8,
     tokens: []const Token,
     nodes: []const Node,
@@ -234,6 +239,11 @@ pub const Ast = struct {
             declare_stmt, // main_token = declare keyword, lhs = token index of the closing `)`, rhs = body (0 = `declare(...);`)
             dynamic_class_const, // Class::{expr}: lhs = class node, rhs = constant name expression
             clone_with, // clone($object, $withProperties) (php 8.5): main_token = clone keyword, lhs = object, rhs = properties
+            // the parts of an interpolating string_literal (lhs = extra index -> {count, part...}, rhs = interpolated)
+            interp_literal, // main_token = the string token, lhs/rhs = the text's source range, escapes unprocessed
+            interp_varname, // main_token = the name of "${name}": a read of $name
+            interp_offset, // main_token = the offset name or number of "$a[k]", lhs = 1 after a `-`
+            interp_dollar_brace, // main_token = the string token, lhs = the read, rhs = offset of `${` | dollar_brace_expr for "${expr}"
         };
     };
 

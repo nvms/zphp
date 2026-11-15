@@ -378,9 +378,11 @@ const Lexer = struct {
         if (isDigit(c)) return self.emit(t.T_NUM_STRING, numberSpan(r).len);
         if (c == '$' and r.len > 1 and isLabelStart(r[1])) return self.emit(t.T_VARIABLE, 1 + labelLen(r[1..]));
         if (isLabelStart(c)) return self.emit(t.T_STRING, labelLen(r));
+        // yyless(0): an empty token, and the character is read again as
+        // string content
         if (std.mem.indexOfScalar(u8, " \n\r\t\\'#", c) != null) {
             self.pop();
-            return self.emit(t.T_ENCAPSED_AND_WHITESPACE, 1);
+            return self.emit(t.T_ENCAPSED_AND_WHITESPACE, 0);
         }
         if (std.mem.indexOfScalar(u8, ";:,.|^&+-/*=%!~$<>?@[(){}\"`", c) != null) return self.emit(c, 1);
         try self.emit(t.T_BAD_CHARACTER, 1);

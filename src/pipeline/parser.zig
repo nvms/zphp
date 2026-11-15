@@ -8,6 +8,7 @@ const AttrRange = ast_mod.AttrRange;
 const PropertyHooks = ast_mod.PropertyHooks;
 const Token = @import("token.zig").Token;
 const Lexer = @import("lexer.zig").Lexer;
+const interp = @import("interp.zig");
 
 const Tag = Token.Tag;
 const NodeTag = Ast.Node.Tag;
@@ -24,8 +25,12 @@ pub fn parse(allocator: Allocator, source: []const u8) Allocator.Error!Ast {
         try tok_buf.append(allocator, tok);
         if (tok.tag == .eof) break;
     }
+    var interp_streams: std.AutoHashMapUnmanaged(u32, u32) = .empty;
+    defer interp_streams.deinit(allocator);
+    try lexInterpolations(allocator, source, &tok_buf, &interp_streams);
 
     var p = Parser{
+        .interp_streams = &interp_streams,
         .source = source,
         .tokens = tok_buf.items,
         .pos = 0,
@@ -74,7 +79,39 @@ pub fn parse(allocator: Allocator, source: []const u8) Allocator.Error!Ast {
     };
 }
 
+// the code inside interpolating strings, lexed after the file's eof: each
+// string with code parts gets one token stream per part, in order, each
+// ending in an eof token, and `streams` maps the string token to its first.
+// strings inside that code are found as the loop reaches their tokens
+fn lexInterpolations(allocator: Allocator, source: []const u8, tokens: *std.ArrayListUnmanaged(Token), streams: *std.AutoHashMapUnmanaged(u32, u32)) Allocator.Error!void {
+    var i: usize = 0;
+    while (i < tokens.items.len) : (i += 1) {
+        const tok = tokens.items[i];
+        if (tok.tag != .string and tok.tag != .heredoc) continue;
+        const b = interp.body(source, tok) orelse continue;
+        var pos = b.start;
+        var first = true;
+        while (interp.nextPart(source, b, pos)) |part| : (pos = part.next) {
+            if (part.kind == .literal) continue;
+            if (first) {
+                try streams.put(allocator, @intCast(i), @intCast(tokens.items.len));
+                first = false;
+            }
+            var lexer = Lexer{ .source = source[0..part.end], .pos = part.start, .state = .php };
+            while (true) {
+                const t = lexer.next();
+                if (t.tag == .eof or t.start >= part.end or lexer.state != .php) break;
+                try tokens.append(allocator, t);
+                if (t.tag == .invalid) break;
+            }
+            try tokens.append(allocator, .{ .tag = .eof, .start = part.end, .end = part.end });
+        }
+    }
+}
+
 const Parser = struct {
+    // the token streams of interpolating strings (lexInterpolations)
+    interp_streams: *const std.AutoHashMapUnmanaged(u32, u32),
     source: []const u8,
     tokens: []const Token,
     pos: u32,
@@ -3208,12 +3245,12 @@ const Parser = struct {
             .string => blk: {
                 try self.checkUnicodeEscapes(self.pos);
                 try self.checkSimpleOffsets(self.pos);
-                break :blk self.addLiteral(.string_literal);
+                break :blk self.parseStringLiteral();
             },
             .heredoc, .nowdoc => blk: {
                 try self.checkHeredocIndentation(self.pos);
                 try self.checkSimpleOffsets(self.pos);
-                break :blk self.addLiteral(.string_literal);
+                break :blk self.parseStringLiteral();
             },
             .kw_true => self.addLiteral(.true_literal),
             .kw_false => self.addLiteral(.false_literal),
@@ -3334,6 +3371,122 @@ const Parser = struct {
     fn addLiteral(self: *Parser, tag: NodeTag) Error!u32 {
         const tok = self.advance();
         return self.addNode(.{ .tag = tag, .main_token = tok, .data = .{} });
+    }
+
+    // a string literal; one that interpolates gets its parts (php's
+    // encaps_list) as an extra list in lhs, with rhs set to
+    // Ast.interpolated: interp_literal nodes for the text and the
+    // expressions, parsed from the string's token streams
+    fn parseStringLiteral(self: *Parser) Error!u32 {
+        const tok = self.pos;
+        const node = try self.addLiteral(.string_literal);
+        var cursor = self.interp_streams.get(tok) orelse return node;
+        const b = interp.body(self.source, self.tokens[tok]) orelse return node;
+        const resume_at = self.pos;
+        defer self.pos = resume_at;
+        var parts = std.ArrayListUnmanaged(u32).empty;
+        defer parts.deinit(self.allocator);
+        var pos = b.start;
+        while (interp.nextPart(self.source, b, pos)) |part| : (pos = part.next) {
+            if (part.kind == .literal) {
+                try parts.append(self.allocator, try self.addNode(.{ .tag = .interp_literal, .main_token = tok, .data = .{ .lhs = part.start, .rhs = part.end } }));
+                continue;
+            }
+            self.pos = cursor;
+            const expr = switch (part.kind) {
+                .simple => try self.parseSimpleInterpolation(),
+                .curly => blk: {
+                    const e = try self.parseExpression();
+                    // T_CURLY_OPEN takes php's `variable`
+                    if (!self.isVariableNode(e) or self.nodes.items[e].tag == .static_prop_access and self.tokens[self.nodes.items[e].main_token].tag != .variable) {
+                        try self.addError(.unexpected_token);
+                        return error.ParseError;
+                    }
+                    break :blk e;
+                },
+                .dollar_brace => try self.parseDollarBraceInterpolation(tok, part),
+                .literal => unreachable,
+            };
+            if (self.peek() != .eof) {
+                try self.addError(.unexpected_token);
+                return error.ParseError;
+            }
+            cursor = self.pos + 1;
+            try parts.append(self.allocator, expr);
+        }
+        const extra = try self.addExtraList(parts.items);
+        self.nodes.items[node].data = .{ .lhs = extra, .rhs = Ast.interpolated };
+        return node;
+    }
+
+    // "$a", "$a[k]", "$a->p" and "$a?->p" (encaps_var's T_VARIABLE forms)
+    fn parseSimpleInterpolation(self: *Parser) Error!u32 {
+        if (self.peek() != .variable) {
+            try self.addError(.unexpected_token);
+            return error.ParseError;
+        }
+        const variable = try self.addLiteral(.variable);
+        switch (self.peek()) {
+            .l_bracket => {
+                const bracket = self.advance();
+                const offset: u32 = switch (self.peek()) {
+                    .variable => try self.addLiteral(.variable),
+                    .minus => blk: {
+                        _ = self.advance();
+                        if (self.peek() != .integer) {
+                            try self.addError(.unexpected_token);
+                            return error.ParseError;
+                        }
+                        const num = self.advance();
+                        break :blk try self.addNode(.{ .tag = .interp_offset, .main_token = num, .data = .{ .lhs = 1 } });
+                    },
+                    else => blk: {
+                        const text = self.lexemeAt(0);
+                        const label = text.len > 0 and interp.isLabelStart(text[0]);
+                        if (self.peek() != .integer and !label) {
+                            try self.addError(.unexpected_token);
+                            return error.ParseError;
+                        }
+                        break :blk try self.addNode(.{ .tag = .interp_offset, .main_token = self.advance(), .data = .{} });
+                    },
+                };
+                _ = try self.expect(.r_bracket);
+                return self.addNode(.{ .tag = .array_access, .main_token = bracket, .data = .{ .lhs = variable, .rhs = offset } });
+            },
+            .arrow, .question_arrow => {
+                const nullsafe = self.tokens[self.advance()].tag == .question_arrow;
+                const name_tok = self.advance();
+                const prop = try self.addNode(.{ .tag = .identifier, .main_token = name_tok, .data = .{} });
+                const tag: Ast.Node.Tag = if (nullsafe) .nullsafe_property_access else .property_access;
+                return self.addNode(.{ .tag = tag, .main_token = name_tok, .data = .{ .lhs = variable, .rhs = prop } });
+            },
+            else => return variable,
+        }
+    }
+
+    // "${name}", "${name[expr]}" (T_STRING_VARNAME) and "${expr}": an
+    // interp_dollar_brace node over the variable read, rhs the offset of
+    // `${` plus Ast.dollar_brace_expr for the variable-variable form
+    fn parseDollarBraceInterpolation(self: *Parser, string_tok: u32, part: interp.Part) Error!u32 {
+        const s = self.source;
+        var j: usize = part.start;
+        const varname = j < part.end and interp.isLabelStart(s[j]) and blk: {
+            while (j < part.end and interp.isLabelChar(s[j])) j += 1;
+            break :blk j == part.end or s[j] == '[';
+        };
+        const at = part.start - 2;
+        if (!varname) {
+            const e = try self.parseExpression();
+            return self.addNode(.{ .tag = .interp_dollar_brace, .main_token = string_tok, .data = .{ .lhs = e, .rhs = at | Ast.dollar_brace_expr } });
+        }
+        var inner = try self.addNode(.{ .tag = .interp_varname, .main_token = self.advance(), .data = .{} });
+        if (self.peek() == .l_bracket) {
+            const bracket = self.advance();
+            const index = try self.parseExpression();
+            _ = try self.expect(.r_bracket);
+            inner = try self.addNode(.{ .tag = .array_access, .main_token = bracket, .data = .{ .lhs = inner, .rhs = index } });
+        }
+        return self.addNode(.{ .tag = .interp_dollar_brace, .main_token = string_tok, .data = .{ .lhs = inner, .rhs = at } });
     }
 
     fn parseGroupedExpr(self: *Parser) Error!u32 {
@@ -4174,33 +4327,66 @@ const Parser = struct {
     // whitespace is fine)
     fn checkHeredocIndentation(self: *Parser, token: u32) Error!void {
         const tok = self.tokens[token];
-        const lexeme = self.source[tok.start..tok.end];
-        const first_nl = std.mem.indexOfScalar(u8, lexeme, '\n') orelse return;
-        const body_start = first_nl + 1;
-        var end = lexeme.len;
-        while (end > body_start and (lexeme[end - 1] == '\n' or lexeme[end - 1] == '\r' or lexeme[end - 1] == ';')) end -= 1;
-        while (end > body_start and (std.ascii.isAlphanumeric(lexeme[end - 1]) or lexeme[end - 1] == '_' or lexeme[end - 1] >= 0x80)) end -= 1;
-        var closing_line_start = end;
-        while (closing_line_start > body_start and lexeme[closing_line_start - 1] != '\n') closing_line_start -= 1;
-        const indent = lexeme[closing_line_start..end];
-        if (indent.len == 0) return;
+        const h = interp.heredoc(self.source, tok) orelse return;
+        if (h.indent == 0) return;
+        const src = self.source;
+        // the closing marker's indentation sits just before its label
+        var label_start: usize = tok.end;
+        while (label_start > h.body_start and interp.isLabelChar(src[label_start - 1])) label_start -= 1;
+        const indent = src[label_start - h.indent .. label_start];
         const has_space = std.mem.indexOfScalar(u8, indent, ' ') != null;
         const has_tab = std.mem.indexOfScalar(u8, indent, '\t') != null;
         // php reports a mixed closing marker on the line after the opener
         if (has_space and has_tab) return self.addHeredocError(token, .heredoc_mixed_indentation, 0, 1);
         const using_spaces = has_space;
-        if (closing_line_start <= body_start) return;
-        const body = lexeme[body_start .. closing_line_start - 1];
-        var lines = std.mem.splitScalar(u8, body, '\n');
-        var delta: u32 = 1;
-        while (lines.next()) |line| : (delta += 1) {
-            for (0..indent.len) |k| {
-                if (k == line.len or line[k] == '\r') break;
-                const c = line[k];
-                if (c != ' ' and c != '\t') return self.addHeredocError(token, .heredoc_body_indentation, @intCast(indent.len), delta);
-                if ((c == ' ') != using_spaces) return self.addHeredocError(token, .heredoc_mixed_indentation, 0, delta);
+        // strip_multiline_string_indentation over each literal part: every
+        // line it starts needs the marker's indentation, except a line
+        // that is only whitespace, and a part may not end on a line start
+        // before its indentation unless the body ends there
+        const b: interp.Body = .{ .start = h.body_start, .end = h.body_end, .heredoc = true, .indent = h.indent };
+        var pos = b.start;
+        while (interp.nextPart(src, b, pos)) |part| : (pos = part.next) {
+            if (part.kind != .literal) {
+                // code on the body's first line start has no indentation
+                if (pos == b.start) return self.addHeredocError(token, .heredoc_body_indentation, h.indent, lineBreaks(src[tok.start..pos]));
+                continue;
+            }
+            const end: usize = part.end;
+            const at_end = end == b.end;
+            var line: usize = part.start;
+            if (part.start != b.start) {
+                line = nextLineStart(src, part.start, end) orelse continue;
+            }
+            while (true) {
+                const nl = std.mem.indexOfAnyPos(u8, src[0..end], line, "\r\n");
+                const stop: ?usize = nl orelse if (at_end) end else null;
+                var k: usize = 0;
+                while (k < h.indent) : (k += 1) {
+                    const at = line + k;
+                    if (stop != null and at == stop.?) break;
+                    const delta = lineBreaks(src[tok.start..line]);
+                    if (at == end or (src[at] != ' ' and src[at] != '\t')) return self.addHeredocError(token, .heredoc_body_indentation, h.indent, delta);
+                    if ((src[at] == ' ') != using_spaces) return self.addHeredocError(token, .heredoc_mixed_indentation, 0, delta);
+                }
+                line = nextLineStart(src, line, end) orelse break;
             }
         }
+    }
+
+    fn lineBreaks(text: []const u8) u32 {
+        var n: u32 = 0;
+        for (text, 0..) |c, i| {
+            if (c == '\n' or (c == '\r' and (i + 1 >= text.len or text[i + 1] != '\n'))) n += 1;
+        }
+        return n;
+    }
+
+    // the start of the line after the one `from` is on, within `end`
+    fn nextLineStart(src: []const u8, from: usize, end: usize) ?usize {
+        const nl = std.mem.indexOfAnyPos(u8, src[0..end], from, "\r\n") orelse return null;
+        var next = nl + 1;
+        if (src[nl] == '\r' and next < end and src[next] == '\n') next += 1;
+        return next;
     }
 
     fn addHeredocError(self: *Parser, token: u32, tag: Ast.Error.Tag, detail: u32, line_delta: u32) Error!void {

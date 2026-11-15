@@ -77,6 +77,14 @@ pub const CompileWarning = struct {
     level: u16,
     message: []const u8,
     line: u32,
+    // raised by php's scanner, which reads the whole file before anything
+    // compiles: these come first
+    scanner: bool = false,
+
+    pub fn before(_: void, a: CompileWarning, b: CompileWarning) bool {
+        if (a.scanner != b.scanner) return a.scanner;
+        return a.line < b.line;
+    }
 };
 
 pub const FunctionAttrEntry = struct {
@@ -224,11 +232,7 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
     errdefer c.discardOutput();
     // runs before discardOutput frees the messages
     errdefer if (origin.diagnostic) |slot| if (slot.*) |*d| {
-        std.sort.insertion(CompileWarning, c.warnings.items, {}, struct {
-            fn lt(_: void, x: CompileWarning, y: CompileWarning) bool {
-                return x.line < y.line;
-            }
-        }.lt);
+        std.sort.insertion(CompileWarning, c.warnings.items, {}, CompileWarning.before);
         for (c.warnings.items) |w| {
             if (d.note_count == d.notes.len) break;
             var note: Diagnostic.Note = .{ .level = w.level, .line = w.line };
@@ -309,11 +313,7 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
 
     // php compiles a file top to bottom; zphp compiles early-bound classes
     // first, so its warnings are put back in source order
-    std.sort.insertion(CompileWarning, c.warnings.items, {}, struct {
-        fn lessThan(_: void, a: CompileWarning, b: CompileWarning) bool {
-            return a.line < b.line;
-        }
-    }.lessThan);
+    std.sort.insertion(CompileWarning, c.warnings.items, {}, CompileWarning.before);
     var result = c.takeOutput();
     result.local_count = c.next_slot;
     result.slot_names = slot_names;
@@ -1102,6 +1102,7 @@ pub const Compiler = struct {
             .integer_literal => try self.compileInteger(node),
             .float_literal => try self.compileFloat(node),
             .string_literal => try compiler_strings.compileString(self, node),
+            .interp_literal, .interp_varname, .interp_offset, .interp_dollar_brace => try compiler_strings.compileInterpPart(self, idx),
             .true_literal => try self.emitOp(.op_true),
             .false_literal => try self.emitOp(.op_false),
             .null_literal => try self.emitOp(.op_null),
