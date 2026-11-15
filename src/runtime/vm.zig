@@ -2585,7 +2585,8 @@ pub const VM = struct {
             "OpenSSLCertificateSigningRequest", "Socket",               "AddressInfo",          "Shmop",
             "SysvMessageQueue",                 "SysvSemaphore",        "SysvSharedMemory",     "FTP\\Connection",
             "LDAP\\Connection",               "LDAP\\Result",       "LDAP\\ResultEntry",  "PgSql\\Connection",
-            "PgSql\\Result",                  "PgSql\\Lob",
+            "PgSql\\Result",                  "PgSql\\Lob",                "Random\\Engine\\Mt19937",
+            "Random\\Engine\\PcgOneseq128XslRr64", "Random\\Engine\\Xoshiro256StarStar", "Random\\Engine\\Secure",
         }) |name| {
             if (vm.classes.getPtr(name)) |cls| cls.no_dynamic_properties = true;
         }
