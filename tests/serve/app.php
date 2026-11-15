@@ -139,6 +139,13 @@ if ($path === "/health") {
     date_parse("not a date");
     ob_end_clean();
     echo "dirty";
+} elseif ($path === "/static-self") {
+    // a static call into an autoloaded class whose method uses self::, on
+    // every request (the call site's cache must not outlive the request)
+    spl_autoload_register(function ($class) {
+        if ($class === 'StaticFactory') require __DIR__ . '/StaticFactory.php';
+    });
+    echo json_encode(["result" => StaticFactory::create()]);
 } elseif ($path === "/isolation/probe") {
     function isolation_counter() { static $n = 0; return ++$n; }
     echo json_encode([

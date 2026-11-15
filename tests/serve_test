@@ -532,6 +532,14 @@ for i in $(seq 1 25); do
 done
 check "request isolation over repeated dirty requests" "1" "$iso_loop_ok"
 
+# test: a static method of an autoloaded class calls self:: on every request,
+# on both workers (a static call site's cache must not outlive a request)
+static_self_ok=1
+for i in $(seq 1 8); do
+    if [ "$(curl -s http://localhost:$PORT/static-self)" != '{"result":"made via self StaticFactory"}' ]; then static_self_ok=0; break; fi
+done
+check "self:: in an autoloaded static method on repeated requests" "1" "$static_self_ok"
+
 # test: hostile request bodies are rejected and the server stays up
 hostile() {
     python3 - "$PORT" "$1" <<'PY'

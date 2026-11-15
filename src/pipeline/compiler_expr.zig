@@ -2771,7 +2771,16 @@ pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
         else => {},
     }
 
-    const class_name = try resolveNodeClassName(self, class_node);
+    // self:: and parent:: forward the caller's late static binding, so they
+    // are resolved as the call runs
+    const forwarding = class_node.tag == .identifier and blk: {
+        const written = self.ast.tokenSlice(class_node.main_token);
+        break :blk std.mem.eql(u8, written, "self") or std.mem.eql(u8, written, "parent");
+    };
+    const class_name = if (forwarding) blk: {
+        _ = try resolveNodeClassName(self, class_node);
+        break :blk self.ast.tokenSlice(class_node.main_token);
+    } else try resolveNodeClassName(self, class_node);
     const class_idx = try self.addConstant(.{ .string = Value.String.borrowed(class_name) });
     const method_idx = try self.addConstant(.{ .string = Value.String.borrowed(method_name) });
 

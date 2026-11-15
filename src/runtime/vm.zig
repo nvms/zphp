@@ -3987,6 +3987,10 @@ pub const VM = struct {
                 ic_ptr.resolved_calls.clearRetainingCapacity();
                 self.clearResolvedMethods(ic_ptr);
                 ic_ptr.class_const = @splat(.{});
+                // a static call site's entry would enter last request's method
+                // without its class being declared (autoloaded) this request,
+                // so the method would run with no class scope
+                ic_ptr.method = @splat(.{});
             }
             // chunk_to_func_names indexes per-chunk name lists - many entries
             // are closure instance names (`__closure_N_inst_M`, `__closure_bound_N`)
@@ -13499,8 +13503,6 @@ pub const VM = struct {
                             lsb_class = self.currentFrame().called_class;
                             if (self.currentDefiningClass()) |dc| class_name = dc;
                         }
-                    } else if (self.currentFrame().called_class) |cc| {
-                        if (self.isAncestor(class_name, cc)) lsb_class = cc;
                     }
                     const effective_called = lsb_class orelse class_name;
                     if (!self.classes.contains(class_name)) {
@@ -14675,7 +14677,8 @@ pub const VM = struct {
 
     // the class a `$class::method()` call looks the method up in, and the
     // class static:: names inside it: self and parent keep the caller's late
-    // static binding, as does a call to an ancestor of it
+    // static binding, a named class is its own (an instance method called on
+    // a fitting $this takes $this's class later, in callStaticMethod)
     fn dynamicStaticTarget(self: *VM, raw_class: []const u8) struct { class_name: []const u8, called_class: []const u8 } {
         var class_name = raw_class;
         var lsb_class: ?[]const u8 = null;
@@ -14700,9 +14703,6 @@ pub const VM = struct {
             if (class_name.len > 0 and class_name[0] == '\\') class_name = class_name[1..];
             // a class_alias() name calls the class it names
             class_name = self.classes.aliasTarget(class_name) orelse class_name;
-            if (self.currentFrame().called_class) |cc| {
-                if (self.isAncestor(class_name, cc)) lsb_class = cc;
-            }
         }
         return .{ .class_name = class_name, .called_class = lsb_class orelse class_name };
     }
