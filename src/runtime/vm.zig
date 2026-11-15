@@ -1059,6 +1059,10 @@ pub const VM = struct {
     cycle_fiber_candidates: std.ArrayListUnmanaged(*Fiber) = .empty,
     // the cycle collector's walk stack, kept for its capacity
     cycle_work: std.ArrayListUnmanaged(CycleWork) = .empty,
+    // pass 3's worklist: nodes just found alive whose children are still
+    // to be marked (php's gc_scan_black walks it the same way)
+    cycle_alive: std.ArrayListUnmanaged(CycleAlive) = .empty,
+    cycle_alive_lost: bool = false,
     collecting_cycles: bool = false,
     closure_instance_count: u32 = 0,
     // the closure instances self.functions holds: no call site names one, so
@@ -3705,6 +3709,7 @@ pub const VM = struct {
         self.cycle_gen_candidates.deinit(self.allocator);
         self.cycle_fiber_candidates.deinit(self.allocator);
         self.cycle_work.deinit(self.allocator);
+        self.cycle_alive.deinit(self.allocator);
         self.array_ref_bindings.deinit(self.allocator);
         if (self.ref_index) |ri| {
             ri.deinit(self.allocator);
@@ -31968,15 +31973,45 @@ pub const VM = struct {
     }
 
     // pass 3 of the collector: nodes with external references are alive,
-    // and so is everything they reach
+    // and so is everything they reach. each node is marked once and its
+    // children are walked once, from a worklist, so the pass is linear in
+    // the graph (a fixpoint over every node made a deep chain quadratic)
     fn cyclePropagateAlive(self: *VM, vo: anytype, va: anytype) void {
+        const work = &self.cycle_alive;
+        work.clearRetainingCapacity();
+        self.cycle_alive_lost = false;
+        for (self.ref_cells.items) |cell| {
+            if (cell.visited and cell.scratch != 0) self.cycleAliveQueue(.{ .cell = cell });
+        }
+        for (self.cycle_gens.keys(), self.cycle_gens.values()) |g, scratch| {
+            if (scratch != 0) self.cycleAliveQueue(.{ .generator = g });
+        }
+        for (self.cycle_fibers.keys(), self.cycle_fibers.values()) |f, scratch| {
+            if (scratch != 0) self.cycleAliveQueue(.{ .fiber = f });
+        }
+        for (vo.keys()) |obj| {
+            if (obj.scratch_rc != 0) self.cycleAliveQueue(.{ .object = obj });
+        }
+        for (va.keys()) |arr| {
+            if (arr.scratch_rc != 0) self.cycleAliveQueue(.{ .array = arr });
+        }
+        while (work.pop()) |item| switch (item) {
+            .cell => |cell| if (cell.visited) {
+                _ = self.cycleMarkAliveChild(cell.value, vo, va);
+            },
+            .generator => |g| _ = self.cycleGeneratorEdges(g, .mark_alive, vo, va),
+            .fiber => |f| _ = self.cycleFiberEdges(f, .mark_alive, vo, va),
+            .object => |obj| _ = self.cycleMarkAlive(obj, vo, va),
+            .array => |arr| _ = self.cycleMarkAliveArr(arr, vo, va),
+        };
+        // a node the worklist couldn't hold: fall back to sweeping every
+        // live node until nothing changes, so nothing alive is collected
+        if (!self.cycle_alive_lost) return;
         var changed = true;
         while (changed) {
             changed = false;
             for (self.ref_cells.items) |cell| {
-                if (cell.visited and cell.scratch != 0) {
-                    if (self.cycleMarkAliveChild(cell.value, vo, va)) changed = true;
-                }
+                if (cell.visited and cell.scratch != 0 and self.cycleMarkAliveChild(cell.value, vo, va)) changed = true;
             }
             for (self.cycle_gens.keys(), self.cycle_gens.values()) |g, scratch| {
                 if (scratch != 0 and self.cycleGeneratorEdges(g, .mark_alive, vo, va)) changed = true;
@@ -31984,22 +32019,31 @@ pub const VM = struct {
             for (self.cycle_fibers.keys(), self.cycle_fibers.values()) |f, scratch| {
                 if (scratch != 0 and self.cycleFiberEdges(f, .mark_alive, vo, va)) changed = true;
             }
-            var it = vo.iterator();
-            while (it.next()) |kv| {
-                const obj = kv.key_ptr.*;
-                if (obj.scratch_rc != 0) {
-                    if (self.cycleMarkAlive(obj, vo, va)) changed = true;
-                }
+            for (vo.keys()) |obj| {
+                if (obj.scratch_rc != 0 and self.cycleMarkAlive(obj, vo, va)) changed = true;
             }
-            var ait = va.iterator();
-            while (ait.next()) |kv| {
-                const arr = kv.key_ptr.*;
-                if (arr.scratch_rc != 0) {
-                    if (self.cycleMarkAliveArr(arr, vo, va)) changed = true;
-                }
+            for (va.keys()) |arr| {
+                if (arr.scratch_rc != 0 and self.cycleMarkAliveArr(arr, vo, va)) changed = true;
             }
+            work.clearRetainingCapacity();
         }
+        self.cycle_alive_lost = false;
+    }
 
+    const CycleAlive = union(enum) { object: *PhpObject, array: *PhpArray, cell: *RefCell, generator: *Generator, fiber: *Fiber };
+
+    fn cycleAliveQueue(self: *VM, item: CycleAlive) void {
+        self.cycle_alive.append(self.allocator, item) catch {
+            self.cycle_alive_lost = true;
+        };
+    }
+
+    // marks a cell alive, queueing its value
+    fn cycleMarkCellAlive(self: *VM, cell: *RefCell) bool {
+        if (cell.scratch != 0) return false;
+        cell.scratch = 1;
+        self.cycleAliveQueue(.{ .cell = cell });
+        return true;
     }
 
     const GcTarget = union(enum) { obj: *PhpObject, arr: *PhpArray };
@@ -32522,10 +32566,7 @@ pub const VM = struct {
         switch (action) {
             .visit => |work| work.append(self.allocator, .{ .cell = cell }) catch {},
             .decrement => cellOf(cell).scratch -= 1,
-            .mark_alive => if (cellOf(cell).scratch == 0) {
-                cellOf(cell).scratch = 1;
-                return true;
-            },
+            .mark_alive => return self.cycleMarkCellAlive(cellOf(cell)),
         }
         return false;
     }
@@ -32632,21 +32673,14 @@ pub const VM = struct {
             for (self.captures.items[range.start..][0..range.len]) |capture| {
                 if (self.cycleMarkAliveChild(capture.value, vo, va)) changed = true;
                 if (capture.ref_cell) |cell| {
-                    if (cellOf(cell).scratch == 0) {
-                        cellOf(cell).scratch = 1;
-                        changed = true;
-                    }
+                    if (self.cycleMarkCellAlive(cellOf(cell))) changed = true;
                 }
             }
             if (range.has_statics) {
                 var statics = self.statics_cells.iterator();
                 while (statics.next()) |entry| {
                     if (!closureOwnsStatic(name, entry.key_ptr.*)) continue;
-                    const cell = cellOf(entry.value_ptr.*);
-                    if (cell.scratch == 0) {
-                        cell.scratch = 1;
-                        changed = true;
-                    }
+                    if (self.cycleMarkCellAlive(cellOf(entry.value_ptr.*))) changed = true;
                 }
             }
         };
@@ -32671,11 +32705,7 @@ pub const VM = struct {
         for (arr.entries.items) |e| {
             if (self.cycleMarkAliveChild(e.value, vo, va)) changed = true;
             if (e.ref) |value| {
-                const cell = cellOf(value);
-                if (cell.scratch == 0) {
-                    cell.scratch = 1;
-                    changed = true;
-                }
+                if (self.cycleMarkCellAlive(cellOf(value))) changed = true;
             }
         }
         return changed;
@@ -32686,24 +32716,28 @@ pub const VM = struct {
             .generator => |g| if (self.cycle_gens.getPtr(g)) |scratch| {
                 if (scratch.* == 0) {
                     scratch.* = 1;
+                    self.cycleAliveQueue(.{ .generator = g });
                     return true;
                 }
             },
             .fiber => |f| if (self.cycle_fibers.getPtr(f)) |scratch| {
                 if (scratch.* == 0) {
                     scratch.* = 1;
+                    self.cycleAliveQueue(.{ .fiber = f });
                     return true;
                 }
             },
             .object => |o| {
-                if (vo.contains(o) and o.scratch_rc == 0) {
+                if (o.scratch_rc == 0 and vo.contains(o)) {
                     o.scratch_rc = 1;
+                    self.cycleAliveQueue(.{ .object = o });
                     return true;
                 }
             },
             .array => |a| {
-                if (va.contains(a) and a.scratch_rc == 0) {
+                if (a.scratch_rc == 0 and va.contains(a)) {
                     a.scratch_rc = 1;
+                    self.cycleAliveQueue(.{ .array = a });
                     return true;
                 }
             },
