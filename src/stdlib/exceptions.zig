@@ -235,7 +235,15 @@ fn exceptionGetMessage(ctx: *NativeContext, _: []const Value) RuntimeError!Nativ
 fn exceptionToString(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.literal("");
     if (this_val != .object) return NativeResult.literal("");
-    return NativeResult.takeString(try Value.String.adopt(ctx.allocator, try describe(ctx, this_val.object)));
+    const text = try Value.String.adopt(ctx.allocator, try describe(ctx, this_val.object));
+    // php keeps the result in the base class's private $string
+    const obj = this_val.object;
+    const base: []const u8 = if (ctx.vm.isInstanceOf(obj.class_name, "Exception")) "Exception" else "Error";
+    obj.setForScope(ctx.vm.allocator, "string", .{ .string = text }, base) catch {
+        text.release();
+        return error.OutOfMemory;
+    };
+    return NativeResult.takeString(text);
 }
 
 // what php prints after "Uncaught ": the pending throwable's __toString, a
