@@ -13468,7 +13468,10 @@ pub const VM = struct {
                         self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
                         return error.RuntimeError;
                     };
-                    // remove class name from stack (shift args down)
+                    // remove class name from stack (shift args down). the
+                    // operand may be a temporary string: the call keeps the
+                    // class's declared name, and the operand is released
+                    const declared_class = self.declaredClassName(class_name);
                     var i: usize = 0;
                     while (i < ac) : (i += 1) {
                         self.stack[self.sp - ac - 1 + i] = self.stack[self.sp - ac + i];
@@ -13476,7 +13479,8 @@ pub const VM = struct {
                     }
                     self.clearArgStackFrom(self.sp - 1);
                     self.sp -= 1;
-                    try self.callStaticFunction(full_name, arg_count, self.scopedCallClass(full_name, class_name));
+                    self.stackRelease(class_val);
+                    try self.callStaticFunction(full_name, arg_count, self.scopedCallClass(full_name, declared_class));
                 },
 
                 .static_call_dyn_method => {
