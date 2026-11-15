@@ -184,7 +184,7 @@ fn errorExceptionConstruct(ctx: *NativeContext, args: []const Value) RuntimeErro
     const line = if (args.len >= 5) try a.longOrNull(4, "line") else null;
     const previous = if (args.len >= 6) try a.objectOrNull(5, "previous", "Throwable") else null;
     if (message) |m| try setMessage(ctx, obj, args[0], m);
-    if (code) |c| try obj.set(ctx.allocator, "code", .{ .int = c });
+    if (code) |c| try setCode(ctx, obj, c);
     if (severity) |sv| try obj.set(ctx.allocator, "severity", .{ .int = sv });
     // a filename without a line puts the line at 0
     if (file) |f| {
@@ -193,6 +193,17 @@ fn errorExceptionConstruct(ctx: *NativeContext, args: []const Value) RuntimeErro
     } else if (line) |l| try obj.set(ctx.allocator, "line", .{ .int = l });
     if (previous) |p| try obj.set(ctx.allocator, "previous", .{ .object = p });
     return NativeResult.scalar(.null);
+}
+
+// zend_update_property_ex: a subclass may redeclare $code with a set hook,
+// which runs (and may throw, ending the constructor)
+fn setCode(ctx: *NativeContext, obj: *PhpObject, code: i64) RuntimeError!void {
+    if (ctx.vm.hasPropHook(obj.class_name, "code", .set) and !ctx.vm.inPropHook(obj, "code")) {
+        if (try ctx.vm.callPropHook(obj, "code", .set, .{ .int = code })) |r| ctx.vm.releaseValue(r);
+        if (ctx.vm.pending_exception != null) return error.RuntimeError;
+        return;
+    }
+    try obj.set(ctx.allocator, "code", .{ .int = code });
 }
 
 // the message argument, shared when it already is a string
@@ -218,7 +229,7 @@ fn exceptionConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     const code = if (args.len >= 2) try a.long(1, "code") else null;
     const previous = if (args.len >= 3) try a.objectOrNull(2, "previous", "Throwable") else null;
     if (message) |m| try setMessage(ctx, obj, args[0], m);
-    if (code) |c| try obj.set(ctx.allocator, "code", .{ .int = c });
+    if (code) |c| try setCode(ctx, obj, c);
     if (previous) |p| try obj.set(ctx.allocator, "previous", .{ .object = p });
     return NativeResult.scalar(.null);
 }

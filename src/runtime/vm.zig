@@ -19617,11 +19617,14 @@ pub const VM = struct {
                         const setter = try std.fmt.allocPrint(self.allocator, "{s}$hook_set", .{parent_prop.name});
                         defer self.allocator.free(setter);
                         if (parent_prop.is_virtual and !parent_cls.methods.contains(setter)) continue;
-                        if (@intFromEnum(child_prop.set_visibility) > @intFromEnum(parent_prop.set_visibility)) {
-                            if (parent_prop.set_visibility == .public) {
+                        // a set visibility no wider than the property's own is php's implicit one
+                        const parent_set = @max(@intFromEnum(parent_prop.set_visibility), @intFromEnum(parent_prop.visibility));
+                        const child_set = @max(@intFromEnum(child_prop.set_visibility), @intFromEnum(child_prop.visibility));
+                        if (child_set > parent_set) {
+                            if (parent_set == @intFromEnum(ClassDef.Visibility.public)) {
                                 self.setErrorMsg("Set access level of {s}::${s} must be omitted (as in class {s})", .{ class_name, child_prop.name, parent_class_name });
                             } else {
-                                self.setErrorMsg("Set access level of {s}::${s} must be {s}(set) (as in class {s}) or weaker", .{ class_name, child_prop.name, @tagName(parent_prop.set_visibility), parent_class_name });
+                                self.setErrorMsg("Set access level of {s}::${s} must be {s}(set) (as in class {s}) or weaker", .{ class_name, child_prop.name, @tagName(@as(ClassDef.Visibility, @enumFromInt(parent_set))), parent_class_name });
                             }
                             return error.RuntimeError;
                         }
