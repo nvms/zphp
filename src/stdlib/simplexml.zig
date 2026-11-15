@@ -785,6 +785,8 @@ fn sxmlGet(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
         if (!nameMatches(ch, name)) continue;
         if (ns_filter) |ns| if (!nodeInNs(ch, ns)) continue;
         const wrapper = try buildWrapper(ctx, doc, ch);
+        // php's SXE_ITER_ELEMENT: the elements of this name
+        try wrapper.set(ctx.allocator, "__named", .{ .bool = true });
         // propagate namespace filter so chained child accesses keep working
         if (ns_filter) |ns| {
             try wrapper.setCopiedString(ctx.allocator, "__ns", ns);
@@ -1018,10 +1020,61 @@ fn sxmlGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRes
     return NativeResult.borrowed(.{ .object = iter_obj });
 }
 
+// match_ns without a prefix: no filter (children() and attributes() without
+// a namespace) takes nodes outside any prefixed namespace
+fn matchNs(ns: ?*c.xmlNs, filter: ?[]const u8) bool {
+    const f = filter orelse return ns == null or ns.?.prefix == null;
+    const n = ns orelse return false;
+    if (n.href == null) return false;
+    return std.mem.eql(u8, n.href[0..cstrLen(n.href)], f);
+}
+
+// sxe_object_cast_ex's _IS_BOOL: true when the iteration the object stands
+// for has a first node, else when sxe_prop_is_empty finds something
+fn castObject(obj: *PhpObject, target: @import("../runtime/value.zig").NumericCast) ?Value {
+    if (target != .bool) return null;
+    const node = getNodePtr(obj) orelse return .{ .bool = false };
+    const ns_v = obj.get("__ns");
+    // zphp marks children() and attributes() without a namespace with ""
+    const filter: ?[]const u8 = if (ns_v == .string and ns_v.string.len > 0) ns_v.string.bytes() else null;
+    const attr_list = obj.get("__attr_view") == .bool and obj.get("__attr_view").bool;
+    const iter_children = obj.get("__iter_children") == .bool and obj.get("__iter_children").bool;
+    // the document's wrapper iterates children too, but without the
+    // namespace filter children() sets
+    const child_list = iter_children and !(ns_v != .string and isRootElement(node));
+    // the elements a name selects have their first one; a single element
+    // (the document's, one an iteration or an offset gives) iterates nothing
+    if (obj.get("__named") == .bool and obj.get("__named").bool) return .{ .bool = true };
+    // the attributes count for every kind but a single element
+    var attr = node.properties;
+    while (attr != null) : (attr = attr.*.next) {
+        if (matchNs(attr.*.ns, filter)) return .{ .bool = true };
+    }
+    if (attr_list) return .{ .bool = false };
+    var child = node.children;
+    while (child != null) : (child = child.*.next) {
+        const n = child.*;
+        if (child_list) {
+            if (n.type == c.XML_ELEMENT_NODE and matchNs(n.ns, filter)) return .{ .bool = true };
+            continue;
+        }
+        if (n.children != null or n.prev != null or n.next != null) {
+            if (n.type == c.XML_TEXT_NODE) continue;
+        } else if (n.type == c.XML_TEXT_NODE) {
+            if (n.content != null and n.content[0] != 0) return .{ .bool = true };
+            continue;
+        }
+        if (n.type == c.XML_ELEMENT_NODE and !matchNs(n.ns, filter)) continue;
+        if (n.name == null) continue;
+        return .{ .bool = true };
+    }
+    return .{ .bool = false };
+}
+
 // ---------------- registration ----------------
 
 pub fn register(vm: *VM, a: Allocator) !void {
-    var def = ClassDef{ .name = "SimpleXMLElement", .native_clone = cloneHandle, .native_cleanup = cleanupWrapper };
+    var def = ClassDef{ .name = "SimpleXMLElement", .native_clone = cloneHandle, .native_cleanup = cleanupWrapper, .native_cast = castObject };
     try def.interfaces.append(a, "Countable");
     try def.interfaces.append(a, "IteratorAggregate");
     try def.interfaces.append(a, "ArrayAccess");
