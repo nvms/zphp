@@ -3085,7 +3085,7 @@ const Parser = struct {
             if (prec == 0 or prec <= min_prec) {
                 // php allows assignment as rhs of any operator: false === $x = expr
                 const left_tag = self.nodes.items[left].tag;
-                if (prec == 4 and (isAssignTarget(left_tag) or ((left_tag == .array_literal or left_tag == .list_destructure or left_tag == .array_push_target) and self.peek() == .equal))) {
+                if (prec == 4 and (isAssignTarget(left_tag) or left_tag == .array_push_target or ((left_tag == .array_literal or left_tag == .list_destructure) and self.peek() == .equal))) {
                     // fall through to parse the assignment
                 } else break;
             }
