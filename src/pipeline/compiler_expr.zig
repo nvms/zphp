@@ -602,7 +602,9 @@ pub fn compileBinaryOp(self: *Compiler, node: Ast.Node) Error!void {
     if (op_tag == .kw_instanceof) {
         try self.compileNode(node.data.lhs);
         const rhs = self.ast.nodes[node.data.rhs];
-        if (rhs.tag == .variable or rhs.tag == .variable_variable or rhs.tag == .property_access or rhs.tag == .array_access) {
+        // class_name_reference: a name, or a variable or `(expr)` whose value
+        // names the class
+        if (rhs.tag != .identifier and rhs.tag != .qualified_name) {
             try self.compileNode(node.data.rhs);
         } else {
             const class_name = try resolveNodeClassName(self, rhs);
