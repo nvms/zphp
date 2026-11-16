@@ -38,3 +38,23 @@ echo (new MyException)->getMessage(), "\n";
 // static internal methods still work
 var_dump(DateTime::createFromFormat('Y-m-d', '2024-01-02') instanceof DateTime);
 var_dump(Closure::fromCallable('strlen')('abc'));
+
+// aliases and methods without parameters php declares non-static too
+$calls = [
+    fn() => ReflectionClass::isIterateable(),
+    fn() => ReflectionClass::isIterable(),
+    fn() => ReflectionClass::getExtensionName(),
+    fn() => ReflectionMethod::hasPrototype(),
+    fn() => ReflectionParameter::isCallable(),
+    fn() => SplObjectStorage::seek(0),
+    fn() => SplPriorityQueue::getExtractFlags(),
+    fn() => SplFixedArray::getIterator(),
+];
+foreach ($calls as $call) {
+    try {
+        $call();
+        echo "no error\n";
+    } catch (Error $e) {
+        echo get_class($e), ": ", $e->getMessage(), "\n";
+    }
+}
