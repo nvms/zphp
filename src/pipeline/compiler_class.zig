@@ -3004,6 +3004,16 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
         if (self.ast.nodes[m].tag == .class_property_hooks) return self.fail(self.ast.nodes[m].main_token, "Hooked properties cannot be readonly");
     };
 
+    // zend_begin_method_decl: an abstract method needs an abstract class,
+    // refused while compiling, at the method
+    if (class_modifiers & 1 == 0) for (members) |m| {
+        const member = self.ast.nodes[m];
+        if (member.tag != .interface_method) continue;
+        const method = self.ast.tokenSlice(member.main_token);
+        if (class_names.isAnonymous(class_name)) return self.failFmt(member.main_token, "Anonymous class method {s}() must not be abstract", .{method});
+        return self.failFmt(member.main_token, "Class {s} declares abstract method {s}() and must therefore be declared abstract", .{ class_name, method });
+    };
+
     var method_count: u16 = 0;
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
