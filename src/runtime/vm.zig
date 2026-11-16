@@ -1062,6 +1062,9 @@ pub const VM = struct {
     // where the caller of a function returning by reference resumes when
     // that function returned no variable (php still hands back a reference)
     return_ref_value_at: ?struct { frame: usize, ip: usize } = null,
+    // where the caller of the last return_ref resumes: an argument a call
+    // returned by reference is that reference only right after that call
+    return_ref_site: ?struct { frame: usize, ip: usize } = null,
     // the destructors php's request shutdown runs, with no script running
     shutdown_destructors: bool = false,
     captures: std.ArrayListUnmanaged(CaptureEntry) = .empty,
@@ -6144,6 +6147,7 @@ pub const VM = struct {
                     const rr_saved_entry_sp = self.currentFrame().entry_sp;
                     try self.popFrame();
                     self.return_ref_fresh = self.last_return_ref != null;
+                    self.return_ref_site = if (self.frame_count > 0) .{ .frame = self.frame_count - 1, .ip = self.currentFrame().ip } else null;
                     if (rr_saved_entry_sp > 0) self.sp = rr_saved_entry_sp;
                     self.pushTransfer(rr_result);
                     const rr_drained = self.frame_count > base_frame and self.drainAtReturn();
@@ -11935,8 +11939,12 @@ pub const VM = struct {
                         // SEND_VAR_NO_REF: a call that returned a reference
                         // passes it; any other result is a temporary the
                         // callee gets to itself, with php's notice
-                        if (self.return_ref_fresh) if (self.last_return_ref) |cell| if (sameReferent(cell.*, sent)) continue;
-                        if (self.returnedRefValueHere(field - 1)) continue;
+                        const at = field - bytecode.op_bytes;
+                        if (self.returnedRefHere(at)) |cell| {
+                            self.setArgSource(self.sp - 1, .{ .cell = .{ .value = cell } });
+                            continue;
+                        }
+                        if (self.returnedRefValueHere(at)) continue;
                         if (sent == .array and sent.array.refcount > 1) {
                             const own = try self.cowSeparate(sent.array);
                             if (own != sent.array) {
@@ -23645,6 +23653,16 @@ pub const VM = struct {
 
     // whether the call that just returned to the instruction at ip was to
     // a function returning by reference that returned no variable
+    // the reference the call that just returned to `ip` handed back
+    fn returnedRefHere(self: *VM, ip: usize) ?*Value {
+        if (!self.return_ref_fresh) return null;
+        const cell = self.last_return_ref orelse return null;
+        const site = self.return_ref_site orelse return null;
+        if (self.frame_count == 0 or site.frame != self.frame_count - 1 or site.ip != ip) return null;
+        self.return_ref_fresh = false;
+        return cell;
+    }
+
     fn returnedRefValueHere(self: *VM, ip: usize) bool {
         const at = self.return_ref_value_at orelse return false;
         if (self.frame_count == 0 or at.frame != self.frame_count - 1 or at.ip != ip) return false;

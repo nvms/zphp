@@ -1504,7 +1504,18 @@ fn compileArgLvalue(self: *Compiler, arg_idx: u32, guard: ArgGuard) Error!void {
             switch (argSendKind(self, arg_idx)) {
                 .call => try emitValueGuard(self, guard, .arg_call_result),
                 .value => try emitValueGuard(self, guard, .arg_value),
-                .reference => {},
+                .reference => {
+                    // `$b =& $a` sends the reference it made: the variable
+                    // it assigned
+                    const node = self.ast.nodes[arg_idx];
+                    if (node.tag == .assign and self.ast.nodes[node.data.lhs].tag == .variable) {
+                        try self.emitOp(.arg_variable);
+                        try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(self.ast.tokenSlice(self.ast.nodes[node.data.lhs].main_token)) }));
+                        try guard.guards.append(self.allocator, @intCast(self.chunk.offset()));
+                        try self.emitU16(0);
+                        try self.emitByte(guard.pos);
+                    }
+                },
             }
         },
     }
