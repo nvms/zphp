@@ -6,6 +6,10 @@ $path = parse_url($_SERVER["REQUEST_URI"], PHP_URL_PATH);
 
 if ($path === "/health") {
     echo json_encode(["status" => "ok"]);
+} elseif ($path === "/large") {
+    // 4 MB, more than a socket buffer holds: a slow reader makes writes block
+    header("Content-Type: text/plain");
+    for ($i = 0; $i < 65536; $i++) echo sprintf("%063d\n", $i);
 } elseif ($path === "/warning-midway") {
     echo "before ";
     trigger_error("careful", E_USER_WARNING);

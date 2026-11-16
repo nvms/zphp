@@ -338,6 +338,17 @@ check "h2 status 201" "201" "$h2_status"
 h1_fallback=$(curl -sk --http1.1 https://localhost:$H2_PORT/health)
 check "h1 fallback" '{"status":"ok"}' "$h1_fallback"
 
+# a response larger than the socket buffers, read slowly, arrives whole:
+# writes that would block wait for the reader instead of dropping bytes
+large_expected=$(python3 -c "import hashlib,sys; sys.stdout.write(hashlib.md5(b''.join(b'%063d\\n' % i for i in range(65536))).hexdigest())")
+for proto in --http2 --http1.1; do
+    large_got=$(curl -sk $proto --limit-rate 2M --max-time 60 "https://localhost:$H2_PORT/large" | md5sum | cut -d' ' -f1)
+    check "tls large response, slow reader ($proto)" "$large_expected" "$large_got"
+done
+
+large_plain=$(curl -s --limit-rate 2M --max-time 60 "http://localhost:$PORT/large" | md5sum | cut -d' ' -f1)
+check "large response, slow reader (plain http)" "$large_expected" "$large_plain"
+
 h2_multi=$(curl -sk --http2 https://localhost:$H2_PORT/health https://localhost:$H2_PORT/health https://localhost:$H2_PORT/health 2>&1)
 h2_count=$(echo "$h2_multi" | grep -o '"status":"ok"' | wc -l | tr -d ' ')
 check "h2 multiplexing" "3" "$h2_count"

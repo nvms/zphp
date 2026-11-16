@@ -105,6 +105,8 @@ const Request = struct {
 
 const ConnState = enum { tls_handshaking, http_reading, h2_active, ws_idle, closing };
 
+const write_stall_ms: i32 = 30_000;
+
 const Connection = struct {
     fd: posix.socket_t,
     stream: net.Stream,
@@ -146,6 +148,23 @@ const Connection = struct {
 
     pub fn write(self: *Connection, data: []const u8) !usize {
         return self.ioWrite(data);
+    }
+
+    // a whole response part on a non-blocking socket: short writes go on
+    // from where they stopped, and a write that would block waits for the
+    // peer to drain (giving up after write_stall_ms without progress)
+    fn writeAll(self: *Connection, data: []const u8) !void {
+        var sent: usize = 0;
+        while (sent < data.len) {
+            const n = self.ioWrite(data[sent..]) catch |err| {
+                if (err != error.WouldBlock) return err;
+                var fds = [_]sys.pollfd{.{ .fd = self.fd, .events = sys.POLL.OUT, .revents = 0 }};
+                if (try sys.poll(&fds, write_stall_ms) == 0) return error.WriteStalled;
+                continue;
+            };
+            if (n == 0) return error.ConnectionClosed;
+            sent += n;
+        }
     }
 
     fn deinit(self: *Connection, allocator: Allocator) void {
@@ -1722,7 +1741,7 @@ fn tryServeStatic(allocator: Allocator, conn: *Connection, doc_root: []const u8,
             const conn_val = if (keep_alive) "keep-alive" else "close";
             var hdr_buf: [512]u8 = undefined;
             const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 304 Not Modified\r\nETag: {s}\r\nConnection: {s}\r\n\r\n", .{ etag, conn_val }) catch return false;
-            _ = conn.ioWrite(hdr) catch return false;
+            conn.writeAll(hdr) catch return false;
             return true;
         }
     }
@@ -1738,15 +1757,15 @@ fn tryServeStatic(allocator: Allocator, conn: *Connection, doc_root: []const u8,
             defer allocator.free(compressed);
             var hdr_buf: [512]u8 = undefined;
             const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nContent-Encoding: gzip\r\nETag: {s}\r\nCache-Control: public, max-age=3600\r\nVary: Accept-Encoding\r\nConnection: {s}\r\n\r\n", .{ mime, compressed.len, etag, conn_val }) catch return false;
-            _ = conn.ioWrite(hdr) catch return false;
-            _ = conn.ioWrite(compressed) catch return true;
+            conn.writeAll(hdr) catch return false;
+            conn.writeAll(compressed) catch return true;
             return true;
         }
     }
 
     var hdr_buf: [512]u8 = undefined;
     const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nETag: {s}\r\nCache-Control: public, max-age=3600\r\nConnection: {s}\r\n\r\n", .{ mime, size, etag, conn_val }) catch return false;
-    _ = conn.ioWrite(hdr) catch return false;
+    conn.writeAll(hdr) catch return false;
 
     var fbuf: [32768]u8 = undefined;
     var remaining: u64 = size;
@@ -1754,7 +1773,7 @@ fn tryServeStatic(allocator: Allocator, conn: *Connection, doc_root: []const u8,
         const to_read = @min(remaining, fbuf.len);
         const nr = platform.read(file, fbuf[0..to_read]) catch return true;
         if (nr == 0) break;
-        _ = conn.ioWrite(fbuf[0..nr]) catch return true;
+        conn.writeAll(fbuf[0..nr]) catch return true;
         remaining -= nr;
     }
     return true;
@@ -1869,8 +1888,8 @@ fn writeResponse(conn: *Connection, code: i64, content_type: []const u8, extra_h
         hdr_buf[pos + 1] = '\n';
         pos += 2;
     }
-    _ = conn.ioWrite(hdr_buf[0..pos]) catch return;
-    if (actual_body.len > 0) _ = conn.ioWrite(actual_body) catch return;
+    conn.writeAll(hdr_buf[0..pos]) catch return;
+    if (actual_body.len > 0) conn.writeAll(actual_body) catch return;
 }
 
 fn acceptsGzip(req: *const Request) bool {
