@@ -9234,6 +9234,10 @@ pub const VM = struct {
                             return error.RuntimeError;
                         };
                         obj_ptr = obj_ptr.storage();
+                        if (!self.overloadedForWrite(obj_ptr, prop_name)) if (self.restrictedObjectProperty(obj_ptr, prop_name)) |held| {
+                            try self.bindRefSlot(&frame.ref_slots, dst_name, try self.tempRefCell(held));
+                            continue;
+                        };
                         if (!self.overloadedForWrite(obj_ptr, prop_name) and try self.checkPropertyMutation(obj_ptr, prop_name, .indirect)) continue;
                         if (self.hasPropHook(obj_ptr.class_name, prop_name, .get) and !self.inPropHook(obj_ptr, prop_name) and !try self.propGetReturnsRef(obj_ptr, prop_name)) {
                             obj_ptr.refcount +%= 1;
@@ -9340,6 +9344,10 @@ pub const VM = struct {
                             return error.RuntimeError;
                         };
                         obj_ptr = obj_ptr.storage();
+                        if (self.restrictedObjectProperty(obj_ptr, prop_owned)) |held| {
+                            try self.bindRefSlot(&frame.ref_slots, dst_name, try self.tempRefCell(held));
+                            continue;
+                        }
                         if (try self.checkPropertyMutation(obj_ptr, prop_owned, .indirect)) continue;
                         if (self.hasPropHook(obj_ptr.class_name, prop_owned, .get) and !self.inPropHook(obj_ptr, prop_owned) and !try self.propGetReturnsRef(obj_ptr, prop_owned)) {
                             obj_ptr.refcount +%= 1;
@@ -25276,6 +25284,23 @@ pub const VM = struct {
         if (raw == .undef and mode != .write) return false;
         if (vr.is_readonly and self.reinit_windows.items.len > 0 and self.readonlyReinitable(obj, name)) return false;
         return self.checkPropertyMutationVis(obj, name, .indirect, vr);
+    }
+
+    // the object a readonly or private(set) property holds where the scope
+    // can't modify it: a write fetch gets a copy of it (zend_std_read_property
+    // for BP_VAR_W), so a reference to the property is a reference to that copy
+    fn restrictedObjectProperty(self: *VM, obj: *PhpObject, name: []const u8) ?Value {
+        const vr = self.findPropertyVisibility(obj.class_name, name);
+        if (!vr.declared or !self.propVisible(vr, name, vr.visibility) or datePeriodField(vr, name)) return null;
+        if (!vr.is_readonly and (vr.set_visibility == vr.visibility or self.propVisible(vr, name, vr.set_visibility))) return null;
+        const raw = obj.rawForScope(name, vr.defining_class);
+        return if (raw == .object) raw else null;
+    }
+
+    fn tempRefCell(self: *VM, value: Value) !*Value {
+        const cell = try self.newRefCell();
+        self.setCell(cell, value);
+        return cell;
     }
 
     fn checkPropertyMutation(self: *VM, obj: *PhpObject, name: []const u8, action: MutationAction) RuntimeError!bool {
