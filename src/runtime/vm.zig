@@ -26180,7 +26180,18 @@ pub const VM = struct {
         };
         if (!writable and result == .array) {
             self.pushCallResult(.{ .array = try self.shallowCloneCow(result.array) });
-        } else self.pushCallResult(result);
+            return;
+        }
+        // a reference to null becomes the array the write goes into, as
+        // the write fetch vivifies the element offsetGet handed out
+        if (writable and result == .null and self.return_ref_fresh) if (self.last_return_ref) |cell| if (cell.* == .null) {
+            self.return_ref_fresh = false;
+            const fresh: Value = .{ .array = try self.allocArray() };
+            try self.writeReference(cell, fresh);
+            self.pushFetched(cell.*);
+            return;
+        };
+        self.pushCallResult(result);
     }
 
     // php's zend_fetch_dimension_address on an ArrayAccess object: what
