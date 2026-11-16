@@ -80,7 +80,14 @@ fn createObject(ctx: *NativeContext, class: []const u8, context: ?*PhpObject) Ru
     obj.retain();
     errdefer ctx.vm.releaseValue(.{ .object = obj });
     if (!try filters.assignTypedProperty(ctx, obj, "context", if (context) |c| .{ .resource = c } else .null)) return error.RuntimeError;
-    if (ctx.vm.hasMethod(class, "__construct")) _ = try ctx.vm.callMethod(obj, "__construct", &.{});
+    if (ctx.vm.hasMethod(class, "__construct")) {
+        // called from the stream function: an ArgumentCountError names no
+        // calling file and line
+        const outer = ctx.vm.native_caller;
+        ctx.vm.native_caller = .{ .name = ctx.call_name, .frames = ctx.vm.frame_count };
+        defer ctx.vm.native_caller = outer;
+        _ = try ctx.vm.callMethod(obj, "__construct", &.{});
+    }
     return obj;
 }
 
