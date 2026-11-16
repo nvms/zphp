@@ -24374,11 +24374,21 @@ pub const VM = struct {
                         try self.bindRefSlot(refs, func.params[ri], cell);
                         continue;
                     }
+                    // php made the reference as the argument was sent, so a
+                    // later argument that wrote the variable (`f($x, $x = 1)`)
+                    // wrote through it: the parameter takes the variable's
+                    // value now, not the one pushed. a typed parameter keeps
+                    // the pushed value, which its check coerced
+                    const coerced = func.has_param_types;
                     if (self.currentFrame().ref_slots.get(caller_var)) |existing_cell| {
-                        self.setCell(existing_cell, new_vars.get(func.params[ri]) orelse .null);
+                        if (coerced)
+                            self.setCell(existing_cell, new_vars.get(func.params[ri]) orelse .null)
+                        else
+                            try new_vars.put(self.allocator, func.params[ri], existing_cell.*);
                         try self.bindRefSlot(refs, func.params[ri], existing_cell);
                     } else {
-                        var bound = new_vars.get(func.params[ri]) orelse .null;
+                        var bound = if (coerced) new_vars.get(func.params[ri]) orelse .null else self.frameVariable(self.currentFrame(), caller_var) orelse .null;
+                        if (!coerced) try new_vars.put(self.allocator, func.params[ri], bound);
                         // a PHP reference is never COW-shared with a non-reference:
                         // binding the ref to a COW-shared array must give it a
                         // private copy, else an in-place mutation through the ref
