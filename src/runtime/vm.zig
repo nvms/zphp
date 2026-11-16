@@ -3301,6 +3301,7 @@ pub const VM = struct {
             try c.put(a, "LC_NUMERIC", .{ .int = lc.numeric });
             try c.put(a, "LC_TIME", .{ .int = lc.time });
             if (lc.messages) |m| try c.put(a, "LC_MESSAGES", .{ .int = m });
+            for (@import("../stdlib/locale.zig").langinfo_items) |item| try c.put(a, item[0], .{ .int = item[1] });
         }
         try c.put(a, "INPUT_SERVER", .{ .int = 5 });
         try c.put(a, "INPUT_SESSION", .{ .int = 6 });

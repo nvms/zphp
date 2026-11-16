@@ -14,6 +14,88 @@ extern "c" fn setlocale(category: c_int, locale: ?[*:0]const u8) ?[*:0]const u8;
 extern "c" fn mbrlen(s: [*]const u8, n: usize, ps: *anyopaque) usize;
 extern "c" fn localeconv() *const Lconv;
 extern "c" fn strcoll(a: [*:0]const u8, b: [*:0]const u8) c_int;
+extern "c" fn nl_langinfo(item: c_int) ?[*:0]const u8;
+
+// the nl_item constants php registers, with glibc's values (php is built
+// against glibc on linux; other systems have no table here yet)
+pub const langinfo_items: []const struct { []const u8, i64 } = if (builtin.os.tag == .linux) &.{
+    .{ "ABDAY_1", 131072 },
+    .{ "ABDAY_2", 131073 },
+    .{ "ABDAY_3", 131074 },
+    .{ "ABDAY_4", 131075 },
+    .{ "ABDAY_5", 131076 },
+    .{ "ABDAY_6", 131077 },
+    .{ "ABDAY_7", 131078 },
+    .{ "DAY_1", 131079 },
+    .{ "DAY_2", 131080 },
+    .{ "DAY_3", 131081 },
+    .{ "DAY_4", 131082 },
+    .{ "DAY_5", 131083 },
+    .{ "DAY_6", 131084 },
+    .{ "DAY_7", 131085 },
+    .{ "ABMON_1", 131086 },
+    .{ "ABMON_2", 131087 },
+    .{ "ABMON_3", 131088 },
+    .{ "ABMON_4", 131089 },
+    .{ "ABMON_5", 131090 },
+    .{ "ABMON_6", 131091 },
+    .{ "ABMON_7", 131092 },
+    .{ "ABMON_8", 131093 },
+    .{ "ABMON_9", 131094 },
+    .{ "ABMON_10", 131095 },
+    .{ "ABMON_11", 131096 },
+    .{ "ABMON_12", 131097 },
+    .{ "MON_1", 131098 },
+    .{ "MON_2", 131099 },
+    .{ "MON_3", 131100 },
+    .{ "MON_4", 131101 },
+    .{ "MON_5", 131102 },
+    .{ "MON_6", 131103 },
+    .{ "MON_7", 131104 },
+    .{ "MON_8", 131105 },
+    .{ "MON_9", 131106 },
+    .{ "MON_10", 131107 },
+    .{ "MON_11", 131108 },
+    .{ "MON_12", 131109 },
+    .{ "AM_STR", 131110 },
+    .{ "PM_STR", 131111 },
+    .{ "D_T_FMT", 131112 },
+    .{ "D_FMT", 131113 },
+    .{ "T_FMT", 131114 },
+    .{ "T_FMT_AMPM", 131115 },
+    .{ "ERA", 131116 },
+    .{ "ERA_YEAR", 131117 },
+    .{ "ERA_D_T_FMT", 131120 },
+    .{ "ERA_D_FMT", 131118 },
+    .{ "ERA_T_FMT", 131121 },
+    .{ "ALT_DIGITS", 131119 },
+    .{ "INT_CURR_SYMBOL", 262144 },
+    .{ "CURRENCY_SYMBOL", 262145 },
+    .{ "CRNCYSTR", 262159 },
+    .{ "MON_DECIMAL_POINT", 262146 },
+    .{ "MON_THOUSANDS_SEP", 262147 },
+    .{ "MON_GROUPING", 262148 },
+    .{ "POSITIVE_SIGN", 262149 },
+    .{ "NEGATIVE_SIGN", 262150 },
+    .{ "INT_FRAC_DIGITS", 262151 },
+    .{ "FRAC_DIGITS", 262152 },
+    .{ "P_CS_PRECEDES", 262153 },
+    .{ "P_SEP_BY_SPACE", 262154 },
+    .{ "N_CS_PRECEDES", 262155 },
+    .{ "N_SEP_BY_SPACE", 262156 },
+    .{ "P_SIGN_POSN", 262157 },
+    .{ "N_SIGN_POSN", 262158 },
+    .{ "DECIMAL_POINT", 65536 },
+    .{ "RADIXCHAR", 65536 },
+    .{ "THOUSANDS_SEP", 65537 },
+    .{ "THOUSEP", 65537 },
+    .{ "GROUPING", 65538 },
+    .{ "YESEXPR", 327680 },
+    .{ "NOEXPR", 327681 },
+    .{ "YESSTR", 327682 },
+    .{ "NOSTR", 327683 },
+    .{ "CODESET", 14 },
+} else &.{};
 
 // the members c requires, in its order; libraries add theirs after them
 const Lconv = extern struct {
@@ -49,7 +131,25 @@ pub const entries = .{
     .{ "setlocale", native_setlocale },
     .{ "localeconv", native_localeconv },
     .{ "strcoll", native_strcoll },
+    .{ "nl_langinfo", native_nl_langinfo },
 };
+
+// php's nl_langinfo: only the items it registers, read from the c library
+fn native_nl_langinfo(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const item: i64 = if (args.len > 0) Value.toInt(args[0]) else 0;
+    const known = for (langinfo_items) |entry| {
+        if (entry[1] == item) break true;
+    } else false;
+    if (!known) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "nl_langinfo(): Item '{d}' is not valid", .{item});
+        defer ctx.allocator.free(msg);
+        try ctx.vm.emitWarning(msg);
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    if (comptime builtin.os.tag != .linux) return NativeResult.scalar(.{ .bool = false });
+    const text = nl_langinfo(@intCast(item)) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.copyString(ctx.allocator, std.mem.span(text));
+}
 
 // set by a script's setlocale, so the end of a request puts the startup
 // locale back (php's BG(locale_changed))

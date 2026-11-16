@@ -155,7 +155,6 @@ pub const entries = .{
     .{ "ctype_punct", ctype_punct },
     .{ "ctype_cntrl", ctype_cntrl },
     .{ "ctype_graph", ctype_graph },
-    .{ "nl_langinfo", native_nl_langinfo },
     .{ "func_get_args", native_func_get_args },
     .{ "func_num_args", native_func_num_args },
     .{ "func_get_arg", native_func_get_arg },
@@ -631,11 +630,6 @@ fn ctype_cntrl(_: *NativeContext, args: []const Value) RuntimeError!NativeResult
 }
 fn ctype_graph(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     return NativeResult.scalar(ctypeCheck(args, isGraph));
-}
-
-fn native_nl_langinfo(_: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    _ = args;
-    return NativeResult.literal("");
 }
 
 fn isPunct(c: u8) bool {
