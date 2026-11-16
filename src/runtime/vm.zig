@@ -1403,6 +1403,9 @@ pub const VM = struct {
     response_headers: ?*PhpArray = null,
     last_http_response_headers: ?*PhpArray = null,
     headers_sent: bool = false,
+    // php_module_startup failed (a removed directive is set): the cli runs
+    // nothing and exits 1
+    startup_failed: bool = false,
     // the cli has no response code until one is set
     response_code_set: bool = false,
     // header_register_callback's callback, run as the headers are sent
@@ -2493,6 +2496,21 @@ pub const VM = struct {
         if (@import("../ini_config.zig").get("allow_url_include")) |v| {
             if (!(v.len == 0 or std.mem.eql(u8, v, "0") or std.ascii.eqlIgnoreCase(v, "off") or std.ascii.eqlIgnoreCase(v, "false") or std.ascii.eqlIgnoreCase(v, "no")))
                 vm.raiseErrorAt(E_DEPRECATED, "Directive 'allow_url_include' is deprecated", .{ .file = "Unknown", .line = 0 }) catch {};
+        }
+        // and of the ones php removed: any set to a nonzero number is an
+        // E_CORE_ERROR, which fails the startup
+        for ([_][]const u8{ "allow_call_time_pass_reference", "asp_tags", "define_syslog_variables", "highlight.bg", "magic_quotes_gpc", "magic_quotes_runtime", "magic_quotes_sybase", "register_globals", "register_long_arrays", "safe_mode", "safe_mode_gid", "safe_mode_include_dir", "safe_mode_exec_dir", "safe_mode_allowed_env_vars", "safe_mode_protected_env_vars", "zend.ze1_compatibility_mode", "track_errors" }) |name| {
+            const v = @import("../ini_config.zig").get(name) orelse continue;
+            // cfg_get_long: the leading number of the configured value
+            const trimmed = std.mem.trim(u8, v, " \t");
+            var end: usize = 0;
+            while (end < trimmed.len and (std.ascii.isDigit(trimmed[end]) or (end == 0 and (trimmed[0] == '-' or trimmed[0] == '+')))) end += 1;
+            if ((std.fmt.parseInt(i64, trimmed[0..end], 10) catch 0) == 0) continue;
+            const msg = std.fmt.allocPrint(allocator, "Directive '{s}' is no longer available in PHP", .{name}) catch continue;
+            defer allocator.free(msg);
+            vm.raiseErrorAt(16, msg, .{ .file = "Unknown", .line = 0 }) catch {};
+            vm.startup_failed = true;
+            break;
         }
         account.rebase();
     }

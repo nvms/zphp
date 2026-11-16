@@ -724,6 +724,10 @@ fn runWithVM(allocator: std.mem.Allocator, result: *CompileResult, script_path: 
     }
     vm.file_loader = &loadFile;
     vm.destructors_after_shutdown = true;
+    if (vm.startup_failed) {
+        _ = flushScriptOutput(vm);
+        std.process.exit(1);
+    }
     try initCliServerVars(vm, allocator);
     try initArgv(vm, allocator, script_path, script_args);
     vm.interpret(result) catch {
