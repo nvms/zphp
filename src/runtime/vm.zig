@@ -23463,17 +23463,19 @@ pub const VM = struct {
     pub fn cannotPassByReference(self: *VM, callee: []const u8, pos: u8) ![]u8 {
         var param: []const u8 = "";
         var shown: []const u8 = callee;
+        // get_function_arg_name: a variadic parameter has no name here
         if (self.functions.get(callee)) |func| {
             shown = try self.funcDisplayName(func);
-            if (func.params.len > 0) param = func.params[@min(pos, func.params.len - 1)];
+            const named = func.params.len - @intFromBool(func.is_variadic);
+            if (pos < named) param = func.params[pos];
             if (param.len > 0 and param[0] == '$') param = param[1..];
         } else {
             var lower_buf: [256]u8 = undefined;
             if (callee.len <= lower_buf.len) {
                 const signatures = @import("../stdlib/native_params_generated.zig").map;
                 const sig = signatures.get(callee) orelse signatures.get(std.ascii.lowerString(&lower_buf, callee));
-                if (sig) |sg| if (sg.params.len > 0) {
-                    param = sg.params[@min(pos, sg.params.len - 1)].name;
+                if (sig) |sg| if (pos < sg.params.len and !sg.params[pos].variadic) {
+                    param = sg.params[pos].name;
                 };
             }
         }
