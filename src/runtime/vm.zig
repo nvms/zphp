@@ -13650,6 +13650,19 @@ pub const VM = struct {
                     if (!self.classes.contains(class_name)) {
                         try self.tryAutoload(class_name);
                     }
+                    // zend_fetch_class: a class that doesn't exist is an Error
+                    // before any method lookup
+                    if (!self.classKnown(class_name)) {
+                        self.dropN(ac + 2);
+                        if (self.pending_exception != null) {
+                            if (self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        }
+                        const msg = try std.fmt.allocPrint(self.allocator, "Class \"{s}\" not found", .{class_name});
+                        defer self.allocator.free(msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    }
                     const full_name = self.resolveMethod(class_name, method_name) catch {
                         if (self.hasMethod(class_name, "__callStatic")) {
                             var args_arr = try self.allocArray();
@@ -13705,6 +13718,19 @@ pub const VM = struct {
                     const target = self.dynamicStaticTarget(raw_class);
                     const class_name = target.class_name;
                     if (!self.classes.contains(class_name)) try self.tryAutoload(class_name);
+                    if (!self.classKnown(class_name)) {
+                        self.stackRelease(args_val);
+                        self.stackRelease(method_val);
+                        self.stackRelease(class_val);
+                        if (self.pending_exception != null) {
+                            if (self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        }
+                        const msg = try std.fmt.allocPrint(self.allocator, "Class \"{s}\" not found", .{class_name});
+                        defer self.allocator.free(msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    }
                     const arr = args_val.array;
                     // the popped argument array is a temporary; autoloading or
                     // argument evaluation below may run PHP and drain, so pin
@@ -14278,6 +14304,11 @@ pub const VM = struct {
                 },
             }
         }
+    }
+
+    // a class, interface or trait of that name is declared
+    fn classKnown(self: *VM, name: []const u8) bool {
+        return self.classes.contains(name) or self.interfaces.contains(name) or self.traits.contains(name);
     }
 
     fn resolveRelativeClassName(self: *VM, name: []const u8) []const u8 {
