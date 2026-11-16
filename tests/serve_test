@@ -87,6 +87,12 @@ check "uncaught exception keeps a redirect" "301" "$(curl -s -o /dev/null -w "%{
 for i in 1 2 3; do
     check "extension constants ($i)" "42 1 no-stdin" "$(curl -s http://localhost:$PORT/extension-constants)"
 done
+check "garbage memory is reused" "bounded" "$(curl -s http://localhost:$PORT/garbage-memory)"
+# the response's header list survives a script dropping headers_list()'s array
+for i in 1 2 3; do
+    check "header list outlives headers_list ($i)" "text/plain listed" "$(curl -s -w '%{content_type} ' -o /tmp/zphp_serve_hl.$$ http://localhost:$PORT/header-list-then-garbage)$(cat /tmp/zphp_serve_hl.$$ 2>/dev/null)"
+done
+rm -f /tmp/zphp_serve_hl.$$
 
 # test: GET params
 resp=$(curl -s "http://localhost:$PORT/echo?name=alice&age=30")

@@ -283,7 +283,8 @@ fn native_headers_sent(ctx: *NativeContext, args: []const Value) RuntimeError!Na
 }
 
 fn native_headers_list(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    if (getResponseHeaders(ctx)) |arr| return NativeResult.borrowed(.{ .array = arr });
+    // a new array, as php builds one: the list is the vm's
+    if (getResponseHeaders(ctx)) |arr| return NativeResult.borrowed(.{ .array = try ctx.vm.cloneArray(arr) });
     return NativeResult.borrowed(.{ .array = try ctx.createArray() });
 }
 
@@ -312,6 +313,10 @@ pub fn appendResponseHeader(ctx: *NativeContext, hdr: []const u8) !void {
     } else {
         const arr = try ctx.createArray();
         try arr.append(ctx.allocator, .{ .string = owned });
+        // the vm holds the list until the request ends (its heap teardown
+        // frees it): nothing else counts it, and a release would free it
+        // while the response still has to read it
+        VM.arrayRetain(arr);
         ctx.vm.response_headers = arr;
     }
 }

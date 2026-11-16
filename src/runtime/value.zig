@@ -139,6 +139,9 @@ pub const PhpArray = struct {
     refcount: u32 = 0,
     elements_released: bool = false,
     pooled: bool = false,
+    // allocated before a serve worker's first request: never reused, since
+    // a serve reset keeps it and whatever request data it would hold
+    builtin: bool = false,
     cycle_queued: bool = false,
     release_queued: bool = false,
     // a weak container (WeakMap key list): its entries hold no reference to
@@ -1188,6 +1191,8 @@ pub const PhpObject = struct {
     // its destructor revives gets them back, so a later run can collect it
     gc_internal_refs: u32 = 0,
     pooled: bool = false,
+    // allocated before a serve worker's first request (see PhpArray.builtin)
+    builtin: bool = false,
     cycle_queued: bool = false,
     // a reference cell has targeted one of this object's properties; the
     // release path must detach those weak mirrors before the address is reused

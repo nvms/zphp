@@ -25,6 +25,26 @@ if ($path === "/health") {
 } elseif ($path === "/extension-constants") {
     // constants the stdlib modules define, not just the core ones
     echo CURLOPT_HEADER, " ", PREG_SPLIT_NO_EMPTY, " ", defined("STDIN") ? "stdin" : "no-stdin";
+} elseif ($path === "/header-list-then-garbage") {
+    // headers_list() hands out a copy; the vm's own list must outlive it
+    // while freed arrays are reused
+    header("X-One: 1");
+    $list = headers_list();
+    unset($list);
+    for ($i = 0; $i < 100; $i++) {
+        $x = [$i, "Content-Type: text/broken"];
+    }
+    header("Content-Type: text/plain");
+    echo "listed";
+} elseif ($path === "/garbage-memory") {
+    // freed arrays and objects are reused within a request
+    $base = memory_get_usage();
+    for ($i = 0; $i < 20000; $i++) {
+        $a = json_decode('{"a":[1,2,3],"b":{"c":' . $i . '}}', true);
+        $o = new stdClass;
+        $o->a = [$i];
+    }
+    echo memory_get_usage() - $base < 1000000 ? "bounded" : "grows";
 } elseif ($path === "/echo") {
     echo json_encode([
         "method" => $method,

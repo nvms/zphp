@@ -2498,6 +2498,8 @@ pub const VM = struct {
         vm.builtin_arr_hw = vm.arrays.items.len;
         vm.builtin_str_hw = vm.strings.items.len;
         vm.builtin_constant_count = vm.php_constants.count();
+        for (vm.arrays.items) |arr| arr.builtin = true;
+        for (vm.objects.items) |obj| obj.builtin = true;
         // a shell pooled during init lies below the marks, where a serve reset
         // never tears down what it holds; request code must not be handed one
         vm.free_objects.clearRetainingCapacity();
@@ -32181,7 +32183,7 @@ pub const VM = struct {
         // closures it held go before it
         self.drainPendingStringReleases();
         self.freeHandle(obj);
-        if (!self.serve_mode and !self.debug_no_pool and reusable) {
+        if (!self.debug_no_pool and reusable) {
             self.released_objects.append(self.allocator, obj) catch {};
         }
     }
@@ -32269,7 +32271,7 @@ pub const VM = struct {
         self.releaseArrayElements(arr);
         self.release_log = outer_log;
         self.destroyDropped(dropped.items, deferred_stack_arrays);
-        if (!self.serve_mode) self.released_arrays.append(self.allocator, arr) catch {};
+        self.released_arrays.append(self.allocator, arr) catch {};
     }
 
     // php frees a function's variables as it returns (zend_leave_helper), so
@@ -32313,7 +32315,9 @@ pub const VM = struct {
                 self.clearArgArraySources(arr);
                 arr.deinit(self.allocator);
                 arr.pooled = true;
-                self.free_arrays.append(self.allocator, arr) catch {};
+                // a builtin shell is never handed out again: a serve reset
+                // keeps it, with whatever a request stored in it
+                if (!arr.builtin) self.free_arrays.append(self.allocator, arr) catch {};
             }
             self.released_arrays.clearRetainingCapacity();
             for (self.released_objects.items) |obj| {
@@ -32328,7 +32332,7 @@ pub const VM = struct {
                 }
                 obj.deinit(self.allocator);
                 obj.pooled = true;
-                self.free_objects.append(self.allocator, obj) catch {};
+                if (!obj.builtin) self.free_objects.append(self.allocator, obj) catch {};
             }
             self.released_objects.clearRetainingCapacity();
         }
@@ -33814,7 +33818,7 @@ pub const VM = struct {
         if (arr.refcount != 0 or arr.elements_released or arr.pooled) return;
         arr.elements_released = true;
         self.releaseArrayElements(arr);
-        if (!self.serve_mode) self.released_arrays.append(self.allocator, arr) catch {};
+        self.released_arrays.append(self.allocator, arr) catch {};
     }
 
     pub fn queueArrayRelease(self: *VM, arr: *PhpArray) void {
