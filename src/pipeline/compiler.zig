@@ -490,6 +490,8 @@ pub const Compiler = struct {
     in_trait: bool = false,
     // set while the parameters and return type of a closure compile
     closure_signature: bool = false,
+    // a closure's parameter defaults are being compiled
+    closure_param_defaults: bool = false,
     // compiling a named function's signature: self and parent need a class
     named_signature: bool = false,
     // the type names already warned about as confusable, by token

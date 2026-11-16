@@ -1925,6 +1925,7 @@ fn extractParamTypes(self: *Compiler, param_nodes: []const u32) Error![]const []
 // with `function` as the function being compiled (its __FUNCTION__ and the
 // names of closures in it)
 fn paramDefaultValue(self: *Compiler, pnode: Ast.Node, function: []const u8) Error!Value {
+    if (relativeClassNameDefault(self, pnode.data.lhs, function)) |name| return .{ .string = Value.String.borrowed(name) };
     if (!sentinelDefault(self.ast, pnode.data.lhs)) {
         const outer_function = self.current_function;
         self.current_function = function;
@@ -1954,6 +1955,22 @@ fn paramDefaultValue(self: *Compiler, pnode: Ast.Node, function: []const u8) Err
     const mask = php_types.shape(text).mask;
     if (mask & php_types.DOUBLE != 0 and mask & php_types.LONG == 0) return .{ .float = @floatFromInt(value.int) };
     return value;
+}
+
+// `self::class` or `parent::class` where the class is known while compiling
+// (not in a trait or a closure): php compiles it to the name's string
+// (zend_try_compile_const_expr_resolve_class_name)
+fn relativeClassNameDefault(self: *Compiler, idx: u32, function: []const u8) ?[]const u8 {
+    if (idx == 0 or self.in_trait or self.closure_signature or self.closure_param_defaults or std.mem.startsWith(u8, function, "{closure")) return null;
+    const node = self.ast.nodes[idx];
+    if (node.tag != .static_prop_access or node.main_token == 0) return null;
+    if (!std.ascii.eqlIgnoreCase(self.ast.tokenSlice(node.main_token), "class")) return null;
+    const class_node = self.ast.nodes[node.data.lhs];
+    if (class_node.tag != .identifier) return null;
+    const written = self.ast.tokenSlice(class_node.main_token);
+    if (std.ascii.eqlIgnoreCase(written, "self") and self.current_class.len > 0) return self.current_class;
+    if (std.ascii.eqlIgnoreCase(written, "parent") and self.current_parent.len > 0) return self.current_parent;
+    return null;
 }
 
 // whether a parameter default is one the folded and sentinel defaults
@@ -2239,6 +2256,10 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
             is_variadic = true;
             try defaults.append(self.allocator, .null);
         } else if (pnode.data.lhs != 0) {
+            // a closure's scope isn't known while compiling its defaults
+            const outer_defaults = self.closure_param_defaults;
+            self.closure_param_defaults = true;
+            defer self.closure_param_defaults = outer_defaults;
             try defaults.append(self.allocator, try paramDefaultValue(self, pnode, self.current_function));
         } else {
             try defaults.append(self.allocator, .null);
