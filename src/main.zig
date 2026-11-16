@@ -251,6 +251,18 @@ fn compileSource(allocator: std.mem.Allocator, source: []const u8, path: []const
     return compileFrom(allocator, source, .{ .file_path = path });
 }
 
+// the script php_execute_script runs: the main file between
+// auto_prepend_file and auto_append_file ("none" or empty for neither)
+fn compileMainScript(allocator: std.mem.Allocator, source: []const u8, path: []const u8) !CompileResult {
+    return compileFrom(allocator, source, .{ .file_path = path, .auto_prepend = autoFile("auto_prepend_file"), .auto_append = autoFile("auto_append_file") });
+}
+
+fn autoFile(name: []const u8) []const u8 {
+    const value = @import("ini_config.zig").get(name) orelse return "";
+    if (std.ascii.eqlIgnoreCase(value, "none")) return "";
+    return value;
+}
+
 fn compileFrom(allocator: std.mem.Allocator, source: []const u8, origin: compiler.Origin) !CompileResult {
     const path = origin.file_path;
     var ast = try parser.parse(allocator, source);
@@ -680,7 +692,7 @@ fn runFile(allocator: std.mem.Allocator, path: []const u8, script_args: []const 
     const abs_path = resolvePath(allocator, path);
     defer if (abs_path.ptr != path.ptr) allocator.free(abs_path);
 
-    var result = try compileSource(allocator, source, abs_path);
+    var result = try compileMainScript(allocator, source, abs_path);
     defer result.deinit();
 
     try runWithVM(allocator, &result, path, script_args);

@@ -177,6 +177,10 @@ pub const Origin = struct {
     dir: ?[]const u8 = null,
     // receives the reason when compilation stops at a php compile-time error
     diagnostic: ?*?Diagnostic = null,
+    // auto_prepend_file and auto_append_file, required around the main
+    // script's own code (php_execute_script)
+    auto_prepend: []const u8 = "",
+    auto_append: []const u8 = "",
 };
 
 // a php compile-time fatal: the message and the token it is reported at
@@ -202,6 +206,14 @@ pub const Diagnostic = struct {
         return d.text[0..d.len];
     }
 };
+
+// `require 'path';` for auto_prepend_file and auto_append_file
+fn emitAutoRequire(self: *Compiler, path: []const u8) Error!void {
+    try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(path) }));
+    try self.emitOp(.require);
+    try self.emitByte(0);
+    try self.emitOp(.pop);
+}
 
 pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) Error!CompileResult {
     const file_path = origin.file_path;
@@ -271,6 +283,9 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
         anon_class_keys = outer_keys;
     }
     try compiler_class.assignRtdKeys(&c, ast.extraSlice(root.data.lhs), &anon_class_keys);
+    // php runs the prepended file before it compiles the script, so before
+    // anything of the script is declared
+    if (origin.auto_prepend.len > 0) try emitAutoRequire(&c, origin.auto_prepend);
     c.namespace = "";
     c.use_aliases.clearRetainingCapacity();
     try compiler_class.hoistEarlyClasses(&c, ast.extraSlice(root.data.lhs));
@@ -282,6 +297,7 @@ pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) 
         try c.compileNode(stmt);
     }
     try c.patchGotos();
+    if (origin.auto_append.len > 0) try emitAutoRequire(&c, origin.auto_append);
     try c.emitOp(.halt);
 
     const slot_names = try c.buildSlotNames();
