@@ -33765,6 +33765,12 @@ pub const VM = struct {
                         };
                         var pit = obj.properties.iterator();
                         while (pit.next()) |e| work.append(self.allocator, .{ .value = e.value_ptr.* }) catch return;
+                        if (obj.ref_mirrored) if (self.ref_index) |ri| {
+                            var cells = ri.fwd.iterator();
+                            while (cells.next()) |entry| for (entry.value_ptr.items) |target| {
+                                if (target == .object and target.object.object == obj) work.append(self.allocator, .{ .cell = entry.key_ptr.* }) catch return;
+                            };
+                        };
                     },
                     .array => |arr| {
                         if (va.contains(arr)) continue;
@@ -33814,6 +33820,14 @@ pub const VM = struct {
         }
         var pit = obj.properties.iterator();
         while (pit.next()) |e| self.cycleDecChild(e.value_ptr.*, vo, va);
+        // a property bound to a reference is one of the cell's binders, an
+        // edge inside the graph as an array element's is
+        if (obj.ref_mirrored) if (self.ref_index) |ri| {
+            var cells = ri.fwd.iterator();
+            while (cells.next()) |entry| for (entry.value_ptr.items) |target| {
+                if (target == .object and target.object.object == obj) cellOf(entry.key_ptr.*).scratch -= 1;
+            };
+        };
     }
 
     // a referenced element carries two counted holders of its value: the
@@ -33982,6 +33996,12 @@ pub const VM = struct {
         var pit = obj.properties.iterator();
         while (pit.next()) |e| if (self.cycleMarkAliveChild(e.value_ptr.*, vo, va)) {
             changed = true;
+        };
+        if (obj.ref_mirrored) if (self.ref_index) |ri| {
+            var cells = ri.fwd.iterator();
+            while (cells.next()) |entry| for (entry.value_ptr.items) |target| {
+                if (target == .object and target.object.object == obj and self.cycleMarkCellAlive(cellOf(entry.key_ptr.*))) changed = true;
+            };
         };
         return changed;
     }
