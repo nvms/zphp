@@ -4194,6 +4194,15 @@ pub const VM = struct {
         }
         self.global_slot_names = result.slot_names;
         self.top_slot_names = result.slot_names;
+        // php's symbol table has a slot for every compiled variable of the
+        // main script from the start, so assigning one allocates nothing
+        // memory_get_usage() would see
+        if (self.globals_array) |ga| {
+            const want = ga.entries.items.len + result.slot_names.len;
+            try ga.entries.ensureTotalCapacity(self.allocator, want);
+            try ga.reserveStringIndex(self.allocator, want);
+        }
+        try vars.ensureUnusedCapacity(self.allocator, @intCast(result.slot_names.len));
         if (self.ic) |ic| {
             try ic.top_dirty.resize(self.allocator, result.slot_names.len, false);
             ic.top_dirty.unsetAll();
@@ -11692,7 +11701,7 @@ pub const VM = struct {
                             defer self.freeStackArgs(args_buf_s, &args_buf);
                             self.dropN(ac);
 
-                            var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
+                            var tmp_vars = self.acquireFrameVars();
                             try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                             try self.ensureCallRoom();
                             self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .native = true };
@@ -11941,7 +11950,7 @@ pub const VM = struct {
                             const args_buf_s = try self.copyStackArgs(&args_buf, self.stack[self.sp - ac ..][0..ac]);
                             defer self.freeStackArgs(args_buf_s, &args_buf);
                             self.dropN(ac + 1);
-                            var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
+                            var tmp_vars = self.acquireFrameVars();
                             try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                             try self.ensureCallRoom();
                             self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .native = true };
@@ -12661,7 +12670,7 @@ pub const VM = struct {
                                 self.saveFrameArgs(arg_count);
                                 if (native.byref) self.captureArgSources(ac);
                                 self.dropN(ac + 1);
-                                var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
+                                var tmp_vars = self.acquireFrameVars();
                                 try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                                 try self.ensureCallRoom();
                                 self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .native = true };
@@ -12798,7 +12807,7 @@ pub const VM = struct {
                         self.dropN(1);
 
                         // push a temporary frame so native can read $this
-                        var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
+                        var tmp_vars = self.acquireFrameVars();
                         try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                         try self.ensureCallRoom();
                         self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .native = true };
@@ -13084,7 +13093,7 @@ pub const VM = struct {
                         self.saveFrameArgs(mcs_ac);
                         self.dropN(ac);
                         self.dropN(1);
-                        var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
+                        var tmp_vars = self.acquireFrameVars();
                         try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                         try self.ensureCallRoom();
                         self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .native = true };
@@ -13244,7 +13253,7 @@ pub const VM = struct {
                         self.saveFrameArgs(arg_count);
                         self.dropN(ac);
                         self.dropN(1);
-                        var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
+                        var tmp_vars = self.acquireFrameVars();
                         try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                         try self.ensureCallRoom();
                         self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .native = true };
@@ -13432,7 +13441,7 @@ pub const VM = struct {
                         self.saveFrameArgs(mcds_ac);
                         self.dropN(ac);
                         self.dropN(1);
-                        var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
+                        var tmp_vars = self.acquireFrameVars();
                         try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
                         try self.ensureCallRoom();
                         self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .native = true };
@@ -14754,7 +14763,7 @@ pub const VM = struct {
                     defer self.freeStackArgs(args_buf_s, &args_buf);
                     self.saveFrameArgs(arg_count);
                     self.dropN(ac);
-                    var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
+                    var tmp_vars = self.acquireFrameVars();
                     try tmp_vars.put(self.allocator, "$this", tv);
                     try self.ensureCallRoom();
                     self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .native = true, .called_class = this_called };
@@ -29653,7 +29662,7 @@ pub const VM = struct {
             }
         }
         if (self.native_fns.get(full_name)) |native| {
-            var tmp_vars: std.StringHashMapUnmanaged(Value) = .{};
+            var tmp_vars = self.acquireFrameVars();
             try tmp_vars.put(self.allocator, "$this", .{ .object = obj });
             try self.ensureCallRoom();
             self.frames[self.frame_count] = .{ .chunk = self.currentChunk(), .ip = self.currentFrame().ip, .vars = tmp_vars, .native = true };
