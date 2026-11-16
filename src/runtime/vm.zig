@@ -16211,6 +16211,14 @@ pub const VM = struct {
         }
         if (!self.classes.contains(class_name)) try self.tryAutoload(class_name);
         const ctn = (self.resolveMethod(class_name, "__construct") catch null) orelse {
+            // ZEND_NEW passes the arguments to zend_pass_function, which
+            // takes no names
+            if (self.classes.contains(class_name)) for (entries) |entry| if (entry.key == .string) {
+                const msg = try std.fmt.allocPrint(self.allocator, "Unknown named parameter ${s}", .{entry.key.string.bytes()});
+                defer self.allocator.free(msg);
+                if (try self.throwBuiltinException("Error", msg)) return .thrown;
+                return error.RuntimeError;
+            };
             try self.pushArgEntries(arr, entries);
             return .{ .count = entries.len };
         };
