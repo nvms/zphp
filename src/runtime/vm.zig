@@ -6311,6 +6311,71 @@ pub const VM = struct {
                     self.push(current);
                     self.pushTransfer(value);
                 },
+                .append_incdec => {
+                    const kind = self.readByte();
+                    const inc = kind & 1 == 0;
+                    const postfix = kind & 2 != 0;
+                    const container = self.stack[self.sp - 1];
+                    switch (container) {
+                        .array => |arr| {
+                            if (!try arr.appendNew(self.allocator, .null)) {
+                                if (try self.throwNextElementOccupied()) continue;
+                                return error.RuntimeError;
+                            }
+                            const stepped = try self.stepValue(.null, inc) orelse continue;
+                            // null steps to 1 or stays null
+                            arr.entries.items[arr.entries.items.len - 1].value = stepped;
+                            // the fetched container is borrowed, as array_push_assign has it
+                            _ = self.pop();
+                            self.push(if (postfix) .null else stepped);
+                            if (stepped == .string and stepped.string.owner != null) self.releaseValue(stepped);
+                        },
+                        .object => |obj| {
+                            if (!self.hasMethod(obj.class_name, "offsetGet")) {
+                                _ = self.pop();
+                                const msg = try std.fmt.allocPrint(self.allocator, "Cannot use object of type {s} as array", .{obj.class_name});
+                                defer self.allocator.free(msg);
+                                if (try self.throwBuiltinException("Error", msg)) continue;
+                                return error.RuntimeError;
+                            }
+                            const saved_append = self.dim_append_depth;
+                            self.dim_append_depth = self.frame_count + 1;
+                            const got = self.callMethod(obj, "offsetGet", &.{.null}) catch {
+                                self.dim_append_depth = saved_append;
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                            self.dim_append_depth = saved_append;
+                            // the element is a temporary: what the step does
+                            // to it stays there
+                            if (got != .object) {
+                                const msg = try std.fmt.allocPrint(self.allocator, "Indirect modification of overloaded element of {s} has no effect", .{obj.class_name});
+                                defer self.allocator.free(msg);
+                                self.raiseError(8, msg) catch if (try self.resumeRaised()) continue;
+                            }
+                            const stepped = try self.stepValue(got, inc) orelse continue;
+                            // the fetched container is borrowed, as array_push_assign has it
+                            _ = self.pop();
+                            self.push(if (postfix) got else stepped);
+                            if (stepped == .string and stepped.string.owner != null) self.releaseValue(stepped);
+                        },
+                        .string => {
+                            _ = self.pop();
+                            if (try self.throwBuiltinException("Error", "[] operator not supported for strings")) continue;
+                            return error.RuntimeError;
+                        },
+                        else => if (blk: {
+                            _ = self.pop();
+                            break :blk try self.refuseDimWrite(container);
+                        }) |handled| {
+                            if (handled) continue;
+                            return error.RuntimeError;
+                        } else {
+                            if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
+                            return error.RuntimeError;
+                        },
+                    }
+                },
                 .array_push_assign => {
                     const val = self.pop();
                     const arr_val = self.pop();

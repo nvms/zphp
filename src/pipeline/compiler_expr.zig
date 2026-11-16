@@ -58,7 +58,7 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
         // operators apply to null and append the result
         if (op_tag == .question_question_equal) return self.fail(target.main_token, "Cannot use [] for reading");
         if (op_tag != .equal) {
-            try compileVivifyChain(self, target.data.lhs);
+            try compileVivifyChainRw(self, target.data.lhs);
             try self.compileNode(node.data.rhs);
             try self.emitOp(.append_op_read);
             try emitCompoundOp(self, op_tag);
@@ -1129,14 +1129,9 @@ pub fn compilePrefixOp(self: *Compiler, node: Ast.Node) Error!void {
 // `++$a[]` / `$a[]++`: the element appended is null, stepped in place; the
 // postfix form's value is that null
 fn compileAppendIncDec(self: *Compiler, target: Ast.Node, op_tag: Token.Tag, postfix: bool) Error!void {
-    try compileVivifyChain(self, target.data.lhs);
-    try self.emitOp(.op_null);
-    try self.emitOp(if (op_tag == .plus_plus) .inc_value else .dec_value);
-    try self.emitOp(.array_push_assign);
-    if (postfix) {
-        try self.emitOp(.pop);
-        try self.emitOp(.op_null);
-    }
+    try compileVivifyChainRw(self, target.data.lhs);
+    try self.emitOp(.append_incdec);
+    try self.emitByte(@as(u8, if (op_tag == .plus_plus) 0 else 1) | @as(u8, if (postfix) 2 else 0));
 }
 
 pub fn compilePostfixOp(self: *Compiler, node: Ast.Node) Error!void {

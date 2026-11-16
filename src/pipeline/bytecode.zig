@@ -595,6 +595,11 @@ pub const OpCode = enum(u16) {
     // null for an array, offsetGet(null) for an ArrayAccess object, an
     // Error for a string or another object
     append_op_read,
+    // `$c[]++` and the like (FETCH_DIM_RW with no offset, then the step):
+    // u8 bit 0 decrement, bit 1 postfix. [container] -> [result]: an array
+    // gets a stepped null appended, an ArrayAccess object's offsetGet(null)
+    // is stepped as a temporary, a string is an Error before the step
+    append_incdec,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -699,7 +704,7 @@ pub const OpCode = enum(u16) {
             .static_prop_bind_ref_source => 6,
             .yield_ref => 5,
             .arg_guard_static_prop => 9,
-            .check_rw_container => 3,
+            .check_rw_container, .append_incdec => 3,
             .defer_class_const => 6,
             .static_call => 7,
             .less_local_local_jif => 8,
