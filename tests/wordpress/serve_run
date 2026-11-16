@@ -100,7 +100,9 @@ check_status() {
 
 check_body_contains() {
     local name="$1" path="$2" needle="$3"
-    local zb=$(curl -s -m 90 "http://localhost:$ZPHP_PORT$path" 2>&1)
+    # the seeded site's url is http://localhost, so any other host gets
+    # WordPress's canonical redirect instead of the page
+    local zb=$(curl -s -m 90 -H 'Host: localhost' "http://localhost:$ZPHP_PORT$path" 2>&1)
     if echo "$zb" | grep -qF "$needle"; then
         passed=$((passed + 1))
         echo "  pass  $name (contains '$needle')"
