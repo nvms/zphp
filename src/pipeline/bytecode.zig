@@ -607,6 +607,9 @@ pub const OpCode = enum(u16) {
     // declared property reads as null without an error, and the get_prop
     // after it is skipped
     fetch_prop_unset,
+    // [the $GLOBALS view] -> [php's copy of the global symbol table], a
+    // read of $GLOBALS as a value (ZEND_FETCH_GLOBALS)
+    globals_copy,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {

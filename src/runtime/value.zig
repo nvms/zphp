@@ -72,6 +72,9 @@ pub const Recursion = struct {
     pub const debug: u8 = 2;
     pub const export_: u8 = 4;
     pub const json: u8 = 8;
+    // a sort is moving the array's elements (zend_sort runs over the
+    // buckets in place, its hash stale until the sort ends)
+    pub const sorting: u8 = 16;
 };
 extern fn zphp_value_hooks() callconv(.c) *anyopaque;
 extern fn zphp_double_text(buf: *[1100]u8, f: f64) callconv(.c) usize;
@@ -1989,6 +1992,9 @@ pub const Value = union(enum) {
         }
         if (a == .array and b == .array) {
             if (a.array == b.array) return 0;
+            // php looks the keys up in the other table through its hash, which
+            // a running sort of that table left stale: they aren't found
+            if (b.array.recursion & Recursion.sorting != 0 and a.array.entries.items.len == b.array.entries.items.len and a.array.entries.items.len > 0) return 1;
             if (stack_limit.overflowed()) {
                 compareFailed(.array_stack);
                 return 1;

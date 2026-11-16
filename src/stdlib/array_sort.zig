@@ -390,7 +390,12 @@ fn sortArray(sc: *SortContext, arr: *PhpArray, renumber: bool) RuntimeError!void
     const items = try sc.ctx.allocator.alloc(Item, n);
     defer sc.ctx.allocator.free(items);
     for (arr.entries.items, 0..) |e, i| items[i] = .{ .entry = e, .idx = i };
-    try array_diff.zendSort(Item, items, sc);
+    {
+        const was_sorting = arr.recursion & value_mod.Recursion.sorting;
+        arr.recursion |= value_mod.Recursion.sorting;
+        defer arr.recursion = (arr.recursion & ~value_mod.Recursion.sorting) | was_sorting;
+        try array_diff.zendSort(Item, items, sc);
+    }
     // a comparison that ran php code may have changed the array under the
     // sort; php sorts a copy then, and its changes are lost either way
     if (arr.entries.items.len != n) return;

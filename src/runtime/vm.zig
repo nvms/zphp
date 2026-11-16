@@ -1005,6 +1005,9 @@ pub const VM = struct {
     // to $GLOBALS[key] = val also propagate to the top frame's variable
     // table (matching PHP's superglobal semantics)
     globals_array: ?*PhpArray = null,
+    // the auto globals php creates only once code naming them is compiled
+    // (auto_globals_jit): until then $GLOBALS has no entry for them
+    armed_auto_globals: struct { env: bool = false, request: bool = false } = .{},
     rng_seeded: bool = false,
     rng_state: std.Random.DefaultPrng = std.Random.DefaultPrng.init(0),
     mt19937: @import("../stdlib/mt19937.zig").Mt19937 = .{},
@@ -4019,6 +4022,7 @@ pub const VM = struct {
         self.statics_cells.clearRetainingCapacity();
         self.globals_cells.clearRetainingCapacity();
         self.globals_array = null;
+        self.armed_auto_globals = .{};
         self.static_vars.clearRetainingCapacity();
         self.global_vars.clearRetainingCapacity();
         if (self.ic) |ic_ptr| {
@@ -4702,6 +4706,8 @@ pub const VM = struct {
     // declare_fn can find its function from the executing frame's chunk
     pub fn registerResultFunctions(self: *VM, result: *const CompileResult) RuntimeError!void {
         try self.chunk_to_result.put(self.allocator, @intFromPtr(&result.chunk), result);
+        self.armAutoGlobals(&result.chunk);
+        for (result.functions.items) |*func| self.armAutoGlobals(&func.chunk);
         // a script compiled again (an include run twice) brings the same
         // attributes; reflection may hold the first copy's arguments
         for (result.function_attrs.items) |fa| {
@@ -6601,8 +6607,10 @@ pub const VM = struct {
                     };
                     if (arr_val == .array) {
                         if (self.globals_array) |ga| {
-                            if (arr_val.array == ga and key == .string) {
-                                const dollar_name = try self.internVarName(key.string.bytes());
+                            if (arr_val.array == ga and (key == .string or key == .int)) {
+                                var key_buf: [32]u8 = undefined;
+                                const key_text = if (key == .int) std.fmt.bufPrint(&key_buf, "{d}", .{key.int}) catch "" else key.string.bytes();
+                                const dollar_name = try self.internVarName(key_text);
                                 if (self.globals_cells.get(dollar_name)) |cell| {
                                     self.push(cell.*);
                                     continue;
@@ -6611,6 +6619,11 @@ pub const VM = struct {
                                 // reference) is read through its cell
                                 if (self.frame_count > 0) if (self.frames[0].ref_slots.get(dollar_name)) |cell| {
                                     self.push(cell.*);
+                                    continue;
+                                };
+                                // `${1}` is the global the int key 1 names
+                                if (!capturing and key == .int and self.frame_count > 0) if (self.frameVariable(&self.frames[0], dollar_name)) |v| if (v != .undef) {
+                                    self.push(v);
                                     continue;
                                 };
                             }
@@ -7886,6 +7899,12 @@ pub const VM = struct {
                         try self.setVariableByName(frame, name, new_val);
                     }
                     self.pushFetched(new_val);
+                },
+
+                .globals_copy => {
+                    _ = self.pop();
+                    const copy = try self.globalsCopy();
+                    self.push(.{ .array = copy });
                 },
 
                 .fetch_prop_unset => {
@@ -19337,6 +19356,77 @@ pub const VM = struct {
         }
         try self.putFrameVar(&frame.vars, name, val);
         try self.syncGlobalView(frame, name, val);
+    }
+
+    // zend_is_auto_global as the compiler calls it: code that names $_ENV or
+    // $_REQUEST makes php fill it in
+    fn armAutoGlobals(self: *VM, chunk: *const Chunk) void {
+        if (self.armed_auto_globals.env and self.armed_auto_globals.request) return;
+        for (chunk.constants.items) |c| {
+            if (c != .string) continue;
+            const text = c.string.bytes();
+            if (std.mem.eql(u8, text, "$_ENV")) self.armed_auto_globals.env = true;
+            if (std.mem.eql(u8, text, "$_REQUEST")) self.armed_auto_globals.request = true;
+        }
+    }
+
+    // php's $GLOBALS read as a value (ZEND_FETCH_GLOBALS,
+    // zend_proptable_to_symtable): a copy of the global symbol table in its
+    // order (argv and argc, the auto globals, the main script's compiled
+    // variables, then the others as they were made), numeric names as
+    // integer keys, and a variable whose reference something else also
+    // holds kept as that reference
+    fn globalsCopy(self: *VM) RuntimeError!*PhpArray {
+        const out = try self.allocArray();
+        if (self.frame_count == 0) return out;
+        const frame = &self.frames[0];
+        var seen: std.StringHashMapUnmanaged(void) = .{};
+        defer seen.deinit(self.allocator);
+        try self.globalsCopyAdd(out, frame, "$argv", &seen);
+        try self.globalsCopyAdd(out, frame, "$argc", &seen);
+        for ([_][]const u8{ "$_GET", "$_POST", "$_COOKIE", "$_FILES", "$_SERVER", "$_ENV", "$_REQUEST" }) |name| {
+            if (std.mem.eql(u8, name, "$_ENV") and !self.armed_auto_globals.env) continue;
+            if (std.mem.eql(u8, name, "$_REQUEST") and !self.armed_auto_globals.request) continue;
+            const cell = self.globals_cells.get(name) orelse continue;
+            if (cell.* == .undef) continue;
+            try self.globalsCopyPut(out, name[1..], cell.*, null);
+        }
+        for (self.global_slot_names) |name| try self.globalsCopyAdd(out, frame, name, &seen);
+        if (self.globals_array) |ga| {
+            var i: usize = 0;
+            while (i < ga.entries.items.len) : (i += 1) {
+                const key = ga.entries.items[i].key;
+                if (key != .string) continue;
+                const name = try self.internVarName(key.string.bytes());
+                try self.globalsCopyAdd(out, frame, name, &seen);
+            }
+        }
+        var it = frame.vars.iterator();
+        while (it.next()) |entry| try self.globalsCopyAdd(out, frame, entry.key_ptr.*, &seen);
+        return out;
+    }
+
+    fn globalsCopyAdd(self: *VM, out: *PhpArray, frame: *CallFrame, name: []const u8, seen: *std.StringHashMapUnmanaged(void)) RuntimeError!void {
+        if (name.len < 2 or name[0] != '$') return;
+        if (isSuperglobal(name) or std.mem.eql(u8, name, "$GLOBALS") or std.mem.eql(u8, name, "$this")) return;
+        const gop = try seen.getOrPut(self.allocator, name);
+        if (gop.found_existing) return;
+        const cell = frame.ref_slots.get(name);
+        const value = self.frameVariable(frame, name) orelse return;
+        if (value == .undef) return;
+        const keep = if (cell) |c| (if (cellOf(c).binders > 1) c else null) else null;
+        try self.globalsCopyPut(out, name[1..], value, keep);
+    }
+
+    fn globalsCopyPut(self: *VM, out: *PhpArray, name: []const u8, value: Value, keep: ?*Value) RuntimeError!void {
+        const owned = Value.String.create(self.allocator, name) catch return error.RuntimeError;
+        defer owned.release();
+        const key = PhpArray.normalizeKey(.{ .string = owned });
+        if (keep) |cell| {
+            self.array_ref_active = true;
+            return self.arrayAddEntry(out, key, .{ .key = key, .value = value, .ref = cell }, cell);
+        }
+        out.set(self.allocator, key, value) catch return error.RuntimeError;
     }
 
     // the views of a global-scope variable other than the frame's own:

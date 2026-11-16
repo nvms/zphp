@@ -381,6 +381,10 @@ pub const Compiler = struct {
     // set while compiling the variable of an isset, ??, or empty(): its read
     // doesn't warn when the variable holds nothing
     quiet_reads: bool = false,
+    // the tokens of the `$GLOBALS` that are the container of an element
+    // (`$GLOBALS[k]`, which is the global $k); any other read of $GLOBALS
+    // is php's copy of the symbol table. built when first needed
+    globals_dim_tokens: ?std.AutoHashMapUnmanaged(u32, void) = null,
     // php deprecates reading $http_response_header in a function (or file)
     // until something assigns it there; a parameter of that name counts
     http_response_header_assigned: bool = false,
@@ -1477,6 +1481,21 @@ pub const Compiler = struct {
         }
         if (std.mem.eql(u8, name, "$http_response_header")) self.http_response_header_read = true;
         try self.emitGetVar(name);
+        if (std.mem.eql(u8, name, "$GLOBALS") and !(try self.globalsDimToken(node.main_token))) try self.emitOp(.globals_copy);
+    }
+
+    fn globalsDimToken(self: *Compiler, token: u32) Error!bool {
+        if (self.globals_dim_tokens == null) {
+            var set: std.AutoHashMapUnmanaged(u32, void) = .{};
+            for (self.ast.nodes) |n| {
+                if (n.tag != .array_access and n.tag != .array_push_target) continue;
+                const base = self.ast.nodes[n.data.lhs];
+                if (base.tag == .variable and std.mem.eql(u8, self.ast.tokenSlice(base.main_token), "$GLOBALS"))
+                    try set.put(self.allocator, base.main_token, {});
+            }
+            self.globals_dim_tokens = set;
+        }
+        return self.globals_dim_tokens.?.contains(token);
     }
 
     // the canonical spelling of a magic constant written in any case
@@ -2518,6 +2537,7 @@ pub const Compiler = struct {
         self.labels.deinit(a);
         self.label_sites.deinit(a);
         self.local_slots.deinit(a);
+        if (self.globals_dim_tokens) |*set| set.deinit(a);
         self.hoisted_nodes.deinit(a);
         self.hoisted_names.deinit(a);
         self.php_bound_names.deinit(a);
