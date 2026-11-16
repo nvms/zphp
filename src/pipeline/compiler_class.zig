@@ -4016,7 +4016,19 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
     // a trait's own insteadof and as rules apply when it is composed
     try emitTraitRules(self, members);
-    try self.emitByte(@intCast(own_props.items.len));
+    // a constructor's promoted parameters are the trait's properties too
+    var promoted = std.ArrayListUnmanaged(u32).empty;
+    defer promoted.deinit(self.allocator);
+    for (members) |member_idx| {
+        const member = self.ast.nodes[member_idx];
+        if (member.tag != .class_method or !std.ascii.eqlIgnoreCase(self.ast.tokenSlice(member.main_token), "__construct")) continue;
+        for (self.ast.extraSlice(member.data.lhs)) |p| {
+            const pnode = self.ast.nodes[p];
+            if ((pnode.data.rhs >> 2) & 3 > 0 and !hookedPromotion(self, members, pnode.main_token)) try promoted.append(self.allocator, p);
+        }
+        break;
+    }
+    try self.emitByte(@intCast(own_props.items.len + promoted.items.len));
     for (own_props.items) |pi| {
         const pmember = self.ast.nodes[pi];
         var pname = self.ast.tokenSlice(pmember.main_token);
@@ -4029,6 +4041,28 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitU16(try propertyTypeConst(self, pmember.data.rhs));
         // a hooked property can't be composed beside another of its name
         try self.emitByte(if (pmember.tag == .class_property_hooks) 1 else 0);
+    }
+    for (promoted.items) |p| {
+        const pnode = self.ast.nodes[p];
+        var pname = self.ast.tokenSlice(pnode.main_token);
+        if (pname.len > 0 and pname[0] == '$') pname = pname[1..];
+        try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(pname) }));
+        // no default: the constructor assigns it
+        try self.emitByte(0);
+        const promotion = (pnode.data.rhs >> 2) & 3;
+        const is_ro: u8 = if ((pnode.data.rhs & 16) != 0) 4 else 0;
+        const set_promo = (pnode.data.rhs >> 5) & 3;
+        const asymm_bits: u8 = if (set_promo > 0) (@as(u8, @intCast(set_promo - 1)) << 3) | 0x20 else 0;
+        const is_final: u8 = if ((pnode.data.rhs & 0x80) != 0) 0x80 else 0;
+        try self.emitByte(@as(u8, @intCast(promotion - 1)) | is_ro | asymm_bits | is_final);
+        const param_type_extra = pnode.data.rhs >> 8;
+        if (param_type_extra == 0) {
+            try self.emitU16(0xffff);
+        } else {
+            const type_str = try buildTypeString(self, self.ast.extra_data[param_type_extra - 1], self.ast.extra_data[param_type_extra]);
+            try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(type_str) }));
+        }
+        try self.emitByte(0);
     }
     try self.emitByte(@intCast(static_props.items.len));
     for (static_props.items) |pi| {
