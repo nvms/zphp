@@ -28715,7 +28715,7 @@ pub const VM = struct {
         const fn_strict = if (frame.func) |f| f.strict_types else self.script_strict_types;
         const accepted = if (std.mem.eql(u8, ti.return_type, "void")) (if (val.* == .null) val.* else null) else try self.verifyDeclaredType(val.*, ti.return_type, self.functionScope(func_name), fn_strict);
         if (accepted == null) {
-            const shown = if (frame.func) |f| (if (f.display_name.len > 0) f.display_name else func_name) else func_name;
+            const shown = if (frame.func) |f| try self.returnFunctionLabel(frame, f) else func_name;
             const msg = std.fmt.allocPrint(self.allocator, "{s}(): Return value must be of type {s}, {s} returned", .{ shown, try self.resolvedTypeText(ti.return_type, self.functionScope(func_name)), valueTypeName(val.*) }) catch return error.RuntimeError;
             defer self.allocator.free(msg);
             // raised inside the function, as php's VERIFY_RETURN_TYPE is
@@ -28728,12 +28728,22 @@ pub const VM = struct {
     }
 
     // a typed function reached its end without returning
+    // the function zend_verify_type_error_common names: a closure with a
+    // class scope is named after the scope
+    fn returnFunctionLabel(self: *VM, frame: *const CallFrame, func: *const ObjFunction) RuntimeError![]const u8 {
+        if (func.display_name.len == 0) return func.name;
+        const scope = (if (frame.call_name) |cn| self.closureScopeByName(cn) else null) orelse self.closureDefClassForFrame(frame) orelse return func.display_name;
+        const s = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ scope, func.display_name });
+        defer self.allocator.free(s);
+        return self.internName(s);
+    }
+
     noinline fn throwImplicitReturn(self: *VM) RuntimeError!bool {
         const frame = &self.frames[self.frame_count - 1];
         const func = frame.func orelse return false;
         const ti = self.typeInfoFor(func.name) orelse return false;
         if (ti.return_type.len == 0) return false;
-        const shown = if (func.display_name.len > 0) func.display_name else try self.callableDisplayName(func.name, func);
+        const shown = try self.returnFunctionLabel(frame, func);
         // zend_verify_never_error: a function with a class scope is a method
         const scoped = std.mem.indexOf(u8, func.name, "::") != null or
             (if (frame.call_name) |cn| self.closureScopeByName(cn) != null else false);
