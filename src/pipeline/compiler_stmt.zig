@@ -317,6 +317,7 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
 
     // iter_check pushed: key, value (value on top)
     const val_node = self.ast.nodes[val_n];
+    var prop_ref_synth: ?[]const u8 = null;
     if (val_node.tag == .array_literal or val_node.tag == .list_destructure) {
         // destructure (incl. by-ref `[&$x, &$y]`, which binds per element via
         // compileDestructure -> bind_array_ref) - consumes the value on top
@@ -334,7 +335,15 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
         // `$r = &$v` / `$arr[$k] = &$v` capture the ELEMENT'S OWN storage
         // (distinct per iteration). the O(1) cell-keyed registry makes the
         // per-iteration bind affordable (was O(n^2) under the linear scan)
-        const val_name = self.ast.tokenSlice(val_node.main_token);
+        // `&$o->p`: each element is bound to a hidden variable, and the
+        // property to it by reference (ASSIGN_OBJ_REF per iteration)
+        const prop_target = val_node.tag == .property_access;
+        const val_name = if (prop_target) blk: {
+            const synth = try std.fmt.allocPrint(self.allocator, "__foreach_ref_{d}", .{self.loop_depth});
+            try self.string_allocs.append(self.allocator, synth);
+            prop_ref_synth = synth;
+            break :blk synth;
+        } else self.ast.tokenSlice(val_node.main_token);
         const key_name = if (key_n != 0)
             self.ast.tokenSlice(self.ast.nodes[key_n].main_token)
         else blk: {
@@ -353,6 +362,21 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
         const vidx = try self.addConstant(.{ .string = Value.String.borrowed(val_name) });
         try self.emitOp(.foreach_ref_bind); // $v = &iterable[key] (reverts prior elem if uncaptured)
         try self.emitU16(vidx);
+        if (prop_target) {
+            try compiler_expr.compilePropWriteBase(self, val_node.data.lhs);
+            if (self.isDynamicProp(val_node)) {
+                if (val_node.main_token == 0) {
+                    try self.compileNode(val_node.data.rhs);
+                } else {
+                    try self.emitGetVar(self.ast.tokenSlice(self.ast.nodes[val_node.data.rhs].main_token));
+                }
+                try self.emitOp(.prop_bind_ref_dyn);
+            } else {
+                try self.emitOp(.prop_bind_ref);
+                try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(self.propName(val_node)) }));
+            }
+            try self.emitU16(vidx);
+        }
     } else {
         try self.compileStoreTop(val_n);
         if (key_n != 0) {
@@ -383,6 +407,12 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     try self.emitOp(end_op);
     try self.patchBreaks(&prev_breaks);
     if (iter_temp) |synth| {
+        try self.emitOp(.unset_var);
+        try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(synth) }));
+    }
+    // the element's hidden variable goes with the loop, as php frees its
+    // fetch, leaving the property the reference's last holder
+    if (prop_ref_synth) |synth| {
         try self.emitOp(.unset_var);
         try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(synth) }));
     }

@@ -2288,7 +2288,7 @@ pub fn compileOutsideChain(self: *Compiler, idx: u32) Error!void {
 // the object a property write goes to, fetched for writing as php's
 // zend_fetch_property_address does: a variable without the undefined
 // warning, a property of a property through prepare_prop_w
-fn compilePropWriteBase(self: *Compiler, node_idx: u32) Error!void {
+pub fn compilePropWriteBase(self: *Compiler, node_idx: u32) Error!void {
     return compilePropFetchBase(self, node_idx, false);
 }
 
