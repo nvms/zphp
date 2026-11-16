@@ -1639,6 +1639,32 @@ pub const Compiler = struct {
     // writes the value on top of the stack into an array-access destructure
     // target ($arr[$key]). stack: [source, value] -> [source]
     fn compileDestructureArraySlot(self: *Compiler, slot_node: Ast.Node) Error!void {
+        // an element of a plain variable is stored as `$v[k] = ...` stores
+        // it, so a string offset write lands in the variable
+        if (slot_node.tag == .array_access) {
+            const root = self.ast.nodes[slot_node.data.lhs];
+            if (root.tag == .variable) {
+                const var_name = self.ast.tokenSlice(root.main_token);
+                const slot_opt: ?u16 = if (std.mem.eql(u8, var_name, "$this"))
+                    null
+                else if (self.local_slots.get(var_name)) |sl|
+                    sl
+                else if (self.arrowCaptureSlot(var_name)) |sl|
+                    sl
+                else if (!isSuperglobal(var_name) and !self.inFunctionScope() and var_name.len > 0 and var_name[0] == '$')
+                    self.getOrCreateSlot(var_name)
+                else
+                    null;
+                if (slot_opt) |slot| {
+                    try self.compileNode(slot_node.data.rhs);
+                    try self.emitOp(.swap);
+                    try self.emitOp(.array_set_local);
+                    try self.emitU16(slot);
+                    try self.emitOp(.pop);
+                    return;
+                }
+            }
+        }
         try compiler_expr.compileVivifyChain(self, slot_node.data.lhs);
         try self.emitOp(.swap);
         if (slot_node.tag == .array_push_target) {
