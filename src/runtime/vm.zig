@@ -486,6 +486,32 @@ pub const ReinitWindow = struct {
     written: std.StringHashMapUnmanaged(void) = .empty,
 };
 
+// global constants by name: the namespace part of a name is matched in any
+// case, the constant's own name exactly (zend_register_constant lowercases
+// the namespace)
+pub const ConstantNameContext = struct {
+    pub fn hash(_: ConstantNameContext, name: []const u8) u32 {
+        const sep = std.mem.lastIndexOfScalar(u8, name, '\\') orelse return std.array_hash_map.hashString(name);
+        var h = std.hash.Wyhash.init(0);
+        var buf: [64]u8 = undefined;
+        var i: usize = 0;
+        while (i < sep) {
+            const n = @min(buf.len, sep - i);
+            h.update(std.ascii.lowerString(buf[0..n], name[i..][0..n]));
+            i += n;
+        }
+        h.update(name[sep..]);
+        return @truncate(h.final());
+    }
+    pub fn eql(_: ConstantNameContext, a: []const u8, b: []const u8, _: usize) bool {
+        if (a.len != b.len) return false;
+        const sep = std.mem.lastIndexOfScalar(u8, a, '\\') orelse return std.mem.eql(u8, a, b);
+        if (b[sep] != '\\' or std.mem.lastIndexOfScalar(u8, b, '\\') != sep) return false;
+        return std.ascii.eqlIgnoreCase(a[0..sep], b[0..sep]) and std.mem.eql(u8, a[sep..], b[sep..]);
+    }
+};
+pub const ConstantMap = std.ArrayHashMapUnmanaged([]const u8, Value, ConstantNameContext, true);
+
 pub const UnpackSite = struct { chunk: *const Chunk, call_ip: usize, args_base: usize };
 
 pub const RefSource = union(enum) {
@@ -1143,7 +1169,7 @@ pub const VM = struct {
     // obligations the trait method checks of the class being declared began
     trait_deferred: std.ArrayListUnmanaged(*inheritance.Deferred) = .empty,
     free_closure_names: std.ArrayListUnmanaged(struct { compile_name: []const u8, name: []const u8 }) = .empty,
-    php_constants: std.StringArrayHashMapUnmanaged(Value) = .{},
+    php_constants: ConstantMap = .{},
     user_constants: std.StringHashMapUnmanaged(void) = .{},
     // traits declared #[\Deprecated], with what the warning adds after
     // "is deprecated"
@@ -2651,7 +2677,7 @@ pub const VM = struct {
         }
     }
 
-    fn initConstants(c: *std.StringArrayHashMapUnmanaged(Value), a: Allocator) !void {
+    fn initConstants(c: *ConstantMap, a: Allocator) !void {
         try c.put(a, "TRUE", .{ .bool = true });
         try c.put(a, "FALSE", .{ .bool = false });
         try c.put(a, "NULL", .null);
@@ -16965,7 +16991,23 @@ pub const VM = struct {
     // defines a global constant (`const`, define()); one already defined
     // keeps its value, with php's warning. takes a reference to the value
     // only when it defines
-    pub fn defineConstant(self: *VM, name: []const u8, value: Value) RuntimeError!bool {
+    pub fn defineConstant(self: *VM, given: []const u8, value: Value) RuntimeError!bool {
+        // zend_register_constant keeps a namespaced name with its namespace
+        // lowercased
+        var name = given;
+        if (std.mem.lastIndexOfScalar(u8, given, '\\')) |sep| {
+            var lowered = false;
+            for (given[0..sep]) |c| if (std.ascii.isUpper(c)) {
+                lowered = true;
+                break;
+            };
+            if (lowered) {
+                const buf = try self.allocator.dupe(u8, given);
+                defer self.allocator.free(buf);
+                _ = std.ascii.lowerString(buf[0..sep], given[0..sep]);
+                name = try self.internName(buf);
+            }
+        }
         // zend_register_constant: __COMPILER_HALT_OFFSET__ is never defined
         if (self.php_constants.contains(name) or std.mem.eql(u8, name, "__COMPILER_HALT_OFFSET__")) {
             const msg = try std.fmt.allocPrint(self.allocator, "Constant {s} already defined, this will be an error in PHP 9", .{name});
