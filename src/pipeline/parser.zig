@@ -1420,6 +1420,12 @@ const Parser = struct {
                     class_expr = try self.addNode(.{ .tag = .property_access, .main_token = new_tok, .data = .{ .lhs = class_expr, .rhs = prop } });
                     continue;
                 }
+                // new_variable '::' simple_variable: a static property of
+                // the class the variable names
+                if (self.peek() == .colon_colon and self.peekAt(1) == .variable) {
+                    class_expr = try self.parseStaticAccess(class_expr);
+                    continue;
+                }
                 break;
             }
 
