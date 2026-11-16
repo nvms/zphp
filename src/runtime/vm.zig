@@ -6315,6 +6315,12 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
                     }
+                    // object_init_ex evaluates the class's constant
+                    // expressions before the object (and the arguments)
+                    if ((self.lazy_constant_classes > 0 or self.ic.?.pending_defaults > 0) and !relative and self.classes.contains(name)) self.prepareClassDefaults(name) catch {
+                        if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    };
                     const placeholder = try self.allocObject(.{ .class_name = new_reservation });
                     self.push(.{ .object = placeholder });
                 },
@@ -11642,6 +11648,13 @@ pub const VM = struct {
                         return error.RuntimeError;
                     }
 
+                    // object_init_ex evaluates the class's constant
+                    // expressions before the object exists, so a failure
+                    // takes no handle
+                    self.prepareClassDefaults(class_name) catch {
+                        if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    };
                     const obj = try self.allocUserObjectHandle(class_name, self.takeReservedHandle(arg_count));
 
                     // set property defaults from class and parent chain
@@ -11889,6 +11902,10 @@ pub const VM = struct {
                         return error.RuntimeError;
                     };
 
+                    self.prepareClassDefaults(class_name) catch {
+                        if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    };
                     const obj = try self.allocUserObject(class_name);
                     self.initObjectProperties(obj, class_name) catch {
                         if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -26609,6 +26626,21 @@ pub const VM = struct {
     fn slotDefault(def: *const ClassDef, prop: ClassDef.PropertyDef) Value {
         if (!def.is_internal and prop.type_str.len > 0 and (!prop.has_default or prop.is_promoted)) return .undef;
         return prop.default;
+    }
+
+    // zend_update_class_constants for a class about to be instantiated
+    inline fn prepareClassDefaults(self: *VM, class_name: []const u8) RuntimeError!void {
+        // nothing is pending anywhere on the hot path
+        if (self.lazy_constant_classes == 0 and self.ic.?.pending_defaults == 0) return;
+        return self.prepareClassDefaultsSlow(class_name);
+    }
+
+    fn prepareClassDefaultsSlow(self: *VM, class_name: []const u8) RuntimeError!void {
+        if (self.lazy_constant_classes > 0) try self.updateClassConstants(class_name);
+        const cls = self.classes.get(class_name) orelse return;
+        if (cls.slot_layout) |layout| {
+            if (!layout.defaults_ready) try self.resolveClassDefaults(class_name);
+        } else if (cls.defaults_pending) try self.resolveClassDefaults(class_name);
     }
 
     pub fn initObjectProperties(self: *VM, obj: *PhpObject, class_name: []const u8) RuntimeError!void {

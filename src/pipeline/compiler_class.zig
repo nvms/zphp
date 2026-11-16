@@ -2488,18 +2488,29 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
 // early. literals (and literal arrays / unary / binary of literals) are
 // order-independent and safe to relocate
 fn defaultExprIsLiteral(ast: *const Ast, idx: u32) bool {
+    return literalDefault(ast, idx, true);
+}
+
+// a default set when the class is declared: php evaluates any constant
+// expression in one (self::C included) at the class's first use, so an
+// undefined constant is an Error there, not at the declaration
+fn defaultIsImmediate(ast: *const Ast, idx: u32) bool {
+    return literalDefault(ast, idx, false);
+}
+
+fn literalDefault(ast: *const Ast, idx: u32, class_refs: bool) bool {
     if (idx == 0) return true;
     const node = ast.nodes[idx];
     return switch (node.tag) {
         .integer_literal, .float_literal, .string_literal, .true_literal, .false_literal, .null_literal => true,
-        .prefix_op => defaultExprIsLiteral(ast, node.data.lhs),
-        .binary_op => defaultExprIsLiteral(ast, node.data.lhs) and defaultExprIsLiteral(ast, node.data.rhs),
+        .prefix_op => literalDefault(ast, node.data.lhs, class_refs),
+        .binary_op => literalDefault(ast, node.data.lhs, class_refs) and literalDefault(ast, node.data.rhs, class_refs),
         .array_literal => {
             for (ast.extraSlice(node.data.lhs)) |el_idx| {
                 const el = ast.nodes[el_idx];
                 if (el.tag != .array_element) return false;
-                if (!defaultExprIsLiteral(ast, el.data.lhs)) return false;
-                if (el.data.rhs != 0 and !defaultExprIsLiteral(ast, el.data.rhs)) return false;
+                if (!literalDefault(ast, el.data.lhs, class_refs)) return false;
+                if (el.data.rhs != 0 and !literalDefault(ast, el.data.rhs, class_refs)) return false;
             }
             return true;
         },
@@ -2511,6 +2522,7 @@ fn defaultExprIsLiteral(ast: *const Ast, idx: u32) bool {
         // explicit ClassName::CONST stay excluded - their target may not be
         // available at the relocated position
         .static_prop_access => {
+            if (!class_refs) return false;
             const member = ast.tokenSlice(node.main_token);
             if (member.len == 0 or member[0] == '$' or std.mem.eql(u8, member, "class")) return false;
             const class_node = ast.nodes[node.data.lhs];
@@ -3585,7 +3597,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
     // below for the class's first use
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
-        if (member.tag == .static_class_property and member.data.lhs != 0 and defaultExprIsLiteral(self.ast, member.data.lhs)) {
+        if (member.tag == .static_class_property and member.data.lhs != 0 and defaultIsImmediate(self.ast, member.data.lhs)) {
             try self.compileNode(member.data.lhs);
             var sp_name = self.ast.tokenSlice(member.main_token);
             if (sp_name.len > 0 and sp_name[0] == '$') sp_name = sp_name[1..];
@@ -3609,7 +3621,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
     }
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
-        if (member.tag == .class_property and member.data.lhs != 0 and defaultExprIsLiteral(self.ast, member.data.lhs)) {
+        if (member.tag == .class_property and member.data.lhs != 0 and defaultIsImmediate(self.ast, member.data.lhs)) {
             try self.compileNode(member.data.lhs);
             var p_name = self.ast.tokenSlice(member.main_token);
             if (p_name.len > 0 and p_name[0] == '$') p_name = p_name[1..];
@@ -4648,7 +4660,7 @@ fn checkMagicMethod(self: *Compiler, class_name: []const u8, member: Ast.Node, m
 // initializer; returns whether there were any
 fn isDeferredDefault(ast: *const Ast, member: Ast.Node) bool {
     if (member.tag != .class_property and member.tag != .static_class_property) return false;
-    return member.data.lhs != 0 and !defaultExprIsLiteral(ast, member.data.lhs);
+    return member.data.lhs != 0 and !defaultIsImmediate(ast, member.data.lhs);
 }
 
 // a class constant's value: a constant expression folded while compiling
@@ -4812,6 +4824,7 @@ fn compileDeferredPropDefaults(self: *Compiler, class_name: []const u8, members:
         .current_function = name,
         .class_body_function = self.class_body_function,
         .in_trait = self.in_trait,
+        .relative_const_classes = true,
         .const_expr = true,
     };
     defer sub.deinitScratch();
