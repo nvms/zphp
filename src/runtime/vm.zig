@@ -4324,28 +4324,48 @@ pub const VM = struct {
             }
         }.lessThan);
         var next_waiting: usize = 0;
-        for (live.items) |obj| {
-            // generators and fibers with lower handles go first
-            while (next_waiting < waiting.items.len) : (next_waiting += 1) {
-                const w = waiting.items[next_waiting];
-                const h = if (w == .generator) w.generator.handle else w.fiber.handle;
-                if (h > obj.id) break;
-                self.destroyAtShutdown(w);
+        // php walks the whole object store, which grows while it walks:
+        // objects a destructor makes are destructed too, after the others
+        // (EG_FLAGS_OBJECT_STORE_NO_REUSE gives them new handles)
+        var round: usize = 0;
+        while (true) : (round += 1) {
+            for (live.items) |obj| {
+                // generators and fibers with lower handles go first
+                while (round == 0 and next_waiting < waiting.items.len) : (next_waiting += 1) {
+                    const w = waiting.items[next_waiting];
+                    const h = if (w == .generator) w.generator.handle else w.fiber.handle;
+                    if (h > obj.id) break;
+                    self.destroyAtShutdown(w);
+                }
+                if (self.pending_exception != null and self.destructors_after_shutdown) break;
+                if (obj.destructed) continue;
+                if (self.pendingExceptionIs(obj)) continue;
+                obj.destructed = true;
+                if (obj.ownsDestructor() and !obj.destructor_called and self.hasMethod(obj.class_name, "__destruct")) {
+                    if (self.destructorRefused(obj) catch true) continue;
+                    _ = self.callMethod(obj, "__destruct", &.{}) catch {
+                        // php's uncaught exception ends the destructors: the
+                        // objects left are freed without theirs
+                        if (self.pending_exception == null or !self.destructors_after_shutdown) self.discardPending();
+                    };
+                }
             }
+            if (round == 0) while (next_waiting < waiting.items.len) : (next_waiting += 1) self.destroyAtShutdown(waiting.items[next_waiting]);
             if (self.pending_exception != null and self.destructors_after_shutdown) break;
-            if (obj.destructed) continue;
-            if (self.pendingExceptionIs(obj)) continue;
-            obj.destructed = true;
-            if (obj.ownsDestructor() and !obj.destructor_called and self.hasMethod(obj.class_name, "__destruct")) {
-                if (self.destructorRefused(obj) catch true) continue;
-                _ = self.callMethod(obj, "__destruct", &.{}) catch {
-                    // php's uncaught exception ends the destructors: the
-                    // objects left are freed without theirs
-                    if (self.pending_exception == null or !self.destructors_after_shutdown) self.discardPending();
-                };
+            const done = live.items.len;
+            live.clearRetainingCapacity();
+            for (self.objects.items) |obj| {
+                if (obj.destructed or obj.pooled or obj.resource or obj.destructor_called) continue;
+                if (self.pendingExceptionIs(obj)) continue;
+                live.append(self.allocator, obj) catch return;
             }
+            if (live.items.len == 0 or done == 0) break;
+            std.mem.sort(*PhpObject, live.items, {}, struct {
+                fn lessThan(_: void, a: *PhpObject, b: *PhpObject) bool {
+                    return a.id < b.id;
+                }
+            }.lessThan);
         }
-        while (next_waiting < waiting.items.len) : (next_waiting += 1) self.destroyAtShutdown(waiting.items[next_waiting]);
         self.drain_raised = false;
         if (self.pending_exception != null and self.destructors_after_shutdown) {
             for (live.items) |obj| obj.destructor_called = true;
