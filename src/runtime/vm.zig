@@ -12589,13 +12589,13 @@ pub const VM = struct {
                             continue;
                         }
                     } else if (self.functions.get(full_name)) |func| {
+                        if (func.has_param_types) {
+                            if (try self.checkParamTypes(full_name, arg_count)) continue;
+                        }
                         if (ac < func.required_params) {
                             if (try self.throwTooFewArgs(full_name, ac, func, self.stack[self.sp - ac .. self.sp])) continue;
                             self.dropN(ac + 1);
                             return error.RuntimeError;
-                        }
-                        if (func.has_param_types) {
-                            if (try self.checkParamTypes(full_name, arg_count)) continue;
                         }
                         if (self.ic) |ic| {
                             const mc_ip2 = self.currentFrame().ip - 3 - bytecode.op_bytes;
@@ -28745,12 +28745,14 @@ pub const VM = struct {
     // the body of a call to a user function already resolved by name
     fn enterUserFunction(self: *VM, func: *const ObjFunction, name: []const u8, arg_count: u32, named_extras: ?*PhpArray) RuntimeError!void {
         const ac: usize = arg_count;
+        // php's RECV checks each argument passed before the first missing
+        // one is reported
+        if (func.has_param_types) {
+            if (try self.checkParamTypes(name, arg_count)) return;
+        }
         if (ac < func.required_params) {
             if (try self.throwTooFewArgs(name, ac, func, self.stack[self.sp - ac .. self.sp])) return;
             return error.RuntimeError;
-        }
-        if (func.has_param_types) {
-            if (try self.checkParamTypes(name, arg_count)) return;
         }
         if (func.locals_only) {
             // callLocalsOnly takes the frame's call name from here; no other
