@@ -141,9 +141,16 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
             try self.emitOp(.array_get_coalesce);
             const skip_jump = try self.emitJump(.jump_if_not_null);
             try self.emitOp(.pop);
+            // zend_compile_assign_coalesce: the default runs before the
+            // write fetch of the containers
+            try self.compileNode(node.data.rhs);
             try compileVivifyChain(self, target.data.lhs);
             try self.compileNode(target.data.rhs);
-            try self.compileNode(node.data.rhs);
+            // [value, container, key] -> [container, key, value]
+            try self.emitOp(.bury);
+            try self.emitByte(2);
+            try self.emitOp(.bury);
+            try self.emitByte(2);
             try self.emitOp(.array_set);
             self.patchJump(skip_jump);
             return;
@@ -385,7 +392,7 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
     if (target.tag == .static_prop_access) {
         const class_node = self.ast.nodes[target.data.lhs];
         // dynamic property name: Class::${expr} = v, Class::$$var = v
-        if (target.main_token == 0 and target.data.rhs != 0 and op_tag == .equal) {
+        if (target.main_token == 0 and target.data.rhs != 0 and (op_tag == .equal or op_tag == .question_question_equal)) {
             if (class_node.tag == .identifier or class_node.tag == .qualified_name) {
                 const cn = try resolveNodeClassName(self, class_node);
                 const ci = try self.addConstant(.{ .string = Value.String.borrowed(cn) });
@@ -395,6 +402,24 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                 try self.compileNode(target.data.lhs);
             }
             try self.compileNode(target.data.rhs);
+            if (op_tag == .question_question_equal) {
+                // [class, name] -> [class, name, current], read as isset reads
+                try self.emitOp(.dup2);
+                try self.emitOp(.get_static_prop_dyn_both_quiet);
+                const skip_jump = try self.emitJump(.jump_if_not_null);
+                try self.emitOp(.pop);
+                try self.compileNode(node.data.rhs);
+                try self.emitOp(.set_static_prop_dyn);
+                const end_jump = try self.emitJump(.jump);
+                self.patchJump(skip_jump);
+                // the value it already held, without the class and name
+                try self.emitOp(.bury);
+                try self.emitByte(2);
+                try self.emitOp(.pop);
+                try self.emitOp(.pop);
+                self.patchJump(end_jump);
+                return;
+            }
             try self.compileNode(node.data.rhs);
             try self.emitOp(.set_static_prop_dyn);
             return;
