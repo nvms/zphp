@@ -42,6 +42,7 @@ jobs:
         if: ${{ !matrix.alpine }}
         with:
           version: 0.17.1
+          use-cache: false
 
       - name: install system libs (ubuntu glibc)
         if: runner.os == 'Linux' && !matrix.alpine
@@ -220,6 +221,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+          # a restored zig cache has built stale binaries (2026-11: a soak
+          # that leaked only on ci, a gc test that failed only there)
+          use-cache: false
 
       - name: build
         run: zig build -Doptimize=fast

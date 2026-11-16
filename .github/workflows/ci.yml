@@ -50,6 +50,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+          # a restored zig cache has built stale binaries (2026-11: a soak
+          # that leaked only on ci, a gc test that failed only there)
+          use-cache: false
       - name: install system libs
         timeout-minutes: 5
         env:
@@ -76,6 +79,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+          # a restored zig cache has built stale binaries (2026-11: a soak
+          # that leaked only on ci, a gc test that failed only there)
+          use-cache: false
       - name: install system libs
         timeout-minutes: 5
         env:
@@ -97,6 +103,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+          # a restored zig cache has built stale binaries (2026-11: a soak
+          # that leaked only on ci, a gc test that failed only there)
+          use-cache: false
       - name: install system libs
         timeout-minutes: 5
         env:
@@ -118,6 +127,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+          # a restored zig cache has built stale binaries (2026-11: a soak
+          # that leaked only on ci, a gc test that failed only there)
+          use-cache: false
       - name: install system libs
         timeout-minutes: 5
         env:
@@ -138,6 +150,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+          # a restored zig cache has built stale binaries (2026-11: a soak
+          # that leaked only on ci, a gc test that failed only there)
+          use-cache: false
       - name: install system libs
         timeout-minutes: 5
         env:
@@ -158,6 +173,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+          # a restored zig cache has built stale binaries (2026-11: a soak
+          # that leaked only on ci, a gc test that failed only there)
+          use-cache: false
       - name: install system libs
         timeout-minutes: 5
         env:
@@ -181,6 +199,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+          # a restored zig cache has built stale binaries (2026-11: a soak
+          # that leaked only on ci, a gc test that failed only there)
+          use-cache: false
       - name: install system libs
         timeout-minutes: 5
         env:
@@ -208,6 +229,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+          # a restored zig cache has built stale binaries (2026-11: a soak
+          # that leaked only on ci, a gc test that failed only there)
+          use-cache: false
       - name: install system libs
         timeout-minutes: 5
         env:
@@ -232,6 +256,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+          # a restored zig cache has built stale binaries (2026-11: a soak
+          # that leaked only on ci, a gc test that failed only there)
+          use-cache: false
       - name: install system libs
         timeout-minutes: 5
         env:
@@ -259,6 +286,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+          # a restored zig cache has built stale binaries (2026-11: a soak
+          # that leaked only on ci, a gc test that failed only there)
+          use-cache: false
       - name: install system libs
         timeout-minutes: 5
         env:
@@ -286,6 +316,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+          # a restored zig cache has built stale binaries (2026-11: a soak
+          # that leaked only on ci, a gc test that failed only there)
+          use-cache: false
       - name: install system libs
         timeout-minutes: 5
         env:
@@ -313,6 +346,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+          # a restored zig cache has built stale binaries (2026-11: a soak
+          # that leaked only on ci, a gc test that failed only there)
+          use-cache: false
       - name: install system libs
         timeout-minutes: 5
         env:
@@ -339,6 +375,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+          # a restored zig cache has built stale binaries (2026-11: a soak
+          # that leaked only on ci, a gc test that failed only there)
+          use-cache: false
       - name: install system libs
         timeout-minutes: 5
         env:
@@ -365,6 +404,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+          # a restored zig cache has built stale binaries (2026-11: a soak
+          # that leaked only on ci, a gc test that failed only there)
+          use-cache: false
       - name: install system libs
         timeout-minutes: 5
         env:
@@ -392,6 +434,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+          # a restored zig cache has built stale binaries (2026-11: a soak
+          # that leaked only on ci, a gc test that failed only there)
+          use-cache: false
       - name: install system libs
         timeout-minutes: 5
         env:
@@ -445,6 +490,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+          # a restored zig cache has built stale binaries (2026-11: a soak
+          # that leaked only on ci, a gc test that failed only there)
+          use-cache: false
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
@@ -475,6 +523,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+          # a restored zig cache has built stale binaries (2026-11: a soak
+          # that leaked only on ci, a gc test that failed only there)
+          use-cache: false
       - name: install system libs
         timeout-minutes: 5
         env:
@@ -500,6 +551,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+          # a restored zig cache has built stale binaries (2026-11: a soak
+          # that leaked only on ci, a gc test that failed only there)
+          use-cache: false
       - name: install system libs
         timeout-minutes: 5
         env:
@@ -544,6 +598,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
+          # a restored zig cache has built stale binaries (2026-11: a soak
+          # that leaked only on ci, a gc test that failed only there)
+          use-cache: false
       - name: install system libs
         timeout-minutes: 5
         env:
