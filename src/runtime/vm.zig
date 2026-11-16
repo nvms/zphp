@@ -14294,6 +14294,13 @@ pub const VM = struct {
                 }
             }
         }
+        // INIT_STATIC_METHOD_CALL of the constructor: a class without one
+        // has nothing to call, whatever __callStatic would take
+        if (method_name.len == 11 and std.ascii.eqlIgnoreCase(method_name, "__construct") and !self.hasMethod(class_name, "__construct")) {
+            self.dropN(arg_count);
+            if (try self.throwBuiltinException("Error", "Cannot call constructor")) return;
+            return error.RuntimeError;
+        }
         if (site) |st| {
             const entry = st.entry;
             if (entry.key == st.key and entry.chunk_key == st.chunk_key and entry.class_ptr == @intFromPtr(class_name.ptr)) {
