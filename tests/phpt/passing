@@ -719,6 +719,7 @@ Zend/tests/bug75426.phpt
 Zend/tests/bug75474.phpt
 Zend/tests/bug75573.phpt
 Zend/tests/bug75921.phpt
+Zend/tests/bug76383.phpt
 Zend/tests/bug76534.phpt
 Zend/tests/bug76752.phpt
 Zend/tests/bug76846.phpt
@@ -1607,6 +1608,7 @@ Zend/tests/fibers/destructors_007.phpt
 Zend/tests/fibers/destructors_008.phpt
 Zend/tests/fibers/destructors_009.phpt
 Zend/tests/fibers/destructors_010.phpt
+Zend/tests/fibers/destructors_011.phpt
 Zend/tests/fibers/destructors_013.phpt
 Zend/tests/fibers/destructors_014.phpt
 Zend/tests/fibers/destructors_015.phpt
@@ -2774,6 +2776,8 @@ Zend/tests/lazy_objects/write_magic_may_initialize.phpt
 Zend/tests/lazy_objects/write_skipped_no_initialize.phpt
 Zend/tests/line_numbers/bug81631.phpt
 Zend/tests/line_numbers/gh16509.phpt
+Zend/tests/line_numbers/gh8810_1.phpt
+Zend/tests/line_numbers/gh8810_2.phpt
 Zend/tests/line_numbers/gh8810_3.phpt
 Zend/tests/line_numbers/gh8810_4.phpt
 Zend/tests/line_numbers/gh8810_5.phpt
@@ -2904,6 +2908,7 @@ Zend/tests/magic_methods/bug47353.phpt
 Zend/tests/magic_methods/bug47801.phpt
 Zend/tests/magic_methods/bug48248.phpt
 Zend/tests/magic_methods/bug51421.phpt
+Zend/tests/magic_methods/bug51822.phpt
 Zend/tests/magic_methods/bug52361.phpt
 Zend/tests/magic_methods/bug52484.phpt
 Zend/tests/magic_methods/bug52484_2.phpt
@@ -2933,6 +2938,7 @@ Zend/tests/magic_methods/bug72177_2.phpt
 Zend/tests/magic_methods/bug72813.phpt
 Zend/tests/magic_methods/bug72854.phpt
 Zend/tests/magic_methods/bug73288.phpt
+Zend/tests/magic_methods/bug74053.phpt
 Zend/tests/magic_methods/bug74340.phpt
 Zend/tests/magic_methods/bug74862.phpt
 Zend/tests/magic_methods/bug74862_2.phpt
@@ -3785,6 +3791,7 @@ Zend/tests/restrict_globals/invalid_foreach.phpt
 Zend/tests/restrict_globals/invalid_foreach_ref.phpt
 Zend/tests/restrict_globals/invalid_pass_by_ref.phpt
 Zend/tests/restrict_globals/invalid_unset.phpt
+Zend/tests/restrict_globals/key_canonicalization.phpt
 Zend/tests/restrict_globals/valid.phpt
 Zend/tests/result_unused.phpt
 Zend/tests/return_by_ref_from_void_function.phpt
@@ -6165,8 +6172,11 @@ ext/reflection/tests/ReflectionExtension_isPersistant.phpt
 ext/reflection/tests/ReflectionExtension_isTemporary.phpt
 ext/reflection/tests/ReflectionFiber_backtrace.phpt
 ext/reflection/tests/ReflectionFiber_basic.phpt
+ext/reflection/tests/ReflectionFiber_bug_gh11121_1.phpt
+ext/reflection/tests/ReflectionFiber_bug_gh11121_2.phpt
 ext/reflection/tests/ReflectionFiber_errors.phpt
 ext/reflection/tests/ReflectionFiber_notrace_1.phpt
+ext/reflection/tests/ReflectionFiber_notrace_2.phpt
 ext/reflection/tests/ReflectionFunction_001.phpt
 ext/reflection/tests/ReflectionFunction_construct.001.phpt
 ext/reflection/tests/ReflectionFunction_getClosureScopeClass.phpt
@@ -11072,6 +11082,7 @@ tests/lang/passByReference_005.phpt
 tests/lang/passByReference_006.phpt
 tests/lang/passByReference_007.phpt
 tests/lang/passByReference_008.phpt
+tests/lang/passByReference_009.phpt
 tests/lang/passByReference_010.phpt
 tests/lang/passByReference_012.phpt
 tests/lang/returnByReference.001.phpt
