@@ -1719,15 +1719,11 @@ fn array_key_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
             break :blk .{ .string = Value.String.borrowed("") };
         },
         .float => |f| blk: {
-            // zend_dval_to_lval_safe
-            if (!Value.floatFitsInt(f) or f != @trunc(f)) {
-                var tmp: [64]u8 = undefined;
-                const msg = try std.fmt.allocPrint(ctx.allocator, "Implicit conversion from float {s} to int loses precision", .{@import("output.zig").formatFloat(&tmp, f)});
-                defer ctx.allocator.free(msg);
-                try ctx.vm.raiseError(8192, msg);
-                if (ctx.vm.pending_exception != null) return error.RuntimeError;
-            }
-            break :blk .{ .int = if (Value.floatFitsInt(f)) @intFromFloat(@trunc(f)) else 0 };
+            // zend_dval_to_lval_safe: a float past the int range is cast
+            // modulo 2^64 with a warning, a fraction is deprecated
+            try ctx.vm.warnOffsetKey(args[0]);
+            if (ctx.vm.pending_exception != null) return error.RuntimeError;
+            break :blk .{ .int = Value.dvalToLval(f) };
         },
         .bool => |b| .{ .int = @intFromBool(b) },
         .resource => |r| blk: {
