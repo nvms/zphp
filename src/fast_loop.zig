@@ -162,7 +162,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     ip += op_bytes;
                     continue :dispatch _next;
                 },
-                inline .add, .subtract, .multiply => |arith_op| {
+                inline .add, .subtract, .multiply, .multiply_swapped => |op_tag| {
+                    // numbers multiply the same either way round
+                    const arith_op = comptime if (op_tag == .multiply_swapped) OpCode.multiply else op_tag;
                     // operands are read in place: a whole copy of a value the
                     // previous handler just wrote stalls on store forwarding
                     const bp = &stack[sp - 1];
@@ -323,7 +325,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     ip += op_bytes;
                     continue :dispatch _next;
                 },
-                .bit_and => {
+                .bit_and, .bit_and_swapped => {
                     const b_ba = stack[sp - 1];
                     const a_ba = stack[sp - 2];
                     if (a_ba == .int and b_ba == .int) {
@@ -337,7 +339,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     self.sp = sp;
                     return;
                 },
-                .bit_or => {
+                .bit_or, .bit_or_swapped => {
                     const b_bo = stack[sp - 1];
                     const a_bo = stack[sp - 2];
                     if (a_bo == .int and b_bo == .int) {
@@ -351,7 +353,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     self.sp = sp;
                     return;
                 },
-                .bit_xor => {
+                .bit_xor, .bit_xor_swapped => {
                     const b_bx = stack[sp - 1];
                     const a_bx = stack[sp - 2];
                     if (a_bx == .int and b_bx == .int) {

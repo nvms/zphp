@@ -610,6 +610,13 @@ pub const OpCode = enum(u16) {
     // [the $GLOBALS view] -> [php's copy of the global symbol table], a
     // read of $GLOBALS as a value (ZEND_FETCH_GLOBALS)
     globals_copy,
+    // [a, b] -> [b op a]: php's vm specializes these commutative operators
+    // with the operand of the lower kind (const < tmp < var < cv) second, so
+    // errors, warnings and overloaded objects see them swapped
+    multiply_swapped,
+    bit_and_swapped,
+    bit_or_swapped,
+    bit_xor_swapped,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -794,6 +801,10 @@ pub const OpCode = enum(u16) {
             .bit_and,
             .bit_or,
             .bit_xor,
+            .multiply_swapped,
+            .bit_and_swapped,
+            .bit_or_swapped,
+            .bit_xor_swapped,
             .logical_xor,
             .shift_left,
             .shift_right,

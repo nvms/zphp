@@ -5493,9 +5493,10 @@ pub const VM = struct {
                     if (try self.checkArithOperands(a, b, "-")) continue;
                     self.push(Value.subtract(a, b));
                 },
-                .multiply => {
-                    const b = self.pop();
-                    const a = self.pop();
+                .multiply, .multiply_swapped => {
+                    var b = self.pop();
+                    var a = self.pop();
+                    if (op == .multiply_swapped) std.mem.swap(Value, &a, &b);
                     const handlers_before = self.handler_count;
                     const overloaded = self.objectBinop(.mul, a, b) catch {
                         if (self.resumeAfterThrow(base_frame, handlers_before)) continue;
@@ -5634,9 +5635,10 @@ pub const VM = struct {
                     }
                 },
 
-                .bit_and => {
-                    const b = self.pop();
-                    const a = self.pop();
+                .bit_and, .bit_and_swapped => {
+                    var b = self.pop();
+                    var a = self.pop();
+                    if (op == .bit_and_swapped) std.mem.swap(Value, &a, &b);
                     if (a == .string and b == .string) {
                         self.pushTransfer(.{ .string = try self.bitwiseStrings(a.string.bytes(), b.string.bytes(), .and_op) });
                     } else {
@@ -5654,9 +5656,10 @@ pub const VM = struct {
                         self.push(.{ .int = Value.toInt(a) & Value.toInt(b) });
                     }
                 },
-                .bit_or => {
-                    const b = self.pop();
-                    const a = self.pop();
+                .bit_or, .bit_or_swapped => {
+                    var b = self.pop();
+                    var a = self.pop();
+                    if (op == .bit_or_swapped) std.mem.swap(Value, &a, &b);
                     if (a == .string and b == .string) {
                         self.pushTransfer(.{ .string = try self.bitwiseStrings(a.string.bytes(), b.string.bytes(), .or_op) });
                     } else {
@@ -5674,9 +5677,10 @@ pub const VM = struct {
                         self.push(.{ .int = Value.toInt(a) | Value.toInt(b) });
                     }
                 },
-                .bit_xor => {
-                    const b = self.pop();
-                    const a = self.pop();
+                .bit_xor, .bit_xor_swapped => {
+                    var b = self.pop();
+                    var a = self.pop();
+                    if (op == .bit_xor_swapped) std.mem.swap(Value, &a, &b);
                     if (a == .string and b == .string) {
                         self.pushTransfer(.{ .string = try self.bitwiseStrings(a.string.bytes(), b.string.bytes(), .xor_op) });
                     } else {
@@ -16605,6 +16609,10 @@ pub const VM = struct {
         // php converts the left operand before it finds the right one
         // unusable, warning about a leading-numeric string
         if (isArithOperand(a) and a == .string and isPartialNumericString(a.string.bytes())) self.emitNonNumericWarning() catch return self.resumeRaised();
+        // the integer operators' zendi_try_get_long warns about a lossy float
+        const int_op = comptime std.mem.eql(u8, op, "%") or std.mem.eql(u8, op, "<<") or std.mem.eql(u8, op, ">>") or
+            std.mem.eql(u8, op, "&") or std.mem.eql(u8, op, "|") or std.mem.eql(u8, op, "^");
+        if (int_op and isArithOperand(a)) self.warnIntOperand(a) catch return self.resumeRaised();
         const tn_a = Value.typeName(a);
         const tn_b = Value.typeName(b);
         const msg = try std.fmt.allocPrint(self.allocator, "Unsupported operand types: {s} " ++ op ++ " {s}", .{ tn_a, tn_b });

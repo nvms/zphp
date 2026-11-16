@@ -623,6 +623,33 @@ pub fn compileBinaryOp(self: *Compiler, node: Ast.Node) Error!void {
         .equal_equal, .bang_equal, .equal_equal_equal, .bang_equal_equal, .lt_gt => isCompileConst(self, node.data.lhs) and !isCompileConst(self, node.data.rhs),
         else => false,
     };
+    // the other commutative operators run with the operands swapped the same
+    // way, by operand kind; a constant on the left is just compiled second
+    const commutative = op_tag == .star or op_tag == .amp or op_tag == .pipe or op_tag == .caret;
+    const lhs_kind = if (commutative) phpOperandKind(self, node.data.lhs) else 0;
+    const rhs_kind = if (commutative) phpOperandKind(self, node.data.rhs) else 0;
+    if (commutative and lhs_kind < rhs_kind) {
+        if (lhs_kind == operand_const) {
+            try self.compileNode(node.data.rhs);
+            try self.compileNode(node.data.lhs);
+            try self.emitOp(switch (op_tag) {
+                .star => .multiply,
+                .amp => .bit_and,
+                .pipe => .bit_or,
+                else => .bit_xor,
+            });
+        } else {
+            try self.compileNode(node.data.lhs);
+            try self.compileNode(node.data.rhs);
+            try self.emitOp(switch (op_tag) {
+                .star => .multiply_swapped,
+                .amp => .bit_and_swapped,
+                .pipe => .bit_or_swapped,
+                else => .bit_xor_swapped,
+            });
+        }
+        return;
+    }
     // php's binary opcodes read a variable operand when they run, after the
     // right side: one the right side writes is read with the new value
     const late_lhs = !swap and lateVariableOperand(self, node.data.lhs, node.data.rhs);
@@ -696,6 +723,73 @@ fn isNamedVariable(self: *Compiler, idx: u32, name: []const u8) bool {
 }
 
 // a literal php's compiler makes an IS_CONST operand of
+// the kind of operand php's compiler makes of an expression (IS_CONST,
+// IS_TMP_VAR, IS_VAR, IS_CV), which orders a commutative opcode's operands
+const operand_const: u8 = 1;
+const operand_tmp: u8 = 2;
+const operand_var: u8 = 4;
+const operand_cv: u8 = 8;
+
+fn phpOperandKind(self: *Compiler, idx: u32) u8 {
+    if (isCompileConst(self, idx)) return operand_const;
+    const node = self.ast.nodes[idx];
+    switch (node.tag) {
+        .prefix_op => {
+            // a negated number folds to a constant
+            const tag = self.ast.tokens[node.main_token].tag;
+            const inner = self.ast.nodes[node.data.lhs].tag;
+            if ((tag == .minus or tag == .plus) and (inner == .integer_literal or inner == .float_literal)) return operand_const;
+            return operand_tmp;
+        },
+        .variable => {
+            const name = self.ast.tokenSlice(node.main_token);
+            // $this and the superglobals are fetched, not compiled variables
+            if (std.mem.eql(u8, name, "$this") or isSuperglobalName(name)) return operand_tmp;
+            return operand_cv;
+        },
+        .method_call, .nullsafe_method_call, .static_call, .dynamic_static_call, .new_expr, .new_expr_dynamic, .anonymous_class => return operand_var,
+        .call => {
+            // the functions php compiles to their own opcodes (or frameless
+            // calls) give a temporary; any other call a var
+            const callee = self.ast.nodes[node.data.lhs];
+            if (callee.tag != .identifier and callee.tag != .qualified_name) return operand_var;
+            const name = self.ast.tokenSlice(callee.main_token);
+            if (callee.tag == .qualified_name) {
+                // only `\f`: one part, absolute
+                const raw = callee.data.rhs & ~((@as(u32, 1) << 31) | (@as(u32, 1) << 30));
+                if (callee.data.rhs & (1 << 31) == 0) return operand_var;
+                if (raw != 0 and self.ast.extraSlice(raw).len > 1) return operand_var;
+            } else if (self.namespace.len > 0) return operand_var;
+            var lower_buf: [32]u8 = undefined;
+            if (name.len > lower_buf.len) return operand_var;
+            const lower = std.ascii.lowerString(&lower_buf, name);
+            for (tmp_result_functions) |f| {
+                if (std.mem.eql(u8, lower, f)) return operand_tmp;
+            }
+            return operand_var;
+        },
+        else => return operand_tmp,
+    }
+}
+
+// zend_try_compile_special_func's functions and the frameless ones
+const tmp_result_functions = [_][]const u8{
+    "strlen",       "is_null",      "is_bool",          "is_long",          "is_int",          "is_integer",     "is_float",    "is_double",
+    "is_string",    "is_array",     "is_object",        "is_resource",      "is_scalar",       "boolval",        "intval",      "floatval",
+    "doubleval",    "strval",       "defined",          "chr",              "ord",             "in_array",       "count",       "sizeof",
+    "get_class",    "get_called_class", "gettype",      "func_num_args",    "func_get_args",   "array_slice",    "array_key_exists", "sprintf",
+    "class_exists", "dechex",       "dirname",          "implode",          "is_numeric",      "max",            "min",         "preg_match",
+    "preg_replace", "property_exists", "str_contains",  "str_replace",      "str_starts_with", "strpos",         "strstr",      "strtr",
+    "substr",       "trim",
+};
+
+fn isSuperglobalName(name: []const u8) bool {
+    for ([_][]const u8{ "$GLOBALS", "$_SERVER", "$_GET", "$_POST", "$_FILES", "$_COOKIE", "$_SESSION", "$_REQUEST", "$_ENV" }) |g| {
+        if (std.mem.eql(u8, name, g)) return true;
+    }
+    return false;
+}
+
 fn isCompileConst(self: *Compiler, idx: u32) bool {
     const node = self.ast.nodes[idx];
     return switch (node.tag) {
