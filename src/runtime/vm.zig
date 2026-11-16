@@ -23104,10 +23104,9 @@ pub const VM = struct {
         if (vr.declared and vr.type_str.len > 0) try self.verifyPropAssignableByRef(vr, prop_name, cell);
         self.detachPropRefs(obj, prop_name, cell);
         const scope: ?[]const u8 = if (vr.declared) vr.defining_class else null;
-        const old = obj.getForScope(prop_name, scope);
         obj.clearUnset(self.allocator, prop_name);
+        // the store releases the value the property held
         try obj.setForScope(self.allocator, prop_name, cell.*, scope);
-        self.releaseValue(old);
         const ri = try self.refIndex();
         const persistent = try self.persistentRefOwner();
         const frame = self.currentFrame();
