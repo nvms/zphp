@@ -19358,6 +19358,26 @@ pub const VM = struct {
         return if (at + next.width() == frame.ip) up else null;
     }
 
+    // the error the set_prop after a failed ++/-- of a property raises for a
+    // readonly property, or null
+    fn readonlyStepWrite(self: *VM) RuntimeError!?[]u8 {
+        if (self.frame_count == 0 or self.sp == 0) return null;
+        const frame = self.currentFrame();
+        const code = frame.chunk.code.items;
+        if (!bytecode.opIs(code, frame.ip, .set_prop) or frame.ip + bytecode.op_bytes + 2 > code.len) return null;
+        const at = frame.ip + bytecode.op_bytes;
+        const name_value = frame.chunk.constants.items[(@as(u16, code[at]) << 8) | code[at + 1]];
+        if (name_value != .string) return null;
+        const name = name_value.string.bytes();
+        const target = self.stack[self.sp - 1];
+        if (target != .object) return null;
+        const obj = target.object;
+        const vr = self.findPropertyVisibility(obj.class_name, name);
+        if (!vr.is_readonly or obj.rawForScope(name, vr.defining_class) == .undef or obj.isUnset(name)) return null;
+        if (self.reinit_windows.items.len > 0 and self.readonlyReinitable(obj, name)) return null;
+        return try std.fmt.allocPrint(self.allocator, "Cannot modify readonly property {s}::${s}", .{ vr.defining_class, name });
+    }
+
     fn throwIncdecRef(self: *VM, src: TypeSource, up: bool) RuntimeError {
         const msg = std.fmt.allocPrint(self.allocator, "Cannot {s} a reference held by property {s}::${s} of type {s} past its {s} value", .{ if (up) "increment" else "decrement", src.class, src.prop, try self.propertyTypeText(src.type_str, src.class), if (up) "maximal" else "minimal" }) catch return error.RuntimeError;
         defer self.allocator.free(msg);
@@ -19368,6 +19388,17 @@ pub const VM = struct {
     fn throwStepError(self: *VM, verb: []const u8, type_name: []const u8) RuntimeError!?Value {
         const msg = try std.fmt.allocPrint(self.allocator, "Cannot {s} {s}", .{ verb, type_name });
         defer self.allocator.free(msg);
+        if (try self.readonlyStepWrite()) |readonly_msg| {
+            // php's ++/-- on a readonly property reads it, steps the copy and
+            // writes it back (zend_post_incdec_overloaded_property): the
+            // write's error is thrown with the step's as its previous
+            defer self.allocator.free(readonly_msg);
+            const step_error = try self.newBuiltinException("TypeError", msg, null);
+            const readonly_error = try self.newBuiltinException("Error", readonly_msg, null);
+            _ = try self.chainPrevious(readonly_error, step_error);
+            if (self.throwObject(readonly_error)) return null;
+            return error.RuntimeError;
+        }
         if (try self.throwBuiltinException("TypeError", msg)) return null;
         return error.RuntimeError;
     }
