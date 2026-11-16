@@ -26487,7 +26487,9 @@ pub const VM = struct {
             try self.initBuiltinAncestorDefaults(obj, cls.parent);
             return layout.throwable;
         }
-        // fallback for classes without slot layout
+        // fallback for classes without slot layout. their static defaults
+        // are evaluated all the same (zend_update_class_constants)
+        if (cls.defaults_pending) try self.resolveClassDefaults(class_name);
         if (cls.parent) |parent| _ = try self.initPropertyDefaults(obj, parent);
         for (cls.properties.items) |prop| {
             try obj.set(self.allocator, prop.name, try self.copyDefault(prop.default));
