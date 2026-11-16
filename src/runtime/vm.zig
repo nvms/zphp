@@ -5362,9 +5362,11 @@ pub const VM = struct {
                         self.releaseValue(val);
                         continue;
                     }
-                    if (self.currentFrame().ref_slots.get(name)) |cell| {
-                        self.setCell(cell, val);
-                        try self.propagateCellWrite(cell, val);
+                    if (self.currentFrame().ref_slots.contains(name)) {
+                        // the cell takes its own reference and the slot with
+                        // its vars mirror this one, as set_local stores
+                        try self.setVariableByName(self.currentFrame(), name, val);
+                        continue;
                     } else {
                         const svf = self.currentFrame();
                         // overwrite-release: drop the object the variable held
