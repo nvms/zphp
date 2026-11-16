@@ -590,6 +590,11 @@ pub const OpCode = enum(u16) {
     // variable before creating it
     array_get_vivify_rw,
     ensure_array_local_rw, // u16: slot
+    // `$c[] op= v` (ASSIGN_DIM_OP with no offset): [container, value] ->
+    // [container, current, value]. the element the operator starts from:
+    // null for an array, offsetGet(null) for an ArrayAccess object, an
+    // Error for a string or another object
+    append_op_read,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -719,6 +724,7 @@ pub const OpCode = enum(u16) {
             .reference_source,
             .constant,
             .op_null,
+            .append_op_read,
             .op_true,
             .op_false,
             .dup,

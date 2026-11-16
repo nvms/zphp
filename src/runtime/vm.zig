@@ -6251,6 +6251,35 @@ pub const VM = struct {
                     const arr = try self.allocArray();
                     self.push(.{ .array = arr });
                 },
+                .append_op_read => {
+                    // zend_binary_assign_op_obj_dim / _dim_slow with no offset
+                    const container = self.stack[self.sp - 2];
+                    var current: Value = .null;
+                    switch (container) {
+                        .object => |obj| if (self.hasMethod(obj.class_name, "offsetGet")) {
+                            const saved_append = self.dim_append_depth;
+                            self.dim_append_depth = self.frame_count + 1;
+                            defer self.dim_append_depth = saved_append;
+                            current = self.callMethod(obj, "offsetGet", &.{.null}) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                        } else {
+                            const msg = try std.fmt.allocPrint(self.allocator, "Cannot use object of type {s} as array", .{obj.class_name});
+                            defer self.allocator.free(msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        },
+                        .string => {
+                            if (try self.throwBuiltinException("Error", "[] operator not supported for strings")) continue;
+                            return error.RuntimeError;
+                        },
+                        else => {},
+                    }
+                    const value = self.popTransfer();
+                    self.push(current);
+                    self.pushTransfer(value);
+                },
                 .array_push_assign => {
                     const val = self.pop();
                     const arr_val = self.pop();

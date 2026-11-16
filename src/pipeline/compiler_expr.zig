@@ -59,8 +59,8 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
         if (op_tag == .question_question_equal) return self.fail(target.main_token, "Cannot use [] for reading");
         if (op_tag != .equal) {
             try compileVivifyChain(self, target.data.lhs);
-            try self.emitOp(.op_null);
             try self.compileNode(node.data.rhs);
+            try self.emitOp(.append_op_read);
             try emitCompoundOp(self, op_tag);
             try self.emitOp(.array_push_assign);
             return;
