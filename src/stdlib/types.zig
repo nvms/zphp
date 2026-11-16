@@ -1823,6 +1823,8 @@ pub fn iniDefault(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "ignore_user_abort")) return "0";
     if (std.mem.eql(u8, name, "docref_root")) return "";
     if (std.mem.eql(u8, name, "docref_ext")) return "";
+    if (std.mem.eql(u8, name, "error_prepend_string")) return "";
+    if (std.mem.eql(u8, name, "error_append_string")) return "";
     if (std.mem.eql(u8, name, "user_agent")) return "";
     if (std.mem.eql(u8, name, "auto_detect_line_endings")) return "0";
     if (std.mem.eql(u8, name, "from")) return "";

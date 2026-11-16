@@ -132,6 +132,29 @@ pub fn formatUncaught(alloc: std.mem.Allocator, vm: *const VM, copy: Copy, descr
 
 const UncaughtReport = struct { copy: Copy, description: ?[]const u8 };
 
+pub const UncaughtParts = struct { level: i64, message: []u8, file: []const u8, line: i64 };
+
+// the pending throwable as php_error_cb receives it (level, message, file,
+// line), for the html display; null for the shapes only the text form has
+pub fn uncaughtParts(alloc: std.mem.Allocator, vm: *const VM, description: ?[]const u8) ?UncaughtParts {
+    const exc = vm.pending_exception orelse return null;
+    if (exc != .object) return null;
+    const obj = exc.object;
+    const msg_v = obj.get("message");
+    const message: []const u8 = if (msg_v == .string) msg_v.string.bytes() else "";
+    const file_v = obj.get("file");
+    const line_v = obj.get("line");
+    const file: []const u8 = if (file_v == .string and file_v.string.bytes().len > 0) file_v.string.bytes() else "Unknown";
+    const line: i64 = if (line_v == .int) line_v.int else 0;
+    if (std.mem.eql(u8, obj.class_name, "ParseError") or std.mem.eql(u8, obj.class_name, "CompileError")) {
+        const level: i64 = if (std.mem.eql(u8, obj.class_name, "ParseError")) 4 else 64;
+        return .{ .level = level, .message = alloc.dupe(u8, message) catch return null, .file = displayPath(file), .line = line };
+    }
+    if (vm.uncatchable_fatal) return .{ .level = 1, .message = alloc.dupe(u8, message) catch return null, .file = file, .line = line };
+    const text = std.fmt.allocPrint(alloc, "Uncaught {s}\n  thrown", .{description orelse ""}) catch return null;
+    return .{ .level = 1, .message = text, .file = file, .line = line };
+}
+
 fn formatUncaughtException(buf: *Writer, alloc: std.mem.Allocator, vm: *const VM, exc: Value, report: UncaughtReport) void {
     const copy = report.copy;
     var class_name: []const u8 = "Exception";

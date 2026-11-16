@@ -841,8 +841,17 @@ fn reportRuntimeError(allocator: std.mem.Allocator, vm: *VM) !void {
     switch (vm.displayTarget()) {
         .none => {},
         .stdout => {
+            if (vm.htmlErrors()) if (error_format.uncaughtParts(allocator, vm, description)) |parts| {
+                defer allocator.free(parts.message);
+                const text = try vm.displayedError(parts.level, parts.message, parts.file, parts.line);
+                defer vm.allocator.free(text);
+                try vm.output.appendSlice(vm.allocator, text);
+                return;
+            };
+            try vm.output.appendSlice(vm.allocator, vm.iniText("error_prepend_string"));
             try vm.output.append(vm.allocator, '\n');
             try vm.output.appendSlice(vm.allocator, error_format.formatUncaught(allocator, vm, .display, description));
+            try vm.output.appendSlice(vm.allocator, vm.iniText("error_append_string"));
         },
         .stderr => {
             vm.flushOutputToStdout();

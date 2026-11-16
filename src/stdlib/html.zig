@@ -454,8 +454,21 @@ fn findEntityForCharBasic(k: u32, table: []const CodePointEntity) ?[]const u8 {
 // php_escape_html_entities_ex; null where php returns an empty string for
 // ill-formed input
 pub fn escapeHtmlEntities(ctx: *NativeContext, func: []const u8, old: []const u8, all_requested: bool, flags: i32, hint: ?[]const u8, double_encode: bool, out: *std.ArrayListUnmanaged(u8)) RuntimeError!bool {
+    return escapeHtmlEntitiesEx(ctx, func, old, all_requested, flags, hint, double_encode, false, out);
+}
+
+// main.c's escape_html for error messages: htmlspecialchars in the default
+// charset, quietly, retrying with invalid sequences substituted when the
+// first try gives nothing
+pub fn escapeErrorText(ctx: *NativeContext, text: []const u8, out: *std.ArrayListUnmanaged(u8)) RuntimeError!void {
+    if (try escapeHtmlEntitiesEx(ctx, "", text, false, quote_double, null, true, true, out) and out.items.len > 0) return;
+    out.clearRetainingCapacity();
+    _ = try escapeHtmlEntitiesEx(ctx, "", text, false, quote_double | substitute_errors, null, true, true, out);
+}
+
+fn escapeHtmlEntitiesEx(ctx: *NativeContext, func: []const u8, old: []const u8, all_requested: bool, flags: i32, hint: ?[]const u8, double_encode: bool, quiet: bool, out: *std.ArrayListUnmanaged(u8)) RuntimeError!bool {
     const allocator = ctx.allocator;
-    const charset = try determineCharset(ctx, func, hint, false);
+    const charset = try determineCharset(ctx, func, hint, quiet);
     const doctype = flags & doc_type_mask;
     var all = all_requested;
     if (all) {

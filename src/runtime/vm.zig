@@ -17453,7 +17453,7 @@ pub const VM = struct {
         switch (self.displayTarget()) {
             .none => {},
             .stdout => {
-                const display_text = std.fmt.allocPrint(self.allocator, "\n{s}: {s} in {s} on line {d}\n", .{ label, msg, at.file, at.line }) catch return;
+                const display_text = self.displayedError(level, msg, at.file, at.line) catch return;
                 defer self.allocator.free(display_text);
                 self.output.appendSlice(self.allocator, display_text) catch {};
                 // php_printf goes through the output layer: a chunked
@@ -17467,6 +17467,76 @@ pub const VM = struct {
                 _ = platform.write(std.Io.File.stderr(), display_text) catch {};
             },
         }
+    }
+
+    pub fn htmlErrors(self: *const VM) bool {
+        return self.iniFlagOn("html_errors", "0");
+    }
+
+    pub fn iniText(self: *const VM, name: []const u8) []const u8 {
+        return self.ini_settings.get(name) orelse @import("../ini_config.zig").get(name) orelse "";
+    }
+
+    // php_error_cb's display copy as php_printf writes it, around the
+    // message error_prepend_string and error_append_string, in html when
+    // html_errors is on. an E_ERROR or E_PARSE message is escaped there; a
+    // docref message (php_verror) was escaped when it was made
+    pub fn displayedError(self: *VM, level: i64, msg: []const u8, file: []const u8, line: i64) ![]u8 {
+        const a = self.allocator;
+        const label = errorLabel(level);
+        const prepend = self.iniText("error_prepend_string");
+        const append = self.iniText("error_append_string");
+        if (!self.htmlErrors()) return std.fmt.allocPrint(a, "{s}\n{s}: {s} in {s} on line {d}\n{s}", .{ prepend, label, msg, file, line, append });
+        var text: std.ArrayListUnmanaged(u8) = .empty;
+        defer text.deinit(a);
+        if (level == 1 or level == 4) {
+            try self.escapeErrorHtml(msg, &text);
+        } else if (try self.docrefHtml(msg, &text)) {} else try text.appendSlice(a, msg);
+        return std.fmt.allocPrint(a, "{s}<br />\n<b>{s}</b>:  {s} in <b>{s}</b> on line <b>{d}</b><br />\n{s}", .{ prepend, label, text.items, file, line, append });
+    }
+
+    fn escapeErrorHtml(self: *VM, text: []const u8, out: *std.ArrayListUnmanaged(u8)) !void {
+        var ctx = self.makeContext(null);
+        @import("../stdlib/html.zig").escapeErrorText(&ctx, text, out) catch {
+            out.clearRetainingCapacity();
+            try out.appendSlice(self.allocator, text);
+        };
+    }
+
+    // php_verror's html form of "origin: message", escaped in two parts with
+    // the manual's link between them when docref_root is set. zphp's natives
+    // hand over the finished text, so the origin is read back from its start
+    fn docrefHtml(self: *VM, msg: []const u8, out: *std.ArrayListUnmanaged(u8)) !bool {
+        const a = self.allocator;
+        var i: usize = 0;
+        while (i < msg.len and (std.ascii.isAlphanumeric(msg[i]) or msg[i] == '_' or msg[i] == '\\' or msg[i] == ':')) i += 1;
+        if (i == 0 or i >= msg.len or msg[i] != '(' or std.ascii.isDigit(msg[0])) return false;
+        const name = msg[0..i];
+        const close = std.mem.indexOfPos(u8, msg, i, "): ") orelse return false;
+        const origin = msg[0 .. close + 1];
+        const body = msg[close + 3 ..];
+        try self.escapeErrorHtml(origin, out);
+        const root = self.iniText("docref_root");
+        if (root.len > 0) {
+            var function = name;
+            var class: []const u8 = "";
+            if (std.mem.indexOf(u8, name, "::")) |sep| {
+                class = name[0..sep];
+                function = name[sep + 2 ..];
+            }
+            while (function.len > 0 and function[0] == '_') function = function[1..];
+            const ref = if (class.len > 0)
+                try std.fmt.allocPrint(a, "{s}.{s}{s}", .{ class, function, self.iniText("docref_ext") })
+            else
+                try std.fmt.allocPrint(a, "function.{s}{s}", .{ function, self.iniText("docref_ext") });
+            defer a.free(ref);
+            const ext_len = self.iniText("docref_ext").len;
+            for (ref[0 .. ref.len - ext_len]) |*c| c.* = if (c.* == '_') '-' else std.ascii.toLower(c.*);
+            try out.print(a, " [<a href='{s}{s}'>{s}</a>]", .{ root, ref, ref });
+        }
+        try out.appendSlice(a, ": ");
+        try self.escapeErrorHtml(body, out);
+        return true;
     }
 
     pub fn errorLabel(level: i64) []const u8 {
