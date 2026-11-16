@@ -1403,6 +1403,10 @@ pub const VM = struct {
     response_headers: ?*PhpArray = null,
     last_http_response_headers: ?*PhpArray = null,
     headers_sent: bool = false,
+    // the cli has no response code until one is set
+    response_code_set: bool = false,
+    // header_register_callback's callback, run as the headers are sent
+    header_callback: ?Value = null,
     // where the output that sent the headers came from, for headers_sent()
     output_start: ?SourcePosition = null,
     default_tz_name: []const u8 = "UTC",
@@ -3953,6 +3957,9 @@ pub const VM = struct {
         self.ob_stack.clearRetainingCapacity();
         self.request_vars.clearRetainingCapacity();
         self.response_code = 200;
+        self.response_code_set = false;
+        if (self.header_callback) |cb| self.releaseValue(cb);
+        self.header_callback = null;
         self.response_headers = null;
         self.last_http_response_headers = null;
         self.headers_sent = false;
@@ -6189,10 +6196,10 @@ pub const VM = struct {
                         if (v == .array) self.emitWarning("Array to string conversion") catch if (try self.resumeRaised()) continue;
                         try v.format(&self.output, self.allocator);
                     }
-                    if (self.ob_stack.items.len == 0 and !self.headers_sent) {
-                        self.headers_sent = true;
-                        self.output_start = self.currentSourcePosition();
-                    }
+                    if (self.ob_stack.items.len == 0 and !self.headers_sent) self.noteTopLevelOutput() catch |err| {
+                        if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                        return err;
+                    };
                     if (self.ob_chunk_watch) output_control.checkChunks(self) catch if (try self.resumeRaised()) continue;
                 },
                 .halt => return,
@@ -17448,6 +17455,10 @@ pub const VM = struct {
     // the stream. in serve the buffer is the response body and stays put
     pub fn flushOutputToStdout(self: *VM) void {
         if (self.serve_mode or self.output.items.len == 0) return;
+        if (!self.headers_sent and (self.ob_stack.items.len == 0 or self.ob_stack.items[0].start > 0)) {
+            self.headers_sent = true;
+            self.output_start = self.currentSourcePosition();
+        }
         // what output buffering holds stays in its buffers
         if (self.ob_stack.items.len > 0) {
             const sent = self.ob_stack.items[0].start;
@@ -17460,6 +17471,40 @@ pub const VM = struct {
         }
         platform.writeStdout(self.output.items);
         self.output.clearRetainingCapacity();
+    }
+
+    // php_output_header: output that reaches the top level sends the
+    // headers, running header_register_callback's callback first, so what
+    // it prints goes before the output that sent them
+    pub fn noteTopLevelOutput(self: *VM) RuntimeError!void {
+        if (self.headers_sent) return;
+        const top = if (self.ob_stack.items.len == 0) self.output.items.len else self.ob_stack.items[0].start;
+        if (top == 0) return;
+        self.headers_sent = true;
+        self.output_start = self.currentSourcePosition();
+        const cb = self.header_callback orelse return;
+        self.header_callback = null;
+        defer self.releaseValue(cb);
+        if (self.ob_stack.items.len > 0) {
+            _ = try self.callValueCallable(cb, &.{});
+            return;
+        }
+        const sent = try self.allocator.dupe(u8, self.output.items);
+        defer self.allocator.free(sent);
+        self.output.clearRetainingCapacity();
+        defer self.output.appendSlice(self.allocator, sent) catch {};
+        _ = try self.callValueCallable(cb, &.{});
+    }
+
+    // php_output_deactivate sends the headers a script never sent
+    pub fn sendHeadersAtShutdown(self: *VM) RuntimeError!void {
+        try self.noteTopLevelOutput();
+        if (self.headers_sent) return;
+        self.headers_sent = true;
+        const cb = self.header_callback orelse return;
+        self.header_callback = null;
+        defer self.releaseValue(cb);
+        _ = try self.callValueCallable(cb, &.{});
     }
 
     pub const DisplayTarget = enum { none, stdout, stderr };
@@ -26924,6 +26969,10 @@ pub const VM = struct {
         // calls resets this for what it calls in turn by adding a frame
         self.forwarding_depth = if (isUserCallForwarder(name)) self.frame_count else std.math.maxInt(usize);
         const result = try native.call(ctx, native_args);
+        if (!self.headers_sent) self.noteTopLevelOutput() catch |err| {
+            self.releaseValue(result.value);
+            return err;
+        };
         if (self.ic) |ic| if (ic.ref_write_refused) {
             ic.ref_write_refused = false;
             if (self.pending_exception != null) {

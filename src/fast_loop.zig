@@ -866,8 +866,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     return;
                 },
                 .echo => {
-                    // a buffer with a chunk size runs its handler as it fills
-                    if (self.ob_chunk_watch) {
+                    // a buffer with a chunk size runs its handler as it fills,
+                    // and the first output to reach the top sends the headers
+                    if (self.ob_chunk_watch or (!self.headers_sent and self.ob_stack.items.len == 0)) {
                         frame.ip = ip - op_bytes;
                         self.sp = sp;
                         return;

@@ -18,7 +18,40 @@ pub const entries = .{
     .{ "headers_list", native_headers_list },
     .{ "http_get_last_response_headers", native_http_get_last_response_headers },
     .{ "http_clear_last_response_headers", native_http_clear_last_response_headers },
+    .{ "header_register_callback", native_header_register_callback },
 };
+
+// sapi_header_op's refusal once output has sent the headers. the cli sends
+// them with its first output; serve keeps the whole response until the end
+fn headersAlreadySent(ctx: *NativeContext, comptime what: []const u8, comptime joiner: []const u8) RuntimeError!bool {
+    const vm = ctx.vm;
+    if (vm.serve_mode) return false;
+    try vm.noteTopLevelOutput();
+    if (!vm.headers_sent) return false;
+    const msg = if (vm.output_start) |at|
+        try std.fmt.allocPrint(ctx.allocator, what ++ joiner ++ "(output started at {s}:{d})", .{ at.file, at.line })
+    else
+        try ctx.allocator.dupe(u8, what);
+    defer ctx.allocator.free(msg);
+    try vm.emitWarning(msg);
+    return true;
+}
+
+// php's header_register_callback: the callback runs as the headers are sent
+fn native_header_register_callback(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const vm = ctx.vm;
+    if (vm.header_callback) |old| {
+        vm.header_callback = null;
+        vm.releaseValue(old);
+    }
+    if (!vm.serve_mode) try vm.noteTopLevelOutput();
+    // one registered after the headers went out would never run
+    if (args.len > 0 and !vm.headers_sent) {
+        VM.retainValue(args[0]);
+        vm.header_callback = args[0];
+    }
+    return NativeResult.scalar(.{ .bool = true });
+}
 
 fn native_flush(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     // CLI: nothing to flush at HTTP level
@@ -29,6 +62,7 @@ fn native_header(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.null);
     const hdr = args[0].string.bytes();
     const replace = args.len < 2 or args[1] != .bool or args[1].bool;
+    if (try headersAlreadySent(ctx, "Cannot modify header information - headers already sent", " by ")) return NativeResult.scalar(.null);
 
     // PHP treats `header("HTTP/1.1 301 ...")` as a status-code set, not a real
     // header. parse the numeric code out and update response_code. the header
@@ -36,6 +70,7 @@ fn native_header(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     // (matching PHP's observable behavior), but writeResponse will skip emitting
     // any HTTP/ line on the wire - the wire status comes from response_code
     if (std.mem.startsWith(u8, hdr, "HTTP/")) {
+        ctx.vm.response_code_set = true;
         // expect "HTTP/x.y CODE message"
         var it = std.mem.tokenizeScalar(u8, hdr, ' ');
         _ = it.next(); // HTTP/x.y
@@ -46,9 +81,12 @@ fn native_header(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         }
     }
 
-    if (args.len >= 3 and args[2] == .int) {
+    if (args.len >= 3 and args[2] == .int and args[2].int != 0) {
         ctx.vm.response_code = args[2].int;
+        ctx.vm.response_code_set = true;
     }
+    // the cli's header handler keeps no headers
+    if (!ctx.vm.serve_mode) return NativeResult.scalar(.null);
 
     if (replace) {
         if (std.mem.indexOf(u8, hdr, ":")) |colon| {
@@ -61,10 +99,22 @@ fn native_header(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
 }
 
 fn native_http_response_code(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    if (args.len >= 1 and args[0] == .int) {
-        ctx.vm.response_code = args[0].int;
+    const vm = ctx.vm;
+    if (vm.serve_mode) {
+        if (args.len >= 1 and args[0] == .int) vm.response_code = args[0].int;
+        return NativeResult.scalar(.{ .int = vm.response_code });
     }
-    return NativeResult.scalar(.{ .int = ctx.vm.response_code });
+    // the cli has no response code until one is set
+    const code: i64 = if (args.len >= 1 and args[0] == .int) args[0].int else 0;
+    if (code != 0) {
+        if (try headersAlreadySent(ctx, "http_response_code(): Cannot set response code - headers already sent", " ")) return NativeResult.scalar(.{ .bool = false });
+        const old: i64 = if (vm.response_code_set) vm.response_code else 0;
+        vm.response_code = code;
+        vm.response_code_set = true;
+        return NativeResult.scalar(if (old != 0) .{ .int = old } else .{ .bool = true });
+    }
+    if (!vm.response_code_set) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.scalar(.{ .int = vm.response_code });
 }
 
 // php's head.c: php_setcookie_common and php_setcookie
@@ -184,7 +234,8 @@ fn setcookieCommon(ctx: *NativeContext, args: []const Value, comptime func: []co
     };
     if (partitioned) try buf.appendSlice(a, "; Partitioned");
 
-    try appendResponseHeader(ctx, buf.items);
+    if (try headersAlreadySent(ctx, "Cannot modify header information - headers already sent", " by ")) return NativeResult.scalar(.{ .bool = false });
+    if (ctx.vm.serve_mode) try appendResponseHeader(ctx, buf.items);
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -201,6 +252,7 @@ fn appendRawUrlEncoded(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, s
 }
 
 fn native_header_remove(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (try headersAlreadySent(ctx, "Cannot modify header information - headers already sent", " by ")) return NativeResult.scalar(.null);
     if (args.len == 0) {
         if (getResponseHeaders(ctx)) |arr| {
             while (arr.entries.items.len > 0) {
@@ -215,6 +267,7 @@ fn native_header_remove(ctx: *NativeContext, args: []const Value) RuntimeError!N
 
 // headers_sent(&$filename, &$line): where output started, or "" and 0
 fn native_headers_sent(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    if (!ctx.vm.serve_mode) try ctx.vm.noteTopLevelOutput();
     const start: ?@TypeOf(ctx.vm.output_start.?) = if (ctx.vm.headers_sent) ctx.vm.output_start else null;
     if (args.len >= 1) {
         const file = try Value.String.create(ctx.allocator, if (start) |at| at.file else "");

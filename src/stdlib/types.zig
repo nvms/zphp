@@ -100,7 +100,6 @@ pub const entries = .{
     .{ "ignore_user_abort", native_ignore_user_abort },
     .{ "getmxrr", native_getmxrr },
     .{ "dns_get_mx", native_getmxrr },
-    .{ "header_register_callback", native_noop_true },
     .{ "spl_classes", native_spl_classes },
     .{ "iconv_mime_decode", native_iconv_mime_decode },
     .{ "iconv_mime_decode_headers", native_iconv_mime_decode_headers },
