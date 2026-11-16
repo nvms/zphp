@@ -2166,6 +2166,22 @@ pub fn emitSpreadArgs(self: *Compiler, args: []const u32) Error!ArgGuards {
         const arg_node = self.ast.nodes[arg_idx];
         if (arg_node.tag == .splat_expr) {
             try self.compileNode(arg_node.data.lhs);
+            // the callee decides at run time whether elements go by
+            // reference; only a variable's own array is written
+            var slot: u16 = 0xFFFF;
+            const src = self.ast.nodes[arg_node.data.lhs];
+            if (src.tag == .variable) {
+                const vname = self.ast.tokenSlice(src.main_token);
+                if (self.local_slots.get(vname)) |s| {
+                    slot = s;
+                } else if (self.arrowCaptureSlot(vname)) |s| {
+                    slot = s;
+                }
+            }
+            try self.emitOp(.arg_unpack);
+            try guards.append(self.allocator, @intCast(self.chunk.offset()));
+            try self.emitU16(0);
+            try self.emitU16(slot);
             try self.emitOp(.array_spread);
             try self.emitByte(1);
         } else if (arg_node.tag == .named_arg) {

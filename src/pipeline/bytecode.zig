@@ -619,10 +619,16 @@ pub const OpCode = enum(u16) {
     bit_xor_swapped,
     // unset(C::${expr}): u16 class name, the property name on the stack
     unset_static_prop_dyn_name,
+    // u16 delta to the call, u16 local slot of the unpacked variable
+    // (0xFFFF for any other expression), before a call's `array_spread 1`:
+    // ZEND_SEND_UNPACK's by-reference half. [args, src] -> [args, src]; an
+    // array in a variable has the elements sent by reference made references
+    arg_unpack,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
             .arg_variable => 7,
+            .arg_unpack => 6,
             .return_ref_value, .array_get_w, .const_expr_fcc_check, .array_spread => 3,
             .tick => 4,
             .jump_if_class_declared, .bind_const_attributes => 6,

@@ -486,6 +486,8 @@ pub const ReinitWindow = struct {
     written: std.StringHashMapUnmanaged(void) = .empty,
 };
 
+pub const UnpackSite = struct { chunk: *const Chunk, call_ip: usize, args_base: usize };
+
 pub const RefSource = union(enum) {
     none,
     simple: []const u8,
@@ -1453,6 +1455,8 @@ pub const VM = struct {
     // set by an argument guard whose callee takes that position by reference
     // or cannot be resolved yet; consumed by the fetch opcode right after it
     arg_capture_pending: bool = false,
+    // the call an `arg_unpack` named for the `array_spread 1` after it
+    unpack_site: ?UnpackSite = null,
     // exclusive high-water mark of provenance writes in ic.arg_stack,
     // independent of sp: fastLoop pops values without visiting the transport
     arg_source_end: usize = 0,
@@ -10966,10 +10970,48 @@ pub const VM = struct {
                     }
                 },
 
+                .arg_unpack => {
+                    const field = self.currentFrame().ip;
+                    const delta = self.readU16();
+                    const slot = self.readU16();
+                    const chunk = self.currentChunk();
+                    const site: UnpackSite = .{ .chunk = chunk, .call_ip = field + delta, .args_base = self.sp - 2 };
+                    self.unpack_site = site;
+                    if (slot == 0xFFFF or self.stack[self.sp - 1] != .array or self.stack[site.args_base] != .array) continue;
+                    const start = self.stack[site.args_base].array.entries.items.len;
+                    if (!self.unpackSendsRef(site, start, self.stack[self.sp - 1].array.entries.items.len) and !self.unpackNamesRef(site, self.stack[self.sp - 1].array)) continue;
+                    // SEND_UNPACK separates the variable's array and makes
+                    // the elements sent by reference references
+                    const frame = self.currentFrame();
+                    const cell = self.slotRefCell(frame, slot);
+                    const cur = self.loadLocalSlot(frame, slot, cell);
+                    if (cur != .array) continue;
+                    _ = self.pop();
+                    var arr = cur.array;
+                    if (cell) |c| {
+                        if (try self.separateReferencedArray(frame, self.slotName(frame, slot), c, arr)) |sep| arr = sep;
+                    } else {
+                        const sep = try self.cowSeparate(arr);
+                        if (sep != arr) {
+                            try self.storeLocalSlot(frame, slot, .{ .array = sep });
+                            arr = sep;
+                        }
+                    }
+                    var i: usize = 0;
+                    while (i < arr.entries.items.len) : (i += 1) {
+                        const entry = arr.entries.items[i];
+                        if (entry.ref != null) continue;
+                        const by_ref = if (entry.key == .string) self.unpackNamedSendsRef(site, entry.key.string.bytes()) else self.unpackSendsRef(site, start + i, 1);
+                        if (by_ref) try self.makeElementReference(arr, entry.key);
+                    }
+                    self.pushFetched(.{ .array = arr });
+                },
                 .array_spread => {
                     // 1: a call's ZEND_SEND_UNPACK, 0: an array literal's
                     // ZEND_ADD_ARRAY_UNPACK
                     const call_args = self.readByte() != 0;
+                    const unpack_site = if (call_args) self.unpack_site else null;
+                    self.unpack_site = null;
                     var src = self.pop();
                     const target = self.peek();
                     if (target != .array) continue;
@@ -11009,7 +11051,9 @@ pub const VM = struct {
                             }
                             if (entry.key == .string) named = true;
                             if (entry.key == .string) {
-                                try self.arraySetOwned(target.array, entry.key, if (entry.ref) |ref| ref.* else entry.value);
+                                if (entry.ref) |ref| {
+                                    try self.bindElementToCell(target.array, entry.key, ref);
+                                } else try self.arraySetOwned(target.array, entry.key, entry.value);
                             } else if (entry.ref) |ref| {
                                 const key: PhpArray.Key = .{ .int = target.array.next_int_key };
                                 try target.array.append(self.allocator, ref.*);
@@ -11032,7 +11076,7 @@ pub const VM = struct {
                             };
                         }
                         while (gen.state != .completed) {
-                            switch (try self.unpackEntry(target.array, gen.current_key, gen.current_value, call_args, &named)) {
+                            switch (try self.unpackEntry(target.array, gen.current_key, gen.current_value, call_args, &named, unpack_site)) {
                                 .stored => {},
                                 .occupied => {
                                     occupied = true;
@@ -11063,7 +11107,7 @@ pub const VM = struct {
                                 if (!valid.isTruthy()) break;
                                 const val = self.callMethod(src.object, "current", &.{}) catch break :iterate true;
                                 const key = self.callMethod(src.object, "key", &.{}) catch break :iterate true;
-                                switch (try self.unpackEntry(target.array, key, val, call_args, &named)) {
+                                switch (try self.unpackEntry(target.array, key, val, call_args, &named, unpack_site)) {
                                     .stored => {},
                                     .occupied => {
                                         occupied = true;
@@ -12905,7 +12949,7 @@ pub const VM = struct {
                             if (ac > fixed) for (fixed..ac) |i| try rest_arr.append(self.allocator, try self.bindFrameArg(self.stack[self.sp - ac + i]));
                             if (self.pending_named_extras) |extras| {
                                 self.pending_named_extras = null;
-                                for (extras.entries.items) |entry| try rest_arr.set(self.allocator, entry.key, try self.bindFrameArg(entry.value));
+                                for (extras.entries.items) |entry| try self.addVariadicExtra(rest_arr, entry);
                             }
                             try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
                         } else {
@@ -13037,8 +13081,9 @@ pub const VM = struct {
                                     ac = bound.count;
                                     for (bound.args(), bound.origins[0..ac]) |v, origin| {
                                         self.push(v);
-                                        self.setArgSource(self.sp - 1, if (origin) |ei| self.argArraySource(arr, arr.entries.items[ei].key) else .none);
+                                        self.setArgSource(self.sp - 1, if (origin) |ei| self.namedArgSource(arr, ei) else .none);
                                     }
+                                    try self.bindNamedExtrasByRef(func, arr, bound.extras);
                                     self.pending_named_extras = bound.extras;
                                 } else if (native_params.get(fn_name)) |signature| {
                                     const params = signature.params;
@@ -13167,7 +13212,7 @@ pub const VM = struct {
                             if (ac > fixed) for (fixed..ac) |i| try rest_arr.append(self.allocator, try self.bindFrameArg(self.stack[self.sp - ac + i]));
                             if (self.pending_named_extras) |extras| {
                                 self.pending_named_extras = null;
-                                for (extras.entries.items) |entry| try rest_arr.set(self.allocator, entry.key, try self.bindFrameArg(entry.value));
+                                for (extras.entries.items) |entry| try self.addVariadicExtra(rest_arr, entry);
                             }
                             try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
                         } else {
@@ -16242,14 +16287,70 @@ pub const VM = struct {
 
     const UnpackStep = enum { stored, occupied, positional_after_named, bad_key };
 
+    // whether the call an unpacking feeds takes any of positions
+    // [start, start + count) by reference (ARG_SHOULD_BE_SENT_BY_REF)
+    fn unpackSendsRef(self: *VM, site: UnpackSite, start: usize, count: usize) bool {
+        var pos = start;
+        while (pos < start + count and pos < arg_pos_named) : (pos += 1) {
+            if (self.callSiteByValue(site.chunk, site.call_ip, @intCast(pos), site.args_base) == false) return true;
+        }
+        return false;
+    }
+
+    // a named element of an unpacked array goes to the parameter of its
+    // name, or the variadic. only user functions are looked up
+    fn unpackNamedSendsRef(self: *VM, site: UnpackSite, name: []const u8) bool {
+        return self.unpackNamedRefPosition(site, name) != null;
+    }
+
+    // the 0-based argument position a named element sent by reference takes
+    fn unpackNamedRefPosition(self: *VM, site: UnpackSite, name: []const u8) ?usize {
+        const callee = self.argCalleeName(site.chunk, site.call_ip, site.args_base) orelse return null;
+        const func = self.functions.get(callee) orelse return null;
+        const fixed = if (func.is_variadic) func.params.len - 1 else func.params.len;
+        for (func.params[0..fixed], 0..) |param, i| {
+            const bare = if (param.len > 0 and param[0] == '$') param[1..] else param;
+            if (std.mem.eql(u8, bare, name)) return if (i < func.ref_params.len and func.ref_params[i]) i else null;
+        }
+        return if (variadicTakesRef(func)) fixed else null;
+    }
+
+    fn unpackNamesRef(self: *VM, site: UnpackSite, arr: *PhpArray) bool {
+        for (arr.entries.items) |entry| {
+            if (entry.key == .string and self.unpackNamedSendsRef(site, entry.key.string.bytes())) return true;
+        }
+        return false;
+    }
+
+    // ZVAL_MAKE_REF on an array element: it becomes a reference nothing
+    // else names yet
+    fn makeElementReference(self: *VM, arr: *PhpArray, key: PhpArray.Key) RuntimeError!void {
+        const cell = try self.newRefCell();
+        var elem = arr.get(key);
+        if (elem == .array and elem.array.refcount > 1) {
+            elem = .{ .array = try self.shallowCloneCow(elem.array) };
+            try self.arraySetOwned(arr, key, elem);
+        }
+        self.setCell(cell, elem);
+        try self.regRefArray(try self.persistentRefOwner(), cell, arr, key);
+        if (arr.getPtr(key)) |ep| self.setEntryRef(ep, cell);
+        self.array_ref_active = true;
+    }
+
     // one element a Traversable gives an unpacking: a string key that reads
     // as an integer is a position in an array literal, and a name in a call
-    fn unpackEntry(self: *VM, target: *PhpArray, key: Value, value: Value, call_args: bool, named: *bool) RuntimeError!UnpackStep {
+    fn unpackEntry(self: *VM, target: *PhpArray, key: Value, value: Value, call_args: bool, named: *bool, site: ?UnpackSite) RuntimeError!UnpackStep {
         switch (key) {
             .int => {},
             .string => |k| {
                 const positional = !call_args and PhpArray.normalizeKey(.{ .string = k }) == .int;
                 if (!positional) {
+                    if (site) |st| if (self.unpackNamedRefPosition(st, k.bytes())) |pos| {
+                        const callee = self.argCalleeName(st.chunk, st.call_ip, st.args_base) orelse "";
+                        const msg = try std.fmt.allocPrint(self.allocator, "Cannot pass by-reference argument {d} of {s}() by unpacking a Traversable, passing by-value instead", .{ pos + 1, callee });
+                        defer self.allocator.free(msg);
+                        try self.emitWarning(msg);
+                    };
                     named.* = true;
                     try self.arraySetOwned(target, .{ .string = k }, value);
                     return .stored;
@@ -16258,6 +16359,15 @@ pub const VM = struct {
             else => return .bad_key,
         }
         if (call_args and named.*) return .positional_after_named;
+        if (site) |st| {
+            const pos = target.entries.items.len;
+            if (self.unpackSendsRef(st, pos, 1)) {
+                const callee = self.argCalleeName(st.chunk, st.call_ip, st.args_base) orelse "";
+                const msg = try std.fmt.allocPrint(self.allocator, "Cannot pass by-reference argument {d} of {s}() by unpacking a Traversable, passing by-value instead", .{ pos + 1, callee });
+                defer self.allocator.free(msg);
+                try self.emitWarning(msg);
+            }
+        }
         if (!try target.appendNew(self.allocator, value)) return .occupied;
         return .stored;
     }
@@ -24432,6 +24542,8 @@ pub const VM = struct {
         // By-value calls need neither an owning snapshot nor binding storage.
         const ref_count = @min(ac, func.ref_params.len);
         if (std.mem.indexOfScalar(bool, func.ref_params[0..ref_count], true) == null) return;
+        // a by-reference variadic takes every position past the fixed ones
+        const window = if (variadicTakesRef(func)) ac else ref_count;
         var source_buf: [256]RefSource = undefined;
         const live_sources = self.callerArgSources(ac);
         const source_count = @min(live_sources.len, source_buf.len);
@@ -24447,8 +24559,8 @@ pub const VM = struct {
             self.ic.?.active_arg_count = saved_active_count;
         }
         errdefer self.releaseBoundArgSources(owner);
-        for (0..@min(@min(ac, func.ref_params.len), sources.len)) |i| {
-            if (!func.ref_params[i] or sources[i] == .none) continue;
+        for (0..@min(window, sources.len)) |i| {
+            if (!paramTakesRef(func, i) or sources[i] == .none) continue;
             var source = self.retainArgSource(sources[i]);
             errdefer self.releaseArgSource(&source);
             try self.ic.?.bound_arg_sources.append(self.allocator, .{ .owner = owner, .source = source });
@@ -24460,8 +24572,8 @@ pub const VM = struct {
         var active: [256]RefSource = undefined;
         @memcpy(active[0..active_count], self.ic.?.active_args[0..active_count]);
         var position: usize = 0;
-        for (0..@min(@min(ac, func.ref_params.len), sources.len)) |i| {
-            if (!func.ref_params[i] or sources[i] == .none) continue;
+        for (0..@min(window, sources.len)) |i| {
+            if (!paramTakesRef(func, i) or sources[i] == .none) continue;
             while (self.ic.?.bound_arg_sources.items[position].owner != owner) position += 1;
             self.ic.?.active_args[i] = self.ic.?.bound_arg_sources.items[position].source;
             position += 1;
@@ -24551,6 +24663,17 @@ pub const VM = struct {
         _ = try self.checkPropertyMutation(obj, name, .indirect);
     }
 
+    fn variadicTakesRef(func: *const ObjFunction) bool {
+        return func.is_variadic and func.ref_params.len > 0 and func.ref_params[func.ref_params.len - 1];
+    }
+
+    // whether argument position i binds by reference: a variadic's flag
+    // covers every position from its own on
+    fn paramTakesRef(func: *const ObjFunction, i: usize) bool {
+        if (func.is_variadic and func.ref_params.len > 0 and i >= func.ref_params.len - 1) return func.ref_params[func.ref_params.len - 1];
+        return i < func.ref_params.len and func.ref_params[i];
+    }
+
     fn bindRefParams(
         self: *VM,
         ac: usize,
@@ -24562,8 +24685,11 @@ pub const VM = struct {
         _ = owner;
         if (func.ref_params.len == 0) return;
         // reference flags are per-position; only bind passed reference params.
-        // destinations come from evaluated argument transport, not bytecode
-        const ref_window = @min(ac, func.ref_params.len);
+        // destinations come from evaluated argument transport, not bytecode.
+        // a variadic's positions bind elements of its array, below
+        const fixed = if (func.is_variadic) func.ref_params.len - 1 else func.ref_params.len;
+        const ref_window = @min(ac, fixed);
+        const variadic_refs = variadicTakesRef(func) and ac > fixed;
         var any_ref = false;
         for (0..ref_window) |ri| {
             if (func.ref_params[ri]) {
@@ -24571,16 +24697,22 @@ pub const VM = struct {
                 break;
             }
         }
-        if (!any_ref) return;
+        if (!any_ref and !variadic_refs) return;
         var source_buf: [256]RefSource = undefined;
         const live_sources = self.callerArgSources(ac);
         const source_count = @min(live_sources.len, source_buf.len);
         @memcpy(source_buf[0..source_count], live_sources[0..source_count]);
         const arg_sources = source_buf[0..source_count];
         for (arg_sources, 0..) |source, ri| {
-            if (ri >= ref_window or !func.ref_params[ri]) continue;
+            if (!(ri < ref_window and func.ref_params[ri]) and !(variadic_refs and ri >= fixed)) continue;
             if (source == .cell) try self.checkArgCell(source.cell.denial);
         }
+        if (variadic_refs) if (new_vars.get(func.params[fixed])) |rest| if (rest == .array) {
+            for (arg_sources, 0..) |source, ri| {
+                if (ri < fixed) continue;
+                try self.bindVariadicElement(rest.array, .{ .int = @intCast(ri - fixed) }, source);
+            }
+        };
         for (arg_sources, 0..) |source, ri| {
             if (ri >= ref_window or !func.ref_params[ri]) continue;
             switch (source) {
@@ -24644,6 +24776,86 @@ pub const VM = struct {
                 .none => {},
             }
         }
+    }
+
+    // `function f(&...$args)`: the variadic array's element for one argument
+    // becomes a reference to what the argument names, as php's RECV_VARIADIC
+    // copies the references SEND_REF made
+    fn bindVariadicElement(self: *VM, rest: *PhpArray, key: PhpArray.Key, source: RefSource) !void {
+        const cell = (try self.argSourceCell(source)) orelse return;
+        if (rest.getPtr(key) == null) return;
+        try self.bindElementToCell(rest, key, cell);
+    }
+
+    // an element made a reference to cell, as the variadic array's elements
+    // and php's array_push_ref are
+    fn bindElementToCell(self: *VM, arr: *PhpArray, key: PhpArray.Key, cell: *Value) !void {
+        self.detachArrayEntryRef(arr, key);
+        try self.arraySetOwned(arr, key, cell.*);
+        if (arr.getPtr(key)) |ep| self.setEntryRef(ep, cell);
+        try self.regRefArray(try self.persistentRefOwner(), cell, arr, key);
+        self.array_ref_active = true;
+    }
+
+    // a named argument's provenance: what its guard recorded, else the
+    // reference an unpacked element already is
+    fn namedArgSource(self: *VM, arr: *PhpArray, index: usize) RefSource {
+        const entry = arr.entries.items[index];
+        const source = self.argArraySource(arr, entry.key);
+        if (source != .none) return source;
+        if (entry.ref) |ref| return .{ .cell = .{ .value = ref } };
+        return .none;
+    }
+
+    // named arguments collected by a by-reference variadic
+    // (`f(&...$a)` called as `f(x: $x)`) bind its elements to them
+    fn bindNamedExtrasByRef(self: *VM, func: *const ObjFunction, arr: *PhpArray, extras: ?*PhpArray) !void {
+        const collected = extras orelse return;
+        if (!variadicTakesRef(func)) return;
+        for (collected.entries.items) |entry| {
+            const src_entry = arr.getPtr(entry.key) orelse continue;
+            const index = (@intFromPtr(src_entry) - @intFromPtr(arr.entries.items.ptr)) / @sizeOf(PhpArray.Entry);
+            const source = self.namedArgSource(arr, index);
+            if (source == .cell) try self.checkArgCell(source.cell.denial);
+            const cell = (try self.argSourceCell(source)) orelse continue;
+            try self.bindElementToCell(collected, entry.key, cell);
+        }
+    }
+
+    // a variadic array's element for a named argument, keeping a reference
+    fn addVariadicExtra(self: *VM, rest: *PhpArray, entry: PhpArray.Entry) !void {
+        if (entry.ref) |cell| return self.bindElementToCell(rest, entry.key, cell);
+        try rest.set(self.allocator, entry.key, try self.bindFrameArg(entry.value));
+    }
+
+    // the reference cell a by-reference argument binds to: the one its
+    // source names, or a new one the caller's variable is bound to
+    fn argSourceCell(self: *VM, source: RefSource) !?*Value {
+        return switch (source) {
+            .none => null,
+            .cell => |c| blk: {
+                if (c.value.* == .array and c.value.array.refcount > 1) {
+                    const separated = try self.shallowCloneCow(c.value.array);
+                    self.setCell(c.value, .{ .array = separated });
+                    try self.propagateCellWrite(c.value, c.value.*);
+                }
+                break :blk c.value;
+            },
+            .simple => |caller_var| blk: {
+                if (isSuperglobal(caller_var)) {
+                    const cell = try self.superglobalCell(caller_var);
+                    if (cell.* == .array) _ = try self.separateReferencedArray(self.currentFrame(), caller_var, cell, cell.array);
+                    break :blk cell;
+                }
+                if (self.currentFrame().ref_slots.get(caller_var)) |existing| break :blk existing;
+                var bound = self.frameVariable(self.currentFrame(), caller_var) orelse .null;
+                if (bound == .array and bound.array.refcount > 1) bound = .{ .array = try self.shallowCloneCow(bound.array) };
+                const cell = try self.newRefCell();
+                self.setCell(cell, bound);
+                try self.bindRefSlot(&self.currentFrame().ref_slots, caller_var, cell);
+                break :blk cell;
+            },
+        };
     }
 
     fn writebackStatics(self: *VM) !void {
@@ -27681,7 +27893,7 @@ pub const VM = struct {
             }
             if (self.pending_named_extras) |extras| {
                 self.pending_named_extras = null;
-                for (extras.entries.items) |entry| try rest.set(self.allocator, entry.key, try self.bindFrameArg(entry.value));
+                for (extras.entries.items) |entry| try self.addVariadicExtra(rest, entry);
             }
             try vars.put(self.allocator, func.params[fixed], .{ .array = rest });
             return;
@@ -29278,8 +29490,9 @@ pub const VM = struct {
             defer bound.deinit(self.allocator);
             for (bound.args(), bound.origins[0..bound.count]) |v, origin| {
                 self.push(v);
-                self.setArgSource(self.sp - 1, if (origin) |ei| self.argArraySource(arr, arr.entries.items[ei].key) else .none);
+                self.setArgSource(self.sp - 1, if (origin) |ei| self.namedArgSource(arr, ei) else .none);
             }
+            try self.bindNamedExtrasByRef(func, arr, bound.extras);
             self.callNamedFunctionV(name, @intCast(bound.count), bound.extras) catch {
                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) return;
                 return error.RuntimeError;
@@ -29422,9 +29635,7 @@ pub const VM = struct {
             // named arguments matching no fixed parameter land in the
             // variadic, keyed by name (PHP 8.1)
             if (named_extras) |extras| {
-                for (extras.entries.items) |entry| {
-                    try rest_arr.set(self.allocator, entry.key, try self.bindFrameArg(entry.value));
-                }
+                for (extras.entries.items) |entry| try self.addVariadicExtra(rest_arr, entry);
             }
             try new_vars.put(self.allocator, func.params[fixed], .{ .array = rest_arr });
         } else {
