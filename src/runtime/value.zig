@@ -157,6 +157,9 @@ pub const PhpArray = struct {
     // lowest slot it may be in while stack_held is set, so the look starts
     // there instead of at the bottom of a deep stack
     stack_held: bool = false,
+    // in VM.deferred_roots: one reference is the vm's, until the result is
+    // stored somewhere or dropped from the operand stack
+    deferred_root: bool = false,
     stack_low: u32 = 0,
     // Recursion flags
     recursion: u8 = 0,

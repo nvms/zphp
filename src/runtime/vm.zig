@@ -975,6 +975,13 @@ pub const VM = struct {
     // hitting 0. arrays need their own roots so pure array cycles are visible
     cycle_candidates: std.ArrayListUnmanaged(*PhpObject) = .empty,
     cycle_array_candidates: std.ArrayListUnmanaged(*PhpArray) = .empty,
+    // arrays an internal function returned while dropping a reference of its
+    // own (unserialize's table), each held by one counted reference that
+    // stands for that table's until the result has a holder or is dropped
+    // (`settleDeferredRoots`, `stackRelease`): the stack doesn't count
+    // arrays, so dropping it at once would leave the result a root nothing
+    // holds, which a collection frees
+    deferred_roots: std.ArrayListUnmanaged(*PhpArray) = .empty,
     gc_enabled: bool = true,
     gc_runs: usize = 0,
     gc_collected: usize = 0,
@@ -3758,6 +3765,7 @@ pub const VM = struct {
         self.trait_method_stale.deinit(self.allocator);
         self.cycle_candidates.deinit(self.allocator);
         self.cycle_array_candidates.deinit(self.allocator);
+        self.deferred_roots.deinit(self.allocator);
         self.cycle_gen_candidates.deinit(self.allocator);
         self.cycle_fiber_candidates.deinit(self.allocator);
         self.cycle_work.deinit(self.allocator);
@@ -3966,6 +3974,7 @@ pub const VM = struct {
         self.shutdown_callbacks.clearRetainingCapacity();
         self.cycle_candidates.clearRetainingCapacity();
         self.cycle_array_candidates.clearRetainingCapacity();
+        self.deferred_roots.clearRetainingCapacity();
         // the request's generators and fibers are freed by now: the lists are
         // dropped without reading them
         self.cycle_gen_candidates.clearRetainingCapacity();
@@ -31858,6 +31867,7 @@ pub const VM = struct {
     pub fn drainPendingDestruct(self: *VM) void {
         if (@import("value.zig").hooks().trace_obj) |obj| self.gcCheckTraced(obj);
         if (self.draining_destructors or self.heap_teardown) return;
+        if (self.deferred_roots.items.len > 0) self.settleDeferredRoots();
         self.draining_destructors = true;
         var deferred_stack_arrays: std.ArrayListUnmanaged(*PhpArray) = .empty;
         defer deferred_stack_arrays.deinit(self.allocator);
@@ -32139,6 +32149,7 @@ pub const VM = struct {
 
     fn collectCyclesPass(self: *VM, rerun_needed: *bool, first: bool) usize {
         if (self.draining_destructors or self.collecting_cycles) return 0;
+        if (self.deferred_roots.items.len > 0) self.settleDeferredRoots();
         self.collecting_cycles = true;
         defer self.collecting_cycles = false;
         if (self.cycle_candidates.items.len == 0 and self.cycle_array_candidates.items.len == 0 and self.capture_index.count() == 0 and self.cycle_gen_candidates.items.len == 0 and self.cycle_fiber_candidates.items.len == 0) return 0;
@@ -33700,7 +33711,7 @@ pub const VM = struct {
             // with no durable owner is an orphaned temporary (a literal or
             // call result consumed by a native); queue it so the drain frees
             // it unless a root or container still reaches it
-            .array => |arr| if (arr.refcount == 0) self.queueArrayRelease(arr),
+            .array => |arr| if (arr.refcount == 0) self.queueArrayRelease(arr) else if (arr.deferred_root) self.dropDeferredRoot(arr),
             .generator => self.genRelease(v.generator),
             .fiber => self.fiberRelease(v.fiber),
             else => {},
@@ -33715,12 +33726,53 @@ pub const VM = struct {
                 self.cycle_candidates.append(self.allocator, obj) catch return;
                 obj.cycle_queued = true;
             },
-            .array => |arr| if (!arr.elements_released and !arr.cycle_queued and arr.entries.items.len > 0) {
-                self.cycle_array_candidates.append(self.allocator, arr) catch return;
-                arr.cycle_queued = true;
+            .array => |arr| if (!arr.elements_released and arr.entries.items.len > 0) {
+                if (arr.refcount > 0) {
+                    if (arr.cycle_queued) return;
+                    self.cycle_array_candidates.append(self.allocator, arr) catch return;
+                    arr.cycle_queued = true;
+                    return;
+                }
+                // nothing counts it yet: php's return value holds it when
+                // the table lets go, so hold it until it is stored or
+                // dropped, and let go then
+                if (arr.deferred_root) return;
+                self.deferred_roots.append(self.allocator, arr) catch return;
+                arr.refcount += 1;
+                arr.deferred_root = true;
             },
             else => {},
         }
+    }
+
+    // drop the hold of each deferred root something else holds now, which
+    // leaves it a possible root as php's table leaves its result
+    pub fn settleDeferredRoots(self: *VM) void {
+        var kept: usize = 0;
+        for (self.deferred_roots.items) |arr| {
+            if (arr.refcount <= 1 and arr.deferred_root) {
+                self.deferred_roots.items[kept] = arr;
+                kept += 1;
+                continue;
+            }
+            if (!arr.deferred_root) continue;
+            arr.deferred_root = false;
+            self.arrayRelease(arr);
+        }
+        self.deferred_roots.shrinkRetainingCapacity(kept);
+    }
+
+    // a deferred root left the operand stack unstored: let go of it, which
+    // frees it when nothing else took it
+    noinline fn dropDeferredRoot(self: *VM, arr: *PhpArray) void {
+        arr.deferred_root = false;
+        for (self.deferred_roots.items, 0..) |held, i| {
+            if (held == arr) {
+                _ = self.deferred_roots.swapRemove(i);
+                break;
+            }
+        }
+        self.arrayRelease(arr);
     }
 
     // a discarded result (.pop): php's FREE drops it with
