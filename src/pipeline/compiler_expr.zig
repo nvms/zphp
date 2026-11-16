@@ -1412,6 +1412,15 @@ pub fn compileSeparatedFetch(self: *Compiler, node_idx: u32) Error!bool {
 // fetched for unset (FETCH_OBJ_UNSET), anything else read
 fn compileUnsetPropBase(self: *Compiler, node_idx: u32) Error!void {
     const node = self.ast.nodes[node_idx];
+    // an element on an unset's path is fetched for unsetting
+    // (FETCH_DIM_UNSET): a missing one is null without a warning, and a
+    // string offset can't hold the property
+    if (node.tag == .array_access and node.data.rhs != 0 and !isGlobalsFetch(self, node.data.lhs)) {
+        try compileUnsetDimensionBase(self, node.data.lhs);
+        try self.compileNode(node.data.rhs);
+        try self.emitOp(.array_get_unset);
+        return;
+    }
     if (node.tag != .property_access or self.isDynamicProp(node)) return self.compileNode(node_idx);
     try compileUnsetPropBase(self, node.data.lhs);
     const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(self.propName(node)) });
@@ -2199,6 +2208,17 @@ fn compileUnset(self: *Compiler, args: []const u32) Error!void {
             try self.emitOp(.unset_static_prop);
             try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(class_name) }));
             try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(prop_name) }));
+            continue;
+        }
+        // a static property named at run time: the name is computed, then
+        // the class fetched, which is where unset fails
+        if (arg.tag == .static_prop_access and arg.main_token == 0 and arg.data.rhs != 0 and
+            (self.ast.nodes[arg.data.lhs].tag == .identifier or self.ast.nodes[arg.data.lhs].tag == .qualified_name))
+        {
+            const class_name = try resolveNodeClassName(self, self.ast.nodes[arg.data.lhs]);
+            try self.compileNode(arg.data.rhs);
+            try self.emitOp(.unset_static_prop_dyn_name);
+            try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(class_name) }));
             continue;
         }
         if (arg.tag == .variable) {

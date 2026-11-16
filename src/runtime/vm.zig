@@ -6876,7 +6876,12 @@ pub const VM = struct {
                                     },
                                     else => false,
                                 };
-                                if (try self.throwBuiltinException("Error", if (integral) "Cannot use string offset as an array" else "Cannot unset string offsets")) continue;
+                                // zend_wrong_string_offset_error: what the fetch is for
+                                const code = self.currentChunk().code.items;
+                                const ip = self.currentFrame().ip;
+                                const for_object = bytecode.opIs(code, ip, .unset_prop) or bytecode.opIs(code, ip, .fetch_prop_unset);
+                                const msg = if (!integral) "Cannot unset string offsets" else if (for_object) "Cannot use string offset as an object" else "Cannot use string offset as an array";
+                                if (try self.throwBuiltinException("Error", msg)) continue;
                                 return error.RuntimeError;
                             },
                             .object => |o| {
@@ -7969,7 +7974,14 @@ pub const VM = struct {
                 .fetch_prop_unset => {
                     const prop_name = self.currentChunk().constants.items[self.readU16()].string.bytes();
                     const container = self.peek();
-                    if (container != .object) continue;
+                    if (container != .object) {
+                        // zend_fetch_property_address: an unset reaches
+                        // nothing through a non-object, without a warning
+                        self.stack[self.sp - 1] = .null;
+                        self.stackRelease(container);
+                        self.currentFrame().ip += OpCode.get_prop.width();
+                        continue;
+                    }
                     const obj = container.object;
                     const vr = self.findPropertyVisibility(obj.class_name, prop_name);
                     if (!vr.declared or obj.lazy != null or self.magicApplies(obj, prop_name, .get) or !self.propVisible(vr, prop_name, vr.visibility)) continue;
@@ -9907,11 +9919,18 @@ pub const VM = struct {
                     }
                 },
 
-                .unset_static_prop => {
+                .unset_static_prop, .unset_static_prop_dyn_name => {
                     const class_idx = self.readU16();
-                    const prop_idx = self.readU16();
+                    var name_text: [32]u8 = undefined;
+                    // the name is read as get_static_prop_dyn_name reads it,
+                    // and copied: an autoloader may free the operand
+                    const name_val: Value = if (op == .unset_static_prop_dyn_name) self.pop() else .null;
+                    const prop_name = if (op == .unset_static_prop)
+                        self.currentChunk().constants.items[self.readU16()].string.bytes()
+                    else
+                        try self.allocator.dupe(u8, varVarText(name_val, &name_text));
+                    defer if (op == .unset_static_prop_dyn_name) self.allocator.free(prop_name);
                     const class_name = self.resolveStaticClassName(self.currentChunk().constants.items[class_idx].string.bytes());
-                    const prop_name = self.currentChunk().constants.items[prop_idx].string.bytes();
                     if (!self.classes.contains(class_name)) self.tryAutoload(class_name) catch {
                         if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                         return error.RuntimeError;

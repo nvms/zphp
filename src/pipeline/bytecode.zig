@@ -617,6 +617,8 @@ pub const OpCode = enum(u16) {
     bit_and_swapped,
     bit_or_swapped,
     bit_xor_swapped,
+    // unset(C::${expr}): u16 class name, the property name on the stack
+    unset_static_prop_dyn_name,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -666,6 +668,7 @@ pub const OpCode = enum(u16) {
             .get_static_prop_dynamic_quiet,
             .get_static_prop_dyn_name,
             .get_static_prop_dyn_name_quiet,
+            .unset_static_prop_dyn_name,
             .ensure_array_local,
             .ensure_array_local_rw,
             .ensure_array_prop,
