@@ -146,7 +146,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     if (isOpAt(code, ip, .pop) or isOpAt(code, ip, .pop_boundary)) {
                         ip += op_bytes;
                         sp -= 1;
-                        if (!isScalar(&stack[sp])) self.stackRelease(stack[sp]);
+                        if (!isScalar(&stack[sp])) self.stackDiscard(stack[sp]);
                         // the fused pop is still a statement boundary: free
                         // the temporaries this statement dropped, as .pop does
                         if (self.hasPendingReleases()) {
@@ -451,7 +451,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     } else if (isOpAt(code, ip, .pop) or isOpAt(code, ip, .pop_boundary)) {
                         ip += op_bytes;
                         sp -= 1;
-                        self.stackRelease(stack[sp]);
+                        self.stackDiscard(stack[sp]);
                         if (self.hasPendingReleases()) {
                             self.sp = sp;
                             // a destructor's trace names this statement
@@ -474,7 +474,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     } else if (isOpAt(code, ip, .pop) or isOpAt(code, ip, .pop_boundary)) {
                         ip += op_bytes;
                         sp -= 1;
-                        self.stackRelease(stack[sp]);
+                        self.stackDiscard(stack[sp]);
                         if (self.hasPendingReleases()) {
                             self.sp = sp;
                             // a destructor's trace names this statement
@@ -499,8 +499,8 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .pop, .pop_boundary => {
                     sp -= 1;
                     // a discarded operand-stack object releases its reference
-                    // (Stage 1; arrays are not stack-owned - refcounting Stage 2)
-                    self.stackRelease(stack[sp]);
+                    // without becoming a possible root, as php's FREE
+                    self.stackDiscard(stack[sp]);
                     if (self.hasPendingReleases()) {
                         // destructors run nested PHP on the shared operand
                         // stack: publish the local stack pointer first

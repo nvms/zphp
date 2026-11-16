@@ -1727,6 +1727,10 @@ fn native_unserialize(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     }
     const result = if (top.cell) |cell| cell.* else top.value;
     if (result == .string and !owned_string) result.string.retain();
+    // php reads into a temporary of its table and copies it out; freeing the
+    // table drops the temporary's reference, making the result a possible
+    // root
+    ctx.vm.notePossibleRoot(result);
     return NativeResult.transfer(result);
 }
 

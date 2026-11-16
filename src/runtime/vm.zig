@@ -5013,6 +5013,13 @@ pub const VM = struct {
         // fastLoop may bail in a descendant, not just the constructor frame.
         if (self.frame_count > base_frame) try self.runUntilFrame(base_frame);
         _ = self.pop(); // only a normally returned constructor has a result
+        // php's constructor call lets go of the object with OBJ_RELEASE as
+        // it returns, which makes it a possible root. the new expression
+        // takes its reference next, so it is counted by the next collection
+        if (!obj.destructed and !obj.cycle_queued) {
+            self.cycle_candidates.append(self.allocator, obj) catch return;
+            obj.cycle_queued = true;
+        }
     }
 
     // the script's own loop: an exception any frame catches resumes there,
@@ -5086,7 +5093,9 @@ pub const VM = struct {
                 .pop, .pop_boundary => {
                     // run any destructors queued by the discarded value's
                     // expression
-                    _ = self.pop();
+                    self.clearArgStackFrom(self.sp - 1);
+                    self.sp -= 1;
+                    self.stackDiscard(self.stack[self.sp]);
                     if (self.hasPendingReleases()) self.drainPendingDestruct();
                     if (self.drainRaised()) {
                         if (self.dispatchPendingException(base_frame)) continue;
@@ -29899,11 +29908,13 @@ pub const VM = struct {
             self.clearArgStackFrom(base_sp);
             self.sp = base_sp;
             self.handler_count = base_handler;
+            // the callable goes as the function ends, thrown or not
+            const callable = fiber.callable;
+            fiber.callable = .null;
+            self.releaseValue(callable);
             return err;
         };
 
-        self.current_fiber = prev_fiber;
-        self.handler_floor = prev_floor;
         fiber.state = .terminated;
         if (self.sp > base_sp) {
             fiber.return_value = self.popTransfer();
@@ -29911,7 +29922,28 @@ pub const VM = struct {
         }
         self.clearArgStackFrom(base_sp);
         self.sp = base_sp;
+        // still in the fiber, php's zend_fiber_execute lets go of the
+        // callable as its function returns: what only the closure held is
+        // freed here, and the collection those releases call for runs here,
+        // its destructors' exceptions thrown out of the fiber
+        const raised = self.releaseFiberCallable(fiber);
+        self.current_fiber = prev_fiber;
+        self.handler_floor = prev_floor;
+        if (raised) {
+            fiber.threw = true;
+            return error.RuntimeError;
+        }
         return .null;
+    }
+
+    fn releaseFiberCallable(self: *VM, fiber: *Fiber) bool {
+        const callable = fiber.callable;
+        if (callable == .null) return false;
+        fiber.callable = .null;
+        self.releaseValue(callable);
+        if (self.hasPendingReleases()) self.drainPendingDestruct();
+        self.collectCyclesIfNeeded();
+        return self.drainRaised();
     }
 
     const FiberMethod = enum { start, @"resume", throw, getReturn, isStarted, isSuspended, isRunning, isTerminated, __construct };
@@ -33504,6 +33536,34 @@ pub const VM = struct {
             .fiber => self.fiberRelease(v.fiber),
             else => {},
         }
+    }
+
+    // a value whose reference an internal function dropped while others
+    // still hold it, which php's gc_possible_root takes as a possible root
+    pub fn notePossibleRoot(self: *VM, v: Value) void {
+        switch (v) {
+            .object => |obj| if (!obj.destructed and !obj.cycle_queued and obj.refcount > 0) {
+                self.cycle_candidates.append(self.allocator, obj) catch return;
+                obj.cycle_queued = true;
+            },
+            .array => |arr| if (!arr.elements_released and !arr.cycle_queued and arr.entries.items.len > 0) {
+                self.cycle_array_candidates.append(self.allocator, arr) catch return;
+                arr.cycle_queued = true;
+            },
+            else => {},
+        }
+    }
+
+    // a discarded result (.pop): php's FREE drops it with
+    // zval_ptr_dtor_nogc, so an object that stays referenced is no
+    // possible root (`$a[] = new C;` leaves no root, as in php)
+    pub inline fn stackDiscard(self: *VM, v: Value) void {
+        if (v == .object and v.object.refcount > 1) {
+            v.object.refcount -= 1;
+            @import("value.zig").traceObjRc(v.object, "release");
+            return;
+        }
+        self.stackRelease(v);
     }
 
     // store a superglobal ($_SERVER, $_ENV, ...) into request_vars. that map
