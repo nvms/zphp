@@ -3140,7 +3140,10 @@ fn compileStaticPropRead(self: *Compiler, node: Ast.Node, quiet: bool) Error!voi
     const raw = self.ast.tokenSlice(node.main_token);
     const is_static_prop = raw.len > 0 and raw[0] == '$';
     const written_class = if (class_node.tag == .identifier) self.ast.tokenSlice(class_node.main_token) else "";
-    const keep_written = self.relative_const_classes and !is_static_prop and (std.ascii.eqlIgnoreCase(written_class, "self") or std.ascii.eqlIgnoreCase(written_class, "parent"));
+    // a closure's scope is known only when it runs (zend_is_scope_known):
+    // a rebound closure reads the constants of the class it is bound to
+    const in_closure = std.mem.startsWith(u8, self.current_function, "{closure:") and !std.ascii.eqlIgnoreCase(raw, "class");
+    const keep_written = (self.relative_const_classes or in_closure) and !is_static_prop and (std.ascii.eqlIgnoreCase(written_class, "self") or std.ascii.eqlIgnoreCase(written_class, "parent"));
     const class_name = if (keep_written) written_class else try resolveNodeClassName(self, class_node);
     // ::class is matched in any case
     const prop_name = if (is_static_prop) raw[1..] else if (std.ascii.eqlIgnoreCase(raw, "class")) "class" else raw;
