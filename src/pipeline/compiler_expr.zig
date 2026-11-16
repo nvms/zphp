@@ -1843,7 +1843,7 @@ fn compileCallPlain(self: *Compiler, node: Ast.Node) Error!void {
                 try self.emitOp(.not);
                 return;
             }
-            if (arg.tag == .variable or arg.tag == .static_prop_access or arg.tag == .nullsafe_property_access or (arg.tag == .property_access and !self.isDynamicProp(arg))) {
+            if (arg.tag == .variable or arg.tag == .static_prop_access or arg.tag == .nullsafe_property_access or arg.tag == .property_access) {
                 try compileCoalesceFetch(self, args[0]);
                 try self.emitOp(.cast_bool);
                 try self.emitOp(.not);
