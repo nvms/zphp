@@ -671,31 +671,40 @@ fn get_called_class(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRe
     return error.RuntimeError;
 }
 
-fn native_get_declared_classes(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+// get_declared_class_impl: the class table in the order names were added;
+// an alias is listed under its own name, lowercased as php keys it
+fn declaredNames(ctx: *NativeContext, map: anytype, comptime kind: enum { class, interface, trait }) RuntimeError!NativeResult {
+    const vm = ctx.vm;
     const arr = try ctx.createArray();
-    var it = ctx.vm.classes.iterator();
-    while (it.next()) |e| {
-        try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(e.key_ptr.*) });
+    const listed = try map.listInOrder(ctx.allocator);
+    defer ctx.allocator.free(listed);
+    for (listed) |entry| {
+        const declared = entry.alias_of orelse entry.name;
+        // vm.classes holds interfaces (and traits) too
+        if (kind == .class and (vm.interfaces.map.contains(declared) or vm.traits.map.contains(declared))) continue;
+        if (entry.alias_of == null) {
+            try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(entry.name) });
+        } else {
+            const lower = try std.ascii.allocLowerString(ctx.allocator, entry.name);
+            defer ctx.allocator.free(lower);
+            const s = try Value.String.create(ctx.allocator, lower);
+            defer s.release();
+            try arr.append(ctx.allocator, .{ .string = s });
+        }
     }
     return NativeResult.borrowed(.{ .array = arr });
+}
+
+fn native_get_declared_classes(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return declaredNames(ctx, &ctx.vm.classes, .class);
 }
 
 fn native_get_declared_interfaces(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const arr = try ctx.createArray();
-    var it = ctx.vm.interfaces.iterator();
-    while (it.next()) |e| {
-        try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(e.key_ptr.*) });
-    }
-    return NativeResult.borrowed(.{ .array = arr });
+    return declaredNames(ctx, &ctx.vm.interfaces, .interface);
 }
 
 fn native_get_declared_traits(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const arr = try ctx.createArray();
-    var it = ctx.vm.traits.iterator();
-    while (it.next()) |e| {
-        try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(e.key_ptr.*) });
-    }
-    return NativeResult.borrowed(.{ .array = arr });
+    return declaredNames(ctx, &ctx.vm.traits, .trait);
 }
 
 fn class_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

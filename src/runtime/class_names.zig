@@ -165,6 +165,10 @@ pub fn AliasMap(comptime V: type) type {
         map: Inner = .{},
         // alias -> the declared name of the class it stands for
         aliases: Map([]const u8) = .{},
+        // when each name (declared or alias) was added, for listings in
+        // php's class table order
+        order_of: Map(u64) = .{},
+        next_seq: u64 = 0,
         // a bit per alias (by length and last character, case-folded), so
         // the lookups that miss the class table (instanceof checks, names
         // that are interfaces) rarely hash the name a second time
@@ -185,6 +189,7 @@ pub fn AliasMap(comptime V: type) type {
 
         pub fn putAlias(self: *Self, allocator: std.mem.Allocator, alias: []const u8, target: []const u8) !void {
             try self.aliases.put(allocator, alias, target);
+            try self.noteOrder(allocator, alias);
             const bit = aliasBit(alias);
             self.alias_bits[bit >> 6] |= @as(u64, 1) << @intCast(bit & 63);
         }
@@ -219,10 +224,39 @@ pub fn AliasMap(comptime V: type) type {
 
         pub fn put(self: *Self, allocator: std.mem.Allocator, name: []const u8, value: V) !void {
             try self.map.put(allocator, name, value);
+            try self.noteOrder(allocator, name);
+        }
+
+        fn noteOrder(self: *Self, allocator: std.mem.Allocator, name: []const u8) !void {
+            const gop = try self.order_of.getOrPut(allocator, name);
+            if (gop.found_existing) return;
+            gop.key_ptr.* = name;
+            gop.value_ptr.* = self.next_seq;
+            self.next_seq += 1;
         }
 
         pub fn fetchRemove(self: *Self, name: []const u8) ?KV {
-            return self.map.fetchRemove(name);
+            const kv = self.map.fetchRemove(name) orelse return null;
+            _ = self.order_of.remove(name);
+            return kv;
+        }
+
+        pub const Listed = struct { name: []const u8, alias_of: ?[]const u8, seq: u64 };
+
+        // every name, aliases included, in the order they were added
+        pub fn listInOrder(self: *const Self, allocator: std.mem.Allocator) ![]Listed {
+            var out: std.ArrayListUnmanaged(Listed) = .empty;
+            errdefer out.deinit(allocator);
+            var it = self.map.keyIterator();
+            while (it.next()) |k| try out.append(allocator, .{ .name = k.*, .alias_of = null, .seq = self.order_of.get(k.*) orelse std.math.maxInt(u64) });
+            var ai = self.aliases.iterator();
+            while (ai.next()) |e| try out.append(allocator, .{ .name = e.key_ptr.*, .alias_of = e.value_ptr.*, .seq = self.order_of.get(e.key_ptr.*) orelse std.math.maxInt(u64) });
+            std.mem.sort(Listed, out.items, {}, struct {
+                fn lt(_: void, a: Listed, b: Listed) bool {
+                    return a.seq < b.seq;
+                }
+            }.lt);
+            return out.toOwnedSlice(allocator);
         }
 
         pub fn count(self: *const Self) Inner.Size {
@@ -243,10 +277,13 @@ pub fn AliasMap(comptime V: type) type {
 
         pub fn clearRetainingCapacity(self: *Self) void {
             self.map.clearRetainingCapacity();
+            self.order_of.clearRetainingCapacity();
             self.clearAliases();
         }
 
         pub fn clearAliases(self: *Self) void {
+            var it = self.aliases.keyIterator();
+            while (it.next()) |k| _ = self.order_of.remove(k.*);
             self.aliases.clearRetainingCapacity();
             self.alias_bits = .{ 0, 0, 0, 0 };
         }
@@ -254,6 +291,7 @@ pub fn AliasMap(comptime V: type) type {
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             self.map.deinit(allocator);
             self.aliases.deinit(allocator);
+            self.order_of.deinit(allocator);
         }
     };
 }
