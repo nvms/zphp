@@ -1201,10 +1201,23 @@ pub fn compileNullCoalesce(self: *Compiler, node: Ast.Node) Error!void {
     self.patchJump(end_jump);
 }
 
+// the container of an isset/empty/?? fetch: `$this` there is php's FETCH_THIS
+// (or an UNUSED op1), which throws outside an object even under isset
+fn compileCoalesceContainer(self: *Compiler, node_idx: u32) Error!void {
+    const n = self.ast.nodes[node_idx];
+    if (n.tag == .variable and std.mem.eql(u8, self.ast.tokenSlice(n.main_token), "$this")) {
+        const saved = self.quiet_reads;
+        self.quiet_reads = false;
+        defer self.quiet_reads = saved;
+        return self.compileNode(node_idx);
+    }
+    return compileCoalesceFetch(self, node_idx);
+}
+
 fn compileCoalesceFetch(self: *Compiler, node_idx: u32) Error!void {
     const n = self.ast.nodes[node_idx];
     if (n.tag == .array_access) {
-        try compileCoalesceFetch(self, n.data.lhs);
+        try compileCoalesceContainer(self, n.data.lhs);
         try self.compileNode(n.data.rhs);
         try self.emitOp(.array_get_coalesce);
         return;
@@ -1213,7 +1226,7 @@ fn compileCoalesceFetch(self: *Compiler, node_idx: u32) Error!void {
     // uninitialized typed property must read as null, not throw. recurse so a
     // chain `$a->b->c ?? x` is non-throwing all the way down
     if (n.tag == .property_access) {
-        try compileCoalesceFetch(self, n.data.lhs);
+        try compileCoalesceContainer(self, n.data.lhs);
         if (self.isDynamicProp(n)) {
             try self.compileNode(n.data.rhs);
             try self.emitOp(.get_prop_coalesce_dynamic);
@@ -1674,7 +1687,7 @@ fn compileCallPlain(self: *Compiler, node: Ast.Node) Error!void {
             // semantics here: an undefined key or an uninitialized typed
             // property must not warn/throw, just count as empty
             if (arg.tag == .array_access) {
-                try compileCoalesceFetch(self, arg.data.lhs);
+                try compileCoalesceContainer(self, arg.data.lhs);
                 try self.compileNode(arg.data.rhs);
                 try self.emitOp(.array_get_empty);
                 try self.emitOp(.cast_bool);
@@ -1709,11 +1722,11 @@ fn compileCallPlain(self: *Compiler, node: Ast.Node) Error!void {
                 const arg = self.ast.nodes[arg_idx];
                 if (arg.tag == .property_access) {
                     if (self.isDynamicProp(arg)) {
-                        try self.compileNode(arg.data.lhs);
+                        try compileCoalesceContainer(self, arg.data.lhs);
                         try self.compileNode(arg.data.rhs);
                         try self.emitOp(.isset_prop_dynamic);
                     } else {
-                        try compileCoalesceFetch(self, arg.data.lhs);
+                        try compileCoalesceContainer(self, arg.data.lhs);
                         const prop_name = self.propName(arg);
                         const prop_idx = try self.addConstant(.{ .string = Value.String.borrowed(prop_name) });
                         try self.emitOp(.isset_prop);
@@ -1722,7 +1735,7 @@ fn compileCallPlain(self: *Compiler, node: Ast.Node) Error!void {
                 } else if (arg.tag == .array_access) {
                     // Fetch each chain link once: hooks are reads, not a separate
                     // existence probe followed by another getter invocation.
-                    try compileCoalesceFetch(self, arg.data.lhs);
+                    try compileCoalesceContainer(self, arg.data.lhs);
                     try self.compileNode(arg.data.rhs);
                     try self.emitOp(.isset_index);
                 } else {
