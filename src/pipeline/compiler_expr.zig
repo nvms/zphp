@@ -2955,6 +2955,13 @@ fn compileStaticPropRead(self: *Compiler, node: Ast.Node, quiet: bool) Error!voi
     }
     const class_idx = try self.addConstant(.{ .string = Value.String.borrowed(class_name) });
     const prop_idx = try self.addConstant(.{ .string = Value.String.borrowed(prop_name) });
+    // get_static_prop reads "class" as ::class: a static property of that
+    // name goes by its name on the stack
+    if (is_static_prop and std.mem.eql(u8, prop_name, "class")) {
+        try self.emitConstant(prop_idx);
+        try self.emitOp(if (quiet) .get_static_prop_dyn_name_quiet else .get_static_prop_dyn_name);
+        return self.emitU16(class_idx);
+    }
     // a bare-identifier member (not $prop, not ::class) is a class constant or
     // enum case - get_class_const throws Error on a miss instead of nulling
     if (!is_static_prop and !std.mem.eql(u8, prop_name, "class")) {

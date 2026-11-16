@@ -13832,10 +13832,6 @@ pub const VM = struct {
                     const prop_name: []const u8 = varVarText(name_val, &name_text);
                     if (prop_name.len == 0 and quiet) {
                         self.push(.null);
-                    } else if (std.mem.eql(u8, prop_name, "class")) {
-                        // Class::{'class'} resolves to the class name string,
-                        // matching the static `Class::class` form
-                        self.push(.{ .string = Value.String.borrowed(class_name) });
                     } else {
                         self.pushStaticProp(class_name, prop_name, quiet) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -13858,8 +13854,6 @@ pub const VM = struct {
                     });
                     if (class_name.len == 0 or prop_name.len == 0) {
                         self.push(.null);
-                    } else if (std.mem.eql(u8, prop_name, "class")) {
-                        self.push(.{ .string = Value.String.borrowed(class_name) });
                     } else {
                         self.pushStaticProp(class_name, prop_name, quiet) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;

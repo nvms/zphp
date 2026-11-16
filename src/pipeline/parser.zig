@@ -3851,8 +3851,9 @@ const Parser = struct {
             return self.addNode(.{ .tag = .static_prop_access, .main_token = 0, .data = .{ .lhs = class_node, .rhs = name_expr } });
         }
 
-        // ::class is a special class name resolution constant
-        if (self.peek() == .kw_class) {
+        // ::class is a special class name resolution constant; ::class() is
+        // a method named class
+        if (self.peek() == .kw_class and self.peekAt(1) != .l_paren) {
             const class_tok = self.advance();
             return self.addNode(.{ .tag = .static_prop_access, .main_token = class_tok, .data = .{ .lhs = class_node } });
         }
