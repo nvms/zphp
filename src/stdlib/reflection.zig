@@ -4113,8 +4113,15 @@ fn rfGetNamespaceName(ctx: *NativeContext, _: []const Value) RuntimeError!Native
     const name_v = this.get("name");
     if (name_v != .string) return NativeResult.literal("");
     const name = name_v.string.bytes();
+    if (isRealClosureName(name)) return NativeResult.literal("");
     const last_bs = std.mem.lastIndexOfScalar(u8, name, '\\') orelse return NativeResult.literal("");
     return try NativeResult.copyString(ctx.allocator, name[0..last_bs]);
+}
+
+// a closure expression's function is in no namespace, whatever its name
+// holds (a closure made from a callable is the function it names)
+fn isRealClosureName(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "{closure");
 }
 
 fn rfGetShortName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
@@ -4122,6 +4129,7 @@ fn rfGetShortName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResu
     const name_v = this.get("name");
     if (name_v != .string) return NativeResult.literal("");
     const name = name_v.string.bytes();
+    if (isRealClosureName(name)) return NativeResult.shareString(name_v.string);
     const last_bs = std.mem.lastIndexOfScalar(u8, name, '\\') orelse return NativeResult.shareString(name_v.string);
     return try NativeResult.copyString(ctx.allocator, name[last_bs + 1 ..]);
 }
@@ -4130,6 +4138,7 @@ fn rfInNamespace(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const name_v = this.get("name");
     if (name_v != .string) return NativeResult.scalar(.{ .bool = false });
+    if (isRealClosureName(name_v.string.bytes())) return NativeResult.scalar(.{ .bool = false });
     return NativeResult.scalar(.{ .bool = std.mem.indexOfScalar(u8, name_v.string.bytes(), '\\') != null });
 }
 
