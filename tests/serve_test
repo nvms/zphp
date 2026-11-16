@@ -81,6 +81,11 @@ check "warning keeps the response" "before after" "$(curl -s http://localhost:$P
 # shutdown functions, as php-fpm does with display_errors off
 check "uncaught exception status" "500" "$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$PORT/uncaught)"
 check "uncaught exception body" "partial shutdown" "$(curl -s http://localhost:$PORT/uncaught)"
+# every request after the first runs after a reset, which once dropped the
+# constants the stdlib modules register
+for i in 1 2 3; do
+    check "extension constants ($i)" "42 1 no-stdin" "$(curl -s http://localhost:$PORT/extension-constants)"
+done
 
 # test: GET params
 resp=$(curl -s "http://localhost:$PORT/echo?name=alice&age=30")

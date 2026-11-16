@@ -18,6 +18,9 @@ if ($path === "/health") {
     register_shutdown_function(function () { echo " shutdown"; });
     echo "partial";
     throw new RuntimeException("boom");
+} elseif ($path === "/extension-constants") {
+    // constants the stdlib modules define, not just the core ones
+    echo CURLOPT_HEADER, " ", PREG_SPLIT_NO_EMPTY, " ", defined("STDIN") ? "stdin" : "no-stdin";
 } elseif ($path === "/echo") {
     echo json_encode([
         "method" => $method,

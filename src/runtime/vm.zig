@@ -940,6 +940,9 @@ pub const VM = struct {
     builtin_obj_hw: usize = 0,
     builtin_arr_hw: usize = 0,
     builtin_str_hw: usize = 0,
+    // constants defined before the first request (initConstants, the stdlib
+    // modules' register functions, extensions): a serve reset keeps these
+    builtin_constant_count: usize = 0,
     builtins_recorded: bool = false,
     builtin_classes: std.StringHashMapUnmanaged(void) = .{},
     builtin_interfaces: std.StringHashMapUnmanaged(void) = .{},
@@ -2494,6 +2497,7 @@ pub const VM = struct {
         vm.builtin_obj_hw = vm.objects.items.len;
         vm.builtin_arr_hw = vm.arrays.items.len;
         vm.builtin_str_hw = vm.strings.items.len;
+        vm.builtin_constant_count = vm.php_constants.count();
         // a shell pooled during init lies below the marks, where a serve reset
         // never tears down what it holds; request code must not be handed one
         vm.free_objects.clearRetainingCapacity();
@@ -3384,7 +3388,8 @@ pub const VM = struct {
         defer self.heap_teardown = false;
         // static state (class static props, function statics, superglobals)
         // holds owned values that no frame releases
-        for (self.php_constants.values()) |*value| {
+        const const_start: usize = if (free_all) 0 else self.builtin_constant_count;
+        for (self.php_constants.values()[@min(const_start, self.php_constants.count())..]) |*value| {
             if (value.* == .string) {
                 self.releaseValue(value.*);
                 value.* = .null;
@@ -4067,13 +4072,23 @@ pub const VM = struct {
             while (ctfn_it.next()) |e| e.value_ptr.*.deinit(self.allocator);
             self.chunk_to_func_names.clearRetainingCapacity();
             self.clearMethodNameIndex();
-            self.php_constants.clearRetainingCapacity();
             self.user_constants.clearRetainingCapacity();
             self.deprecated_traits.clearRetainingCapacity();
             self.constant_attributes.clearRetainingCapacity();
             self.deprecated_globals.clearRetainingCapacity();
-            initConstants(&self.php_constants, self.allocator) catch {};
-            extension.applyConstants(self) catch {};
+            // the stdlib modules register constants too (curl, gd, intl, ...), so
+            // initConstants alone would drop them for every request
+            if (self.builtins_recorded and self.php_constants.count() >= self.builtin_constant_count) {
+                self.php_constants.shrinkRetainingCapacity(self.builtin_constant_count);
+                // php's built-in server defines no standard stream constants
+                for ([_][]const u8{ "STDIN", "STDOUT", "STDERR" }) |name| {
+                    if (self.php_constants.orderedRemove(name)) self.builtin_constant_count -= 1;
+                }
+            } else {
+                self.php_constants.clearRetainingCapacity();
+                initConstants(&self.php_constants, self.allocator) catch {};
+                extension.applyConstants(self) catch {};
+            }
             // builtins persist across reset now (freeClassState kept them), so the
             // stdlib classes + their native methods + enum objects DON'T need
             // rebuilding every request - that re-registration was the dominant
