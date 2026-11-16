@@ -1094,7 +1094,7 @@ pub fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bo
         } else {
             try entry.set(alloc, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(vm.frameFile(i - 1)) });
             const caller = &vm.frames[i - 1];
-            if (vm.sourceLocation(caller.chunk, caller.ip)) |loc| {
+            if (vm.sourceLocation(caller.chunk, if (caller.ip > 0) caller.ip - 1 else 0)) |loc| {
                 try entry.set(alloc, .{ .string = Value.String.borrowed("line") }, .{ .int = @intCast(loc.line) });
             }
         }
@@ -1161,7 +1161,7 @@ pub fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bo
             } else if (!called_by_native) {
                 try w.set(alloc, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(vm.frameFile(i - 1)) });
                 const caller = &vm.frames[i - 1];
-                if (vm.sourceLocation(caller.chunk, caller.ip)) |loc| {
+                if (vm.sourceLocation(caller.chunk, if (caller.ip > 0) caller.ip - 1 else 0)) |loc| {
                     try w.set(alloc, .{ .string = Value.String.borrowed("line") }, .{ .int = @intCast(loc.line) });
                 }
             }

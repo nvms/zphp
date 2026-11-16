@@ -1850,7 +1850,8 @@ fn compileCallPlain(self: *Compiler, node: Ast.Node) Error!void {
             try emitCallOp(self, &guards, .call_indirect_spread, .{});
         }
     } else if (callee.tag == .identifier) {
-        const call_offset = self.current_source_offset;
+        // a call is on the line of its name, wherever its arguments start
+        const call_offset = self.ast.tokens[callee.main_token].start;
         const raw_name = self.ast.tokenSlice(callee.main_token);
         const name = try self.callTargetName(raw_name, self.resolveFunctionName(raw_name));
         for (args, 0..) |arg, i| {
@@ -1863,8 +1864,8 @@ fn compileCallPlain(self: *Compiler, node: Ast.Node) Error!void {
         const idx = try self.addConstant(.{ .string = Value.String.borrowed(name) });
         try emitCallOp(self, &guards, .call, .{ .a = idx, .argc = @intCast(args.len) });
     } else if (callee.tag == .qualified_name) {
-        const call_offset = self.current_source_offset;
         const parts = self.ast.extraSlice(callee.data.lhs);
+        const call_offset = if (parts.len > 0) self.ast.tokens[parts[0]].start else self.current_source_offset;
         const fqn = try self.buildQualifiedString(parts);
         const name = try self.callTargetName(null, try self.resolveQualifiedNonClassName(fqn, callee.data.rhs));
         var guards = try compileArgs(self, args);
@@ -2646,6 +2647,8 @@ fn lhsIsChainLink(ast: anytype, node: Ast.Node) bool {
     };
 }
 
+// php puts a method call on the line of the method name (the line traces and
+// the call's errors report), not the line the object expression starts on
 pub fn compileMethodCall(self: *Compiler, node: Ast.Node) Error!void {
     var local_jumps: std.ArrayListUnmanaged(usize) = .empty;
     const owns_chain = self.nullsafe_chain_jumps == null and lhsIsChainLink(self.ast, node);
@@ -2664,9 +2667,11 @@ pub fn compileMethodCall(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitGetVar(var_name);
         if (hasSplatOrNamed(self.ast, args)) {
             var guards = try emitSpreadArgs(self, args);
+            self.current_source_offset = self.ast.tokens[node.main_token].start;
             try emitCallOp(self, &guards, .method_call_dynamic_spread, .{});
         } else {
             var guards = try compileArgs(self, args);
+            self.current_source_offset = self.ast.tokens[node.main_token].start;
             try emitCallOp(self, &guards, .method_call_dynamic, .{ .argc = @intCast(args.len) });
         }
         return;
@@ -2677,9 +2682,11 @@ pub fn compileMethodCall(self: *Compiler, node: Ast.Node) Error!void {
 
     if (hasSplatOrNamed(self.ast, args)) {
         var guards = try emitSpreadArgs(self, args);
+        self.current_source_offset = self.ast.tokens[node.main_token].start;
         try emitCallOp(self, &guards, .method_call_spread, .{ .a = name_idx });
     } else {
         var guards = try compileArgs(self, args);
+        self.current_source_offset = self.ast.tokens[node.main_token].start;
         try emitCallOp(self, &guards, .method_call, .{ .a = name_idx, .argc = @intCast(args.len) });
     }
 }
@@ -2735,9 +2742,11 @@ pub fn compileNullsafeMethodCall(self: *Compiler, node: Ast.Node) Error!void {
 
     if (hasSplatOrNamed(self.ast, args)) {
         var guards = try emitSpreadArgs(self, args);
+        self.current_source_offset = self.ast.tokens[node.main_token].start;
         try emitCallOp(self, &guards, .method_call_spread, .{ .a = name_idx });
     } else {
         var guards = try compileArgs(self, args);
+        self.current_source_offset = self.ast.tokens[node.main_token].start;
         try emitCallOp(self, &guards, .method_call, .{ .a = name_idx, .argc = @intCast(args.len) });
     }
     try self.nullsafe_chain_jumps.?.append(self.allocator, end_jump);
@@ -2798,6 +2807,7 @@ pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
         const method_idx = try self.addConstant(.{ .string = Value.String.borrowed(method_name) });
         if (hasSplatOrNamed(self.ast, args)) return emitDynStaticSpread(self, method_idx, args);
         var guards = try compileArgs(self, args);
+        self.current_source_offset = self.ast.tokens[node.main_token].start;
         try emitCallOp(self, &guards, .static_call_dynamic, .{ .a = method_idx, .argc = @intCast(args.len) });
         return;
     }
@@ -2824,6 +2834,7 @@ pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
             const method_idx = try self.addConstant(.{ .string = Value.String.borrowed(method_name) });
             if (hasSplatOrNamed(self.ast, args)) return emitDynStaticSpread(self, method_idx, args);
             var guards = try compileArgs(self, args);
+            self.current_source_offset = self.ast.tokens[node.main_token].start;
             try emitCallOp(self, &guards, .static_call_dynamic, .{ .a = method_idx, .argc = @intCast(args.len) });
             return;
         },
@@ -2835,6 +2846,7 @@ pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
             const method_idx = try self.addConstant(.{ .string = Value.String.borrowed(method_name) });
             if (hasSplatOrNamed(self.ast, args)) return emitDynStaticSpread(self, method_idx, args);
             var guards = try compileArgs(self, args);
+            self.current_source_offset = self.ast.tokens[node.main_token].start;
             try emitCallOp(self, &guards, .static_call_dynamic, .{ .a = method_idx, .argc = @intCast(args.len) });
             return;
         },
@@ -2855,9 +2867,11 @@ pub fn compileStaticCall(self: *Compiler, node: Ast.Node) Error!void {
 
     if (hasSplatOrNamed(self.ast, args)) {
         var guards = try emitSpreadArgs(self, args);
+        self.current_source_offset = self.ast.tokens[node.main_token].start;
         try emitCallOp(self, &guards, .static_call_spread, .{ .a = class_idx, .b = method_idx });
     } else {
         var guards = try compileArgs(self, args);
+        self.current_source_offset = self.ast.tokens[node.main_token].start;
         try emitCallOp(self, &guards, .static_call, .{ .a = class_idx, .b = method_idx, .argc = @intCast(args.len) });
     }
 }
