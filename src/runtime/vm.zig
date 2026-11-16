@@ -16550,6 +16550,7 @@ pub const VM = struct {
     pub fn powFunction(self: *VM, a: Value, b: Value) RuntimeError!Value {
         if (try self.objectBinop(.pow, a, b)) |r| return r;
         if (!isArithOperand(a) or !isArithOperand(b)) {
+            if (isArithOperand(a) and a == .string and isPartialNumericString(a.string.bytes())) try self.emitNonNumericWarning();
             const msg = try std.fmt.allocPrint(self.allocator, "Unsupported operand types: {s} ** {s}", .{ Value.typeName(a), Value.typeName(b) });
             defer self.allocator.free(msg);
             try self.setPendingException("TypeError", msg);
@@ -16567,6 +16568,9 @@ pub const VM = struct {
             if (b == .string and isPartialNumericString(b.string.bytes())) self.emitNonNumericWarning() catch return self.resumeRaised();
             return false;
         }
+        // php converts the left operand before it finds the right one
+        // unusable, warning about a leading-numeric string
+        if (isArithOperand(a) and a == .string and isPartialNumericString(a.string.bytes())) self.emitNonNumericWarning() catch return self.resumeRaised();
         const tn_a = Value.typeName(a);
         const tn_b = Value.typeName(b);
         const msg = try std.fmt.allocPrint(self.allocator, "Unsupported operand types: {s} " ++ op ++ " {s}", .{ tn_a, tn_b });
