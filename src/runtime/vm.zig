@@ -5360,10 +5360,8 @@ pub const VM = struct {
                     const name_val = self.pop();
                     var text_buf: [32]u8 = undefined;
                     const raw_name = varVarText(name_val, &text_buf);
-                    if (raw_name.len == 0) {
-                        if (op == .get_var_var) self.undefinedVariableRead("$") catch if (try self.resumeRaised()) continue;
-                        self.push(.null);
-                    } else {
+                    // an empty name is the variable named "" (`${''}`)
+                    {
                         var buf: [256]u8 = undefined;
                         const dollar_name = varVarName(raw_name, &buf);
                         if (isSuperglobal(dollar_name) and self.frameInGlobalScope(self.currentFrame())) {
@@ -5429,12 +5427,12 @@ pub const VM = struct {
                         if (try self.throwBuiltinException("Error", "Cannot re-assign $this")) continue;
                         return error.RuntimeError;
                     }
-                    if (raw_name.len > 0) {
+                    {
                         var check_buf: [256]u8 = undefined;
                         try self.checkTypedNameWrite(self.currentFrame(), varVarName(raw_name, &check_buf));
                     }
                     const val = try self.copyValue(self.peek());
-                    if (raw_name.len > 0) {
+                    {
                         var buf: [256]u8 = undefined;
                         const dollar_name = varVarName(raw_name, &buf);
                         if (isSuperglobal(dollar_name) and self.frameInGlobalScope(self.currentFrame())) {

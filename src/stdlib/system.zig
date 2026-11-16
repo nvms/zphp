@@ -1391,8 +1391,8 @@ fn native_get_defined_vars(ctx: *NativeContext, _: []const Value) RuntimeError!N
     while (iter.next()) |entry| {
         const raw = entry.key_ptr.*;
         if (raw.len == 0 or raw[0] != '$') continue;
+        // `${''}` is a variable named ""
         const name = raw[1..];
-        if (name.len == 0) continue;
         if (entry.value_ptr.* == .null) continue;
         if (std.mem.eql(u8, name, "this")) continue;
         // php 8.1's $GLOBALS is no variable of the symbol table
