@@ -8544,37 +8544,21 @@ pub const VM = struct {
                         try self.bindRefSlot(&self.currentFrame().ref_slots, name, cell);
                         try self.mirrorBoundName(self.currentFrame(), name, cell.*);
                     } else if (src_val == .array) {
-                        const arr_ptr = src_val.array;
                         const key: PhpArray.Key = switch (key_val) {
                             .int => |i| .{ .int = i },
                             .string => |s| .{ .string = s },
                             else => .{ .int = Value.toInt(key_val) },
                         };
-                        // an element that already is a reference (another loop
-                        // over the array is bound to it) is shared, not copied
-                        if (arr_ptr.getPtr(key)) |ep| if (ep.ref) |existing| {
-                            try self.bindRefSlot(&self.currentFrame().ref_slots, name, existing);
-                            continue;
+                        try self.bindForeachElementRef(name, src_val.array, key);
+                    } else if (src_val == .object and (self.isInstanceOf(src_val.object.class_name, "ArrayObject") or self.isInstanceOf(src_val.object.class_name, "ArrayIterator"))) {
+                        // spl_array's by-reference iterator hands out the
+                        // storage's own elements
+                        var ctx = self.makeContext(null);
+                        const target = @import("../stdlib/spl.zig").arrayStorageRefTarget(&ctx, src_val.object, key_val) catch |err| {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return err;
                         };
-                        const cell = try self.newRefCell();
-                        var elem = arr_ptr.get(key);
-                        if (elem == .array and elem.array.refcount > 1) {
-                            const fresh = try self.shallowCloneCow(elem.array);
-                            elem = .{ .array = fresh };
-                            try self.arraySetOwned(arr_ptr, key, elem);
-                        }
-                        self.setCell(cell, elem);
-
-                        try self.bindRefSlot(&self.currentFrame().ref_slots, name, cell);
-                        // only bind to the array if the key still EXISTS in the
-                        // live array. if the body unset this key earlier in the
-                        // iteration, a write to $v must NOT resurrect it (PHP
-                        // skips deleted keys) - $v becomes a detached reference
-                        if (arr_ptr.getPtr(key)) |ep| {
-                            try self.regRefArray(try self.ensureRefOwner(self.currentFrame()), cell, arr_ptr, key);
-                            self.setEntryRef(ep, cell);
-                            self.array_ref_active = true;
-                        }
+                        if (target) |t| try self.bindForeachElementRef(name, t.arr, t.key);
                     } else if (src_val == .object and key_val == .string) {
                         // a hooked property (zho_declared_it_fetch_current with
                         // by_ref): only a get hook that returns by reference
@@ -21388,6 +21372,35 @@ pub const VM = struct {
             if (self.pending_exception != null) return null;
             return err;
         };
+    }
+
+    // a by-reference foreach binds its variable to arr[key]
+    fn bindForeachElementRef(self: *VM, name: []const u8, arr_ptr: *PhpArray, key: PhpArray.Key) RuntimeError!void {
+        // an element that already is a reference (another loop over the
+        // array is bound to it) is shared, not copied
+        if (arr_ptr.getPtr(key)) |ep| if (ep.ref) |existing| {
+            try self.bindRefSlot(&self.currentFrame().ref_slots, name, existing);
+            return;
+        };
+        const cell = try self.newRefCell();
+        var elem = arr_ptr.get(key);
+        if (elem == .array and elem.array.refcount > 1) {
+            const fresh = try self.shallowCloneCow(elem.array);
+            elem = .{ .array = fresh };
+            try self.arraySetOwned(arr_ptr, key, elem);
+        }
+        self.setCell(cell, elem);
+
+        try self.bindRefSlot(&self.currentFrame().ref_slots, name, cell);
+        // only bind to the array if the key still EXISTS in the live array.
+        // if the body unset this key earlier in the iteration, a write to $v
+        // must NOT resurrect it (PHP skips deleted keys) - $v becomes a
+        // detached reference
+        if (arr_ptr.getPtr(key)) |ep| {
+            try self.regRefArray(try self.ensureRefOwner(self.currentFrame()), cell, arr_ptr, key);
+            self.setEntryRef(ep, cell);
+            self.array_ref_active = true;
+        }
     }
 
     fn bindArrayElementRef(self: *VM, arr_val: Value, key_opt: ?PhpArray.Key, var_name: []const u8) RuntimeError!Value {
