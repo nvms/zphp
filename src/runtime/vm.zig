@@ -8178,6 +8178,7 @@ pub const VM = struct {
                             continue;
                         }
                     }
+                    if (self.traitStaticAccess(class_name, prop_name) catch |err| return err) continue;
                     self.resolveStaticDefaults(class_name) catch {
                         if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                         return error.RuntimeError;
@@ -9560,6 +9561,7 @@ pub const VM = struct {
                     const dst_name = self.currentChunk().constants.items[dst_idx].string.bytes();
                     const class_name = self.currentChunk().constants.items[class_idx].string.bytes();
                     const prop_name = self.currentChunk().constants.items[prop_idx].string.bytes();
+                    if (self.traitStaticAccess(self.resolveStaticClassName(class_name), prop_name) catch |err| return err) continue;
                     const frame = self.currentFrame();
                     const cell = self.staticPropRefCell(class_name, prop_name) catch {
                         if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -14011,6 +14013,7 @@ pub const VM = struct {
                         self.push(.{ .string = Value.String.borrowed(class_name) });
                         continue;
                     }
+                    if (self.traitStaticAccess(class_name, prop_name) catch |err| return err) continue;
                     self.pushStaticProp(class_name, prop_name, quiet) catch {
                         if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                         return error.RuntimeError;
@@ -14407,6 +14410,10 @@ pub const VM = struct {
                     const prop_name = self.currentChunk().constants.items[prop_idx].string.bytes();
 
                     class_name = self.resolveStaticClassName(class_name);
+                    // a read-modify-write warned at its read
+                    if (op == .set_static_prop) {
+                        if (self.traitStaticAccess(class_name, prop_name) catch |err| return err) continue;
+                    }
                     self.resolveStaticDefaults(class_name) catch {
                         if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                         return error.RuntimeError;
@@ -14593,7 +14600,8 @@ pub const VM = struct {
 
         const full_name = self.resolveMethod(class_name, method_name) catch {
             if (try self.refuseInterfaceStaticCall(class_name, method_name, arg_count)) return;
-            if (!self.classes.contains(class_name) and self.traits.contains(class_name)) {
+            // vm.classes may hold a trait too (attributes, static storage)
+            if (self.traits.contains(class_name)) {
                 if (try self.callTraitStatic(class_name, method_name, arg_count)) return;
             }
             // a class that isn't there (after the autoloaders) is "not found"
@@ -14616,7 +14624,7 @@ pub const VM = struct {
         // class's __callStatic, else php's Error
         const found = self.methodInfoOf(full_name, class_name, method_name);
         // a static method of a trait called on the trait itself
-        if (found == null and !self.classes.contains(class_name) and self.traits.contains(class_name)) {
+        if (found == null and self.traits.contains(class_name)) {
             if (try self.callTraitStatic(class_name, method_name, arg_count)) return;
         }
         // an interface's method resolves to no class's declaration
@@ -26792,6 +26800,37 @@ pub const VM = struct {
         if (self.classes.contains(class_name) or self.interfaces.contains(class_name)) return null;
         try self.tryAutoload(class_name);
         return self.staticPropValue(class_name, prop_name);
+    }
+
+    // php keeps a trait's static properties on the trait too: accessing one
+    // through the trait is deprecated and uses that storage. it is built on
+    // the first such access as a class entry of the trait's name (vm.classes
+    // already holds traits with attributes). true when the deprecation's
+    // handler threw and the exception was dispatched
+    fn traitStaticAccess(self: *VM, class_name: []const u8, prop_name: []const u8) RuntimeError!bool {
+        if (!self.traits.contains(class_name)) return false;
+        const trait_name = self.traits.getKey(class_name) orelse class_name;
+        const sprops = self.trait_static_props.get(trait_name) orelse &.{};
+        if (!self.classes.contains(trait_name)) try self.classes.put(self.allocator, trait_name, ClassDef{ .name = trait_name, .is_internal = false });
+        const def = self.classes.getPtr(trait_name) orelse return false;
+        var declared: ?ClassDef.Visibility = null;
+        for (sprops) |sp| {
+            const vis: ClassDef.Visibility = @enumFromInt(sp.flags & 3);
+            if (std.mem.eql(u8, sp.name, prop_name)) declared = vis;
+            if (def.static_props.contains(sp.name)) continue;
+            try def.static_props.put(self.allocator, sp.name, try self.copyDefault(sp.value));
+            try self.recordStaticDefault(def, sp.name, sp.value);
+            if (vis != .public) try def.static_prop_visibility.put(self.allocator, sp.name, vis);
+            if (sp.type_str.len > 0) try def.static_prop_types.put(self.allocator, sp.name, sp.type_str);
+        }
+        // zend_std_get_static_property_with_info warns once the property is
+        // found and visible
+        const vis = declared orelse return false;
+        if (!self.checkVisibility(trait_name, vis)) return false;
+        const msg = try std.fmt.allocPrint(self.allocator, "Accessing static trait property {s}::${s} is deprecated, it should only be accessed on a class using the trait", .{ trait_name, prop_name });
+        defer self.allocator.free(msg);
+        self.raiseError(E_DEPRECATED, msg) catch return self.resumeRaised();
+        return false;
     }
 
     // a static read: the value, or php's error for a missing class or
