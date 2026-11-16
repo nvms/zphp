@@ -22186,6 +22186,9 @@ pub const VM = struct {
         // this closure's contiguous capture range (no whole-list scan / name cmp)
         if (cap_range) |range| {
             for (self.captures.items[range.start .. range.start + range.len]) |cap| {
+                // a closure made outside an object has no $this: its slot
+                // stays unset, so a read is php's Error
+                if (cap.value == .null and isThisCapture(cap.var_name)) continue;
                 for (func.slot_names, 0..) |sn, si| {
                     if (sn.len == cap.var_name.len and std.mem.eql(u8, sn, cap.var_name)) {
                         locals[si] = try self.copyCapturedValue(cap.value);
@@ -26865,6 +26868,10 @@ pub const VM = struct {
         }
     }
 
+    inline fn isThisCapture(name: []const u8) bool {
+        return name.len == 5 and std.mem.eql(u8, name, "$this");
+    }
+
     fn copyCapturedValue(self: *VM, val: Value) RuntimeError!Value {
         return self.cloneArrayValue(val);
     }
@@ -27039,6 +27046,8 @@ pub const VM = struct {
                 if (std.mem.eql(u8, cap.var_name, "$__closure_defclass")) continue;
                 if (cap.ref_cell) |cell| {
                     if (ref_slots) |rs| try self.bindRefSlot(rs, cap.var_name, cell);
+                } else if (cap.value == .null and isThisCapture(cap.var_name)) {
+                    // no object to be $this: the variable stays unset
                 } else {
                     try vars.put(self.allocator, cap.var_name, try self.copyCapturedValue(cap.value));
                 }
@@ -29836,6 +29845,9 @@ pub const VM = struct {
         if (self.getCaptureRange(name)) |cr| {
             const caps = self.captures.items[cr.start .. cr.start + cr.len];
             for (caps) |cap| {
+                // a closure made outside an object has no $this: its slot
+                // stays unset, so a read is php's Error
+                if (cap.value == .null and isThisCapture(cap.var_name)) continue;
                 for (func.slot_names, 0..) |sn, si| {
                     if (sn.len == cap.var_name.len and std.mem.eql(u8, sn, cap.var_name)) {
                         locals[si] = try self.copyCapturedValue(cap.value);
