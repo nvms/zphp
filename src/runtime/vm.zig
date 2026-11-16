@@ -8491,6 +8491,17 @@ pub const VM = struct {
                                 }
                                 break :unwrap;
                             };
+                            // zend_user_it_get_new_iterator: anything but
+                            // another Traversable is an Exception
+                            const traversable = (inner == .object and self.isInstanceOf(inner.object.class_name, "Traversable") and inner.object != iterable.object) or inner == .generator;
+                            if (!traversable) {
+                                const msg = try std.fmt.allocPrint(self.allocator, "Objects returned by {s}::getIterator() must be traversable or implement interface Iterator", .{iterable.object.class_name});
+                                defer self.allocator.free(msg);
+                                if (try self.throwBuiltinException("Exception", msg)) {
+                                    unwrap_dispatched = true;
+                                } else unwrap_failed = true;
+                                break :unwrap;
+                            }
                             // inner takes the stack slot - it holds a reference (Stage 1)
                             retainValue(inner);
                             self.stackRelease(self.stack[self.sp - 1]);
