@@ -1110,7 +1110,9 @@ fn reportUncaught(w: *Worker) void {
             },
         }
     }
-    vm.response_code = 500;
+    // php_error_cb: only a response still at 200 whose error isn't displayed
+    // becomes a 500 (a redirect set before the error stays a redirect)
+    if (vm.response_code == 200 and vm.displayTarget() == .none) vm.response_code = 500;
 }
 
 // HTTP/2 processing
