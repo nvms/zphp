@@ -7986,6 +7986,16 @@ pub const VM = struct {
                     }
                     const obj = container.object;
                     const vr = self.findPropertyVisibility(obj.class_name, prop_name);
+                    // zend_std_get_property_ptr_ptr for BP_VAR_UNSET: a
+                    // missing dynamic property is created as null, quietly
+                    if (!vr.declared and obj.lazy == null and !self.magicApplies(obj, prop_name, .get) and
+                        (obj.isUnset(prop_name) or !obj.properties.contains(prop_name)) and
+                        (obj.slots == null or obj.getSlotIndex(prop_name) == null) and !badPropertyName(prop_name))
+                    {
+                        if (try self.checkDynamicProperty(obj, prop_name)) continue;
+                        try obj.set(self.allocator, prop_name, .null);
+                        continue;
+                    }
                     if (!vr.declared or obj.lazy != null or self.magicApplies(obj, prop_name, .get) or !self.propVisible(vr, prop_name, vr.visibility)) continue;
                     const raw = obj.rawForScope(prop_name, vr.defining_class);
                     if (raw != .undef) {
