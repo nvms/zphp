@@ -681,6 +681,7 @@ Zend/tests/bug71724.phpt
 Zend/tests/bug71859.phpt
 Zend/tests/bug71871.phpt
 Zend/tests/bug71871_2.phpt
+Zend/tests/bug71930.phpt
 Zend/tests/bug72038.phpt
 Zend/tests/bug72107.phpt
 Zend/tests/bug72335.phpt
@@ -1176,6 +1177,7 @@ Zend/tests/ctor_promotion/ctor_promotion_mixing.phpt
 Zend/tests/ctor_promotion/ctor_promotion_not_a_ctor.phpt
 Zend/tests/ctor_promotion/ctor_promotion_null_default.phpt
 Zend/tests/ctor_promotion/ctor_promotion_repeated_prop.phpt
+Zend/tests/ctor_promotion/ctor_promotion_trait.phpt
 Zend/tests/ctor_promotion/ctor_promotion_untyped_default.phpt
 Zend/tests/ctor_promotion/ctor_promotion_variadic.phpt
 Zend/tests/custom_assert_forbidden.phpt
@@ -1331,6 +1333,7 @@ Zend/tests/enum/gh7792_2.phpt
 Zend/tests/enum/gh7792_3.phpt
 Zend/tests/enum/gh7792_4.phpt
 Zend/tests/enum/gh7792_5.phpt
+Zend/tests/enum/gh8176.phpt
 Zend/tests/enum/gh8418.phpt
 Zend/tests/enum/gh9775_1.phpt
 Zend/tests/enum/gh9775_2.phpt
@@ -2478,6 +2481,7 @@ Zend/tests/inheritance/bug63468.phpt
 Zend/tests/inheritance/bug63816.phpt
 Zend/tests/inheritance/bug66286.phpt
 Zend/tests/inheritance/bug70873.phpt
+Zend/tests/inheritance/bug70957.phpt
 Zend/tests/inheritance/bug70997.phpt
 Zend/tests/inheritance/bug71248.phpt
 Zend/tests/inheritance/bug71414.phpt
@@ -3424,6 +3428,7 @@ Zend/tests/oom_unserialize_007.phpt
 Zend/tests/oom_unserialize_011.phpt
 Zend/tests/oom_unserialize_014.phpt
 Zend/tests/oom_unserialize_016.phpt
+Zend/tests/operator_unsupported_types.phpt
 Zend/tests/optimizer/nan_warning_switch.phpt
 Zend/tests/or_001.phpt
 Zend/tests/oss-fuzz-403816122.phpt
@@ -3752,6 +3757,7 @@ Zend/tests/readonly_props/readonly_clone_success2.phpt
 Zend/tests/readonly_props/readonly_clone_success4.phpt
 Zend/tests/readonly_props/readonly_coercion_type_error.phpt
 Zend/tests/readonly_props/readonly_const.phpt
+Zend/tests/readonly_props/readonly_containing_object.phpt
 Zend/tests/readonly_props/readonly_method.phpt
 Zend/tests/readonly_props/readonly_method_trait.phpt
 Zend/tests/readonly_props/readonly_modification.phpt
@@ -3808,6 +3814,7 @@ Zend/tests/return_types/009.phpt
 Zend/tests/return_types/010.phpt
 Zend/tests/return_types/011.phpt
 Zend/tests/return_types/012.phpt
+Zend/tests/return_types/013.phpt
 Zend/tests/return_types/014.phpt
 Zend/tests/return_types/015.phpt
 Zend/tests/return_types/016.phpt
@@ -3885,6 +3892,7 @@ Zend/tests/self_and.phpt
 Zend/tests/self_class_const_outside_class.phpt
 Zend/tests/self_in_eval.phpt
 Zend/tests/self_instanceof_outside_class.phpt
+Zend/tests/self_method_or_prop_outside_class.phpt
 Zend/tests/self_mod.phpt
 Zend/tests/self_or.phpt
 Zend/tests/self_xor.phpt
@@ -3924,6 +3932,7 @@ Zend/tests/str_offset_008.phpt
 Zend/tests/strcasecmp_basic.phpt
 Zend/tests/strict_001.phpt
 Zend/tests/strict_002.phpt
+Zend/tests/string_offset_as_object.phpt
 Zend/tests/string_offset_errors.phpt
 Zend/tests/string_offset_int_min_max.phpt
 Zend/tests/string_offset_optimization.phpt
@@ -4106,6 +4115,7 @@ Zend/tests/traits/constant_017.phpt
 Zend/tests/traits/constant_018.phpt
 Zend/tests/traits/constant_019.phpt
 Zend/tests/traits/constant_021.phpt
+Zend/tests/traits/direct_static_member_access.phpt
 Zend/tests/traits/error_002.phpt
 Zend/tests/traits/error_003.phpt
 Zend/tests/traits/error_004.phpt
@@ -6040,6 +6050,7 @@ ext/reflection/tests/ReflectionAttribute_newInstance_deprecated.phpt
 ext/reflection/tests/ReflectionAttribute_newInstance_exception.phpt
 ext/reflection/tests/ReflectionAttribute_toString.phpt
 ext/reflection/tests/ReflectionClassConstant_basic1.phpt
+ext/reflection/tests/ReflectionClassConstant_double_construct.phpt
 ext/reflection/tests/ReflectionClassConstant_getValue.phpt
 ext/reflection/tests/ReflectionClassConstant_getValue_typed.phpt
 ext/reflection/tests/ReflectionClassConstant_isDeprecated_userland.phpt
@@ -8295,6 +8306,7 @@ ext/standard/tests/file/bug38086.phpt
 ext/standard/tests/file/bug38450.phpt
 ext/standard/tests/file/bug38450_1.phpt
 ext/standard/tests/file/bug38450_2.phpt
+ext/standard/tests/file/bug38450_3.phpt
 ext/standard/tests/file/bug39367.phpt
 ext/standard/tests/file/bug39538.phpt
 ext/standard/tests/file/bug39551.phpt
@@ -9565,6 +9577,8 @@ ext/standard/tests/serialize/bug69793.phpt
 ext/standard/tests/serialize/bug70172.phpt
 ext/standard/tests/serialize/bug70172_2.phpt
 ext/standard/tests/serialize/bug70213.phpt
+ext/standard/tests/serialize/bug70219.phpt
+ext/standard/tests/serialize/bug70219_1.phpt
 ext/standard/tests/serialize/bug70436.phpt
 ext/standard/tests/serialize/bug70513.phpt
 ext/standard/tests/serialize/bug70963.phpt
@@ -9576,6 +9590,7 @@ ext/standard/tests/serialize/bug71995.phpt
 ext/standard/tests/serialize/bug72229.phpt
 ext/standard/tests/serialize/bug72663.phpt
 ext/standard/tests/serialize/bug72663_2.phpt
+ext/standard/tests/serialize/bug72663_3.phpt
 ext/standard/tests/serialize/bug72731.phpt
 ext/standard/tests/serialize/bug72785.phpt
 ext/standard/tests/serialize/bug73052.phpt
@@ -9716,6 +9731,7 @@ ext/standard/tests/streams/bug76859.phpt
 ext/standard/tests/streams/bug76943.phpt
 ext/standard/tests/streams/bug77069.phpt
 ext/standard/tests/streams/bug77080.phpt
+ext/standard/tests/streams/bug77664.phpt
 ext/standard/tests/streams/bug78326.phpt
 ext/standard/tests/streams/bug78326_1.phpt
 ext/standard/tests/streams/bug78506.phpt
@@ -9927,6 +9943,7 @@ ext/standard/tests/strings/bug72263.phpt
 ext/standard/tests/strings/bug72264.phpt
 ext/standard/tests/strings/bug72433.phpt
 ext/standard/tests/strings/bug72663.phpt
+ext/standard/tests/strings/bug72663_2.phpt
 ext/standard/tests/strings/bug72663_3.phpt
 ext/standard/tests/strings/bug72823.phpt
 ext/standard/tests/strings/bug73058.phpt
