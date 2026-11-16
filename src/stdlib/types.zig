@@ -1020,13 +1020,27 @@ fn settypeValue(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         if (val == .float and std.math.isNan(val.float)) try ctx.vm.emitWarning("unexpected NAN value was coerced to null");
         return NativeResult.scalar(.null);
     }
-    if (is(type_name, "array")) {
-        if (val == .array) return NativeResult.share(val);
-        return NativeResult.borrowed(try ctx.vm.castToArray(val));
-    }
-    if (is(type_name, "object")) {
-        if (val == .object) return NativeResult.share(val);
-        return NativeResult.borrowed(try ctx.vm.castToObject(val));
+    if (is(type_name, "array") or is(type_name, "object")) {
+        const to_array = is(type_name, "array");
+        if ((to_array and val == .array) or (!to_array and val == .object)) return NativeResult.share(val);
+        // convert_to_array/object warn about a NAN first, then wrap the
+        // variable as the warning's handler left it, whatever it holds
+        if (val == .float and std.math.isNan(val.float)) {
+            try ctx.vm.emitWarning(if (to_array) "unexpected NAN value was coerced to array" else "unexpected NAN value was coerced to object");
+            var now = val;
+            if (ctx.byRefArg(0, args.len)) |arg| if (ctx.readByRefArg(arg)) |v| {
+                now = v;
+            };
+            if (to_array) {
+                const arr = try ctx.vm.allocArray();
+                try arr.append(ctx.allocator, now);
+                return NativeResult.borrowed(.{ .array = arr });
+            }
+            const obj = try ctx.createObject("stdClass");
+            try obj.set(ctx.allocator, "scalar", now);
+            return NativeResult.borrowed(.{ .object = obj });
+        }
+        return NativeResult.borrowed(if (to_array) try ctx.vm.castToArray(val) else try ctx.vm.castToObject(val));
     }
     if (is(type_name, "resource")) {
         try ctx.vm.setPendingException("ValueError", "Cannot convert to resource type");
