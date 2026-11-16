@@ -97,41 +97,144 @@ fn sessionPath(ctx: *NativeContext, sid: []const u8) ![]const u8 {
     return std.mem.concat(ctx.allocator, u8, &.{ dir, "/sess_", sid });
 }
 
-fn loadSessionData(ctx: *NativeContext, sid: []const u8) !*PhpArray {
+// php_session_initialize: the stored data is decoded into a fresh $_SESSION
+// with the configured serializer; data it can't decode destroys the session
+fn loadSessionData(ctx: *NativeContext, sid: []const u8) RuntimeError!void {
+    try ctx.vm.putRequestVar("$_SESSION", .{ .array = try ctx.createArray() });
     const path = try sessionPath(ctx, sid);
     defer ctx.allocator.free(path);
-
-    const data = bundle.readFileAlloc(ctx.allocator, path, 1024 * 1024) catch {
-        return try ctx.createArray();
-    };
+    const data = bundle.readFileAlloc(ctx.allocator, path, 1024 * 1024) catch return;
     defer ctx.allocator.free(data);
-
-    // session data is stored as a serialize()'d array (PHP's "php_serialize" format).
-    // if the file is empty or the deserialize fails, fall back to an empty array so
-    // a corrupt session can never break session_start.
-    if (data.len == 0) return try ctx.createArray();
-    const parsed = serialize_mod.unserializeFromString(ctx, data) orelse return try ctx.createArray();
-    if (parsed != .array) {
-        if (parsed == .string) parsed.string.release();
-        return try ctx.createArray();
-    }
-    return parsed.array;
+    _ = try decodeSession(ctx, data);
 }
 
 fn saveSessionData(ctx: *NativeContext, sid: []const u8) !void {
-    const session_val = ctx.vm.request_vars.get("$_SESSION") orelse return;
-    if (session_val != .array) return;
-
-    const serialized = (try serialize_mod.serializeToString(ctx, session_val)).value;
-    defer if (serialized == .string) serialized.string.release();
-    if (serialized != .string) return;
+    const encoded = (try encodeSession(ctx)) orelse return;
+    defer encoded.release();
 
     const path = try sessionPath(ctx, sid);
     defer ctx.allocator.free(path);
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const target = paths.streamPath(&path_buf, path);
     bundle.prepareWrite(target, .create);
-    std.Io.Dir.cwd().writeFile(platform.io, .{ .sub_path = target, .data = serialized.string.bytes() }) catch return;
+    std.Io.Dir.cwd().writeFile(platform.io, .{ .sub_path = target, .data = encoded.bytes() }) catch return;
+}
+
+const Serializer = enum { php, php_serialize, php_binary };
+
+fn serializer(ctx: *NativeContext) ?Serializer {
+    return std.meta.stringToEnum(Serializer, iniValue(ctx, "session.serialize_handler", "php"));
+}
+
+// php's session serializers (ext/session/session.c PS_SERIALIZER_ENCODE_FUNC):
+// the encoded $_SESSION, or null when a key can't be written
+fn encodeSession(ctx: *NativeContext) RuntimeError!?Value.String {
+    const session_val = ctx.vm.request_vars.get("$_SESSION") orelse return null;
+    const handler = serializer(ctx) orelse return null;
+    if (handler == .php_serialize) {
+        const out = (try serialize_mod.serializeToString(ctx, session_val)).value;
+        return if (out == .string) out.string else null;
+    }
+    if (session_val != .array) return try Value.String.create(ctx.allocator, "");
+    var w = serialize_mod.Writer{ .ctx = ctx };
+    w.begin();
+    defer w.deinit();
+    for (session_val.array.entries.items) |entry| {
+        const key = switch (entry.key) {
+            .string => |k| k.bytes(),
+            .int => |n| {
+                try serialize_mod.docref(ctx, 2, "Skipping numeric key {d}", .{n});
+                continue;
+            },
+        };
+        switch (handler) {
+            .php => {
+                if (std.mem.indexOfScalar(u8, key, '|') != null) {
+                    try serialize_mod.docref(ctx, 2, "Failed to write session data. Data contains invalid key \"{s}\"", .{key});
+                    return null;
+                }
+                try w.raw(key);
+                try w.raw("|");
+            },
+            .php_binary => {
+                if (key.len > 127) continue;
+                try w.raw(&.{@intCast(key.len)});
+                try w.raw(key);
+            },
+            .php_serialize => unreachable,
+        }
+        try w.value(entry.value);
+    }
+    return try Value.String.create(ctx.allocator, w.buf.items);
+}
+
+// PS_SERIALIZER_DECODE_FUNC: fills $_SESSION from data; false when it is
+// malformed, after php_session_cancel_decode destroyed the session
+fn decodeSession(ctx: *NativeContext, data: []const u8) RuntimeError!bool {
+    const handler = serializer(ctx) orelse return false;
+    const ok = switch (handler) {
+        .php_serialize => blk: {
+            var r = serialize_mod.Reader{ .ctx = ctx, .s = data };
+            r.begin();
+            defer r.deinit();
+            const v = try r.value();
+            const vars: Value = if (v) |val| (if (val == .null) .{ .array = try ctx.createArray() } else val) else .{ .array = try ctx.createArray() };
+            try ctx.vm.putRequestVar("$_SESSION", vars);
+            if (v) |val| if (val == .string) val.string.release();
+            break :blk v != null or data.len == 0;
+        },
+        .php, .php_binary => blk: {
+            const target = try ctx.createArray();
+            const current = ctx.vm.request_vars.get("$_SESSION");
+            if (current) |cur| if (cur == .array) {
+                for (cur.array.entries.items) |entry| try ctx.vm.arrayAddCarried(target, entry.key, entry, cur.array);
+            };
+            var r = serialize_mod.Reader{ .ctx = ctx, .s = data };
+            r.begin();
+            defer r.deinit();
+            var good = true;
+            while (r.pos < data.len) {
+                var name: []const u8 = undefined;
+                if (handler == .php) {
+                    const bar = std.mem.indexOfScalarPos(u8, data, r.pos, '|') orelse {
+                        good = false;
+                        break;
+                    };
+                    name = data[r.pos..bar];
+                    r.pos = bar + 1;
+                } else {
+                    const len = data[r.pos] & 0x7f;
+                    if (r.pos + len >= data.len) {
+                        good = false;
+                        break;
+                    }
+                    name = data[r.pos + 1 ..][0..len];
+                    r.pos += len + 1;
+                }
+                const v = (try r.value()) orelse {
+                    good = false;
+                    break;
+                };
+                const key = try Value.String.create(ctx.allocator, name);
+                defer key.release();
+                try target.set(ctx.allocator, .{ .string = key }, v);
+                if (v == .string) v.string.release();
+            }
+            try ctx.vm.putRequestVar("$_SESSION", .{ .array = target });
+            break :blk good;
+        },
+    };
+    if (ok) return true;
+    // php_session_cancel_decode
+    if (getSessionVar(ctx, "__session_id")) |sid| if (sid == .string) {
+        const path = try sessionPath(ctx, sid.string.bytes());
+        defer ctx.allocator.free(path);
+        std.Io.Dir.cwd().deleteFile(platform.io, path) catch {};
+    };
+    try setSessionVar(ctx, "__session_active", .{ .bool = false });
+    try ctx.vm.putRequestVar("$_SESSION", .{ .array = try ctx.createArray() });
+    try serialize_mod.docref(ctx, 2, "Failed to decode session object. Session has been destroyed", .{});
+    return false;
 }
 
 fn getCookieSessionId(ctx: *NativeContext) ?[]const u8 {
@@ -207,7 +310,10 @@ fn native_session_start(ctx: *NativeContext, _: []const Value) RuntimeError!Nati
     // already active? (do not short-circuit on __session_id alone so that
     // a session reopened after session_write_close correctly re-loads data)
     const active = getSessionVar(ctx, "__session_active");
-    if (active != null and active.? == .bool and active.?.bool) return NativeResult.scalar(.{ .bool = true });
+    if (active != null and active.? == .bool and active.?.bool) {
+        try serialize_mod.docref(ctx, 8, "Ignoring session_start() because a session is already active (started from {s})", .{startedAt(ctx)});
+        return NativeResult.scalar(.{ .bool = true });
+    }
 
     var sid: []const u8 = undefined;
     var generated: ?Value.String = null;
@@ -258,8 +364,7 @@ fn native_session_start(ctx: *NativeContext, _: []const Value) RuntimeError!Nati
     defer at_str.release();
     try setSessionVar(ctx, "__session_started_at", .{ .string = at_str });
 
-    const arr = try loadSessionData(ctx, sid);
-    try ctx.vm.putRequestVar("$_SESSION", .{ .array = arr });
+    try loadSessionData(ctx, sid);
 
     if (is_new and iniBool(iniValue(ctx, "session.use_cookies", "1"))) try setSessionCookie(ctx, sid);
     try applyTransSid(ctx, sid);
@@ -278,6 +383,10 @@ fn native_session_id(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
 }
 
 fn native_session_destroy(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    if (!isActive(ctx)) {
+        try serialize_mod.docref(ctx, 2, "Trying to destroy uninitialized session", .{});
+        return NativeResult.scalar(.{ .bool = false });
+    }
     const sid_val = getSessionVar(ctx, "__session_id") orelse return NativeResult.scalar(.{ .bool = false });
     if (sid_val != .string) return NativeResult.scalar(.{ .bool = false });
 
@@ -391,8 +500,7 @@ fn native_session_abort(ctx: *NativeContext, _: []const Value) RuntimeError!Nati
 fn native_session_reset(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const sid_val = getSessionVar(ctx, "__session_id") orelse return NativeResult.scalar(.{ .bool = false });
     if (sid_val != .string) return NativeResult.scalar(.{ .bool = false });
-    const arr = try loadSessionData(ctx, sid_val.string.bytes());
-    try ctx.vm.putRequestVar("$_SESSION", .{ .array = arr });
+    try loadSessionData(ctx, sid_val.string.bytes());
     return NativeResult.scalar(.{ .bool = true });
 }
 
@@ -412,20 +520,21 @@ fn native_session_get_cookie_params(ctx: *NativeContext, _: []const Value) Runti
 }
 
 fn native_session_encode(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    const session_val = ctx.vm.request_vars.get("$_SESSION") orelse return NativeResult.literal("");
-    if (session_val != .array) return NativeResult.literal("");
-    return try serialize_mod.serializeToString(ctx, session_val);
+    if (ctx.vm.request_vars.get("$_SESSION") == null) {
+        try serialize_mod.docref(ctx, 2, "Cannot encode non-existent session", .{});
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    const encoded = (try encodeSession(ctx)) orelse return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.takeString(encoded);
 }
 
 fn native_session_decode(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const parsed = serialize_mod.unserializeFromString(ctx, args[0].string.bytes()) orelse return NativeResult.scalar(.{ .bool = false });
-    if (parsed != .array) {
-        if (parsed == .string) parsed.string.release();
+    if (!isActive(ctx)) {
+        try serialize_mod.docref(ctx, 2, "Session data cannot be decoded when there is no active session", .{});
         return NativeResult.scalar(.{ .bool = false });
     }
-    try ctx.vm.putRequestVar("$_SESSION", parsed);
-    return NativeResult.scalar(.{ .bool = true });
+    return NativeResult.scalar(.{ .bool = try decodeSession(ctx, args[0].string.bytes()) });
 }
 
 // called from serve after PHP execution to persist session

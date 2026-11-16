@@ -69,7 +69,7 @@ fn refuseNotSerializable(ctx: *NativeContext, class_name: []const u8, direction:
 }
 
 // php_error_docref's warning: the running internal function's name first
-fn docref(ctx: *NativeContext, level: i64, comptime fmt: []const u8, args: anytype) RuntimeError!void {
+pub fn docref(ctx: *NativeContext, level: i64, comptime fmt: []const u8, args: anytype) RuntimeError!void {
     const label: []const u8 = if (ctx.vm.native_call) |call| call.label else "unserialize";
     const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): " ++ fmt, .{label} ++ args);
     defer ctx.allocator.free(msg);
