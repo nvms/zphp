@@ -91,6 +91,14 @@ pub fn getTypeInfo(key: []const u8) ?TypeInfo {
     return g_type_info.get(key);
 }
 
+// frees this thread's type table. a VM deinits it as it ends, but a serve
+// worker's VM is deinited by the thread that joined the worker, which has
+// a table of its own: the worker's thread frees its table before it exits
+pub fn releaseThreadTypeInfo(allocator: Allocator) void {
+    g_type_info.deinit(allocator);
+    g_type_info = .{};
+}
+
 pub const FileLoader = fn (path: []const u8, allocator: Allocator, vm: *VM) ?*CompileResult;
 
 // holds a phar archive's raw bytes + parsed manifest, kept alive for the

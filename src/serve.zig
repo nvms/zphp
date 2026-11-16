@@ -695,6 +695,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
 // event loop (runs on each worker thread)
 
 fn eventLoop(w: *Worker) void {
+    defer @import("runtime/vm.zig").releaseThreadTypeInfo(w.vm.allocator);
     while (!queue.shutdown) {
         _ = sys.poll(w.poll_fds[0..w.n_fds], 1000) catch continue;
 
