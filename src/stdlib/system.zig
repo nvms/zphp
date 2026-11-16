@@ -1230,8 +1230,10 @@ fn appendNativeEntries(vm: *VM, result: *PhpArray, natives: []const *const @impo
         const site = if (outermost and !natives[next.*].from_native) vm.framePosition(i) else null;
         // an instance method's $this is in the frame pushed for the call
         const depth = natives[next.*].depth;
-        const object: ?Value = if (provide_object and natives[next.*].instance and depth >= 1 and vm.frames[depth - 1].native)
-            if (VM.frameThis(&vm.frames[depth - 1])) |t| (if (t == .object) t else null) else null
+        const object: ?Value = if (provide_object and natives[next.*].instance and natives[next.*].this != .null)
+            natives[next.*].this
+        else if (provide_object and natives[next.*].instance and depth >= 1 and vm.frames[depth - 1].native)
+            if (VM.frameThis(&vm.frames[depth - 1])) |t| (if (t == .object or t == .fiber or t == .generator) t else null) else null
         else
             null;
         // eval() is a construct: its entry has no arguments

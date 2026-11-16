@@ -802,6 +802,9 @@ pub const NativeCall = struct {
     // called by the running native itself, which a trace shows as
     // "[internal function]"
     from_native: bool = false,
+    // the object an engine method runs on (a fiber's or generator's own
+    // methods have no native frame to hold it)
+    this: Value = .null,
 };
 
 pub const NativeInvocation = struct {
@@ -18605,6 +18608,7 @@ pub const VM = struct {
         };
         var record: NativeCall = undefined;
         self.enterEngineMethod(&record, label, args, true);
+        record.this = .{ .generator = gen };
         defer self.native_call = record.outer;
         const arity: u16 = if (method == .send or method == .throw) 1 else 0;
         if (args.len != arity) return self.argumentCountError(label, arity, arity, args.len);
@@ -30508,6 +30512,7 @@ pub const VM = struct {
         };
         var record: NativeCall = undefined;
         self.enterEngineMethod(&record, label, args, true);
+        record.this = .{ .fiber = fiber };
         defer self.native_call = record.outer;
         const unbounded = @import("natives.zig").Arity.unbounded;
         const min: u16, const max: u16 = switch (method) {
@@ -31310,10 +31315,17 @@ pub const VM = struct {
         const p = fiber.native orelse return cut;
         const nat: *FiberNative = @ptrCast(@alignCast(p));
         const bounds = nat.co.bounds();
+        // the fiber's calls are the run of the chain on its machine stack;
+        // fibers it started and that still run lie inside it
         var call = self.native_call;
+        var entered = false;
         while (call) |c| : (call = c.outer) {
             const addr = @intFromPtr(c);
-            if (addr < bounds.low or addr >= bounds.high) break;
+            if (addr < bounds.low or addr >= bounds.high) {
+                if (entered) break;
+                continue;
+            }
+            entered = true;
             cut.bottom = @constCast(c);
         }
         if (cut.bottom) |c| {
@@ -31322,6 +31334,26 @@ pub const VM = struct {
         }
         self.trace_floor = nat.base.frame;
         return cut;
+    }
+
+    // the running fiber that `fiber` resumed or started and that runs now
+    // inside it (directly, or with fibers of its own inside), null when
+    // `fiber` is the current one
+    pub fn fiberRunningInside(self: *VM, fiber: *Fiber) ?*Fiber {
+        const base = (fiber.native orelse return null);
+        const outer_base = @as(*FiberNative, @ptrCast(@alignCast(base))).base.frame;
+        var best: ?*Fiber = null;
+        var best_base: usize = std.math.maxInt(usize);
+        for (self.fibers.items) |f| {
+            if (f == fiber or f.pooled or f.state != .running) continue;
+            const p = f.native orelse continue;
+            const b = @as(*FiberNative, @ptrCast(@alignCast(p))).base.frame;
+            if (b > outer_base and b < best_base) {
+                best = f;
+                best_base = b;
+            }
+        }
+        return best;
     }
 
     pub fn endTraceCut(self: *VM, cut: *TraceCut) void {

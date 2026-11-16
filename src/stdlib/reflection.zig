@@ -6646,6 +6646,28 @@ fn rfibGetTrace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         const all = try ctx.vm.callByName("debug_backtrace", &.{.{ .int = options & 3 }});
         return NativeResult.share(all);
     }
+    if (fib.state == .running) {
+        // it runs, but another fiber runs inside it: its trace is its own
+        // frames, from the call that started or resumed the inner one
+        const inner = ctx.vm.fiberRunningInside(fib) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+        const all = blk: {
+            var cut = ctx.vm.cutTraceAtFiber(fib);
+            defer ctx.vm.endTraceCut(&cut);
+            break :blk try ctx.vm.callByName("debug_backtrace", &.{.{ .int = options & 3 }});
+        };
+        const out = try ctx.createArray();
+        if (all != .array) return NativeResult.borrowed(.{ .array = out });
+        const above = blk: {
+            var cut = ctx.vm.cutTraceAtFiber(inner);
+            defer ctx.vm.endTraceCut(&cut);
+            break :blk try ctx.vm.callByName("debug_backtrace", &.{.{ .int = 2 }});
+        };
+        const skip = if (above == .array) above.array.entries.items.len else 0;
+        if (skip < all.array.entries.items.len) {
+            for (all.array.entries.items[skip..]) |e| try out.append(ctx.allocator, e.value);
+        }
+        return NativeResult.borrowed(.{ .array = out });
+    }
     // its frames go back where they ran while debug_backtrace's walk lists
     // them, below php's Fiber::suspend() entry
     const frames = VM.suspendedFiberFrames(fib);
@@ -6661,6 +6683,12 @@ fn rfibGetTrace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         break :blk try @import("system.zig").buildBacktrace(ctx, options & 2 != 0, options & 1 != 0, 0);
     };
     const arr = try ctx.createArray();
+    // a Fiber::suspend() a native called is already the walk's first entry
+    if (VM.suspendedByNative(fib) and listed.entries.items.len > 0 and isFiberSuspendEntry(listed.entries.items[0].value)) {
+        for (listed.entries.items) |e| try arr.append(ctx.allocator, e.value);
+        listed.entries.clearRetainingCapacity();
+        return NativeResult.borrowed(.{ .array = arr });
+    }
     const entry = try ctx.createArray();
     if (top_pos) |pos| {
         try traceSet(ctx, entry, "file", .{ .string = Value.String.borrowed(pos.file) });
@@ -6680,6 +6708,13 @@ fn rfibGetTrace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     for (listed.entries.items) |e| try arr.append(ctx.allocator, e.value);
     listed.entries.clearRetainingCapacity();
     return NativeResult.borrowed(.{ .array = arr });
+}
+
+fn isFiberSuspendEntry(v: Value) bool {
+    if (v != .array) return false;
+    const func = v.array.get(.{ .string = Value.String.borrowed("function") });
+    const class = v.array.get(.{ .string = Value.String.borrowed("class") });
+    return func == .string and class == .string and std.mem.eql(u8, func.string.bytes(), "suspend") and std.mem.eql(u8, class.string.bytes(), "Fiber");
 }
 
 fn hasDeprecatedAttribute(attrs: []const AttributeDef) bool {
