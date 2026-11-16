@@ -1314,6 +1314,19 @@ pub fn compileSeparatedFetch(self: *Compiler, node_idx: u32) Error!bool {
 // the container of an unset($c[..][k]): every array on the path is
 // separated from its co-holders (the root by the caller for a variable),
 // and nothing missing is created
+// the object an unset reaches a property through: a property on the way is
+// fetched for unset (FETCH_OBJ_UNSET), anything else read
+fn compileUnsetPropBase(self: *Compiler, node_idx: u32) Error!void {
+    const node = self.ast.nodes[node_idx];
+    if (node.tag != .property_access or self.isDynamicProp(node)) return self.compileNode(node_idx);
+    try compileUnsetPropBase(self, node.data.lhs);
+    const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(self.propName(node)) });
+    try self.emitOp(.fetch_prop_unset);
+    try self.emitU16(name_idx);
+    try self.emitOp(.get_prop);
+    try self.emitU16(name_idx);
+}
+
 fn compileUnsetDimensionBase(self: *Compiler, node_idx: u32) Error!void {
     const node = self.ast.nodes[node_idx];
     if (node.tag == .array_access) {
@@ -1321,7 +1334,7 @@ fn compileUnsetDimensionBase(self: *Compiler, node_idx: u32) Error!void {
         try self.compileNode(node.data.rhs);
         try self.emitOp(.array_get_unset);
     } else if (node.tag == .property_access) {
-        try self.compileNode(node.data.lhs);
+        try compileUnsetPropBase(self, node.data.lhs);
         if (self.isDynamicProp(node)) {
             try self.compileNode(node.data.rhs);
         } else {
@@ -2102,7 +2115,7 @@ fn compileUnset(self: *Compiler, args: []const u32) Error!void {
             try self.compileNode(arg.data.lhs);
             try self.emitOp(.unset_var_var);
         } else if (arg.tag == .property_access) {
-            try self.compileNode(arg.data.lhs);
+            try compileUnsetPropBase(self, arg.data.lhs);
             if (self.isDynamicProp(arg)) {
                 if (arg.main_token == 0) {
                     try self.compileNode(arg.data.rhs);
@@ -2292,7 +2305,7 @@ fn compilePropFetchBase(self: *Compiler, node_idx: u32, rw: bool) Error!void {
     if (node.tag == .property_access and !self.isDynamicProp(node)) {
         try compilePropFetchBase(self, node.data.lhs, rw);
         const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(self.propName(node)) });
-        try self.emitOp(.prepare_prop_w);
+        try self.emitOp(if (rw) .prepare_prop_rw else .prepare_prop_w);
         try self.emitU16(name_idx);
         try self.emitOp(.get_prop);
         try self.emitU16(name_idx);

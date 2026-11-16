@@ -7885,7 +7885,27 @@ pub const VM = struct {
                     self.pushFetched(new_val);
                 },
 
-                .prepare_prop_w => {
+                .fetch_prop_unset => {
+                    const prop_name = self.currentChunk().constants.items[self.readU16()].string.bytes();
+                    const container = self.peek();
+                    if (container != .object) continue;
+                    const obj = container.object;
+                    const vr = self.findPropertyVisibility(obj.class_name, prop_name);
+                    if (!vr.declared or obj.lazy != null or self.magicApplies(obj, prop_name, .get) or !self.propVisible(vr, prop_name, vr.visibility)) continue;
+                    const raw = obj.rawForScope(prop_name, vr.defining_class);
+                    if (raw != .undef) {
+                        if (self.refuseIndirectFetch(obj, prop_name, vr, .unset) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        }) continue;
+                        continue;
+                    }
+                    // nothing to unset in: the get_prop after this is skipped
+                    self.stack[self.sp - 1] = .null;
+                    self.stackRelease(container);
+                    self.currentFrame().ip += OpCode.get_prop.width();
+                },
+                .prepare_prop_w, .prepare_prop_rw => {
                     const prop_name = self.currentChunk().constants.items[self.readU16()].string.bytes();
                     const container = self.peek();
                     if (container != .object) {
@@ -7895,6 +7915,15 @@ pub const VM = struct {
                         return error.RuntimeError;
                     }
                     const pw_obj = container.object;
+                    if (pw_obj.lazy == null and !self.magicApplies(pw_obj, prop_name, .get)) {
+                        const vr = self.findPropertyVisibility(pw_obj.class_name, prop_name);
+                        if (vr.declared and self.propVisible(vr, prop_name, vr.visibility)) {
+                            if (self.refuseIndirectFetch(pw_obj, prop_name, vr, if (op == .prepare_prop_w) .write else .read_write) catch {
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            }) continue;
+                        }
+                    }
                     // zend_std_get_property_ptr_ptr: a property nothing has
                     // (and no __get answers for) is created as null
                     if (pw_obj.lazy == null and !self.magicApplies(pw_obj, prop_name, .get) and
@@ -9842,7 +9871,7 @@ pub const VM = struct {
                         const cur = obj_val.object.getForScope(name, vr.defining_class);
                         // an unset fetch of an uninitialized property reads
                         // nothing (zend_std_read_property with BP_VAR_UNSET)
-                        const uninit_readonly = vr.is_readonly and obj_val.object.rawForScope(name, vr.defining_class) == .undef;
+                        const uninit_readonly = (vr.is_readonly or vr.set_visibility != vr.visibility) and self.propVisible(vr, name, vr.visibility) and obj_val.object.rawForScope(name, vr.defining_class) == .undef;
                         if ((cur != .object and !uninit_readonly) or datePeriodField(vr, name)) {
                             if (try self.checkPropertyMutationVis(obj_val.object, name, .indirect, vr)) continue;
                         }
@@ -25231,6 +25260,22 @@ pub const VM = struct {
     fn undefinedMethodMessage(self: *VM, obj: *PhpObject, method_name: []const u8) ![]u8 {
         if (isIncompleteObject(obj)) return self.incompleteMessage(obj, "call a method");
         return std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ obj.class_name, method_name });
+    }
+
+    // zend_std_read_property for a write, read-write or unset fetch of a
+    // property whose holder is fetched in turn: a readonly property, or one
+    // the scope may not set, is never modified in place, so only an object
+    // in it can be written through. an uninitialized one is refused for a
+    // write; a read-write fetch reports it uninitialized instead and an
+    // unset fetch reads nothing. true when the Error was thrown
+    fn refuseIndirectFetch(self: *VM, obj: *PhpObject, name: []const u8, vr: VisResult, mode: enum { write, read_write, unset }) RuntimeError!bool {
+        const restricted = vr.is_readonly or (vr.set_visibility != vr.visibility and !self.propVisible(vr, name, vr.set_visibility));
+        if (!restricted) return false;
+        const raw = obj.rawForScope(name, vr.defining_class);
+        if (raw == .object) return false;
+        if (raw == .undef and mode != .write) return false;
+        if (vr.is_readonly and self.reinit_windows.items.len > 0 and self.readonlyReinitable(obj, name)) return false;
+        return self.checkPropertyMutationVis(obj, name, .indirect, vr);
     }
 
     fn checkPropertyMutation(self: *VM, obj: *PhpObject, name: []const u8, action: MutationAction) RuntimeError!bool {

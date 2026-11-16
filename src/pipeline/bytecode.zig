@@ -600,6 +600,13 @@ pub const OpCode = enum(u16) {
     // gets a stepped null appended, an ArrayAccess object's offsetGet(null)
     // is stepped as a temporary, a string is an Error before the step
     append_incdec,
+    // u16 name: prepare_prop_w for a read-write fetch (`$o->p->q += 1`)
+    prepare_prop_rw,
+    // u16 name, then a get_prop of the same name: the fetch of an unset's
+    // container (`unset($o->p->q)`, FETCH_OBJ_UNSET). an uninitialized
+    // declared property reads as null without an error, and the get_prop
+    // after it is skipped
+    fetch_prop_unset,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -654,6 +661,8 @@ pub const OpCode = enum(u16) {
             .ensure_array_prop,
             .ensure_array_static_prop_dyn,
             .prepare_prop_w,
+            .prepare_prop_rw,
+            .fetch_prop_unset,
             .array_set_var,
             .cow_separate_local,
             .make_var_array_elem_ref,
