@@ -905,6 +905,17 @@ pub fn compileStaticVar(self: *Compiler, node: Ast.Node) Error!void {
         const skip = try self.emitJump(.jump_if_not_null);
         try self.emitOp(.pop);
         try self.compileNode(node.data.lhs);
+        // ZEND_BIND_STATIC: an initializer that initialized the variable
+        // itself (a recursive call) leaves that value, and its own is dropped
+        try self.emitOp(.get_static);
+        try self.emitU16(var_idx);
+        const initialized = try self.emitJump(.jump_if_not_null);
+        try self.emitOp(.pop);
+        const done = try self.emitJump(.jump);
+        self.patchJump(initialized);
+        try self.emitOp(.swap);
+        try self.emitOp(.pop);
+        self.patchJump(done);
         self.patchJump(skip);
     }
 
