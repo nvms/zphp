@@ -173,6 +173,10 @@ pub const H2Session = struct {
         self.send_buf.items.len = 0;
     }
 
+    pub fn hasPendingOutput(self: *H2Session) bool {
+        return self.send_buf.items.len > 0 or c.nghttp2_session_want_write(self.session) != 0;
+    }
+
     pub fn findCompletedStream(self: *H2Session) ?*H2Stream {
         for (&self.streams) |*s| {
             if (s.active and s.complete) return s;

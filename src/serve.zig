@@ -702,7 +702,13 @@ fn eventLoop(w: *Worker) void {
                     switch (c.state) {
                         .tls_handshaking => processTlsHandshake(w, c, i),
                         .http_reading => processHttpRead(w, c),
-                        .h2_active => processH2Read(w, c),
+                        .h2_active => {
+                            processH2Read(w, c);
+                            // output the socket couldn't take yet goes out once it is writable
+                            if (c.h2_session) |session| {
+                                w.poll_fds[i].events = if (session.hasPendingOutput()) sys.POLL.IN | sys.POLL.OUT else sys.POLL.IN;
+                            }
+                        },
                         .ws_idle => processWsRead(w, c),
                         .closing => {},
                     }
@@ -1102,7 +1108,13 @@ fn processH2Read(w: *Worker, conn: *Connection) void {
     };
 
     const n = conn.ioRead(conn.buf[conn.buffered..]) catch |err| {
-        if (err == error.WouldBlock) return;
+        if (err == error.WouldBlock) {
+            // woken to write: send what the session still has
+            session.flush() catch {
+                conn.state = .closing;
+            };
+            return;
+        }
         conn.state = .closing;
         return;
     };

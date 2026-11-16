@@ -36,6 +36,12 @@ pub fn initContext(cert_path: [*:0]const u8, key_path: [*:0]const u8) ?*SSL_CTX 
     // reject deprecated TLS 1.0/1.1 - require 1.2+
     _ = c.SSL_CTX_set_min_proto_version(ctx, c.TLS1_2_VERSION);
 
+    // a write that would block is retried later from a buffer of its own
+    // (h2's send_buf, the http/1 writers' loops), which openssl refuses as a
+    // bad write retry unless the buffer may move; partial writes let those
+    // loops count what went out
+    _ = c.SSL_CTX_set_mode(ctx, c.SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | c.SSL_MODE_ENABLE_PARTIAL_WRITE);
+
     if (c.SSL_CTX_use_certificate_chain_file(ctx, cert_path) != 1) {
         c.SSL_CTX_free(ctx);
         return null;
