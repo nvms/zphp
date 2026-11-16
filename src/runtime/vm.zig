@@ -5198,8 +5198,11 @@ pub const VM = struct {
                         self.push(val);
                     } else if (std.mem.lastIndexOfScalar(u8, name, '\\')) |sep| blk: {
                         // PHP fallback: bare constants in a namespace try
-                        // <ns>\<name> first, then fall back to the global <name>
-                        const bare = name[sep + 1 ..];
+                        // <ns>\<name> first, then fall back to the global <name>;
+                        // a qualified or imported name (marked with a leading
+                        // backslash) is only itself
+                        const exact = name[0] == '\\';
+                        const bare = if (exact) name[1..] else name[sep + 1 ..];
                         if (self.php_constants.get(bare)) |val| {
                             self.warnDeprecatedConstant(bare) catch if (try self.resumeRaised()) continue;
                             self.push(val);
@@ -5207,7 +5210,7 @@ pub const VM = struct {
                         }
                         // an undefined bare constant is a fatal Error in PHP 8,
                         // not a silent null
-                        const msg = try std.fmt.allocPrint(self.allocator, "Undefined constant \"{s}\"", .{name});
+                        const msg = try std.fmt.allocPrint(self.allocator, "Undefined constant \"{s}\"", .{if (exact) bare else name});
                         defer self.allocator.free(msg);
                         if (bareDefaultRunning(self.currentFrame())) self.bare_default_failed = true;
                         if (try self.throwBuiltinException("Error", msg)) continue;

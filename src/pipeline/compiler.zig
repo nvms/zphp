@@ -422,6 +422,8 @@ pub const Compiler = struct {
     use_aliases: std.StringHashMapUnmanaged([]const u8) = .{},
     use_fn_aliases: std.StringHashMapUnmanaged([]const u8) = .{},
     use_const_aliases: std.StringHashMapUnmanaged([]const u8) = .{},
+    // set while emitGetVar emits a constant name already resolved
+    const_name_resolved: bool = false,
     labels: std.StringHashMapUnmanaged(usize) = .{},
     // the token of each label's statement, telling a repeat compile of the
     // same statement from a second definition
@@ -1313,7 +1315,11 @@ pub const Compiler = struct {
             .qualified_name => {
                 const parts = self.ast.extraSlice(node.data.lhs);
                 const fqn = try self.buildQualifiedString(parts);
-                try self.emitGetVar(try self.resolveQualifiedNonClassName(fqn, node.data.rhs));
+                const resolved = try self.exactConstantName(try self.resolveQualifiedNonClassName(fqn, node.data.rhs));
+                // a qualified name is no `use const` alias
+                self.const_name_resolved = true;
+                defer self.const_name_resolved = false;
+                try self.emitGetVar(resolved);
             },
             .root => {},
         }
@@ -1432,7 +1438,9 @@ pub const Compiler = struct {
         //      falls back to global by stripping the namespace prefix)
         if (name.len > 0 and name[0] != '$') {
             if (self.use_const_aliases.get(name)) |fqn| {
-                try self.emitGetVar(fqn);
+                self.const_name_resolved = true;
+                defer self.const_name_resolved = false;
+                try self.emitGetVar(try self.exactConstantName(fqn));
                 return;
             }
             if (self.namespace.len > 0) {
@@ -2310,6 +2318,17 @@ pub const Compiler = struct {
         return q;
     }
 
+    // a namespaced constant read that must not fall back to the global
+    // constant of its last segment (a qualified or imported name; php's
+    // FETCH_CONSTANT without IS_CONSTANT_UNQUALIFIED_IN_NAMESPACE) carries a
+    // leading backslash, which the vm strips
+    pub fn exactConstantName(self: *Compiler, name: []const u8) Error![]const u8 {
+        if (name.len == 0 or name[0] == '\\' or std.mem.indexOfScalar(u8, name, '\\') == null) return name;
+        const marked = try std.fmt.allocPrint(self.allocator, "\\{s}", .{name});
+        try self.string_allocs.append(self.allocator, marked);
+        return marked;
+    }
+
     pub fn resolveFunctionName(self: *Compiler, name: []const u8) []const u8 {
         if (name.len > 0 and name[0] == '\\') return name[1..];
         if (self.use_fn_aliases.get(name)) |fqn| return fqn;
@@ -2666,7 +2685,7 @@ pub const Compiler = struct {
             return;
         }
         // non-$ name: may be a namespaced constant aliased by `use const`
-        const resolved = if (name.len == 0 or name[0] != '$') (self.use_const_aliases.get(name) orelse name) else name;
+        const resolved = if (!self.const_name_resolved and (name.len == 0 or name[0] != '$')) (self.use_const_aliases.get(name) orelse name) else name;
         const idx = try self.addConstant(.{ .string = Value.String.borrowed(resolved) });
         try self.emitOp(get_var);
         try self.emitU16(idx);
