@@ -1065,6 +1065,9 @@ pub const VM = struct {
     // where the caller of the last return_ref resumes: an argument a call
     // returned by reference is that reference only right after that call
     return_ref_site: ?struct { frame: usize, ip: usize } = null,
+    // the next native call is call_user_func(_array) reached through a
+    // namespace's fallback, which php calls as a function, not compiled away
+    user_call_by_name: bool = false,
     // the destructors php's request shutdown runs, with no script running
     shutdown_destructors: bool = false,
     captures: std.ArrayListUnmanaged(CaptureEntry) = .empty,
@@ -27220,7 +27223,12 @@ pub const VM = struct {
         var record: NativeCall = undefined;
         const label = call.label orelse name orelse "";
         const admitted = native.arity.admits(input_args.len);
-        if (!isUserCallForwarder(name) and (!admitted or !isFrameOutNative(label))) {
+        // php compiles a call_user_func it can name at compile time to a
+        // direct call (zend_compile_func_cuf); any other is an internal call
+        const by_name = self.user_call_by_name;
+        self.user_call_by_name = false;
+        const forwarder = isUserCallForwarder(name) and !call.dynamic and !by_name;
+        if (!forwarder and (!admitted or !isFrameOutNative(label))) {
             // eval is a language construct to php: its frame lists no arguments
             const shown_args = if (std.mem.eql(u8, label, "eval")) &[_]Value{} else input_args;
             const from_native = if (outer) |o| o.depth == self.frame_count or (o.depth + 1 == self.frame_count and self.frames[self.frame_count - 1].native) else false;
@@ -27310,7 +27318,7 @@ pub const VM = struct {
         defer self.forwarding_depth = outer_forwarding;
         // a native call_user_func makes is called by it; a user function it
         // calls resets this for what it calls in turn by adding a frame
-        self.forwarding_depth = if (isUserCallForwarder(name)) self.frame_count else std.math.maxInt(usize);
+        self.forwarding_depth = if (forwarder) self.frame_count else std.math.maxInt(usize);
         const result = try native.call(ctx, native_args);
         if (!self.headers_sent) self.noteTopLevelOutput() catch |err| {
             self.releaseValue(result.value);
@@ -29064,6 +29072,9 @@ pub const VM = struct {
         } else {
             if (self.resolveFunctionNameIn(name, !qualified and !dynamic)) |registered| {
                 self.pending_dynamic_call = dynamic;
+                // zend_compile_ns_call: an unqualified name in a namespace
+                // is resolved at run time, so call_user_func is a real call
+                self.user_call_by_name = isUserCallForwarder(registered);
                 return self.callNamedFunctionV(registered, arg_count, named_extras);
             }
             const msg = std.fmt.allocPrint(self.allocator, "Call to undefined function {s}()", .{name}) catch "Call to undefined function";
