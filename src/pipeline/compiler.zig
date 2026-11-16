@@ -2142,15 +2142,16 @@ pub const Compiler = struct {
 
     pub fn resolveClassName(self: *Compiler, name: []const u8) []const u8 {
         if (name.len > 0 and name[0] == '\\') return name[1..];
-        if (std.mem.eql(u8, name, "self")) {
+        // self, parent and static are keywords, matched in any case
+        if (std.ascii.eqlIgnoreCase(name, "self")) {
             if (self.current_class.len > 0 and !self.in_trait) return self.current_class;
-            return name;
+            return "self";
         }
-        if (std.mem.eql(u8, name, "parent")) {
+        if (std.ascii.eqlIgnoreCase(name, "parent")) {
             if (self.current_parent.len > 0 and !self.in_trait) return self.current_parent;
-            return name;
+            return "parent";
         }
-        if (std.mem.eql(u8, name, "static")) return name;
+        if (std.ascii.eqlIgnoreCase(name, "static")) return "static";
         if (std.ascii.startsWithIgnoreCase(name, "namespace\\")) {
             const rest = name["namespace\\".len..];
             if (self.namespace.len == 0) return rest;

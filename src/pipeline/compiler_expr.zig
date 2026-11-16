@@ -3144,7 +3144,9 @@ fn compileStaticPropRead(self: *Compiler, node: Ast.Node, quiet: bool) Error!voi
     // a rebound closure reads the constants of the class it is bound to
     const in_closure = std.mem.startsWith(u8, self.current_function, "{closure:") and !std.ascii.eqlIgnoreCase(raw, "class");
     const keep_written = (self.relative_const_classes or in_closure) and !is_static_prop and (std.ascii.eqlIgnoreCase(written_class, "self") or std.ascii.eqlIgnoreCase(written_class, "parent"));
-    const class_name = if (keep_written) written_class else try resolveNodeClassName(self, class_node);
+    const class_name = if (!keep_written)
+        try resolveNodeClassName(self, class_node)
+    else if (std.ascii.eqlIgnoreCase(written_class, "self")) "self" else "parent";
     // ::class is matched in any case
     const prop_name = if (is_static_prop) raw[1..] else if (std.ascii.eqlIgnoreCase(raw, "class")) "class" else raw;
     if (self.trait_const_values and std.mem.eql(u8, prop_name, "class") and
