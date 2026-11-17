@@ -6214,6 +6214,7 @@ ext/reflection/tests/ReflectionClass_toString_004.phpt
 ext/reflection/tests/ReflectionClass_toString_005.phpt
 ext/reflection/tests/ReflectionClass_toString_006.phpt
 ext/reflection/tests/ReflectionClass_toString_007.phpt
+ext/reflection/tests/ReflectionClass_toString_008.phpt
 ext/reflection/tests/ReflectionConstant_double_construct.phpt
 ext/reflection/tests/ReflectionConstant_getAttributes.phpt
 ext/reflection/tests/ReflectionConstant_getAttributes_empty.phpt
@@ -6282,6 +6283,7 @@ ext/reflection/tests/ReflectionGenerator_in_Generator.phpt
 ext/reflection/tests/ReflectionGenerator_isClosed.phpt
 ext/reflection/tests/ReflectionGenerator_isClosed_002.phpt
 ext/reflection/tests/ReflectionMethod_006.phpt
+ext/reflection/tests/ReflectionMethod_basic1.phpt
 ext/reflection/tests/ReflectionMethod_basic2.phpt
 ext/reflection/tests/ReflectionMethod_basic3.phpt
 ext/reflection/tests/ReflectionMethod_basic4.phpt

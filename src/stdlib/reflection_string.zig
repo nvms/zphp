@@ -1030,6 +1030,10 @@ fn entryView(ctx: *NativeContext, class_name: []const u8, m: MethodEntry) !FnVie
 // php iterates an object with a hooked property through its hooks, which
 // gives the class an iterator
 fn hasHookedProperty(vm: *VM, class_name: []const u8) bool {
+    // an interface declaring a hooked property gets php's hooked iterator too
+    if (vm.interfaces.get(class_name)) |iface| {
+        for (iface.methods.items) |m| if (std.mem.indexOf(u8, m, "$hook_") != null) return true;
+    }
     var current: ?[]const u8 = class_name;
     var depth: usize = 0;
     while (current) |name| : (depth += 1) {

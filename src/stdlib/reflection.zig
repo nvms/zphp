@@ -215,6 +215,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.methods.put(a, "hasProperty", .{ .name = "hasProperty", .arity = 1 });
     try rc_def.methods.put(a, "newInstanceWithoutConstructor", .{ .name = "newInstanceWithoutConstructor", .arity = 0 });
     try rc_def.constants.put(a, "SKIP_INITIALIZATION_ON_SERIALIZE", .{ .int = 8 });
+    // the order php's stub declares them in, which ReflectionClass lists
+    for ([_][]const u8{ "IS_IMPLICIT_ABSTRACT", "IS_EXPLICIT_ABSTRACT", "IS_FINAL", "IS_READONLY", "SKIP_INITIALIZATION_ON_SERIALIZE", "SKIP_DESTRUCTOR" }) |name| try rc_def.constant_order.append(a, name);
     try rc_def.methods.put(a, "newLazyGhost", .{ .name = "newLazyGhost", .arity = 1 });
     try rc_def.methods.put(a, "newLazyProxy", .{ .name = "newLazyProxy", .arity = 1 });
     try rc_def.methods.put(a, "initializeLazyObject", .{ .name = "initializeLazyObject", .arity = 1 });
@@ -5821,6 +5823,7 @@ fn methodInvoke(ctx: *NativeContext, args: []const Value, variadic: bool) Runtim
 fn methodIsAbstract(vm: *VM, this: *PhpObject, method_name: []const u8, declaring: []const u8) bool {
     _ = this;
     if (vm.interfaces.contains(declaring)) return true;
+    if (vm.classes.get(declaring) == null and vm.traits.contains(declaring)) return traitMethodInfo(vm, declaring, method_name).is_abstract;
     if (vm.classes.get(declaring)) |cls| {
         if (cls.methods.get(method_name)) |m| if (m.is_abstract) return true;
     }
@@ -5873,6 +5876,7 @@ fn rmIsAbstract(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
     const declaring = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else return NativeResult.scalar(.{ .bool = false });
 
     if (ctx.vm.interfaces.contains(declaring)) return NativeResult.scalar(.{ .bool = true });
+    if (ctx.vm.classes.get(declaring) == null and ctx.vm.traits.contains(declaring)) return NativeResult.scalar(.{ .bool = traitMethodInfo(ctx.vm, declaring, method_name).is_abstract });
 
     if (ctx.vm.classes.get(declaring)) |cls| {
         if (cls.methods.get(method_name)) |m| {
