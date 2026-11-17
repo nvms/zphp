@@ -6097,10 +6097,15 @@ pub const VM = struct {
                     const arg_count = self.readByte();
                     const name = self.currentChunk().constants.items[name_idx].string.bytes();
                     if (self.global_vars_dirty) try self.syncGlobalLocalsToVars();
+                    const frames_before = self.frame_count;
                     self.callNamedFunction(name, arg_count) catch {
                         if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                         return error.RuntimeError;
                     };
+                    if (self.frame_count == frames_before and self.settleInternalCall()) {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    }
                 },
                 .call_indirect => {
                     const cf_scope = try self.enterCallFamily(op);
@@ -6132,12 +6137,17 @@ pub const VM = struct {
                         // the callee value's slot is gone; it is released once
                         // the callee frame holds a closure by call_name
                         self.pending_dynamic_call = true;
+                        const frames_before = self.frame_count;
                         const called = self.callNamedFunction(name, arg_count);
                         self.stackRelease(name_val);
                         called catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         };
+                        if (self.frame_count == frames_before and self.settleInternalCall()) {
+                            if (self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        }
                     } else {
                         // the value stays alive across the call; its stack slot goes
                         retainValue(name_val);
@@ -32923,6 +32933,14 @@ pub const VM = struct {
     }
 
     // a drain left an exception for the code that released the value
+    // zend_vm_stack_free_args after an internal function: the arguments it
+    // was the last to hold are destroyed then, and a destructor's exception
+    // stops the code after the call. true when one is pending
+    inline fn settleInternalCall(self: *VM) bool {
+        if (self.hasPendingReleases()) self.drainPendingDestruct();
+        return self.drainRaised();
+    }
+
     inline fn drainRaised(self: *VM) bool {
         if (!self.drain_raised) return false;
         self.drain_raised = false;

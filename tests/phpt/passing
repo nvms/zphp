@@ -7231,6 +7231,8 @@ ext/spl/tests/iterator_038.phpt
 ext/spl/tests/iterator_039.phpt
 ext/spl/tests/iterator_040.phpt
 ext/spl/tests/iterator_041.phpt
+ext/spl/tests/iterator_041a.phpt
+ext/spl/tests/iterator_041b.phpt
 ext/spl/tests/iterator_042.phpt
 ext/spl/tests/iterator_043.phpt
 ext/spl/tests/iterator_044.phpt
