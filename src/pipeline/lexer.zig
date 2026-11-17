@@ -166,7 +166,7 @@ pub const Lexer = struct {
             ']' => self.makeToken(.r_bracket, start),
             ';' => self.makeToken(.semicolon, start),
             ',' => self.makeToken(.comma, start),
-            '\\' => self.makeToken(.backslash, start),
+            '\\' => self.makeToken(if (self.separatorJoinsName()) .backslash else .invalid, start),
 
             else => self.makeToken(.invalid, start),
         };
@@ -705,6 +705,19 @@ pub const Lexer = struct {
         return i;
     }
 
+    // php scans a namespaced name as one token, so the label after a `\`
+    // must follow it directly; a lone T_NS_SEPARATOR only opens a group use
+    // (`use A\{B, C}`)
+    fn separatorJoinsName(self: *const Lexer) bool {
+        var i = self.pos;
+        if (i < self.source.len) {
+            const c = self.source[i];
+            if (std.ascii.isAlphabetic(c) or c == '_' or c >= 0x80) return true;
+        }
+        while (i < self.source.len and std.ascii.isWhitespace(self.source[i])) i += 1;
+        return i < self.source.len and self.source[i] == '{';
+    }
+
     fn makeToken(self: *const Lexer, tag: Tag, start: usize) Token {
         return .{ .tag = tag, .start = @intCast(start), .end = @intCast(self.pos) };
     }
@@ -813,13 +826,19 @@ test "bare dollar" {
 }
 
 test "all single-char operators" {
-    try expectTokens("<?php + - * / % = ! < > & | ^ ~ @ . ? ( ) { } [ ] ; , : \\", &.{
+    try expectTokens("<?php + - * / % = ! < > & | ^ ~ @ . ? ( ) { } [ ] ; , : \\x", &.{
         .open_tag, .plus,      .minus,     .star,      .slash,
         .percent,  .equal,     .bang,      .lt,        .gt,
         .amp,      .pipe,      .caret,     .tilde,     .at,
         .dot,      .question,  .l_paren,   .r_paren,   .l_brace,
         .r_brace,  .l_bracket, .r_bracket, .semicolon, .comma,
-        .colon,    .backslash,
+        .colon,    .backslash, .identifier,
+    });
+}
+
+test "a namespace separator joins only a name right after it" {
+    try expectTokens("<?php A\\B A \\ B A\\ {", &.{
+        .open_tag, .identifier, .backslash, .identifier, .identifier, .invalid, .identifier, .identifier, .backslash, .l_brace,
     });
 }
 
