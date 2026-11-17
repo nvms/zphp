@@ -22737,6 +22737,10 @@ pub const VM = struct {
         if (arr_val == .array) {
             const arr_ptr = arr_val.array;
             const key: PhpArray.Key = if (key_opt) |k| k else .{ .int = if (arr_ptr.has_int_keys) arr_ptr.next_int_key else 0 };
+            // a reference the element was part of before goes on without it
+            // (a by-reference foreach's variable keeps its value), and stops
+            // being written back into the element
+            if (key_opt != null) if (arr_ptr.getPtr(key)) |ep| if (ep.ref) |old| if (old != cell) self.detachArrayEntryRef(arr_ptr, key);
             // the element becomes a mirror of the cell
             if (key_opt != null) try self.arraySetOwned(arr_ptr, key, cell.*) else try arr_ptr.append(self.allocator, cell.*);
             if (arr_ptr.getPtr(key)) |ep| self.setEntryRef(ep, cell);
