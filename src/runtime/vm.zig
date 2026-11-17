@@ -22105,6 +22105,10 @@ pub const VM = struct {
                     // property - deep-clone so array values are not shared
                     try def.static_props.put(self.allocator, sp.name, try self.copyDefault(sp.value));
                     try self.recordStaticDefault(def, sp.name, sp.value);
+                    // with the trait's declaration: its visibility and type
+                    const vis: ClassDef.Visibility = @enumFromInt(sp.flags & 3);
+                    if (vis != .public and !def.static_prop_visibility.contains(sp.name)) try def.static_prop_visibility.put(self.allocator, sp.name, vis);
+                    if (sp.type_str.len > 0 and !def.static_prop_types.contains(sp.name)) try def.static_prop_types.put(self.allocator, sp.name, sp.type_str);
                 }
             }
         }
@@ -29771,6 +29775,9 @@ pub const VM = struct {
     // a property's type in errors (zend_type_to_string): a named class's
     // self was resolved when it compiled, an anonymous class's was not
     pub fn propertyTypeText(self: *VM, type_str: []const u8, decl_class: []const u8) RuntimeError![]const u8 {
+        // a trait's self and parent are unknown until a class uses it: php
+        // keeps them as written
+        if (self.traits.contains(decl_class)) return type_str;
         return self.resolvedTypeText(type_str, if (class_names.isAnonymous(decl_class)) null else decl_class);
     }
 
