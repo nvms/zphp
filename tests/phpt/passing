@@ -486,6 +486,7 @@ Zend/tests/bug37811.phpt
 Zend/tests/bug38211.phpt
 Zend/tests/bug38220.phpt
 Zend/tests/bug38287.phpt
+Zend/tests/bug38469.phpt
 Zend/tests/bug38779.phpt
 Zend/tests/bug38779_1.phpt
 Zend/tests/bug38808.phpt
@@ -1936,6 +1937,7 @@ Zend/tests/gc/gc_028.phpt
 Zend/tests/gc/gc_029.phpt
 Zend/tests/gc/gc_030.phpt
 Zend/tests/gc/gc_031.phpt
+Zend/tests/gc/gc_032.phpt
 Zend/tests/gc/gc_033.phpt
 Zend/tests/gc/gc_034.phpt
 Zend/tests/gc/gc_035.phpt

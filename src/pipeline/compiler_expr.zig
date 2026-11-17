@@ -109,6 +109,15 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
                 else => {},
             }
         }
+        if (isAssignToSelf(self, node.data.lhs, node.data.rhs)) {
+            // the right side is copied before the containers are fetched
+            try self.compileNode(node.data.rhs);
+            try compileVivifyChain(self, target.data.lhs);
+            try self.emitOp(.bury);
+            try self.emitByte(1);
+            try self.emitOp(.array_push_assign);
+            return;
+        }
         try compileVivifyChain(self, target.data.lhs);
         try self.compileNode(node.data.rhs);
         try self.emitOp(.array_push_assign);
@@ -242,6 +251,22 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
             // route through array_set_chain so a string at the parent
             // position gets a char-write written back into the parent
             // instead of being clobbered with a new array
+            if (target_lhs.tag == .array_access and !rhs_is_ref and isAssignToSelf(self, node.data.lhs, node.data.rhs)) {
+                // zend_compile_expr_with_potential_assign_to_self: `$a[i][j]
+                // = $a` copies the right side before the write fetches, so
+                // the containers separate from the value
+                try self.compileNode(node.data.rhs);
+                try compileVivifyChain(self, target_lhs.data.lhs);
+                try self.compileNode(target_lhs.data.rhs);
+                try self.compileNode(target.data.rhs);
+                // [value, base, outer key, inner key] -> [base, outer key, inner key, value]
+                for (0..3) |_| {
+                    try self.emitOp(.bury);
+                    try self.emitByte(3);
+                }
+                try self.emitOp(.array_set_chain);
+                return;
+            }
             if (target_lhs.tag == .array_access) {
                 try compileVivifyChain(self, target_lhs.data.lhs); // push base
                 try self.compileNode(target_lhs.data.rhs); // push outer key
@@ -2656,6 +2681,17 @@ pub fn compileReferenceBinding(self: *Compiler, source: u32, dst: u16) Error!boo
         else => return false,
     }
     return true;
+}
+
+// zend_is_assign_to_self: the right side is the plain variable at the root
+// of the target's chain
+fn isAssignToSelf(self: *Compiler, target_idx: u32, rhs_idx: u32) bool {
+    const rhs = self.ast.nodes[rhs_idx];
+    if (rhs.tag != .variable) return false;
+    var node = self.ast.nodes[target_idx];
+    while (node.tag == .array_access or node.tag == .array_push_target or node.tag == .property_access) node = self.ast.nodes[node.data.lhs];
+    if (node.tag != .variable) return false;
+    return std.mem.eql(u8, self.ast.tokenSlice(node.main_token), self.ast.tokenSlice(rhs.main_token));
 }
 
 // what compileReferenceBinding can make a reference of
