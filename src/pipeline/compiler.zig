@@ -2617,7 +2617,9 @@ pub const Compiler = struct {
                 return self.failFmt(token, "Duplicate declaration of static variable {s}", .{name});
             return;
         };
-        const initial: Value = if (init_node != 0) self.evalConstExpr(init_node) else .null;
+        // `new` is no constant php evaluates while compiling: the variable
+        // is null until its declaration runs
+        const initial: Value = if (init_node != 0 and self.ast.nodes[init_node].tag != .new_expr) self.evalConstExpr(init_node) else .null;
         const index = self.static_vars.items.len;
         self.static_vars.append(self.allocator, .{ .name = name, .initial = initial }) catch return error.CompileError;
         if (index < self.static_var_tokens.len) self.static_var_tokens[index] = token;
