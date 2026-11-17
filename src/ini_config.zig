@@ -321,6 +321,12 @@ fn reportStartupDeprecations(vm: *VM) RuntimeError!void {
     if (get("report_memleaks")) |value| if (!iniBool(value)) {
         try vm.raiseErrorAt(8192, "PHP Startup: Directive 'report_memleaks' is deprecated", .{ .file = "Unknown", .line = 0 });
     };
+    // mbstring reapplies zend.script_encoding as it starts
+    if (@import("pipeline/multibyte.zig").invalid_script_encoding) |name| {
+        const msg = try std.fmt.allocPrint(vm.allocator, "PHP Startup: INI setting contains invalid encoding \"{s}\"", .{name});
+        defer vm.allocator.free(msg);
+        try vm.raiseErrorAt(2, msg, .{ .file = "Unknown", .line = 0 });
+    }
     // the session module's handlers, in the order it registers them, then
     // the url rewriter's in ext/standard
     const session = @import("stdlib/session.zig");

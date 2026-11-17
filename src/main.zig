@@ -3,6 +3,7 @@ const std = @import("std");
 const platform = @import("platform.zig");
 const parser = @import("pipeline/parser.zig");
 const compiler = @import("pipeline/compiler.zig");
+const multibyte = @import("pipeline/multibyte.zig");
 const runtime_value = @import("runtime/value.zig");
 const VM = @import("runtime/vm.zig").VM;
 const includes = @import("runtime/includes.zig");
@@ -142,6 +143,7 @@ fn loadStartupFlags(allocator: std.mem.Allocator, raw_args: []const []const u8) 
     for (defines.items) |d| ini_config.define(d);
     if (ini_config.get("short_open_tag")) |v| @import("pipeline/lexer.zig").short_open_tag = ini_config.iniBool(v);
     if (ini_config.get("zend.multibyte")) |v| @import("pipeline/compiler.zig").zend_multibyte = ini_config.iniBool(v);
+    multibyte.configure(ini_config.get);
     if (platform.getenv("ZPHP_EXTENSION_DIR")) |dir| extension.loadDirectory(dir);
     return args.toOwnedSlice(allocator);
 }
@@ -317,12 +319,22 @@ fn exitOnCompileFailure(allocator: std.mem.Allocator, class_name: []const u8, me
 }
 
 fn readSource(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
-    return std.Io.Dir.cwd().readFileAlloc(platform.io, path, allocator, .limited(max_source_size)) catch |err| {
+    const source = std.Io.Dir.cwd().readFileAlloc(platform.io, path, allocator, .limited(max_source_size)) catch |err| {
         try writeStderr("error: could not read file '");
         try writeStderr(path);
         try writeStderr("'\n");
         return err;
     };
+    return multibyteFilter(allocator, source);
+}
+
+// zend.multibyte: the script converted from its encoding as the lexer reads
+// it; takes the source it is given
+fn multibyteFilter(allocator: std.mem.Allocator, source: []const u8) ![]const u8 {
+    if (!compiler.zend_multibyte) return source;
+    const filtered = (try multibyte.filterScript(allocator, source)) orelse return source;
+    allocator.free(source);
+    return filtered;
 }
 
 fn resolvePath(allocator: std.mem.Allocator, path: []const u8) []const u8 {
@@ -368,6 +380,8 @@ fn compileCachePath(allocator: std.mem.Allocator, path: []const u8, stat: std.Io
     hasher.update(&.{@intFromBool(@import("pipeline/lexer.zig").short_open_tag)});
     // and declare(encoding) warns differently with zend.multibyte on
     hasher.update(&.{@intFromBool(@import("pipeline/compiler.zig").zend_multibyte)});
+    // and the encodings its script filter converts between
+    hasher.update(&.{ @intFromBool(multibyte.detect_unicode), @backingInt(multibyte.internal_encoding), if (multibyte.script_encoding) |e| @backingInt(e) + 1 else 0 });
     hasher.final(&digest);
     const hex = std.fmt.bytesToHex(digest, .lower);
     const cache_root = try compileCacheRoot(allocator);
@@ -531,6 +545,11 @@ fn loadFile(path: []const u8, allocator: std.mem.Allocator, vm: *@import("runtim
         }
         source_stat = stat;
     }
+    source = multibyteFilter(allocator, source) catch {
+        allocator.free(source);
+        allocator.free(abs_path);
+        return null;
+    };
 
     var ast = parser.parse(allocator, source) catch {
         allocator.free(source);
