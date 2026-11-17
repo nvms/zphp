@@ -9957,7 +9957,7 @@ pub const VM = struct {
                         }
                         {
                             const vr = self.findPropertyVisibility(obj.class_name, prop_name);
-                            if (vr.is_readonly and obj.get(prop_name) != .null and !self.inReinitWindow(obj)) {
+                            if (vr.is_readonly and obj.rawForScope(prop_name, vr.defining_class) != .undef and !obj.isUnset(prop_name) and !self.inReinitWindow(obj)) {
                                 const msg = try std.fmt.allocPrint(self.allocator, "Cannot unset readonly property {s}::${s}", .{ obj.class_name, prop_name });
                                 defer self.allocator.free(msg);
                                 if (try self.throwBuiltinException("Error", msg)) continue;
@@ -10025,7 +10025,7 @@ pub const VM = struct {
                             return error.RuntimeError;
                         }
                         const vr = self.findPropertyVisibility(obj.class_name, prop_name);
-                        if (vr.is_readonly and obj.get(prop_name) != .null and !self.inReinitWindow(obj)) {
+                        if (vr.is_readonly and obj.rawForScope(prop_name, vr.defining_class) != .undef and !obj.isUnset(prop_name) and !self.inReinitWindow(obj)) {
                             const msg = try std.fmt.allocPrint(self.allocator, "Cannot unset readonly property {s}::${s}", .{ obj.class_name, prop_name });
                             defer self.allocator.free(msg);
                             if (try self.throwBuiltinException("Error", msg)) continue;
@@ -26148,7 +26148,7 @@ pub const VM = struct {
         } else if (action == .unset and vr.is_readonly and self.reinit_windows.items.len > 0 and self.readonlyReinitable(obj, name)) {
             // __clone may unset a readonly property once
             self.consumeReinit(obj, name);
-        } else if (action == .unset and vr.is_readonly and obj.rawForScope(name, vr.defining_class) != .undef) {
+        } else if (action == .unset and vr.is_readonly and obj.rawForScope(name, vr.defining_class) != .undef and !obj.isUnset(name)) {
             msg = try std.fmt.allocPrint(self.allocator, "Cannot unset readonly property {s}::${s}", .{ vr.defining_class, name });
         } else if (action == .indirect and vr.is_readonly and self.propVisible(vr, name, vr.visibility)) {
             // zend_std_read_property for writing: a readonly property is never

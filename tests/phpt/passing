@@ -3823,6 +3823,7 @@ Zend/tests/readonly_props/readonly_without_type.phpt
 Zend/tests/readonly_props/readwrite_to_readonly.phpt
 Zend/tests/readonly_props/serialization.phpt
 Zend/tests/readonly_props/static.phpt
+Zend/tests/readonly_props/unset.phpt
 Zend/tests/readonly_props/variation.phpt
 Zend/tests/readonly_props/variation_nested.phpt
 Zend/tests/readonly_props/visibility_change.phpt
