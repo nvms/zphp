@@ -5112,11 +5112,14 @@ fn checkPropertyInstance(ctx: *NativeContext, this: *PhpObject, obj: *PhpObject)
 fn readPropertyAs(ctx: *NativeContext, obj_in: *PhpObject, prop_name: []const u8, scope: []const u8) RuntimeError!NativeResult {
     const vm = ctx.vm;
     const decl = vm.propertyDeclaration(obj_in.class_name, prop_name);
-    const slot_scope = privateScopeFor(vm, obj_in.class_name, prop_name, scope) orelse decl.defining_class;
+    const private_scope = privateScopeFor(vm, obj_in.class_name, prop_name, scope);
+    const slot_scope = private_scope orelse decl.defining_class;
     try vm.triggerLazyProperty(obj_in, prop_name, slot_scope);
     const obj = obj_in.storage();
-    if (vm.hasPropHook(obj.class_name, prop_name, .get) and !vm.inPropHook(obj, prop_name)) {
-        if (try vm.callPropHook(obj, prop_name, .get, .null)) |hv| return NativeResult.share(hv);
+    // the scope's own private property has its own hooks, or none
+    const hook_cls = private_scope orelse obj.class_name;
+    if (vm.hasPropHook(hook_cls, prop_name, .get) and !vm.inPropHook(obj, prop_name)) {
+        if (try vm.callPropHookIn(obj, hook_cls, prop_name, .get, .null)) |hv| return NativeResult.share(hv);
     }
     const val = obj.rawForScope(prop_name, slot_scope);
     const slot_present = obj.slots != null and obj.getSlotIndexForScope(prop_name, slot_scope) != null;
@@ -5183,9 +5186,13 @@ fn rpGetRawValue(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     const prop_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
     const ce = reflectedClass(this) orelse obj.class_name;
     if (!ctx.vm.isInstanceOf(obj.class_name, ce)) return throwReflection(ctx, "Given object is not an instance of the class this property was declared in");
-    if (staticDeclaringClass(this) != null) return throwReflection(ctx, "May not use getRawValue on static properties");
-    if (!ctx.vm.hasPropHook(obj.class_name, prop_name, .get)) return readPropertyAs(ctx, obj, prop_name, ce);
-    const decl = ctx.vm.propertyDeclaration(obj.class_name, prop_name);
+    if (effectiveProperty(ctx.vm, this, obj)) |e| if (e.is_static) return throwReflection(ctx, "May not use getRawValue on static properties");
+    // reflection_property_get_effective_prop: the scope's own private
+    // property, else the object class's declaration
+    const private_scope = privateScopeFor(ctx.vm, obj.class_name, prop_name, ce);
+    const effective = private_scope orelse obj.class_name;
+    if (!ctx.vm.hasPropHook(effective, prop_name, .get)) return readPropertyAs(ctx, obj, prop_name, ce);
+    const decl = ctx.vm.propertyDeclaration(effective, prop_name);
     if (propertyIsVirtual(ctx.vm, decl.defining_class, prop_name)) {
         const msg = try std.fmt.allocPrint(ctx.allocator, "Must not read from virtual property {s}::${s}", .{ decl.defining_class, prop_name });
         defer ctx.allocator.free(msg);
@@ -5206,7 +5213,7 @@ fn propertyIsVirtual(vm: *VM, class_name: []const u8, prop_name: []const u8) boo
 fn rpSkipLazy(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (args.len == 0 or args[0] != .object) return NativeResult.scalar(.null);
-    try checkLazyCompatible(ctx, this, "skipLazyInitialization");
+    try checkLazyCompatible(ctx, this, "skipLazyInitialization", args[0].object);
     const name = this.get("name");
     const dc = this.get("__declaring_class");
     if (name != .string) return NativeResult.scalar(.null);
@@ -5241,15 +5248,31 @@ fn rpIsLazy(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult 
     return NativeResult.scalar(.{ .bool = obj.isLazySlot(name.string.bytes(), if (dc == .string) dc.string.bytes() else null) });
 }
 // reflection_property_check_lazy_compatible
-fn checkLazyCompatible(ctx: *NativeContext, this: *PhpObject, method: []const u8) RuntimeError!void {
+// reflection_property_get_effective_prop: on an object of another class than
+// the reflected one, a property that isn't private to the reflected class is
+// the object class's declaration (null: a dynamic property)
+const EffectiveProperty = struct { declaring: []const u8, is_static: bool };
+
+fn effectiveProperty(vm: *VM, this: *PhpObject, object: ?*PhpObject) ?EffectiveProperty {
     const name = if (this.get("name") == .string) this.get("name").string.bytes() else "";
-    if (this.get("__dynamic") == .bool) {
+    if (object) |obj| if (reflectedClass(this)) |scope| if (!std.mem.eql(u8, scope, obj.class_name) and privateScopeFor(vm, obj.class_name, name, scope) == null) {
+        const found = findPropertyDef(vm, obj.class_name, name) orelse return null;
+        return .{ .declaring = found.declaring_class, .is_static = found.is_static };
+    };
+    if (this.get("__dynamic") == .bool) return null;
+    const dc = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else "";
+    return .{ .declaring = dc, .is_static = staticDeclaringClass(this) != null };
+}
+
+fn checkLazyCompatible(ctx: *NativeContext, this: *PhpObject, method: []const u8, object: ?*PhpObject) RuntimeError!void {
+    const name = if (this.get("name") == .string) this.get("name").string.bytes() else "";
+    const effective = effectiveProperty(ctx.vm, this, object) orelse {
         const msg = try std.fmt.allocPrint(ctx.allocator, "Can not use {s} on dynamic property {s}::${s}", .{ method, reflectedClass(this) orelse "", name });
         defer ctx.allocator.free(msg);
         return throwReflection(ctx, msg);
-    }
-    const dc = if (this.get("__declaring_class") == .string) this.get("__declaring_class").string.bytes() else "";
-    const kind: ?[]const u8 = if (staticDeclaringClass(this) != null) "static" else if (propertyIsVirtual(ctx.vm, dc, name)) "virtual" else null;
+    };
+    const dc = effective.declaring;
+    const kind: ?[]const u8 = if (effective.is_static) "static" else if (propertyIsVirtual(ctx.vm, dc, name)) "virtual" else null;
     if (kind) |k| {
         const msg = try std.fmt.allocPrint(ctx.allocator, "Can not use {s} on {s} property {s}::${s}", .{ method, k, dc, name });
         defer ctx.allocator.free(msg);
@@ -5268,8 +5291,9 @@ fn rpWrite(ctx: *NativeContext, args: []const Value, mode: WriteMode) RuntimeErr
         .raw => "ReflectionProperty::setRawValue",
         .raw_without_lazy => "ReflectionProperty::setRawValueWithoutLazyInitialization",
     };
-    if (mode == .raw_without_lazy) try checkLazyCompatible(ctx, this, "setRawValueWithoutLazyInitialization");
-    if (mode == .raw and staticDeclaringClass(this) != null) return throwReflection(ctx, "May not use setRawValue on static properties");
+    if (mode == .raw_without_lazy) try checkLazyCompatible(ctx, this, "setRawValueWithoutLazyInitialization", if (args.len > 0 and args[0] == .object) args[0].object else null);
+    if (mode == .raw) if (effectiveProperty(ctx.vm, this, if (args.len > 0 and args[0] == .object) args[0].object else null)) |e| if (e.is_static)
+        return throwReflection(ctx, "May not use setRawValue on static properties");
     if (mode == .value) if (staticDeclaringClass(this)) |declaring| {
         // php's setValue($value) and setValue($ignored, $value) forms
         const value = if (args.len == 1) args[0] else if (args.len >= 2) args[1] else {
@@ -5336,6 +5360,22 @@ fn rpWrite(ctx: *NativeContext, args: []const Value, mode: WriteMode) RuntimeErr
     }
     var value = args[1];
     if (try ctx.vm.checkPropertyType(&value, vr.type_str, vr.defining_class, prop_name)) return error.RuntimeError;
+    // write_property creating a dynamic property
+    if (!decl.declared and !target.properties.contains(prop_name)) switch (ctx.vm.dynamicPropertyRule(target)) {
+        .allowed => {},
+        .forbidden => {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Cannot create dynamic property {s}::${s}", .{ target.class_name, prop_name });
+            defer ctx.allocator.free(msg);
+            _ = try ctx.vm.throwBuiltinException("Error", msg);
+            return error.RuntimeError;
+        },
+        .deprecated => {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Creation of dynamic property {s}::${s} is deprecated", .{ target.class_name, prop_name });
+            defer ctx.allocator.free(msg);
+            try ctx.vm.raiseError(VM.E_DEPRECATED, msg);
+            if (ctx.vm.pending_exception != null) return error.RuntimeError;
+        },
+    };
     try target.setForScope(ctx.allocator, prop_name, value, slot_scope);
     if (skip) _ = try rpSkipLazy(ctx, args);
     return NativeResult.scalar(.null);
