@@ -26198,6 +26198,15 @@ pub const VM = struct {
         };
         const obj = obj_in.storage();
 
+        // reflection_write_property: a reflector's declared name and class
+        // are read-only
+        if ((std.mem.eql(u8, prop_name, "name") or std.mem.eql(u8, prop_name, "class")) and self.isReflectionObject(obj.class_name) and self.classDeclaresProperty(obj.class_name, prop_name)) {
+            const msg = std.fmt.allocPrint(self.allocator, "Cannot set read-only property {s}::${s}", .{ obj.class_name, prop_name }) catch return error.OutOfMemory;
+            defer self.allocator.free(msg);
+            if (try self.throwBuiltinException("ReflectionException", msg)) return .{ .step = .dispatched };
+            return error.RuntimeError;
+        }
+
         // the set-scope gate runs before hooks and __set, but only an
         // asymmetric or readonly declaration can ever deny a write
         const vr = self.findPropertyVisibility(obj.class_name, prop_name);
@@ -26234,6 +26243,19 @@ pub const VM = struct {
             // fall through to the regular slot/property write
         }
         return .{ .step = .proceed, .obj = obj, .vr = vr };
+    }
+
+    // whether a class is one of the reflection extension's, or extends one
+    fn isReflectionObject(self: *VM, class_name: []const u8) bool {
+        var current: ?[]const u8 = class_name;
+        var depth: usize = 0;
+        while (current) |cn| : (depth += 1) {
+            if (depth > 64) return false;
+            const cls = self.classes.getPtr(cn) orelse return false;
+            if (cls.is_internal) return std.mem.startsWith(u8, cls.name, "Reflection");
+            current = cls.parent;
+        }
+        return false;
     }
 
     const PropWriteOutcome = enum { written, magic, dispatched };

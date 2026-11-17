@@ -37,6 +37,57 @@ fn setLazyDefault(ctx: *NativeContext, obj: *PhpObject, func: *const ObjFunction
     try obj.set(ctx.allocator, "__default_index", .{ .int = @intCast(index) });
 }
 
+// the methods php's stub declares on ReflectionFunctionAbstract, with what
+// ReflectionMethod and ReflectionFunction each run for them
+const rfa_shared = .{
+    .{ "inNamespace", reflectionFalse, rfInNamespace },
+    .{ "isClosure", reflectionFalse, rfIsClosure },
+    .{ "isDeprecated", rmIsDeprecated, rfIsDeprecated },
+    .{ "isInternal", rmIsInternal, rfIsInternal },
+    .{ "isUserDefined", rmIsUserDefined, rfIsUserDefined },
+    .{ "isGenerator", rmIsGenerator, rfIsGenerator },
+    .{ "isVariadic", rmIsVariadic, rfIsVariadic },
+    .{ "isStatic", rmIsStatic, rfIsStatic },
+    .{ "getClosureThis", reflectionNullResult, rfGetClosureThis },
+    .{ "getClosureScopeClass", reflectionNullResult, rfGetClosureScopeClass },
+    .{ "getClosureCalledClass", reflectionNullResult, rfGetClosureCalledClass },
+    .{ "getClosureUsedVariables", reflectionEmptyArray, rfGetClosureUsedVariables },
+    .{ "getDocComment", rmGetDocComment, rfGetDocComment },
+    .{ "getEndLine", rmGetEndLine, rfGetEndLine },
+    .{ "getExtension", rfGetExtension, rfGetExtension },
+    .{ "getExtensionName", rfGetExtensionName, rfGetExtensionName },
+    .{ "getFileName", rmGetFileName, rfGetFileName },
+    .{ "getName", rmGetName, rfGetName },
+    .{ "getNamespaceName", reflectionEmptyString, rfGetNamespaceName },
+    .{ "getNumberOfParameters", rmGetNumberOfParameters, rfGetNumberOfParameters },
+    .{ "getNumberOfRequiredParameters", rmGetNumberOfRequiredParameters, rfGetNumberOfRequiredParameters },
+    .{ "getParameters", rmGetParameters, rfGetParameters },
+    .{ "getShortName", rmGetName, rfGetShortName },
+    .{ "getStartLine", rmGetStartLine, rfGetStartLine },
+    .{ "getStaticVariables", rmGetStaticVariables, rfGetStaticVariables },
+    .{ "returnsReference", rmReturnsReference, rfReturnsReference },
+    .{ "hasReturnType", rmHasReturnType, rfHasReturnType },
+    .{ "getReturnType", rmGetReturnType, rfGetReturnType },
+    .{ "hasTentativeReturnType", rmHasTentativeReturnType, reflectionFalse },
+    .{ "getTentativeReturnType", rmGetTentativeReturnType, reflectionNullResult },
+    .{ "getAttributes", rmGetAttributes, rfGetAttributes },
+};
+
+// a native declared on a parent reflection class that reads its object the
+// way the object's own class does
+fn bySubclass(comptime class: []const u8, comptime when_class: vm_mod.NativeFn, comptime otherwise: vm_mod.NativeFn) vm_mod.NativeFn {
+    return struct {
+        fn call(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+            const this = getThis(ctx) orelse return otherwise(ctx, args);
+            return if (ctx.vm.isInstanceOf(this.class_name, class)) when_class(ctx, args) else otherwise(ctx, args);
+        }
+    }.call;
+}
+
+fn reflectionNullResult(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.null);
+}
+
 pub fn register(vm: *VM, a: Allocator) !void {
     // Unit enum cases are request-lifetime objects, just like RoundingMode.
     var hook_type = ClassDef{ .name = "PropertyHookType", .is_enum = true, .is_final = true };
@@ -322,6 +373,12 @@ pub fn register(vm: *VM, a: Allocator) !void {
     // php declares the subclasses' name here, and its subclasses inherit it
     try rfa_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") }, .type_str = "string" });
     try rfa_def.interfaces.append(a, "Reflector");
+    // php declares these on ReflectionFunctionAbstract, so a method's
+    // declaring class is the parent; each runs the subclass's own reading
+    inline for (rfa_shared) |m| {
+        try rfa_def.methods.put(a, m[0], .{ .name = m[0], .arity = 0 });
+        try vm.native_fns.put(a, "ReflectionFunctionAbstract::" ++ m[0], bySubclass("ReflectionMethod", m[1], m[2]));
+    }
     try vm.classes.put(a, "ReflectionFunctionAbstract", rfa_def);
 
     var rm_def = ClassDef{ .name = "ReflectionMethod", .parent = "ReflectionFunctionAbstract" };
@@ -333,93 +390,41 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rm_def.constants.put(a, "IS_FINAL", .{ .int = 32 });
     try rm_def.properties.append(a, .{ .name = "class", .default = .{ .string = Value.String.borrowed("") }, .type_str = "string" });
     try rm_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
-    try rm_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
-    try rm_def.methods.put(a, "getParameters", .{ .name = "getParameters", .arity = 0 });
     try rm_def.methods.put(a, "isPublic", .{ .name = "isPublic", .arity = 0 });
     try rm_def.methods.put(a, "isProtected", .{ .name = "isProtected", .arity = 0 });
     try rm_def.methods.put(a, "isPrivate", .{ .name = "isPrivate", .arity = 0 });
-    try rm_def.methods.put(a, "isStatic", .{ .name = "isStatic", .arity = 0 });
     try rm_def.methods.put(a, "getDeclaringClass", .{ .name = "getDeclaringClass", .arity = 0 });
-    try rm_def.methods.put(a, "getReturnType", .{ .name = "getReturnType", .arity = 0 });
     try rm_def.methods.put(a, "isConstructor", .{ .name = "isConstructor", .arity = 0 });
     try rm_def.methods.put(a, "isDestructor", .{ .name = "isDestructor", .arity = 0 });
-    try rm_def.methods.put(a, "getDocComment", .{ .name = "getDocComment", .arity = 0 });
-    try rm_def.methods.put(a, "getNumberOfParameters", .{ .name = "getNumberOfParameters", .arity = 0 });
-    try rm_def.methods.put(a, "getNumberOfRequiredParameters", .{ .name = "getNumberOfRequiredParameters", .arity = 0 });
     try rm_def.methods.put(a, "setAccessible", .{ .name = "setAccessible", .arity = 1 });
     try rm_def.methods.put(a, "invoke", .{ .name = "invoke", .arity = 1 });
-    try rm_def.methods.put(a, "hasReturnType", .{ .name = "hasReturnType", .arity = 0 });
-    try rm_def.methods.put(a, "hasTentativeReturnType", .{ .name = "hasTentativeReturnType", .arity = 0 });
-    try rm_def.methods.put(a, "getTentativeReturnType", .{ .name = "getTentativeReturnType", .arity = 0 });
     try rm_def.methods.put(a, "invokeArgs", .{ .name = "invokeArgs", .arity = 2 });
     try rm_def.methods.put(a, "isAbstract", .{ .name = "isAbstract", .arity = 0 });
     try rm_def.methods.put(a, "isFinal", .{ .name = "isFinal", .arity = 0 });
-    try rm_def.methods.put(a, "isVariadic", .{ .name = "isVariadic", .arity = 0 });
-    try rm_def.methods.put(a, "isGenerator", .{ .name = "isGenerator", .arity = 0 });
-    try rm_def.methods.put(a, "returnsReference", .{ .name = "returnsReference", .arity = 0 });
     try rm_def.methods.put(a, "getModifiers", .{ .name = "getModifiers", .arity = 0 });
-    try rm_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
     try rm_def.methods.put(a, "getClosure", .{ .name = "getClosure", .arity = 1 });
-    try rm_def.methods.put(a, "getFileName", .{ .name = "getFileName", .arity = 0 });
-    try rm_def.methods.put(a, "getStartLine", .{ .name = "getStartLine", .arity = 0 });
-    try rm_def.methods.put(a, "getEndLine", .{ .name = "getEndLine", .arity = 0 });
-    try rm_def.methods.put(a, "getNamespaceName", .{ .name = "getNamespaceName", .arity = 0 });
-    try rm_def.methods.put(a, "getShortName", .{ .name = "getShortName", .arity = 0 });
-    try rm_def.methods.put(a, "inNamespace", .{ .name = "inNamespace", .arity = 0 });
-    try rm_def.methods.put(a, "isInternal", .{ .name = "isInternal", .arity = 0 });
-    try rm_def.methods.put(a, "isUserDefined", .{ .name = "isUserDefined", .arity = 0 });
-    try rm_def.methods.put(a, "isDeprecated", .{ .name = "isDeprecated", .arity = 0 });
-    try rm_def.methods.put(a, "getStaticVariables", .{ .name = "getStaticVariables", .arity = 0 });
-    try rm_def.methods.put(a, "getExtension", .{ .name = "getExtension", .arity = 0 });
     try rm_def.methods.put(a, "getPrototype", .{ .name = "getPrototype", .arity = 0 });
     try rm_def.methods.put(a, "hasPrototype", .{ .name = "hasPrototype", .arity = 0 });
-    try rm_def.methods.put(a, "getExtensionName", .{ .name = "getExtensionName", .arity = 0 });
     try rm_def.methods.put(a, "createFromMethodName", .{ .name = "createFromMethodName", .arity = 1, .is_static = true });
     try vm.classes.put(a, "ReflectionMethod", rm_def);
 
     try vm.native_fns.put(a, "ReflectionMethod::__construct", rmConstruct);
     try vm.native_fns.put(a, "ReflectionMethod::createFromMethodName", rmCreateFromMethodName);
-    try vm.native_fns.put(a, "ReflectionMethod::getName", rmGetName);
-    try vm.native_fns.put(a, "ReflectionMethod::getParameters", rmGetParameters);
     try vm.native_fns.put(a, "ReflectionMethod::isPublic", rmIsPublic);
     try vm.native_fns.put(a, "ReflectionMethod::isProtected", rmIsProtected);
     try vm.native_fns.put(a, "ReflectionMethod::isPrivate", rmIsPrivate);
-    try vm.native_fns.put(a, "ReflectionMethod::isStatic", rmIsStatic);
     try vm.native_fns.put(a, "ReflectionMethod::getDeclaringClass", rmGetDeclaringClass);
-    try vm.native_fns.put(a, "ReflectionMethod::getReturnType", rmGetReturnType);
     try vm.native_fns.put(a, "ReflectionMethod::isConstructor", rmIsConstructor);
     try vm.native_fns.put(a, "ReflectionMethod::isDestructor", rmIsDestructor);
-    try vm.native_fns.put(a, "ReflectionMethod::getDocComment", rmGetDocComment);
-    try vm.native_fns.put(a, "ReflectionMethod::getNumberOfParameters", rmGetNumberOfParameters);
-    try vm.native_fns.put(a, "ReflectionMethod::getNumberOfRequiredParameters", rmGetNumberOfRequiredParameters);
     try vm.native_fns.put(a, "ReflectionMethod::setAccessible", reflectionNoop);
     try vm.native_fns.put(a, "ReflectionMethod::invoke", rmInvoke);
-    try vm.native_fns.put(a, "ReflectionMethod::hasReturnType", rmHasReturnType);
-    try vm.native_fns.put(a, "ReflectionMethod::hasTentativeReturnType", rmHasTentativeReturnType);
-    try vm.native_fns.put(a, "ReflectionMethod::getTentativeReturnType", rmGetTentativeReturnType);
     try vm.native_fns.put(a, "ReflectionMethod::invokeArgs", rmInvokeArgs);
     try vm.native_fns.put(a, "ReflectionMethod::isAbstract", rmIsAbstract);
     try vm.native_fns.put(a, "ReflectionMethod::isFinal", rmIsFinal);
-    try vm.native_fns.put(a, "ReflectionMethod::isVariadic", rmIsVariadic);
-    try vm.native_fns.put(a, "ReflectionMethod::isGenerator", rmIsGenerator);
-    try vm.native_fns.put(a, "ReflectionMethod::returnsReference", rmReturnsReference);
     try vm.native_fns.put(a, "ReflectionMethod::getModifiers", rmGetModifiers);
-    try vm.native_fns.put(a, "ReflectionMethod::getAttributes", rmGetAttributes);
     try vm.native_fns.put(a, "ReflectionMethod::getClosure", rmGetClosure);
-    try vm.native_fns.put(a, "ReflectionMethod::getFileName", rmGetFileName);
-    try vm.native_fns.put(a, "ReflectionMethod::getStartLine", rmGetStartLine);
-    try vm.native_fns.put(a, "ReflectionMethod::getEndLine", rmGetEndLine);
-    try vm.native_fns.put(a, "ReflectionMethod::getNamespaceName", reflectionEmptyString);
-    try vm.native_fns.put(a, "ReflectionMethod::getShortName", rmGetName);
-    try vm.native_fns.put(a, "ReflectionMethod::inNamespace", reflectionFalse);
-    try vm.native_fns.put(a, "ReflectionMethod::isInternal", rmIsInternal);
-    try vm.native_fns.put(a, "ReflectionMethod::isUserDefined", rmIsUserDefined);
-    try vm.native_fns.put(a, "ReflectionMethod::isDeprecated", rmIsDeprecated);
-    try vm.native_fns.put(a, "ReflectionMethod::getStaticVariables", rmGetStaticVariables);
-    try vm.native_fns.put(a, "ReflectionMethod::getExtension", rfGetExtension);
     try vm.native_fns.put(a, "ReflectionMethod::getPrototype", rmGetPrototype);
     try vm.native_fns.put(a, "ReflectionMethod::hasPrototype", rmHasPrototype);
-    try vm.native_fns.put(a, "ReflectionMethod::getExtensionName", rfGetExtensionName);
 
     var rp_def = ClassDef{ .name = "ReflectionParameter" };
     try rp_def.interfaces.append(a, "Reflector");
@@ -474,35 +479,27 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rnt_def.properties.append(a, .{ .name = "__nullable", .default = .{ .bool = false } });
     try rnt_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
     try rnt_def.methods.put(a, "isBuiltin", .{ .name = "isBuiltin", .arity = 0 });
-    try rnt_def.methods.put(a, "allowsNull", .{ .name = "allowsNull", .arity = 0 });
-    try rnt_def.methods.put(a, "__toString", .{ .name = "__toString", .arity = 0 });
     try vm.classes.put(a, "ReflectionNamedType", rnt_def);
 
     try vm.native_fns.put(a, "ReflectionNamedType::getName", rntGetName);
     try vm.native_fns.put(a, "ReflectionNamedType::isBuiltin", rntIsBuiltin);
-    try vm.native_fns.put(a, "ReflectionNamedType::allowsNull", rntAllowsNull);
-    try vm.native_fns.put(a, "ReflectionNamedType::__toString", rntToString);
 
     var rut_def = ClassDef{ .name = "ReflectionUnionType", .parent = "ReflectionType" };
     try rut_def.properties.append(a, .{ .name = "__type_str", .default = .{ .string = Value.String.borrowed("") } });
     try rut_def.properties.append(a, .{ .name = "__nullable", .default = .{ .bool = false } });
     try rut_def.methods.put(a, "getTypes", .{ .name = "getTypes", .arity = 0 });
-    try rut_def.methods.put(a, "allowsNull", .{ .name = "allowsNull", .arity = 0 });
-    try rut_def.methods.put(a, "__toString", .{ .name = "__toString", .arity = 0 });
     try vm.classes.put(a, "ReflectionUnionType", rut_def);
     try vm.native_fns.put(a, "ReflectionUnionType::getTypes", rutGetTypes);
-    try vm.native_fns.put(a, "ReflectionUnionType::allowsNull", rutAllowsNull);
-    try vm.native_fns.put(a, "ReflectionUnionType::__toString", rutToString);
 
     var rit_def = ClassDef{ .name = "ReflectionIntersectionType", .parent = "ReflectionType" };
     try rit_def.properties.append(a, .{ .name = "__type_str", .default = .{ .string = Value.String.borrowed("") } });
     try rit_def.methods.put(a, "getTypes", .{ .name = "getTypes", .arity = 0 });
-    try rit_def.methods.put(a, "allowsNull", .{ .name = "allowsNull", .arity = 0 });
-    try rit_def.methods.put(a, "__toString", .{ .name = "__toString", .arity = 0 });
     try vm.classes.put(a, "ReflectionIntersectionType", rit_def);
     try vm.native_fns.put(a, "ReflectionIntersectionType::getTypes", ritGetTypes);
-    try vm.native_fns.put(a, "ReflectionIntersectionType::allowsNull", ritAllowsNull);
-    try vm.native_fns.put(a, "ReflectionIntersectionType::__toString", ritToString);
+
+    // php declares allowsNull and __toString on ReflectionType
+    try vm.native_fns.put(a, "ReflectionType::allowsNull", bySubclass("ReflectionNamedType", rntAllowsNull, bySubclass("ReflectionUnionType", rutAllowsNull, ritAllowsNull)));
+    try vm.native_fns.put(a, "ReflectionType::__toString", bySubclass("ReflectionNamedType", rntToString, bySubclass("ReflectionUnionType", rutToString, ritToString)));
 
     var re_def = ClassDef{ .name = "ReflectionEnum" };
     re_def.parent = "ReflectionClass";
@@ -546,74 +543,18 @@ pub fn register(vm: *VM, a: Allocator) !void {
     var rf_def = ClassDef{ .name = "ReflectionFunction", .parent = "ReflectionFunctionAbstract" };
     try rf_def.constants.put(a, "IS_DEPRECATED", .{ .int = 2048 });
     try rf_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
-    try rf_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
-    try rf_def.methods.put(a, "getParameters", .{ .name = "getParameters", .arity = 0 });
-    try rf_def.methods.put(a, "getReturnType", .{ .name = "getReturnType", .arity = 0 });
-    try rf_def.methods.put(a, "getNumberOfParameters", .{ .name = "getNumberOfParameters", .arity = 0 });
-    try rf_def.methods.put(a, "getNumberOfRequiredParameters", .{ .name = "getNumberOfRequiredParameters", .arity = 0 });
     try rf_def.methods.put(a, "isAnonymous", .{ .name = "isAnonymous", .arity = 0 });
-    try rf_def.methods.put(a, "isClosure", .{ .name = "isClosure", .arity = 0 });
-    try rf_def.methods.put(a, "isInternal", .{ .name = "isInternal", .arity = 0 });
-    try rf_def.methods.put(a, "isUserDefined", .{ .name = "isUserDefined", .arity = 0 });
-    try rf_def.methods.put(a, "isGenerator", .{ .name = "isGenerator", .arity = 0 });
-    try rf_def.methods.put(a, "isVariadic", .{ .name = "isVariadic", .arity = 0 });
-    try rf_def.methods.put(a, "returnsReference", .{ .name = "returnsReference", .arity = 0 });
-    try rf_def.methods.put(a, "getStaticVariables", .{ .name = "getStaticVariables", .arity = 0 });
-    try rf_def.methods.put(a, "getClosureScopeClass", .{ .name = "getClosureScopeClass", .arity = 0 });
     try rf_def.methods.put(a, "getClosure", .{ .name = "getClosure", .arity = 0 });
-    try rf_def.methods.put(a, "getClosureThis", .{ .name = "getClosureThis", .arity = 0 });
-    try rf_def.methods.put(a, "isStatic", .{ .name = "isStatic", .arity = 0 });
-    try rf_def.methods.put(a, "hasReturnType", .{ .name = "hasReturnType", .arity = 0 });
-    try rf_def.methods.put(a, "getAttributes", .{ .name = "getAttributes", .arity = 0 });
     try rf_def.methods.put(a, "invoke", .{ .name = "invoke", .arity = 0 });
     try rf_def.methods.put(a, "invokeArgs", .{ .name = "invokeArgs", .arity = 1 });
-    try rf_def.methods.put(a, "getFileName", .{ .name = "getFileName", .arity = 0 });
-    try rf_def.methods.put(a, "getStartLine", .{ .name = "getStartLine", .arity = 0 });
-    try rf_def.methods.put(a, "getEndLine", .{ .name = "getEndLine", .arity = 0 });
-    try rf_def.methods.put(a, "getDocComment", .{ .name = "getDocComment", .arity = 0 });
-    try rf_def.methods.put(a, "getNamespaceName", .{ .name = "getNamespaceName", .arity = 0 });
-    try rf_def.methods.put(a, "getShortName", .{ .name = "getShortName", .arity = 0 });
-    try rf_def.methods.put(a, "inNamespace", .{ .name = "inNamespace", .arity = 0 });
-    try rf_def.methods.put(a, "getExtension", .{ .name = "getExtension", .arity = 0 });
-    try rf_def.methods.put(a, "getExtensionName", .{ .name = "getExtensionName", .arity = 0 });
-    try rf_def.methods.put(a, "isDeprecated", .{ .name = "isDeprecated", .arity = 0 });
     try rf_def.methods.put(a, "isDisabled", .{ .name = "isDisabled", .arity = 0 });
     try vm.classes.put(a, "ReflectionFunction", rf_def);
 
     try vm.native_fns.put(a, "ReflectionFunction::__construct", rfConstruct);
-    try vm.native_fns.put(a, "ReflectionFunction::getName", rfGetName);
-    try vm.native_fns.put(a, "ReflectionFunction::getParameters", rfGetParameters);
-    try vm.native_fns.put(a, "ReflectionFunction::getReturnType", rfGetReturnType);
-    try vm.native_fns.put(a, "ReflectionFunction::getNumberOfParameters", rfGetNumberOfParameters);
-    try vm.native_fns.put(a, "ReflectionFunction::getNumberOfRequiredParameters", rfGetNumberOfRequiredParameters);
     try vm.native_fns.put(a, "ReflectionFunction::isAnonymous", rfIsAnonymous);
-    try vm.native_fns.put(a, "ReflectionFunction::isClosure", rfIsClosure);
-    try vm.native_fns.put(a, "ReflectionFunction::isInternal", rfIsInternal);
-    try vm.native_fns.put(a, "ReflectionFunction::isUserDefined", rfIsUserDefined);
-    try vm.native_fns.put(a, "ReflectionFunction::isGenerator", rfIsGenerator);
-    try vm.native_fns.put(a, "ReflectionFunction::isVariadic", rfIsVariadic);
-    try vm.native_fns.put(a, "ReflectionFunction::returnsReference", rfReturnsReference);
-    try vm.native_fns.put(a, "ReflectionFunction::getClosureScopeClass", rfGetClosureScopeClass);
     try vm.native_fns.put(a, "ReflectionFunction::getClosure", rfGetClosure);
-    try vm.native_fns.put(a, "ReflectionFunction::getClosureThis", rfGetClosureThis);
-    try vm.native_fns.put(a, "ReflectionFunction::isStatic", rfIsStatic);
-    try vm.native_fns.put(a, "ReflectionFunction::hasReturnType", rfHasReturnType);
-    try vm.native_fns.put(a, "ReflectionFunction::getAttributes", rfGetAttributes);
-    try vm.native_fns.put(a, "ReflectionFunction::getClosureUsedVariables", rfGetClosureUsedVariables);
-    try vm.native_fns.put(a, "ReflectionFunction::getStaticVariables", rfGetStaticVariables);
-    try vm.native_fns.put(a, "ReflectionFunction::getClosureCalledClass", rfGetClosureCalledClass);
     try vm.native_fns.put(a, "ReflectionFunction::invoke", rfInvoke);
     try vm.native_fns.put(a, "ReflectionFunction::invokeArgs", rfInvokeArgs);
-    try vm.native_fns.put(a, "ReflectionFunction::getFileName", rfGetFileName);
-    try vm.native_fns.put(a, "ReflectionFunction::getStartLine", rfGetStartLine);
-    try vm.native_fns.put(a, "ReflectionFunction::getEndLine", rfGetEndLine);
-    try vm.native_fns.put(a, "ReflectionFunction::getDocComment", rfGetDocComment);
-    try vm.native_fns.put(a, "ReflectionFunction::getNamespaceName", rfGetNamespaceName);
-    try vm.native_fns.put(a, "ReflectionFunction::getShortName", rfGetShortName);
-    try vm.native_fns.put(a, "ReflectionFunction::inNamespace", rfInNamespace);
-    try vm.native_fns.put(a, "ReflectionFunction::getExtension", rfGetExtension);
-    try vm.native_fns.put(a, "ReflectionFunction::getExtensionName", rfGetExtensionName);
-    try vm.native_fns.put(a, "ReflectionFunction::isDeprecated", rfIsDeprecated);
     try vm.native_fns.put(a, "ReflectionFunction::isDisabled", reflectionFalse);
 
     var rprop_def = ClassDef{ .name = "ReflectionProperty" };

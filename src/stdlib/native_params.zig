@@ -139,5 +139,26 @@ pub fn defaultExpression(func: []const u8, param: []const u8) ?[]const u8 {
 }
 
 pub fn get(name: []const u8) ?Signature {
-    return zphp_only.get(name) orelse generated.map.get(name) orelse php_stub.get(name);
+    return zphp_only.get(name) orelse generated.map.get(name) orelse php_stub.get(name) orelse inheritedSignature(name);
+}
+
+// the generated map lists a method under every class that has it; an
+// abstract parent's own declaration reads the same from a subclass
+fn inheritedSignature(name: []const u8) ?Signature {
+    const pairs = [_][2][]const u8{
+        .{ "ReflectionFunctionAbstract::", "ReflectionFunction::" },
+        .{ "ReflectionFunctionAbstract::", "ReflectionMethod::" },
+        .{ "ReflectionType::", "ReflectionNamedType::" },
+    };
+    for (pairs) |pair| {
+        if (!std.mem.startsWith(u8, name, pair[0])) continue;
+        var buf: [128]u8 = undefined;
+        const method = name[pair[0].len..];
+        if (pair[1].len + method.len > buf.len) return null;
+        @memcpy(buf[0..pair[1].len], pair[1]);
+        @memcpy(buf[pair[1].len..][0..method.len], method);
+        const child = buf[0 .. pair[1].len + method.len];
+        if (generated.map.get(child) orelse php_stub.get(child)) |sig| return sig;
+    }
+    return null;
 }
