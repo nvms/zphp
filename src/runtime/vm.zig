@@ -13805,8 +13805,8 @@ pub const VM = struct {
                     const obj_val = self.stack[self.sp - ac - 2];
                     if (method_name_val != .string) {
                         self.dropN(ac + 2);
-                        const msg = std.fmt.allocPrint(self.allocator, "Fatal error: Uncaught TypeError: Method name must be a string", .{}) catch null;
-                        self.error_msg = msg;
+                        // ZEND_INIT_METHOD_CALL
+                        if (try self.throwBuiltinException("Error", "Method name must be a string")) continue;
                         return error.RuntimeError;
                     }
                     const method_name = method_name_val.string.bytes();
@@ -13962,7 +13962,7 @@ pub const VM = struct {
                         return error.RuntimeError;
                     }
                     if (method_name_val != .string) {
-                        self.setErrorMsg("Fatal error: Uncaught TypeError: Method name must be a string", .{});
+                        if (try self.throwBuiltinException("Error", "Method name must be a string")) continue;
                         return error.RuntimeError;
                     }
                     if (obj_val != .object) {
