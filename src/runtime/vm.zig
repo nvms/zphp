@@ -29071,7 +29071,11 @@ pub const VM = struct {
         }
         const raw_param = if (index < func.params.len) func.params[index] else "";
         const param_name = if (raw_param.len > 0 and raw_param[0] == '$') raw_param[1..] else raw_param;
-        const msg = try std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given, called in {s} on line {d}", .{ try self.callableDisplayName(func.name, func), index + 1, param_name, try self.resolvedTypeText(type_str, self.functionScope(func.name)), valueTypeName(value), cs_file, cs_line });
+        // php formats the method's name as one "Class::method" string, which
+        // an anonymous class's name cuts short at its NUL
+        const shown_name = try self.callableDisplayName(func.name, func);
+        const fn_name = if (std.mem.indexOfScalar(u8, shown_name, 0)) |nul| shown_name[0..nul] else shown_name;
+        const msg = try std.fmt.allocPrint(self.allocator, "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given, called in {s} on line {d}", .{ fn_name, index + 1, param_name, try self.resolvedTypeText(type_str, self.functionScope(func.name)), valueTypeName(value), cs_file, cs_line });
         defer self.allocator.free(msg);
         const at: ?SourcePosition = if (func.file_path.len > 0) SourcePosition{ .file = func.file_path, .line = func.start_line } else null;
         const exc = try self.newBuiltinException("TypeError", msg, at);
@@ -29995,7 +29999,10 @@ pub const VM = struct {
             const cip: usize = if (caller.ip > 0) caller.ip - 1 else 0;
             if (self.sourceLocation(caller.chunk, cip)) |loc| cs_line = loc.line;
         }
-        const shown = try self.callableDisplayName(name, func);
+        // php formats the method's name as one "Class::method" string, which
+        // an anonymous class's name cuts short at its NUL
+        const full_shown = try self.callableDisplayName(name, func);
+        const shown = if (std.mem.indexOfScalar(u8, full_shown, 0)) |nul| full_shown[0..nul] else full_shown;
         const type_shown = try self.resolvedTypeText(failure.type_str, self.functionScope(name));
         const site = if (failure.internal_caller) "" else std.fmt.allocPrint(self.allocator, ", called in {s} on line {d}", .{ cs_file, cs_line }) catch return error.RuntimeError;
         defer if (!failure.internal_caller) self.allocator.free(site);
