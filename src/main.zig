@@ -222,10 +222,39 @@ fn isScriptPath(arg: []const u8) bool {
 }
 
 fn serveCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    try requireArg(args, 3, "usage: zphp serve <file> [--port 8080] [--workers N] [--watch] [--tls-cert FILE --tls-key FILE]\n");
-    var config = @import("serve.zig").ServeConfig{ .file = args[2] };
+    const serve = @import("serve.zig");
+    try requireArg(args, 3, "usage: zphp serve <file> [--port 8080] [--workers N] [--watch] [--tls-cert FILE --tls-key FILE]\n" ++
+        "                  [--admin-port N [--admin-host IP]] [--access-log] [--log-format text|json] [--log-file FILE] [--request-id]\n");
+    var config = serve.ServeConfig{ .file = args[2] };
+    var admin_port: ?u16 = null;
+    var admin_host: ?[]const u8 = null;
+    var log_format: ?serve.LogFormat = null;
     var i: usize = 3;
     while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--admin-port")) {
+            const port = std.fmt.parseInt(u16, try serveFlagValue(args, &i), 10) catch 0;
+            if (port == 0) serveConfigError("--admin-port needs a port between 1 and 65535");
+            admin_port = port;
+            continue;
+        } else if (std.mem.eql(u8, args[i], "--admin-host")) {
+            admin_host = try serveFlagValue(args, &i);
+            continue;
+        } else if (std.mem.eql(u8, args[i], "--log-format")) {
+            log_format = std.meta.stringToEnum(serve.LogFormat, try serveFlagValue(args, &i)) orelse
+                serveConfigError("--log-format must be text or json");
+            continue;
+        } else if (std.mem.eql(u8, args[i], "--log-file")) {
+            const path = try serveFlagValue(args, &i);
+            if (path.len == 0) serveConfigError("--log-file needs a path");
+            config.log_file = path;
+            continue;
+        } else if (std.mem.eql(u8, args[i], "--access-log")) {
+            config.access_log = true;
+            continue;
+        } else if (std.mem.eql(u8, args[i], "--request-id")) {
+            config.request_id = true;
+            continue;
+        }
         if (std.mem.eql(u8, args[i], "--port") and i + 1 < args.len) {
             config.port = std.fmt.parseInt(u16, args[i + 1], 10) catch 8080;
             i += 1;
@@ -245,7 +274,38 @@ fn serveCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
             config.watch = true;
         }
     }
-    try @import("serve.zig").serve(allocator, config);
+
+    if (admin_port) |port| {
+        if (port == config.port) serveConfigError("--admin-port must differ from --port");
+        config.admin_address = @import("net.zig").Address.parseIp(admin_host orelse "127.0.0.1", port) catch
+            serveConfigError("--admin-host must be an IPv4 or IPv6 address");
+    } else if (admin_host != null) {
+        serveConfigError("--admin-host requires --admin-port");
+    }
+    // access logs and log files are JSON Lines, which the text format is not
+    const wants_json = config.access_log or config.log_file != null;
+    if (log_format != null and log_format.? == .text and wants_json) serveConfigError("--access-log and --log-file write JSON lines; drop --log-format text");
+    config.log_format = log_format orelse if (wants_json) .json else .text;
+
+    try serve.serve(allocator, config);
+}
+
+fn serveFlagValue(args: []const []const u8, i: *usize) ![]const u8 {
+    if (i.* + 1 >= args.len) {
+        try writeStderr("error: ");
+        try writeStderr(args[i.*]);
+        try writeStderr(" needs a value\n");
+        std.process.exit(1);
+    }
+    i.* += 1;
+    return args[i.*];
+}
+
+fn serveConfigError(msg: []const u8) noreturn {
+    writeStderr("error: ") catch {};
+    writeStderr(msg) catch {};
+    writeStderr("\n") catch {};
+    std.process.exit(1);
 }
 
 fn requireArg(args: []const []const u8, min: usize, usage: []const u8) !void {
@@ -1067,6 +1127,7 @@ test {
     _ = @import("stdlib/date_iso_interval.zig");
     _ = @import("stdlib/phar_path.zig");
     _ = @import("serve.zig");
+    _ = @import("observe.zig");
     _ = @import("stdlib/pcre.zig");
     _ = @import("pipeline/parser_tests.zig");
     _ = @import("integration_tests.zig");

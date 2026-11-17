@@ -44,9 +44,10 @@ fn writeAllTo(writer: anytype, data: []const u8) !void {
     }
 }
 
-pub fn writeHandshakeResponse(writer: anytype, accept_key: []const u8) !void {
-    var hdr_buf: [256]u8 = undefined;
-    const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {s}\r\n\r\n", .{accept_key}) catch return error.IoError;
+// extra_headers is zero or more complete "Name: value\r\n" lines
+pub fn writeHandshakeResponse(writer: anytype, accept_key: []const u8, extra_headers: []const u8) !void {
+    var hdr_buf: [384]u8 = undefined;
+    const hdr = std.fmt.bufPrint(&hdr_buf, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {s}\r\n{s}\r\n", .{ accept_key, extra_headers }) catch return error.IoError;
     try writeAllTo(writer, hdr);
 }
 

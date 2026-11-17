@@ -201,21 +201,24 @@ pub const H2Session = struct {
         return null;
     }
 
-    pub fn submitResponse(self: *H2Session, stream_id: i32, status: u16, content_type: []const u8, body: []const u8) void {
+    // request_id, when not empty, is sent as x-request-id
+    pub fn submitResponse(self: *H2Session, stream_id: i32, status: u16, content_type: []const u8, body: []const u8, request_id: []const u8) void {
         // u16 max is 5 digits, valid http statuses are 3
         var status_buf: [5]u8 = undefined;
         const status_str = std.fmt.bufPrint(&status_buf, "{d}", .{status}) catch "500";
 
-        var nv = [_]c.nghttp2_nv{
+        var all_nv = [_]c.nghttp2_nv{
             makeNv(":status", status_str),
             makeNv("content-type", content_type),
+            makeNv("x-request-id", request_id),
         };
+        const nv = all_nv[0..if (request_id.len > 0) all_nv.len else all_nv.len - 1];
 
         if (body.len > 0) {
             // find the stream before allocating - if it's gone, body_source
             // would never get attached and onStreamClose would never free it
             const stream = self.findStream(stream_id) orelse {
-                _ = c.nghttp2_submit_response(self.session, stream_id, &nv, nv.len, null);
+                _ = c.nghttp2_submit_response(self.session, stream_id, nv.ptr, nv.len, null);
                 return;
             };
             const src = self.allocator.create(BodySource) catch return;
@@ -231,9 +234,9 @@ pub const H2Session = struct {
                 .source = .{ .ptr = @ptrCast(src) },
                 .read_callback = bodyReadCb,
             };
-            _ = c.nghttp2_submit_response(self.session, stream_id, &nv, nv.len, &prd);
+            _ = c.nghttp2_submit_response(self.session, stream_id, nv.ptr, nv.len, &prd);
         } else {
-            _ = c.nghttp2_submit_response(self.session, stream_id, &nv, nv.len, null);
+            _ = c.nghttp2_submit_response(self.session, stream_id, nv.ptr, nv.len, null);
         }
     }
 };

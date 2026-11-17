@@ -526,6 +526,25 @@ pub fn peakRss() i64 {
     }
 }
 
+// the process's current resident size, where the os reports it cheaply
+pub fn currentRss() ?u64 {
+    if (is_windows) {
+        var counters: ProcessMemoryCounters = undefined;
+        counters.cb = @sizeOf(ProcessMemoryCounters);
+        if (K32GetProcessMemoryInfo(win32.GetCurrentProcess(), &counters, counters.cb) == 0) return null;
+        return counters.working_set_size;
+    }
+    if (builtin.os.tag != .linux) return null;
+    const file = std.Io.Dir.cwd().openFile(io, "/proc/self/statm", .{}) catch return null;
+    defer file.close(io);
+    var buf: [128]u8 = undefined;
+    const n = read(file, &buf) catch return null;
+    var fields = std.mem.tokenizeScalar(u8, buf[0..n], ' ');
+    _ = fields.next() orelse return null;
+    const pages = std.fmt.parseInt(u64, fields.next() orelse return null, 10) catch return null;
+    return pages * std.heap.pageSize();
+}
+
 // windows' read-only attribute is the only "not writable" a plain file has
 pub fn isReadOnly(path: []const u8) bool {
     if (!is_windows) return false;

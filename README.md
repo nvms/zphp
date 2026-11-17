@@ -79,6 +79,8 @@ $rates = json_decode($response->await(), true);
 zphp serve public/index.php --workers 8 --tls-cert cert.pem --tls-key key.pem
 ```
 
+For production, `--admin-port 9090` adds `/health`, `/ready` and Prometheus `/metrics` on a separate loopback listener, and `--access-log` writes JSON Lines with request IDs. See [Observability](https://nvms.github.io/zphp/server/observability.html).
+
 ## Standalone executables
 
 `zphp build --compile app.php` turns an application into an executable that runs on machines without PHP installed. It packs every file under the project root, so the scripts the entry point requires and the assets it reads travel with it.

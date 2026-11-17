@@ -17,6 +17,10 @@ The entry point is compiled at startup. Each worker keeps a persistent VM, with 
 | `--tls-cert <file>` | None | TLS certificate |
 | `--tls-key <file>` | None | TLS private key |
 | `--watch` | Off | Restart workers when PHP file changes are detected under the document root |
+| `--admin-port <N>` | Off | Serve `/health`, `/ready` and `/metrics` on a separate loopback listener |
+| `--access-log` | Off | Write a JSON line per request |
+
+Logging, request IDs and metrics have more options; see [Observability](./observability.md).
 
 The server binds to all IPv4 interfaces. Use firewall rules or a reverse proxy to control access. Provide both TLS flags to enable HTTPS.
 
