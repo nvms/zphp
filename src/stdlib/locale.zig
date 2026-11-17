@@ -230,7 +230,8 @@ fn native_setlocale(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
             .array => null,
             .null, .undef => "",
             .string => |s| s.bytes(),
-            .int, .float, .bool => try strings.coerceToString(ctx, arg),
+            // strict_types takes no scalar for a string
+            .int, .float, .bool => if (ctx.vm.currentStrictTypes()) return wrongType(ctx, position, arg) else try strings.coerceToString(ctx, arg),
             .object => |o| if (ctx.vm.hasMethod(o.class_name, "__toString")) try ctx.vm.objectToString(o) else return wrongType(ctx, position, arg),
             else => return wrongType(ctx, position, arg),
         };
