@@ -99,6 +99,7 @@ const zphp_only = std.StaticStringMap(Signature).initComptime(.{
 // php methods the generator, which reads php's reflection of the methods
 // zphp registered when it last ran, has not seen yet
 const php_stub = std.StaticStringMap(Signature).initComptime(.{
+    .{ "ReflectionEnumUnitCase::getEnum", Signature{ .params = &[_]Param{}, .returns = "ReflectionEnum" } },
     .{ "ArrayObject::__debugInfo", Signature{ .params = &[_]Param{}, .tentative_returns = "array" } },
     .{ "ArrayIterator::__debugInfo", Signature{ .params = &[_]Param{}, .tentative_returns = "array" } },
     .{ "ReflectionAttribute::__toString", Signature{ .params = &[_]Param{}, .returns = "string" } },

@@ -523,11 +523,13 @@ pub fn register(vm: *VM, a: Allocator) !void {
     var reuc_def = ClassDef{ .name = "ReflectionEnumUnitCase", .parent = "ReflectionClassConstant" };
     try reuc_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
     try reuc_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
+    try reuc_def.methods.put(a, "getEnum", .{ .name = "getEnum", .arity = 0 });
     try reuc_def.methods.put(a, "getValue", .{ .name = "getValue", .arity = 0 });
     try vm.classes.put(a, "ReflectionEnumUnitCase", reuc_def);
     try vm.native_fns.put(a, "ReflectionEnumUnitCase::__construct", reucConstruct);
     try vm.native_fns.put(a, "ReflectionEnumUnitCase::getName", reucGetName);
     try vm.native_fns.put(a, "ReflectionEnumUnitCase::getValue", reucGetValue);
+    try vm.native_fns.put(a, "ReflectionEnumUnitCase::getEnum", reucGetEnum);
 
     var rebc_def = ClassDef{ .name = "ReflectionEnumBackedCase" };
     rebc_def.parent = "ReflectionEnumUnitCase";
@@ -6380,6 +6382,17 @@ fn raIsRepeated(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const repeated = this.get("__is_repeated");
     return if (repeated == .bool) NativeResult.share(repeated) else NativeResult.scalar(.{ .bool = false });
+}
+
+// the ReflectionEnum of the case's enum
+fn reucGetEnum(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const class_name = if (this.get("class") == .string) this.get("class").string.bytes() else return NativeResult.scalar(.null);
+    const obj = try ctx.createObject("ReflectionEnum");
+    try obj.set(ctx.allocator, "name", .{ .string = Value.String.borrowed(try ctx.vm.stableClassName(class_name)) });
+    try obj.set(ctx.allocator, "__is_interface", .{ .bool = false });
+    try obj.set(ctx.allocator, "__is_trait", .{ .bool = false });
+    return NativeResult.borrowed(.{ .object = obj });
 }
 
 fn reConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
