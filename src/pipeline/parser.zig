@@ -153,6 +153,10 @@ const Parser = struct {
     stmt_depth: u32 = 0,
     // a __halt_compiler() inside a block ended the tokens
     halted_inside: bool = false,
+    // property hook bodies being parsed, and the node ranges of functions
+    // and classes nested in them (see noteNestedScope)
+    hook_scan_depth: u32 = 0,
+    nested_scopes: std.ArrayListUnmanaged([2]u32) = .empty,
 
     // root
 
@@ -1553,7 +1557,7 @@ const Parser = struct {
             (if (is_final) @as(u32, 1) << 7 else 0);
     }
 
-    fn parseAnonymousClass(self: *Parser, new_tok: u32) Error!u32 {
+    fn parseAnonymousClassBody(self: *Parser, new_tok: u32) Error!u32 {
         _ = self.advance(); // class
 
         var ctor_args = std.ArrayListUnmanaged(u32).empty;
@@ -2486,6 +2490,13 @@ const Parser = struct {
         var written = std.ArrayListUnmanaged(u32).empty;
         defer written.deinit(self.allocator);
         const hook_nodes_start = self.nodes.items.len;
+        const scopes_start = self.nested_scopes.items.len;
+        self.hook_scan_depth += 1;
+        defer {
+            self.hook_scan_depth -= 1;
+            self.nested_scopes.shrinkRetainingCapacity(scopes_start);
+            if (self.hook_scan_depth == 0) self.nested_scopes.clearAndFree(self.allocator);
+        }
         while (self.peek() != .r_brace and self.peek() != .eof) {
             try self.parseAttributes();
             var flags: u32 = 0;
@@ -2575,8 +2586,10 @@ const Parser = struct {
         // Backing is a syntactic access to this property's storage in either body.
         // A short setter implicitly writes that storage.
         var backed = (set_short & 1) != 0;
-        for (self.nodes.items[hook_nodes_start..]) |n| {
-            if (n.tag != .property_access) continue;
+        const nested = self.nested_scopes.items[scopes_start..];
+        nodes: for (self.nodes.items[hook_nodes_start..], hook_nodes_start..) |n, idx| {
+            if (n.tag != .property_access and n.tag != .nullsafe_property_access) continue;
+            for (nested) |r| if (idx >= r[0] and idx < r[1]) continue :nodes;
             const receiver = self.nodes.items[n.data.lhs];
             if (receiver.tag != .variable or !std.mem.eql(u8, self.tokens[receiver.main_token].lexeme(self.source), "$this")) continue;
             const prop_node = self.nodes.items[n.data.rhs];
@@ -2590,7 +2603,35 @@ const Parser = struct {
         return self.addNode(.{ .tag = .class_property_hooks, .main_token = name_tok, .data = .{ .lhs = extra_idx } });
     }
 
+    // the nodes of a function or class nested in a hook body, which php's
+    // property usage search doesn't enter (zend_ast_is_special)
+    fn noteNestedScope(self: *Parser, start: usize) Error!void {
+        if (self.hook_scan_depth == 0) return;
+        try self.nested_scopes.append(self.allocator, .{ @intCast(start), @intCast(self.nodes.items.len) });
+    }
+
     fn parseClosureExpr(self: *Parser) Error!u32 {
+        const start = self.nodes.items.len;
+        const node = try self.parseClosureExprBody();
+        try self.noteNestedScope(start);
+        return node;
+    }
+
+    fn parseArrowFunc(self: *Parser, is_static: bool) Error!u32 {
+        const start = self.nodes.items.len;
+        const node = try self.parseArrowFuncBody(is_static);
+        try self.noteNestedScope(start);
+        return node;
+    }
+
+    fn parseAnonymousClass(self: *Parser, new_tok: u32) Error!u32 {
+        const start = self.nodes.items.len;
+        const node = try self.parseAnonymousClassBody(new_tok);
+        try self.noteNestedScope(start);
+        return node;
+    }
+
+    fn parseClosureExprBody(self: *Parser) Error!u32 {
         var is_static = false;
         if (self.peek() == .kw_static) {
             is_static = true;
@@ -2669,7 +2710,7 @@ const Parser = struct {
         return self.addNode(.{ .tag = .closure_expr, .main_token = fn_tok, .data = .{ .lhs = param_extra, .rhs = rhs_extra } });
     }
 
-    fn parseArrowFunc(self: *Parser, is_static: bool) Error!u32 {
+    fn parseArrowFuncBody(self: *Parser, is_static: bool) Error!u32 {
         const fn_tok = self.advance(); // fn
         const returns_ref = self.peek() == .amp;
         if (returns_ref) _ = self.advance();
