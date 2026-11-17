@@ -184,7 +184,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     var rconst_def = ClassDef{ .name = "ReflectionConstant" };
     try rconst_def.interfaces.append(a, "Reflector");
-    try rconst_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") }, .type_str = "string" });
+    try rconst_def.properties.append(a, .{ .name = "name", .default = .undef, .type_str = "string" });
     inline for (.{ .{ "__construct", 1 }, .{ "getName", 0 }, .{ "getValue", 0 }, .{ "getShortName", 0 }, .{ "getNamespaceName", 0 }, .{ "isDeprecated", 0 }, .{ "getAttributes", 2 }, .{ "getFileName", 0 }, .{ "__toString", 0 }, .{ "getExtension", 0 }, .{ "getExtensionName", 0 } }) |m| {
         try rconst_def.methods.put(a, m[0], .{ .name = m[0], .arity = m[1] });
     }
@@ -229,7 +229,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.constants.put(a, "IS_READONLY", .{ .int = 65536 });
     try rc_def.constants.put(a, "SKIP_DESTRUCTOR", .{ .int = 16 });
     try rc_def.interfaces.append(a, "Reflector");
-    try rc_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") }, .type_str = "string" });
+    try rc_def.properties.append(a, .{ .name = "name", .default = .undef, .type_str = "string" });
     try rc_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
     try rc_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
     try rc_def.methods.put(a, "getConstructor", .{ .name = "getConstructor", .arity = 0 });
@@ -371,7 +371,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     var rfa_def = ClassDef{ .name = "ReflectionFunctionAbstract", .is_abstract = true };
     // php declares the subclasses' name here, and its subclasses inherit it
-    try rfa_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") }, .type_str = "string" });
+    try rfa_def.properties.append(a, .{ .name = "name", .default = .undef, .type_str = "string" });
     try rfa_def.interfaces.append(a, "Reflector");
     // php declares these on ReflectionFunctionAbstract, so a method's
     // declaring class is the parent; each runs the subclass's own reading
@@ -388,7 +388,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rm_def.constants.put(a, "IS_PRIVATE", .{ .int = 4 });
     try rm_def.constants.put(a, "IS_ABSTRACT", .{ .int = 64 });
     try rm_def.constants.put(a, "IS_FINAL", .{ .int = 32 });
-    try rm_def.properties.append(a, .{ .name = "class", .default = .{ .string = Value.String.borrowed("") }, .type_str = "string" });
+    try rm_def.properties.append(a, .{ .name = "class", .default = .undef, .type_str = "string" });
     try rm_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
     try rm_def.methods.put(a, "isPublic", .{ .name = "isPublic", .arity = 0 });
     try rm_def.methods.put(a, "isProtected", .{ .name = "isProtected", .arity = 0 });
@@ -428,7 +428,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     var rp_def = ClassDef{ .name = "ReflectionParameter" };
     try rp_def.interfaces.append(a, "Reflector");
-    try rp_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") }, .type_str = "string" });
+    try rp_def.properties.append(a, .{ .name = "name", .default = .undef, .type_str = "string" });
     try rp_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
     try rp_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
     try rp_def.methods.put(a, "getType", .{ .name = "getType", .arity = 0 });
@@ -559,8 +559,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     var rprop_def = ClassDef{ .name = "ReflectionProperty" };
     try rprop_def.interfaces.append(a, "Reflector");
-    try rprop_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") }, .type_str = "string" });
-    try rprop_def.properties.append(a, .{ .name = "class", .default = .{ .string = Value.String.borrowed("") }, .type_str = "string" });
+    try rprop_def.properties.append(a, .{ .name = "name", .default = .undef, .type_str = "string" });
+    try rprop_def.properties.append(a, .{ .name = "class", .default = .undef, .type_str = "string" });
     try rprop_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
     try rprop_def.methods.put(a, "setAccessible", .{ .name = "setAccessible", .arity = 1 });
     try rprop_def.methods.put(a, "getValue", .{ .name = "getValue", .arity = 1 });
@@ -678,8 +678,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     inline for (.{ .{ "IS_PUBLIC", 1 }, .{ "IS_PROTECTED", 2 }, .{ "IS_PRIVATE", 4 }, .{ "IS_FINAL", 32 } }) |constant| {
         try rcc_def.constants.put(a, constant[0], .{ .int = constant[1] });
     }
-    try rcc_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") }, .type_str = "string" });
-    try rcc_def.properties.append(a, .{ .name = "class", .default = .{ .string = Value.String.borrowed("") }, .type_str = "string" });
+    try rcc_def.properties.append(a, .{ .name = "name", .default = .undef, .type_str = "string" });
+    try rcc_def.properties.append(a, .{ .name = "class", .default = .undef, .type_str = "string" });
     try rcc_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
     try rcc_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
     try rcc_def.methods.put(a, "getValue", .{ .name = "getValue", .arity = 0 });
@@ -735,7 +735,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     var rext_def = ClassDef{ .name = "ReflectionExtension" };
     try rext_def.interfaces.append(a, "Reflector");
-    try rext_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") }, .type_str = "string" });
+    try rext_def.properties.append(a, .{ .name = "name", .default = .undef, .type_str = "string" });
     for ([_][]const u8{
         "__construct",   "getName",     "getVersion",    "getFunctions",    "getConstants",
         "getINIEntries", "getClasses",  "getClassNames", "getDependencies", "info",
@@ -745,7 +745,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     var rzext_def = ClassDef{ .name = "ReflectionZendExtension" };
     try rzext_def.interfaces.append(a, "Reflector");
-    try rzext_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") }, .type_str = "string" });
+    try rzext_def.properties.append(a, .{ .name = "name", .default = .undef, .type_str = "string" });
     for ([_][]const u8{ "__construct", "__toString", "getName", "getVersion", "getAuthor", "getURL", "getCopyright" }) |method| {
         try rzext_def.methods.put(a, method, .{ .name = method, .arity = if (std.mem.eql(u8, method, "__construct")) 1 else 0 });
     }

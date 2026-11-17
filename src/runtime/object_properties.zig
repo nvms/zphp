@@ -304,6 +304,13 @@ pub fn appendOwn(vm: *VM, obj: *PhpObject, purpose: Purpose, listing: *Listing, 
             }
         }
         const declared = vm.propertyDeclaration(obj.class_name, name);
+        // a typed property an internal class declares without a default
+        // (a reflector's name before its constructor ran)
+        if (entry.value_ptr.* == .undef and declared.type_str.len > 0) {
+            if (purpose != .debug) continue;
+            try listing.items.append(allocator, .{ .key = .{ .name = name }, .value = .null, .visibility = declared.visibility, .declaring = declared.defining_class, .declared = true, .uninitialized = try vm.propertyTypeText(declared.type_str, declared.defining_class) });
+            continue;
+        }
         try listing.items.append(allocator, .{ .key = .{ .name = name }, .value = entry.value_ptr.*, .visibility = declared.visibility, .declaring = declared.defining_class });
     }
 }

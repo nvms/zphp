@@ -26287,6 +26287,37 @@ pub const VM = struct {
         return .{ .step = .proceed, .obj = obj, .vr = vr };
     }
 
+    // php's GET_REFLECTION_OBJECT: a reflector its constructor never set up
+    // (newInstanceWithoutConstructor, a subclass constructor that skips the
+    // parent's) refuses every method that reads what it reflects
+    fn checkReflectorInitialized(self: *VM, label: []const u8) RuntimeError!void {
+        const sep = std.mem.indexOf(u8, label, "::") orelse return;
+        const method = label[sep + 2 ..];
+        for ([_][]const u8{ "__construct", "isDisabled", "setAccessible", "__clone" }) |exempt| {
+            if (std.mem.eql(u8, method, exempt)) return;
+        }
+        if (self.frame_count == 0) return;
+        const this = self.currentFrame().vars.get("$this") orelse return;
+        if (this != .object) return;
+        const obj = this.object;
+        const uninitialized = if (self.classDeclaresProperty(obj.class_name, "name"))
+            obj.rawForScope("name", null) == .undef
+        else if (self.classDeclaresProperty(obj.class_name, "__type_name"))
+            obj.get("__type_name") == .string and obj.get("__type_name").string.len == 0
+        else if (self.classDeclaresProperty(obj.class_name, "__type_str"))
+            obj.get("__type_str") == .string and obj.get("__type_str").string.len == 0
+        else
+            false;
+        if (!uninitialized or !self.isReflectionObject(obj.class_name)) return;
+        // a constant's getName reads the typed property itself
+        if (std.mem.eql(u8, method, "getName") and self.isInstanceOf(obj.class_name, "ReflectionClassConstant")) {
+            try self.setPendingException("Error", "Typed property ReflectionClassConstant::$name must not be accessed before initialization");
+            return error.RuntimeError;
+        }
+        try self.setPendingException("Error", "Internal error: Failed to retrieve the reflection object");
+        return error.RuntimeError;
+    }
+
     // whether a class is one of the reflection extension's, or extends one
     fn isReflectionObject(self: *VM, class_name: []const u8) bool {
         var current: ?[]const u8 = class_name;
@@ -28757,6 +28788,7 @@ pub const VM = struct {
             try self.setPendingException("ArgumentCountError", native.arity.describe(&buf, label, input_args.len));
             return error.RuntimeError;
         }
+        if (call.instance and std.mem.startsWith(u8, label, "Reflection")) try self.checkReflectorInitialized(label);
         var args_buf: [16]Value = undefined;
         var separated_args: ?[]Value = null;
         defer if (separated_args) |copy| self.freeStackArgs(copy, &args_buf);
