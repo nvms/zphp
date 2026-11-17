@@ -6625,8 +6625,17 @@ pub const VM = struct {
                     }
                 },
                 .array_push_assign => {
+                    const container_fetched = self.ic.?.stack_fetch[self.sp - 2];
+                    defer self.value_returned = null;
                     const val = self.pop();
-                    const arr_val = self.pop();
+                    var arr_val = self.pop();
+                    // a call's by-value result is separated from its owners
+                    // before the append (SEPARATE_ARRAY), as array_set does
+                    if (arr_val == .array and !container_fetched and self.value_returned == arr_val.array and arr_val.array.refcount > 0) {
+                        const copy = try self.shallowCloneCow(arr_val.array);
+                        self.queueArrayRelease(copy);
+                        arr_val = .{ .array = copy };
+                    }
                     if (arr_val == .array) {
                         if (!try arr_val.array.appendNew(self.allocator, try self.selfStoreCopy(arr_val.array, val))) {
                             if (try self.throwNextElementOccupied()) continue;
@@ -32902,6 +32911,8 @@ pub const VM = struct {
         if (value == .string and value.string.owner != null and value.string.owner.?.refcount > 0) {
             self.pushTransfer(value);
         } else self.push(value);
+        // a by-value result: a write into it separates it from its owners
+        if (value == .array) self.value_returned = value.array;
         if (self.hasPendingReleases()) self.drainPendingDestruct();
     }
 
