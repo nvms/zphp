@@ -256,7 +256,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ArrayIterator::__unset", aoMagicUnset);
 
     // WeakMap (simplified - uses spl_object_id as key, no weak reference semantics)
-    var wm_def = ClassDef{ .name = "WeakMap", .native_properties = weakMapProperties };
+    var wm_def = ClassDef{ .name = "WeakMap", .is_final = true, .native_properties = weakMapProperties };
     try wm_def.interfaces.append(a, "ArrayAccess");
     try wm_def.interfaces.append(a, "Countable");
     try wm_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });

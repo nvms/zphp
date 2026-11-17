@@ -16,7 +16,7 @@ fn cleanupParser(_: *PhpObject) bool {
 }
 
 pub fn register(vm: *VM, a: Allocator) !void {
-    try vm.classes.put(a, "XMLParser", ClassDef{ .name = "XMLParser", .native_cleanup = cleanupParser });
+    try vm.classes.put(a, "XMLParser", ClassDef{ .name = "XMLParser", .is_final = true, .native_cleanup = cleanupParser });
 
     try vm.native_fns.put(a, "xml_parser_create", create);
     try vm.native_fns.put(a, "xml_parser_create_ns", createNs);

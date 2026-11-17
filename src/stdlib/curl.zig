@@ -1222,15 +1222,15 @@ fn cleanupPoolable(obj: *PhpObject) bool {
 }
 
 pub fn register(vm: *VM, a: std.mem.Allocator) !void {
-    var curl_def = ClassDef{ .name = "CurlHandle", .native_cleanup = cleanupPoolable, .native_clone = cloneHandle };
+    var curl_def = ClassDef{ .name = "CurlHandle", .is_final = true, .native_cleanup = cleanupPoolable, .native_clone = cloneHandle };
     try vm.classes.put(a, "CurlHandle", curl_def);
     _ = &curl_def;
 
-    var share_def = ClassDef{ .name = "CurlShareHandle", .native_cleanup = cleanupShare };
+    var share_def = ClassDef{ .name = "CurlShareHandle", .is_final = true, .native_cleanup = cleanupShare };
     try vm.classes.put(a, "CurlShareHandle", share_def);
     _ = &share_def;
 
-    var mh_def = ClassDef{ .name = "CurlMultiHandle" };
+    var mh_def = ClassDef{ .name = "CurlMultiHandle", .is_final = true };
     try vm.classes.put(a, "CurlMultiHandle", mh_def);
     _ = &mh_def;
 

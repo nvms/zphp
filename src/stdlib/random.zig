@@ -30,7 +30,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try crypto_engine_iface.methods.append(a, "generate");
     try vm.interfaces.put(a, "Random\\CryptoSafeEngine", crypto_engine_iface);
 
-    var rndmizer = ClassDef{ .name = "Random\\Randomizer" };
+    var rndmizer = ClassDef{ .name = "Random\\Randomizer", .is_final = true };
     try rndmizer.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
     try rndmizer.methods.put(a, "getBytes", .{ .name = "getBytes", .arity = 1 });
     try rndmizer.methods.put(a, "getInt", .{ .name = "getInt", .arity = 2 });
@@ -68,7 +68,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.classes.put(a, "Random\\IntervalBoundary", boundary);
     try vm.registerEnumMethods("Random\\IntervalBoundary", 0);
 
-    var mt = ClassDef{ .name = "Random\\Engine\\Mt19937" };
+    var mt = ClassDef{ .name = "Random\\Engine\\Mt19937", .is_final = true };
     try mt.interfaces.append(a, "Random\\Engine");
     try mt.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
     try mt.methods.put(a, "generate", .{ .name = "generate", .arity = 0 });
@@ -76,7 +76,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "Random\\Engine\\Mt19937::__construct", mtConstruct);
     try vm.native_fns.put(a, "Random\\Engine\\Mt19937::generate", mtGenerate);
 
-    var pcg = ClassDef{ .name = "Random\\Engine\\PcgOneseq128XslRr64" };
+    var pcg = ClassDef{ .name = "Random\\Engine\\PcgOneseq128XslRr64", .is_final = true };
     try pcg.interfaces.append(a, "Random\\Engine");
     try pcg.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
     try pcg.methods.put(a, "generate", .{ .name = "generate", .arity = 0 });
@@ -84,7 +84,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "Random\\Engine\\PcgOneseq128XslRr64::__construct", pcgConstruct);
     try vm.native_fns.put(a, "Random\\Engine\\PcgOneseq128XslRr64::generate", pcgGenerate);
 
-    var xosh = ClassDef{ .name = "Random\\Engine\\Xoshiro256StarStar" };
+    var xosh = ClassDef{ .name = "Random\\Engine\\Xoshiro256StarStar", .is_final = true };
     try xosh.interfaces.append(a, "Random\\Engine");
     try xosh.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
     try xosh.methods.put(a, "generate", .{ .name = "generate", .arity = 0 });
@@ -92,7 +92,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "Random\\Engine\\Xoshiro256StarStar::__construct", xoshConstruct);
     try vm.native_fns.put(a, "Random\\Engine\\Xoshiro256StarStar::generate", xoshGenerate);
 
-    var secure = ClassDef{ .name = "Random\\Engine\\Secure" };
+    var secure = ClassDef{ .name = "Random\\Engine\\Secure", .is_final = true };
     try secure.interfaces.append(a, "Random\\CryptoSafeEngine");
     try secure.interfaces.append(a, "Random\\Engine");
     try secure.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });

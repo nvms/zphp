@@ -146,6 +146,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
         def.parent = entry[1];
         // the subclasses that redeclare a property, as php's do
         if (comptime std.mem.eql(u8, entry[0], "DOMException")) {
+            def.is_final = true;
             try def.properties.append(a, .{ .name = "code", .default = .{ .int = 0 }, .has_default = true });
         } else if (comptime std.mem.eql(u8, entry[0], "PDOException")) {
             try def.properties.append(a, .{ .name = "code", .default = .{ .int = 0 }, .has_default = true, .visibility = .protected });

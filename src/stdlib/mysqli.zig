@@ -736,15 +736,15 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try sc.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
     try vm.classes.put(a, "mysqli_stmt", sc);
 
-    var driver = ClassDef{ .name = "mysqli_driver" };
+    var driver = ClassDef{ .name = "mysqli_driver", .is_final = true };
     try driver.static_props.put(a, "__report_mode", .{ .int = 3 });
     try driver.methods.put(a, "__get", .{ .name = "__get", .arity = 1 });
     try driver.methods.put(a, "__set", .{ .name = "__set", .arity = 2 });
     try vm.classes.put(a, "mysqli_driver", driver);
     try vm.native_fns.put(a, "mysqli_driver::__get", driverGet);
     try vm.native_fns.put(a, "mysqli_driver::__set", driverSet);
-    try vm.classes.put(a, "mysqli_warning", ClassDef{ .name = "mysqli_warning" });
-    var exception = ClassDef{ .name = "mysqli_sql_exception", .parent = "RuntimeException" };
+    try vm.classes.put(a, "mysqli_warning", ClassDef{ .name = "mysqli_warning", .is_final = true });
+    var exception = ClassDef{ .name = "mysqli_sql_exception", .is_final = true, .parent = "RuntimeException" };
     try exception.properties.append(a, .{ .name = "sqlstate", .default = .{ .string = Value.String.borrowed("00000") }, .has_default = true, .type_str = "string", .visibility = .protected });
     try exception.methods.put(a, "getSqlState", .{ .name = "getSqlState", .arity = 0 });
     try vm.classes.put(a, "mysqli_sql_exception", exception);

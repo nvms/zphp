@@ -520,7 +520,7 @@ fn cloneGmp(_: *VM, src: *PhpObject, copy: *PhpObject) bool {
 }
 
 pub fn register(vm: *VM, a: Allocator) !void {
-    var def = ClassDef{ .name = "GMP", .native_cleanup = cleanupGmp, .native_clone = cloneGmp, .native_properties = gmpProperties, .native_binop = gmpBinop, .native_cast = gmpCast };
+    var def = ClassDef{ .name = "GMP", .is_final = true, .native_cleanup = cleanupGmp, .native_clone = cloneGmp, .native_properties = gmpProperties, .native_binop = gmpBinop, .native_cast = gmpCast };
     // GMP is mostly a value-holding class; user-facing methods are
     // PHP's procedural ones. providing __toString lets `(string)$gmp` work
     try def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });

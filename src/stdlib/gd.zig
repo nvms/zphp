@@ -630,7 +630,7 @@ fn cleanupImage(obj: *PhpObject) bool {
 }
 
 pub fn register(vm: *VM, a: Allocator) !void {
-    const def = ClassDef{ .name = "GdImage", .native_cleanup = cleanupImage };
+    const def = ClassDef{ .name = "GdImage", .is_final = true, .native_cleanup = cleanupImage };
     try vm.classes.put(a, "GdImage", def);
 
     // font size constants

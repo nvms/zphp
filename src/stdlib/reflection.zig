@@ -795,7 +795,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     // ReflectionGenerator wraps a Generator value and exposes the currently-
     // executing position (file / line / function). zphp's Generator carries
     // its compiled function + ip so we can derive everything from there
-    var rg_def = ClassDef{ .name = "ReflectionGenerator" };
+    var rg_def = ClassDef{ .name = "ReflectionGenerator", .is_final = true };
     try rg_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
     try rg_def.methods.put(a, "getExecutingLine", .{ .name = "getExecutingLine", .arity = 0 });
     try rg_def.methods.put(a, "getExecutingFile", .{ .name = "getExecutingFile", .arity = 0 });
@@ -814,7 +814,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionGenerator::getTrace", rgGetTrace);
     try vm.native_fns.put(a, "ReflectionGenerator::isClosed", rgIsClosed);
 
-    var rfib_def = ClassDef{ .name = "ReflectionFiber" };
+    var rfib_def = ClassDef{ .name = "ReflectionFiber", .is_final = true };
     try rfib_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
     try rfib_def.methods.put(a, "getExecutingLine", .{ .name = "getExecutingLine", .arity = 0 });
     try rfib_def.methods.put(a, "getExecutingFile", .{ .name = "getExecutingFile", .arity = 0 });
@@ -2541,6 +2541,14 @@ fn rcMarkLazyObjectAsInitialized(ctx: *NativeContext, args: []const Value) Runti
     return NativeResult.borrowed(.{ .object = args[0].object.storage() });
 }
 
+// the internal final classes php leaves to the standard object handlers
+fn plainFinalClass(name: []const u8) bool {
+    for ([_][]const u8{ "AllowDynamicProperties", "Attribute", "DelayedTargetValidation", "Deprecated", "Directory", "NoDiscard", "Override", "ReturnTypeWillChange", "SensitiveParameter", "SensitiveParameterValue", "StreamBucket", "Dom\\NamespaceInfo", "Uri\\WhatWg\\UrlValidationError" }) |plain| {
+        if (std.ascii.eqlIgnoreCase(name, plain)) return true;
+    }
+    return false;
+}
+
 fn rcNewInstanceWithoutConstructor(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
@@ -2552,6 +2560,10 @@ fn rcNewInstanceWithoutConstructor(ctx: *NativeContext, _: []const Value) Runtim
     // constructor lookup, which this skips)
     if (ctx.vm.classes.get(class_name)) |cd| if (cd.construct_refusal != null and !std.mem.eql(u8, class_name, "Directory"))
         return throwReflectionFmt(ctx, "Class {s} is an internal class marked as final that cannot be instantiated without invoking its constructor", .{class_name});
+    // php refuses every internal final class with a create_object handler:
+    // all but the plain ones below, whose objects are ordinary
+    if (ctx.vm.classes.get(class_name)) |cd| if (cd.is_internal and cd.is_final and !cd.is_enum and !plainFinalClass(cd.name))
+        return throwReflectionFmt(ctx, "Class {s} is an internal class marked as final that cannot be instantiated without invoking its constructor", .{cd.name});
     try checkInstantiable(ctx, class_name);
 
     const obj = try ctx.vm.allocObject(.{ .class_name = try ctx.vm.stableClassName(class_name) });
