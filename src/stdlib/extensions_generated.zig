@@ -1417,6 +1417,7 @@ pub const classes = Map.initComptime(.{
     .{ "php_user_filter", "standard" },
     .{ "StreamBucket", "standard" },
     .{ "RequestParseBodyException", "Core" },
+    .{ "__PHP_Incomplete_Class", "standard" },
 });
 
 pub const constants = Map.initComptime(.{
@@ -2667,8 +2668,11 @@ pub const class_order = [_][]const u8{
     "Fiber",
     "FiberError",
     "stdClass",
+    "__PHP_Incomplete_Class",
     "AssertionError",
     "RoundingMode",
+    "php_user_filter",
+    "StreamBucket",
     "Directory",
     "LogicException",
     "BadFunctionCallException",
