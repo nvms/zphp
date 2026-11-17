@@ -119,6 +119,10 @@ fn runTestFile(allocator: Allocator, path: []const u8) TestResult {
             vm.deinit();
             allocator.destroy(vm);
         }
+        @import("stdlib/testing.zig").register(vm) catch {
+            result.failed = 1;
+            return result;
+        };
 
         var text_buf: [1024]u8 = undefined;
         vm.interpret(&compile_result) catch {
@@ -139,6 +143,7 @@ fn runTestFile(allocator: Allocator, path: []const u8) TestResult {
             vm.deinit();
             allocator.destroy(vm);
         }
+        @import("stdlib/testing.zig").register(vm) catch continue;
 
         vm.registerResultFunctions(&compile_result) catch continue;
 

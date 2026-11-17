@@ -2,9 +2,17 @@ const NativeResult = @import("../runtime/native_result.zig").NativeResult;
 const std = @import("std");
 const Value = @import("../runtime/value.zig").Value;
 const NativeContext = @import("../runtime/vm.zig").NativeContext;
+const VM = @import("../runtime/vm.zig").VM;
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
-pub const entries = .{
+// the assertion helpers `zphp test` gives the files it runs. php has no
+// such functions, so a script run any other way doesn't see them (and may
+// declare its own)
+pub fn register(vm: *VM) !void {
+    inline for (entries) |entry| try vm.native_fns.put(vm.allocator, entry[0], entry[1]);
+}
+
+const entries = .{
     .{ "assert_eq", assertEq },
     .{ "assert_true", assertTrue },
     .{ "assert_false", assertFalse },

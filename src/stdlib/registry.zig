@@ -34,7 +34,6 @@ pub fn register(map: *@import("../runtime/vm.zig").NativeTable, allocator: std.m
         @import("datetime.zig").entries,
         @import("pcre.zig").entries,
         @import("output.zig").entries,
-        @import("testing.zig").entries,
         @import("session.zig").entries,
         @import("crypto.zig").entries,
         @import("hash.zig").entries,
