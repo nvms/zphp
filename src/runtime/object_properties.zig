@@ -191,6 +191,11 @@ pub fn list(vm: *VM, obj: *PhpObject, purpose: Purpose, allocator: std.mem.Alloc
     if (obj.lazy) |state| if (state.proxy) if (state.backing) |instance| {
         if (purpose == .debug) {
             try listing.items.append(allocator, .{ .key = .{ .name = "instance" }, .value = .{ .object = instance } });
+            // php builds a table holding the instance for the listing
+            // (zend_lazy_object_debug_info), so its count shows one more
+            const held = try vm.allocArray();
+            listing.holder = held;
+            try held.append(vm.allocator, .{ .object = instance });
             return listing;
         }
         return list(vm, instance, purpose, allocator);

@@ -336,6 +336,8 @@ fn varDumpMarked(ctx: *NativeContext, val: Value, depth: usize, marker: []const 
 
             var listing = try object_properties.list(ctx.vm, obj, .debug, a);
             defer listing.deinit(a);
+            const holder = listing.takeHolder();
+            defer object_properties.releaseHolder(ctx.vm, holder);
 
             try appendIndent(out, a, indent);
             try out.appendSlice(a, marker);
@@ -500,6 +502,8 @@ pub fn printRValueImpl(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), v
             // php reads the properties (__debugInfo) before it prints anything
             var listing_opt: ?object_properties.Listing = if (vm) |v| try object_properties.list(v, obj, .debug, a) else null;
             defer if (listing_opt) |*l| l.deinit(a);
+            const holder = if (listing_opt) |*l| l.takeHolder() else null;
+            defer if (vm) |v| object_properties.releaseHolder(v, holder);
 
             try out.appendSlice(a, class_names.display(obj.class_name));
             // enums print as "ClassName Enum:type" (or "ClassName Enum" for non-backed)
