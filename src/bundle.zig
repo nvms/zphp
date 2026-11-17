@@ -307,7 +307,14 @@ pub fn readFileAlloc(allocator: Allocator, spelled: []const u8, max_bytes: usize
         },
         .dir => return error.IsDir,
     };
-    return std.Io.Dir.cwd().readFileAlloc(platform.io, path, allocator, .limited(max_bytes));
+    const data = try std.Io.Dir.cwd().readFileAlloc(platform.io, path, allocator, .limited(max_bytes));
+    if (data.len > 0) return data;
+    // a file that reports no size can still have content (/proc, /sys):
+    // php reads it until eof
+    allocator.free(data);
+    const file = try std.Io.Dir.cwd().openFile(platform.io, path, .{});
+    defer file.close(platform.io);
+    return platform.readToEndAlloc(file, allocator, max_bytes);
 }
 
 pub const WriteMode = enum {
