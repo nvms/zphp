@@ -2160,7 +2160,8 @@ fn native_get_loaded_extensions(ctx: *NativeContext, _: []const Value) RuntimeEr
 
 fn native_get_extension_funcs(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const name = args[0].string.bytes();
+    // "zend" names the engine's own functions, extension Core
+    const name = if (std.ascii.eqlIgnoreCase(args[0].string.bytes(), "zend")) "Core" else args[0].string.bytes();
     // the functions zphp has of the extension, by php's map of which
     // extension declares each; false for an extension that isn't loaded or
     // declares none

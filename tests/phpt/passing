@@ -782,6 +782,7 @@ Zend/tests/bug81104.phpt
 Zend/tests/bug81159.phpt
 Zend/tests/bug81626.phpt
 Zend/tests/bugGH-8655.phpt
+Zend/tests/builtin_functions_basic.phpt
 Zend/tests/builtin_in_write_context_error1.phpt
 Zend/tests/builtin_in_write_context_error2.phpt
 Zend/tests/bw_or_assign_with_ref.phpt
