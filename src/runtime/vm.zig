@@ -14227,32 +14227,15 @@ pub const VM = struct {
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
                     }
-                    const full_name = self.resolveMethod(class_name, method_name) catch {
-                        // zend_std_get_static_method: __call on a fitting
-                        // $this, else __callStatic. the class operand under
-                        // the arguments goes first
-                        retainValue(class_val);
-                        defer self.releaseValue(class_val);
-                        self.stackRelease(class_val);
-                        var i: usize = 0;
-                        while (i < ac) : (i += 1) {
-                            self.stack[self.sp - ac - 1 + i] = self.stack[self.sp - ac + i];
-                            self.setArgSource(self.sp - ac - 1 + i, self.ic.?.arg_stack[self.sp - ac + i]);
-                        }
-                        self.clearArgStackFrom(self.sp - 1);
-                        self.sp -= 1;
-                        if (try self.staticCallFallback(class_name, method_name, arg_count, class_name)) continue;
-                        self.dropN(ac);
-                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ self.declaredClassName(class_name), method_name }) catch return error.OutOfMemory;
-                        defer self.allocator.free(msg);
-                        if (try self.throwBuiltinException("Error", msg)) continue;
-                        self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
-                        return error.RuntimeError;
-                    };
-                    // remove class name from stack (shift args down). the
+                    // the class operand under the arguments goes first; the
+                    // call then follows ZEND_INIT_STATIC_METHOD_CALL as a named
+                    // class's does (visibility, __call/__callStatic, an
+                    // instance method on a fitting $this or an Error). the
                     // operand may be a temporary string: the call keeps the
-                    // class's declared name, and the operand is released
+                    // class's declared name
                     const declared_class = self.declaredClassName(class_name);
+                    retainValue(class_val);
+                    defer self.releaseValue(class_val);
                     var i: usize = 0;
                     while (i < ac) : (i += 1) {
                         self.stack[self.sp - ac - 1 + i] = self.stack[self.sp - ac + i];
@@ -14261,7 +14244,7 @@ pub const VM = struct {
                     self.clearArgStackFrom(self.sp - 1);
                     self.sp -= 1;
                     self.stackRelease(class_val);
-                    try self.callStaticFunction(full_name, arg_count, self.scopedCallClass(full_name, declared_class));
+                    try self.callStaticMethod(declared_class, method_name, arg_count, declared_class, null);
                 },
 
                 .static_call_dyn_method => {
@@ -14378,24 +14361,14 @@ pub const VM = struct {
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
                     }
-                    const full_name = self.resolveMethod(class_name, method_name) catch {
-                        if (self.hasMethod(class_name, "__callStatic")) {
-                            var args_arr = try self.allocArray();
-                            for (0..ac) |i| try args_arr.append(self.allocator, self.stack[self.sp - ac + i]);
-                            self.dropN(ac + 2);
-                            const cs_name = try self.resolveMethod(class_name, "__callStatic");
-                            self.push(.{ .string = Value.String.borrowed(method_name) });
-                            self.push(.{ .array = args_arr });
-                            try self.callStaticTrampoline(cs_name, effective_called);
-                            continue;
-                        }
-                        const msg = std.fmt.allocPrint(self.allocator, "Call to undefined method {s}::{s}()", .{ self.declaredClassName(class_name), method_name }) catch return error.OutOfMemory;
-                        defer self.allocator.free(msg);
-                        if (try self.throwBuiltinException("Error", msg)) continue;
-                        self.setErrorMsg("Fatal error: Uncaught Error: {s}", .{msg});
-                        return error.RuntimeError;
-                    };
-                    // remove class name and method name from stack (shift args down by 2)
+                    // the call follows ZEND_INIT_STATIC_METHOD_CALL as a named
+                    // class's does (visibility, __call/__callStatic, an
+                    // instance method on a fitting $this or an Error); the
+                    // class and method operands under the arguments go first
+                    retainValue(class_val);
+                    defer self.releaseValue(class_val);
+                    retainValue(method_val);
+                    defer self.releaseValue(method_val);
                     var i: usize = 0;
                     while (i < ac) : (i += 1) {
                         self.stack[self.sp - ac - 2 + i] = self.stack[self.sp - ac + i];
@@ -14403,7 +14376,9 @@ pub const VM = struct {
                     }
                     self.clearArgStackFrom(self.sp - 2);
                     self.sp -= 2;
-                    try self.callStaticFunction(full_name, arg_count, effective_called);
+                    self.stackRelease(class_val);
+                    self.stackRelease(method_val);
+                    try self.callStaticMethod(class_name, method_name, arg_count, effective_called, null);
                 },
 
                 .static_call_dyn_both_spread => {
