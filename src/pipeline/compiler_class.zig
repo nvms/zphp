@@ -3367,8 +3367,12 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
     }
 
     try self.emitU16(static_prop_count);
+    // how many instance properties the class declares before each static
+    // one: php lists them all in declaration order
+    var instance_before: u8 = 0;
     for (members) |member_idx| {
         const member = self.ast.nodes[member_idx];
+        if (member.tag == .class_property or member.tag == .class_property_hooks) instance_before +|= 1;
         if (member.tag == .static_class_property) {
             var prop_name = self.ast.tokenSlice(member.main_token);
             if (prop_name.len > 0 and prop_name[0] == '$') prop_name = prop_name[1..];
@@ -3376,7 +3380,8 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
             try self.emitU16(pname_idx);
             try self.emitByte(if (member.data.lhs != 0) @as(u8, 1) else @as(u8, 0));
             try self.emitByte(@intCast(member.data.rhs & 0xff));
-            try self.emitByte(0); // 0 = static property
+            // bit 0 clear: a static property; the rest, instance_before
+            try self.emitByte(@min(instance_before, 127) << 1);
             try self.emitU16(try propertyTypeConst(self, member.data.rhs));
             try self.emitU16(try docCommentConst(self, member.main_token));
         } else if (member.tag == .const_decl) {

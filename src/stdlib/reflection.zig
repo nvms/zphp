@@ -2356,7 +2356,25 @@ fn rcGetProperties(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     for (chain.items) |name| {
         const is_own = std.mem.eql(u8, name, class_name);
         const cls = ctx.vm.classes.get(name) orelse break;
-        for (cls.properties.items) |prop| {
+        // the static properties go where they were declared among the
+        // instance ones
+        const statics = cls.static_props.keys();
+        for (0..cls.properties.items.len + 1) |pi| {
+            for (statics) |sp_name| {
+                const at = cls.static_prop_positions.get(sp_name) orelse 0;
+                if (if (pi == cls.properties.items.len) at < pi else at != pi) continue;
+                const vis: ClassDef.Visibility = cls.static_prop_visibility.get(sp_name) orelse .public;
+                if (!is_own and vis == .private) continue;
+                if (seen.contains(sp_name)) continue;
+                try seen.put(ctx.allocator, sp_name, {});
+                const def = staticPropertyDef(&cls, sp_name, cls.static_prop_defaults.get(sp_name) orelse cls.static_props.get(sp_name).?);
+                if (!matchPropFilter(filter, propertyFlags(def, true))) continue;
+                const obj = try buildPropertyObj(ctx, class_name, def, name);
+                try obj.set(ctx.allocator, "__is_static", .{ .bool = true });
+                try arr.append(ctx.allocator, .{ .object = obj });
+            }
+            if (pi == cls.properties.items.len) break;
+            const prop = cls.properties.items[pi];
             if (!is_own and prop.visibility == .private) continue;
             if (!seen.contains(prop.name)) {
                 try seen.put(ctx.allocator, prop.name, {});
@@ -2365,20 +2383,7 @@ fn rcGetProperties(ctx: *NativeContext, args: []const Value) RuntimeError!Native
                 try arr.append(ctx.allocator, .{ .object = obj });
             }
         }
-        var sp_iter = cls.static_props.iterator();
-        while (sp_iter.next()) |entry| {
-            const sp_name = entry.key_ptr.*;
-            const vis: ClassDef.Visibility = cls.static_prop_visibility.get(sp_name) orelse .public;
-            if (!is_own and vis == .private) continue;
-            if (!seen.contains(sp_name)) {
-                try seen.put(ctx.allocator, sp_name, {});
-                const def = staticPropertyDef(&cls, sp_name, cls.static_prop_defaults.get(sp_name) orelse entry.value_ptr.*);
-                if (!matchPropFilter(filter, propertyFlags(def, true))) continue;
-                const obj = try buildPropertyObj(ctx, class_name, def, name);
-                try obj.set(ctx.allocator, "__is_static", .{ .bool = true });
-                try arr.append(ctx.allocator, .{ .object = obj });
-            }
-        }
+
         if (ctx.vm.interfaces.contains(name)) {
             try appendInterfaceProperties(ctx, class_name, name, filter, arr, &seen);
         }
@@ -3156,7 +3161,9 @@ fn rcGetDefaultProperties(ctx: *NativeContext, _: []const Value) RuntimeError!Na
             if (!is_own and prop.visibility == .private) continue;
             if (seen.contains(prop.name)) continue;
             try seen.put(ctx.allocator, prop.name, {});
-            // a typed property without a default has none to list
+            // a typed property without a default has none to list, nor has a
+            // virtual one
+            if (prop.is_virtual) continue;
             if (!cls.is_internal and prop.type_str.len > 0 and (!prop.has_default or prop.is_promoted)) continue;
             try arr.set(ctx.allocator, .{ .string = Value.String.borrowed(prop.name) }, prop.default);
         }

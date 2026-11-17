@@ -669,6 +669,9 @@ pub const ClassDef = struct {
     constant_docs: std.StringHashMapUnmanaged([]const u8) = .{},
     static_prop_docs: std.StringHashMapUnmanaged([]const u8) = .{},
     static_prop_final: std.StringHashMapUnmanaged(void) = .{},
+    // how many of the class's instance properties precede a static one in
+    // its declaration (none when absent), for php's listing order
+    static_prop_positions: std.StringHashMapUnmanaged(u8) = .{},
     const_visibility: std.StringHashMapUnmanaged(Visibility) = .{},
     constant_types: std.StringHashMapUnmanaged([]const u8) = .{},
     static_prop_visibility: std.StringHashMapUnmanaged(Visibility) = .{},
@@ -795,6 +798,7 @@ pub const ClassDef = struct {
         self.constant_docs.deinit(allocator);
         self.static_prop_docs.deinit(allocator);
         self.static_prop_final.deinit(allocator);
+        self.static_prop_positions.deinit(allocator);
         if (self.slot_layout) |layout| {
             allocator.free(layout.names);
             allocator.free(layout.defaults);
@@ -20747,12 +20751,12 @@ pub const VM = struct {
                 const v = sdefaults[sj];
                 sj += 1;
                 break :blk v;
-            } else if (sprop_type[pi].len > 0 and sprop_is_const[pi] != 1) Value.undef else Value{ .null = {} };
+            } else if (sprop_type[pi].len > 0 and sprop_is_const[pi] & 1 == 0) Value.undef else Value{ .null = {} };
             // copyValue: an array/object default is owned by the ClassDef -
             // it must be refcounted (else an array default sits at refcount 0
             // and the first get_static_prop+push+pop releases it)
             const vis_byte = sprop_visibility[pi] & 0x03;
-            if (sprop_is_const[pi] == 1) {
+            if (sprop_is_const[pi] & 1 == 1) {
                 if (!def.constants.contains(sprop_names[pi])) try def.constant_order.append(self.allocator, sprop_names[pi]);
                 try def.constants.put(self.allocator, sprop_names[pi], try self.copyDefault(default_val));
                 if (sprop_type[pi].len > 0) try def.constant_types.put(self.allocator, sprop_names[pi], sprop_type[pi]);
@@ -20764,6 +20768,7 @@ pub const VM = struct {
             } else {
                 try def.static_props.put(self.allocator, sprop_names[pi], try self.copyDefault(default_val));
                 try self.recordStaticDefault(&def, sprop_names[pi], default_val);
+                if (sprop_is_const[pi] >> 1 != 0) try def.static_prop_positions.put(self.allocator, sprop_names[pi], sprop_is_const[pi] >> 1);
                 if (sprop_type[pi].len > 0) try def.static_prop_types.put(self.allocator, sprop_names[pi], sprop_type[pi]);
                 if (sprop_doc[pi].len > 0) try def.static_prop_docs.put(self.allocator, sprop_names[pi], sprop_doc[pi]);
                 if ((sprop_visibility[pi] & 0x80) != 0) try def.static_prop_final.put(self.allocator, sprop_names[pi], {});
