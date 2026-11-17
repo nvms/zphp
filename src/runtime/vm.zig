@@ -29266,8 +29266,10 @@ pub const VM = struct {
     }
 
     // zendi_try_get_long's diagnostics for the operands of a bitwise
-    // operator or %: a float, or a float string, past the int range warns,
-    // one with a fraction is deprecated
+    // operator or %: a float past the int range warns, one with a fraction
+    // is deprecated. a float string is capped to the int range
+    // (zend_dval_to_lval_cap), so past it, too, the conversion is only
+    // deprecated as losing precision
     fn warnIntOperands(self: *VM, a: Value, b: Value) RuntimeError!void {
         try self.warnIntOperand(a);
         try self.warnIntOperand(b);
@@ -29283,11 +29285,13 @@ pub const VM = struct {
             else => return,
         };
         if (!(f >= -9.2233720368547758e18 and f < 9.2233720368547758e18)) {
+            if (text != null) {
+                const capped: i64 = if (!std.math.isFinite(f)) 0 else if (f > 0) std.math.maxInt(i64) else std.math.minInt(i64);
+                if (@as(f64, @floatFromInt(capped)) != f) try self.warnLossyIntConversion(f, text);
+                return;
+            }
             var tmp: [64]u8 = undefined;
-            const m = if (text) |t|
-                try std.fmt.allocPrint(self.allocator, "The float-string \"{s}\" is not representable as an int, cast occurred", .{t})
-            else
-                try std.fmt.allocPrint(self.allocator, "The float {s} is not representable as an int, cast occurred", .{formatted_print.gcvt(f, -1, '.', 'E', &tmp)});
+            const m = try std.fmt.allocPrint(self.allocator, "The float {s} is not representable as an int, cast occurred", .{formatted_print.gcvt(f, -1, '.', 'E', &tmp)});
             defer self.allocator.free(m);
             return self.emitWarning(m);
         }
