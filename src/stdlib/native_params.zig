@@ -96,6 +96,34 @@ const zphp_only = std.StaticStringMap(Signature).initComptime(.{
     .{ "Zphp\\Buffer::writeFloat64BE", Signature{ .params = &[_]Param{ .{ .name = "offset", .type = "int" }, .{ .name = "value", .type = "int|float" } }, .returns = "void" } },
 });
 
+// php methods the generator, which reads php's reflection of the methods
+// zphp registered when it last ran, has not seen yet
+const php_stub = std.StaticStringMap(Signature).initComptime(.{
+    .{ "ArrayObject::__debugInfo", Signature{ .params = &[_]Param{}, .tentative_returns = "array" } },
+    .{ "ArrayIterator::__debugInfo", Signature{ .params = &[_]Param{}, .tentative_returns = "array" } },
+    .{ "ReflectionAttribute::__toString", Signature{ .params = &[_]Param{}, .returns = "string" } },
+    .{ "ReflectionClassConstant::__toString", Signature{ .params = &[_]Param{}, .returns = "string" } },
+    .{ "ReflectionProperty::__toString", Signature{ .params = &[_]Param{}, .returns = "string" } },
+    .{ "ReflectionParameter::__toString", Signature{ .params = &[_]Param{}, .returns = "string" } },
+    .{ "ReflectionMethod::__toString", Signature{ .params = &[_]Param{}, .returns = "string" } },
+    .{ "ReflectionFunction::__toString", Signature{ .params = &[_]Param{}, .returns = "string" } },
+    .{ "ReflectionClass::__toString", Signature{ .params = &[_]Param{}, .returns = "string" } },
+    .{ "ReflectionClass::__clone", Signature{ .params = &[_]Param{}, .returns = "void" } },
+    .{ "ReflectionFunctionAbstract::__clone", Signature{ .params = &[_]Param{}, .returns = "void" } },
+    .{ "ReflectionParameter::__clone", Signature{ .params = &[_]Param{}, .returns = "void" } },
+    .{ "ReflectionType::__clone", Signature{ .params = &[_]Param{}, .returns = "void" } },
+    .{ "ReflectionProperty::__clone", Signature{ .params = &[_]Param{}, .returns = "void" } },
+    .{ "ReflectionClassConstant::__clone", Signature{ .params = &[_]Param{}, .returns = "void" } },
+    .{ "ReflectionExtension::__clone", Signature{ .params = &[_]Param{}, .returns = "void" } },
+    .{ "ReflectionZendExtension::__clone", Signature{ .params = &[_]Param{}, .returns = "void" } },
+    .{ "ReflectionReference::__clone", Signature{ .params = &[_]Param{}, .returns = "void" } },
+    .{ "ReflectionAttribute::__clone", Signature{ .params = &[_]Param{}, .returns = "void" } },
+    .{ "Exception::__clone", Signature{ .params = &[_]Param{}, .returns = "void" } },
+    .{ "Error::__clone", Signature{ .params = &[_]Param{}, .returns = "void" } },
+    .{ "Exception::__wakeup", Signature{ .params = &[_]Param{}, .tentative_returns = "void" } },
+    .{ "Error::__wakeup", Signature{ .params = &[_]Param{}, .tentative_returns = "void" } },
+});
+
 pub fn get(name: []const u8) ?Signature {
-    return zphp_only.get(name) orelse generated.map.get(name);
+    return zphp_only.get(name) orelse generated.map.get(name) orelse php_stub.get(name);
 }

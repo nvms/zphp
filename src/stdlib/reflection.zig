@@ -133,7 +133,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     var rconst_def = ClassDef{ .name = "ReflectionConstant" };
     try rconst_def.interfaces.append(a, "Reflector");
-    try rconst_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") } });
+    try rconst_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") }, .type_str = "string" });
     inline for (.{ .{ "__construct", 1 }, .{ "getName", 0 }, .{ "getValue", 0 }, .{ "getShortName", 0 }, .{ "getNamespaceName", 0 }, .{ "isDeprecated", 0 }, .{ "getAttributes", 2 }, .{ "getFileName", 0 }, .{ "__toString", 0 }, .{ "getExtension", 0 }, .{ "getExtensionName", 0 } }) |m| {
         try rconst_def.methods.put(a, m[0], .{ .name = m[0], .arity = m[1] });
     }
@@ -178,7 +178,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rc_def.constants.put(a, "IS_READONLY", .{ .int = 65536 });
     try rc_def.constants.put(a, "SKIP_DESTRUCTOR", .{ .int = 16 });
     try rc_def.interfaces.append(a, "Reflector");
-    try rc_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") } });
+    try rc_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") }, .type_str = "string" });
     try rc_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
     try rc_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
     try rc_def.methods.put(a, "getConstructor", .{ .name = "getConstructor", .arity = 0 });
@@ -315,11 +315,12 @@ pub fn register(vm: *VM, a: Allocator) !void {
     // ReflectionObject extends ReflectionClass. behavior is identical to
     // ReflectionClass(get_class($obj)) when constructed with an instance,
     // so register an empty subclass and let method dispatch fall through
-    var ro_def = ClassDef{ .name = "ReflectionObject", .parent = "ReflectionClass" };
-    try ro_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") } });
+    const ro_def = ClassDef{ .name = "ReflectionObject", .parent = "ReflectionClass" };
     try vm.classes.put(a, "ReflectionObject", ro_def);
 
     var rfa_def = ClassDef{ .name = "ReflectionFunctionAbstract", .is_abstract = true };
+    // php declares the subclasses' name here, and its subclasses inherit it
+    try rfa_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") }, .type_str = "string" });
     try rfa_def.interfaces.append(a, "Reflector");
     try vm.classes.put(a, "ReflectionFunctionAbstract", rfa_def);
 
@@ -330,8 +331,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try rm_def.constants.put(a, "IS_PRIVATE", .{ .int = 4 });
     try rm_def.constants.put(a, "IS_ABSTRACT", .{ .int = 64 });
     try rm_def.constants.put(a, "IS_FINAL", .{ .int = 32 });
-    try rm_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") } });
-    try rm_def.properties.append(a, .{ .name = "class", .default = .{ .string = Value.String.borrowed("") } });
+    try rm_def.properties.append(a, .{ .name = "class", .default = .{ .string = Value.String.borrowed("") }, .type_str = "string" });
     try rm_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
     try rm_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
     try rm_def.methods.put(a, "getParameters", .{ .name = "getParameters", .arity = 0 });
@@ -423,7 +423,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     var rp_def = ClassDef{ .name = "ReflectionParameter" };
     try rp_def.interfaces.append(a, "Reflector");
-    try rp_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") } });
+    try rp_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") }, .type_str = "string" });
     try rp_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
     try rp_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
     try rp_def.methods.put(a, "getType", .{ .name = "getType", .arity = 0 });
@@ -506,7 +506,6 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     var re_def = ClassDef{ .name = "ReflectionEnum" };
     re_def.parent = "ReflectionClass";
-    try re_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") } });
     try re_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
     try re_def.methods.put(a, "isBacked", .{ .name = "isBacked", .arity = 0 });
     try re_def.methods.put(a, "getBackingType", .{ .name = "getBackingType", .arity = 0 });
@@ -522,8 +521,6 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionEnum::hasCase", reHasCase);
 
     var reuc_def = ClassDef{ .name = "ReflectionEnumUnitCase", .parent = "ReflectionClassConstant" };
-    try reuc_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") } });
-    try reuc_def.properties.append(a, .{ .name = "class", .default = .{ .string = Value.String.borrowed("") } });
     try reuc_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
     try reuc_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
     try reuc_def.methods.put(a, "getValue", .{ .name = "getValue", .arity = 0 });
@@ -534,8 +531,6 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     var rebc_def = ClassDef{ .name = "ReflectionEnumBackedCase" };
     rebc_def.parent = "ReflectionEnumUnitCase";
-    try rebc_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") } });
-    try rebc_def.properties.append(a, .{ .name = "class", .default = .{ .string = Value.String.borrowed("") } });
     try rebc_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
     try rebc_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
     try rebc_def.methods.put(a, "getValue", .{ .name = "getValue", .arity = 0 });
@@ -548,7 +543,6 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     var rf_def = ClassDef{ .name = "ReflectionFunction", .parent = "ReflectionFunctionAbstract" };
     try rf_def.constants.put(a, "IS_DEPRECATED", .{ .int = 2048 });
-    try rf_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") } });
     try rf_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 1 });
     try rf_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
     try rf_def.methods.put(a, "getParameters", .{ .name = "getParameters", .arity = 0 });
@@ -622,8 +616,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     var rprop_def = ClassDef{ .name = "ReflectionProperty" };
     try rprop_def.interfaces.append(a, "Reflector");
-    try rprop_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") } });
-    try rprop_def.properties.append(a, .{ .name = "class", .default = .{ .string = Value.String.borrowed("") } });
+    try rprop_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") }, .type_str = "string" });
+    try rprop_def.properties.append(a, .{ .name = "class", .default = .{ .string = Value.String.borrowed("") }, .type_str = "string" });
     try rprop_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
     try rprop_def.methods.put(a, "setAccessible", .{ .name = "setAccessible", .arity = 1 });
     try rprop_def.methods.put(a, "getValue", .{ .name = "getValue", .arity = 1 });
@@ -741,8 +735,8 @@ pub fn register(vm: *VM, a: Allocator) !void {
     inline for (.{ .{ "IS_PUBLIC", 1 }, .{ "IS_PROTECTED", 2 }, .{ "IS_PRIVATE", 4 }, .{ "IS_FINAL", 32 } }) |constant| {
         try rcc_def.constants.put(a, constant[0], .{ .int = constant[1] });
     }
-    try rcc_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") } });
-    try rcc_def.properties.append(a, .{ .name = "class", .default = .{ .string = Value.String.borrowed("") } });
+    try rcc_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") }, .type_str = "string" });
+    try rcc_def.properties.append(a, .{ .name = "class", .default = .{ .string = Value.String.borrowed("") }, .type_str = "string" });
     try rcc_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
     try rcc_def.methods.put(a, "getName", .{ .name = "getName", .arity = 0 });
     try rcc_def.methods.put(a, "getValue", .{ .name = "getValue", .arity = 0 });
@@ -798,7 +792,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     var rext_def = ClassDef{ .name = "ReflectionExtension" };
     try rext_def.interfaces.append(a, "Reflector");
-    try rext_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") } });
+    try rext_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") }, .type_str = "string" });
     for ([_][]const u8{
         "__construct",   "getName",     "getVersion",    "getFunctions",    "getConstants",
         "getINIEntries", "getClasses",  "getClassNames", "getDependencies", "info",
@@ -808,7 +802,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     var rzext_def = ClassDef{ .name = "ReflectionZendExtension" };
     try rzext_def.interfaces.append(a, "Reflector");
-    try rzext_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") } });
+    try rzext_def.properties.append(a, .{ .name = "name", .default = .{ .string = Value.String.borrowed("") }, .type_str = "string" });
     for ([_][]const u8{ "__construct", "__toString", "getName", "getVersion", "getAuthor", "getURL", "getCopyright" }) |method| {
         try rzext_def.methods.put(a, method, .{ .name = method, .arity = if (std.mem.eql(u8, method, "__construct")) 1 else 0 });
     }
@@ -898,6 +892,18 @@ pub fn register(vm: *VM, a: Allocator) !void {
     for ([_][]const u8{ "ReflectionClass", "ReflectionFunctionAbstract", "ReflectionParameter", "ReflectionType", "ReflectionProperty", "ReflectionClassConstant", "ReflectionExtension", "ReflectionZendExtension", "ReflectionReference", "ReflectionAttribute", "ReflectionGenerator", "ReflectionFiber", "ReflectionConstant" }) |name| {
         if (vm.classes.getPtr(name)) |cls| cls.uncloneable = true;
     }
+    // and declares a private __clone on these
+    inline for (.{ "ReflectionClass", "ReflectionFunctionAbstract", "ReflectionParameter", "ReflectionType", "ReflectionProperty", "ReflectionClassConstant", "ReflectionExtension", "ReflectionZendExtension", "ReflectionReference", "ReflectionAttribute" }) |name| {
+        if (vm.classes.getPtr(name)) |cls| {
+            try cls.addMethod(a, .{ .name = "__clone", .arity = 0, .visibility = .private });
+            try vm.native_fns.put(a, name ++ "::__clone", reflectorClone);
+        }
+    }
+}
+
+// private, and never reached: a reflector is uncloneable
+fn reflectorClone(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.null);
 }
 
 fn rextConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -1909,7 +1915,7 @@ fn rcGetMethods(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         if (cls.method_order.items.len > 0) {
             for (cls.method_order.items) |method_name| {
                 const info = cls.methods.get(method_name) orelse continue;
-                if (std.mem.indexOf(u8, method_name, "$hook_") != null) continue;
+                if (std.mem.indexOf(u8, method_name, "$hook_") != null or info.hidden) continue;
                 if (depth > 0 and info.visibility == .private) continue;
                 if (seen.contains(method_name)) continue;
                 try seen.put(ctx.allocator, method_name, {});
@@ -1923,7 +1929,7 @@ fn rcGetMethods(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
             while (it.next()) |entry| {
                 const method_name = entry.key_ptr.*;
                 const info = entry.value_ptr.*;
-                if (std.mem.indexOf(u8, method_name, "$hook_") != null) continue;
+                if (std.mem.indexOf(u8, method_name, "$hook_") != null or info.hidden) continue;
                 if (depth > 0 and info.visibility == .private) continue;
                 if (seen.contains(method_name)) continue;
                 try seen.put(ctx.allocator, method_name, {});
@@ -2012,7 +2018,7 @@ fn rcGetMethod(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     }
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
 
-    if (!ctx.vm.hasMethod(class_name, method_name)) {
+    if (!ctx.vm.hasMethod(class_name, method_name) or !ctx.vm.methodListed(class_name, method_name)) {
         const msg = std.fmt.allocPrint(ctx.allocator, "Method {s}::{s}() does not exist", .{ class_name, method_name }) catch return error.OutOfMemory;
         defer ctx.allocator.free(msg);
         return throwReflection(ctx, msg);
@@ -2041,6 +2047,7 @@ fn rcHasMethod(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
     const method_name = try zpp.str(ctx, "ReflectionClass::hasMethod", args, 0, "name");
     const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.{ .bool = false });
+    if (!ctx.vm.methodListed(class_name, method_name)) return NativeResult.scalar(.{ .bool = false });
     // PHP method names are case-insensitive
     if (ctx.vm.hasMethod(class_name, method_name)) return NativeResult.scalar(.{ .bool = true });
     if (std.mem.eql(u8, class_name, "Closure") and isInvokeName(method_name)) return NativeResult.scalar(.{ .bool = true });
@@ -2330,9 +2337,24 @@ fn rcGetProperties(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     var seen = std.StringHashMapUnmanaged(void){};
     defer seen.deinit(ctx.allocator);
 
-    var is_own = true;
-    var current: ?[]const u8 = class_name;
-    while (current) |name| {
+    // a user class lists its own properties before its parents'; php
+    // registers an internal class's inherited properties before the ones it
+    // declares, so its internal ancestors list root first
+    var chain: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer chain.deinit(ctx.allocator);
+    var walk: ?[]const u8 = class_name;
+    while (walk) |name| {
+        if (chain.items.len > 256) break;
+        const cls = ctx.vm.classes.get(name) orelse break;
+        try chain.append(ctx.allocator, name);
+        walk = cls.parent;
+    }
+    var user_part: usize = 0;
+    while (user_part < chain.items.len and !ctx.vm.classes.get(chain.items[user_part]).?.is_internal) user_part += 1;
+    std.mem.reverse([]const u8, chain.items[user_part..]);
+
+    for (chain.items) |name| {
+        const is_own = std.mem.eql(u8, name, class_name);
         const cls = ctx.vm.classes.get(name) orelse break;
         for (cls.properties.items) |prop| {
             if (!is_own and prop.visibility == .private) continue;
@@ -2360,8 +2382,6 @@ fn rcGetProperties(ctx: *NativeContext, args: []const Value) RuntimeError!Native
         if (ctx.vm.interfaces.contains(name)) {
             try appendInterfaceProperties(ctx, class_name, name, filter, arr, &seen);
         }
-        current = cls.parent;
-        is_own = false;
     }
     const reflected = this.get("__object");
     if (reflected == .object and (filter == null or filter.? & 1 != 0)) {

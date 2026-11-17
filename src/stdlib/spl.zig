@@ -134,6 +134,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try ao_def.methods.put(a, "exchangeArray", .{ .name = "exchangeArray", .arity = 1 });
     try ao_def.methods.put(a, "setIteratorClass", .{ .name = "setIteratorClass", .arity = 1 });
     try ao_def.methods.put(a, "getIteratorClass", .{ .name = "getIteratorClass", .arity = 0 });
+    try ao_def.methods.put(a, "__debugInfo", .{ .name = "__debugInfo", .arity = 0 });
     try ao_def.methods.put(a, "__get", .{ .name = "__get", .arity = 1 });
     try ao_def.methods.put(a, "__set", .{ .name = "__set", .arity = 2 });
     try ao_def.methods.put(a, "__isset", .{ .name = "__isset", .arity = 1 });
@@ -172,6 +173,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ArrayObject::exchangeArray", aoExchangeArray);
     try vm.native_fns.put(a, "ArrayObject::setIteratorClass", aoSetIteratorClass);
     try vm.native_fns.put(a, "ArrayObject::getIteratorClass", aoGetIteratorClass);
+    try vm.native_fns.put(a, "ArrayObject::__debugInfo", arrayDebugInfo);
     try vm.native_fns.put(a, "ArrayObject::__get", aoMagicGet);
     try vm.native_fns.put(a, "ArrayObject::__set", aoMagicSet);
     try vm.native_fns.put(a, "ArrayObject::__isset", aoMagicIsset);
@@ -210,6 +212,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try ai_def.methods.put(a, "natsort", .{ .name = "natsort", .arity = 0 });
     try ai_def.methods.put(a, "natcasesort", .{ .name = "natcasesort", .arity = 0 });
     try ai_def.methods.put(a, "seek", .{ .name = "seek", .arity = 1 });
+    try ai_def.methods.put(a, "__debugInfo", .{ .name = "__debugInfo", .arity = 0 });
     try ai_def.methods.put(a, "__get", .{ .name = "__get", .arity = 1 });
     try ai_def.methods.put(a, "__set", .{ .name = "__set", .arity = 2 });
     try ai_def.methods.put(a, "__isset", .{ .name = "__isset", .arity = 1 });
@@ -246,6 +249,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ArrayIterator::natsort", aoNatsort);
     try vm.native_fns.put(a, "ArrayIterator::natcasesort", aoNatcasesort);
     try vm.native_fns.put(a, "ArrayIterator::seek", aiSeek);
+    try vm.native_fns.put(a, "ArrayIterator::__debugInfo", arrayDebugInfo);
     try vm.native_fns.put(a, "ArrayIterator::__get", aoMagicGet);
     try vm.native_fns.put(a, "ArrayIterator::__set", aoMagicSet);
     try vm.native_fns.put(a, "ArrayIterator::__isset", aoMagicIsset);
@@ -407,6 +411,13 @@ fn weakMapGetIterator(ctx: *NativeContext, _: []const Value) RuntimeError!Native
     if (data_v == .array) try iter.set(ctx.allocator, "__info", data_v);
     try iter.set(ctx.allocator, "__cursor", .{ .int = 0 });
     return NativeResult.borrowed(.{ .object = iter });
+}
+
+// spl_array's __debugInfo: the table var_dump shows
+fn arrayDebugInfo(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
+    const table = (try arrayStorageProperties(ctx, obj, .debug)) orelse return NativeResult.scalar(.null);
+    return NativeResult.borrowed(.{ .array = table });
 }
 
 // ArrayObject and ArrayIterator (spl_array_get_properties_for and

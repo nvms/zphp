@@ -421,6 +421,8 @@ fn findMethod(vm: *VM, class: []const u8, method: []const u8) RuntimeError!?Meth
     const declaring = registered[0..sep];
     const name = registered[sep + 2 ..];
     const info: ?ClassDef.MethodInfo = if (vm.classes.get(declaring)) |cls| cls.methods.get(name) else null;
+    // a method zphp adds for an object handler is no callable php sees
+    if (info) |i| if (i.hidden) return null;
     return .{
         .class = declaring,
         .name = name,

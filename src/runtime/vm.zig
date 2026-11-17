@@ -691,6 +691,10 @@ pub const ClassDef = struct {
         // ZEND_ACC_CHANGED: an ancestor has a private (or changed) method of
         // this name, so a call from that ancestor's scope may run its own
         changed: bool = false,
+        // a method zphp gives an internal class to implement one of php's
+        // object handlers (ArrayObject's __get): callable, but not part of
+        // the class php declares, so listings and method_exists skip it
+        hidden: bool = false,
     };
 
     pub fn addMethod(self: *ClassDef, allocator: Allocator, info: MethodInfo) !void {
@@ -2784,6 +2788,54 @@ pub const VM = struct {
             def.method_order.deinit(allocator);
             def.method_order = ordered;
         }
+        // a method no stub of the class, its ancestors or its interfaces
+        // declares is zphp's own
+        it = vm.classes.iterator();
+        while (it.next()) |entry| {
+            const def = entry.value_ptr;
+            if (!def.is_internal or !stubListed(entry.key_ptr.*)) continue;
+            var mit = def.methods.iterator();
+            while (mit.next()) |m| {
+                if (std.mem.indexOf(u8, m.key_ptr.*, "$hook_") != null) continue;
+                // reflection lists a closure's __invoke, which php makes per object
+                if (std.mem.eql(u8, entry.key_ptr.*, "Closure") and std.ascii.eqlIgnoreCase(m.key_ptr.*, "__invoke")) continue;
+                if (!vm.stubDeclaresMethod(entry.key_ptr.*, m.key_ptr.*, 0)) m.value_ptr.hidden = true;
+            }
+        }
+    }
+
+    fn stubListed(class_name: []const u8) bool {
+        var lower_buf: [128]u8 = undefined;
+        if (class_name.len > lower_buf.len) return false;
+        return method_order.orders.get(std.ascii.lowerString(&lower_buf, class_name)) != null;
+    }
+
+    fn stubDeclaresMethod(vm: *VM, class_name: []const u8, method: []const u8, depth: usize) bool {
+        if (depth > 32) return false;
+        var lower_buf: [128]u8 = undefined;
+        if (class_name.len <= lower_buf.len) {
+            if (method_order.orders.get(std.ascii.lowerString(&lower_buf, class_name))) |order| {
+                for (order) |m| if (std.ascii.eqlIgnoreCase(m, method)) return true;
+            }
+        }
+        const def = vm.classes.getPtr(class_name) orelse return false;
+        if (def.parent) |p| if (vm.stubDeclaresMethod(p, method, depth + 1)) return true;
+        for (def.interfaces.items) |i| if (vm.stubDeclaresMethod(i, method, depth + 1)) return true;
+        return false;
+    }
+
+    // whether php's listings (get_class_methods, reflection, method_exists)
+    // see the method the class or its nearest ancestor declaring it has
+    pub fn methodListed(self: *VM, class_name: []const u8, method: []const u8) bool {
+        var current: ?[]const u8 = class_name;
+        var depth: usize = 0;
+        while (current) |cn| : (depth += 1) {
+            if (depth > 256) break;
+            const cls = self.classes.getPtr(cn) orelse break;
+            if (cls.methods.get(method)) |info| return !info.hidden;
+            current = cls.parent;
+        }
+        return true;
     }
 
     fn initConstants(c: *ConstantMap, a: Allocator) !void {

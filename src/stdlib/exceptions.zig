@@ -41,7 +41,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try appendThrowableProperties(a, &exc_def, trace_default);
     exc_def.slot_layout = try vm.buildSlotLayout(&exc_def);
     try exc_def.interfaces.append(a, "Throwable");
+    try exc_def.methods.put(a, "__clone", .{ .name = "__clone", .arity = 0, .visibility = .private });
     try exc_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 3 });
+    try exc_def.methods.put(a, "__wakeup", .{ .name = "__wakeup", .arity = 0 });
     try exc_def.methods.put(a, "getMessage", .{ .name = "getMessage", .arity = 0, .is_final = true });
     try exc_def.methods.put(a, "getCode", .{ .name = "getCode", .arity = 0, .is_final = true });
     try exc_def.methods.put(a, "getPrevious", .{ .name = "getPrevious", .arity = 0, .is_final = true });
@@ -53,7 +55,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try exc_def.interfaces.append(a, "Stringable");
     try vm.classes.put(a, "Exception", exc_def);
 
+    try vm.native_fns.put(a, "Exception::__clone", exceptionClone);
     try vm.native_fns.put(a, "Exception::__construct", exceptionConstruct);
+    try vm.native_fns.put(a, "Exception::__wakeup", exceptionWakeup);
     try vm.native_fns.put(a, "Exception::getMessage", exceptionGetMessage);
     try vm.native_fns.put(a, "Exception::getCode", exceptionGetCode);
     try vm.native_fns.put(a, "Exception::getPrevious", exceptionGetPrevious);
@@ -67,7 +71,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try appendThrowableProperties(a, &err_def, trace_default);
     err_def.slot_layout = try vm.buildSlotLayout(&err_def);
     try err_def.interfaces.append(a, "Throwable");
+    try err_def.methods.put(a, "__clone", .{ .name = "__clone", .arity = 0, .visibility = .private });
     try err_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 3 });
+    try err_def.methods.put(a, "__wakeup", .{ .name = "__wakeup", .arity = 0 });
     try err_def.methods.put(a, "getMessage", .{ .name = "getMessage", .arity = 0, .is_final = true });
     try err_def.methods.put(a, "getCode", .{ .name = "getCode", .arity = 0, .is_final = true });
     try err_def.methods.put(a, "getPrevious", .{ .name = "getPrevious", .arity = 0, .is_final = true });
@@ -79,7 +85,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try err_def.interfaces.append(a, "Stringable");
     try vm.classes.put(a, "Error", err_def);
 
+    try vm.native_fns.put(a, "Error::__clone", exceptionClone);
     try vm.native_fns.put(a, "Error::__construct", exceptionConstruct);
+    try vm.native_fns.put(a, "Error::__wakeup", exceptionWakeup);
     try vm.native_fns.put(a, "Error::getMessage", exceptionGetMessage);
     try vm.native_fns.put(a, "Error::getCode", exceptionGetCode);
     try vm.native_fns.put(a, "Error::getPrevious", exceptionGetPrevious);
@@ -234,11 +242,49 @@ fn exceptionConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     return NativeResult.scalar(.null);
 }
 
+// declared private, as php's, so nothing outside can call it: an exception
+// is uncloneable before any __clone runs
+fn exceptionClone(_: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    return NativeResult.scalar(.null);
+}
+
+// php's Exception::__wakeup: an unserialized message or code of the wrong
+// type is removed; the typed properties enforce the rest
+fn exceptionWakeup(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.scalar(.null);
+    if (this_val != .object) return NativeResult.scalar(.null);
+    const obj = this_val.object;
+    for ([_]struct { []const u8, std.meta.Tag(Value) }{ .{ "message", .string }, .{ "code", .int } }) |check| {
+        if (obj.isUnset(check[0])) continue;
+        const v = obj.get(check[0]);
+        if (v == .null or v == check[1]) continue;
+        if (obj.ref_mirrored) ctx.vm.detachPropRefs(obj, check[0], null);
+        try obj.markUnset(ctx.allocator, check[0]);
+        if (obj.slots) |slots| if (obj.getSlotIndex(check[0])) |idx| {
+            ctx.vm.releaseValue(slots[idx]);
+            slots[idx] = .null;
+        };
+    }
+    return NativeResult.scalar(.null);
+}
+
 fn exceptionGetMessage(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.scalar(.null);
     if (this_val != .object) return NativeResult.scalar(.null);
+    if (this_val.object.isUnset("message")) {
+        // removed by __wakeup: php's read warns, and the string return is empty
+        try undefinedThrowableProperty(ctx, this_val.object, "message");
+        return NativeResult.literal("");
+    }
     const message = this_val.object.get("message");
     return if (message == .string) NativeResult.shareString(message.string) else NativeResult.borrowed(message);
+}
+
+fn undefinedThrowableProperty(ctx: *NativeContext, obj: *PhpObject, name: []const u8) RuntimeError!void {
+    const base: []const u8 = if (ctx.vm.isInstanceOf(obj.class_name, "Exception")) "Exception" else "Error";
+    const msg = try std.fmt.allocPrint(ctx.allocator, "Undefined property: {s}::${s}", .{ base, name });
+    defer ctx.allocator.free(msg);
+    try ctx.vm.raiseError(2, msg);
 }
 
 // php's Exception::__toString: the throwable and each previous one, the
@@ -293,6 +339,7 @@ pub fn describe(ctx: *NativeContext, throwable: *PhpObject) RuntimeError![]u8 {
         const e = current.object;
         const trace = try traceString(ctx, e);
         defer ctx.allocator.free(trace);
+        if (e.isUnset("message")) try undefinedThrowableProperty(ctx, e, "message");
         const message = e.get("message");
         const message_text = if (message == .string) message.string.bytes() else "";
         const file = e.get("file");
@@ -315,6 +362,10 @@ pub fn describe(ctx: *NativeContext, throwable: *PhpObject) RuntimeError![]u8 {
 fn exceptionGetCode(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this_val = ctx.vm.currentFrame().vars.get("$this") orelse return NativeResult.scalar(.null);
     if (this_val != .object) return NativeResult.scalar(.null);
+    if (this_val.object.isUnset("code")) {
+        try undefinedThrowableProperty(ctx, this_val.object, "code");
+        return NativeResult.scalar(.null);
+    }
     const value = this_val.object.get("code");
     return if (value == .string) NativeResult.shareString(value.string) else NativeResult.borrowed(value);
 }

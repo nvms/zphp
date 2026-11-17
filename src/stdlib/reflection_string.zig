@@ -953,7 +953,7 @@ fn collectMethods(ctx: *NativeContext, class_name: []const u8, out: *std.ArrayLi
         while (it.next()) |entry| if (!containsName(order.items, entry.key_ptr.*)) try order.append(ctx.allocator, entry.key_ptr.*);
         for (order.items) |method_name| {
             const info = cls.methods.get(method_name) orelse continue;
-            if (std.mem.indexOf(u8, method_name, "$hook_") != null) continue;
+            if (std.mem.indexOf(u8, method_name, "$hook_") != null or info.hidden) continue;
             if (depth > 0 and info.visibility == .private) continue;
             if (hasMethod(out.items, method_name)) continue;
             const declaring = reflection.findDeclaringClass(vm, class_name, method_name);

@@ -755,6 +755,7 @@ fn method_exists(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
         if (ctx.vm.classes.get(cn)) |cls| {
             // the methods map ignores case and keeps the declared spelling
             if (cls.methods.getEntry(method_name)) |entry| {
+                if (entry.value_ptr.hidden) return NativeResult.scalar(.{ .bool = false });
                 canonical_method = entry.key_ptr.*;
                 if (entry.value_ptr.visibility == .private) private_at_this_class = true;
             }
@@ -1323,7 +1324,7 @@ fn getClassMethodsOf(ctx: *NativeContext, class_name: []const u8) RuntimeError!N
         if (ctx.vm.classes.get(cn)) |cls| {
             const emit = struct {
                 fn run(c: *NativeContext, a: *@import("../runtime/value.zig").PhpArray, s: *std.StringHashMapUnmanaged(void), name: []const u8, info: anytype, d: usize, cnn: []const u8, clsn: []const u8, callr: ?[]const u8) !void {
-                    if (std.mem.indexOf(u8, name, "$hook_") != null) return;
+                    if (std.mem.indexOf(u8, name, "$hook_") != null or info.hidden) return;
                     // an inherited private method stays in the function table,
                     // listed only for its own class's scope
                     _ = d;
