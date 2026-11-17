@@ -1513,7 +1513,10 @@ fn setPropertyReflection(ctx: *NativeContext, obj: *PhpObject, class_name: []con
     const untyped = prop.type_str.len == 0;
     const effective_has_default = !prop.is_virtual and (if (prop.is_promoted) untyped else prop.has_default or untyped);
     try obj.set(ctx.allocator, "__has_default", .{ .bool = effective_has_default });
-    try obj.set(ctx.allocator, "__default_value", if (effective_has_default and !prop.is_promoted) prop.default else .null);
+    // the object holds its own copy of an array: an internal class's
+    // default array has no owner to count it
+    const default: Value = if (!effective_has_default or prop.is_promoted) .null else if (prop.default == .array) .{ .array = try ctx.vm.cloneArray(prop.default.array) } else prop.default;
+    try obj.set(ctx.allocator, "__default_value", default);
     try obj.set(ctx.allocator, "__declaring_class", .{ .string = Value.String.borrowed(result.declaring_class) });
     try obj.set(ctx.allocator, "__set_visibility", .{ .int = @backingInt(prop.set_visibility) });
     try obj.set(ctx.allocator, "__has_set_visibility", .{ .bool = prop.has_set_visibility });
