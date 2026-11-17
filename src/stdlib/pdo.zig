@@ -830,10 +830,11 @@ fn pdoSqliteCreateCollation(ctx: *NativeContext, args: []const Value) RuntimeErr
 
 fn pdoConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const obj = getThis(ctx) orelse return NativeResult.scalar(.null);
-    if (args.len < 1 or args[0] != .string) return throwPdo(ctx, "PDO::__construct() expects a DSN string");
+    // a null dsn is the empty string zpp makes of it
+    if (args.len < 1 or (args[0] != .string and args[0] != .null)) return throwPdo(ctx, "PDO::__construct() expects a DSN string");
 
-    const dsn = args[0].string.bytes();
-    const colon = std.mem.indexOf(u8, dsn, ":") orelse return throwPdo(ctx, "Invalid DSN: missing driver prefix");
+    const dsn = if (args[0] == .string) args[0].string.bytes() else "";
+    const colon = std.mem.indexOf(u8, dsn, ":") orelse return throwPdo(ctx, "PDO::__construct(): Argument #1 ($dsn) must be a valid data source name");
     const driver = dsn[0..colon];
     const rest = dsn[colon + 1 ..];
 

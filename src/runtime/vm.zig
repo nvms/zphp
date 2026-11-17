@@ -30990,6 +30990,12 @@ pub const VM = struct {
             // throwBuiltinException can dispatch in-place and the native
             // returns error.RuntimeError to unwind. detect that and let
             // the caller resume from the dispatched handler frame
+            // called from native code (call_user_func, a callable value), the
+            // method's exception goes back through that code as pending
+            // rather than straight to a php handler under it
+            const floor = self.handler_floor;
+            self.handler_floor = self.handler_count;
+            defer self.handler_floor = floor;
             const result = self.invokeNative(native, &ctx, .{ .args = args, .name = full_name, .instance = true }) catch |native_err| {
                 if (self.frame_count < saved_fc) return .null;
                 return native_err;
@@ -31619,6 +31625,9 @@ pub const VM = struct {
             // mt_rand distinguish by name) work when dispatched indirectly via
             // call_user_func / first-class-callable / array callable
             var ctx = self.makeContext(name);
+            const floor = self.handler_floor;
+            self.handler_floor = self.handler_count;
+            defer self.handler_floor = floor;
             const result = try self.invokeNative(native, &ctx, .{ .args = args, .name = name, .dynamic = true });
             return self.borrowCallResult(result);
         } else if (self.functions.get(name)) |func| {
