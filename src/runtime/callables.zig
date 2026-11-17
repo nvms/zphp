@@ -456,13 +456,19 @@ pub fn invoke(vm: *VM, callee: Callee, args: []const Value) RuntimeError!Value {
             for (args) |arg| try packed_args.append(vm.allocator, arg);
             // a transient copy: __call may return the name, which then
             // outlives whatever callable it came from
-            const magic_args = [_]Value{ .{ .string = try vm.transientBytes(m.name) }, .{ .array = packed_args } };
+            const magic_args = [_]Value{ .{ .string = try vm.transientBytes(trampolineName(m.name)) }, .{ .array = packed_args } };
             if (m.object) |obj| return vm.callTrampoline(obj, &magic_args);
             const registered = try vm.resolveMethod(m.class, "__callStatic");
             return vm.callByNameAs(registered, &magic_args, m.called orelse m.class);
         },
         .engine => |e| return invokeEngine(vm, e.target, e.name, args),
     }
+}
+
+// zend_get_call_trampoline_func: the method name __call and __callStatic
+// receive ends at its first NUL
+fn trampolineName(name: []const u8) []const u8 {
+    return if (std.mem.indexOfScalar(u8, name, 0)) |nul| name[0..nul] else name;
 }
 
 fn invokeEngine(vm: *VM, target: Value, name: []const u8, args: []const Value) RuntimeError!Value {
@@ -510,7 +516,7 @@ pub fn invokeArgArrayFrom(vm: *VM, callee: Callee, arr: *PhpArray, from_native: 
                 const v = if (entry.ref) |cell| cell.* else entry.value;
                 if (entry.key == .string) try packed_args.set(vm.allocator, entry.key, v) else try packed_args.append(vm.allocator, v);
             }
-            const magic_args = [_]Value{ .{ .string = try vm.transientBytes(m.name) }, .{ .array = packed_args } };
+            const magic_args = [_]Value{ .{ .string = try vm.transientBytes(trampolineName(m.name)) }, .{ .array = packed_args } };
             if (m.object) |obj| return vm.callTrampoline(obj, &magic_args);
             const registered = try vm.resolveMethod(m.class, "__callStatic");
             return vm.callByNameAs(registered, &magic_args, m.called orelse m.class);

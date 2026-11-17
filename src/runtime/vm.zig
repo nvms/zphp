@@ -23761,15 +23761,37 @@ pub const VM = struct {
 
     // __call for a method the object lacks
     pub fn callTrampoline(self: *VM, obj: *PhpObject, args: []const Value) RuntimeError!Value {
+        if (args.len == 2) if (try self.trampolineName(args[0])) |cut| {
+            self.pending_trampoline = true;
+            defer self.pending_trampoline = false;
+            return self.callMethod(obj, "__call", &.{ .{ .string = cut }, args[1] });
+        };
         self.pending_trampoline = true;
         defer self.pending_trampoline = false;
         return self.callMethod(obj, "__call", args);
     }
 
     fn callStaticTrampoline(self: *VM, cs_name: []const u8, called_class: []const u8) RuntimeError!void {
+        // the name and the argument array are the top two slots
+        if (try self.trampolineName(self.stack[self.sp - 2])) |cut| {
+            const old = self.stack[self.sp - 2];
+            // the slot holds its own reference, beside the transient one
+            cut.retain();
+            self.stack[self.sp - 2] = .{ .string = cut };
+            self.stackRelease(old);
+        }
         self.pending_trampoline = true;
         defer self.pending_trampoline = false;
         return self.callStaticFunction(cs_name, 2, called_class);
+    }
+
+    // zend_get_call_trampoline_func: the method name __call and
+    // __callStatic receive ends at its first NUL
+    fn trampolineName(self: *VM, name: Value) RuntimeError!?Value.String {
+        if (name != .string) return null;
+        const bytes = name.string.bytes();
+        const nul = std.mem.indexOfScalar(u8, bytes, 0) orelse return null;
+        return try self.transientBytes(bytes[0..nul]);
     }
 
     // the name a trampoline frame stands for: "Class::method" from the
