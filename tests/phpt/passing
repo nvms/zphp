@@ -10263,6 +10263,7 @@ ext/standard/tests/strings/setlocale_variation5.phpt
 ext/standard/tests/strings/sha1.phpt
 ext/standard/tests/strings/sha1_basic.phpt
 ext/standard/tests/strings/sha1_file.phpt
+ext/standard/tests/strings/sha1_file_stream_error.phpt
 ext/standard/tests/strings/sha1raw.phpt
 ext/standard/tests/strings/show_source_basic.phpt
 ext/standard/tests/strings/show_source_variation1.phpt

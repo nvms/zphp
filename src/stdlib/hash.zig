@@ -137,6 +137,8 @@ fn doHash(ctx: *NativeContext, comptime func: []const u8, algo: []const u8, data
     if (is_file) {
         if (std.mem.indexOfScalar(u8, data, 0) != null) return throwFmt(ctx, "ValueError", func ++ "(): Argument #1 ($algo) must not contain any null bytes", .{});
         input = (try filesystem.readPathAs(ctx, data, func)) orelse return NativeResult.scalar(.{ .bool = false });
+        // php_hash_do_hash's read loop fails on a read error
+        if (filesystem.read_failed) return NativeResult.scalar(.{ .bool = false });
     }
     var scratch: Scratch = undefined;
     const context = ctxPtr(&scratch, ops);
@@ -156,6 +158,8 @@ fn doHmac(ctx: *NativeContext, comptime func: []const u8, algo: []const u8, data
     if (is_file) {
         if (std.mem.indexOfScalar(u8, data, 0) != null) return throwFmt(ctx, "ValueError", func ++ "(): Argument #2 ($filename) must not contain any null bytes", .{});
         input = (try filesystem.readPathAs(ctx, data, func)) orelse return NativeResult.scalar(.{ .bool = false });
+        // php_hash_do_hash's read loop fails on a read error
+        if (filesystem.read_failed) return NativeResult.scalar(.{ .bool = false });
     }
     var digest: [algos.max_digest_size]u8 = undefined;
     try hmac(ops, if (input) |s| s.bytes() else data, key, digest[0..ops.digest_size]);
@@ -228,8 +232,38 @@ fn native_sha1_file(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
 }
 
 fn digestFile(ctx: *NativeContext, comptime func: []const u8, ops: *const Ops, path: []const u8, binary: bool) RuntimeError!NativeResult {
+    // a user wrapper's stream is read as php's md5_file/sha1_file read it:
+    // a failed read (sha1_file) or a stream that stops short of its end
+    // gives false
+    if (filesystem.userWrapperFor(ctx.vm, path)) |wrapper_class| {
+        const opened = (try filesystem.openUserStream(ctx, wrapper_class, path, "rb", @import("user_streams.zig").REPORT_ERRORS, null)) orelse return NativeResult.scalar(.{ .bool = false });
+        const fh = opened.resource;
+        fh.retain();
+        defer ctx.vm.releaseValue(opened);
+        var scratch: Scratch = undefined;
+        const context = ctxPtr(&scratch, ops);
+        try ops.init(context, .{});
+        var buf: [1024]u8 = undefined;
+        var failed = false;
+        while (true) {
+            const n = try streams.read(ctx, fh, &buf);
+            if (n <= 0) {
+                failed = n < 0 and comptime std.mem.eql(u8, func, "sha1_file");
+                break;
+            }
+            ops.update(context, buf[0..@intCast(n)]);
+        }
+        if (!failed) failed = !try streams.eof(ctx, fh);
+        _ = try filesystem.closeStream(ctx, fh);
+        if (failed) return NativeResult.scalar(.{ .bool = false });
+        var digest: [algos.max_digest_size]u8 = undefined;
+        ops.final(digest[0..ops.digest_size], context);
+        return digestResult(ctx, digest[0..ops.digest_size], binary);
+    }
     const content = (try filesystem.readPathAs(ctx, path, func)) orelse return NativeResult.scalar(.{ .bool = false });
     defer content.release();
+    // sha1_file fails on a read error (md5_file reads to the end anyway)
+    if (filesystem.read_failed and comptime std.mem.eql(u8, func, "sha1_file")) return NativeResult.scalar(.{ .bool = false });
     var scratch: Scratch = undefined;
     const context = ctxPtr(&scratch, ops);
     try ops.init(context, .{});

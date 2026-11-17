@@ -912,7 +912,12 @@ pub fn readPath(ctx: *NativeContext, raw_path: []const u8) RuntimeError!?Value.S
 
 // readPath for a php function that reports, as php's stream opener does, why
 // the path could not be opened (func names it in the warning)
+// set by readPathAs when the path opened but reading it failed (a
+// directory), which php's read loops see as a read returning -1
+pub threadlocal var read_failed: bool = false;
+
 pub fn readPathAs(ctx: *NativeContext, raw_path: []const u8, comptime func: ?[]const u8) RuntimeError!?Value.String {
+    read_failed = false;
     var path = raw_path;
     if (func != null and path.len == 0) return throwValueError(ctx, "Path must not be empty", .{});
     switch (fileUrl(path)) {
@@ -1014,6 +1019,7 @@ pub fn readPathAs(ctx: *NativeContext, raw_path: []const u8, comptime func: ?[]c
                 const chunk: i64 = 8192;
                 const size: i64 = if (std.mem.eql(u8, name, "file_get_contents")) (if (plainStat(path, false)) |st| st.size else 0) else 0;
                 try notice(ctx, name ++ "(): Read of {d} bytes failed with errno=21 Is a directory", .{if (size > 0) size + chunk else chunk});
+                read_failed = true;
                 return try Value.String.create(ctx.allocator, "");
             }
             try warn(ctx, name ++ "({s}): Failed to open stream: {s}", .{ raw_path, errorText(err) });
