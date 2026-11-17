@@ -6654,7 +6654,11 @@ pub const VM = struct {
                     const cell = try self.getOrCreateVarCell(frame, name);
                     self.push(cell.*);
                     self.setArgSource(self.sp - 1, .{ .cell = .{ .value = cell } });
-                    self.unbindRefSlot(&frame.ref_slots, name);
+                    // the slot's hold was this fetch's own (php's VAR
+                    // operand): letting it go records no possible root
+                    if (frame.ref_slots.fetchRemove(name)) |entry| {
+                        if (cellOf(entry.value).binders > 1) cellOf(entry.value).binders -= 1 else self.unbindCell(entry.value);
+                    }
                 },
                 .array_set_elem_ref, .array_push_ref => {
                     var source = self.retainArgSource(self.ic.?.arg_stack[self.sp - 1]);
@@ -9449,8 +9453,10 @@ pub const VM = struct {
                     // _late has the source fetched before the container:
                     // [source, array, key]
                     const late = bind_op == .array_bind_ref_source_late;
-                    var source = self.retainArgSource(self.ic.?.arg_stack[if (late) self.sp - 3 else self.sp - 1]);
-                    defer self.releaseArgSource(&source);
+                    const source_slot = if (late) self.sp - 3 else self.sp - 1;
+                    var source = self.retainArgSource(self.ic.?.arg_stack[source_slot]);
+                    defer self.releaseBindSource(&source);
+                    self.releaseBindSource(&self.ic.?.arg_stack[source_slot]);
                     if (!late) _ = self.pop();
                     const key = self.pop();
                     const arr_val = self.pop();
@@ -9482,7 +9488,8 @@ pub const VM = struct {
 
                 .array_push_bind_ref_source => {
                     var source = self.retainArgSource(self.ic.?.arg_stack[self.sp - 1]);
-                    defer self.releaseArgSource(&source);
+                    defer self.releaseBindSource(&source);
+                    self.releaseBindSource(&self.ic.?.arg_stack[self.sp - 1]);
                     _ = self.pop();
                     const arr_val = self.pop();
                     if (source != .cell) return error.RuntimeError;
@@ -9515,7 +9522,8 @@ pub const VM = struct {
 
                 .prop_bind_ref_source, .prop_bind_ref_source_dyn => |bind_op| {
                     var source = self.retainArgSource(self.ic.?.arg_stack[self.sp - 1]);
-                    defer self.releaseArgSource(&source);
+                    defer self.releaseBindSource(&source);
+                    self.releaseBindSource(&self.ic.?.arg_stack[self.sp - 1]);
                     _ = self.pop();
                     var name_hold: Value = .null;
                     defer self.stackRelease(name_hold);
@@ -24868,6 +24876,16 @@ pub const VM = struct {
     }
 
     fn releaseArgSource(self: *VM, source: *RefSource) void {
+        self.releaseArgSourceAs(source, true);
+    }
+
+    // a binding op's own hold on its source (php's VAR operand, freed
+    // without gc_check_possible_root)
+    fn releaseBindSource(self: *VM, source: *RefSource) void {
+        self.releaseArgSourceAs(source, false);
+    }
+
+    inline fn releaseArgSourceAs(self: *VM, source: *RefSource, comptime possible_root: bool) void {
         if (source.* == .none) return;
         const old = source.*;
         source.* = .none;
@@ -24893,7 +24911,9 @@ pub const VM = struct {
                         }
                     }
                 }
-                self.unbindCell(c.value);
+                if (!possible_root and cellOf(c.value).binders > 1) {
+                    cellOf(c.value).binders -= 1;
+                } else self.unbindCell(c.value);
             },
             .simple, .none => {},
         }
