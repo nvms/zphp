@@ -7490,8 +7490,8 @@ pub const VM = struct {
                         }
                         if (!(self.array_ref_active and try self.writeArrayElemRef(ea.array, ik, v))) {
                             try self.arraySetOwned(ea.array, ik, v);
-                        }
-                        self.push(v);
+                            self.push(v);
+                        } else self.push(typedElementResult(ea.array, ik, v));
                         continue;
                     }
                     if (existing == .null or (existing == .bool and !existing.bool)) {
@@ -7724,8 +7724,8 @@ pub const VM = struct {
                         }
                         if (!(self.array_ref_active and try self.writeArrayElemRef(ea.array, ik, v))) {
                             try self.arraySetOwned(ea.array, ik, v);
-                        }
-                        self.push(v);
+                            self.push(v);
+                        } else self.push(typedElementResult(ea.array, ik, v));
                         continue;
                     }
                     if (existing == .null or (existing == .bool and !existing.bool)) {
@@ -7823,6 +7823,9 @@ pub const VM = struct {
                     // COW copyValue shares (no independent iterator pointer) so it
                     // adds nothing here - pass raw, let set do the single retain
                     const val = raw_val;
+                    // the assignment's result: what a typed reference the
+                    // element is took, after coercion
+                    var result = val;
                     if (arr_val == .array) {
                         if (key == .array or key == .object) {
                             if (try self.throwOffsetKeyType(key, .access)) continue;
@@ -7854,7 +7857,7 @@ pub const VM = struct {
                         const stored = try self.selfStoreCopy(arr_val.array, val);
                         if (is_ref or !(self.array_ref_active and try self.writeArrayElemRef(arr_val.array, norm_key, stored))) {
                             try self.arraySetOwned(arr_val.array, norm_key, stored);
-                        }
+                        } else result = typedElementResult(arr_val.array, norm_key, val);
                     } else if (arr_val == .object and self.hasMethod(arr_val.object.class_name, "offsetSet")) {
                         _ = self.callMethod(arr_val.object, "offsetSet", &.{ key, val }) catch {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -7867,7 +7870,7 @@ pub const VM = struct {
                         if (try self.throwBuiltinException("TypeError", "Cannot access offset of type string on string")) continue;
                         return error.RuntimeError;
                     }
-                    self.push(val);
+                    self.push(result);
                 },
 
                 .array_set_if_present => {
@@ -8011,8 +8014,8 @@ pub const VM = struct {
                         const stored = try self.selfStoreCopy(cur.array, val);
                         if (op == .array_set_local_ref or !(self.array_ref_active and try self.writeArrayElemRef(cur.array, norm_key, stored))) {
                             try self.arraySetOwned(cur.array, norm_key, stored);
-                        }
-                        self.push(val);
+                            self.push(val);
+                        } else self.push(typedElementResult(cur.array, norm_key, val));
                         continue;
                     }
 
@@ -24105,6 +24108,14 @@ pub const VM = struct {
 
         try self.bindRefSlot(&frame.ref_slots, var_name, cell);
         return cell;
+    }
+
+    // the result of an assignment written through an element's reference:
+    // what a typed reference took after coercion (zend_assign_to_typed_ref)
+    fn typedElementResult(arr: *PhpArray, key: PhpArray.Key, val: Value) Value {
+        const ep = arr.getPtr(key) orelse return val;
+        const cell = ep.ref orelse return val;
+        return if (cellOf(cell).typed) cell.* else val;
     }
 
     // a DIRECT write `$arr[$k] = X` to an element that is a php reference must
