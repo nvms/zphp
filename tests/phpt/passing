@@ -3910,6 +3910,7 @@ Zend/tests/return_types/never_reflected.phpt
 Zend/tests/return_types/never_return_throw.phpt
 Zend/tests/return_types/never_tostring.phpt
 Zend/tests/return_types/reflection001.phpt
+Zend/tests/return_types/return_reference_separation.phpt
 Zend/tests/return_types/rfc001.phpt
 Zend/tests/return_types/rfc002.phpt
 Zend/tests/return_types/rfc003.phpt

@@ -6251,7 +6251,8 @@ pub const VM = struct {
                         if (self.ref_index) |ri| ri.releaseOwner(self.allocator, self.last_return_ref_owner);
                         self.last_return_ref_owner = 0;
                     }
-                    if (self.currentFrame().ref_slots.get(ref_name.bytes())) |cell| {
+                    const ret_cell = self.currentFrame().ref_slots.get(ref_name.bytes());
+                    if (ret_cell) |cell| {
                         self.setReturnRef(cell);
                         const ri = try self.refIndex();
                         self.last_return_ref_owner = ri.createOwner();
@@ -6267,11 +6268,22 @@ pub const VM = struct {
                     const rr_ret_arr_pin: ?*PhpArray = if (rr_result == .array) rr_result.array else null;
                     if (rr_ret_arr_pin) |a| arrayRetain(a);
                     if (g_type_info.count() > 0) {
+                        const unchecked = rr_result;
                         if (try self.checkReturnType(&rr_result)) {
                             if (rr_ret_pin) |p| self.objRelease(p);
                             if (rr_ret_arr_pin) |a| arrayUnpin(a);
                             continue;
                         }
+                        // ZEND_VERIFY_RETURN_TYPE coerces the reference
+                        // itself: the variable returned takes the value
+                        if (ret_cell) |cell| if (@intFromEnum(unchecked) != @intFromEnum(rr_result)) {
+                            self.writeReference(cell, rr_result) catch {
+                                if (rr_ret_pin) |p| self.objRelease(p);
+                                if (rr_ret_arr_pin) |a| arrayUnpin(a);
+                                if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                                return error.RuntimeError;
+                            };
+                        };
                     }
                     const rr_saved_entry_sp = self.currentFrame().entry_sp;
                     try self.popFrame();
