@@ -26692,6 +26692,10 @@ pub const VM = struct {
         // read from its storage, which initializes the object
         if (self.propertyHooked(obj.class_name, name) and !self.inPropHook(obj, name) and
             (self.hasRealGetHook(obj.class_name, name) or self.propertyIsVirtual(obj.class_name, name))) return;
+        // a property the scope can't see goes to __get/__set or fails
+        // (zend_get_property_offset's wrong offset) before anything initializes
+        const vr = self.findPropertyVisibility(obj.class_name, name);
+        if (vr.declared and vr.visibility != .public and !self.propVisible(vr, name, vr.visibility)) return;
         try self.triggerLazyProperty(obj, name, self.currentDefiningClass());
     }
 
