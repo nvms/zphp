@@ -3297,6 +3297,7 @@ Zend/tests/nullsafe_operator/018.phpt
 Zend/tests/nullsafe_operator/020.phpt
 Zend/tests/nullsafe_operator/021.phpt
 Zend/tests/nullsafe_operator/022.phpt
+Zend/tests/nullsafe_operator/023.phpt
 Zend/tests/nullsafe_operator/024.phpt
 Zend/tests/nullsafe_operator/025.phpt
 Zend/tests/nullsafe_operator/026.phpt

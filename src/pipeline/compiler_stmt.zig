@@ -278,12 +278,14 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     // binds; one that is no variable or element (a call, a literal) is
     // evaluated once into a hidden variable, dropped when the loop ends
     var iter_temp: ?[]const u8 = null;
-    if (val_by_ref and (iter_tag == .variable or iter_tag == .array_access)) {
+    // zend_can_write_to_variable: a nullsafe chain is read as a value
+    const short_circuited = compiler_expr.isShortCircuited(self, iter_n);
+    if (val_by_ref and !short_circuited and (iter_tag == .variable or iter_tag == .array_access)) {
         try compiler_expr.compileVivifyChain(self, iter_n);
-    } else if (val_by_ref and try compiler_expr.compileSeparatedFetch(self, iter_n)) {
+    } else if (val_by_ref and !short_circuited and try compiler_expr.compileSeparatedFetch(self, iter_n)) {
         // a property, static property or ${...} variable: its array is
         // separated from co-holders before the loop binds into it
-    } else if (val_by_ref and val_node_is_plain(self, val_n) and !isReadablePlace(iter_tag)) {
+    } else if (val_by_ref and val_node_is_plain(self, val_n) and (short_circuited or !isReadablePlace(iter_tag))) {
         const synth = try std.fmt.allocPrint(self.allocator, "__foreach_iterable_{d}", .{self.loop_depth});
         try self.string_allocs.append(self.allocator, synth);
         iter_temp = synth;
