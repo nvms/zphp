@@ -31,6 +31,7 @@ const RefIndex = @import("value.zig").RefIndex;
 const BindingTarget = @import("value.zig").BindingTarget;
 const PropRefKey = @import("value.zig").PropRefKey;
 const bytecode = @import("../pipeline/bytecode.zig");
+const method_order = @import("../stdlib/method_order_generated.zig");
 const Chunk = bytecode.Chunk;
 const OpCode = bytecode.OpCode;
 const ObjFunction = bytecode.ObjFunction;
@@ -2716,6 +2717,43 @@ pub const VM = struct {
             "AddressInfo", "AppendIterator", "CachingIterator", "CallbackFilterIterator", "Collator", "CurlMultiHandle", "CurlShareHandle", "CurlSharePersistentHandle", "DOMNamedNodeMap", "DOMNodeList", "DOMXPath", "DeflateContext", "Directory", "Dom\\DtdNamedNodeMap", "Dom\\HTMLCollection", "Dom\\Implementation", "Dom\\NamedNodeMap", "Dom\\NodeList", "Dom\\TokenList", "Dom\\XPath", "Error", "Exception", "FFI", "FFI\\CType", "FTP\\Connection", "Fiber", "GdFont", "GdImage", "Generator", "GlobIterator", "InfiniteIterator", "InflateContext", "InternalIterator", "IntlIterator", "IntlListFormatter", "IntlPartsIterator", "IteratorIterator", "LimitIterator", "NoRewindIterator", "OpenSSLAsymmetricKey", "OpenSSLCertificate", "OpenSSLCertificateSigningRequest", "PDO", "PDORow", "PDOStatement", "ParentIterator", "PgSql\\Connection", "PgSql\\Lob", "PgSql\\Result", "Random\\Engine\\Secure", "Random\\Randomizer", "RecursiveCachingIterator", "RecursiveCallbackFilterIterator", "RecursiveIteratorIterator", "RecursiveRegexIterator", "RecursiveTreeIterator", "RegexIterator", "ResourceBundle", "SQLite3", "SQLite3Result", "SQLite3Stmt", "Shmop", "Socket", "SplFileObject", "SysvMessageQueue", "SysvSemaphore", "SysvSharedMemory", "WeakReference", "XMLParser", "XMLReader", "XMLWriter", "XSLTProcessor", "ZipArchive", "finfo", "mysqli", "mysqli_driver", "mysqli_result", "mysqli_stmt", "mysqli_warning",
         }) |name| {
             if (vm.classes.getPtr(name)) |cls| cls.uncloneable = true;
+        }
+        try applyInternalMethodOrder(vm, allocator);
+    }
+
+    // php's function table lists an internal class's methods in its stub's
+    // declaration order (reflection, get_class_methods); methods zphp adds
+    // that php's stubs don't declare follow in their own order
+    fn applyInternalMethodOrder(vm: *VM, allocator: Allocator) RuntimeError!void {
+        var it = vm.classes.iterator();
+        while (it.next()) |entry| {
+            const def = entry.value_ptr;
+            if (!def.is_internal) continue;
+            const name = entry.key_ptr.*;
+            var lower_buf: [128]u8 = undefined;
+            if (name.len > lower_buf.len) continue;
+            const order = method_order.orders.get(std.ascii.lowerString(&lower_buf, name)) orelse continue;
+            var ordered: std.ArrayListUnmanaged([]const u8) = .empty;
+            errdefer ordered.deinit(allocator);
+            var placed: std.StringHashMapUnmanaged(void) = .{};
+            defer placed.deinit(allocator);
+            for (order) |m| {
+                const key = def.methods.getKey(m) orelse continue;
+                if ((try placed.getOrPut(allocator, key)).found_existing) continue;
+                try ordered.append(allocator, key);
+            }
+            for (def.method_order.items) |m| {
+                const key = def.methods.getKey(m) orelse continue;
+                if ((try placed.getOrPut(allocator, key)).found_existing) continue;
+                try ordered.append(allocator, key);
+            }
+            var rest = def.methods.keyIterator();
+            while (rest.next()) |k| {
+                if ((try placed.getOrPut(allocator, k.*)).found_existing) continue;
+                try ordered.append(allocator, k.*);
+            }
+            def.method_order.deinit(allocator);
+            def.method_order = ordered;
         }
     }
 
