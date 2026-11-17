@@ -374,7 +374,7 @@ fn serializeValue(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: *
             try serializeObject(ctx, buf, sctx, obj);
         },
         .generator, .fiber => refuseNotSerializable(ctx, if (val == .generator) "Generator" else "Fiber", .serialize) catch |err| {
-            if (err == error.OutOfMemory) return err;
+            if (err == error.OutOfMemory or ctx.vm.exit_requested) return err;
         },
         // php writes a resource as int 0
         .resource => try buf.appendSlice(a, "i:0;"),
@@ -391,7 +391,7 @@ fn serializeObject(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: 
     const a = ctx.allocator;
     const class_name = obj.class_name;
     refuseNotSerializable(ctx, class_name, .serialize) catch |err| {
-        if (err == error.OutOfMemory) return err;
+        if (err == error.OutOfMemory or ctx.vm.exit_requested) return err;
         return;
     };
     if (ctx.vm.classes.get(class_name)) |cdef| if (cdef.is_enum) {
@@ -420,7 +420,7 @@ fn serializeObject(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: 
         serialize_lock += 1;
         const result = ctx.vm.callMethod(obj, "__serialize", &.{}) catch |err| {
             serialize_lock -= 1;
-            if (err == error.OutOfMemory) return err;
+            if (err == error.OutOfMemory or ctx.vm.exit_requested) return err;
             return;
         };
         serialize_lock -= 1;
@@ -441,7 +441,7 @@ fn serializeObject(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: 
     // that later references to the object repeat
     if (ctx.vm.isInstanceOf(class_name, "Serializable") and ctx.vm.hasMethod(class_name, "serialize")) {
         const result = ctx.vm.callMethod(obj, "serialize", &.{}) catch |err| {
-            if (err == error.OutOfMemory) return err;
+            if (err == error.OutOfMemory or ctx.vm.exit_requested) return err;
             try markFailed(ctx, sctx, obj);
             try buf.appendSlice(a, "N;");
             return;
@@ -471,7 +471,7 @@ fn serializeObject(ctx: *NativeContext, buf: *std.ArrayListUnmanaged(u8), sctx: 
         serialize_lock += 1;
         const result = ctx.vm.callMethod(obj, "__sleep", &.{}) catch |err| {
             serialize_lock -= 1;
-            if (err == error.OutOfMemory) return err;
+            if (err == error.OutOfMemory or ctx.vm.exit_requested) return err;
             return;
         };
         serialize_lock -= 1;
@@ -647,6 +647,8 @@ const UnserCtx = struct {
     // what nested reads returned, which php keeps in the table (var_tmp_var)
     // so a later back reference into it finds it alive
     kept: std.ArrayListUnmanaged(Value) = .empty,
+    // a queued call ran out of memory or exited: the script ends
+    fatal: ?RuntimeError = null,
 
     fn deinit(self: *UnserCtx, a: Allocator) void {
         self.slots.deinit(a);
@@ -1163,6 +1165,14 @@ fn readObject(ctx: *NativeContext, u_opt: ?*UnserCtx, sc: *Scan, dest: Loc, star
 
     var incomplete = false;
     var class_name: []const u8 = name;
+    // php reads the name into a string of its own and looks the class up
+    // by a lowercased copy (zend_lookup_class), which memory_limit sees
+    const name_copy = try ctx.allocator.dupe(u8, name);
+    defer ctx.allocator.free(name_copy);
+    const lowered: ?[]u8 = for (name) |c| {
+        if (std.ascii.isUpper(c)) break try std.ascii.allocLowerString(ctx.allocator, name);
+    } else null;
+    defer if (lowered) |l| ctx.allocator.free(l);
     resolve: {
         if (u.allowed) |allowed| {
             const lc = try std.ascii.allocLowerString(ctx.allocator, name);
@@ -1188,7 +1198,7 @@ fn readObject(ctx: *NativeContext, u_opt: ?*UnserCtx, sc: *Scan, dest: Loc, star
         serialize_lock += 1;
         const autoloaded = ctx.vm.tryAutoload(name);
         serialize_lock -= 1;
-        autoloaded catch |err| if (err == error.OutOfMemory) return err;
+        autoloaded catch |err| if (err == error.OutOfMemory or ctx.vm.exit_requested) return err;
         if (ctx.vm.pending_exception != null) return false;
         if (ctx.vm.classes.getKey(name)) |declared| {
             class_name = declared;
@@ -1208,13 +1218,13 @@ fn readObject(ctx: *NativeContext, u_opt: ?*UnserCtx, sc: *Scan, dest: Loc, star
         serialize_lock += 1;
         const called = ctx.invokeCallable(.{ .string = Value.String.borrowed(callback) }, &.{arg});
         serialize_lock -= 1;
-        if (called) |r| ctx.vm.releaseValue(r) else |err| if (err == error.OutOfMemory) return err;
+        if (called) |r| ctx.vm.releaseValue(r) else |err| if (err == error.OutOfMemory or ctx.vm.exit_requested) return err;
         if (ctx.vm.pending_exception != null) return false;
         if (ctx.vm.classes.getKey(name) == null) {
             serialize_lock += 1;
             const again = ctx.vm.tryAutoload(name);
             serialize_lock -= 1;
-            again catch |err| if (err == error.OutOfMemory) return err;
+            again catch |err| if (err == error.OutOfMemory or ctx.vm.exit_requested) return err;
             if (ctx.vm.pending_exception != null) return false;
         }
         if (ctx.vm.classes.getKey(name)) |declared| {
@@ -1228,7 +1238,7 @@ fn readObject(ctx: *NativeContext, u_opt: ?*UnserCtx, sc: *Scan, dest: Loc, star
     if (incomplete) class_name = incomplete_class;
     if (!incomplete) {
         refuseNotSerializable(ctx, class_name, .unserialize) catch |err| {
-            if (err == error.OutOfMemory) return err;
+            if (err == error.OutOfMemory or ctx.vm.exit_requested) return err;
             return false;
         };
     }
@@ -1333,7 +1343,7 @@ fn readGmpPayload(ctx: *NativeContext, u: *UnserCtx, dest: Loc, payload: []const
     num.value.string.release();
     const base: Value = .{ .int = 10 };
     const r = ctx.vm.callMethod(obj, "__construct", &.{ num.value, base }) catch |err| {
-        if (err == error.OutOfMemory) return err;
+        if (err == error.OutOfMemory or ctx.vm.exit_requested) return err;
         if (ctx.vm.pending_exception != null) {
             if (ctx.vm.takePending()) |pending| ctx.vm.stackRelease(pending);
         }
@@ -1393,7 +1403,7 @@ fn readCustomObject(ctx: *NativeContext, u: *UnserCtx, sc: *Scan, dest: Loc, cla
         const arg = try stringValue(ctx, payload);
         defer arg.string.release();
         const r = ctx.vm.callMethod(obj, "unserialize", &.{arg}) catch |err| {
-            if (err == error.OutOfMemory) return err;
+            if (err == error.OutOfMemory or ctx.vm.exit_requested) return err;
             return false;
         };
         ctx.vm.releaseValue(r);
@@ -1547,7 +1557,7 @@ fn readEnum(ctx: *NativeContext, u_opt: ?*UnserCtx, sc: *Scan, dest: Loc, start:
     const case_name = str[colon + 1 ..];
     if (!validClassName(enum_name)) return false;
     if (!ctx.vm.classes.contains(enum_name)) {
-        ctx.vm.tryAutoload(enum_name) catch |err| if (err == error.OutOfMemory) return err;
+        ctx.vm.tryAutoload(enum_name) catch |err| if (err == error.OutOfMemory or ctx.vm.exit_requested) return err;
         if (ctx.vm.pending_exception != null) return false;
     }
     const cls = ctx.vm.classes.get(enum_name) orelse {
@@ -1583,7 +1593,12 @@ fn runDelayed(ctx: *NativeContext, uctx: *UnserCtx) void {
                 ctx.vm.callMethod(d.obj, "__unserialize", &.{.{ .array = data }})
             else
                 ctx.vm.callMethod(d.obj, "__wakeup", &.{});
-            if (r) |v| ctx.vm.releaseValue(v) else |_| failed = true;
+            if (r) |v| ctx.vm.releaseValue(v) else |err| {
+                failed = true;
+                // memory_limit and exit() end the script; nothing after
+                // the failed call runs
+                if (err == error.OutOfMemory or ctx.vm.exit_requested) uctx.fatal = err;
+            }
             if (ctx.vm.pending_exception != null) failed = true;
             if (failed) d.obj.destructed = true;
         } else {
@@ -1720,6 +1735,10 @@ fn native_unserialize(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     // reference to the result is in the result
     if (outer == null) runDelayed(ctx, uctx);
     const owned_string = top.cell == null and top.value == .string;
+    if (uctx.fatal) |err| {
+        if (owned_string) top.value.string.release();
+        return err;
+    }
     if (!ok or ctx.vm.pending_exception != null) {
         if (owned_string) top.value.string.release();
         if (ctx.vm.pending_exception != null) return error.RuntimeError;

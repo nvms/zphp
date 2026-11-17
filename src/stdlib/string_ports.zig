@@ -804,6 +804,27 @@ fn native_strtr(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
 fn implodeWith(ctx: *NativeContext, glue: []const u8, pieces: *PhpArray) RuntimeError!NativeResult {
     const items = pieces.entries.items;
     if (items.len == 0) return NativeResult.literal("");
+    // php_implode sizes the result first and allocates it once, which is
+    // what memory_limit sees; strings alone can be sized without converting
+    var total: usize = glue.len * (items.len - 1);
+    for (items) |entry| {
+        const v = entryValue(entry);
+        if (v != .string) break;
+        total = std.math.add(usize, total, v.string.len) catch return error.OutOfMemory;
+    } else {
+        const buf = try ctx.allocator.alloc(u8, total);
+        var at: usize = 0;
+        for (items, 0..) |entry, i| {
+            if (i > 0) {
+                @memcpy(buf[at..][0..glue.len], glue);
+                at += glue.len;
+            }
+            const bytes = entryValue(entry).string.bytes();
+            @memcpy(buf[at..][0..bytes.len], bytes);
+            at += bytes.len;
+        }
+        return NativeResult.takeString(try Value.String.adopt(ctx.allocator, buf));
+    }
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(ctx.allocator);
     var i: usize = 0;
@@ -1288,6 +1309,14 @@ fn native_wordwrap(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     }
     var out: std.ArrayListUnmanaged(u8) = .empty;
     defer out.deinit(ctx.allocator);
+    // php allocates for the most breaks the width allows before wrapping
+    {
+        const chk: usize = if (linelength > 0) text.len / @as(usize, @intCast(linelength)) + 1 else text.len;
+        const per: usize = if (linelength > 0) brk.len else brk.len + 1;
+        const extra = std.math.mul(usize, chk, per) catch return error.OutOfMemory;
+        const base: usize = if (linelength > 0) text.len else 0;
+        try out.ensureTotalCapacityPrecise(ctx.allocator, std.math.add(usize, extra, base) catch return error.OutOfMemory);
+    }
     var laststart: i64 = 0;
     var lastspace: i64 = 0;
     var current: i64 = 0;

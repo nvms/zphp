@@ -2,8 +2,12 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Alignment = std.mem.Alignment;
 const StringPool = @This();
+const MemoryAccount = @import("memory.zig").MemoryAccount;
 
 backing: Allocator,
+// the VM's memory account, charged for the strings handed out (not for the
+// blocks kept for reuse), at the length asked for as php would
+account: ?*MemoryAccount = null,
 free_lists: [9][32]?[*]u8 = @splat(@splat(null)),
 counts: [9]usize = @splat(0),
 
@@ -33,6 +37,14 @@ pub fn deinit(self: *StringPool) void {
 
 fn alloc(ctx: *anyopaque, length: usize, alignment: Alignment, ra: usize) ?[*]u8 {
     const self: *StringPool = @ptrCast(@alignCast(ctx));
+    const account = self.account orelse return self.take(length, alignment, ra);
+    if (!account.admitLen(length)) return null;
+    const ptr = self.take(length, alignment, ra) orelse return null;
+    account.chargeLen(length);
+    return ptr;
+}
+
+fn take(self: *StringPool, length: usize, alignment: Alignment, ra: usize) ?[*]u8 {
     const index = sizeClass(length, alignment) orelse return self.backing.rawAlloc(length, alignment, ra);
     if (self.counts[index] > 0) {
         self.counts[index] -= 1;
@@ -43,6 +55,14 @@ fn alloc(ctx: *anyopaque, length: usize, alignment: Alignment, ra: usize) ?[*]u8
 
 fn resize(ctx: *anyopaque, bytes: []u8, alignment: Alignment, length: usize, ra: usize) bool {
     const self: *StringPool = @ptrCast(@alignCast(ctx));
+    const account = self.account orelse return self.resizeBlock(bytes, alignment, length, ra);
+    if (!account.admitGrowthLen(bytes.len, length)) return false;
+    if (!self.resizeBlock(bytes, alignment, length, ra)) return false;
+    account.adjustLen(bytes.len, length);
+    return true;
+}
+
+fn resizeBlock(self: *StringPool, bytes: []u8, alignment: Alignment, length: usize, ra: usize) bool {
     const old = sizeClass(bytes.len, alignment);
     const new = sizeClass(length, alignment);
     if (old != null or new != null) return old == new;
@@ -55,6 +75,7 @@ fn remap(ctx: *anyopaque, bytes: []u8, alignment: Alignment, length: usize, ra: 
 
 fn free(ctx: *anyopaque, bytes: []u8, alignment: Alignment, ra: usize) void {
     const self: *StringPool = @ptrCast(@alignCast(ctx));
+    if (self.account) |account| account.dischargeLen(bytes.len);
     const index = sizeClass(bytes.len, alignment) orelse {
         self.backing.rawFree(bytes, alignment, ra);
         return;

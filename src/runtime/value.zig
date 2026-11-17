@@ -1,5 +1,6 @@
 const std = @import("std");
 const stack_limit = @import("stack_limit.zig");
+const memory = @import("memory.zig");
 
 // the VM installs this so container stores can release the value they
 // replace without knowing the VM: overwrite-release at the store choke point
@@ -182,6 +183,14 @@ pub const PhpArray = struct {
     // HashTable iterators): what it needs to keep its place as entries are
     // removed. allocated with the c allocator, freed with the array
     iter_log: ?*IterLog = null,
+    // what the array's storage is counted at in the vm's memory account
+    // above (or below) the bytes it takes: php's packed and hash tables are
+    // smaller than zphp's entries, and memory_get_usage() and memory_limit
+    // follow php. undone when the storage is freed
+    mem_adj: i64 = 0,
+    // php's nTableSize for the array: a power of two of at least 8, doubled
+    // as elements outgrow it or raised to what was reserved
+    php_table: u32 = 0,
 
     pub const IterLog = struct {
         // by-reference loops that registered on the array and haven't ended
@@ -304,6 +313,11 @@ pub const PhpArray = struct {
         for (self.entries.items) |entry| {
             if (entry.key == .string) entry.key.string.release();
         }
+        if (self.mem_adj != 0) {
+            if (memory.accountOf(allocator)) |account| account.skew(-self.mem_adj);
+            self.mem_adj = 0;
+        }
+        self.php_table = 0;
         self.entries.deinit(allocator);
         self.string_index.deinit(allocator);
         if (self.iter_log) |log| {
@@ -314,6 +328,62 @@ pub const PhpArray = struct {
 
     // increment the refcount (Stage 2). a method on PhpArray so value.zig
     // can refcount array elements without importing the VM
+    // the bytes php's HashTable would take for this array's storage: a
+    // packed table of zvals, or buckets and their hash slots, sized to the
+    // power of two (at least 8) its elements fill
+    fn phpTableFor(count: usize) u32 {
+        const size = std.math.ceilPowerOfTwo(usize, @max(count, 8)) catch return std.math.maxInt(u32);
+        return std.math.cast(u32, size) orelse std.math.maxInt(u32);
+    }
+
+    fn phpStorageBytes(size: usize, is_packed: bool) usize {
+        return memory.phpSize(if (is_packed) size * 16 + 8 else size * 40);
+    }
+
+    fn rawStorageBytes(entry_capacity: usize, index_capacity: usize) usize {
+        var bytes = memory.phpSize(entry_capacity * @sizeOf(Entry));
+        if (index_capacity > 0) bytes += memory.phpSize(3 * @sizeOf(usize) + index_capacity * (1 + @sizeOf([]const u8) + @sizeOf(usize)));
+        return bytes;
+    }
+
+    fn isPacked(self: *const PhpArray) bool {
+        return self.string_index.count() == 0 and (self.entries.items.len == 0 or (self.has_int_keys and self.next_int_key == self.entries.items.len));
+    }
+
+    fn skewTo(self: *PhpArray, account: *memory.MemoryAccount, want: i64) void {
+        account.skew(want - self.mem_adj);
+        self.mem_adj = want;
+    }
+
+    // count the storage at php's size again after it grew or shrank
+    pub fn settleMemory(self: *PhpArray, allocator: std.mem.Allocator) void {
+        const account = memory.accountOf(allocator) orelse return;
+        if (self.entries.items.len > self.php_table) self.php_table = phpTableFor(self.entries.items.len);
+        const php: i64 = if (self.entries.capacity == 0) 0 else @intCast(phpStorageBytes(@max(self.php_table, 8), self.isPacked()));
+        self.skewTo(account, php - @as(i64, @intCast(rawStorageBytes(self.entries.capacity, self.string_index.capacity()))));
+    }
+
+    // room for `total` entries. the storage is counted at php's size for
+    // them before the bytes are asked for, so memory_limit checks that
+    // rather than zphp's larger entries
+    pub fn reserve(self: *PhpArray, allocator: std.mem.Allocator, total: usize, string_key: bool) !void {
+        const grew_table = total > self.php_table;
+        if (grew_table) self.php_table = phpTableFor(total);
+        if (self.entries.capacity >= total) {
+            if (grew_table) self.settleMemory(allocator);
+            return;
+        }
+        if (memory.accountOf(allocator)) |account| {
+            const capacity = std.ArrayListUnmanaged(Entry).growCapacity(total);
+            const php: i64 = @intCast(phpStorageBytes(self.php_table, !string_key and self.isPacked()));
+            self.skewTo(account, php - @as(i64, @intCast(rawStorageBytes(capacity, self.string_index.capacity()))));
+        }
+        self.entries.ensureTotalCapacity(allocator, total) catch |err| {
+            self.settleMemory(allocator);
+            return err;
+        };
+    }
+
     pub fn retain(self: *PhpArray) void {
         self.refcount +%= 1;
     }
@@ -340,11 +410,15 @@ pub const PhpArray = struct {
                 if (entry.key == .int and entry.key.int == k) return;
             }
         }
-        try self.entries.ensureUnusedCapacity(allocator, 1);
+        const capacity = self.entries.capacity;
+        try self.reserve(allocator, self.entries.items.len + 1, false);
         if (!self.weak) retainStored(value);
         self.entries.appendAssumeCapacity(.{ .key = .{ .int = k }, .value = value });
         self.next_int_key = if (k == std.math.maxInt(i64)) k else k + 1;
         self.has_int_keys = true;
+        // php's table doubles as an element past a power of two arrives
+        const n = self.entries.items.len;
+        if (self.entries.capacity != capacity or n > self.php_table) self.settleMemory(allocator);
     }
 
     // an element holding its own counted copy of bytes the caller keeps
@@ -429,7 +503,9 @@ pub const PhpArray = struct {
         const new_idx = self.entries.items.len;
         // Capacity may grow on failure, but entries, index contents, key
         // progression and ownership remain unchanged until both reserves succeed.
-        try self.entries.ensureUnusedCapacity(allocator, 1);
+        const capacity = self.entries.capacity;
+        const index_capacity = self.string_index.capacity();
+        try self.reserve(allocator, new_idx + 1, key == .string);
         if (key == .string) try self.string_index.ensureUnusedCapacity(allocator, 1);
         if (!self.weak) retainStored(value);
         if (key == .string) key.string.retain();
@@ -441,6 +517,9 @@ pub const PhpArray = struct {
         } else if (key == .string) {
             self.string_index.putAssumeCapacity(key.string.bytes(), new_idx);
         }
+        // the first string key makes a packed table a hash
+        const n = new_idx + 1;
+        if (self.entries.capacity != capacity or self.string_index.capacity() != index_capacity or n > self.php_table or (key == .string and new_idx > 0 and self.string_index.count() == 1)) self.settleMemory(allocator);
     }
 
     pub fn contains(self: *const PhpArray, raw_key: Key) bool {
@@ -527,6 +606,7 @@ pub const PhpArray = struct {
         }
         self.string_index.deinit(allocator);
         self.string_index = index;
+        self.settleMemory(allocator);
     }
 
     // Reserve an upper bound on the number of string-keyed entries AFTER the
@@ -534,6 +614,7 @@ pub const PhpArray = struct {
     pub fn reserveStringIndex(self: *PhpArray, allocator: std.mem.Allocator, string_count: usize) !void {
         const count = std.math.cast(u32, string_count) orelse return error.OutOfMemory;
         try self.string_index.ensureTotalCapacity(allocator, count);
+        self.settleMemory(allocator);
     }
 
     pub fn rebuildStringIndexAssumeCapacity(self: *PhpArray) void {
@@ -1209,6 +1290,10 @@ pub const PhpObject = struct {
     // native pointers behind a builtin or extension class live here, never
     // in properties, so php code cannot read or forge them
     native: NativeHandle = .{},
+    // what the dynamic property table is counted at in the vm's memory
+    // account beyond the bytes it takes (php's property HashTable is
+    // smaller); undone when the table is freed, as PhpArray.mem_adj
+    mem_adj: i64 = 0,
 
     pub const LazyState = struct {
         initializer: Value,
@@ -1301,6 +1386,10 @@ pub const PhpObject = struct {
             allocator.destroy(state);
         }
         for (self.properties.keys()) |name| allocator.free(name);
+        if (self.mem_adj != 0) {
+            if (memory.accountOf(allocator)) |account| account.skew(-self.mem_adj);
+            self.mem_adj = 0;
+        }
         self.properties.deinit(allocator);
         var unset_names = self.unset_slots.keyIterator();
         while (unset_names.next()) |name| allocator.free(name.*);
@@ -1344,7 +1433,28 @@ pub const PhpObject = struct {
 
     // stores an already-counted value; a new property's name is copied, so
     // callers may pass bytes that die with the call
+    fn propertyTableAdjust(count: usize, capacity: usize) i64 {
+        if (capacity == 0) return 0;
+        const size = std.math.ceilPowerOfTwo(usize, @max(count, 8)) catch return 0;
+        var raw = memory.phpSize(capacity * (@sizeOf([]const u8) + @sizeOf(Value) + @sizeOf(u32)));
+        if (capacity > 8) raw += memory.phpSize((std.math.ceilPowerOfTwo(usize, capacity + capacity / 4) catch capacity) * 8);
+        return @as(i64, @intCast(memory.phpSize(size * 40))) - @as(i64, @intCast(raw));
+    }
+
+    fn skewProperties(self: *PhpObject, allocator: std.mem.Allocator, count: usize, capacity: usize) void {
+        const account = memory.accountOf(allocator) orelse return;
+        const want = propertyTableAdjust(count, capacity);
+        account.skew(want - self.mem_adj);
+        self.mem_adj = want;
+    }
+
     pub fn putProperty(self: *PhpObject, allocator: std.mem.Allocator, name: []const u8, value: Value) !void {
+        // the table is counted at php's size for what it will hold before
+        // it grows, so memory_limit checks that size
+        const capacity = self.properties.capacity();
+        const count = self.properties.count();
+        if (count == capacity) self.skewProperties(allocator, count + 1, (count + 1) + (count + 1) / 2 + 8);
+        defer if (self.properties.capacity() != capacity or (count > 8 and count & (count - 1) == 0)) self.skewProperties(allocator, self.properties.count(), self.properties.capacity());
         const gop = try self.properties.getOrPut(allocator, name);
         if (gop.found_existing) {
             const old = gop.value_ptr.*;

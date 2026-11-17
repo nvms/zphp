@@ -1659,6 +1659,14 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                 .concat => {
                     const b = stack[sp - 1];
                     const a = stack[sp - 2];
+                    if (try VM.extendTemporaryString(a, b)) |extended| {
+                        self.stackRelease(b);
+                        sp -= 1;
+                        stack[sp - 1] = extended;
+                        const _next = readOp(code, ip);
+                        ip += op_bytes;
+                        continue :dispatch _next;
+                    }
                     if (a == .string and b == .string) {
                         const as = a.string.bytes();
                         const bs = b.string.bytes();

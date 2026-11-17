@@ -2,10 +2,17 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 // php's view of a VM's memory: the bytes its allocator hands out, counted
-// from a baseline (what the VM holds before a script or request runs), and
-// memory_limit enforced on that count. an allocation that would cross the
-// limit fails, and so does every one after it until the VM reports the
-// exhaustion, so a swallowed failure cannot let a script run on unlimited
+// from a baseline (what the VM holds before a script or request runs) the
+// way zend_alloc counts them, and memory_limit enforced on that count.
+//
+// each allocation is counted at the size php's allocator would give it (its
+// small bin, or whole pages), and the limit is checked as zend_mm_check_limit
+// does: against the memory in use rounded up to 2MB chunks (php's real
+// size), when a new chunk or a huge block is needed. memory_limit is php 8.5's soft limit: an allocation
+// that crosses it still succeeds, leaving the exhaustion pending for the VM
+// to report at its next interrupt point, up to the hard limit (twice the
+// soft one, or 1GB above it), past which allocations fail
+
 // the allocator under every account: memory that outlives the VM that
 // allocated it, like values in flight between threads, comes from here
 pub fn root(allocator: Allocator) Allocator {
@@ -17,18 +24,69 @@ pub fn root(allocator: Allocator) Allocator {
     return current;
 }
 
+// the account an allocator charges, if it is one
+pub fn accountOf(allocator: Allocator) ?*MemoryAccount {
+    if (allocator.vtable != &MemoryAccount.vtable) return null;
+    return @ptrCast(@alignCast(allocator.ptr));
+}
+
+pub const chunk_size: usize = 2 * 1024 * 1024;
+const page_size: usize = 4096;
+// ZEND_MM_MAX_LARGE_SIZE: anything bigger is a huge block of its own
+const max_large_size: usize = chunk_size - page_size;
+
+const bins = [_]u16{ 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1280, 1536, 1792, 2048, 2560, 3072 };
+
+// the bin of a small size, by (size - 1) / 8
+const bin_of = blk: {
+    @setEvalBranchQuota(10000);
+    var table: [3072 / 8]u16 = undefined;
+    var bin: usize = 0;
+    for (&table, 0..) |*slot, i| {
+        const size = (i + 1) * 8;
+        while (bins[bin] < size) bin += 1;
+        slot.* = bins[bin];
+    }
+    break :blk table;
+};
+
+// what zend_mm_alloc takes for a request of `len` bytes
+pub fn phpSize(len: usize) usize {
+    if (len == 0) return 0;
+    if (len <= 3072) return bin_of[(len - 1) >> 3];
+    if (len > std.math.maxInt(usize) - page_size) return len;
+    return std.mem.alignForward(usize, len, page_size);
+}
+
+fn isHuge(size: usize) bool {
+    return size > max_large_size;
+}
+
 pub const MemoryAccount = struct {
     parent: Allocator,
     // frees can come from other threads when values cross into worker pools
     used: std.atomic.Value(usize) = .init(0),
+    // arrays counted at php's size for their storage rather than at the
+    // bytes they take (skew); signed, as it is mostly a reduction
+    adjusted: std.atomic.Value(isize) = .init(0),
     peak: std.atomic.Value(usize) = .init(0),
     baseline: usize = 0,
     // bytes allowed above the baseline; 0 is unlimited
     limit: usize = 0,
-    // the size of the allocation the limit refused
+    // the size of the allocation that first crossed the limit: php's
+    // pending (delayed) out of memory error
     refused: ?usize = null,
     // set while the VM reports the exhaustion, which needs memory of its own
     reporting: bool = false,
+    // told when the limit is first crossed, while the code that asked for
+    // the memory is still running: php reports the fatal as from there
+    on_refuse: ?*const fn (owner: *anyopaque) void = null,
+    owner: ?*anyopaque = null,
+    // above zero while php's allocations would be infallible (compiling,
+    // some internal functions): past the hard limit php ends the process
+    // (zend_mm_hard_limit_error) instead of failing the allocation
+    infallible: u32 = 0,
+    on_hard_limit: ?*const fn (owner: *anyopaque, add: usize) noreturn = null,
 
     const vtable: Allocator.VTable = .{
         .alloc = alloc,
@@ -41,45 +99,134 @@ pub const MemoryAccount = struct {
         return .{ .ptr = self, .vtable = &vtable };
     }
 
-    // bytes in use above the baseline
+    fn total(self: *const MemoryAccount) usize {
+        const sum = @as(isize, @intCast(self.used.load(.monotonic))) + self.adjusted.load(.monotonic);
+        return if (sum < 0) 0 else @intCast(sum);
+    }
+
+    // usage that may run below zero for a moment: an array's storage is
+    // counted at php's (smaller) size just before its bytes are asked for
+    fn signedUsage(self: *const MemoryAccount) isize {
+        return @as(isize, @intCast(self.used.load(.monotonic))) + self.adjusted.load(.monotonic) - @as(isize, @intCast(self.baseline));
+    }
+
+    // the real size once `add` more bytes are in use, the room php's
+    // chunks had left taken first when usage is below zero
+    fn realWith(in_use: isize, add: usize) usize {
+        if (in_use >= 0) return realOf(@intCast(in_use)) +| add;
+        const after = in_use + @as(isize, @intCast(@min(add, std.math.maxInt(isize))));
+        return realOf(if (after < 0) 0 else @intCast(after));
+    }
+
+    // bytes in use above the baseline (heap->size)
     pub fn usage(self: *const MemoryAccount) usize {
-        return self.used.load(.monotonic) -| self.baseline;
+        return self.total() -| self.baseline;
     }
 
     pub fn peakUsage(self: *const MemoryAccount) usize {
         return self.peak.load(.monotonic) -| self.baseline;
     }
 
+    // heap->real_size: the 2MB chunks the memory in use takes, at least one
+    pub fn realUsage(self: *const MemoryAccount) usize {
+        return realOf(self.usage());
+    }
+
+    fn realOf(bytes: usize) usize {
+        return @max(chunk_size, std.mem.alignForward(usize, bytes, chunk_size));
+    }
+
     pub fn resetPeak(self: *MemoryAccount) void {
-        self.peak.store(self.used.load(.monotonic), .monotonic);
+        self.peak.store(self.total(), .monotonic);
     }
 
     // start counting from what is held now, as a fresh request does
     pub fn rebase(self: *MemoryAccount) void {
-        self.baseline = self.used.load(.monotonic);
+        self.baseline = self.total();
         self.resetPeak();
         self.refused = null;
         self.reporting = false;
     }
 
+    // zend_mm_update_hard_limit with memory_hard_limit_percent at -1
+    pub fn hardLimit(self: *const MemoryAccount) usize {
+        const gb: usize = 1024 * 1024 * 1024;
+        if (self.limit > gb) return self.limit +| gb;
+        return self.limit *| 2;
+    }
+
     // memory the VM commits itself rather than through the allocator (its
     // call stack regions); false when memory_limit refuses it
     pub fn chargeExternal(self: *MemoryAccount, len: usize) bool {
-        if (!self.admit(len)) return false;
-        self.charge(len);
+        if (!self.admit(phpSize(len))) return false;
+        self.chargeSized(phpSize(len));
         return true;
     }
 
-    fn admit(self: *MemoryAccount, len: usize) bool {
+    pub fn dischargeExternal(self: *MemoryAccount, len: usize) void {
+        self.dischargeSized(phpSize(len));
+    }
+
+    // what an array holds counted at php's size for it rather than at the
+    // bytes zphp's layout takes: positive charges, negative discharges, with
+    // no limit check (the bytes were already admitted)
+    pub fn skew(self: *MemoryAccount, delta: i64) void {
+        _ = self.adjusted.fetchAdd(@intCast(delta), .monotonic);
+        if (delta > 0) _ = self.peak.fetchMax(self.total(), .monotonic);
+    }
+
+    // for an allocator layered on the account's parent (the string pool):
+    // the same checks and counts its own vtable makes
+    pub fn admitLen(self: *MemoryAccount, len: usize) bool {
+        return self.admit(phpSize(len));
+    }
+
+    pub fn admitGrowthLen(self: *MemoryAccount, old_len: usize, new_len: usize) bool {
+        return new_len <= old_len or self.admitGrowth(old_len, new_len);
+    }
+
+    pub fn chargeLen(self: *MemoryAccount, len: usize) void {
+        self.chargeSized(phpSize(len));
+    }
+
+    pub fn dischargeLen(self: *MemoryAccount, len: usize) void {
+        self.dischargeSized(phpSize(len));
+    }
+
+    pub fn adjustLen(self: *MemoryAccount, old_len: usize, new_len: usize) void {
+        self.adjust(old_len, new_len);
+    }
+
+    // zend_mm_check_limit: a php-sized request is checked when it needs a
+    // new chunk (small and large ones) or is a huge block. past the soft
+    // limit it is let through and the exhaustion left pending; past the
+    // hard limit it fails
+    fn admit(self: *MemoryAccount, size: usize) bool {
         if (self.limit == 0 or self.reporting) return true;
-        if (self.refused == null and self.usage() + len <= self.limit) return true;
-        if (self.refused == null) self.refused = len;
-        return false;
+        const in_use = self.signedUsage();
+        var add = size;
+        if (!isHuge(size)) {
+            // the chunks in use have room: no new memory from the system
+            if (in_use < 0 or realOf(@as(usize, @intCast(in_use)) + size) <= realOf(@intCast(in_use))) return true;
+            add = chunk_size;
+        }
+        const need = realWith(in_use, add);
+        if (need <= self.limit) return true;
+        return self.admitPastLimit(need, add);
+    }
+
+    fn admitPastLimit(self: *MemoryAccount, need: usize, add: usize) bool {
+        if (need > self.hardLimit() and self.infallible > 0) if (self.on_hard_limit) |end| end(self.owner.?, add);
+        if (self.refused == null) {
+            self.refused = add;
+            if (self.on_refuse) |notify| notify(self.owner.?);
+        }
+        return need <= self.hardLimit();
     }
 
     fn charge(self: *MemoryAccount, len: usize) void {
-        const now = self.used.fetchAdd(len, .monotonic) + len;
-        _ = self.peak.fetchMax(now, .monotonic);
+        _ = self.used.fetchAdd(len, .monotonic);
+        _ = self.peak.fetchMax(self.total(), .monotonic);
     }
 
     fn discharge(self: *MemoryAccount, len: usize) void {
@@ -87,17 +234,44 @@ pub const MemoryAccount = struct {
         while (self.used.cmpxchgWeak(current, current -| len, .monotonic, .monotonic)) |seen| current = seen;
     }
 
+    fn chargeSized(self: *MemoryAccount, size: usize) void {
+        self.charge(size);
+    }
+
+    fn dischargeSized(self: *MemoryAccount, size: usize) void {
+        self.discharge(size);
+    }
+
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
         const self: *MemoryAccount = @ptrCast(@alignCast(ctx));
-        if (!self.admit(len)) return null;
+        const size = phpSize(len);
+        if (!self.admit(size)) return null;
         const ptr = self.parent.rawAlloc(len, alignment, ret_addr) orelse return null;
-        self.charge(len);
+        self.chargeSized(size);
         return ptr;
+    }
+
+    // a block growing within its php size needs nothing more; a huge block
+    // growing in place is checked for its growth (zend_mm_realloc_huge),
+    // anything else as the new allocation php's realloc makes
+    fn admitGrowth(self: *MemoryAccount, old_len: usize, new_len: usize) bool {
+        const old_size = phpSize(old_len);
+        const new_size = phpSize(new_len);
+        if (new_size <= old_size) return true;
+        if (isHuge(old_size)) return self.admitHugeGrowth(new_size - old_size);
+        return self.admit(new_size);
+    }
+
+    fn admitHugeGrowth(self: *MemoryAccount, add: usize) bool {
+        if (self.limit == 0 or self.reporting) return true;
+        const need = realWith(self.signedUsage(), add);
+        if (need <= self.limit) return true;
+        return self.admitPastLimit(need, add);
     }
 
     fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
         const self: *MemoryAccount = @ptrCast(@alignCast(ctx));
-        if (new_len > memory.len and !self.admit(new_len - memory.len)) return false;
+        if (new_len > memory.len and !self.admitGrowth(memory.len, new_len)) return false;
         if (!self.parent.rawResize(memory, alignment, new_len, ret_addr)) return false;
         self.adjust(memory.len, new_len);
         return true;
@@ -105,7 +279,7 @@ pub const MemoryAccount = struct {
 
     fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
         const self: *MemoryAccount = @ptrCast(@alignCast(ctx));
-        if (new_len > memory.len and !self.admit(new_len - memory.len)) return null;
+        if (new_len > memory.len and !self.admitGrowth(memory.len, new_len)) return null;
         const ptr = self.parent.rawRemap(memory, alignment, new_len, ret_addr) orelse return null;
         self.adjust(memory.len, new_len);
         return ptr;
@@ -114,11 +288,15 @@ pub const MemoryAccount = struct {
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
         const self: *MemoryAccount = @ptrCast(@alignCast(ctx));
         self.parent.rawFree(memory, alignment, ret_addr);
-        self.discharge(memory.len);
+        self.dischargeSized(phpSize(memory.len));
     }
 
     fn adjust(self: *MemoryAccount, old_len: usize, new_len: usize) void {
-        if (new_len > old_len) self.charge(new_len - old_len) else self.discharge(old_len - new_len);
+        const old_size = phpSize(old_len);
+        const new_size = phpSize(new_len);
+        if (old_size == new_size) return;
+        self.dischargeSized(old_size);
+        self.chargeSized(new_size);
     }
 };
 
@@ -359,20 +537,29 @@ pub fn reportQuantity(allocator: std.mem.Allocator, text: []const u8, signed: bo
 test "the account counts, limits and rebases" {
     var account = MemoryAccount{ .parent = std.testing.allocator };
     const a = account.allocator();
+    // counted at php's bin sizes
     const first = try a.alloc(u8, 100);
-    try std.testing.expectEqual(@as(usize, 100), account.usage());
+    try std.testing.expectEqual(@as(usize, 112), account.usage());
     account.rebase();
-    account.limit = 150;
-    const second = try a.alloc(u8, 150);
-    try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 1));
-    try std.testing.expectEqual(@as(?usize, 1), account.refused);
-    a.free(second);
-    try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 1));
+    account.limit = 4 << 20;
+    try std.testing.expectEqual(@as(usize, 2 << 20), account.realUsage());
+    // past the soft limit: let through, the exhaustion left pending
+    const second = try a.alloc(u8, 3 << 20);
+    try std.testing.expectEqual(@as(?usize, 3 << 20), account.refused);
+    try std.testing.expectEqual(@as(usize, 4 << 20), account.realUsage());
+    // past the hard limit (twice the soft one): refused
+    try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 5 << 20));
+    try std.testing.expectEqual(@as(?usize, 3 << 20), account.refused);
     account.reporting = true;
     const third = try a.alloc(u8, 8);
     a.free(third);
+    a.free(second);
     a.free(first);
     try std.testing.expectEqual(@as(usize, 0), account.used.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 8), phpSize(1));
+    try std.testing.expectEqual(@as(usize, 2560), phpSize(2049));
+    try std.testing.expectEqual(@as(usize, 3072), phpSize(3072));
+    try std.testing.expectEqual(@as(usize, 8192), phpSize(4097));
     try std.testing.expectEqual(@as(i64, 128 << 20), parseQuantity("128M").value);
     try std.testing.expectEqual(@as(i64, -1), parseQuantity("-1").value);
     try std.testing.expectEqual(@as(i64, 512), parseQuantity(" 512 ").value);

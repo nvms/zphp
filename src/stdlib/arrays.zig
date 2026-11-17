@@ -789,12 +789,13 @@ fn array_fill(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResul
     const count: usize = @intCast(num);
 
     var result = try ctx.createArray();
-    try result.entries.ensureTotalCapacity(ctx.allocator, count);
+    try result.reserve(ctx.allocator, count, false);
     for (0..count) |i| {
         VM.retainValue(val);
         result.entries.appendAssumeCapacity(.{ .key = .{ .int = start_idx + @as(i64, @intCast(i)) }, .value = val });
     }
     if (count > 0) result.noteIntKey(start_idx + @as(i64, @intCast(count - 1)));
+    result.settleMemory(ctx.allocator);
     return NativeResult.borrowed(.{ .array = result });
 }
 
@@ -2213,7 +2214,7 @@ fn native_range(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         const span: u64 = @as(u64, @bitCast(sl)) -% @as(u64, @bitCast(el));
         if (span < ustep) return boundaryError(ctx);
         const size = try longRangeSize(ctx, span, sl, el, step);
-        try arr.entries.ensureTotalCapacity(ctx.allocator, size);
+        try arr.reserve(ctx.allocator, size, false);
         var i: u64 = 0;
         while (i < size) : (i += 1) try arr.append(ctx.allocator, .{ .int = @bitCast(@as(u64, @bitCast(sl)) -% i *% ustep) });
     } else if (el > sl) {
@@ -2221,12 +2222,13 @@ fn native_range(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         const span: u64 = @as(u64, @bitCast(el)) -% @as(u64, @bitCast(sl));
         if (span < ustep) return boundaryError(ctx);
         const size = try longRangeSize(ctx, span, el, sl, step);
-        try arr.entries.ensureTotalCapacity(ctx.allocator, size);
+        try arr.reserve(ctx.allocator, size, false);
         var i: u64 = 0;
         while (i < size) : (i += 1) try arr.append(ctx.allocator, .{ .int = @bitCast(@as(u64, @bitCast(sl)) +% i *% ustep) });
     } else {
         try arr.append(ctx.allocator, .{ .int = sl });
     }
+    arr.settleMemory(ctx.allocator);
     return NativeResult.borrowed(.{ .array = arr });
 }
 

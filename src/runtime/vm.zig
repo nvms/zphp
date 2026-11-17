@@ -288,7 +288,11 @@ pub const NativeContext = struct {
         const outer = self.vm.native_caller;
         self.vm.native_caller = .{ .name = self.call_name, .frames = self.vm.frame_count };
         defer self.vm.native_caller = outer;
-        return self.invokeCallableAsCaller(callable, args);
+        const result = try self.invokeCallableAsCaller(callable, args);
+        // zend_call_function's interrupt check: memory the callback took
+        // past the limit ends the script as it returns
+        if (self.vm.oom_pending) return self.vm.raisePendingOom();
+        return result;
     }
 
     fn invokeCallableAsCaller(self: *NativeContext, callable: Value, args: []const Value) RuntimeError!Value {
@@ -901,6 +905,17 @@ pub const VM = struct {
     // counts what `allocator` hands out and enforces memory_limit; the VM
     // allocates through it and it wraps the allocator the VM was built with
     memory: ?*MemoryAccount = null,
+    // where the code running when memory_limit refused an allocation was:
+    // php raises the fatal there, before anything unwinds
+    oom_file: [1024]u8 = undefined,
+    oom_file_len: usize = 0,
+    oom_line: i64 = 0,
+    // memory_limit was crossed and php's delayed out of memory error waits
+    // for the next interrupt point (a native call's return, a loop's back
+    // jump, the end of the script). the deadline poll is pointed at it,
+    // its own deadline kept here
+    oom_pending: bool = false,
+    oom_saved_deadline: i64 = 0,
     frame_count: usize = 0,
     frame_high_water: usize = 0,
     stack: []Value = &.{},
@@ -2510,11 +2525,12 @@ pub const VM = struct {
 
     fn initVm(vm: *VM, parent: Allocator) RuntimeError!void {
         const account = try parent.create(MemoryAccount);
-        account.* = .{ .parent = parent };
+        account.* = .{ .parent = parent, .on_refuse = noteMemoryRefused, .on_hard_limit = hardMemoryLimitExceeded, .owner = vm };
         vm.memory = account;
         vm.allocator = account.allocator();
         const allocator = vm.allocator;
-        vm.string_pool.backing = allocator;
+        vm.string_pool.backing = parent;
+        vm.string_pool.account = account;
         if (platform.getenv("ZPHP_NO_POOL") != null) vm.debug_no_pool = true;
         if (platform.getenv("ZPHP_GC_VERIFY") != null) vm.debug_gc_verify = true;
         vm.debug_trace_class = platform.getenv("ZPHP_TRACE_OBJ_CLASS");
@@ -4154,6 +4170,10 @@ pub const VM = struct {
         if (self.memory) |account| {
             self.applyConfiguredMemoryLimit(false);
             account.rebase();
+            if (self.oom_pending) {
+                self.oom_pending = false;
+                self.execution_deadline_ns = self.oom_saved_deadline;
+            }
         }
     }
 
@@ -4262,7 +4282,7 @@ pub const VM = struct {
         // memory_get_usage() would see
         if (self.globals_array) |ga| {
             const want = ga.entries.items.len + result.slot_names.len;
-            try ga.entries.ensureTotalCapacity(self.allocator, want);
+            try ga.reserve(self.allocator, want, true);
             try ga.reserveStringIndex(self.allocator, want);
         }
         try vars.ensureUnusedCapacity(self.allocator, @intCast(result.slot_names.len));
@@ -4292,6 +4312,9 @@ pub const VM = struct {
         // root buffer is empty when the script starts
         self.forgetCycleCandidates();
         self.run() catch |err| return self.reportMemoryExhausted(err);
+        // a refusal some native swallowed still ends the script: php bails
+        // out at the allocation
+        if (self.memory) |account| if (account.refused != null and !account.reporting and !self.exit_requested) return self.reportMemoryExhausted(error.OutOfMemory);
     }
 
     fn forgetCycleCandidates(self: *VM) void {
@@ -4301,13 +4324,53 @@ pub const VM = struct {
         self.cycle_candidates.clearRetainingCapacity();
     }
 
+    fn noteMemoryRefused(owner: *anyopaque) void {
+        const self: *VM = @ptrCast(@alignCast(owner));
+        const at = self.currentSourcePosition();
+        const n = @min(at.file.len, self.oom_file.len);
+        @memcpy(self.oom_file[0..n], at.file[0..n]);
+        self.oom_file_len = n;
+        self.oom_line = at.line;
+        self.oom_pending = true;
+        // the next back jump polls the deadline, which reports this first
+        self.oom_saved_deadline = self.execution_deadline_ns;
+        self.execution_deadline_ns = 1;
+        self.deadline_tick_counter = 0xFFF;
+    }
+
+    // zend_mm_hard_limit_error: an allocation php can't fail went past the
+    // hard limit. what the script printed outside output buffers goes out,
+    // the message goes to stderr, and the process ends at once
+    fn hardMemoryLimitExceeded(owner: *anyopaque, add: usize) noreturn {
+        const self: *VM = @ptrCast(@alignCast(owner));
+        if (!self.serve_mode) {
+            const sent = if (self.ob_stack.items.len > 0) self.ob_stack.items[0].start else self.output.items.len;
+            platform.writeStdout(self.output.items[0..sent]);
+        }
+        const at = self.currentSourcePosition();
+        var buf: [1400]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Hard memory limit of {d} bytes exhausted (tried to allocate {d} bytes) in {s} on line {d}\n", .{ self.memory.?.hardLimit(), add, at.file, at.line }) catch "Hard memory limit exhausted\n";
+        platform.writeAll(std.Io.File.stderr(), msg) catch {};
+        platform.exitWithStatus(137);
+    }
+
+    // php's zend_handle_delayed_oom at an interrupt point
+    pub fn raisePendingOom(self: *VM) RuntimeError {
+        return self.reportMemoryExhausted(error.OutOfMemory);
+    }
+
     // an allocation memory_limit refused surfaces as OutOfMemory wherever it
-    // happened; raise php's fatal for it once the script has stopped
+    // happened; raise php's fatal for it once the script has stopped, naming
+    // where the allocation was asked for
     pub fn reportMemoryExhausted(self: *VM, err: RuntimeError) RuntimeError {
         const account = self.memory orelse return err;
         const refused = account.refused orelse return err;
         if (account.reporting) return err;
         account.reporting = true;
+        if (self.oom_pending) {
+            self.oom_pending = false;
+            self.execution_deadline_ns = self.oom_saved_deadline;
+        }
         var buf: [160]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "Allowed memory size of {d} bytes exhausted (tried to allocate {d} bytes)", .{ account.limit, refused }) catch unreachable;
         // php drops every output buffer before reporting it, unless a
@@ -4316,7 +4379,7 @@ pub const VM = struct {
             if (self.ob_stack.items.len > 0) self.output.shrinkRetainingCapacity(@min(self.ob_stack.items[0].start, self.output.items.len));
             output_control.releaseAll(self);
         }
-        self.raiseError(1, msg) catch |raised| return raised;
+        self.raiseErrorAt(1, msg, .{ .file = self.oom_file[0..self.oom_file_len], .line = self.oom_line }) catch |raised| return raised;
         return error.RuntimeError;
     }
 
@@ -5670,6 +5733,11 @@ pub const VM = struct {
                     self.push(v.negate());
                 },
                 .concat => {
+                    if (try extendTemporaryString(self.stack[self.sp - 2], self.stack[self.sp - 1])) |extended| {
+                        self.stack[self.sp - 2] = extended;
+                        _ = self.pop();
+                        continue;
+                    }
                     const b = self.pop();
                     const a = self.pop();
                     VM.retainValue(a);
@@ -10956,6 +11024,9 @@ pub const VM = struct {
                                 const fs_mod = @import("../stdlib/filesystem.zig");
                                 fs_mod.current_include = @tagName(kind);
                                 defer fs_mod.current_include = null;
+                                // compiling allocates as php's compiler does: it can't fail
+                                self.memory.?.infallible += 1;
+                                defer self.memory.?.infallible -= 1;
                                 break :blk loader(path, self.allocator, self);
                             } else null;
 
@@ -15587,6 +15658,7 @@ pub const VM = struct {
     }
 
     fn expireExecution(self: *VM) RuntimeError!void {
+        if (self.oom_pending) return self.raisePendingOom();
         const unit: []const u8 = if (self.execution_limit_seconds == 1) "second" else "seconds";
         const msg = try std.fmt.allocPrint(self.allocator, "Maximum execution time of {d} {s} exceeded", .{ self.execution_limit_seconds, unit });
         defer self.allocator.free(msg);
@@ -19556,6 +19628,22 @@ pub const VM = struct {
         try buffer.appendSlice(self.stringAllocator(), suffix.items);
         self.pushTransfer(.{ .string = try Value.String.adopt(self.stringAllocator(), try buffer.toOwnedSlice(self.stringAllocator())) });
         return self.assignLocal(frame, slot, self.peek());
+    }
+
+    // php's ZEND_CONCAT extends a left operand only the operand stack holds
+    // (a temporary with one reference) in place instead of copying it, so a
+    // chain of concatenations grows one string. done for big strings, where
+    // the copy costs memory_limit what php's doesn't. the extended value, or
+    // null to concatenate by copying
+    pub fn extendTemporaryString(a: Value, b: Value) RuntimeError!?Value {
+        if (a != .string or b != .string) return null;
+        const owner = a.string.owner orelse return null;
+        if (a.string.len < 4096 or owner.refcount != 1 or owner.release_queued or a.string.ptr != owner.bytes.ptr) return null;
+        const length = std.math.add(usize, a.string.len, b.string.len) catch return error.OutOfMemory;
+        if (length > owner.bytes.len) owner.bytes = try owner.allocator.realloc(owner.bytes, length);
+        @memcpy(owner.bytes[a.string.len..length], b.string.bytes());
+        owner.utf8_valid = false;
+        return .{ .string = .{ .ptr = owner.bytes.ptr, .len = length, .owner = owner } };
     }
 
     // the reference cell bound to a local, if any
@@ -27637,6 +27725,7 @@ pub const VM = struct {
                 copy.string_index.put(self.allocator, entry.key.string.bytes(), i) catch return error.RuntimeError;
             }
         }
+        copy.settleMemory(self.allocator);
         try self.registerCloneRefs(copy);
         // zend_array_dup copies the iterators of a live by-reference loop:
         // the copy keeps the removals the loop hasn't seen yet
@@ -27730,6 +27819,7 @@ pub const VM = struct {
             }
         }
         if (inherit_next and !cursor_set) copy.cursor = copy.entries.items.len;
+        copy.settleMemory(self.allocator);
         try self.registerCloneRefs(copy);
         return copy;
     }
@@ -27792,6 +27882,7 @@ pub const VM = struct {
                 copy.string_index.put(self.allocator, entry.key.string.bytes(), i) catch return error.RuntimeError;
             }
         }
+        copy.settleMemory(self.allocator);
         try self.registerCloneRefs(copy);
         return copy;
     }
@@ -27824,6 +27915,7 @@ pub const VM = struct {
                 copy.string_index.put(self.allocator, entry.key.string.bytes(), i) catch return error.RuntimeError;
             }
         }
+        copy.settleMemory(self.allocator);
         try self.registerCloneRefs(copy);
         return copy;
     }
@@ -28062,6 +28154,12 @@ pub const VM = struct {
                 return error.RuntimeError;
             }
         };
+        // ZEND_VM_FCALL_INTERRUPT_CHECK: memory the call took past the
+        // limit ends the script as it returns
+        if (self.oom_pending) {
+            self.releaseValue(result.value);
+            return self.raisePendingOom();
+        }
         return result.value;
     }
 

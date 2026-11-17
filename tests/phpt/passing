@@ -3414,8 +3414,12 @@ Zend/tests/offsets/null_offset_unset_via_error_handler.phpt
 Zend/tests/offsets/object_container_offset_behaviour.phpt
 Zend/tests/offsets/reference_containers_appended.phpt
 Zend/tests/offsets/string_container_offset_behaviour.phpt
+Zend/tests/oom_SplFixedArray___unserialize.phpt
+Zend/tests/oom_SplFixedArray___wakeup.phpt
 Zend/tests/oom_SplFixedArray_copy_ctor.phpt
 Zend/tests/oom_SplFixedArray_fromArray_001.phpt
+Zend/tests/oom_SplFixedArray_fromArray_002.phpt
+Zend/tests/oom_after_main_script.phpt
 Zend/tests/oom_array_fill_001.phpt
 Zend/tests/oom_array_fill_002.phpt
 Zend/tests/oom_array_fill_003.phpt
@@ -3436,6 +3440,7 @@ Zend/tests/oom_debug_backtrace_args.phpt
 Zend/tests/oom_debug_backtrace_named_args.phpt
 Zend/tests/oom_error_get_last.phpt
 Zend/tests/oom_exception_trace.phpt
+Zend/tests/oom_hard_limit_exceeded_during_complilation.phpt
 Zend/tests/oom_interrupt_unfinished_call_frame.phpt
 Zend/tests/oom_interrupt_unfinished_call_frame_fiber.phpt
 Zend/tests/oom_json_decode_001.phpt
@@ -3445,6 +3450,7 @@ Zend/tests/oom_json_decode_004.phpt
 Zend/tests/oom_json_decode_005.phpt
 Zend/tests/oom_json_decode_006.phpt
 Zend/tests/oom_json_decode_007.phpt
+Zend/tests/oom_pending_at_shutdown.phpt
 Zend/tests/oom_range_001.phpt
 Zend/tests/oom_range_002.phpt
 Zend/tests/oom_range_003.phpt
@@ -3452,14 +3458,20 @@ Zend/tests/oom_range_004.phpt
 Zend/tests/oom_soft_limit_exceeded.phpt
 Zend/tests/oom_soft_limit_exceeded_fcall.phpt
 Zend/tests/oom_str_repeat.phpt
+Zend/tests/oom_unserialize_001.phpt
 Zend/tests/oom_unserialize_002.phpt
 Zend/tests/oom_unserialize_003.phpt
 Zend/tests/oom_unserialize_004.phpt
 Zend/tests/oom_unserialize_005.phpt
 Zend/tests/oom_unserialize_006.phpt
 Zend/tests/oom_unserialize_007.phpt
+Zend/tests/oom_unserialize_008.phpt
+Zend/tests/oom_unserialize_009.phpt
 Zend/tests/oom_unserialize_011.phpt
+Zend/tests/oom_unserialize_012.phpt
+Zend/tests/oom_unserialize_013.phpt
 Zend/tests/oom_unserialize_014.phpt
+Zend/tests/oom_unserialize_015.phpt
 Zend/tests/oom_unserialize_016.phpt
 Zend/tests/operator_unsupported_types.phpt
 Zend/tests/optimizer/nan_warning_switch.phpt
@@ -5764,6 +5776,8 @@ ext/hash/tests/hash_init_error.phpt
 ext/hash/tests/hash_pbkdf2_basic.phpt
 ext/hash/tests/hash_pbkdf2_error.phpt
 ext/hash/tests/hash_pbkdf2_large_length.phpt
+ext/hash/tests/hash_pbkdf2_max_length.phpt
+ext/hash/tests/hash_pbkdf2_max_length_raw.phpt
 ext/hash/tests/hash_serialize_001.phpt
 ext/hash/tests/hash_serialize_002.phpt
 ext/hash/tests/hash_serialize_003.phpt
@@ -10544,6 +10558,7 @@ ext/standard/tests/strings/vsprintf_basic9.phpt
 ext/standard/tests/strings/wordwrap.phpt
 ext/standard/tests/strings/wordwrap_basic.phpt
 ext/standard/tests/strings/wordwrap_error.phpt
+ext/standard/tests/strings/wordwrap_memory_limit.phpt
 ext/standard/tests/strings/wordwrap_memory_limit_002.phpt
 ext/standard/tests/strings/wordwrap_memory_limit_003.phpt
 ext/standard/tests/strings/wordwrap_memory_limit_004.phpt

@@ -2287,9 +2287,9 @@ fn callablePair(ctx: *NativeContext, target: Value, method: []const u8) RuntimeE
 }
 
 fn native_memory_get_usage(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    const used = if (ctx.vm.memory) |m| m.usage() else 0;
+    const account = ctx.vm.memory orelse return NativeResult.scalar(.{ .int = 0 });
     const real = args.len > 0 and args[0].isTruthy();
-    return NativeResult.scalar(.{ .int = @intCast(if (real) VM.realMemoryUsage(used) else used) });
+    return NativeResult.scalar(.{ .int = @intCast(if (real) account.realUsage() else account.usage()) });
 }
 
 fn native_memory_get_peak_usage(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -2320,7 +2320,7 @@ fn setMemoryLimit(ctx: *NativeContext, text: []const u8) RuntimeError!bool {
     }
     const account = ctx.vm.memory orelse return true;
     if (q.value >= 0) {
-        const in_use = VM.realMemoryUsage(account.usage());
+        const in_use = account.realUsage();
         if (@as(u64, @intCast(q.value)) < in_use) {
             const msg = try std.fmt.allocPrint(ctx.allocator, "Failed to set memory limit to {d} bytes (Current memory usage is {d} bytes)", .{ q.value, in_use });
             defer ctx.allocator.free(msg);

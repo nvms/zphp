@@ -720,7 +720,11 @@ fn native_hash_pbkdf2(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     const dsize: i64 = @intCast(ops.digest_size);
     const loops = @divTrunc(digest_length - 1, dsize) + 1;
     const result_len = std.math.mul(usize, @intCast(loops), ops.digest_size) catch return error.OutOfMemory;
-    const result = try ctx.allocator.alloc(u8, result_len);
+    // php's safe_emalloc can't fail: past the hard limit the process ends
+    if (ctx.vm.memory) |m| m.infallible += 1;
+    const allocated = ctx.allocator.alloc(u8, result_len);
+    if (ctx.vm.memory) |m| m.infallible -= 1;
+    const result = try allocated;
     defer ctx.allocator.free(result);
     const computed_salt = try ctx.allocator.alloc(u8, salt.len + 4);
     defer ctx.allocator.free(computed_salt);
