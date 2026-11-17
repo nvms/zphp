@@ -9171,6 +9171,7 @@ ext/standard/tests/general_functions/strval.phpt
 ext/standard/tests/general_functions/sys_getloadavg.phpt
 ext/standard/tests/general_functions/tick_function_remove_trampoline_with_no_functions_set_up.phpt
 ext/standard/tests/general_functions/tick_function_with_trampoline.phpt
+ext/standard/tests/general_functions/type.phpt
 ext/standard/tests/general_functions/uniqid_basic.phpt
 ext/standard/tests/general_functions/unregister_tick_function_error.phpt
 ext/standard/tests/general_functions/url_rewriting_basic1.phpt

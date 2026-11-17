@@ -1002,7 +1002,11 @@ fn settypeValue(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
         if (val == .array) try ctx.vm.emitWarning("Array to string conversion");
         // __toString, or php's "could not be converted to string" Error
         if (val == .object) {
-            const text = try ctx.vm.objectString(val.object);
+            // convert_to_string leaves an empty string after the Error
+            const text = ctx.vm.objectString(val.object) catch |err| {
+                if (ctx.vm.pending_exception != null) ctx.setCallerVar(0, args.len, .{ .string = Value.String.borrowed("") });
+                return err;
+            };
             return if (text.owner != null) NativeResult.takeString(text) else NativeResult.shareString(text);
         }
         if (val == .float and std.math.isNan(val.float)) try ctx.vm.emitWarning("unexpected NAN value was coerced to string");
