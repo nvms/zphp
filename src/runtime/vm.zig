@@ -1418,6 +1418,9 @@ pub const VM = struct {
     // (php's IS_CONSTANT_VISITED), and how deep evaluation is nested
     constants_visited: std.ArrayListUnmanaged([2][]const u8) = .empty,
     constant_eval_depth: u32 = 0,
+    // an include or require is opening or compiling its file: a trace taken
+    // then (an error handler's) lists the include
+    in_require_open: bool = false,
     // trait constants waiting for the using class's own value
     trait_constant_checks: std.ArrayListUnmanaged(struct { class: []const u8, name: []const u8, trait: []const u8, value: Value }) = .empty,
     // a trait property's default waiting for the class's own to be installed
@@ -11223,10 +11226,13 @@ pub const VM = struct {
                     const path_val = self.pop();
                     VM.retainValue(path_val);
                     defer self.releaseValue(path_val);
+                    self.in_require_open = true;
                     const target = self.includeTarget(kind, path_val) catch {
+                        self.in_require_open = false;
                         _ = try self.resumeRaised();
                         continue;
                     };
+                    self.in_require_open = false;
                     {
                         const is_require = kind.required();
                         const path = target orelse {
@@ -11247,6 +11253,8 @@ pub const VM = struct {
                                 // compiling allocates as php's compiler does: it can't fail
                                 self.memory.?.infallible += 1;
                                 defer self.memory.?.infallible -= 1;
+                                self.in_require_open = true;
+                                defer self.in_require_open = false;
                                 break :blk loader(path, self.allocator, self);
                             } else null;
 
@@ -11397,10 +11405,16 @@ pub const VM = struct {
                                 return error.RuntimeError;
                             } else if (@import("../stdlib/filesystem.zig").includeThroughStream(self, path)) {
                                 // the stream's own warnings said why
-                                self.includeFailedOpening(kind, path) catch if (try self.resumeRaised()) continue;
+                                self.in_require_open = true;
+                                const failed = self.includeFailedOpening(kind, path);
+                                self.in_require_open = false;
+                                failed catch if (try self.resumeRaised()) continue;
                                 self.push(.{ .bool = false });
                             } else {
-                                self.includeNotOpened(kind, path, "Permission denied") catch if (try self.resumeRaised()) continue;
+                                self.in_require_open = true;
+                                const failed = self.includeNotOpened(kind, path, "Permission denied");
+                                self.in_require_open = false;
+                                failed catch if (try self.resumeRaised()) continue;
                                 self.push(.{ .bool = false });
                             }
                         }
@@ -15980,6 +15994,26 @@ pub const VM = struct {
     // at the requirer's (frame_idx-1) ip: when the required file is mid-
     // execution it sits just past the 2-byte `require` opcode (op + variant).
     // skipped silently if the shape does not match (defensive)
+    pub fn appendPendingRequire(self: *VM, arr: *PhpArray, frame_idx: usize) !void {
+        const frame = self.frames[frame_idx];
+        if (frame.native or frame.ip < 1 + bytecode.op_bytes) return;
+        if (!self.in_require_open) return;
+        if (!bytecode.opIs(frame.chunk.code.items, frame.ip - 1 - bytecode.op_bytes, .require)) return;
+        const fn_name: []const u8 = switch (frame.chunk.code.items[frame.ip - 1]) {
+            1 => "require_once",
+            2 => "include",
+            3 => "include_once",
+            else => "require",
+        };
+        const entry = try self.allocArray();
+        try entry.set(self.allocator, .{ .string = Value.String.borrowed("function") }, .{ .string = Value.String.borrowed(fn_name) });
+        try entry.set(self.allocator, .{ .string = Value.String.borrowed("file") }, .{ .string = Value.String.borrowed(self.frameFile(frame_idx)) });
+        if (self.sourceLocation(frame.chunk, frame.ip - 1 - bytecode.op_bytes)) |loc| {
+            try entry.set(self.allocator, .{ .string = Value.String.borrowed("line") }, .{ .int = @as(i64, @intCast(loc.line)) });
+        }
+        try arr.append(self.allocator, .{ .array = entry });
+    }
+
     pub fn tryAppendRequireFrame(self: *VM, arr: *PhpArray, frame_idx: usize) !void {
         if (frame_idx == 0 or frame_idx >= self.frame_count) return;
         const frame = self.frames[frame_idx];
@@ -16057,6 +16091,10 @@ pub const VM = struct {
                 const site = attribute_site orelse if (outermost and !natives[next_native].from_native) self.framePosition(site_frame) else null;
                 try arr.append(self.allocator, .{ .array = try self.nativeTraceEntry(natives[next_native], site, true) });
             }
+            // a frame still opening the file it requires, which called the
+            // frame above (an error handler for the failed open), is in that
+            // require, as php's trace lists it
+            if (i + 1 < top and (self.frames[i + 1].func != null or self.frames[i + 1].script_path.len == 0)) try self.appendPendingRequire(arr, i);
             if (self.frames[i].func) |f| if (f.name.len > 0 and i != self.hidden_trace_frame) {
                 const called_by_native = next_native < native_count and natives[next_native].depth == i;
                 const call_site: ?SourcePosition = if (self.attributeSiteAt(i)) |s|

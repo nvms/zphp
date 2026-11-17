@@ -1181,6 +1181,8 @@ pub fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bo
             }
             try result.append(alloc, .{ .array = w });
         }
+        // the caller still opening a file it includes lists that include
+        if (i >= 1 and frame.func != null and (limit == 0 or result.entries.items.len < limit)) try vm.appendPendingRequire(result, i - 1);
     }
 
     // natives the main script's code called
