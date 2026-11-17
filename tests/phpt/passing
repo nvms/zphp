@@ -1208,6 +1208,8 @@ Zend/tests/debug_info/debug_info-error-object.phpt
 Zend/tests/debug_info/debug_info-error-resource.phpt
 Zend/tests/debug_info/debug_info-error-str.phpt
 Zend/tests/debug_info/debug_info-error-true.phpt
+Zend/tests/debug_info/debug_info.phpt
+Zend/tests/debug_info/recursion_return_null.phpt
 Zend/tests/debug_info/recursive_debug_info.phpt
 Zend/tests/declare/bug43027.phpt
 Zend/tests/declare/bug69092.2.phpt
@@ -1935,6 +1937,7 @@ Zend/tests/gc/gc_019.phpt
 Zend/tests/gc/gc_020.phpt
 Zend/tests/gc/gc_021.phpt
 Zend/tests/gc/gc_022.phpt
+Zend/tests/gc/gc_023.phpt
 Zend/tests/gc/gc_024.phpt
 Zend/tests/gc/gc_025.phpt
 Zend/tests/gc/gc_026.phpt
@@ -3588,6 +3591,7 @@ Zend/tests/property_hooks/backed_invariant.phpt
 Zend/tests/property_hooks/backing_value_simple.phpt
 Zend/tests/property_hooks/bug001.phpt
 Zend/tests/property_hooks/bug002.phpt
+Zend/tests/property_hooks/bug003.phpt
 Zend/tests/property_hooks/bug004.phpt
 Zend/tests/property_hooks/bug005.phpt
 Zend/tests/property_hooks/bug006.phpt
@@ -3601,6 +3605,7 @@ Zend/tests/property_hooks/default_on_virtual.phpt
 Zend/tests/property_hooks/default_on_virtual_with_inheritance.phpt
 Zend/tests/property_hooks/default_value_inheritance.phpt
 Zend/tests/property_hooks/direct_hook_call.phpt
+Zend/tests/property_hooks/dump.phpt
 Zend/tests/property_hooks/duplicate_hook.phpt
 Zend/tests/property_hooks/explicit_iter.phpt
 Zend/tests/property_hooks/explicit_set_value_parameter.phpt
@@ -3618,6 +3623,7 @@ Zend/tests/property_hooks/final_prop_promoted_3.phpt
 Zend/tests/property_hooks/final_prop_promoted_4.phpt
 Zend/tests/property_hooks/final_prop_promoted_5.phpt
 Zend/tests/property_hooks/final_prop_promoted_ast.phpt
+Zend/tests/property_hooks/find_property_usage.phpt
 Zend/tests/property_hooks/foreach.phpt
 Zend/tests/property_hooks/foreach_002.phpt
 Zend/tests/property_hooks/foreach_val_to_ref.phpt
@@ -3628,7 +3634,10 @@ Zend/tests/property_hooks/get_by_ref.phpt
 Zend/tests/property_hooks/get_by_ref_auto.phpt
 Zend/tests/property_hooks/get_by_ref_backed.phpt
 Zend/tests/property_hooks/get_by_ref_implemented_by_plain.phpt
+Zend/tests/property_hooks/get_by_ref_implemented_by_val.phpt
+Zend/tests/property_hooks/get_by_ref_virtual.phpt
 Zend/tests/property_hooks/get_type_check.phpt
+Zend/tests/property_hooks/gh15140.phpt
 Zend/tests/property_hooks/gh15187_1.phpt
 Zend/tests/property_hooks/gh15187_2.phpt
 Zend/tests/property_hooks/gh15187_3.phpt
@@ -3647,6 +3656,7 @@ Zend/tests/property_hooks/gh16615_002.phpt
 Zend/tests/property_hooks/gh16725.phpt
 Zend/tests/property_hooks/gh17101.phpt
 Zend/tests/property_hooks/gh17200.phpt
+Zend/tests/property_hooks/gh17234.phpt
 Zend/tests/property_hooks/gh17376.phpt
 Zend/tests/property_hooks/gh17988.phpt
 Zend/tests/property_hooks/gh18000.phpt
@@ -3660,8 +3670,10 @@ Zend/tests/property_hooks/gh19044-6.phpt
 Zend/tests/property_hooks/gh19044-8.phpt
 Zend/tests/property_hooks/gh19548.phpt
 Zend/tests/property_hooks/gh19548_002.phpt
+Zend/tests/property_hooks/gh20270.phpt
 Zend/tests/property_hooks/gh20479.phpt
 Zend/tests/property_hooks/hooked_with_magic_method.phpt
+Zend/tests/property_hooks/indirect_modification.phpt
 Zend/tests/property_hooks/inheritance.phpt
 Zend/tests/property_hooks/interface.phpt
 Zend/tests/property_hooks/interface_explicit_abstract.phpt
@@ -3672,6 +3684,7 @@ Zend/tests/property_hooks/interface_get_by_ref_plain.phpt
 Zend/tests/property_hooks/interface_get_by_ref_virtual.phpt
 Zend/tests/property_hooks/interface_get_only.phpt
 Zend/tests/property_hooks/interface_get_only_readonly.phpt
+Zend/tests/property_hooks/interface_get_set_readonly.phpt
 Zend/tests/property_hooks/interface_get_value_as_ref.phpt
 Zend/tests/property_hooks/interface_invalid_explicitly_abstract.phpt
 Zend/tests/property_hooks/interface_not_implemented.phpt
@@ -3697,7 +3710,9 @@ Zend/tests/property_hooks/no_default_value_untyped_001.phpt
 Zend/tests/property_hooks/no_default_value_untyped_002.phpt
 Zend/tests/property_hooks/no_get_parameters.phpt
 Zend/tests/property_hooks/object_in_hook.phpt
+Zend/tests/property_hooks/oss-fuzz-382922236.phpt
 Zend/tests/property_hooks/oss-fuzz-391975641.phpt
+Zend/tests/property_hooks/oss_fuzz_403308724.phpt
 Zend/tests/property_hooks/override_add_get.phpt
 Zend/tests/property_hooks/override_add_get_contravariant.phpt
 Zend/tests/property_hooks/override_add_set.phpt
@@ -3731,6 +3746,7 @@ Zend/tests/property_hooks/parent_superfluous_args.phpt
 Zend/tests/property_hooks/parent_syntax.phpt
 Zend/tests/property_hooks/parent_wrong_property_info.phpt
 Zend/tests/property_hooks/plain_to_hook.phpt
+Zend/tests/property_hooks/private_override.phpt
 Zend/tests/property_hooks/private_prop_final_hook.phpt
 Zend/tests/property_hooks/property_access_within_closure.phpt
 Zend/tests/property_hooks/property_const.phpt
@@ -3762,6 +3778,7 @@ Zend/tests/property_hooks/type_compatibility_invalid.phpt
 Zend/tests/property_hooks/type_compatibility_invalid_2.phpt
 Zend/tests/property_hooks/unknown_hook.phpt
 Zend/tests/property_hooks/unknown_hook_private.phpt
+Zend/tests/property_hooks/unserialize.phpt
 Zend/tests/property_hooks/unset.phpt
 Zend/tests/property_hooks/update_constants_virtual_prop.phpt
 Zend/tests/property_hooks/var_property.phpt
@@ -6247,6 +6264,7 @@ ext/reflection/tests/ReflectionExtension_bug66218.phpt
 ext/reflection/tests/ReflectionExtension_constructor_basic.phpt
 ext/reflection/tests/ReflectionExtension_constructor_error.phpt
 ext/reflection/tests/ReflectionExtension_double_construct.phpt
+ext/reflection/tests/ReflectionExtension_getClassNames_basic.phpt
 ext/reflection/tests/ReflectionExtension_getClassNames_variation1.phpt
 ext/reflection/tests/ReflectionExtension_getClasses_basic.phpt
 ext/reflection/tests/ReflectionExtension_getDependencies_variation2.phpt
@@ -6571,7 +6589,9 @@ ext/reflection/tests/property_hooks/ReflectionProperty_getSetRawValue.phpt
 ext/reflection/tests/property_hooks/ReflectionProperty_getSetValue.phpt
 ext/reflection/tests/property_hooks/ReflectionProperty_isInitialized.phpt
 ext/reflection/tests/property_hooks/basics.phpt
+ext/reflection/tests/property_hooks/bug_001.phpt
 ext/reflection/tests/property_hooks/gh15718.phpt
+ext/reflection/tests/property_hooks/gh17713.phpt
 ext/reflection/tests/property_hooks/hook_guard.phpt
 ext/reflection/tests/readonly_class.phpt
 ext/reflection/tests/readonly_properties.phpt
@@ -9054,6 +9074,7 @@ ext/standard/tests/general_functions/escapeshellcmd_bug71270.phpt
 ext/standard/tests/general_functions/floatval.phpt
 ext/standard/tests/general_functions/floatval_basic.phpt
 ext/standard/tests/general_functions/floatval_variation1.phpt
+ext/standard/tests/general_functions/get_cfg_var_array.phpt
 ext/standard/tests/general_functions/get_cfg_var_basic.phpt
 ext/standard/tests/general_functions/get_cfg_var_variation2.phpt
 ext/standard/tests/general_functions/get_cfg_var_variation4.phpt
@@ -9331,7 +9352,9 @@ ext/standard/tests/image/iptcembed_001.phpt
 ext/standard/tests/image/iptcembed_002.phpt
 ext/standard/tests/image/iptcembed_003.phpt
 ext/standard/tests/image/iptcembed_reentrant.phpt
+ext/standard/tests/image/oom_getimagesize_cws.phpt
 ext/standard/tests/image/oom_getimagesize_xbm.phpt
+ext/standard/tests/image/oom_getimagesizefromstring_cws.phpt
 ext/standard/tests/ini_info/php_ini_loaded_file.phpt
 ext/standard/tests/mail/bug47983.phpt
 ext/standard/tests/mail/bug51604.phpt
