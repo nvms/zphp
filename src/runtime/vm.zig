@@ -16056,6 +16056,29 @@ pub const VM = struct {
 
     const AbstractCandidate = struct { name: []const u8, scope: []const u8 };
 
+    // an abstract class still declares its private abstract methods (from a
+    // trait) itself: only it could (zend_verify_abstract_class)
+    fn verifyPrivateAbstract(self: *VM, class_name: []const u8, def: *const ClassDef) RuntimeError!void {
+        var names = std.ArrayListUnmanaged(u8).empty;
+        defer names.deinit(self.allocator);
+        var count: usize = 0;
+        for (def.method_order.items) |m| {
+            const info = def.methods.get(m) orelse continue;
+            if (!info.is_abstract or info.visibility != .private or std.mem.indexOf(u8, m, "$hook_") != null) continue;
+            if (count < 3) {
+                if (count > 0) try names.appendSlice(self.allocator, ", ");
+                try names.print(self.allocator, "{s}::{s}", .{ class_name, try self.phpMethodName(m) });
+            }
+            count += 1;
+        }
+        if (count == 0) return;
+        if (count > 3) try names.appendSlice(self.allocator, ", ...");
+        const plural: []const u8 = if (count > 1) "s" else "";
+        const msg = try std.fmt.allocPrint(self.allocator, "Class {s} must implement {d} abstract method{s} ({s})", .{ class_name, count, plural, names.items });
+        defer self.allocator.free(msg);
+        return self.raiseFatal(msg);
+    }
+
     // php's zend_verify_abstract_class: a class that isn't abstract implements
     // every abstract method its parents and interfaces leave it, property
     // hooks included. the error counts what is missing and names the first
@@ -20887,7 +20910,7 @@ pub const VM = struct {
         // unless this class is itself abstract, every abstract method inherited
         // from the parent chain (and required by any implemented interface)
         // must be implemented by a non-abstract method
-        if (!def.is_abstract) try self.verifyAbstractClass(class_name, &def);
+        if (!def.is_abstract) try self.verifyAbstractClass(class_name, &def) else try self.verifyPrivateAbstract(class_name, &def);
 
         // composer's autoloader uses `include` (not require_once), so a class
         // file can be re-executed multiple times during a single autoload chain;
