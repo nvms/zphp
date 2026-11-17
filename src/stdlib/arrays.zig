@@ -1512,13 +1512,23 @@ fn deepReplace(ctx: *NativeContext, base: *PhpArray, overlay: *PhpArray) Runtime
     for (base.entries.items) |entry| {
         try ctx.vm.arraySetOwned(result, entry.key, entry.value);
     }
+    const Recursion = @import("../runtime/value.zig").Recursion;
     for (overlay.entries.items) |entry| {
         const existing = result.get(entry.key);
-        if (existing == .array and entry.value == .array) {
-            const merged = try deepReplace(ctx, existing.array, entry.value.array);
+        const incoming = if (entry.ref) |ref| ref.* else entry.value;
+        if (existing == .array and incoming == .array) {
+            // php_array_replace_recursive: an array met again while its own
+            // replacement runs (one holding a reference to itself)
+            if (incoming.array.recursion & Recursion.gc != 0 or existing.array.recursion & Recursion.gc != 0) {
+                try ctx.vm.setPendingException("Error", "Recursion detected");
+                return error.RuntimeError;
+            }
+            incoming.array.recursion |= Recursion.gc;
+            defer incoming.array.recursion &= ~Recursion.gc;
+            const merged = try deepReplace(ctx, existing.array, incoming.array);
             try ctx.vm.arraySetOwned(result, entry.key, .{ .array = merged });
         } else {
-            try ctx.vm.arraySetOwned(result, entry.key, entry.value);
+            try ctx.vm.arraySetOwned(result, entry.key, incoming);
         }
     }
     return result;
