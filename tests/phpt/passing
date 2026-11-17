@@ -79,6 +79,7 @@ Zend/tests/array_append_COW.phpt
 Zend/tests/array_append_by_reference.phpt
 Zend/tests/array_append_reading_error.phpt
 Zend/tests/array_hash_zero.phpt
+Zend/tests/array_literal_next_element_error.phpt
 Zend/tests/array_merge_recursive_next_key_overflow.phpt
 Zend/tests/array_multisort_exception.phpt
 Zend/tests/array_self_add_globals.phpt
@@ -155,6 +156,7 @@ Zend/tests/assign_to_var_001.phpt
 Zend/tests/assign_to_var_002.phpt
 Zend/tests/assign_to_var_003.phpt
 Zend/tests/assign_to_var_004.phpt
+Zend/tests/assign_typed_ref_result.phpt
 Zend/tests/ast/ast_serialize_backtick_literal.phpt
 Zend/tests/ast/ast_serialize_floats.phpt
 Zend/tests/ast/gh21072.phpt
@@ -2549,6 +2551,7 @@ Zend/tests/int_conversion_exponents.phpt
 Zend/tests/int_overflow_64bit.phpt
 Zend/tests/int_static_prop_name.phpt
 Zend/tests/int_underflow_64bit.phpt
+Zend/tests/inter_007.phpt
 Zend/tests/inter_02.phpt
 Zend/tests/inter_03.phpt
 Zend/tests/inter_04.phpt
@@ -2625,6 +2628,7 @@ Zend/tests/lazy_objects/fetch_op_error.phpt
 Zend/tests/lazy_objects/fetch_op_initializes.phpt
 Zend/tests/lazy_objects/fetch_op_skipped_prop_does_not_initialize.phpt
 Zend/tests/lazy_objects/fetch_ref_initializes.phpt
+Zend/tests/lazy_objects/fetch_ref_skipped_prop_does_not_initialize.phpt
 Zend/tests/lazy_objects/fetch_skipped_prop_does_not_initialize.phpt
 Zend/tests/lazy_objects/final_classes_can_be_initialized_lazily.phpt
 Zend/tests/lazy_objects/gc_001.phpt
@@ -2685,6 +2689,7 @@ Zend/tests/lazy_objects/init_preserves_proxy_class.phpt
 Zend/tests/lazy_objects/init_sets_prop_default_values.phpt
 Zend/tests/lazy_objects/init_trigger_array_cast.phpt
 Zend/tests/lazy_objects/init_trigger_compare.phpt
+Zend/tests/lazy_objects/init_trigger_debug_zval_dump.phpt
 Zend/tests/lazy_objects/init_trigger_foreach.phpt
 Zend/tests/lazy_objects/init_trigger_foreach_hooks.phpt
 Zend/tests/lazy_objects/init_trigger_get_mangled_object_vars.phpt
@@ -2735,6 +2740,7 @@ Zend/tests/lazy_objects/reset_as_lazy_initialized_proxy.phpt
 Zend/tests/lazy_objects/reset_as_lazy_may_call_nested_destructors.phpt
 Zend/tests/lazy_objects/reset_as_lazy_may_skip_destructor.phpt
 Zend/tests/lazy_objects/reset_as_lazy_readonly.phpt
+Zend/tests/lazy_objects/reset_as_lazy_real_instance.phpt
 Zend/tests/lazy_objects/reset_as_lazy_resets_dynamic_props.phpt
 Zend/tests/lazy_objects/reset_as_lazy_while_init_exception.phpt
 Zend/tests/lazy_objects/rfc/rfc_example_001.phpt
@@ -2775,6 +2781,7 @@ Zend/tests/lazy_objects/setRawValueWithoutLazyInitialization_side_effect_destruc
 Zend/tests/lazy_objects/setRawValueWithoutLazyInitialization_skips___set.phpt
 Zend/tests/lazy_objects/setRawValueWithoutLazyInitialization_skips_hook.phpt
 Zend/tests/lazy_objects/skipLazyInitialization_default.phpt
+Zend/tests/lazy_objects/skipLazyInitialization_initialized_object.phpt
 Zend/tests/lazy_objects/skipLazyInitialization_no_dynamic_prop.phpt
 Zend/tests/lazy_objects/skipLazyInitialization_overridden_hooked_prop.phpt
 Zend/tests/lazy_objects/skipLazyInitialization_readonly.phpt
@@ -2944,6 +2951,7 @@ Zend/tests/magic_methods/bug46409.phpt
 Zend/tests/magic_methods/bug47353.phpt
 Zend/tests/magic_methods/bug47801.phpt
 Zend/tests/magic_methods/bug48248.phpt
+Zend/tests/magic_methods/bug48533.phpt
 Zend/tests/magic_methods/bug51421.phpt
 Zend/tests/magic_methods/bug51822.phpt
 Zend/tests/magic_methods/bug52361.phpt
@@ -3101,6 +3109,7 @@ Zend/tests/methods-on-non-objects-catch.phpt
 Zend/tests/methods-on-non-objects-usort.phpt
 Zend/tests/methods-on-non-objects.phpt
 Zend/tests/mod_001.phpt
+Zend/tests/modify_isref_value_return.phpt
 Zend/tests/mul_001.phpt
 Zend/tests/multibyte/bug68665.phpt
 Zend/tests/multibyte/multibyte_encoding_001.phpt
@@ -4083,6 +4092,7 @@ Zend/tests/traits/abstract_method_2.phpt
 Zend/tests/traits/abstract_method_3.phpt
 Zend/tests/traits/abstract_method_4.phpt
 Zend/tests/traits/abstract_method_5.phpt
+Zend/tests/traits/abstract_method_6.phpt
 Zend/tests/traits/abstract_method_7.phpt
 Zend/tests/traits/abstract_method_8.phpt
 Zend/tests/traits/abstract_method_9.phpt
@@ -4749,6 +4759,7 @@ Zend/tests/type_declarations/typed_properties_039.phpt
 Zend/tests/type_declarations/typed_properties_040.phpt
 Zend/tests/type_declarations/typed_properties_041.phpt
 Zend/tests/type_declarations/typed_properties_042.phpt
+Zend/tests/type_declarations/typed_properties_043.phpt
 Zend/tests/type_declarations/typed_properties_044.phpt
 Zend/tests/type_declarations/typed_properties_045.phpt
 Zend/tests/type_declarations/typed_properties_046.phpt
@@ -5911,6 +5922,7 @@ ext/json/tests/json_decode_oom_utf8_substitute.phpt
 ext/json/tests/json_encode_basic.phpt
 ext/json/tests/json_encode_basic_utf8.phpt
 ext/json/tests/json_encode_exceptions.phpt
+ext/json/tests/json_encode_hooked_property_throwing_getter.phpt
 ext/json/tests/json_encode_invalid_utf8.phpt
 ext/json/tests/json_encode_numeric.phpt
 ext/json/tests/json_encode_oom_escape.phpt
@@ -6282,6 +6294,7 @@ ext/reflection/tests/ReflectionFiber_notrace_1.phpt
 ext/reflection/tests/ReflectionFiber_notrace_2.phpt
 ext/reflection/tests/ReflectionFunction_001.phpt
 ext/reflection/tests/ReflectionFunction_construct.001.phpt
+ext/reflection/tests/ReflectionFunction_getClosureCalledClass.phpt
 ext/reflection/tests/ReflectionFunction_getClosureScopeClass.phpt
 ext/reflection/tests/ReflectionFunction_getClosureThis.phpt
 ext/reflection/tests/ReflectionFunction_getClosure_basic.phpt
@@ -8348,6 +8361,7 @@ ext/standard/tests/directory/DirectoryClass_readonly_handle.phpt
 ext/standard/tests/directory/DirectoryClass_readonly_handle_by_pass_via_ArrayObject.phpt
 ext/standard/tests/directory/DirectoryClass_readonly_path.phpt
 ext/standard/tests/directory/DirectoryClass_reflection_create_instance_no_construct.phpt
+ext/standard/tests/directory/DirectoryClass_reflection_structure.phpt
 ext/standard/tests/directory/bug74589_utf8.phpt
 ext/standard/tests/directory/directory_constants.phpt
 ext/standard/tests/directory/gh10992.phpt
