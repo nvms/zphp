@@ -347,18 +347,9 @@ fn native_inflate_get_read_len(ctx: *NativeContext, args: []const Value) Runtime
     return NativeResult.scalar(.{ .int = @intCast(s.z.total_in) });
 }
 
-fn deflateConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return throwFmt(ctx, "Error", "Cannot directly construct DeflateContext, use deflate_init() instead", .{});
-}
-
-fn inflateConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    return throwFmt(ctx, "Error", "Cannot directly construct InflateContext, use inflate_init() instead", .{});
-}
-
 pub fn register(vm: *VM, a: std.mem.Allocator) !void {
-    inline for (.{ .{ deflate_class, deflateConstruct }, .{ inflate_class, inflateConstruct } }) |c| {
-        try vm.classes.put(a, c[0], ClassDef{ .name = c[0], .is_final = true, .native_cleanup = cleanupContext });
-        try vm.native_fns.put(a, c[0] ++ "::__construct", c[1]);
+    inline for (.{ deflate_class, inflate_class }) |c| {
+        try vm.classes.put(a, c, ClassDef{ .name = c, .is_final = true, .native_cleanup = cleanupContext });
     }
     const constants = .{
         .{ "ZLIB_NO_FLUSH", zlib.Z_NO_FLUSH },

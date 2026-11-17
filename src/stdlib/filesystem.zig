@@ -217,7 +217,6 @@ pub fn register(vm: *VM, a: Allocator) !void {
     // to the underlying DirectoryHandle stored in the 'handle' property. php
     // 8.5 made it final and only dir() creates one
     var dir_def = ClassDef{ .name = "Directory", .is_final = true, .uncloneable = true };
-    try dir_def.methods.put(a, "__construct", .{ .name = "__construct", .arity = 0 });
     // readonly and uninitialized until dir() fills them in
     try dir_def.properties.append(a, .{ .name = "path", .default = .undef, .is_readonly = true, .type_str = "string" });
     try dir_def.properties.append(a, .{ .name = "handle", .default = .undef, .is_readonly = true, .type_str = "mixed" });
@@ -226,7 +225,6 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try dir_def.methods.put(a, "read", .{ .name = "read", .arity = 0 });
     dir_def.slot_layout = try vm.buildSlotLayout(&dir_def);
     try vm.classes.put(a, "Directory", dir_def);
-    try vm.native_fns.put(a, "Directory::__construct", directoryConstruct);
     try vm.native_fns.put(a, "Directory::read", directoryRead);
     try vm.native_fns.put(a, "Directory::rewind", directoryRewind);
     try vm.native_fns.put(a, "Directory::close", directoryClose);
@@ -1914,11 +1912,6 @@ fn appendName(ctx: *NativeContext, names: *std.ArrayListUnmanaged(Value.String),
 // dir($path) returns a Directory object with path, handle, and read/rewind/
 // close methods that delegate to the underlying DirectoryHandle. PHP's
 // 'Directory' is a thin OO wrapper around opendir/readdir/rewinddir/closedir
-fn directoryConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    try ctx.vm.setPendingException("Error", "Cannot directly construct Directory, use dir() instead");
-    return error.RuntimeError;
-}
-
 fn native_dir(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len == 0 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
     const handle = (try openDirectory(ctx, args, "dir")).value;

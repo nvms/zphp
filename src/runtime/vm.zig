@@ -614,6 +614,10 @@ pub const ClassDef = struct {
     // an internal class whose objects take no dynamic properties, like a
     // readonly class (Directory)
     no_dynamic_properties: bool = false,
+    // an internal class whose objects only its functions make: `new` (and
+    // reflection's newInstance) fails with this message, as php's
+    // create_object handler does
+    construct_refusal: ?[]const u8 = null,
     // an internal class php refuses to clone though it holds no native handle
     uncloneable: bool = false,
     native_cleanup: ?*const fn (*PhpObject) bool = null,
@@ -2717,6 +2721,31 @@ pub const VM = struct {
             "AddressInfo", "AppendIterator", "CachingIterator", "CallbackFilterIterator", "Collator", "CurlMultiHandle", "CurlShareHandle", "CurlSharePersistentHandle", "DOMNamedNodeMap", "DOMNodeList", "DOMXPath", "DeflateContext", "Directory", "Dom\\DtdNamedNodeMap", "Dom\\HTMLCollection", "Dom\\Implementation", "Dom\\NamedNodeMap", "Dom\\NodeList", "Dom\\TokenList", "Dom\\XPath", "Error", "Exception", "FFI", "FFI\\CType", "FTP\\Connection", "Fiber", "GdFont", "GdImage", "Generator", "GlobIterator", "InfiniteIterator", "InflateContext", "InternalIterator", "IntlIterator", "IntlListFormatter", "IntlPartsIterator", "IteratorIterator", "LimitIterator", "NoRewindIterator", "OpenSSLAsymmetricKey", "OpenSSLCertificate", "OpenSSLCertificateSigningRequest", "PDO", "PDORow", "PDOStatement", "ParentIterator", "PgSql\\Connection", "PgSql\\Lob", "PgSql\\Result", "Random\\Engine\\Secure", "Random\\Randomizer", "RecursiveCachingIterator", "RecursiveCallbackFilterIterator", "RecursiveIteratorIterator", "RecursiveRegexIterator", "RecursiveTreeIterator", "RegexIterator", "ResourceBundle", "SQLite3", "SQLite3Result", "SQLite3Stmt", "Shmop", "Socket", "SplFileObject", "SysvMessageQueue", "SysvSemaphore", "SysvSharedMemory", "WeakReference", "XMLParser", "XMLReader", "XMLWriter", "XSLTProcessor", "ZipArchive", "finfo", "mysqli", "mysqli_driver", "mysqli_result", "mysqli_stmt", "mysqli_warning",
         }) |name| {
             if (vm.classes.getPtr(name)) |cls| cls.uncloneable = true;
+        }
+        // the internal classes only their functions instantiate
+        for ([_][2][]const u8{
+            .{ "Directory", "Cannot directly construct Directory, use dir() instead" },
+            .{ "CurlHandle", "Cannot directly construct CurlHandle, use curl_init() instead" },
+            .{ "CurlMultiHandle", "Cannot directly construct CurlMultiHandle, use curl_multi_init() instead" },
+            .{ "CurlShareHandle", "Cannot directly construct CurlShareHandle, use curl_share_init() instead" },
+            .{ "CurlSharePersistentHandle", "Cannot directly construct CurlSharePersistentHandle, use curl_share_init_persistent() instead" },
+            .{ "DeflateContext", "Cannot directly construct DeflateContext, use deflate_init() instead" },
+            .{ "InflateContext", "Cannot directly construct InflateContext, use inflate_init() instead" },
+            .{ "XMLParser", "Cannot directly construct XMLParser, use xml_parser_create() or xml_parser_create_ns() instead" },
+            .{ "GdImage", "You cannot initialize a GdImage object except through helper functions" },
+            .{ "GdFont", "You cannot initialize a GdFont object except through helper functions" },
+            .{ "OpenSSLCertificate", "Cannot directly construct OpenSSLCertificate, use openssl_x509_read() instead" },
+            .{ "OpenSSLCertificateSigningRequest", "Cannot directly construct OpenSSLCertificateSigningRequest, use openssl_csr_new() instead" },
+            .{ "OpenSSLAsymmetricKey", "Cannot directly construct OpenSSLAsymmetricKey, use openssl_pkey_new() instead" },
+            .{ "PDORow", "You may not create a PDORow manually" },
+            .{ "PgSql\\Connection", "Cannot directly construct PgSql\\Connection, use pg_connect() or pg_pconnect() instead" },
+            .{ "PgSql\\Result", "Cannot directly construct PgSql\\Result, use a dedicated function instead" },
+            .{ "PgSql\\Lob", "Cannot directly construct PgSql\\Lob, use pg_lo_open() instead" },
+            .{ "FTP\\Connection", "Cannot directly construct FTP\\Connection, use ftp_connect() or ftp_ssl_connect() instead" },
+            .{ "Socket", "Cannot directly construct Socket, use socket_create() instead" },
+            .{ "AddressInfo", "Cannot directly construct AddressInfo, use socket_addrinfo_lookup() instead" },
+        }) |entry| {
+            if (vm.classes.getPtr(entry[0])) |cls| cls.construct_refusal = entry[1];
         }
         try applyInternalMethodOrder(vm, allocator);
     }
@@ -12066,6 +12095,11 @@ pub const VM = struct {
                             if (try self.throwBuiltinException("Error", msg)) continue;
                             return error.RuntimeError;
                         }
+                        if (cls_ref.construct_refusal) |msg| {
+                            self.dropN(arg_count);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        }
                     }
                     // closures come from closure expressions and Closure's
                     // factories only
@@ -12325,6 +12359,11 @@ pub const VM = struct {
                         self.dropN(ac + 1);
                         const msg = try std.fmt.allocPrint(self.allocator, "Cannot instantiate abstract class {s}", .{self.declaredClassName(class_name)});
                         defer self.allocator.free(msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    };
+                    if (self.classes.get(class_name)) |cls_ref| if (cls_ref.construct_refusal) |msg| {
+                        self.dropN(ac + 1);
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
                     };

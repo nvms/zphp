@@ -1838,6 +1838,7 @@ fn newInstanceWith(ctx: *NativeContext, positional: []const Value, named: ?*PhpA
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const class_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
     try checkInstantiable(ctx, class_name);
+    if (ctx.vm.classes.get(class_name)) |cd| if (cd.construct_refusal) |msg| return raiseError(ctx, "Error", "{s}", .{msg});
     const ctor = findConstructor(ctx.vm, class_name);
     if (ctor) |c| if (c.visibility != .public) return throwReflectionFmt(ctx, "Access to non-public constructor of class {s}", .{class_name});
     const obj = try ctx.vm.allocObject(.{ .class_name = try ctx.vm.stableClassName(class_name) });
@@ -2576,6 +2577,10 @@ fn rcNewInstanceWithoutConstructor(ctx: *NativeContext, _: []const Value) Runtim
     for ([_][]const u8{ "Closure", "Generator", "Fiber", "WeakReference", "WeakMap", "InternalIterator", "Random\\Randomizer", "CurlHandle", "CurlMultiHandle", "CurlShareHandle" }) |refused| {
         if (std.ascii.eqlIgnoreCase(class_name, refused)) return throwReflectionFmt(ctx, "Class {s} is an internal class marked as final that cannot be instantiated without invoking its constructor", .{class_name});
     }
+    // the ones whose create_object refuses (Directory refuses through its
+    // constructor lookup, which this skips)
+    if (ctx.vm.classes.get(class_name)) |cd| if (cd.construct_refusal != null and !std.mem.eql(u8, class_name, "Directory"))
+        return throwReflectionFmt(ctx, "Class {s} is an internal class marked as final that cannot be instantiated without invoking its constructor", .{class_name});
     try checkInstantiable(ctx, class_name);
 
     const obj = try ctx.vm.allocObject(.{ .class_name = try ctx.vm.stableClassName(class_name) });

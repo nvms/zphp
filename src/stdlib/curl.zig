@@ -863,11 +863,6 @@ fn requireShare(ctx: *NativeContext, args: []const Value, name: []const u8) Runt
     return error.RuntimeError;
 }
 
-fn curlShareConstruct(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
-    try ctx.vm.setPendingException("Error", "Cannot directly construct CurlShareHandle, use curl_share_init() instead");
-    return error.RuntimeError;
-}
-
 fn curlShareInit(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     ensureGlobalInit();
     const handle = c.curl_share_init() orelse return NativeResult.scalar(.{ .bool = false });
@@ -1234,7 +1229,6 @@ pub fn register(vm: *VM, a: std.mem.Allocator) !void {
     var share_def = ClassDef{ .name = "CurlShareHandle", .native_cleanup = cleanupShare };
     try vm.classes.put(a, "CurlShareHandle", share_def);
     _ = &share_def;
-    try vm.native_fns.put(a, "CurlShareHandle::__construct", curlShareConstruct);
 
     var mh_def = ClassDef{ .name = "CurlMultiHandle" };
     try vm.classes.put(a, "CurlMultiHandle", mh_def);
