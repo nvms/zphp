@@ -410,6 +410,7 @@ Zend/tests/backtrace/bug79108.phpt
 Zend/tests/backtrace/bug_debug_backtrace.phpt
 Zend/tests/backtrace/debug_backtrace_limit.phpt
 Zend/tests/backtrace/debug_backtrace_options.phpt
+Zend/tests/backtrace/debug_backtrace_with_include_and_this.phpt
 Zend/tests/backtrace/debug_print_backtrace_from_main.phpt
 Zend/tests/backtrace/debug_print_backtrace_limit.phpt
 Zend/tests/backtrace/fatal_error_backtraces_001.phpt
@@ -461,6 +462,7 @@ Zend/tests/bug32428.phpt
 Zend/tests/bug32674.phpt
 Zend/tests/bug32799.phpt
 Zend/tests/bug32993.phpt
+Zend/tests/bug33257.phpt
 Zend/tests/bug33282.phpt
 Zend/tests/bug33558.phpt
 Zend/tests/bug33996.phpt
@@ -479,6 +481,7 @@ Zend/tests/bug35163.phpt
 Zend/tests/bug35163_2.phpt
 Zend/tests/bug35163_3.phpt
 Zend/tests/bug35239.phpt
+Zend/tests/bug35393.phpt
 Zend/tests/bug35470.phpt
 Zend/tests/bug35509.phpt
 Zend/tests/bug35634.phpt
@@ -581,6 +584,7 @@ Zend/tests/bug60738_variation.phpt
 Zend/tests/bug60771.phpt
 Zend/tests/bug60825.phpt
 Zend/tests/bug60833.phpt
+Zend/tests/bug60909_1.phpt
 Zend/tests/bug60909_2.phpt
 Zend/tests/bug61087.phpt
 Zend/tests/bug61165.phpt
@@ -940,6 +944,8 @@ Zend/tests/closures/closure_034.phpt
 Zend/tests/closures/closure_035.phpt
 Zend/tests/closures/closure_036.phpt
 Zend/tests/closures/closure_037.phpt
+Zend/tests/closures/closure_038.phpt
+Zend/tests/closures/closure_039.phpt
 Zend/tests/closures/closure_040.phpt
 Zend/tests/closures/closure_041.phpt
 Zend/tests/closures/closure_042.phpt
@@ -1128,6 +1134,7 @@ Zend/tests/constants/gh18850.phpt
 Zend/tests/constants/halt_compiler/bug48930.phpt
 Zend/tests/constants/halt_compiler/bug53305.phpt
 Zend/tests/constants/halt_compiler/bug54804.phpt
+Zend/tests/constants/halt_compiler/bug70164.phpt
 Zend/tests/constants/halt_compiler/bug77738.phpt
 Zend/tests/constants/halt_compiler/halt01.phpt
 Zend/tests/constants/halt_compiler/halt02.phpt
@@ -1199,6 +1206,7 @@ Zend/tests/ctor_promotion/ctor_promotion_untyped_default.phpt
 Zend/tests/ctor_promotion/ctor_promotion_variadic.phpt
 Zend/tests/custom_assert_forbidden.phpt
 Zend/tests/dead_array_type_inference.phpt
+Zend/tests/debug_backtrace_sensitive_named_variadic.phpt
 Zend/tests/debug_info/bug69537.phpt
 Zend/tests/debug_info/debug_info-error-0.0.phpt
 Zend/tests/debug_info/debug_info-error-0.phpt
@@ -1353,6 +1361,7 @@ Zend/tests/enum/gh7792_2.phpt
 Zend/tests/enum/gh7792_3.phpt
 Zend/tests/enum/gh7792_4.phpt
 Zend/tests/enum/gh7792_5.phpt
+Zend/tests/enum/gh7821.phpt
 Zend/tests/enum/gh8176.phpt
 Zend/tests/enum/gh8418.phpt
 Zend/tests/enum/gh9775_1.phpt
@@ -1360,6 +1369,7 @@ Zend/tests/enum/gh9775_2.phpt
 Zend/tests/enum/implements.phpt
 Zend/tests/enum/instanceof.phpt
 Zend/tests/enum/json_encode.phpt
+Zend/tests/enum/keyword-no-bc-break.phpt
 Zend/tests/enum/keyword-whitespace.phpt
 Zend/tests/enum/magic-constants.phpt
 Zend/tests/enum/name-property.phpt
@@ -1869,6 +1879,8 @@ Zend/tests/function_arguments/function_arguments_001.phpt
 Zend/tests/function_arguments/function_arguments_002.phpt
 Zend/tests/function_arguments/function_arguments_003.phpt
 Zend/tests/function_arguments/function_default_argument_cache.phpt
+Zend/tests/function_arguments/gh20435.phpt
+Zend/tests/function_arguments/gh20435_2.phpt
 Zend/tests/function_arguments/sensitive_parameter.phpt
 Zend/tests/function_arguments/sensitive_parameter_arrow_function.phpt
 Zend/tests/function_arguments/sensitive_parameter_closure.phpt
@@ -2330,6 +2342,7 @@ Zend/tests/grammar/regression_006.phpt
 Zend/tests/grammar/regression_007.phpt
 Zend/tests/grammar/regression_008.phpt
 Zend/tests/grammar/regression_009.phpt
+Zend/tests/grammar/regression_010.phpt
 Zend/tests/grammar/regression_011.phpt
 Zend/tests/grammar/regression_012.phpt
 Zend/tests/grammar/regression_013.phpt
@@ -2780,6 +2793,7 @@ Zend/tests/lazy_objects/setRawValueWithoutLazyInitialization_realize.phpt
 Zend/tests/lazy_objects/setRawValueWithoutLazyInitialization_side_effect_destruct.phpt
 Zend/tests/lazy_objects/setRawValueWithoutLazyInitialization_skips___set.phpt
 Zend/tests/lazy_objects/setRawValueWithoutLazyInitialization_skips_hook.phpt
+Zend/tests/lazy_objects/skipLazyInitialization.phpt
 Zend/tests/lazy_objects/skipLazyInitialization_default.phpt
 Zend/tests/lazy_objects/skipLazyInitialization_initialized_object.phpt
 Zend/tests/lazy_objects/skipLazyInitialization_no_dynamic_prop.phpt
@@ -3137,6 +3151,7 @@ Zend/tests/named_params/attributes_duplicate_named_param.phpt
 Zend/tests/named_params/attributes_named_flags.phpt
 Zend/tests/named_params/attributes_named_flags_incorrect.phpt
 Zend/tests/named_params/attributes_positional_after_named.phpt
+Zend/tests/named_params/backtrace.phpt
 Zend/tests/named_params/basic.phpt
 Zend/tests/named_params/bug80096.phpt
 Zend/tests/named_params/call_user_func.phpt
@@ -3168,6 +3183,7 @@ Zend/tests/namespaces/gh11152.phpt
 Zend/tests/namespaces/namespace_first_stmt_nop.phpt
 Zend/tests/namespaces/namespace_name_namespace.phpt
 Zend/tests/namespaces/namespace_name_namespace_start.phpt
+Zend/tests/namespaces/namespace_name_reserved_keywords.phpt
 Zend/tests/namespaces/ns_001.phpt
 Zend/tests/namespaces/ns_002.phpt
 Zend/tests/namespaces/ns_003.phpt
@@ -4100,6 +4116,7 @@ Zend/tests/traits/bug53748.phpt
 Zend/tests/traits/bug54441.phpt
 Zend/tests/traits/bug55086.phpt
 Zend/tests/traits/bug55137.phpt
+Zend/tests/traits/bug55214.phpt
 Zend/tests/traits/bug55355.phpt
 Zend/tests/traits/bug55372.phpt
 Zend/tests/traits/bug55424.phpt
@@ -4152,6 +4169,7 @@ Zend/tests/traits/bug74607a.phpt
 Zend/tests/traits/bug74922.phpt
 Zend/tests/traits/bug74922a.phpt
 Zend/tests/traits/bug74922b.phpt
+Zend/tests/traits/bug74922c.phpt
 Zend/tests/traits/bug75607.phpt
 Zend/tests/traits/bug75607a.phpt
 Zend/tests/traits/bug76539.phpt
@@ -4202,6 +4220,7 @@ Zend/tests/traits/constant_016.phpt
 Zend/tests/traits/constant_017.phpt
 Zend/tests/traits/constant_018.phpt
 Zend/tests/traits/constant_019.phpt
+Zend/tests/traits/constant_020.phpt
 Zend/tests/traits/constant_021.phpt
 Zend/tests/traits/direct_static_member_access.phpt
 Zend/tests/traits/error_002.phpt
@@ -4645,6 +4664,8 @@ Zend/tests/type_declarations/relative_types/static/namespace_relative_static.php
 Zend/tests/type_declarations/relative_types/static/static_type_in_final_class.phpt
 Zend/tests/type_declarations/relative_types/static/static_type_outside_class.phpt
 Zend/tests/type_declarations/relative_types/static/static_type_param.phpt
+Zend/tests/type_declarations/relative_types/static/static_type_return.phpt
+Zend/tests/type_declarations/relative_types/static/static_type_trait.phpt
 Zend/tests/type_declarations/relative_types/traits/trait_parent_type_in_class_no_parent1.phpt
 Zend/tests/type_declarations/relative_types/traits/trait_parent_type_in_class_no_parent2.phpt
 Zend/tests/type_declarations/relative_types/traits/trait_parent_type_in_class_no_parent3.phpt
@@ -6029,6 +6050,7 @@ ext/pcre/tests/bug79846.phpt
 ext/pcre/tests/bug80118.phpt
 ext/pcre/tests/bug80866.phpt
 ext/pcre/tests/bug81101.phpt
+ext/pcre/tests/bug81243.phpt
 ext/pcre/tests/bug81424a.phpt
 ext/pcre/tests/check_jit_enabled.phpt
 ext/pcre/tests/delimiters.phpt
@@ -6194,6 +6216,7 @@ ext/reflection/tests/ReflectionClass_getName_error1.phpt
 ext/reflection/tests/ReflectionClass_getNamespaceName.phpt
 ext/reflection/tests/ReflectionClass_getParentClass.phpt
 ext/reflection/tests/ReflectionClass_getProperties_001.phpt
+ext/reflection/tests/ReflectionClass_getProperties_003.phpt
 ext/reflection/tests/ReflectionClass_getProperty_001.phpt
 ext/reflection/tests/ReflectionClass_getProperty_002.phpt
 ext/reflection/tests/ReflectionClass_getProperty_003.phpt
@@ -6242,6 +6265,7 @@ ext/reflection/tests/ReflectionClass_newInstance_001.phpt
 ext/reflection/tests/ReflectionClass_setStaticPropertyValue_001.phpt
 ext/reflection/tests/ReflectionClass_setStaticPropertyValue_002.phpt
 ext/reflection/tests/ReflectionClass_setStaticPropertyValue_003.phpt
+ext/reflection/tests/ReflectionClass_toString_001.phpt
 ext/reflection/tests/ReflectionClass_toString_002.phpt
 ext/reflection/tests/ReflectionClass_toString_003.phpt
 ext/reflection/tests/ReflectionClass_toString_004.phpt
@@ -6259,8 +6283,10 @@ ext/reflection/tests/ReflectionConstant_isDeprecated_userland.phpt
 ext/reflection/tests/ReflectionConstant_ns.phpt
 ext/reflection/tests/ReflectionConstant_null_byte_value.phpt
 ext/reflection/tests/ReflectionEnumBackedCase_getBackingValue.phpt
+ext/reflection/tests/ReflectionEnumBackedCase_getBackingValue_002.phpt
 ext/reflection/tests/ReflectionEnumUnitCase_construct.phpt
 ext/reflection/tests/ReflectionEnumUnitCase_getDocComment.phpt
+ext/reflection/tests/ReflectionEnumUnitCase_getEnum.phpt
 ext/reflection/tests/ReflectionEnumUnitCase_getValue.phpt
 ext/reflection/tests/ReflectionEnum_construct.phpt
 ext/reflection/tests/ReflectionEnum_getBackingType.phpt
@@ -6592,6 +6618,7 @@ ext/reflection/tests/internal_parameter_default_value/ReflectionParameter_isDefa
 ext/reflection/tests/internal_parameter_default_value/ReflectionParameter_toString_Internal.phpt
 ext/reflection/tests/iterable_Reflection.phpt
 ext/reflection/tests/new_in_attributes.phpt
+ext/reflection/tests/new_in_constexpr.phpt
 ext/reflection/tests/parameters_001.phpt
 ext/reflection/tests/parameters_002.phpt
 ext/reflection/tests/property_exists.phpt
@@ -7062,6 +7089,7 @@ ext/spl/tests/bug68175.phpt
 ext/spl/tests/bug68557.phpt
 ext/spl/tests/bug68825.phpt
 ext/spl/tests/bug69181.phpt
+ext/spl/tests/bug69264.phpt
 ext/spl/tests/bug69335.phpt
 ext/spl/tests/bug69737.phpt
 ext/spl/tests/bug69970.phpt
@@ -7698,6 +7726,7 @@ ext/standard/tests/array/array_reduce.phpt
 ext/standard/tests/array/array_reduce_return_by_ref.phpt
 ext/standard/tests/array/array_reduce_variation1.phpt
 ext/standard/tests/array/array_reduce_variation3.phpt
+ext/standard/tests/array/array_replace.phpt
 ext/standard/tests/array/array_replace_merge_recursive_ref.phpt
 ext/standard/tests/array/array_reverse_basic1.phpt
 ext/standard/tests/array/array_reverse_basic2.phpt
@@ -7925,6 +7954,7 @@ ext/standard/tests/array/bug75653.phpt
 ext/standard/tests/array/bug76505.phpt
 ext/standard/tests/array/bug76713.phpt
 ext/standard/tests/array/bug76778.phpt
+ext/standard/tests/array/bug77135.phpt
 ext/standard/tests/array/bug77669.phpt
 ext/standard/tests/array/bug77793.phpt
 ext/standard/tests/array/bug77931.phpt
@@ -10037,6 +10067,7 @@ ext/standard/tests/strings/bug55674.phpt
 ext/standard/tests/strings/bug60801.phpt
 ext/standard/tests/strings/bug60965.phpt
 ext/standard/tests/strings/bug61038.phpt
+ext/standard/tests/strings/bug61116.phpt
 ext/standard/tests/strings/bug61374.phpt
 ext/standard/tests/strings/bug61660.phpt
 ext/standard/tests/strings/bug61764.phpt
@@ -10151,6 +10182,7 @@ ext/standard/tests/strings/get_html_translation_table_basic6.phpt
 ext/standard/tests/strings/get_html_translation_table_basic7.phpt
 ext/standard/tests/strings/get_html_translation_table_basic8.phpt
 ext/standard/tests/strings/get_html_translation_table_basic9.phpt
+ext/standard/tests/strings/get_meta_tags.phpt
 ext/standard/tests/strings/gh10187.phpt
 ext/standard/tests/strings/gh10940.phpt
 ext/standard/tests/strings/gh11982.phpt
@@ -10161,6 +10193,7 @@ ext/standard/tests/strings/gh18823_weak.phpt
 ext/standard/tests/strings/gh18897.phpt
 ext/standard/tests/strings/gh19070.phpt
 ext/standard/tests/strings/gh23204.phpt
+ext/standard/tests/strings/hebrev_basic.phpt
 ext/standard/tests/strings/hex2bin_basic.phpt
 ext/standard/tests/strings/hex2bin_error.phpt
 ext/standard/tests/strings/highlight_file.phpt
@@ -11078,6 +11111,7 @@ tests/lang/bug27354.phpt
 tests/lang/bug27439.phpt
 tests/lang/bug27443.phpt
 tests/lang/bug27535.phpt
+tests/lang/bug28213.phpt
 tests/lang/bug28800.phpt
 tests/lang/bug29566.phpt
 tests/lang/bug29893.phpt
