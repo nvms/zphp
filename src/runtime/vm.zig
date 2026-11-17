@@ -17,6 +17,7 @@ const Value = @import("value.zig").Value;
 const value_mod = @import("value.zig");
 const Region = @import("region.zig").Region;
 const MemoryAccount = @import("memory.zig").MemoryAccount;
+const memory = @import("memory.zig");
 const PhpArray = @import("value.zig").PhpArray;
 const byref_args = @import("../stdlib/byref_args.zig");
 const PhpObject = @import("value.zig").PhpObject;
@@ -3966,7 +3967,7 @@ pub const VM = struct {
         self.pending_destruct.deinit(self.allocator);
         self.default_holds.deinit(self.allocator);
         self.pending_array_release.deinit(self.allocator);
-        self.pending_string_release.deinit(self.allocator);
+        self.pending_string_release.deinit(memory.root(self.allocator));
         self.string_pool.deinit();
         self.pending_gen_release.deinit(self.allocator);
         self.pending_fiber_release.deinit(self.allocator);
@@ -35470,7 +35471,7 @@ pub const VM = struct {
     fn queueStringRelease(self: *VM, owner: *Value.String.Owner) void {
         if (owner.release_queued) return;
         owner.release_queued = true;
-        self.pending_string_release.append(self.allocator, owner) catch {
+        self.pending_string_release.append(memory.root(self.allocator), owner) catch {
             owner.release_queued = false;
             Value.String.destroyOwner(owner);
         };
