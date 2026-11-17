@@ -3907,6 +3907,11 @@ fn rfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
         try this.set(ctx.allocator, "__from_closure", .{ .bool = true });
         if (callable == .string) {
             try this.set(ctx.allocator, "name", callable);
+            if (std.mem.indexOf(u8, callable.string.bytes(), "::")) |sep| {
+                const fake = args[0].object.fakeClosure();
+                const called = if (fake) |f| f.called_class orelse callable.string.bytes()[0..sep] else callable.string.bytes()[0..sep];
+                if (ctx.vm.classes.getKey(called)) |declared| try this.set(ctx.allocator, "__called_class", .{ .string = Value.String.borrowed(declared) });
+            }
         } else if (callable == .array and callable.array.entries.items.len == 2 and callable.array.entries.items[1].value == .string) {
             const target = callable.array.entries.items[0].value;
             const method = callable.array.entries.items[1].value.string.bytes();
@@ -3918,6 +3923,12 @@ fn rfConstruct(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResu
             if (target == .object) {
                 try this.set(ctx.allocator, "__scope_class", .{ .string = Value.String.borrowed(class_name) });
                 try this.set(ctx.allocator, "__closure_this", target);
+            } else if (target == .string) {
+                // a static method's closure is called through the class it
+                // was made from (the closure's called_scope)
+                const fake = args[0].object.fakeClosure();
+                const called = if (fake) |f| f.called_class orelse class_name else class_name;
+                if (ctx.vm.classes.getKey(called)) |declared| try this.set(ctx.allocator, "__called_class", .{ .string = Value.String.borrowed(declared) });
             }
         } else return throwReflection(ctx, "ReflectionFunction::__construct() expects a function name");
     } else if (args[0] == .string) {
@@ -4261,6 +4272,7 @@ fn reflectionClassNamed(ctx: *NativeContext, class: ?[]const u8) RuntimeError!Na
 fn rfGetClosureCalledClass(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     if (this.get("__closure").closureName()) |instance| return reflectionClassNamed(ctx, ctx.vm.closureScopeByName(instance));
+    if (this.get("__called_class") == .string) return NativeResult.borrowed(.{ .object = try classObject(ctx, this.get("__called_class").string.bytes()) });
     if (this.get("__scope_class") == .string) {
         const scope_name = this.get("__scope_class").string.bytes();
         const obj = try classObject(ctx, scope_name);
