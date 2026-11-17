@@ -27507,6 +27507,9 @@ pub const VM = struct {
         if (cls.defaults_pending) try self.resolveClassDefaults(class_name);
         if (cls.parent) |parent| _ = try self.initPropertyDefaults(obj, parent);
         for (cls.properties.items) |prop| {
+            // a virtual property has no storage (with any backed property
+            // in the chain the class would have a layout)
+            if (prop.is_virtual) continue;
             try obj.set(self.allocator, prop.name, try self.copyDefault(prop.default));
         }
         return self.isThrowableClass(class_name);
