@@ -410,6 +410,9 @@ pub const Compiler = struct {
     // per-foreach: the variable a by-reference loop iterates live, read again
     // where the loop ends so it stops counting as the array's iterator
     loop_foreach_live: [32]?LiveIterable = @as([32]?LiveIterable, @splat(null)),
+    // the hidden variables by-reference loops hold their iterables in, which
+    // a catch or finally the loop is unwound into drops
+    foreach_holders: std.ArrayListUnmanaged(Holder) = .empty,
     closure_count: u32 = 0,
     // the static variables the function being compiled declares
     static_vars: std.ArrayListUnmanaged(bytecode.StaticVar) = .empty,
@@ -2552,6 +2555,7 @@ pub const Compiler = struct {
         self.type_warned.deinit(a);
         self.break_jumps.deinit(a);
         self.continue_jumps.deinit(a);
+        self.foreach_holders.deinit(a);
         for (self.pending_gotos.items) |pg| {
             a.free(pg.scopes);
             a.free(pg.jumps);
@@ -2728,7 +2732,23 @@ pub const Compiler = struct {
         return self.getOrCreateSlot(name);
     }
 
-    pub const LiveIterable = union(enum) { node: u32, temp: []const u8 };
+    pub const LiveIterable = union(enum) { node: u32, temp: Holder };
+    // the hidden variable a by-reference foreach keeps its iterable in, and
+    // the variable it is a reference to when the loop iterates one
+    pub const Holder = struct { name: []const u8, variable: ?[]const u8 = null };
+
+    // drops a loop's hidden variable, as php's FE_FREE frees the iterable
+    pub fn emitHolderRelease(self: *Compiler, holder: Holder) Error!void {
+        const name = try self.addConstant(.{ .string = Value.String.borrowed(holder.name) });
+        if (holder.variable) |variable| {
+            try self.emitOp(.foreach_release);
+            try self.emitU16(name);
+            try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(variable) }));
+        } else {
+            try self.emitOp(.unset_var);
+            try self.emitU16(name);
+        }
+    }
 
     // reads the variable a live by-reference foreach iterates, quietly
     pub fn emitLiveIterable(self: *Compiler, src: LiveIterable) Error!void {
@@ -2737,7 +2757,7 @@ pub const Compiler = struct {
         defer self.quiet_reads = saved;
         switch (src) {
             .node => |n| try self.compileNode(n),
-            .temp => |t| try self.emitGetVar(t),
+            .temp => |t| try self.emitGetVar(t.name),
         }
     }
 
@@ -2751,10 +2771,7 @@ pub const Compiler = struct {
         try self.emitOp(if (self.loop_foreach_close[d]) .iter_end_close else .iter_end);
         // a return or break frees the hidden variable holding a by-reference
         // loop's iterable with the loop, as php's FE_FREE does
-        if (self.loop_foreach_live[d]) |src| if (src == .temp) {
-            try self.emitOp(.unset_var);
-            try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(src.temp) }));
-        };
+        if (self.loop_foreach_live[d]) |src| if (src == .temp) try self.emitHolderRelease(src.temp);
     }
 
     pub fn emitGetVar(self: *Compiler, name: []const u8) Error!void {

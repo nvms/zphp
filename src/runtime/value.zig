@@ -15,6 +15,8 @@ pub const RefCell = struct {
     // ZEND_REF_HAS_TYPE_SOURCES): writes check the sources, which the vm
     // finds in the reference index and clears the mark when none are left
     typed: bool = false,
+    // made by a by-reference foreach for the variable it iterates
+    loop_made: bool = false,
 };
 pub fn cellOf(value: *Value) *RefCell {
     return @fieldParentPtr("value", value);

@@ -277,9 +277,26 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     // a by-reference loop reads its iterable again for each element it
     // binds; one that is no variable or element (a call, a literal) is
     // evaluated once into a hidden variable, dropped when the loop ends
-    var iter_temp: ?[]const u8 = null;
+    var iter_temp: ?Compiler.Holder = null;
     // zend_can_write_to_variable: a nullsafe chain is read as a value
     const short_circuited = compiler_expr.isShortCircuited(self, iter_n);
+    // a by-reference loop over a variable iterates the variable's array
+    // live, as php's does: each step reads it again through a hidden
+    // variable bound to it. php's FE_RESET_RW makes the variable a reference
+    // and the loop holds it, so the loop goes on over that array when the
+    // variable is rebound, and keeps it alive without sharing (and so
+    // separating) the array itself
+    if (val_by_ref and val_node_is_plain(self, val_n) and iter_tag == .variable) {
+        const iter_name = self.ast.tokenSlice(self.ast.nodes[iter_n].main_token);
+        if (!std.mem.eql(u8, iter_name, "$this") and !Compiler.isSuperglobal(iter_name)) {
+            const synth = try std.fmt.allocPrint(self.allocator, "__foreach_iterable_{d}", .{self.loop_depth});
+            try self.string_allocs.append(self.allocator, synth);
+            iter_temp = .{ .name = synth, .variable = iter_name };
+            try self.emitOp(.foreach_hold);
+            try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(synth) }));
+            try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(iter_name) }));
+        }
+    }
     if (val_by_ref and !short_circuited and (iter_tag == .variable or iter_tag == .array_access)) {
         try compiler_expr.compileVivifyChain(self, iter_n);
     } else if (val_by_ref and !short_circuited and try compiler_expr.compileSeparatedFetch(self, iter_n)) {
@@ -288,7 +305,7 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     } else if (val_by_ref and val_node_is_plain(self, val_n) and (short_circuited or !isReadablePlace(iter_tag))) {
         const synth = try std.fmt.allocPrint(self.allocator, "__foreach_iterable_{d}", .{self.loop_depth});
         try self.string_allocs.append(self.allocator, synth);
-        iter_temp = synth;
+        iter_temp = .{ .name = synth };
         // a call returning by reference hands over its variable's array
         try self.emitOp(.reset_return_ref);
         try self.compileNode(iter_n);
@@ -298,12 +315,14 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     } else {
         try self.compileNode(iter_n);
     }
-    // a by-reference loop over a variable iterates the variable's array
-    // live, as php's does: each step reads the variable again
+    // a catch or finally the loop is unwound into lets go of the variable it
+    // held (a temporary's hidden variable stays: a generator it holds may
+    // have handed out references that outlive the loop)
+    if (iter_temp) |holder| if (holder.variable != null) try self.foreach_holders.append(self.allocator, holder);
     const live: ?Compiler.LiveIterable = if (!val_by_ref or !val_node_is_plain(self, val_n))
         null
-    else if (iter_temp) |synth|
-        .{ .temp = synth }
+    else if (iter_temp) |holder|
+        .{ .temp = holder }
     else if (iter_tag == .variable and !std.mem.eql(u8, self.ast.tokenSlice(self.ast.nodes[iter_n].main_token), "$this"))
         .{ .node = iter_n }
     else
@@ -359,7 +378,7 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitSetVar(key_name); // $key = key (peek; key still on stack)
         try self.emitOp(.pop); // -> []
         // push the (already-separated) iterable
-        if (iter_temp) |synth| try self.emitGetVar(synth) else try self.compileNode(iter_n);
+        if (iter_temp) |holder| try self.emitGetVar(holder.name) else try self.compileNode(iter_n);
         try self.emitGetVar(key_name); // push the key
         const vidx = try self.addConstant(.{ .string = Value.String.borrowed(val_name) });
         try self.emitOp(.foreach_ref_bind); // $v = &iterable[key] (reverts prior elem if uncaptured)
@@ -408,10 +427,7 @@ pub fn compileForeach(self: *Compiler, node: Ast.Node) Error!void {
     const end_op: bytecode.OpCode = if (close_on_exit) .iter_end_close else .iter_end;
     try self.emitOp(end_op);
     try self.patchBreaks(&prev_breaks);
-    if (iter_temp) |synth| {
-        try self.emitOp(.unset_var);
-        try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(synth) }));
-    }
+    if (iter_temp) |holder| try self.emitHolderRelease(holder);
     // the element's hidden variable goes with the loop, as php frees its
     // fetch, leaving the property the reference's last holder
     if (prop_ref_synth) |synth| {
@@ -714,6 +730,7 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
     // compile try body; a goto leaving it drops the handler and runs the
     // finally, one entering it pushes the handler
     const try_scope = try self.pushScope(.{ .id = 0, .kind = .try_body, .finally_node = finally_node });
+    const holders_before = self.foreach_holders.items.len;
     try self.compileNode(node.data.lhs);
     self.popJumpScope();
 
@@ -724,6 +741,10 @@ pub fn compileTryCatch(self: *Compiler, node: Ast.Node) Error!void {
     // patch catch offset to here
     self.patchJump(handler_offset_pos);
     self.handlerPatched(try_scope);
+    // the loops the exception left free what they held, as php's live
+    // ranges do before the catch runs
+    for (self.foreach_holders.items[holders_before..]) |holder| try self.emitHolderRelease(holder);
+    self.foreach_holders.shrinkRetainingCapacity(holders_before);
 
     // exception is on the stack when we arrive here
     var end_jumps = std.ArrayListUnmanaged(usize).empty;

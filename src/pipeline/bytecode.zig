@@ -624,6 +624,15 @@ pub const OpCode = enum(u16) {
     // ZEND_SEND_UNPACK's by-reference half. [args, src] -> [args, src]; an
     // array in a variable has the elements sent by reference made references
     arg_unpack,
+    // u16 holder name, u16 variable name: a by-reference foreach over a
+    // variable binds a hidden holder to the variable's reference (php's
+    // FE_RESET_RW making the variable a reference the loop keeps). a
+    // reference made for the loop is marked as the loop's
+    foreach_hold,
+    // u16 holder name, u16 variable name: the loop ends and drops its
+    // holder; a reference the loop made that nothing else shares goes back
+    // to being a plain variable
+    foreach_release,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {
@@ -707,7 +716,7 @@ pub const OpCode = enum(u16) {
             .class_name_const_expr,
             => 4,
             .ensure_array_var, .call, .call_spread, .new_obj, .method_call, .method_call_spread, .static_call_dyn_method => 5,
-            .make_var_ref, .make_var_prop_ref => 6,
+            .make_var_ref, .make_var_prop_ref, .foreach_hold, .foreach_release => 6,
             .get_static_prop,
             .get_static_prop_quiet,
             .get_class_const,

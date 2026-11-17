@@ -9374,6 +9374,44 @@ pub const VM = struct {
                     }
                 },
 
+                .foreach_hold => {
+                    const holder_idx = self.readU16();
+                    const var_idx = self.readU16();
+                    const holder = self.currentChunk().constants.items[holder_idx].string.bytes();
+                    const name = self.currentChunk().constants.items[var_idx].string.bytes();
+                    const frame = self.currentFrame();
+                    const fresh = frame.ref_slots.get(name) == null;
+                    const cell = try self.getOrCreateVarCell(frame, name);
+                    if (cell.* == .array) _ = try self.separateReferencedArray(frame, name, cell, cell.array);
+                    if (fresh and cellOf(cell).binders == 1) cellOf(cell).loop_made = true;
+                    try self.bindRefSlot(&frame.ref_slots, holder, cell);
+                    if (frame.include_parent) |parent_idx| {
+                        const parent = &self.frames[parent_idx];
+                        try self.bindRefSlot(&parent.ref_slots, name, cell);
+                        try self.bindRefSlot(&parent.ref_slots, holder, cell);
+                    }
+                },
+
+                .foreach_release => {
+                    const holder_idx = self.readU16();
+                    const var_idx = self.readU16();
+                    const holder = self.currentChunk().constants.items[holder_idx].string.bytes();
+                    const name = self.currentChunk().constants.items[var_idx].string.bytes();
+                    self.unsetVariableNamed(holder);
+                    // the reference the loop made, now named only by the
+                    // variable: php's is a reference of one, which reads as
+                    // the plain value the variable's slot mirrors
+                    const frame = self.currentFrame();
+                    if (frame.include_parent == null) if (frame.ref_slots.get(name)) |cell| {
+                        if (cellOf(cell).loop_made and cellOf(cell).binders == 1) self.unbindRefSlot(&frame.ref_slots, name);
+                    };
+                    if (self.hasPendingReleases()) self.drainPendingDestruct();
+                    if (self.drainRaised()) {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    }
+                },
+
                 .make_global_ref => {
                     const dst_idx = self.readU16();
                     const dst_name = self.currentChunk().constants.items[dst_idx].string.bytes();
