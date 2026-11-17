@@ -29857,10 +29857,22 @@ pub const VM = struct {
         if (ti.return_type.len == 0) return false;
         // the function's own strict_types decides (ZEND_RET_USES_STRICT_TYPES)
         const fn_strict = if (frame.func) |f| f.strict_types else self.script_strict_types;
-        const accepted = if (std.mem.eql(u8, ti.return_type, "void")) (if (val.* == .null) val.* else null) else try self.verifyDeclaredType(val.*, ti.return_type, self.functionScope(func_name), fn_strict);
+        // static is the called class, and nothing without a class scope
+        var ret_type = ti.return_type;
+        var shown_type = ti.return_type;
+        var substituted: ?[]u8 = null;
+        defer if (substituted) |text| self.allocator.free(text);
+        if (std.ascii.findIgnoreCase(ret_type, "static") != null and php_types.shape(ret_type).mask & php_types.STATIC != 0) {
+            const this_class: ?[]const u8 = if (frameThis(frame)) |t| (if (t == .object) t.object.class_name else null) else null;
+            const called = this_class orelse self.intentClassName("static");
+            substituted = try replaceStaticType(self.allocator, ret_type, called orelse "\x00");
+            ret_type = substituted.?;
+            if (called != null) shown_type = ret_type;
+        }
+        const accepted = if (std.mem.eql(u8, ret_type, "void")) (if (val.* == .null) val.* else null) else try self.verifyDeclaredType(val.*, ret_type, self.functionScope(func_name), fn_strict);
         if (accepted == null) {
             const shown = if (frame.func) |f| try self.returnFunctionLabel(frame, f) else func_name;
-            const msg = std.fmt.allocPrint(self.allocator, "{s}(): Return value must be of type {s}, {s} returned", .{ shown, try self.resolvedTypeText(ti.return_type, self.functionScope(func_name)), valueTypeName(val.*) }) catch return error.RuntimeError;
+            const msg = std.fmt.allocPrint(self.allocator, "{s}(): Return value must be of type {s}, {s} returned", .{ shown, try self.resolvedTypeText(shown_type, self.functionScope(func_name)), valueTypeName(val.*) }) catch return error.RuntimeError;
             defer self.allocator.free(msg);
             // raised inside the function, as php's VERIFY_RETURN_TYPE is
             if (try self.throwBuiltinException("TypeError", msg)) return true;
@@ -29869,6 +29881,27 @@ pub const VM = struct {
         }
         if (@intFromEnum(accepted.?) != @intFromEnum(val.*) or !Value.identical(accepted.?, val.*)) self.replaceOwned(val, accepted.?);
         return false;
+    }
+
+    // a type with each `static` member replaced by the class it stands for
+    fn replaceStaticType(allocator: Allocator, type_str: []const u8, class: []const u8) RuntimeError![]u8 {
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(allocator);
+        var i: usize = 0;
+        while (i < type_str.len) {
+            const c = type_str[i];
+            if (std.ascii.isAlphanumeric(c) or c == '_' or c == '\\' or c >= 0x80) {
+                var j = i;
+                while (j < type_str.len and (std.ascii.isAlphanumeric(type_str[j]) or type_str[j] == '_' or type_str[j] == '\\' or type_str[j] >= 0x80)) j += 1;
+                const word = type_str[i..j];
+                out.appendSlice(allocator, if (std.ascii.eqlIgnoreCase(word, "static")) class else word) catch return error.RuntimeError;
+                i = j;
+                continue;
+            }
+            out.append(allocator, c) catch return error.RuntimeError;
+            i += 1;
+        }
+        return out.toOwnedSlice(allocator) catch error.RuntimeError;
     }
 
     // a typed function reached its end without returning
