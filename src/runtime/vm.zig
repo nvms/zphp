@@ -11974,11 +11974,17 @@ pub const VM = struct {
                         const tpa_attrs = try self.readAttributeDefs();
                         trait_prop_attrs[tpi] = .{ .name = tpa_name, .attrs = tpa_attrs };
                     }
+                    const trait_const_attr_count = self.readByte();
+                    var trait_const_attrs: [32]struct { name: []const u8, attrs: []const AttributeDef } = undefined;
+                    for (0..trait_const_attr_count) |tci| {
+                        const tca_name = self.currentChunk().constants.items[self.readU16()].string.bytes();
+                        trait_const_attrs[tci] = .{ .name = tca_name, .attrs = try self.readAttributeDefs() };
+                    }
 
                     try self.checkTraitConstantsOfUsedTraits(trait_name);
                     if (try self.deprecationOf(trait_attrs)) |suffix| try self.deprecated_traits.put(self.allocator, trait_name, suffix);
                     if (self.trait_uses.get(trait_name)) |subs| for (subs) |sub| try self.warnDeprecatedTraitUse(sub, trait_name);
-                    if (trait_attrs.len > 0 or trait_method_attr_count > 0 or trait_prop_attr_count > 0) {
+                    if (trait_attrs.len > 0 or trait_method_attr_count > 0 or trait_prop_attr_count > 0 or trait_const_attr_count > 0) {
                         var tdef = ClassDef{ .name = trait_name, .is_internal = false };
                         for (trait_attrs) |a| try tdef.attributes.append(self.allocator, a);
                         if (trait_attrs.len > 0) self.allocator.free(trait_attrs);
@@ -11987,6 +11993,9 @@ pub const VM = struct {
                         }
                         for (0..trait_prop_attr_count) |tpi| {
                             try tdef.property_attributes.put(self.allocator, trait_prop_attrs[tpi].name, trait_prop_attrs[tpi].attrs);
+                        }
+                        for (0..trait_const_attr_count) |tci| {
+                            try tdef.constant_attributes.put(self.allocator, trait_const_attrs[tci].name, trait_const_attrs[tci].attrs);
                         }
                         try self.classes.put(self.allocator, trait_name, tdef);
                     } else {

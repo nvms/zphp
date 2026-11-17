@@ -4240,6 +4240,21 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
         try emitAttributeData(self, pa.attrs);
     }
     for (props_with_attrs.items) |pa| freeAttrSlice(self.allocator, pa.attrs);
+
+    // constant attributes, which a class using the trait shows too
+    var consts_with_attrs = std.ArrayListUnmanaged(MemberAttr).empty;
+    defer consts_with_attrs.deinit(self.allocator);
+    for (const_decls.items) |ci| {
+        const member = self.ast.nodes[ci];
+        const cattrs = try extractAttributes(self, member.main_token, AttrTarget.class_constant);
+        if (cattrs.len > 0) try consts_with_attrs.append(self.allocator, .{ .name = self.ast.tokenSlice(member.main_token), .attrs = cattrs });
+    }
+    try self.emitByte(@intCast(consts_with_attrs.items.len));
+    for (consts_with_attrs.items) |ca| {
+        try self.emitU16(try self.addConstant(.{ .string = Value.String.borrowed(ca.name) }));
+        try emitAttributeData(self, ca.attrs);
+    }
+    for (consts_with_attrs.items) |ca| freeAttrSlice(self.allocator, ca.attrs);
 }
 
 // php's compile-time checks of an enum (zend_compile_enum_type and its

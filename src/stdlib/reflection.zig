@@ -2687,6 +2687,13 @@ pub const VisibleConstant = struct { declaring: []const u8, name: []const u8, va
 // interfaces'. an override hides the inherited one and a parent's private
 // constant is not inherited
 pub fn visibleConstants(ctx: *NativeContext, class_name: []const u8, out: *std.ArrayListUnmanaged(VisibleConstant)) RuntimeError!void {
+    // a trait's are the ones it declares
+    if (ctx.vm.traits.contains(class_name)) {
+        const declared = ctx.vm.declaredClassName(class_name);
+        const consts = ctx.vm.trait_constants.get(declared) orelse return;
+        for (consts) |c| try out.append(ctx.allocator, .{ .declaring = declared, .name = c.name, .value = c.value });
+        return;
+    }
     var chain: std.ArrayListUnmanaged([]const u8) = .empty;
     defer chain.deinit(ctx.allocator);
     var current: ?[]const u8 = class_name;
@@ -2980,7 +2987,20 @@ fn rccGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     if (cls.constant_attributes.get(const_name)) |attrs| {
         return try buildAttributeArray(ctx, attrs, null, 16, class_name);
     }
+    // a constant the class took from a trait keeps the trait's attributes
+    if (traitConstantAttributes(ctx.vm, cls.used_traits.items, const_name, 0)) |found| {
+        return try buildAttributeArray(ctx, found.attrs, null, 16, class_name);
+    }
     return NativeResult.borrowed(.{ .array = try ctx.createArray() });
+}
+
+fn traitConstantAttributes(vm: *VM, traits: []const []const u8, const_name: []const u8, depth: usize) ?struct { attrs: []const AttributeDef, trait: []const u8 } {
+    if (depth > 32) return null;
+    for (traits) |t| {
+        if (vm.classes.get(t)) |tdef| if (tdef.constant_attributes.get(const_name)) |attrs| return .{ .attrs = attrs, .trait = t };
+        if (vm.trait_uses.get(t)) |subs| if (traitConstantAttributes(vm, subs, const_name, depth + 1)) |found| return found;
+    }
+    return null;
 }
 
 fn rccVisibility(ctx: *NativeContext) ?@import("../runtime/vm.zig").ClassDef.Visibility {
