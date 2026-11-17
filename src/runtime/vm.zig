@@ -10112,7 +10112,7 @@ pub const VM = struct {
                     }
                 },
                 .unset_global_var => {
-                    const name_val = self.pop();
+                    const name_val = self.popTransfer();
                     defer self.stackRelease(name_val);
                     var text_buf: [32]u8 = undefined;
                     const raw_name = varVarText(name_val, &text_buf);
@@ -10130,7 +10130,7 @@ pub const VM = struct {
                 },
                 .unset_var_var => {
                     // unset($$name): the name as a variable-variable read takes it
-                    const name_val = self.pop();
+                    const name_val = self.popTransfer();
                     defer self.stackRelease(name_val);
                     var text_buf: [32]u8 = undefined;
                     const raw_name = varVarText(name_val, &text_buf);
@@ -10312,7 +10312,7 @@ pub const VM = struct {
                     // clone after __clone ran, with the caller's scope rules. a
                     // readonly property may be written again where its set
                     // visibility allows (the wither pattern)
-                    const with_val = self.pop();
+                    const with_val = self.popTransfer();
                     defer self.stackRelease(with_val);
                     if (with_val != .array) {
                         const msg = try std.fmt.allocPrint(self.allocator, "clone(): Argument #2 ($withProperties) must be of type array, {s} given", .{Value.typeName(with_val)});
@@ -14652,7 +14652,7 @@ pub const VM = struct {
                 .get_class_const_dynamic => {
                     const const_idx = self.readU16();
                     const const_name = self.currentChunk().constants.items[const_idx].string.bytes();
-                    const class_val = self.pop();
+                    const class_val = self.popTransfer();
                     defer self.stackRelease(class_val);
                     const class_name = dynClassOperand(class_val) orelse {
                         if (try self.throwBuiltinException("Error", "Class name must be a valid object or a string")) continue;
@@ -14664,7 +14664,7 @@ pub const VM = struct {
                 .get_class_const_dyn_name => {
                     const class_idx = self.readU16();
                     const class_name = self.resolveStaticClassName(self.currentChunk().constants.items[class_idx].string.bytes());
-                    const name_val = self.pop();
+                    const name_val = self.popTransfer();
                     defer self.stackRelease(name_val);
                     // the class is fetched before the name is looked at
                     if (name_val != .string and !self.classes.contains(class_name) and !self.interfaces.contains(class_name)) {
@@ -14684,9 +14684,9 @@ pub const VM = struct {
                 },
 
                 .get_class_const_dyn_both => {
-                    const name_val = self.pop();
+                    const name_val = self.popTransfer();
                     defer self.stackRelease(name_val);
-                    const class_val = self.pop();
+                    const class_val = self.popTransfer();
                     defer self.stackRelease(class_val);
                     const class_name = self.resolveStaticClassName(dynClassOperand(class_val) orelse {
                         if (try self.throwBuiltinException("Error", "Class name must be a valid object or a string")) continue;
