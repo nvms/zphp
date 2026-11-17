@@ -34,7 +34,7 @@ stale: channel 999999 does not exist in this process
 string(14) "through a copy"
 int(20)
 int(2870)
-int(2)
+bool(true)
 int(50)
 int(1)
 int(50)

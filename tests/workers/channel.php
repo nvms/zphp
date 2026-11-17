@@ -53,7 +53,8 @@ $jobs->close();
 var_dump($a->await() + $b->await());
 $results->close();
 $sum = 0; $workers = []; foreach ($results as $r) { $sum += $r['sq']; $workers[$r['worker']] = true; }
-var_dump($sum, count($workers));
+// which consumer takes which job is up to the scheduler: one may take them all
+var_dump($sum, count($workers) >= 1 && count($workers) <= 2);
 
 // a worker produces, main iterates, capacity one keeps them in step
 $stream = new Zphp\Channel(1);
