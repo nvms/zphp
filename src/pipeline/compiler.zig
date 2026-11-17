@@ -1343,6 +1343,12 @@ pub const Compiler = struct {
                 const parts = self.ast.extraSlice(node.data.lhs);
                 const fqn = try self.buildQualifiedString(parts);
                 const resolved = try self.exactConstantName(try self.resolveQualifiedNonClassName(fqn, node.data.rhs));
+                // zend_compile_const: `\__COMPILER_HALT_OFFSET__` is the
+                // offset too (namespace\ names another constant)
+                if (self.ast.halt_offset) |offset| if (std.mem.eql(u8, std.mem.trimStart(u8, resolved, "\\"), "__COMPILER_HALT_OFFSET__")) {
+                    try self.emitConstant(try self.addConstant(.{ .int = offset }));
+                    return;
+                };
                 // a qualified name is no `use const` alias
                 self.const_name_resolved = true;
                 defer self.const_name_resolved = false;
