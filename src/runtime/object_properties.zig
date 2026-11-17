@@ -229,7 +229,12 @@ pub fn table(vm: *VM, obj: *PhpObject, purpose: Purpose) RuntimeError!?*PhpArray
     if (purpose == .debug and vm.hasMethod(obj.class_name, "__debugInfo")) {
         const result = try vm.callMethod(obj, "__debugInfo", &.{});
         if (result == .array) return result.array;
-        if (result == .null) return try vm.allocArray();
+        if (result == .null) {
+            const msg = try std.fmt.allocPrint(vm.allocator, "Returning null from {s}::__debugInfo() is deprecated, return an empty array instead", .{obj.class_name});
+            defer vm.allocator.free(msg);
+            try vm.raiseError(VM.E_DEPRECATED, msg);
+            return try vm.allocArray();
+        }
         return vm.raiseFatal("__debuginfo() must return an array");
     }
     var name: ?[]const u8 = obj.class_name;

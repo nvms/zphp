@@ -497,6 +497,10 @@ pub fn printRValueImpl(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), v
             obj.recursion |= flag;
             defer obj.recursion &= ~flag;
 
+            // php reads the properties (__debugInfo) before it prints anything
+            var listing_opt: ?object_properties.Listing = if (vm) |v| try object_properties.list(v, obj, .debug, a) else null;
+            defer if (listing_opt) |*l| l.deinit(a);
+
             try out.appendSlice(a, class_names.display(obj.class_name));
             // enums print as "ClassName Enum:type" (or "ClassName Enum" for non-backed)
             var label: []const u8 = " Object\n";
@@ -515,9 +519,7 @@ pub fn printRValueImpl(a: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), v
             try appendIndent(out, a, depth * 4);
             try out.appendSlice(a, "(\n");
 
-            if (vm) |v| {
-                var listing = try object_properties.list(v, obj, .debug, a);
-                defer listing.deinit(a);
+            if (listing_opt) |listing| {
                 for (listing.items.items) |prop| {
                     if (prop.uninitialized != null) continue;
                     try appendIndent(out, a, (depth + 1) * 4);
