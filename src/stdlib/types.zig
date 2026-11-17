@@ -2155,8 +2155,10 @@ fn native_extension_loaded(_: *NativeContext, args: []const Value) RuntimeError!
     return NativeResult.scalar(.{ .bool = @import("../extension.zig").isLoaded(name) });
 }
 
-fn native_get_loaded_extensions(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+fn native_get_loaded_extensions(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const arr = try ctx.createArray();
+    // zend_extensions: zphp loads none (php lists Zend OPcache, Xdebug)
+    if (args.len > 0 and args[0].isTruthy()) return NativeResult.borrowed(.{ .array = arr });
     for (SUPPORTED_EXTENSIONS) |s| try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(s) });
     for (@import("../extension.zig").loaded()) |ext| try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(ext.name) });
     return NativeResult.borrowed(.{ .array = arr });

@@ -171,6 +171,12 @@ fn dispatch(allocator: std.mem.Allocator, args: []const []const u8) !void {
     } else if (std.mem.eql(u8, cmd, "-i") or std.mem.eql(u8, cmd, "--info")) {
         // php_print_info(PHP_INFO_ALL & ~PHP_INFO_CREDITS)
         try runCode(allocator, "phpinfo(~INFO_CREDITS);", &.{});
+    } else if (std.mem.eql(u8, cmd, "-m") or std.mem.eql(u8, cmd, "--modules")) {
+        // the cli's print_modules: each list sorted by name, in any case
+        try runCode(allocator,
+            \\$list = function ($zend) { $m = get_loaded_extensions($zend); usort($m, 'strcasecmp'); foreach ($m as $name) echo $name, "\n"; };
+            \\echo "[PHP Modules]\n"; $list(false); echo "\n[Zend Modules]\n"; $list(true); echo "\n";
+        , &.{});
     } else if (std.mem.eql(u8, cmd, "-a") or std.mem.eql(u8, cmd, "--interactive")) {
         // php's cli without the readline extension
         try writeStdout("Interactive shell (-a) requires the readline extension.\n");
