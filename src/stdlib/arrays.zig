@@ -595,7 +595,47 @@ fn array_splice(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     arr.rebuildStringIndexAssumeCapacity();
     try ctx.vm.attachArrayRefs(arr);
 
+    // php builds no array of removed elements when the result is unused:
+    // they die during the splice, and a destructor that changes the array
+    // (php separates it from the splice's hold) or drops it is an Error
+    if (!ctx.vm.nativeResultUsed() and spliceMayDestruct(removed)) try spliceReleaseRemoved(ctx, arr, removed);
     return NativeResult.borrowed(.{ .array = removed });
+}
+
+fn spliceMayDestruct(removed: *PhpArray) bool {
+    for (removed.entries.items) |entry| switch (if (entry.ref) |cell| cell.* else entry.value) {
+        .object, .array => return true,
+        else => {},
+    };
+    return false;
+}
+
+fn spliceReleaseRemoved(ctx: *NativeContext, arr: *PhpArray, removed: *PhpArray) RuntimeError!void {
+    const vm = ctx.vm;
+    const snapshot = try ctx.allocator.dupe(PhpArray.Entry, arr.entries.items);
+    defer ctx.allocator.free(snapshot);
+    const held = arr.refcount;
+    VM.arrayRetain(arr);
+    for (removed.entries.items) |*entry| {
+        if (entry.ref != null) vm.setEntryRef(entry, null);
+        const value = entry.value;
+        entry.value = .null;
+        vm.releaseValue(value);
+        if (vm.hasPendingReleases()) vm.drainPendingDestruct();
+    }
+    var changed = arr.refcount <= held or arr.entries.items.len != snapshot.len;
+    if (!changed) for (arr.entries.items, snapshot) |now, before| {
+        if (!now.key.eql(before.key) or !Value.identical(now.value, before.value) or @intFromEnum(now.value) != @intFromEnum(before.value) or now.ref != before.ref) {
+            changed = true;
+            break;
+        }
+    };
+    vm.arrayRelease(arr);
+    if (vm.pending_exception != null) return error.RuntimeError;
+    if (changed) {
+        try vm.setPendingException("Error", "Array was modified during array_splice operation");
+        return error.RuntimeError;
+    }
 }
 
 fn array_combine(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {

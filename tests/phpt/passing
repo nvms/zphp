@@ -7895,6 +7895,13 @@ ext/standard/tests/array/gh14775.phpt
 ext/standard/tests/array/gh15982.phpt
 ext/standard/tests/array/gh16053.phpt
 ext/standard/tests/array/gh16649/array_splice_normal_destructor.phpt
+ext/standard/tests/array/gh16649/array_splice_uaf_add_elements.phpt
+ext/standard/tests/array/gh16649/array_splice_uaf_array_deallocated.phpt
+ext/standard/tests/array/gh16649/array_splice_uaf_complex_modification.phpt
+ext/standard/tests/array/gh16649/array_splice_uaf_multiple_destructors.phpt
+ext/standard/tests/array/gh16649/array_splice_uaf_original_case.phpt
+ext/standard/tests/array/gh16649/array_splice_uaf_packed_to_hash.phpt
+ext/standard/tests/array/gh16649/array_splice_with_replacement.phpt
 ext/standard/tests/array/gh16905.phpt
 ext/standard/tests/array/gh16957.phpt
 ext/standard/tests/array/gh17447.phpt
@@ -11030,6 +11037,7 @@ tests/lang/foreachLoop.011.phpt
 tests/lang/foreachLoop.012.phpt
 tests/lang/foreachLoop.013.phpt
 tests/lang/foreachLoop.014.phpt
+tests/lang/foreachLoop.015.phpt
 tests/lang/foreachLoop.016.phpt
 tests/lang/foreachLoop.017.phpt
 tests/lang/foreachLoopIterator.001.phpt

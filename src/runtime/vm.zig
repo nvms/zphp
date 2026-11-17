@@ -27935,7 +27935,7 @@ pub const VM = struct {
                 if (std.ascii.eqlIgnoreCase(base, "array_multisort") and input_args[i] != .array) continue;
                 try self.checkArgCell(source.cell.denial);
             }
-            if (sources.len > 0 and sources[0] != .none and input_args[0] == .array and input_args[0].array.refcount > 1 and byref_args.arg0IsByRef(n)) {
+            if (sources.len > 0 and sources[0] != .none and input_args[0] == .array and self.byRefArrayShared(sources[0], input_args) and byref_args.arg0IsByRef(n)) {
                 const separated: Value = .{ .array = try self.shallowCloneCow(input_args[0].array) };
                 const copy = try self.copyStackArgs(&args_buf, input_args);
                 copy[0] = separated;
@@ -30500,6 +30500,32 @@ pub const VM = struct {
         defer self.allocator.free(msg);
         try self.raiseError(E_DEPRECATED, msg);
         if (self.pending_exception != null) return error.RuntimeError;
+    }
+
+    // Z_PARAM_ARRAY_EX's separation of a by-reference array argument: the
+    // array is shared when something holds it besides the variable (or the
+    // reference set) it came from and this call's hold on the argument. the
+    // same array passed again by value is such a holder
+    fn byRefArrayShared(self: *VM, source: RefSource, args: []const Value) bool {
+        const arr = args[0].array;
+        const holders = arr.refcount -| 1;
+        const owners: u32 = switch (source) {
+            .simple => |name| if (self.frame_count > 0) if (self.currentFrame().ref_slots.get(name)) |cell| self.referenceAliasCount(cell) else 1 else 1,
+            .cell => |c| self.referenceAliasCount(c.value),
+            .none => 1,
+        };
+        // an earlier operand holds it as a value (`f($a, sort($a))`)
+        return holders > owners or self.stackHoldsArray(arr);
+    }
+
+    // php's USED_RET() for the running native: false when user code called
+    // it as a statement whose result is thrown away
+    pub fn nativeResultUsed(self: *VM) bool {
+        const record = self.native_call orelse return true;
+        if (record.from_native or self.frame_count == 0 or record.depth != self.frame_count) return true;
+        const frame = self.currentFrame();
+        const code = frame.chunk.code.items;
+        return !(bytecode.opIs(code, frame.ip, .pop_boundary) or bytecode.opIs(code, frame.ip, .pop));
     }
 
     fn warnDiscardedNative(self: *VM, name: []const u8, reason: []const u8, outer: ?*const NativeCall, method: bool) RuntimeError!void {
