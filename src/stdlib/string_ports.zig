@@ -53,6 +53,7 @@ pub const entries = .{
     .{ "str_increment", native_str_increment },
     .{ "str_decrement", native_str_decrement },
     .{ "nl2br", native_nl2br },
+    .{ "hebrev", native_hebrev },
     .{ "wordwrap", native_wordwrap },
     .{ "substr_replace", native_substr_replace },
     .{ "ord", native_ord },
@@ -1270,6 +1271,136 @@ fn native_nl2br(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
             }
             try out.append(ctx.allocator, s[i]);
         } else try out.append(ctx.allocator, c);
+    }
+    return NativeResult.copyString(ctx.allocator, out.items);
+}
+
+// php's hebrev (string.c): logical hebrew text (bytes 224-250) in visual
+// order, broken into lines of at most max_chars avoiding breaking words
+fn native_hebrev(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const p = Args.init(ctx, "hebrev", args);
+    const str = try p.str(0, "string");
+    const max_chars = try p.optLong(1, "max_chars_per_line", 0);
+    const len = str.len;
+    if (len == 0) return NativeResult.literal("");
+    const Heb = struct {
+        fn isheb(c: u8) bool {
+            return c >= 224 and c <= 250;
+        }
+        fn blank(c: u8) bool {
+            return c == ' ' or c == '\t';
+        }
+        fn newline(c: u8) bool {
+            return c == '\n' or c == '\r';
+        }
+        fn punct(c: u8) bool {
+            return c < 128 and std.ascii.isPrint(c) and !std.ascii.isAlphanumeric(c) and c != ' ';
+        }
+    };
+    // the bytes after the string read as its C terminator
+    const at = struct {
+        fn f(bytes: []const u8, i: usize) u8 {
+            return if (i < bytes.len) bytes[i] else 0;
+        }
+    }.f;
+
+    const heb = try ctx.allocator.alloc(u8, len);
+    defer ctx.allocator.free(heb);
+    var target: usize = len; // one past where the next byte goes
+    var tmp: usize = 0;
+    var block_start: usize = 0;
+    var block_end: usize = 0;
+    var hebrew_block = Heb.isheb(str[0]);
+    while (true) {
+        if (hebrew_block) {
+            while (block_end < len - 1) {
+                const c = at(str, tmp + 1);
+                if (!(Heb.isheb(c) or Heb.blank(c) or Heb.punct(c) or c == '\n')) break;
+                tmp += 1;
+                block_end += 1;
+            }
+            var i = block_start + 1;
+            while (i <= block_end + 1) : (i += 1) {
+                target -= 1;
+                heb[target] = switch (str[i - 1]) {
+                    '(' => ')',
+                    ')' => '(',
+                    '[' => ']',
+                    ']' => '[',
+                    '{' => '}',
+                    '}' => '{',
+                    '<' => '>',
+                    '>' => '<',
+                    '\\' => '/',
+                    '/' => '\\',
+                    else => |c| c,
+                };
+            }
+            hebrew_block = false;
+        } else {
+            while (block_end < len - 1) {
+                const c = at(str, tmp + 1);
+                if (Heb.isheb(c) or c == '\n') break;
+                tmp += 1;
+                block_end += 1;
+            }
+            while (block_end > block_start) {
+                const c = str[tmp];
+                if (!((Heb.blank(c) or Heb.punct(c)) and c != '/' and c != '-')) break;
+                tmp -= 1;
+                block_end -= 1;
+            }
+            var i = block_end + 1;
+            while (i >= block_start + 1) : (i -= 1) {
+                target -= 1;
+                heb[target] = str[i - 1];
+            }
+            hebrew_block = true;
+        }
+        block_start = block_end + 1;
+        if (block_end >= len - 1) break;
+    }
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(ctx.allocator);
+    try out.ensureTotalCapacity(ctx.allocator, len);
+    var begin: usize = len - 1;
+    var end: usize = len - 1;
+    while (true) {
+        var char_count: i64 = 0;
+        while ((max_chars == 0 or (max_chars > 0 and char_count < max_chars)) and begin > 0) {
+            char_count += 1;
+            begin -= 1;
+            if (Heb.newline(heb[begin])) {
+                while (begin > 0 and Heb.newline(heb[begin - 1])) {
+                    begin -= 1;
+                    char_count += 1;
+                }
+                break;
+            }
+        }
+        if (max_chars >= 0 and char_count == max_chars) {
+            // try to avoid breaking words
+            var new_char_count = char_count;
+            var new_begin = begin;
+            while (new_char_count > 0) {
+                if (Heb.blank(heb[new_begin]) or Heb.newline(heb[new_begin])) break;
+                new_begin += 1;
+                new_char_count -= 1;
+            }
+            if (new_char_count > 0) begin = new_begin;
+        }
+        const orig_begin = begin;
+        if (Heb.blank(heb[begin])) heb[begin] = '\n';
+        while (begin <= end and Heb.newline(heb[begin])) begin += 1;
+        var i = begin;
+        while (i <= end) : (i += 1) try out.append(ctx.allocator, heb[i]);
+        i = orig_begin;
+        while (i <= end and Heb.newline(heb[i])) : (i += 1) try out.append(ctx.allocator, heb[i]);
+        begin = orig_begin;
+        if (begin == 0) break;
+        begin -= 1;
+        end = begin;
     }
     return NativeResult.copyString(ctx.allocator, out.items);
 }
