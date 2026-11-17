@@ -92,7 +92,10 @@ pub fn nativeCast(obj: *PhpObject, target: NumericCast) ?Value {
 
 fn nativeCompare(a: Value, b: Value) ?i64 {
     const native = (a == .object and a.object.native.kind != .none) or (b == .object and b.object.native.kind != .none);
-    if (!native) return null;
+    // an object against a string is cast with __toString, wherever the
+    // comparison is nested (zend_compare)
+    const stringable = (a == .object and b == .string) or (a == .string and b == .object);
+    if (!native and !stringable) return null;
     const hook = hooks().object orelse return null;
     return hook.compare(hook.ctx, a, b);
 }

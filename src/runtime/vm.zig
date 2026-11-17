@@ -4187,6 +4187,21 @@ pub const VM = struct {
     // rejects falls back to the ordinary object comparison
     fn objectCompareHook(ctx: *anyopaque, a: Value, b: Value) ?i64 {
         const self: *VM = @ptrCast(@alignCast(ctx));
+        const native = (a == .object and a.object.native.kind != .none) or (b == .object and b.object.native.kind != .none);
+        if (!native) {
+            // zend_std_compare_objects: an object with __toString against a
+            // string compares as that string
+            const obj = if (a == .object) a.object else b.object;
+            if (!self.hasMethod(obj.class_name, "__toString")) return null;
+            objRetain(obj);
+            defer self.objRelease(obj);
+            const text = self.callMethod(obj, "__toString", &.{}) catch {
+                self.discardPending();
+                return null;
+            };
+            if (text != .string) return null;
+            return if (a == .object) Value.compare(text, b) else Value.compare(a, text);
+        }
         const order = self.objectBinop(.compare, a, b) catch {
             self.discardPending();
             return null;

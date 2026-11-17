@@ -2249,6 +2249,8 @@ Zend/tests/gh19044.phpt
 Zend/tests/gh19053.phpt
 Zend/tests/gh19280.phpt
 Zend/tests/gh19304.phpt
+Zend/tests/gh19305-001.phpt
+Zend/tests/gh19305-002.phpt
 Zend/tests/gh19305-003.phpt
 Zend/tests/gh19306.phpt
 Zend/tests/gh19326.phpt
