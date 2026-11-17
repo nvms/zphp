@@ -223,6 +223,14 @@ fn array_reverse(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
 }
 
 fn array_merge(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    var count: u64 = 0;
+    for (args) |arg| if (arg == .array) {
+        count += arg.array.entries.items.len;
+    };
+    if (count >= ht_max_size) {
+        try ctx.vm.setPendingException("Error", std.fmt.comptimePrint("The total number of elements must be lower than {d}", .{ht_max_size}));
+        return error.RuntimeError;
+    }
     const arr = try ctx.createArray();
     for (args) |arg| {
         if (arg != .array) continue;

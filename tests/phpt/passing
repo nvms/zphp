@@ -7366,6 +7366,7 @@ ext/standard/tests/array/006.phpt
 ext/standard/tests/array/007.phpt
 ext/standard/tests/array/008.phpt
 ext/standard/tests/array/009.phpt
+ext/standard/tests/array/GHSA-h96m-rvf9-jgm2.phpt
 ext/standard/tests/array/array_all_basic.phpt
 ext/standard/tests/array/array_any_basic.phpt
 ext/standard/tests/array/array_change_key_case.phpt
