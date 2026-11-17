@@ -59,9 +59,23 @@ fn argImg(args: []const Value, idx: usize) ?*c.gdImageStruct {
 
 // ---------------- create / destroy ----------------
 
+// php refuses a size gd can't allocate before asking gd for it
+fn checkImageSize(ctx: *NativeContext, comptime func: []const u8, w: i64, h: i64) RuntimeError!void {
+    const max = std.math.maxInt(c_int);
+    if (w <= 0 or w >= max) {
+        try ctx.vm.setPendingException("ValueError", func ++ "(): Argument #1 ($width) must be greater than 0");
+        return error.RuntimeError;
+    }
+    if (h <= 0 or h >= max) {
+        try ctx.vm.setPendingException("ValueError", func ++ "(): Argument #2 ($height) must be greater than 0");
+        return error.RuntimeError;
+    }
+}
+
 fn imgCreate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const w = argInt(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
     const h = argInt(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
+    try checkImageSize(ctx, "imagecreate", w, h);
     const im = c.gdImageCreate(@intCast(w), @intCast(h));
     return wrapImg(ctx, im);
 }
@@ -69,6 +83,7 @@ fn imgCreate(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult
 fn imgCreateTrueColor(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const w = argInt(args, 0) orelse return NativeResult.scalar(.{ .bool = false });
     const h = argInt(args, 1) orelse return NativeResult.scalar(.{ .bool = false });
+    try checkImageSize(ctx, "imagecreatetruecolor", w, h);
     const im = c.gdImageCreateTrueColor(@intCast(w), @intCast(h));
     return wrapImg(ctx, im);
 }
