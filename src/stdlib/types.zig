@@ -1758,8 +1758,31 @@ fn native_get_cfg_var(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     const ini_config = @import("../ini_config.zig");
     const name = args[0].string.bytes();
     if (std.mem.eql(u8, name, "cfg_file_path")) return NativeResult.copyString(ctx.allocator, ini_config.loadedFile() orelse return NativeResult.scalar(Value{ .bool = false }));
-    const value = ini_config.get(name) orelse return NativeResult.scalar(Value{ .bool = false });
-    return NativeResult.copyString(ctx.allocator, value);
+    // php's ini parser turns a bracketed name into an array entry, so no
+    // configuration name has brackets of its own
+    if (std.mem.indexOfScalar(u8, name, '[') != null) return NativeResult.scalar(Value{ .bool = false });
+    if (ini_config.get(name)) |value| return NativeResult.copyString(ctx.allocator, value);
+    // `name[key] = value` lines make an array (`name[] = value` appends), as
+    // php's ini parser builds them
+    var arr: ?*value_mod.PhpArray = null;
+    for (ini_config.all()) |d| {
+        if (d.name.len < name.len + 2 or !std.mem.startsWith(u8, d.name, name) or d.name[name.len] != '[' or d.name[d.name.len - 1] != ']') continue;
+        const target = arr orelse blk: {
+            const made = try ctx.createArray();
+            arr = made;
+            break :blk made;
+        };
+        const key = d.name[name.len + 1 .. d.name.len - 1];
+        const val: Value = .{ .string = try Value.String.create(ctx.allocator, d.value) };
+        defer val.string.release();
+        if (key.len == 0) {
+            try target.append(ctx.allocator, val);
+        } else {
+            try target.set(ctx.allocator, value_mod.PhpArray.normalizeKey(.{ .string = Value.String.borrowed(key) }), val);
+        }
+    }
+    if (arr) |a| return NativeResult.borrowed(.{ .array = a });
+    return NativeResult.scalar(Value{ .bool = false });
 }
 
 extern "c" fn getlogin() ?[*:0]const u8;
