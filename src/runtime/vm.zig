@@ -2652,6 +2652,7 @@ pub const VM = struct {
         try @import("../stdlib/tokenizer.zig").register(vm, allocator);
 
         try @import("../stdlib/hash.zig").register(vm, allocator);
+        try @import("../stdlib/zlib_context.zig").register(vm, allocator);
 
         // the class unserialize() gives objects of classes it can't load
         // (ext/standard/incomplete_class.c); its accesses are refused in the
@@ -3558,6 +3559,7 @@ pub const VM = struct {
         @import("../stdlib/intl.zig").cleanupResources(self.objects);
         @import("../stdlib/gmp.zig").cleanupResources(self.objects);
         @import("../stdlib/hash.zig").cleanupResources(self.objects);
+        @import("../stdlib/zlib_context.zig").cleanupResources(self.objects);
         @import("../stdlib/workers.zig").cleanupResources(self.objects);
         @import("../stdlib/channel.zig").cleanupResources(self.objects);
         @import("../stdlib/buffer.zig").cleanupResources(self.objects);

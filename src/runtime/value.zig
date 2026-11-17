@@ -1194,6 +1194,8 @@ pub const NativeHandle = struct {
         stream_bucket,
         // a HashContext's algorithm, context and hmac key (hash.zig)
         hash_context,
+        // a DeflateContext's or InflateContext's z_stream (zlib_context.zig)
+        zlib_context,
         _,
     };
 
