@@ -258,7 +258,8 @@ const Parser = struct {
             .kw_do => self.parseDoWhileStmt(),
             .kw_for => self.parseForStmt(),
             .kw_foreach => self.parseForeachStmt(),
-            .kw_function => self.parseFunctionDecl(),
+            // `function () {...};` is a closure in an expression statement
+            .kw_function => if (self.peekAt(1) == .l_paren or (self.peekAt(1) == .amp and self.peekAt(2) == .l_paren)) self.parseExpressionStmt() else self.parseFunctionDecl(),
             .kw_const => self.parseConstDecl(),
             .kw_switch => self.parseSwitchStmt(),
             .kw_return => self.parseReturnStmt(),
