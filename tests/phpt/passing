@@ -4324,6 +4324,8 @@ Zend/tests/type_coercion/float_to_int/no_warnings_compatible_float_vars.phpt
 Zend/tests/type_coercion/float_to_int/no_warnings_compatible_string_float_vars.phpt
 Zend/tests/type_coercion/float_to_int/non-rep-float-as-int-extra1.phpt
 Zend/tests/type_coercion/float_to_int/non-rep-float-as-int-extra2.phpt
+Zend/tests/type_coercion/float_to_int/non-rep-float-as-int-extra3.phpt
+Zend/tests/type_coercion/float_to_int/non-rep-float-as-int-extra4.phpt
 Zend/tests/type_coercion/float_to_int/union_int_string_type_arg.phpt
 Zend/tests/type_coercion/float_to_int/union_int_string_type_arg_promote_exception.phpt
 Zend/tests/type_coercion/float_to_int/warning_float_does_not_fit_zend_long_arrays.phpt

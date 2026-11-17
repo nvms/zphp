@@ -10485,10 +10485,12 @@ pub const VM = struct {
                         };
                         self.push(.{ .bool = result.isTruthy() });
                     } else if (arr_val == .array) {
+                        // zend_find_array_dim_slow: an array a handler of
+                        // the float's warning destroyed holds nothing
                         if (key == .resource or key == .float or key == .null) { if (!(self.warnOffsetKeyOn(key, arr_val.array, .null) catch {
                             _ = try self.resumeRaised();
                             continue;
-                        }) and key == .null) {
+                        }) and (key == .null or (key == .float and arr_val.array.refcount == 0))) {
                             self.push(.{ .bool = false });
                             continue;
                         } }

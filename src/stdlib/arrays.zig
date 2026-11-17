@@ -1763,8 +1763,12 @@ fn array_key_exists(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
         .float => |f| blk: {
             // zend_dval_to_lval_safe: a float past the int range is cast
             // modulo 2^64 with a warning, a fraction is deprecated
+            const held = if (args.len > 1 and args[1] == .array) args[1].array.refcount else 0;
             try ctx.vm.warnOffsetKey(args[0]);
             if (ctx.vm.pending_exception != null) return error.RuntimeError;
+            // an array the warning's handler destroyed has no keys: only
+            // this call's own holds on its arguments are left
+            if (args.len > 1 and args[1] == .array and args[1].array.refcount < held and args[1].array.refcount <= 2) return NativeResult.scalar(.{ .bool = false });
             break :blk .{ .int = Value.dvalToLval(f) };
         },
         .bool => |b| .{ .int = @intFromBool(b) },
