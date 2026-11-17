@@ -432,6 +432,8 @@ pub fn writeTrace(buf: *Writer, alloc: std.mem.Allocator, trace: Value) void {
         if (args_v == .array) {
             for (args_v.array.entries.items, 0..) |arg_entry, ai| {
                 if (ai > 0) write(buf, alloc, ", ");
+                // a named argument (one a variadic collected) shows its name
+                if (arg_entry.key == .string) writeFmt(buf, alloc, "{s}: ", .{arg_entry.key.string.bytes()});
                 writeTraceArg(buf, alloc, arg_entry.value);
             }
         }

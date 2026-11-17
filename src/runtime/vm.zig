@@ -16147,7 +16147,11 @@ pub const VM = struct {
         for (f.params[0..@min(passed orelse declared, declared)], 0..) |pname, i| try args.append(self.allocator, try self.traceArgValue(frameParamValue(frame, f, pname), sensitive, i));
         if (f.is_variadic) {
             const rest = frameParamValue(frame, f, f.params[declared]);
-            if (rest == .array) for (rest.array.entries.items) |e| try args.append(self.allocator, try self.traceArgValue(e.value, sensitive, declared));
+            // named extras keep their names
+            if (rest == .array) for (rest.array.entries.items) |e| {
+                const v = try self.traceArgValue(if (e.ref) |r| r.* else e.value, sensitive, declared);
+                if (e.key == .string) try args.set(self.allocator, e.key, v) else try args.append(self.allocator, v);
+            };
             return;
         }
         const count = passed orelse return;

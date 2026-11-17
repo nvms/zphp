@@ -1141,6 +1141,14 @@ pub fn buildBacktrace(ctx: *NativeContext, ignore_args: bool, provide_object: bo
                             try args_arr.append(alloc, try vm.traceArgValue(ic.fga_buf[offset + a], sensitive, @min(a, variadic_at)));
                         }
                     }
+                    // the named arguments a variadic collected follow, by name
+                    if (frame.func) |func| if (func.is_variadic and func.params.len > 0) {
+                        const rest = @TypeOf(vm.*).frameParamValue(frame, func, func.params[func.params.len - 1]);
+                        if (rest == .array) for (rest.array.entries.items) |e| {
+                            if (e.key != .string) continue;
+                            try args_arr.set(alloc, e.key, try vm.traceArgValue(if (e.ref) |r| r.* else e.value, sensitive, variadic_at));
+                        };
+                    };
                 }
             }
             try entry.set(alloc, .{ .string = Value.String.borrowed("args") }, .{ .array = args_arr });
@@ -1300,6 +1308,10 @@ fn native_debug_print_backtrace(ctx: *NativeContext, args: []const Value) Runtim
         try out.append(alloc, '(');
         if (call_args == .array) for (call_args.array.entries.items, 0..) |a, n| {
             if (n > 0) try out.appendSlice(alloc, ", ");
+            if (a.key == .string) {
+                try out.appendSlice(alloc, a.key.string.bytes());
+                try out.appendSlice(alloc, ": ");
+            }
             @import("../error_format.zig").writeTraceArg(out, alloc, a.value);
         };
         try out.appendSlice(alloc, ")\n");
