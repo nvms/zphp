@@ -751,6 +751,12 @@ pub fn checkInterface(vm: *VM, name: []const u8, def: *const ClassDef, idef: *co
 fn checkProperties(p: *Pending, arena: std.mem.Allocator) (RuntimeError || error{OutOfMemory})!void {
     const def = p.def;
     for (def.properties.items) |prop| try checkSetHookVariance(p, arena, prop);
+    try checkParentProperties(p, arena);
+    if (!p.is_interface) try checkInterfaceProperties(p, arena);
+}
+
+fn checkParentProperties(p: *Pending, arena: std.mem.Allocator) (RuntimeError || error{OutOfMemory})!void {
+    const def = p.def;
     const parent_name = def.parent orelse return;
     for (def.properties.items) |child| {
         const found = inheritedProperty(p, parent_name, child.name) orelse continue;
@@ -769,6 +775,81 @@ fn checkProperties(p: *Pending, arena: std.mem.Allocator) (RuntimeError || error
             current = cdef.parent;
         }
     }
+}
+
+// do_inherit_property for the properties of the interfaces a class
+// implements, against the class's declaration (its own or inherited): set
+// visibility, the hooks it declares, the type, and an abstract set hook's
+// parameter type for a property without a set hook
+fn checkInterfaceProperties(p: *Pending, arena: std.mem.Allocator) (RuntimeError || error{OutOfMemory})!void {
+    const def = p.def;
+    var order: std.ArrayListUnmanaged([]const u8) = .empty;
+    var seen: std.StringHashMapUnmanaged(void) = .{};
+    for (def.interfaces.items) |iface| try collectInterfaces(p, arena, iface, &order, &seen);
+    for (order.items) |iface| {
+        const idef = defOf(p, iface) orelse continue;
+        for (idef.properties.items) |iprop| {
+            const child: ClassDef.PropertyDef = for (def.properties.items) |own| {
+                if (std.mem.eql(u8, own.name, iprop.name)) break own;
+            } else if (def.parent) |parent| (if (inheritedProperty(p, parent, iprop.name)) |found| found.prop else continue) else continue;
+            const name = iprop.name;
+            var hbuf: [256]u8 = undefined;
+            const iface_setter = std.fmt.bufPrint(&hbuf, "{s}$hook_set", .{name}) catch continue;
+            const iface_has_set = idef.methods.contains(iface_setter);
+            // a public readonly property is implicitly protected(set)
+            const child_set: ?ClassDef.Visibility = if (child.has_set_visibility and child.set_visibility != child.visibility)
+                child.set_visibility
+            else if (child.is_readonly and !child.has_set_visibility and child.visibility == .public)
+                .protected
+            else
+                null;
+            if (child_set) |cs| if (!(iprop.is_virtual and !iface_has_set) and cs != .public)
+                return constantFatal(p, "Set access level of {s}::${s} must be omitted (as in class {s})", .{ p.name, name, idef.name });
+            if (child.visibility != .public)
+                return constantFatal(p, "Access level to {s}::${s} must be public (as in class {s})", .{ p.name, name, idef.name });
+            for ([_][]const u8{ "get", "set" }) |kind| try checkInterfaceHook(p, arena, name, idef.name, kind);
+            try checkPropertyType(p, arena, name, child.type_str, idef.name, iprop.type_str, propertyVariance(idef, iprop));
+            if (iface_has_set and child.type_str.len > 0) {
+                const child_setter = try std.fmt.allocPrint(arena, "{s}$hook_set", .{name});
+                if (def.methods.contains(child_setter)) continue;
+                const m = (try methodOf(p, arena, idef.name, iface_setter, true)) orelse continue;
+                if (m.params.len == 0 or m.params[0].type_text.len == 0) continue;
+                const set_type = try canonicalType(p, arena, m.params[0].type_text, idef.name);
+                const child_type = try canonicalType(p, arena, child.type_str, p.name);
+                const status = php_types.covariant(classes(p), idef.name, set_type, child_type);
+                if (p.failure) |err| return err;
+                if (status == .success) continue;
+                const shown = try php_types.format(arena, try parseType(p, arena, m.params[0].type_text, idef.name));
+                return constantFatal(p, "Set type of {s}::${s} must be supertype of {s} (as in interface {s})", .{ p.name, name, shown, idef.name });
+            }
+        }
+    }
+}
+
+fn collectInterfaces(p: *Pending, arena: std.mem.Allocator, iface: []const u8, out: *std.ArrayListUnmanaged([]const u8), seen: *std.StringHashMapUnmanaged(void)) error{OutOfMemory}!void {
+    if (seen.contains(iface)) return;
+    try seen.put(arena, iface, {});
+    if (p.vm.interfaces.get(iface)) |idef| {
+        for (idef.parents.items) |parent| try collectInterfaces(p, arena, parent, out, seen);
+    }
+    try out.append(arena, iface);
+}
+
+// inherit_property_hook against an interface's abstract hook: the class's
+// own hook is checked as a method, so a by-value get can't implement &get
+fn checkInterfaceHook(p: *Pending, arena: std.mem.Allocator, prop: []const u8, iface: []const u8, kind: []const u8) (RuntimeError || error{OutOfMemory})!void {
+    const hook = try std.fmt.allocPrint(arena, "{s}$hook_{s}", .{ prop, kind });
+    if (!p.def.methods.contains(hook)) return;
+    const idef = defOf(p, iface) orelse return;
+    if (!idef.methods.contains(hook)) return;
+    var parent = (try methodOf(p, arena, iface, hook, true)) orelse return;
+    var child = (try methodOf(p, arena, p.name, hook, false)) orelse return;
+    parent.visibility = .public;
+    child.visibility = .public;
+    const shown = try std.fmt.allocPrint(arena, "${s}::{s}", .{ prop, kind });
+    parent.name = shown;
+    child.name = shown;
+    try checkMethod(p, arena, child, parent, false);
 }
 
 // inherit_property_hook: a hook the class declares for a property it
