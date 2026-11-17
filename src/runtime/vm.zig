@@ -606,6 +606,8 @@ pub const ClassDef = struct {
     // duplicates) when its constants are first updated, as php builds its
     // backed enum table
     enum_table_pending: bool = false,
+    // a case's value still waits for its initializer (resolveEnumCaseValues)
+    enum_values_pending: bool = false,
     // this class or an ancestor declares a private method, so a subclass
     // redeclaring one has to look for it
     hides_methods: bool = false,
@@ -15691,6 +15693,10 @@ pub const VM = struct {
             var cls = self.classes.getPtr(cn) orelse return null;
             // as php's FETCH_CLASS_CONSTANT does; a constant expression
             // reads the case without it (zend_get_class_constant_ex)
+            if (cls.enum_values_pending and !self.resolving_quietly) {
+                self.resolveEnumCaseValues(cn) catch return .{ .found = null, .parent = null };
+                cls = self.classes.getPtr(cn) orelse return null;
+            }
             if (cls.enum_table_pending and !self.resolving_quietly and self.constant_eval_depth == 0) {
                 self.updateClassConstants(cn) catch return .{ .found = null, .parent = null };
                 cls = self.classes.getPtr(cn) orelse return null;
@@ -18153,7 +18159,13 @@ pub const VM = struct {
 
     // a case value reading the enum's constants, which the enum's
     // declaration could not, is evaluated now
-    fn resolveEnumCaseValues(self: *VM, enum_name: []const u8) RuntimeError!void {
+    pub fn resolveEnumCaseValues(self: *VM, enum_name: []const u8) RuntimeError!void {
+        const owner = self.classes.getPtr(enum_name) orelse return;
+        if (!owner.enum_values_pending) return;
+        owner.enum_values_pending = false;
+        errdefer if (self.classes.getPtr(enum_name)) |retry| {
+            retry.enum_values_pending = true;
+        };
         var i: usize = 0;
         while (true) : (i += 1) {
             const def = self.classes.getPtr(enum_name) orelse return;
@@ -21337,6 +21349,10 @@ pub const VM = struct {
                 vj += 1;
             }
             objRetain(case_obj);
+            if (case_has_value[ci] == 1) {
+                const v = case_obj.get("value");
+                if (v == .string and bytecode.isEnumCaseInitializer(v.string.bytes())) def.enum_values_pending = true;
+            }
             try def.constants.put(self.allocator, case_names[ci], .{ .object = case_obj });
             try def.constant_order.append(self.allocator, case_names[ci]);
             try def.case_order.append(self.allocator, case_names[ci]);

@@ -6504,6 +6504,7 @@ fn rebcGetBackingValue(ctx: *NativeContext, _: []const Value) RuntimeError!Nativ
     const this = getThis(ctx) orelse return NativeResult.scalar(.null);
     const class_name = if (this.get("class") == .string) this.get("class").string.bytes() else return NativeResult.scalar(.null);
     const case_name = if (this.get("name") == .string) this.get("name").string.bytes() else return NativeResult.scalar(.null);
+    try ctx.vm.resolveEnumCaseValues(class_name);
     const cls = ctx.vm.classes.get(class_name) orelse return NativeResult.scalar(.null);
     const case_obj_v = cls.constants.get(case_name) orelse return NativeResult.scalar(.null);
     if (case_obj_v != .object) return NativeResult.scalar(.null);

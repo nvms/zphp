@@ -4344,9 +4344,10 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .enum_case) {
             if (member.data.lhs != 0) {
-                if (defaultNamesClassOr(self, member, self.ast.tokenSlice(node.main_token))) {
-                    // the enum isn't declared yet: a value reading its own
-                    // constants is evaluated when its cases are first used
+                if (!foldsAtCompileTime(self.ast, member.data.lhs) or defaultNamesClassOr(self, member, self.ast.tokenSlice(node.main_token))) {
+                    // the enum isn't declared yet: a value reading a
+                    // constant, its own or another, is evaluated when its
+                    // cases are first used, as php's case constants are
                     const name = try @import("bytecode.zig").enumCaseInitializerName(self.allocator, enum_name, self.ast.tokenSlice(member.main_token));
                     try self.string_allocs.append(self.allocator, name);
                     try compileInitializer(self, name, .{ .class = enum_name }, member.data.lhs, member.main_token);

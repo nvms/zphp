@@ -41,3 +41,23 @@ try {
 } catch (Error $e) {
     echo get_class($e), ": ", $e->getMessage(), "\n";
 }
+
+// a global constant in a case value is read when the cases are first used
+enum Late: string {
+    case A = LATE_VALUE;
+}
+define('LATE_VALUE', 'late');
+var_dump(Late::A->value, Late::from('late'));
+enum Missing: int {
+    case X = NOT_DEFINED_ANYWHERE;
+}
+try {
+    var_dump(Missing::X);
+} catch (Error $e) {
+    echo get_class($e), ": ", $e->getMessage(), "\n";
+}
+try {
+    var_dump((new ReflectionEnumBackedCase(Missing::class, 'X'))->getBackingValue());
+} catch (Error $e) {
+    echo get_class($e), ": ", $e->getMessage(), "\n";
+}
