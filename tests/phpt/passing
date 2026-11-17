@@ -3081,6 +3081,7 @@ Zend/tests/match/match_scdf_cleanup.phpt
 Zend/tests/match/unmatched_enum.phpt
 Zend/tests/memory_get_peak_usage.phpt
 Zend/tests/memory_reset_peak_usage.phpt
+Zend/tests/method_argument_binding.phpt
 Zend/tests/method_exists.phpt
 Zend/tests/method_exists_002.phpt
 Zend/tests/method_static_var.phpt

@@ -24375,6 +24375,23 @@ pub const VM = struct {
         if (receiver.object.lazy != null) return null;
         // a closure's __invoke takes the closure's own parameters
         if (std.mem.eql(u8, receiver.object.class_name, "Closure") and std.ascii.eqlIgnoreCase(method, "__invoke")) return self.callableByValue(receiver, pos);
+        // zend_std_get_method: the calling scope's own private method wins
+        // for an object of its class or a subclass
+        if (self.currentDefiningClass()) |scope| if (self.classes.get(scope)) |cls| if (cls.methods.get(method)) |info| {
+            if (info.visibility == .private and self.isInstanceOf(receiver.object.class_name, scope)) {
+                const full = self.resolveMethod(scope, method) catch return null;
+                return self.resolvedByValue(full, pos);
+            }
+        };
+        // a method the calling scope can't see is reached through __call,
+        // which takes its arguments by value
+        if (self.findMethodInfo(receiver.object.class_name, method)) |found| if (found.info.visibility != .public) {
+            const visible = if (found.info.visibility == .private)
+                (if (self.currentDefiningClass()) |scope| std.ascii.eqlIgnoreCase(scope, found.defining) else false)
+            else
+                self.checkVisibility(found.defining, .protected) or self.protectedRootVisible(found.defining, method, .protected);
+            if (!visible and self.hasMethod(receiver.object.class_name, "__call")) return true;
+        };
         return self.classMethodByValue(receiver.object.class_name, method, pos, "__call");
     }
 
