@@ -62,6 +62,7 @@ const common_entries = .{
     .{ "gzencode", native_gzencode },
     .{ "gzdecode", native_gzdecode },
     .{ "file_get_contents", native_file_get_contents },
+    .{ "get_meta_tags", native_get_meta_tags },
     .{ "file_put_contents", native_file_put_contents },
     .{ "file_exists", native_file_exists },
     .{ "is_file", native_is_file },
@@ -897,6 +898,204 @@ fn native_file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeErr
     const finish = if (have_len) @min(bytes.len, ustart +| @as(usize, @intCast(length))) else bytes.len;
     return try NativeResult.copyString(ctx.allocator, bytes[ustart..finish]);
 }
+
+// php's get_meta_tags (file.c): the name and content attributes of the
+// <meta> tags before </head>, read with php_next_meta_token's tokenizer
+fn native_get_meta_tags(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const filename = try strArg(ctx, args, "get_meta_tags", 0, "filename", true);
+    const use_include_path = args.len > 1 and args[1].isTruthy();
+    const path = try includePathLookup(ctx, filename, use_include_path);
+    const content = (try readPathAs(ctx, path, "get_meta_tags")) orelse return NativeResult.scalar(.{ .bool = false });
+    defer content.release();
+    const result = try ctx.createArray();
+    var tz = MetaTokenizer{ .data = content.bytes() };
+    var in_tag = false;
+    var done = false;
+    var looking_for_val = false;
+    var have_name = false;
+    var have_content = false;
+    var saw_name = false;
+    var saw_content = false;
+    var name: std.ArrayListUnmanaged(u8) = .empty;
+    defer name.deinit(ctx.allocator);
+    var value: std.ArrayListUnmanaged(u8) = .empty;
+    defer value.deinit(ctx.allocator);
+    var tok_last: MetaToken = .eof;
+    while (!done) {
+        const tok = tz.next();
+        if (tok == .eof) break;
+        switch (tok) {
+            .id => {
+                const text = tz.token;
+                if (tok_last == .opentag) {
+                    tz.in_meta = std.ascii.eqlIgnoreCase(text, "meta");
+                } else if (tok_last == .slash and in_tag) {
+                    if (std.ascii.eqlIgnoreCase(text, "head")) done = true;
+                } else if (tok_last == .equal and looking_for_val) {
+                    if (saw_name) {
+                        try setMetaName(ctx, &name, text);
+                        have_name = true;
+                    } else if (saw_content) {
+                        value.clearRetainingCapacity();
+                        try value.appendSlice(ctx.allocator, text);
+                        have_content = true;
+                    }
+                    looking_for_val = false;
+                } else if (tz.in_meta) {
+                    if (std.ascii.eqlIgnoreCase(text, "name")) {
+                        saw_name = true;
+                        saw_content = false;
+                        looking_for_val = true;
+                    } else if (std.ascii.eqlIgnoreCase(text, "content")) {
+                        saw_name = false;
+                        saw_content = true;
+                        looking_for_val = true;
+                    }
+                }
+            },
+            .string => if (tok_last == .equal and looking_for_val) {
+                // a string outside a meta tag is not kept
+                const text = if (tz.in_meta) tz.token else "";
+                if (saw_name) {
+                    try setMetaName(ctx, &name, text);
+                    have_name = true;
+                } else if (saw_content) {
+                    value.clearRetainingCapacity();
+                    try value.appendSlice(ctx.allocator, text);
+                    have_content = true;
+                }
+                looking_for_val = false;
+            },
+            .opentag => {
+                if (looking_for_val) {
+                    looking_for_val = false;
+                    have_name = false;
+                    saw_name = false;
+                    have_content = false;
+                    saw_content = false;
+                }
+                in_tag = true;
+            },
+            .closetag => {
+                if (have_name) {
+                    for (name.items) |*c| c.* = std.ascii.toLower(c.*);
+                    const text = try Value.String.create(ctx.allocator, if (have_content) value.items else "");
+                    defer text.release();
+                    try result.setCopiedKey(ctx.allocator, name.items, .{ .string = text });
+                }
+                name.clearRetainingCapacity();
+                value.clearRetainingCapacity();
+                in_tag = false;
+                looking_for_val = false;
+                have_name = false;
+                saw_name = false;
+                have_content = false;
+                saw_content = false;
+                tz.in_meta = false;
+            },
+            else => {},
+        }
+        tok_last = tok;
+    }
+    return NativeResult.borrowed(.{ .array = result });
+}
+
+// a name attribute with PHP_META_UNSAFE characters replaced
+fn setMetaName(ctx: *NativeContext, name: *std.ArrayListUnmanaged(u8), text: []const u8) RuntimeError!void {
+    name.clearRetainingCapacity();
+    for (text) |c| try name.append(ctx.allocator, if (std.mem.indexOfScalar(u8, ".\\+*?[^]$() ", c) != null) '_' else c);
+}
+
+const MetaToken = enum { eof, opentag, closetag, slash, equal, space, id, string, other };
+
+// php_next_meta_token over the file's bytes: a NUL ends the reading as
+// php's getc loop does, and the token buffer holds at most 8192 bytes
+const MetaTokenizer = struct {
+    data: []const u8,
+    pos: usize = 0,
+    // php's ungetc: a character to read again
+    pending: ?i32 = null,
+    in_meta: bool = false,
+    token: []const u8 = "",
+    buf: [8192]u8 = undefined,
+    read_past: bool = false,
+
+    fn eof(self: *const MetaTokenizer) bool {
+        return self.pos >= self.data.len and self.read_past;
+    }
+
+    // php_stream_getc: EOF (-1) once the bytes run out, which also makes
+    // php_stream_eof true
+    fn getc(self: *MetaTokenizer) i32 {
+        if (self.pos >= self.data.len) {
+            self.read_past = true;
+            return -1;
+        }
+        const c = self.data[self.pos];
+        self.pos += 1;
+        return c;
+    }
+
+    fn isAlnum(ch: i32) bool {
+        return ch >= 0 and ch < 128 and std.ascii.isAlphanumeric(@intCast(ch));
+    }
+
+    fn next(self: *MetaTokenizer) MetaToken {
+        var ch: i32 = 0;
+        while (true) {
+            if (self.pending == null) {
+                if (self.eof()) return .eof;
+                ch = self.getc();
+                if (ch == 0) return .eof;
+            }
+            if (self.eof()) return .eof;
+            if (self.pending) |p| {
+                ch = p;
+                self.pending = null;
+            }
+            switch (ch) {
+                '<' => return .opentag,
+                '>' => return .closetag,
+                '=' => return .equal,
+                '/' => return .slash,
+                '\'', '"' => {
+                    const quote = ch;
+                    var len: usize = 0;
+                    while (!self.eof()) {
+                        ch = self.getc();
+                        if (ch == 0 or ch == quote or ch == '<' or ch == '>') break;
+                        self.buf[len] = @truncate(@as(u32, @bitCast(ch)));
+                        len += 1;
+                        if (len == self.buf.len) break;
+                    }
+                    if (ch == '<' or ch == '>') self.pending = ch;
+                    self.token = self.buf[0..len];
+                    return .string;
+                },
+                '\n', '\r', '\t' => {},
+                ' ' => return .space,
+                else => {
+                    if (!isAlnum(ch)) return .other;
+                    var len: usize = 0;
+                    self.buf[len] = @intCast(ch);
+                    len += 1;
+                    while (!self.eof()) {
+                        ch = self.getc();
+                        if (ch == 0 or !(isAlnum(ch) or (ch > 0 and std.mem.indexOfScalar(u8, "-_.:", @intCast(ch)) != null))) break;
+                        self.buf[len] = @intCast(ch);
+                        len += 1;
+                        if (len == self.buf.len) break;
+                    }
+                    // php's stand-in for ungetc
+                    const alpha = ch >= 0 and ch < 128 and std.ascii.isAlphabetic(@intCast(ch));
+                    if (!alpha and ch != '-') self.pending = ch;
+                    self.token = self.buf[0..len];
+                    return .id;
+                },
+            }
+        }
+    }
+};
 
 // the context file_get_contents was given, for the stream it opens
 threadlocal var read_context: ?Value = null;
