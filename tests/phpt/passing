@@ -7910,6 +7910,7 @@ ext/standard/tests/array/gh18480.phpt
 ext/standard/tests/array/gh19300_1.phpt
 ext/standard/tests/array/gh19300_2.phpt
 ext/standard/tests/array/gh19926.phpt
+ext/standard/tests/array/gh19926_pointer.phpt
 ext/standard/tests/array/gh20043.phpt
 ext/standard/tests/array/gh22678.phpt
 ext/standard/tests/array/gh23111.phpt

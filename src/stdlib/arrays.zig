@@ -593,6 +593,8 @@ fn array_splice(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRes
     arr.next_int_key = next_int;
     arr.has_int_keys = next_int > 0;
     arr.rebuildStringIndexAssumeCapacity();
+    // php_splice sets the internal pointer to the first position
+    arr.cursor = 0;
     try ctx.vm.attachArrayRefs(arr);
 
     // php builds no array of removed elements when the result is unused:
