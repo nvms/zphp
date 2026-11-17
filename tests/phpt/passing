@@ -1234,6 +1234,7 @@ Zend/tests/dereference/dereference_009.phpt
 Zend/tests/dereference/dereference_010.phpt
 Zend/tests/dereference/dereference_011.phpt
 Zend/tests/dereference/dereference_012.phpt
+Zend/tests/dereference/dereference_013.phpt
 Zend/tests/dereference/dereference_014.phpt
 Zend/tests/dim_assign_001.phpt
 Zend/tests/disable_classes_warning.phpt

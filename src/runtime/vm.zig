@@ -1048,6 +1048,9 @@ pub const VM = struct {
     gc_runs: usize = 0,
     gc_collected: usize = 0,
     gc_threshold: usize = gc_threshold_default,
+    // the array the last by-value return handed its caller, which php's
+    // caller holds as a temporary of its own: a write into it separates
+    value_returned: ?*PhpArray = null,
     // lazy objects property operations hold while they run (operandHolds)
     lazy_operands: std.ArrayListUnmanaged(*PhpObject) = .empty,
     // how many roots of each kind the buffer held when it filled
@@ -6426,6 +6429,7 @@ pub const VM = struct {
                     try self.popFrame();
                     if (saved_entry_sp > 0) self.sp = saved_entry_sp;
                     self.pushTransfer(result);
+                    self.value_returned = ret_arr_pin;
                     const drained = self.frame_count > base_frame and self.drainAtReturn();
                     if (ret_pin) |p| self.objRelease(p);
                     if (ret_string_pin) |s| s.release();
@@ -7755,9 +7759,13 @@ pub const VM = struct {
                     const var_name_idx: ?u16 = if (op == .array_set_var) self.readU16() else null;
                     const static_class_idx: ?u16 = if (op == .array_set_static) self.readU16() else null;
                     const static_prop_idx: ?u16 = if (op == .array_set_static) self.readU16() else null;
+                    // a container pushed as a value (a call's result), not
+                    // fetched for the write
+                    const container_fetched = self.ic.?.stack_fetch[self.sp - 3];
+                    defer self.value_returned = null;
                     const raw_val = self.pop();
                     const key = self.pop();
-                    const arr_val = self.pop();
+                    var arr_val = self.pop();
                     if (static_class_idx) |class_idx| if (arr_val == .string) {
                         const assigned = (self.assignStringOffset(arr_val.string.bytes(), key, raw_val) catch |err| {
                             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
@@ -7818,6 +7826,14 @@ pub const VM = struct {
                             continue;
                         } }
                         const norm_key = Value.toArrayKey(key);
+                        // php separates a function's result from the array's
+                        // owners before writing into it (SEPARATE_ARRAY); the
+                        // copy is written and dropped with the statement
+                        if (op == .array_set and !container_fetched and self.value_returned == arr_val.array and arr_val.array.refcount > 0) {
+                            const copy = try self.shallowCloneCow(arr_val.array);
+                            self.queueArrayRelease(copy);
+                            arr_val = .{ .array = copy };
+                        }
                         // Stage 2 element-overwrite release: if this set replaces
                         // an existing entry, the array loses its retain on the
                         // displaced value. PhpArray.set has no VM access so the

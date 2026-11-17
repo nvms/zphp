@@ -912,8 +912,9 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     const as_key = stack[sp - 2];
                     const as_arr = stack[sp - 3];
                     // an object stored into an array element - bail to runLoop's
-                    // array_set so the element holder refcounts it (Stage 1)
-                    if (as_val == .object or as_val == .resource) {
+                    // array_set so the element holder refcounts it (Stage 1);
+                    // a write into a function's result separates it there
+                    if (as_val == .object or as_val == .resource or (as_arr == .array and self.value_returned == as_arr.array)) {
                         frame.ip = ip - op_bytes;
                         self.sp = sp;
                         return;
@@ -1401,6 +1402,7 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                     if (ret_string_pin) |s| s.retain();
                     const ret_arr_pin = if (result == .array) result.array else null;
                     if (ret_arr_pin) |a| VM.arrayRetain(a);
+                    self.value_returned = ret_arr_pin;
                     self.sp = sp;
                     self.clearArgStackFrom(frame.entry_sp);
                     if (frame.call_name) |name| self.releaseClosureByName(name);
