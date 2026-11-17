@@ -2771,6 +2771,15 @@ pub const VM = struct {
         try c.put(a, "PHP_OS", .{ .string = Value.String.borrowed(if (platform.is_windows) "WINNT" else if (platform.is_macos) "Darwin" else "Linux") });
         try c.put(a, "DIRECTORY_SEPARATOR", .{ .string = Value.String.borrowed(if (platform.is_windows) "\\" else "/") });
         try c.put(a, "PATH_SEPARATOR", .{ .string = Value.String.borrowed(if (platform.is_windows) ";" else ":") });
+        try c.put(a, "PHP_SHLIB_SUFFIX", .{ .string = Value.String.borrowed(if (platform.is_windows) "dll" else "so") });
+        // posix's POSIX_RLIMIT_* name the system's RLIMIT_* resources
+        if (!platform.is_windows) {
+            const R = std.posix.rlimit_resource;
+            inline for (.{ "AS", "CORE", "CPU", "DATA", "FSIZE", "LOCKS", "MEMLOCK", "MSGQUEUE", "NICE", "NOFILE", "NPROC", "RSS", "RTPRIO", "RTTIME", "SIGPENDING", "STACK" }) |name| {
+                if (@hasField(R, name)) try c.put(a, "POSIX_RLIMIT_" ++ name, .{ .int = @intFromEnum(@field(R, name)) });
+            }
+            try c.put(a, "POSIX_RLIMIT_INFINITY", .{ .int = -1 });
+        }
         // syslog priority + facility constants (zphp lacks a real syslog
         // backend, but vendor code references these constants at config time)
         try c.put(a, "LOG_EMERG", .{ .int = 0 });
