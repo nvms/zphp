@@ -416,6 +416,8 @@ pub const Compiler = struct {
     closure_count: u32 = 0,
     // the static variables the function being compiled declares
     static_vars: std.ArrayListUnmanaged(bytecode.StaticVar) = .empty,
+    // a closure's use list, whose names php keeps among its static variables
+    lexical_uses: []const u32 = &.{},
     // the statement token of each of the first static_vars, to tell a second
     // declaration from the same one compiled again (a finally block's copies)
     static_var_tokens: [64]u32 = undefined,
@@ -2616,6 +2618,10 @@ pub const Compiler = struct {
     // a `static $x = expr;` the function declares: php lists it from the start,
     // with expr's value when it is a constant expression
     pub fn noteStaticVar(self: *Compiler, name: []const u8, init_node: u32, token: u32) Error!void {
+        for (self.lexical_uses) |use_node| {
+            if (std.mem.eql(u8, self.ast.tokenSlice(self.ast.nodes[use_node].main_token), name))
+                return self.failFmt(token, "Duplicate declaration of static variable {s}", .{name});
+        }
         for (self.static_vars.items, 0..) |sv, i| if (std.mem.eql(u8, sv.name, name)) {
             if (i < self.static_var_tokens.len and self.static_var_tokens[i] != token)
                 return self.failFmt(token, "Duplicate declaration of static variable {s}", .{name});

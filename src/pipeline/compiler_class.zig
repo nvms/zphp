@@ -2339,6 +2339,7 @@ pub fn compileClosure(self: *Compiler, node: Ast.Node) Error!void {
         .current_parent = self.current_parent,
         .current_function = display_name,
         .in_trait = self.in_trait,
+        .lexical_uses = use_vars,
     };
     defer sub.deinitScratch();
     errdefer sub.discardOutput();
