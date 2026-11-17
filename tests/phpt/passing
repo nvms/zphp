@@ -2628,6 +2628,7 @@ Zend/tests/lazy_objects/gc_006.phpt
 Zend/tests/lazy_objects/get_initializer.phpt
 Zend/tests/lazy_objects/get_properties.phpt
 Zend/tests/lazy_objects/gh15823.phpt
+Zend/tests/lazy_objects/gh15999_001.phpt
 Zend/tests/lazy_objects/gh15999_002.phpt
 Zend/tests/lazy_objects/gh17941.phpt
 Zend/tests/lazy_objects/gh17998.phpt

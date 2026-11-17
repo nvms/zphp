@@ -1048,6 +1048,8 @@ pub const VM = struct {
     gc_runs: usize = 0,
     gc_collected: usize = 0,
     gc_threshold: usize = gc_threshold_default,
+    // lazy objects property operations hold while they run (operandHolds)
+    lazy_operands: std.ArrayListUnmanaged(*PhpObject) = .empty,
     // how many roots of each kind the buffer held when it filled
     gc_full_at: ?struct { objs: usize, arrs: usize } = null,
     // ref-returning function call mechanism: a `&function` sets these on
@@ -3813,6 +3815,7 @@ pub const VM = struct {
         self.error_handler_stack.deinit(self.allocator);
         self.arrays.deinit(self.allocator);
         self.free_arrays.deinit(self.allocator);
+        self.lazy_operands.deinit(self.allocator);
         self.released_arrays.deinit(self.allocator);
         self.objects.deinit(self.allocator);
         self.free_generators.deinit(self.allocator);
@@ -8245,8 +8248,10 @@ pub const VM = struct {
                     var eap_obj = obj_val.object;
                     // Hook reads must precede vivification/COW. A by-value hook
                     // may expose an object for offsetSet, but not writable array storage.
+                    const lazy_pinned = eap_obj.lazy != null and eap_obj.refcount > 0 and self.pinLazyOperand(eap_obj);
                     eap_obj.refcount +%= 1;
                     defer self.objUnpin(obj_val.object);
+                    defer if (lazy_pinned) self.unpinLazyOperand();
                     self.triggerLazyAccess(eap_obj, prop_name) catch {
                         if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                         return error.RuntimeError;
@@ -12512,8 +12517,10 @@ pub const VM = struct {
                     };
                     if (obj_val == .object) {
                         var obj = obj_val.object;
+                        const lazy_pinned = obj.lazy != null and obj.refcount > 0 and self.pinLazyOperand(obj);
                         obj.refcount +%= 1;
                         defer self.objUnpin(obj_val.object);
+                        defer if (lazy_pinned) self.unpinLazyOperand();
 
                         if (isIncompleteObject(obj)) {
                             if (capturing) {
@@ -12707,8 +12714,10 @@ pub const VM = struct {
                     const obj_val = self.pop();
                     if (obj_val == .object) {
                         var obj = obj_val.object;
+                        const lazy_pinned = obj.lazy != null and obj.refcount > 0 and self.pinLazyOperand(obj);
                         obj.refcount +%= 1;
                         defer self.objUnpin(obj_val.object);
+                        defer if (lazy_pinned) self.unpinLazyOperand();
                         if (isIncompleteObject(obj)) {
                             self.incompleteAccessWarning(obj) catch if (try self.resumeRaised()) continue;
                             self.push(.null);
@@ -12780,8 +12789,10 @@ pub const VM = struct {
                     const obj_val = self.pop();
                     if (obj_val == .object) {
                         var obj = obj_val.object;
+                        const lazy_pinned = obj.lazy != null and obj.refcount > 0 and self.pinLazyOperand(obj);
                         obj.refcount +%= 1;
                         defer self.objUnpin(obj_val.object);
+                        defer if (lazy_pinned) self.unpinLazyOperand();
 
                         const gate = try self.propertyWriteGate(obj, prop_name, val, .write, base_frame);
                         switch (gate.step) {
@@ -26527,11 +26538,60 @@ pub const VM = struct {
         try self.triggerLazyProperty(obj, name, self.currentDefiningClass());
     }
 
+    // an object an operation holds while it runs, where php borrows it from
+    // its variable: a lazy object's initializer may drop the last reference
+    // anything else has
+    fn pinLazyOperand(self: *VM, obj: *PhpObject) bool {
+        self.lazy_operands.append(self.allocator, obj) catch return false;
+        return true;
+    }
+
+    fn unpinLazyOperand(self: *VM) void {
+        _ = self.lazy_operands.pop();
+    }
+
+    // the references to obj the vm holds for property operations in flight
+    // on an object a variable or container held, which php's operations
+    // borrow without taking
+    fn operandHolds(self: *VM, obj: *PhpObject) usize {
+        var holds: usize = 0;
+        for (self.lazy_operands.items) |o| {
+            if (o == obj) holds += 1;
+        }
+        return holds;
+    }
+
     pub fn triggerLazyInit(self: *VM, obj: *PhpObject) RuntimeError!void {
         const state = obj.lazy orelse return;
         if (state.initializer == .null or state.running) return;
+        // zend_lazy_object_init holds the object while the initializer runs;
+        // one that held the last reference besides the operation's own was
+        // released: its destructor runs and the access fails
         obj.refcount +%= 1;
-        defer self.releaseValue(.{ .object = obj });
+        const outcome = self.runLazyInitializer(obj, state);
+        // only an operation that knows its hold is a borrow can tell
+        const holds = self.operandHolds(obj);
+        if (holds > 0 and obj.refcount <= 1 + holds and !obj.destructed and !self.exit_requested) {
+            const previous = self.takePending();
+            if (!obj.destructor_called and obj.ownsDestructor() and self.hasMethod(obj.class_name, "__destruct")) {
+                obj.destructor_called = true;
+                _ = self.callMethod(obj, "__destruct", &.{}) catch {};
+            }
+            self.objUnpin(obj);
+            if (self.pending_exception == null) try self.setPendingException("Error", "Lazy object was released during initialization");
+            if (previous) |p| {
+                if (self.pending_exception) |ex| if (ex == .object and p == .object) {
+                    _ = self.chainPrevious(ex.object, p.object) catch {};
+                };
+                self.stackRelease(p);
+            }
+            return error.RuntimeError;
+        }
+        self.releaseValue(.{ .object = obj });
+        return outcome;
+    }
+
+    fn runLazyInitializer(self: *VM, obj: *PhpObject, state: *PhpObject.LazyState) RuntimeError!void {
         // Retained snapshots force COW for arrays changed by the initializer.
         const slots = obj.slots orelse return;
         const saved = try self.allocator.dupe(Value, slots);
