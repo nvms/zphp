@@ -52,6 +52,22 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "Random\\Randomizer::shuffleBytes", rzShuffleBytes);
     try vm.native_fns.put(a, "Random\\Randomizer::pickArrayKeys", rzPickArrayKeys);
 
+    // Random\IntervalBoundary, the interval getFloat() draws from
+    var boundary = ClassDef{ .name = "Random\\IntervalBoundary", .is_enum = true, .is_final = true };
+    for (boundary_cases) |name| {
+        const case_obj = try a.create(PhpObject);
+        case_obj.* = .{ .class_name = "Random\\IntervalBoundary", .enum_case = true };
+        try vm.objects.append(a, case_obj);
+        try case_obj.set(a, "name", .{ .string = Value.String.borrowed(name) });
+        VM.objRetain(case_obj);
+        try boundary.constants.put(a, name, .{ .object = case_obj });
+        try boundary.constant_order.append(a, name);
+        try boundary.case_order.append(a, name);
+    }
+    try boundary.interfaces.append(a, "UnitEnum");
+    try vm.classes.put(a, "Random\\IntervalBoundary", boundary);
+    try vm.registerEnumMethods("Random\\IntervalBoundary", 0);
+
     var mt = ClassDef{ .name = "Random\\Engine\\Mt19937" };
     try mt.interfaces.append(a, "Random\\Engine");
     try mt.methods.put(a, "__construct", .{ .name = "__construct", .arity = 2 });
@@ -363,18 +379,132 @@ fn rzNextInt(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
     return NativeResult.scalar(.{ .int = @as(i64, @intCast(v >> 1)) });
 }
 
+const boundary_cases = [_][]const u8{ "ClosedOpen", "ClosedClosed", "OpenClosed", "OpenOpen" };
+const Boundary = enum { closed_open, closed_closed, open_closed, open_open };
+
+// Randomizer::getFloat: a float drawn uniformly from the interval by the
+// gamma-section algorithm (ext/random/gammasection.c), so a seeded engine
+// gives php's floats
 fn rzGetFloat(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
-    var lo: f64 = 0.0;
-    var hi: f64 = 1.0;
-    if (args.len >= 2 and args[0] != .null) lo = Value.toFloat(args[0]);
-    if (args.len >= 2 and args[1] != .null) hi = Value.toFloat(args[1]);
-    if (hi <= lo) return NativeResult.scalar(.{ .float = lo });
-    const eng_opt = engine(ctx);
-    const v = if (eng_opt) |e| engineNextU64(ctx, e) else freshU64FromCrypto();
-    // 53-bit precision, mapped into [0, 1)
-    const denom: f64 = @as(f64, @floatFromInt(@as(u64, 1) << 53));
-    const r = @as(f64, @floatFromInt(v >> 11)) / denom;
-    return NativeResult.scalar(.{ .float = lo + r * (hi - lo) });
+    const label = "Random\\Randomizer::getFloat()";
+    const min = if (args.len > 0) Value.toFloat(args[0]) else 0.0;
+    const max = if (args.len > 1) Value.toFloat(args[1]) else 0.0;
+    var boundary: Boundary = .closed_open;
+    if (args.len > 2) {
+        const arg = args[2];
+        if (arg != .object or !std.mem.eql(u8, arg.object.class_name, "Random\\IntervalBoundary")) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, label ++ ": Argument #3 ($boundary) must be of type Random\\IntervalBoundary, {s} given", .{@import("types.zig").phpTypeName(arg)});
+            defer ctx.allocator.free(msg);
+            try ctx.vm.setPendingException("TypeError", msg);
+            return error.RuntimeError;
+        }
+        const name = arg.object.get("name");
+        for (boundary_cases, 0..) |case_name, i| {
+            if (name == .string and std.mem.eql(u8, name.string.bytes(), case_name)) boundary = @enumFromInt(i);
+        }
+    }
+    if (!std.math.isFinite(min)) return valueError(ctx, label ++ ": Argument #1 ($min) must be finite");
+    if (!std.math.isFinite(max)) return valueError(ctx, label ++ ": Argument #2 ($max) must be finite");
+    if (boundary == .closed_closed) {
+        if (max < min) return valueError(ctx, label ++ ": Argument #2 ($max) must be greater than or equal to argument #1 ($min)");
+    } else if (max <= min) return valueError(ctx, label ++ ": Argument #2 ($max) must be greater than argument #1 ($min)");
+    const eng = engine(ctx);
+    const result = switch (boundary) {
+        .closed_open => gammaClosedOpen(ctx, eng, min, max),
+        .closed_closed => gammaClosedClosed(ctx, eng, min, max),
+        .open_closed => gammaOpenClosed(ctx, eng, min, max),
+        .open_open => gammaOpenOpen(ctx, eng, min, max),
+    };
+    if (boundary == .open_open and std.math.isNan(result)) return valueError(ctx, "The given interval is empty, there are no floats between argument #1 ($min) and argument #2 ($max)");
+    return NativeResult.scalar(.{ .float = result });
+}
+
+fn valueError(ctx: *NativeContext, msg: []const u8) RuntimeError!NativeResult {
+    try ctx.vm.setPendingException("ValueError", msg);
+    return error.RuntimeError;
+}
+
+fn gammaLow(x: f64) f64 {
+    return x - std.math.nextAfter(f64, x, -std.math.floatMax(f64));
+}
+
+fn gammaHigh(x: f64) f64 {
+    return std.math.nextAfter(f64, x, std.math.floatMax(f64)) - x;
+}
+
+fn gammaMax(x: f64, y: f64) f64 {
+    return if (@abs(x) > @abs(y)) gammaHigh(x) else gammaLow(y);
+}
+
+// (uint64_t) of a non-negative double, saturating where c is undefined
+fn toU64(x: f64) u64 {
+    if (!(x >= 0)) return 0;
+    if (x >= 18446744073709551615.0) return std.math.maxInt(u64);
+    return @intFromFloat(x);
+}
+
+fn ceilint(a: f64, b: f64, g: f64) u64 {
+    const s = b / g - a / g;
+    const e = if (@abs(a) <= @abs(b)) -a / g - (s - b / g) else b / g - (s + a / g);
+    const si = @ceil(s);
+    return if (s != si) toU64(si) else toU64(si) +% @intFromBool(e > 0);
+}
+
+// k as php splits it, so k * g keeps its precision: k >> 2 and k & 3
+fn scaledFromMax(max: f64, k: u64, g: f64) f64 {
+    const k_hi: f64 = @floatFromInt(k >> 2);
+    const k_lo: f64 = @floatFromInt(k & 3);
+    return 4.0 * (max * 0.25 - k_hi * g) - k_lo * g;
+}
+
+fn scaledFromMin(min: f64, k: u64, g: f64) f64 {
+    const k_hi: f64 = @floatFromInt(k >> 2);
+    const k_lo: f64 = @floatFromInt(k & 3);
+    return 4.0 * (min * 0.25 + k_hi * g) + k_lo * g;
+}
+
+fn gammaClosedOpen(ctx: *NativeContext, eng: ?*PhpObject, min: f64, max: f64) f64 {
+    const g = gammaMax(min, max);
+    const hi = ceilint(min, max, g);
+    if (max <= min or hi < 1) return std.math.nan(f64);
+    const k = 1 + rangeU64(ctx, eng, hi - 1);
+    if (@abs(min) <= @abs(max)) {
+        if (k == hi) return min;
+        return scaledFromMax(max, k, g);
+    }
+    return scaledFromMin(min, k - 1, g);
+}
+
+fn gammaClosedClosed(ctx: *NativeContext, eng: ?*PhpObject, min: f64, max: f64) f64 {
+    const g = gammaMax(min, max);
+    const hi = ceilint(min, max, g);
+    if (max < min) return std.math.nan(f64);
+    const k = rangeU64(ctx, eng, hi);
+    if (@abs(min) <= @abs(max)) {
+        if (k == hi) return min;
+        return scaledFromMax(max, k, g);
+    }
+    if (k == hi) return max;
+    return scaledFromMin(min, k, g);
+}
+
+fn gammaOpenClosed(ctx: *NativeContext, eng: ?*PhpObject, min: f64, max: f64) f64 {
+    const g = gammaMax(min, max);
+    const hi = ceilint(min, max, g);
+    if (max <= min or hi < 1) return std.math.nan(f64);
+    const k = rangeU64(ctx, eng, hi - 1);
+    if (@abs(min) <= @abs(max)) return scaledFromMax(max, k, g);
+    if (k == hi - 1) return max;
+    return scaledFromMin(min, k + 1, g);
+}
+
+fn gammaOpenOpen(ctx: *NativeContext, eng: ?*PhpObject, min: f64, max: f64) f64 {
+    const g = gammaMax(min, max);
+    const hi = ceilint(min, max, g);
+    if (max <= min or hi < 2) return std.math.nan(f64);
+    const k = 1 + rangeU64(ctx, eng, hi - 2);
+    if (@abs(min) <= @abs(max)) return scaledFromMax(max, k, g);
+    return scaledFromMin(min, k, g);
 }
 
 fn rzNextFloat(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {

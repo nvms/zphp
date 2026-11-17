@@ -310,6 +310,7 @@ Zend/tests/attributes/deprecated/traits/with_conflicts.phpt
 Zend/tests/attributes/deprecated/type_validation_001.phpt
 Zend/tests/attributes/deprecated/type_validation_002.phpt
 Zend/tests/attributes/deprecated/type_validation_003.phpt
+Zend/tests/attributes/deprecated/type_validation_004.phpt
 Zend/tests/attributes/gh8421.phpt
 Zend/tests/attributes/nodiscard/001.phpt
 Zend/tests/attributes/nodiscard/002.phpt
@@ -325,6 +326,7 @@ Zend/tests/attributes/nodiscard/throwing_error_handler_001.phpt
 Zend/tests/attributes/nodiscard/type_validation_001.phpt
 Zend/tests/attributes/nodiscard/type_validation_002.phpt
 Zend/tests/attributes/nodiscard/type_validation_003.phpt
+Zend/tests/attributes/nodiscard/type_validation_004.phpt
 Zend/tests/attributes/nodiscard/unsupported_clone.phpt
 Zend/tests/attributes/nodiscard/unsupported_constructor.phpt
 Zend/tests/attributes/nodiscard/unsupported_never_function.phpt

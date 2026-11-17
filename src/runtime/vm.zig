@@ -21296,7 +21296,7 @@ pub const VM = struct {
         return values;
     }
 
-    fn registerEnumMethods(self: *VM, enum_name: []const u8, backed_type_byte: u8) !void {
+    pub fn registerEnumMethods(self: *VM, enum_name: []const u8, backed_type_byte: u8) !void {
         // idempotent: serve-mode reset re-runs registerStdlibClasses to re-seed
         // the class table (which freeClassState cleared), but native_fns
         // survives reset - so don't re-register methods that are already there
