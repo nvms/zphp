@@ -742,7 +742,44 @@ pub fn checkInterface(vm: *VM, name: []const u8, def: *const ClassDef, idef: *co
         const proto = (methodOf(p, arena, entry[0], method, true) catch return error.OutOfMemory) orelse continue;
         try checkMethod(p, arena, child, proto, std.ascii.eqlIgnoreCase(method, "__construct"));
     }
+    try checkParentInterfaceMethods(p, arena, idef);
     checkConstants(p, arena) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else err;
+}
+
+// do_interface_implementation for each interface an interface extends, in
+// the order it lists them: a method it doesn't declare itself comes from the
+// first one whose table has it (that interface's own declaration, else its
+// parents'), and each later one's declaration is checked against it
+// (do_inherit_method)
+fn checkParentInterfaceMethods(p: *Pending, arena: std.mem.Allocator, idef: *const vm_mod.InterfaceDef) RuntimeError!void {
+    var inherited: std.StringHashMapUnmanaged(Method) = .{};
+    var listed: std.ArrayListUnmanaged([]const u8) = .empty;
+    if (idef.parent) |parent| listed.append(arena, parent) catch return error.OutOfMemory;
+    for (idef.parents.items) |parent| listed.append(arena, parent) catch return error.OutOfMemory;
+    for (listed.items) |parent| {
+        // the parent's table: ancestors first, so a redeclaration wins
+        var methods: std.ArrayListUnmanaged([2][]const u8) = .empty;
+        var seen: std.StringHashMapUnmanaged(void) = .{};
+        interfaceMethods(p, parent, &methods, arena, &seen) catch return error.OutOfMemory;
+        var table: std.StringArrayHashMapUnmanaged(Method) = .{};
+        for (methods.items) |entry| {
+            const own = for (idef.methods.items) |m| {
+                if (std.ascii.eqlIgnoreCase(m, entry[1])) break true;
+            } else false;
+            if (own) continue;
+            const proto = (methodOf(p, arena, entry[0], entry[1], true) catch return error.OutOfMemory) orelse continue;
+            const lower = std.ascii.allocLowerString(arena, entry[1]) catch return error.OutOfMemory;
+            table.put(arena, lower, proto) catch return error.OutOfMemory;
+        }
+        for (table.keys(), table.values()) |lower, proto| {
+            const first = inherited.getOrPut(arena, lower) catch return error.OutOfMemory;
+            if (!first.found_existing) {
+                first.value_ptr.* = proto;
+            } else if (!std.ascii.eqlIgnoreCase(first.value_ptr.class, proto.class)) {
+                try checkMethod(p, arena, first.value_ptr.*, proto, std.mem.eql(u8, lower, "__construct"));
+            }
+        }
+    }
 }
 
 // php's do_inherit_property type rules: a property keeps the type of the
