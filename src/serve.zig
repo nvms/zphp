@@ -406,6 +406,10 @@ fn stopWorkers(workers: []Worker, threads: []std.Thread) void {
 }
 
 fn reportWorkerFailure(err: anyerror) void {
+    // the startup test fails workers on purpose; zig's build runner shows any
+    // stderr from a passing test run beside a "failed command" line, which
+    // read as a failure on ci
+    if (@import("builtin").is_test) return;
     writeStderr("warning: worker failed to start: ") catch {};
     writeStderr(@errorName(err)) catch {};
     writeStderr("\n") catch {};
