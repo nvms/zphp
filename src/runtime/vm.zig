@@ -14666,6 +14666,20 @@ pub const VM = struct {
                     const class_name = self.resolveStaticClassName(self.currentChunk().constants.items[class_idx].string.bytes());
                     const name_val = self.pop();
                     defer self.stackRelease(name_val);
+                    // the class is fetched before the name is looked at
+                    if (name_val != .string and !self.classes.contains(class_name) and !self.interfaces.contains(class_name)) {
+                        if (self.autoload_callbacks.items.len > 0) self.tryAutoload(class_name) catch {
+                            if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        };
+                        if (!self.classes.contains(class_name) and !self.interfaces.contains(class_name)) {
+                            const msg = try self.classNotFoundMessage(class_name);
+                            defer self.allocator.free(msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        }
+                    }
+                    if (try self.refuseClassConstantName(name_val)) continue;
                     if (try self.pushClassConstant(class_name, classNameOf(name_val))) continue;
                 },
 
@@ -14678,6 +14692,7 @@ pub const VM = struct {
                         if (try self.throwBuiltinException("Error", "Class name must be a valid object or a string")) continue;
                         return error.RuntimeError;
                     });
+                    if (try self.refuseClassConstantName(name_val)) continue;
                     if (try self.pushClassConstant(class_name, classNameOf(name_val))) continue;
                 },
 
@@ -26315,6 +26330,21 @@ pub const VM = struct {
             return error.RuntimeError;
         }
         try self.setPendingException("Error", "Internal error: Failed to retrieve the reflection object");
+        return error.RuntimeError;
+    }
+
+    // ZEND_FETCH_CLASS_CONSTANT with a name computed at run time: only a
+    // string names a constant (zend_invalid_class_constant_type_error).
+    // true when the TypeError was dispatched
+    fn refuseClassConstantName(self: *VM, name: Value) RuntimeError!bool {
+        if (name == .string) return false;
+        const type_name: []const u8 = switch (name) {
+            .object, .generator, .fiber => "object",
+            else => name.typeName(),
+        };
+        const msg = try std.fmt.allocPrint(self.allocator, "Cannot use value of type {s} as class constant name", .{type_name});
+        defer self.allocator.free(msg);
+        if (try self.throwBuiltinException("TypeError", msg)) return true;
         return error.RuntimeError;
     }
 
