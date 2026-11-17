@@ -11,4 +11,5 @@ try {
 } catch (TypeError $e) {
     echo $e->getMessage(), "\n";
 }
-var_dump(setlocale(LC_ALL, "0"));
+// the current locale names the startup environment, which differs by build
+var_dump(is_string(setlocale(LC_ALL, "0")));

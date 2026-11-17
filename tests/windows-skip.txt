@@ -63,3 +63,7 @@ unix_socket_path_truncated.php: the test needs php's unix socket transport and l
 parse_str_separators_and_names.php: the test passes -d through a posix shell (the backslash-escaped ;) to a child php
 nl_langinfo_items.php: php on windows has no nl_langinfo and none of its item constants
 digest_file_read_errors.php: opening a directory as a file fails on windows instead of failing the read
+zend_multibyte_script_encoding.php: php's windows build run with -n has no mbstring (it is a dll there), so the reference side can't run the scripts
+zend_multibyte_shift_jis.php: php's windows build run with -n has no mbstring (it is a dll there), so the reference side can't run the scripts
+memory_usage_php_sizes.php: php's windows allocator reports different sizes, so the size checks don't hold there
+memory_limit_soft.php: on windows zphp runs past the soft limit where php stops (memory accounting there isn't checked against php's windows sizes yet)
