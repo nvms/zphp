@@ -2010,7 +2010,11 @@ pub const Compiler = struct {
                 const arr = self.allocator.create(PhpArray) catch break :blk Value.empty_array_default;
                 arr.* = .{};
                 var ok = true;
-                for (elems) |elem_idx| {
+                // after a key only known at run time, an element without a key
+                // takes the next free one then: it is stored under a marker
+                // key that resolveDefault appends
+                var deferred_key = false;
+                for (elems, 0..) |elem_idx, pos| {
                     const elem = self.ast.nodes[elem_idx];
                     if (elem.tag != .array_element) continue;
                     const val = self.evalConstExpr(elem.data.lhs);
@@ -2020,8 +2024,23 @@ pub const Compiler = struct {
                     }
                     if (elem.data.rhs != 0) {
                         const key = self.evalConstExpr(elem.data.rhs);
+                        if (key == .string and bytecode.isDeferredKeySentinel(key.string.bytes())) deferred_key = true;
                         const set_key: PhpArray.Key = if (key == .string) .{ .string = key.string } else if (key == .null) .{ .string = Value.String.borrowed("") } else .{ .int = Value.toInt(key) };
                         arr.set(self.allocator, set_key, val) catch {
+                            ok = false;
+                            break;
+                        };
+                    } else if (deferred_key) {
+                        const marker = std.fmt.allocPrint(self.allocator, "{s}{d}", .{ bytecode.APPEND_KEY_PREFIX, pos }) catch {
+                            ok = false;
+                            break;
+                        };
+                        self.string_allocs.append(self.allocator, marker) catch {
+                            self.allocator.free(marker);
+                            ok = false;
+                            break;
+                        };
+                        arr.set(self.allocator, .{ .string = Value.String.borrowed(marker) }, val) catch {
                             ok = false;
                             break;
                         };

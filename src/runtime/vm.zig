@@ -28664,10 +28664,16 @@ pub const VM = struct {
                 // entries may themselves be deferred sentinels (constant refs,
                 // class constants, nested arrays) - resolve key and value
                 var key = entry.key;
-                if (key == .string and key.string.len > 4 and
-                    key.string.bytes()[0] == 0 and key.string.bytes()[1] == 'C' and
-                    key.string.bytes()[2] == 'C' and key.string.bytes()[3] == 0)
-                {
+                if (key == .string and std.mem.startsWith(u8, key.string.bytes(), bytecode.APPEND_KEY_PREFIX)) {
+                    const value = try self.resolveDefault(entry.value);
+                    if (arr.has_int_keys and arr.next_int_key == std.math.maxInt(i64) and arr.getPtr(.{ .int = std.math.maxInt(i64) }) != null) {
+                        self.releaseValue(value);
+                        return self.unresolvedDefault("Cannot add element to the array as the next element is already occupied", .{});
+                    }
+                    try arr.append(self.allocator, value);
+                    continue;
+                }
+                if (key == .string and bytecode.isDeferredKeySentinel(key.string.bytes())) {
                     key = Value.toArrayKey(try self.resolveDefault(.{ .string = key.string }));
                 }
                 try arr.set(self.allocator, key, try self.resolveDefault(entry.value));

@@ -1069,6 +1069,15 @@ pub fn encodeDeferredExprSentinel(allocator: std.mem.Allocator, de: *const Defer
     return buf;
 }
 
+// a key of a compile-time array default that a constant decides at run time
+pub fn isDeferredKeySentinel(s: []const u8) bool {
+    return std.mem.startsWith(u8, s, "\x00CC\x00") or std.mem.startsWith(u8, s, DEFERRED_EXPR_PREFIX);
+}
+
+// an element without a key after such a key: appended when the default is
+// resolved
+pub const APPEND_KEY_PREFIX = "\x00AP\x00";
+
 pub const NEW_DEFAULT_PREFIX = "\x00NW\x00";
 
 pub fn isNewDefaultSentinel(s: []const u8) bool {
