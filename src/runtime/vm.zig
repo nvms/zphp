@@ -18316,7 +18316,7 @@ pub const VM = struct {
 
     fn stringHasLeadingNumericish(s: []const u8) bool {
         var i: usize = 0;
-        while (i < s.len and (s[i] == ' ' or s[i] == '\t' or s[i] == '\n' or s[i] == '\r')) i += 1;
+        while (i < s.len and (s[i] == ' ' or s[i] == '\t' or s[i] == '\n' or s[i] == '\r' or s[i] == 0x0b or s[i] == 0x0c)) i += 1;
         if (i >= s.len) return false;
         if (s[i] == '+' or s[i] == '-') i += 1;
         if (i >= s.len) return false;

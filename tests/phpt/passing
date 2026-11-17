@@ -3348,6 +3348,7 @@ Zend/tests/numeric_strings/invalid_numeric_strings_must_generate_warning.phpt
 Zend/tests/numeric_strings/neg_num_string.phpt
 Zend/tests/numeric_strings/oss_fuzz_427814456.phpt
 Zend/tests/numeric_strings/string_offset.phpt
+Zend/tests/numeric_strings/trailling_whitespaces.phpt
 Zend/tests/object-null.phpt
 Zend/tests/object_array_cast.phpt
 Zend/tests/object_gc_in_shutdown.phpt

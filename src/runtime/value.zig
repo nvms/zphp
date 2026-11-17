@@ -2528,7 +2528,7 @@ pub const Value = union(enum) {
                 if (s.len == 0) return .{ .string = Value.String.borrowed("1") };
                 if (isNumericString(s.bytes())) {
                     // a numeric string may carry leading and trailing whitespace
-                    const digits = std.mem.trim(u8, s.bytes(), " \t\n\r");
+                    const digits = std.mem.trim(u8, s.bytes(), " \t\n\r\x0b\x0c");
                     if (isNumericIntString(digits)) {
                         const parsed = std.fmt.parseInt(i64, digits, 10) catch {
                             const f = std.fmt.parseFloat(f64, digits) catch 0.0;
@@ -2556,7 +2556,7 @@ pub const Value = union(enum) {
                 if (s.len == 0) return a;
                 if (isNumericString(s.bytes())) {
                     // a numeric string may carry leading and trailing whitespace
-                    const digits = std.mem.trim(u8, s.bytes(), " \t\n\r");
+                    const digits = std.mem.trim(u8, s.bytes(), " \t\n\r\x0b\x0c");
                     if (isNumericIntString(digits)) {
                         const parsed = std.fmt.parseInt(i64, digits, 10) catch {
                             const f = std.fmt.parseFloat(f64, digits) catch 0.0;
