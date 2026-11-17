@@ -21069,6 +21069,11 @@ pub const VM = struct {
         };
         try self.classes.put(self.allocator, class_name, def);
         registered = true;
+        if (classHasTraitDefaults(&def)) if (self.classes.getPtr(class_name)) |cls| {
+            if (!cls.defaults_pending) self.ic.?.pending_defaults += 1;
+            cls.defaults_pending = true;
+            if (cls.slot_layout) |layout| layout.defaults_ready = false;
+        };
         // a class with obligations, or one whose parent still has some,
         // loads the delayed classes (seeing it registered) before it is done
         const parent_nearly: ?NearlyLinked = if (def.parent) |parent_name| self.nearlyLinked(parent_name) else null;
@@ -22212,6 +22217,11 @@ pub const VM = struct {
         const compatible = existing.visibility == prop.visibility and existing.is_readonly == prop.is_readonly and
             try self.sameConstantType(existing.type_str, class_name, prop.type_str, class_name);
         if (!compatible) return self.traitPropertyConflict(class_name, first, trait_name, prop.name, false);
+        // a default naming the class is compared once evaluated for it
+        if (traitDefaultName(existing.default) != null or traitDefaultName(prop.default) != null) {
+            try self.trait_property_checks.append(self.allocator, .{ .class = class_name, .name = prop.name, .trait = trait_name, .value = prop.default });
+            return;
+        }
         if (existing.trait_origin.len == 0 and existing.has_default) {
             try self.trait_property_checks.append(self.allocator, .{ .class = class_name, .name = prop.name, .trait = trait_name, .value = prop.default });
             return;
@@ -22294,7 +22304,7 @@ pub const VM = struct {
         var i: usize = 0;
         while (i < self.trait_property_checks.items.len) {
             const check = self.trait_property_checks.items[i];
-            if (!std.mem.eql(u8, check.class, class_name) or !std.mem.eql(u8, check.name, prop_name)) {
+            if (!std.mem.eql(u8, check.class, class_name) or !std.mem.eql(u8, check.name, prop_name) or traitDefaultName(check.value) != null) {
                 i += 1;
                 continue;
             }
@@ -27752,6 +27762,100 @@ pub const VM = struct {
         if (layout) |l| self.inheritLayoutDefaults(class_name, l);
     }
 
+    fn traitDefaultName(v: Value) ?[]const u8 {
+        if (v != .string or !bytecode.isTraitDefaultInitializer(v.string.bytes())) return null;
+        return v.string.bytes();
+    }
+
+    fn classHasTraitDefaults(def: *const ClassDef) bool {
+        if (def.used_traits.items.len == 0) return false;
+        for (def.properties.items) |p| if (traitDefaultName(p.default) != null) return true;
+        for (def.static_props.values()) |v| if (traitDefaultName(v) != null) return true;
+        return false;
+    }
+
+    // the trait properties whose default names the using class get it now,
+    // evaluated in the class's scope as the php class's copy of the
+    // expression is
+    fn resolveTraitDefaults(self: *VM, class_name: []const u8) RuntimeError!void {
+        const arg: Value = .{ .string = Value.String.borrowed(class_name) };
+        var i: usize = 0;
+        while (true) : (i += 1) {
+            const cls = self.classes.getPtr(class_name) orelse return;
+            if (i >= cls.properties.items.len) break;
+            const initializer = traitDefaultName(cls.properties.items[i].default) orelse continue;
+            const prop_name = cls.properties.items[i].name;
+            var val = try self.copyValue(try self.callByName(initializer, &.{arg}));
+            const after = self.classes.getPtr(class_name) orelse {
+                self.releaseValue(val);
+                return;
+            };
+            const p = &after.properties.items[i];
+            val = self.widenIntDefault(val, p.type_str, class_name, prop_name) catch |err| {
+                self.releaseValue(val);
+                return err;
+            };
+            p.default = val;
+            p.has_default = true;
+            try self.settleTraitPropertyChecks(class_name, prop_name, val);
+            if (after.slot_layout) |layout| {
+                for (layout.names, 0..) |n, li| {
+                    if (std.mem.eql(u8, n, prop_name) and std.mem.eql(u8, layout.declaring_classes[li], class_name)) {
+                        layout.defaults[li] = val;
+                        break;
+                    }
+                }
+            }
+        }
+        var names: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer names.deinit(self.allocator);
+        if (self.classes.getPtr(class_name)) |cls| {
+            var it = cls.static_props.iterator();
+            while (it.next()) |e| if (traitDefaultName(e.value_ptr.*) != null) try names.append(self.allocator, e.key_ptr.*);
+        }
+        for (names.items) |prop_name| {
+            const cls = self.classes.getPtr(class_name) orelse return;
+            const initializer = traitDefaultName(cls.static_props.get(prop_name) orelse continue) orelse continue;
+            var val = try self.copyValue(try self.callByName(initializer, &.{arg}));
+            const after = self.classes.getPtr(class_name) orelse {
+                self.releaseValue(val);
+                return;
+            };
+            if (after.static_prop_types.get(prop_name)) |t| {
+                val = self.widenIntDefault(val, t, class_name, prop_name) catch |err| {
+                    self.releaseValue(val);
+                    return err;
+                };
+            }
+            try self.recordStaticDefault(after, prop_name, val);
+            const old = after.static_props.get(prop_name) orelse Value.null;
+            try after.static_props.put(self.allocator, prop_name, val);
+            self.releaseValue(old);
+            self.syncStaticPropRefs(class_name, prop_name, val);
+        }
+        // the composition checks that waited for such a default
+        var ci: usize = 0;
+        while (ci < self.trait_property_checks.items.len) {
+            const check = self.trait_property_checks.items[ci];
+            const initializer = traitDefaultName(check.value) orelse {
+                ci += 1;
+                continue;
+            };
+            if (!std.mem.eql(u8, check.class, class_name)) {
+                ci += 1;
+                continue;
+            }
+            _ = self.trait_property_checks.orderedRemove(ci);
+            const theirs = try self.callByName(initializer, &.{arg});
+            const cls = self.classes.getPtr(class_name) orelse return;
+            for (cls.properties.items) |p| {
+                if (!std.mem.eql(u8, p.name, check.name)) continue;
+                if (!Value.identical(p.default, theirs)) return self.traitPropertyConflict(class_name, if (p.trait_origin.len > 0) p.trait_origin else class_name, check.trait, check.name, false);
+                break;
+            }
+        }
+    }
+
     fn runDeferredDefaults(self: *VM, class_name: []const u8) RuntimeError!void {
         const cls = self.classes.getPtr(class_name) orelse return;
         if (!cls.defaults_pending) return;
@@ -27764,7 +27868,13 @@ pub const VM = struct {
         defer self.handler_floor = floor;
         const instantiating = self.frame_count;
         self.bare_default_failed = false;
-        _ = self.callByName(name, &.{}) catch |err| {
+        const runAll = struct {
+            fn run(vm: *VM, cn: []const u8, initializer: []const u8) RuntimeError!void {
+                if (vm.functions.contains(initializer)) _ = try vm.callByName(initializer, &.{});
+                try vm.resolveTraitDefaults(cn);
+            }
+        }.run;
+        runAll(self, class_name, name) catch |err| {
             // a default that only names a global constant is resolved at the
             // instantiation (zval_update_constant_ex); any other expression
             // is php's constant expression

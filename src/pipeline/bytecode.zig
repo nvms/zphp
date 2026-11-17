@@ -1047,6 +1047,19 @@ pub fn paramDefaultInitializerParts(value: []const u8) ?ParamDefaultInitializer 
     return .{ .name = value[0..file_end], .text = value[file_end + 1 ..] };
 }
 
+// a trait property's default that names the using class: the property
+// holds this name until the class's defaults are resolved, when the
+// initializer it names runs with the class
+const trait_default_prefix = "\x00traitdefault\x00";
+
+pub fn traitDefaultInitializerName(allocator: std.mem.Allocator, trait_name: []const u8, prop: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, trait_default_prefix ++ "{s}::{s}", .{ trait_name, prop });
+}
+
+pub fn isTraitDefaultInitializer(s: []const u8) bool {
+    return std.mem.startsWith(u8, s, trait_default_prefix);
+}
+
 pub fn propDefaultsInitializerName(allocator: std.mem.Allocator, class_name: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "\x00propdefaults\x00{s}", .{class_name});
 }

@@ -3169,7 +3169,11 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
             const default_idx = self.ast.extra_data[tmember.data.lhs];
             if (default_idx != 0) try self.compileNode(default_idx);
         } else if (tmember.data.lhs != 0) {
-            try self.compileNode(tmember.data.lhs);
+            if (traitDefaultNeedsClass(self, tmember)) {
+                const tname = self.trait_property_owner.get(tpi) orelse "";
+                const name = try traitDefaultInitializer(self, tname, tmember);
+                try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(name) }));
+            } else try self.compileNode(tmember.data.lhs);
         }
     }
     // promoted params get null defaults (actual values assigned in constructor body)
@@ -3906,6 +3910,69 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
     }
 }
 
+// a trait property's default naming the class it is used in (self::,
+// parent::, __CLASS__) is evaluated for each using class, as php copies the
+// expression into it: the default is a sentinel naming an initializer that
+// takes the class
+fn traitDefaultNeedsClass(self: *Compiler, member: Ast.Node) bool {
+    const tokens = self.ast.tokens;
+    var i: u32 = member.main_token;
+    while (i < tokens.len and tokens[i].tag != .equal) : (i += 1) {
+        if (tokens[i].tag == .semicolon or tokens[i].tag == .comma or tokens[i].tag == .l_brace) return false;
+    }
+    var depth: u32 = 0;
+    while (i < tokens.len) : (i += 1) {
+        switch (tokens[i].tag) {
+            .l_paren, .l_bracket, .l_brace => depth += 1,
+            .r_paren, .r_bracket, .r_brace => {
+                if (depth == 0) return false;
+                depth -= 1;
+            },
+            .semicolon, .eof => return false,
+            .comma => if (depth == 0) return false,
+            else => {},
+        }
+        const text = self.ast.tokenSlice(i);
+        if (std.mem.eql(u8, text, "__CLASS__")) return true;
+        if (i + 1 < tokens.len and tokens[i + 1].tag == .colon_colon and
+            (std.ascii.eqlIgnoreCase(text, "self") or std.ascii.eqlIgnoreCase(text, "parent") or std.ascii.eqlIgnoreCase(text, "static"))) return true;
+    }
+    return false;
+}
+
+// the sentinel and initializer name of a trait property's class-dependent
+// default (see traitDefaultNeedsClass)
+fn traitDefaultInitializer(self: *Compiler, trait_name: []const u8, member: Ast.Node) Error![]const u8 {
+    var pname = self.ast.tokenSlice(member.main_token);
+    if (pname.len > 0 and pname[0] == '$') pname = pname[1..];
+    const name = try @import("bytecode.zig").traitDefaultInitializerName(self.allocator, trait_name, pname);
+    try self.string_allocs.append(self.allocator, name);
+    return name;
+}
+
+// pushes a trait property's default: the value, or the sentinel of its
+// initializer, compiled the first time
+fn compileTraitPropertyDefault(self: *Compiler, trait_name: []const u8, member: Ast.Node, default: u32) Error!void {
+    if (!traitDefaultNeedsClass(self, member)) return self.compileNode(default);
+    const name = try traitDefaultInitializer(self, trait_name, member);
+    var compiled = false;
+    for (self.functions.items) |f| {
+        if (std.mem.eql(u8, f.name, name)) compiled = true;
+    }
+    if (!compiled) {
+        const prev_class = self.current_class;
+        const prev_in_trait = self.in_trait;
+        self.current_class = trait_name;
+        self.in_trait = true;
+        defer {
+            self.current_class = prev_class;
+            self.in_trait = prev_in_trait;
+        }
+        try compileInitializer(self, name, .argument, default, self.ast.nodes[default].main_token);
+    }
+    try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(name) }));
+}
+
 pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     const saved_cond = enterClassCond(self);
     defer self.class_cond_id = saved_cond;
@@ -4011,16 +4078,16 @@ pub fn compileTraitDecl(self: *Compiler, node: Ast.Node) Error!void {
     // compile defaults for static properties (popped second by VM)
     for (static_props.items) |pi| {
         const pmember = self.ast.nodes[pi];
-        if (pmember.data.lhs != 0) {
-            try self.compileNode(pmember.data.lhs);
-        }
+        if (pmember.data.lhs != 0) try compileTraitPropertyDefault(self, trait_name, pmember, pmember.data.lhs);
     }
 
     // compile defaults for own properties last (popped first by VM)
     for (own_props.items) |pi| {
         const pmember = self.ast.nodes[pi];
-        const default = if (pmember.tag == .class_property_hooks) self.ast.extra_data[pmember.data.lhs] else pmember.data.lhs;
-        if (default != 0) try self.compileNode(default);
+        if (pmember.tag == .class_property_hooks) {
+            const default = self.ast.extra_data[pmember.data.lhs];
+            if (default != 0) try self.compileNode(default);
+        } else if (pmember.data.lhs != 0) try compileTraitPropertyDefault(self, trait_name, pmember, pmember.data.lhs);
     }
 
     const name_idx = try self.addConstant(.{ .string = Value.String.borrowed(trait_name) });
