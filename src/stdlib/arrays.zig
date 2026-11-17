@@ -1885,7 +1885,8 @@ fn native_extract(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
                 target = key;
             },
             extr_if_exists => {
-                if (!defined(ctx, frame, slot_names, key)) continue;
+                // $this is no variable of the symbol table these look in
+                if (std.mem.eql(u8, key, "this") or !defined(ctx, frame, slot_names, key)) continue;
                 if (!validVarName(key) or std.mem.eql(u8, key, "GLOBALS")) continue;
                 if (std.mem.eql(u8, key, "this")) return extractError(ctx, "Error", "Cannot re-assign $this");
                 target = key;
@@ -1902,6 +1903,7 @@ fn native_extract(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
             },
             extr_prefix_if_exists => {
                 // a compiled variable that is unset takes the value itself
+                if (std.mem.eql(u8, key, "this")) continue;
                 if (undefSlot(ctx, frame, slot_names, key)) {
                     target = key;
                 } else if (!defined(ctx, frame, slot_names, key)) continue;
