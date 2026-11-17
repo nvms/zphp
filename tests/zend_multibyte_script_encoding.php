@@ -17,7 +17,7 @@ file_put_contents("$dir/plain.php", "<?php echo 'plain', \"\\n\";");
 
 // no ini file, with mbstring, whose functions zend.multibyte converts with
 $base = escapeshellarg(PHP_BINARY) . ' -n';
-if (trim(shell_exec($base . ' -r ' . escapeshellarg('echo (int) extension_loaded("mbstring");'))) !== '1') $base .= ' -d extension=mbstring';
+if (trim(shell_exec($base . ' -r ' . escapeshellarg("echo (int) extension_loaded('mbstring');"))) !== '1') $base .= ' -d extension=mbstring';
 
 function run($dir, $ini, $script) {
     global $base;

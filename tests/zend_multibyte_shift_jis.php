@@ -14,7 +14,7 @@ file_put_contents("$dir/names.php", "<?php\nfunction $func(\$$param) {\n    echo
 file_put_contents("$dir/declared.php", "<?php\ndeclare(encoding='Shift_JIS');\n\$s = \"\x95\x5c\";\nprintf('%x:%x:%d', ord(\$s[0]), ord(\$s[1]), strlen(\$s));\n");
 
 $base = escapeshellarg(PHP_BINARY) . ' -n';
-if (trim(shell_exec($base . ' -r ' . escapeshellarg('echo (int) extension_loaded("mbstring");'))) !== '1') $base .= ' -d extension=mbstring';
+if (trim(shell_exec($base . ' -r ' . escapeshellarg("echo (int) extension_loaded('mbstring');"))) !== '1') $base .= ' -d extension=mbstring';
 
 function run($dir, $ini, $script) {
     global $base;
