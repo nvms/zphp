@@ -545,6 +545,7 @@ Zend/tests/bug50255.phpt
 Zend/tests/bug51176.phpt
 Zend/tests/bug51827.phpt
 Zend/tests/bug52001.phpt
+Zend/tests/bug52041.phpt
 Zend/tests/bug52355.phpt
 Zend/tests/bug52508.phpt
 Zend/tests/bug52939.phpt
@@ -2168,8 +2169,11 @@ Zend/tests/gh10168/assign_dim_ref.phpt
 Zend/tests/gh10168/assign_dim_ref_with_prop_ref.phpt
 Zend/tests/gh10168/assign_dim_with_prop_ref.phpt
 Zend/tests/gh10168/assign_prop.phpt
+Zend/tests/gh10168/assign_prop_ref.phpt
 Zend/tests/gh10168/assign_prop_ref_with_prop_ref.phpt
 Zend/tests/gh10168/assign_prop_with_prop_ref.phpt
+Zend/tests/gh10168/assign_ref.phpt
+Zend/tests/gh10168/assign_ref_with_prop_ref.phpt
 Zend/tests/gh10168/assign_static_prop.phpt
 Zend/tests/gh10168/assign_static_prop_ref.phpt
 Zend/tests/gh10168/assign_static_prop_ref_with_prop_ref.phpt
@@ -2179,9 +2183,11 @@ Zend/tests/gh10168/assign_static_untyped_prop_ref.phpt
 Zend/tests/gh10168/assign_static_untyped_prop_ref_with_prop_ref.phpt
 Zend/tests/gh10168/assign_static_untyped_prop_with_prop_ref.phpt
 Zend/tests/gh10168/assign_untyped_prop.phpt
+Zend/tests/gh10168/assign_untyped_prop_ref.phpt
 Zend/tests/gh10168/assign_untyped_prop_ref_with_prop_ref.phpt
 Zend/tests/gh10168/assign_untyped_prop_with_prop_ref.phpt
 Zend/tests/gh10168/assign_with_prop_ref.phpt
+Zend/tests/gh10168/wrong_assign_to_variable.phpt
 Zend/tests/gh10232.phpt
 Zend/tests/gh10251.phpt
 Zend/tests/gh10486.phpt
@@ -10710,6 +10716,7 @@ tests/classes/ctor_visibility.phpt
 tests/classes/dereferencing_001.phpt
 tests/classes/destructor_and_echo.phpt
 tests/classes/destructor_and_exceptions.phpt
+tests/classes/destructor_and_globals.phpt
 tests/classes/destructor_and_references.phpt
 tests/classes/destructor_inheritance.phpt
 tests/classes/destructor_visibility_001.phpt

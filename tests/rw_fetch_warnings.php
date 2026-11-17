@@ -51,3 +51,14 @@ set_error_handler(function ($no, $msg) {
 $arr = [];
 $arr['m']['n'] .= 'x';
 var_dump($arr);
+$arr = [];
+$arr['m']['n']['o'] .= 'x';
+var_dump($arr);
+$arr = [];
+$arr['m']['n']['o']++;
+var_dump($arr);
+$arr = [];
+var_dump(++$arr['m']['n']);
+$arr = [];
+$arr['m']['n'] += 2;
+var_dump($arr);

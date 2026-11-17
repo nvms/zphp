@@ -1007,6 +1007,11 @@ pub const VM = struct {
     gen_release_cursor: usize = 0,
     pending_fiber_release: std.ArrayListUnmanaged(*@import("value.zig").Fiber) = .empty,
     fiber_release_cursor: usize = 0,
+    // a write through a reference several names share replaced what the
+    // other names' slot mirrors still hold; the next drain points them at
+    // the cell's value, so the old value dies when php frees it (the entry
+    // holds the old value to keep its identity)
+    stale_mirrors: std.ArrayListUnmanaged(StaleMirror) = .empty,
     // registered WeakMap instances. each WeakMap's wmConstruct appends self
     // here; on object destruct we walk this list to remove entries whose key
     // is the just-destructed object (weak semantics)
@@ -3802,6 +3807,7 @@ pub const VM = struct {
         self.string_pool.deinit();
         self.pending_gen_release.deinit(self.allocator);
         self.pending_fiber_release.deinit(self.allocator);
+        self.stale_mirrors.deinit(self.allocator);
         self.weakmaps.deinit(self.allocator);
         self.disabled_natives.deinit(self.allocator);
         self.weak_references.deinit(self.allocator);
@@ -4016,6 +4022,7 @@ pub const VM = struct {
         self.gen_release_cursor = 0;
         self.pending_fiber_release.clearRetainingCapacity();
         self.fiber_release_cursor = 0;
+        self.stale_mirrors.clearRetainingCapacity();
         self.weakmaps.clearRetainingCapacity();
         self.weak_references.clearRetainingCapacity();
         self.held_exceptions.clearRetainingCapacity();
@@ -6644,6 +6651,24 @@ pub const VM = struct {
                         if (self.throwWrongStringOffset(self.stack[self.sp - 1], if (access == 1) "Cannot increment/decrement string offsets" else "Cannot use assign-op operators with string offsets") catch try self.resumeRaised()) continue;
                         return error.RuntimeError;
                     }
+                    // a null container is one an outer write fetch gave up
+                    // on (a handler freed the array it was writing): php's
+                    // write fetch makes it an array, where the key is
+                    // missing, so the read warns as for an array
+                    if (self.stack[self.sp - 2] == .null and bytecode.opIs(self.currentChunk().code.items, self.currentFrame().ip, .array_get)) {
+                        const rw_key = self.stack[self.sp - 1];
+                        if (rw_key != .array and rw_key != .object) {
+                            self.emitUndefinedKeyWarning(PhpArray.normalizeKey(Value.toArrayKey(rw_key))) catch {
+                                if (try self.resumeRaised()) continue;
+                                return error.RuntimeError;
+                            };
+                            self.stackRelease(self.pop());
+                            _ = self.pop();
+                            self.push(.null);
+                            self.currentFrame().ip += bytecode.op_bytes;
+                            continue;
+                        }
+                    }
                     if (try self.refuseDimWrite(self.stack[self.sp - 2])) |handled| {
                         if (handled) continue;
                         return error.RuntimeError;
@@ -7070,6 +7095,18 @@ pub const VM = struct {
                 .array_get_vivify, .array_get_vivify_rw => {
                     const key = self.pop();
                     const arr_val = self.pop();
+                    if (op == .array_get_vivify_rw and arr_val == .null and key != .array and key != .object) {
+                        // an outer write fetch gave up on an array a handler
+                        // freed: php makes the null an array, where the key
+                        // is missing
+                        defer self.stackRelease(key);
+                        self.emitUndefinedKeyWarning(PhpArray.normalizeKey(Value.toArrayKey(key))) catch {
+                            _ = try self.resumeRaised();
+                            continue;
+                        };
+                        self.pushFetched(.null);
+                        continue;
+                    }
                     if (arr_val == .array) {
                         if (key == .array or key == .object) {
                             if (try self.throwOffsetKeyType(key, .access)) continue;
@@ -8443,6 +8480,12 @@ pub const VM = struct {
                     } else if (try self.refuseDimWrite(aei_arr)) |handled| {
                         if (handled) continue;
                         return error.RuntimeError;
+                    } else if (aei_arr == .null and aei_key != .array and aei_key != .object) {
+                        // an outer write fetch gave up on an array a handler
+                        // freed: the null becomes an array without the key
+                        self.emitUndefinedKeyWarning(PhpArray.normalizeKey(Value.toArrayKey(aei_key))) catch if (try self.resumeRaised()) continue;
+                        const stepped = try self.stepValue(.null, up) orelse continue;
+                        self.push(if (pre) stepped else .null);
                     } else {
                         self.push(.null);
                     }
@@ -9020,6 +9063,13 @@ pub const VM = struct {
                         if (!isSuperglobal(src_name)) try self.bindRefSlot(&parent.ref_slots, src_name, cell);
                         if (!isSuperglobal(dst_name)) try self.bindRefSlot(&parent.ref_slots, dst_name, cell);
                     }
+                    // the old value's destructor runs inside the assignment,
+                    // before anything reads its result
+                    if (self.hasPendingReleases()) self.drainPendingDestruct();
+                    if (self.drainRaised()) {
+                        if (self.dispatchPendingException(base_frame)) continue;
+                        return error.RuntimeError;
+                    }
                 },
 
                 .make_global_ref => {
@@ -9197,6 +9247,11 @@ pub const VM = struct {
                         }
                         if (try self.refuseReadonlyRefTarget(target, prop_name)) continue;
                         try self.bindPropToCell(target, prop_name, cell);
+                        if (self.hasPendingReleases()) self.drainPendingDestruct();
+                        if (self.drainRaised()) {
+                            if (self.dispatchPendingException(base_frame)) continue;
+                            return error.RuntimeError;
+                        }
                     } else {
                         // ZEND_ASSIGN_OBJ_REF: the source is fetched for
                         // writing first, then the container refuses
@@ -19169,18 +19224,23 @@ pub const VM = struct {
         return clone;
     }
 
+    // the local slot that mirrors a variable bound to a reference: a
+    // function's compiled variable, or the main script's, whose slot and
+    // named mirror share one count as in a function
+    fn mirrorSlot(self: *VM, frame: *CallFrame, name: []const u8) ?usize {
+        const names = if (frame.func) |func| func.slot_names else if (frame.include_parent == null) self.global_slot_names else return null;
+        for (names, 0..) |sn, si| {
+            if (std.mem.eql(u8, sn, name)) return if (si < frame.locals.len) si else null;
+        }
+        return null;
+    }
+
     // a name just bound to a reference cell mirrors the cell's value. the
     // mirror owns one reference, shared by the slot and its vars entry, and
     // drops the one it held before
     fn mirrorBoundName(self: *VM, frame: *CallFrame, name: []const u8, bound: Value) RuntimeError!void {
-        var slot: ?usize = null;
-        if (frame.func) |func| for (func.slot_names, 0..) |sn, si| {
-            if (std.mem.eql(u8, sn, name)) {
-                if (si < frame.locals.len) slot = si;
-                break;
-            }
-        };
-        const names_in_slots = slot != null and frame.func.?.locals_only and frame.vars.count() == 0;
+        const slot = self.mirrorSlot(frame, name);
+        const names_in_slots = slot != null and frame.func != null and frame.func.?.locals_only and frame.vars.count() == 0;
         const mirror_vars = (name.len == 0 or name[0] != 0) and !names_in_slots;
         if (!mirror_vars and slot == null) return;
         // a var, so the slot store below cannot alias it
@@ -23787,9 +23847,60 @@ pub const VM = struct {
                 }
             }
         }
+        const old = cell.*;
         retainValue(val);
-        self.releaseValue(cell.*);
         cell.* = val;
+        if (cellOf(cell).binders > 1 and (old == .object or old == .array) and !self.heap_teardown and !sameContainer(old, val)) {
+            // the old value stays held by the entry instead of released here
+            self.stale_mirrors.append(self.allocator, .{ .cell = cell, .old = old }) catch self.releaseValue(old);
+            return;
+        }
+        self.releaseValue(old);
+    }
+
+    pub const StaleMirror = struct { cell: *Value, old: Value };
+
+    // every live frame's name bound to a stale entry's cell whose slot
+    // mirror still holds the old value takes the cell's value, as php's
+    // variables, being the reference, would show it already
+    fn refreshStaleMirrors(self: *VM) void {
+        while (self.stale_mirrors.pop()) |entry| {
+            defer self.releaseValue(entry.old);
+            if (cellOf(entry.cell).dead) continue;
+            for (self.frames[0..self.frame_count]) |*frame| {
+                if (frame.include_parent != null or frame.ref_slots.count() == 0) continue;
+                var it = frame.ref_slots.iterator();
+                while (it.next()) |kv| {
+                    if (kv.value_ptr.* != entry.cell) continue;
+                    const name = kv.key_ptr.*;
+                    if (!self.mirrorHolds(frame, name, entry.old)) continue;
+                    self.mirrorBoundName(frame, name, entry.cell.*) catch continue;
+                    if (frame.func == null) if (self.globals_array) |ga| if (name.len > 1 and name[0] == '$') {
+                        ga.set(self.allocator, .{ .string = Value.String.borrowed(name[1..]) }, entry.cell.*) catch {};
+                    };
+                }
+            }
+        }
+    }
+
+    // the value mirrorBoundName would replace is `old`
+    fn mirrorHolds(self: *VM, frame: *CallFrame, name: []const u8, old: Value) bool {
+        const slot = self.mirrorSlot(frame, name);
+        const names_in_slots = slot != null and frame.func != null and frame.func.?.locals_only and frame.vars.count() == 0;
+        const mirror_vars = (name.len == 0 or name[0] != 0) and !names_in_slots;
+        const held: Value = if (mirror_vars)
+            (frame.vars.get(name) orelse if (slot) |si| frame.locals[si] else return false)
+        else if (slot) |si| frame.locals[si] else return false;
+        return sameContainer(held, old);
+    }
+
+    // the same array or object, not an equal one
+    fn sameContainer(a: Value, b: Value) bool {
+        return switch (a) {
+            .array => |x| b == .array and b.array == x,
+            .object => |x| b == .object and b.object == x,
+            else => false,
+        };
     }
 
     fn propagateCellWrite(self: *VM, cell: *Value, val: Value) !void {
@@ -32575,6 +32686,9 @@ pub const VM = struct {
             const refused = self.destructorRefused(obj) catch true;
             if (!refused) _ = self.callMethod(obj, "__destruct", &.{}) catch {};
             self.settleDrainException(in_flight);
+            // what the destructor's writes through references dropped dies
+            // with it, before its handle is freed
+            if (self.stale_mirrors.items.len > 0) self.refreshStaleMirrors();
         }
         // a destructor that kept the object alive (stored $this, or a
         // suspended fiber holds its frame) revived it: it lives on with its
@@ -32788,8 +32902,10 @@ pub const VM = struct {
             self.array_release_cursor < self.pending_array_release.items.len or
             self.gen_release_cursor < self.pending_gen_release.items.len or
             self.fiber_release_cursor < self.pending_fiber_release.items.len or
-            self.pending_string_release.items.len > 0)
+            self.pending_string_release.items.len > 0 or
+            self.stale_mirrors.items.len > 0)
         {
+            self.refreshStaleMirrors();
             self.drainPendingStringReleases();
             while (self.destruct_cursor < self.pending_destruct.items.len) {
                 const obj = self.pending_destruct.items[self.destruct_cursor];
@@ -34314,6 +34430,7 @@ pub const VM = struct {
     // their opcodes rather than protected by a narrower gate
     pub inline fn hasPendingReleases(self: *VM) bool {
         return self.pending_destruct.items.len > 0 or
+            self.stale_mirrors.items.len > 0 or
             self.pending_string_release.items.len > 0 or
             self.pending_array_release.items.len > 0 or
             self.pending_gen_release.items.len > 0 or

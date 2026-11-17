@@ -32,6 +32,20 @@ pub fn compileAssign(self: *Compiler, node: Ast.Node) Error!void {
         const rhs = self.ast.nodes[node.data.rhs];
         if (rhs.tag == .ref_target) {
             const dst = try self.addConstant(.{ .string = Value.String.borrowed(self.ast.tokenSlice(target.main_token)) });
+            switch (self.ast.nodes[rhs.data.lhs].tag) {
+                .call, .method_call, .static_call => {
+                    // the call's result stays as the assignment's: a call
+                    // that returns no reference is php's plain ASSIGN, whose
+                    // result is the value, whatever the old value's
+                    // destructor does to the variable
+                    try self.emitOp(.reset_return_ref);
+                    try self.compileNode(rhs.data.lhs);
+                    try self.emitOp(.bind_ref_from_return);
+                    try self.emitU16(dst);
+                    return;
+                },
+                else => {},
+            }
             if (try compileReferenceBinding(self, rhs.data.lhs, dst)) {
                 try self.emitGetVar(self.ast.tokenSlice(target.main_token));
                 return;
