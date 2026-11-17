@@ -125,6 +125,11 @@ const php_stub = std.StaticStringMap(Signature).initComptime(.{
     .{ "Error::__clone", Signature{ .params = &[_]Param{}, .returns = "void" } },
     .{ "Exception::__wakeup", Signature{ .params = &[_]Param{}, .tentative_returns = "void" } },
     .{ "Error::__wakeup", Signature{ .params = &[_]Param{}, .tentative_returns = "void" } },
+    .{ "date_sunrise", Signature{ .params = &[_]Param{ .{ .name = "timestamp", .type = "int" }, .{ .name = "returnFormat", .default = .{ .int = 1 }, .default_constant = "SUNFUNCS_RET_STRING", .type = "int" }, .{ .name = "latitude", .default = .null, .type = "?float" }, .{ .name = "longitude", .default = .null, .type = "?float" }, .{ .name = "zenith", .default = .null, .type = "?float" }, .{ .name = "utcOffset", .default = .null, .type = "?float" } }, .returns = "string|int|float|false" } },
+    .{ "date_sunset", Signature{ .params = &[_]Param{ .{ .name = "timestamp", .type = "int" }, .{ .name = "returnFormat", .default = .{ .int = 1 }, .default_constant = "SUNFUNCS_RET_STRING", .type = "int" }, .{ .name = "latitude", .default = .null, .type = "?float" }, .{ .name = "longitude", .default = .null, .type = "?float" }, .{ .name = "zenith", .default = .null, .type = "?float" }, .{ .name = "utcOffset", .default = .null, .type = "?float" } }, .returns = "string|int|float|false" } },
+    .{ "date_sun_info", Signature{ .params = &[_]Param{ .{ .name = "timestamp", .type = "int" }, .{ .name = "latitude", .type = "float" }, .{ .name = "longitude", .type = "float" } }, .returns = "array" } },
+    .{ "show_source", Signature{ .params = &[_]Param{ .{ .name = "filename", .type = "string" }, .{ .name = "return", .default = .{ .bool = false }, .type = "bool" } }, .returns = "string|bool" } },
+    .{ "timezone_name_from_abbr", Signature{ .params = &[_]Param{ .{ .name = "abbr", .type = "string" }, .{ .name = "utcOffset", .default = .{ .int = -1 }, .type = "int" }, .{ .name = "isDST", .default = .{ .int = -1 }, .type = "int" } }, .returns = "string|false" } },
 });
 
 // the stub defaults that are expressions of constants, which reflection's
