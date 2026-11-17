@@ -33202,8 +33202,12 @@ pub const VM = struct {
             // an exception in flight waits while the destructor runs, and
             // becomes the previous of one the destructor throws
             const in_flight = self.takePending();
+            // the destructor's own statements consume the flag an earlier
+            // destructor of this drain set for the exception now waiting
+            const raised = self.drain_raised;
             const refused = self.destructorRefused(obj) catch true;
             if (!refused) _ = self.callMethod(obj, "__destruct", &.{}) catch {};
+            if (raised) self.drain_raised = true;
             self.settleDrainException(in_flight);
             // what the destructor's writes through references dropped dies
             // with it, before its handle is freed
