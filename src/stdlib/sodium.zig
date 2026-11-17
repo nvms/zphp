@@ -122,10 +122,21 @@ fn native_hex2bin(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
     return try allocStr(ctx, out[0..out_len]);
 }
 
+// libsodium aborts the process on a variant it doesn't know; php refuses it
+// first
+fn base64Variant(ctx: *NativeContext, args: []const Value, comptime func: []const u8) RuntimeError!c_int {
+    const raw: i64 = if (args.len > 1) Value.toInt(args[1]) else 0;
+    if ((@as(u32, @truncate(@as(u64, @bitCast(raw)))) & ~@as(u32, 0x6)) != 0x1) {
+        try ctx.vm.setPendingException("SodiumException", func ++ "(): Argument #2 ($id) must be a valid base64 variant identifier");
+        return error.RuntimeError;
+    }
+    return @intCast(raw);
+}
+
 fn native_bin2base64(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     ensureInit();
     if (args.len < 1 or args[0] != .string) return NativeResult.literal("");
-    const variant: c_int = if (args.len > 1 and args[1] == .int) @intCast(args[1].int) else 1;
+    const variant = try base64Variant(ctx, args, "sodium_bin2base64");
     const bin = args[0].string.bytes();
     const out_max = c.sodium_base64_encoded_len(bin.len, variant);
     const out = try ctx.allocator.alloc(u8, out_max);
@@ -140,17 +151,20 @@ fn native_bin2base64(ctx: *NativeContext, args: []const Value) RuntimeError!Nati
 fn native_base642bin(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     ensureInit();
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
-    const variant: c_int = if (args.len > 1 and args[1] == .int) @intCast(args[1].int) else 1;
-    const ignore: ?[*:0]const u8 = if (args.len > 2 and args[2] == .string)
-        (try ctx.allocator.dupeSentinel(u8, args[2].string.bytes(), 0)).ptr
-    else
-        null;
+    const variant = try base64Variant(ctx, args, "sodium_base642bin");
+    const ignore_z: ?[:0]u8 = if (args.len > 2 and args[2] == .string) try ctx.allocator.dupeSentinel(u8, args[2].string.bytes(), 0) else null;
+    defer if (ignore_z) |z| ctx.allocator.free(z);
+    const ignore: ?[*:0]const u8 = if (ignore_z) |z| z.ptr else null;
     const src = args[0].string.bytes();
     const out = try ctx.allocator.alloc(u8, src.len + 1);
     defer ctx.allocator.free(out);
     var out_len: usize = 0;
-    const rc = c.sodium_base642bin(out.ptr, out.len, src.ptr, src.len, ignore, &out_len, null, variant);
-    if (rc != 0) return NativeResult.scalar(.{ .bool = false });
+    var end: [*c]const u8 = null;
+    const rc = c.sodium_base642bin(out.ptr, out.len, src.ptr, src.len, ignore, &out_len, &end, variant);
+    if (rc != 0 or end != src.ptr + src.len) {
+        try ctx.vm.setPendingException("SodiumException", "sodium_base642bin(): Argument #1 ($string) must be a valid base64 string");
+        return error.RuntimeError;
+    }
     return try allocStr(ctx, out[0..out_len]);
 }
 
