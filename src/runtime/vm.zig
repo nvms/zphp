@@ -12592,12 +12592,14 @@ pub const VM = struct {
                             continue;
                         }
                         if (self.returnedRefValueHere(at)) continue;
-                        if (sent == .array and sent.array.refcount > 1) {
-                            const own = try self.cowSeparate(sent.array);
-                            if (own != sent.array) {
-                                self.stack[self.sp - 1] = .{ .array = own };
-                                self.stackRelease(sent);
-                            }
+                        // the stack doesn't count arrays: a result one owner
+                        // still holds (a property or static returned by
+                        // value) is copied too, so the callee can't write to it
+                        if (sent == .array and sent.array.refcount >= 1 and self.globals_array != sent.array) {
+                            const own = try self.shallowCloneCow(sent.array);
+                            own.refcount = 0;
+                            self.stack[self.sp - 1] = .{ .array = own };
+                            self.stackRelease(sent);
                         }
                         self.raiseError(8, "Only variables should be passed by reference") catch if (try self.resumeRaised()) continue;
                         continue;
