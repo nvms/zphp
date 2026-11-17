@@ -10106,7 +10106,14 @@ pub const VM = struct {
                         defer self.allocator.free(msg);
                         const caller = &self.frames[self.frame_count - 2];
                         const line: i64 = if (self.sourceLocation(caller.chunk, if (caller.ip > 0) caller.ip - 1 else 0)) |loc| @intCast(loc.line) else 0;
-                        self.raiseErrorAt(E_USER_DEPRECATED, msg, .{ .file = self.frameFile(self.frame_count - 2), .line = line }) catch if (try self.resumeRaised()) continue;
+                        // php warns before the function's frame exists: a
+                        // call the engine makes once the script stopped (an
+                        // exception handler) names no file
+                        const at: SourcePosition = if (self.frame_count - 2 < self.finished_frames) .{ .file = "Unknown", .line = 0 } else .{ .file = self.frameFile(self.frame_count - 2), .line = line };
+                        const hidden_before = self.hidden_trace_frame;
+                        self.hidden_trace_frame = self.frame_count - 1;
+                        defer self.hidden_trace_frame = hidden_before;
+                        self.raiseErrorAt(E_USER_DEPRECATED, msg, at) catch if (try self.resumeRaised()) continue;
                     }
                 },
 
@@ -29098,6 +29105,11 @@ pub const VM = struct {
         var engine = self.engineCall();
         self.native_call = &engine;
         defer self.native_call = engine.outer;
+        // the engine calls it once the script stopped: what is raised
+        // calling it names no file ("Unknown")
+        const outer_finished = self.finished_frames;
+        self.finished_frames = self.frame_count;
+        defer self.finished_frames = outer_finished;
         var ctx = self.makeContext(null);
         _ = ctx.invokeCallable(handler, &.{exc}) catch {};
         // what the handler threw leaves its frame with no frame below:

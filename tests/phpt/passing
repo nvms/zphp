@@ -284,6 +284,7 @@ Zend/tests/attributes/deprecated/error_on_class.phpt
 Zend/tests/attributes/deprecated/error_on_enum.phpt
 Zend/tests/attributes/deprecated/error_on_interface.phpt
 Zend/tests/attributes/deprecated/functions/001.phpt
+Zend/tests/attributes/deprecated/functions/deprecated_handler_001.phpt
 Zend/tests/attributes/deprecated/functions/deprecated_handler_003.phpt
 Zend/tests/attributes/deprecated/functions/error_code_001.phpt
 Zend/tests/attributes/deprecated/functions/magic_call.phpt
