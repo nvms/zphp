@@ -927,7 +927,7 @@ pub fn readPathAs(ctx: *NativeContext, raw_path: []const u8, comptime func: ?[]c
         },
     }
     if (std.ascii.startsWithIgnoreCase(path, "php://filter/")) {
-        const opened = (try openStreamValue(ctx, path, "rb", null)) orelse return null;
+        const opened = (try openStreamValue(ctx, path, "rb", read_context)) orelse return null;
         const fh = opened.resource;
         fh.retain();
         defer ctx.vm.releaseValue(opened);
@@ -940,7 +940,7 @@ pub fn readPathAs(ctx: *NativeContext, raw_path: []const u8, comptime func: ?[]c
         path = plain;
     };
     if (userWrapperFor(ctx.vm, path)) |class_name| {
-        const opened = (try dispatchUserOpen(ctx, class_name, path, "rb")) orelse return null;
+        const opened = (try openUserStream(ctx, class_name, path, "rb", user_streams.REPORT_ERRORS, read_context)) orelse return null;
         const fh = opened.resource;
         fh.retain();
         defer ctx.vm.releaseValue(opened);
@@ -2801,7 +2801,10 @@ fn openFilterStream(ctx: *NativeContext, path: []const u8, mode: []const u8, con
     var read_chain = std.mem.indexOfAny(u8, mode, "r+") != null;
     var write_chain = std.mem.indexOfAny(u8, mode, "w+a") != null;
     const s = try streams.of(ctx, obj);
-    var parts = std.mem.tokenizeScalar(u8, path[spec_start + 1 .. spec_start + marker], '/');
+    // php cuts the spec at "/resource=", so with nothing before it the
+    // filters are read from the rest of the path (resource=..., the url's
+    // own parts), which name no filter
+    var parts = std.mem.tokenizeScalar(u8, if (marker > 0) path[spec_start + 1 .. spec_start + marker] else path[spec_start + 1 ..], '/');
     while (parts.next()) |part| {
         var list = part;
         var on_read = read_chain;

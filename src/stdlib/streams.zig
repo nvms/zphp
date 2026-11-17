@@ -638,6 +638,12 @@ pub fn copyToMem(ctx: *NativeContext, obj: *PhpObject, maxlen: ?usize) RuntimeEr
         out.shrinkRetainingCapacity(len);
         return try out.toOwnedSlice(ctx.allocator);
     };
+    // _php_stream_copy_to_mem stats the stream to size its buffer, which a
+    // user wrapper sees as a stream_stat call
+    switch (backend(obj)) {
+        .user => |w| _ = try user_streams.stat(ctx, w),
+        else => {},
+    }
     var chunk: [chunk_default]u8 = undefined;
     while (true) {
         const want = if (maxlen) |m| @min(chunk.len, m - out.items.len) else chunk.len;

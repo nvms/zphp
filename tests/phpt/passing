@@ -9825,6 +9825,7 @@ ext/standard/tests/streams/gh10406.phpt
 ext/standard/tests/streams/gh11418.phpt
 ext/standard/tests/streams/gh14506.phpt
 ext/standard/tests/streams/gh14930.phpt
+ext/standard/tests/streams/gh15155.phpt
 ext/standard/tests/streams/gh15908.phpt
 ext/standard/tests/streams/gh15980.phpt
 ext/standard/tests/streams/gh16889.phpt
