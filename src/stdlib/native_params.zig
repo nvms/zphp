@@ -125,6 +125,17 @@ const php_stub = std.StaticStringMap(Signature).initComptime(.{
     .{ "Error::__wakeup", Signature{ .params = &[_]Param{}, .tentative_returns = "void" } },
 });
 
+// the stub defaults that are expressions of constants, which reflection's
+// string form prints as written
+pub fn defaultExpression(func: []const u8, param: []const u8) ?[]const u8 {
+    const html = [_][]const u8{ "htmlspecialchars", "htmlspecialchars_decode", "html_entity_decode", "htmlentities", "get_html_translation_table" };
+    if (std.mem.eql(u8, param, "flags")) {
+        for (html) |f| if (std.ascii.eqlIgnoreCase(func, f)) return "ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401";
+        if (std.ascii.eqlIgnoreCase(func, "stream_socket_server")) return "STREAM_SERVER_BIND | STREAM_SERVER_LISTEN";
+    }
+    return null;
+}
+
 pub fn get(name: []const u8) ?Signature {
     return zphp_only.get(name) orelse generated.map.get(name) orelse php_stub.get(name);
 }

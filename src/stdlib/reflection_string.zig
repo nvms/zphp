@@ -560,6 +560,8 @@ const ParamView = struct {
     required: bool = true,
     user_default: ?Value = null,
     native: ?native_params.Param = null,
+    // the internal function it belongs to
+    native_fn: []const u8 = "",
     self_class: ?[]const u8 = null,
     // a closure's __invoke has internal arginfo with userland names, so its
     // defaults print as <default>
@@ -597,6 +599,7 @@ fn paramView(view: FnView, i: usize) ParamView {
         .by_ref = sp.by_ref,
         .required = sp.default == .required and !sp.variadic,
         .native = sp,
+        .native_fn = view.name,
         .self_class = view.scope,
     };
 }
@@ -617,7 +620,7 @@ fn appendParameter(w: *Writer, p: ParamView) !void {
             try w.str(" = <default>");
         } else if (p.native) |np| {
             try w.str(" = ");
-            try appendNativeDefault(w, np);
+            if (native_params.defaultExpression(p.native_fn, p.name)) |text| try w.str(text) else try appendNativeDefault(w, np);
         } else if (p.user_default) |d| {
             try w.str(" = ");
             // a parameter default's self:: and parent:: are kept as written
