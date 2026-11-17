@@ -2647,7 +2647,7 @@ fn native_gc_status(ctx: *NativeContext, _: []const Value) RuntimeError!NativeRe
     // collector_time, etc.). emit the full key set so callers that read
     // them via array access don't see undefined-index notices
     const arr = try ctx.createArray();
-    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("running") }, .{ .bool = false });
+    try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("running") }, .{ .bool = ctx.vm.gc_active });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("protected") }, .{ .bool = false });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("full") }, .{ .bool = false });
     try arr.set(ctx.allocator, .{ .string = Value.String.borrowed("runs") }, .{ .int = @intCast(ctx.vm.gc_runs) });

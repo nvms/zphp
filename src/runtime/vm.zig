@@ -1137,6 +1137,9 @@ pub const VM = struct {
     cycle_alive: std.ArrayListUnmanaged(CycleAlive) = .empty,
     cycle_alive_lost: bool = false,
     collecting_cycles: bool = false,
+    // php's GC_G(gc_active): a collection is running, its destructors
+    // included; gc_status() reports it and a nested collection does nothing
+    gc_active: bool = false,
     closure_instance_count: u32 = 0,
     // the closure instances self.functions holds: no call site names one, so
     // creating or freeing one leaves every call site's callee as it was
@@ -33019,6 +33022,9 @@ pub const VM = struct {
     // 4. remaining nodes (scratch_rc == 0) are unreachable cycles - destruct
     //    + free
     pub fn collectCycles(self: *VM) usize {
+        if (self.gc_active) return 0;
+        self.gc_active = true;
+        defer self.gc_active = false;
         self.dropUnreachableWeakMapEntries();
         var rerun = false;
         var collected = self.collectCyclesPass(&rerun, true);
