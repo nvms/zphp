@@ -26671,6 +26671,17 @@ pub const VM = struct {
 
     pub fn triggerLazyProperty(self: *VM, obj: *PhpObject, name: []const u8, scope: ?[]const u8) RuntimeError!void {
         if (obj.isLazySlot(name, scope)) try self.triggerLazyInit(obj);
+        // an initialized proxy forwards to its instance, which may have been
+        // made lazy again (resetAsLazy*) and initializes on this access
+        var inner = obj;
+        var depth: usize = 0;
+        while (inner.lazy) |state| {
+            const next = state.backing orelse break;
+            if (next == inner or depth == 64) break;
+            if (next.isLazySlot(name, scope)) try self.triggerLazyInit(next);
+            inner = next;
+            depth += 1;
+        }
     }
 
     // resolving the scope walks frames, so skip it for the common eager object

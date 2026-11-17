@@ -1332,9 +1332,18 @@ pub const PhpObject = struct {
         return .null;
     }
 
+    // an initialized proxy's instance, followed through proxies whose
+    // instance is a proxy too
     pub fn storage(self: *PhpObject) *PhpObject {
-        if (self.lazy) |state| if (state.backing) |obj| return obj;
-        return self;
+        var obj = self;
+        var depth: usize = 0;
+        while (obj.lazy) |state| {
+            const next = state.backing orelse break;
+            if (next == obj or depth == 64) break;
+            obj = next;
+            depth += 1;
+        }
+        return obj;
     }
 
     pub fn ownsDestructor(self: *const PhpObject) bool {
