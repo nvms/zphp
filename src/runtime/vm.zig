@@ -7403,6 +7403,10 @@ pub const VM = struct {
                             if (try self.throwBuiltinException("Error", msg)) continue;
                             return error.RuntimeError;
                         }
+                    } else if (try self.setOnlyHookRefusal(obj, pname)) |msg| {
+                        defer self.allocator.free(msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
                     }
                     if (existing != .object or datePeriodField(self.findPropertyVisibility(obj.class_name, pname), pname)) {
                         if (try self.checkPropertyMutation(obj, pname, .indirect)) continue;
@@ -8311,6 +8315,10 @@ pub const VM = struct {
                             if (try self.throwBuiltinException("Error", msg)) continue;
                             return error.RuntimeError;
                         }
+                    } else if (try self.setOnlyHookRefusal(eap_obj, prop_name)) |msg| {
+                        defer self.allocator.free(msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
                     }
                     // a property the scope can't reach, with __get: php's
                     // read_property(BP_VAR_W). a by-value __get hands back a
@@ -9606,6 +9614,11 @@ pub const VM = struct {
                             if (try self.throwBuiltinException("Error", msg)) continue;
                             return error.RuntimeError;
                         }
+                        if (try self.setOnlyHookRefusal(obj_ptr, prop_name)) |msg| {
+                            defer self.allocator.free(msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        }
                         const has_prop = obj_ptr.properties.contains(prop_name) or (obj_ptr.slots != null and obj_ptr.getSlotIndex(prop_name) != null);
                         const ref_hook = self.hasPropHook(obj_ptr.class_name, prop_name, .get) and !self.inPropHook(obj_ptr, prop_name);
                         if (ref_hook or self.overloadedForWrite(obj_ptr, prop_name)) {
@@ -9712,6 +9725,11 @@ pub const VM = struct {
                                 return error.RuntimeError;
                             };
                             const msg = try std.fmt.allocPrint(self.allocator, "Indirect modification of {s}::${s} is not allowed", .{ obj_ptr.class_name, prop_owned });
+                            defer self.allocator.free(msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        }
+                        if (try self.setOnlyHookRefusal(obj_ptr, prop_owned)) |msg| {
                             defer self.allocator.free(msg);
                             if (try self.throwBuiltinException("Error", msg)) continue;
                             return error.RuntimeError;
@@ -12554,7 +12572,9 @@ pub const VM = struct {
                     defer if (capturing and self.hasPendingReleases()) self.drainPendingDestruct();
                     if (capturing) stackRetain(obj_val);
                     defer if (capturing) self.releaseValue(obj_val);
-                    defer if (capturing and obj_val == .object and self.sp == arg_sp + 1 and self.pending_exception == null) {
+                    // a hook answered the write fetch: no property cell
+                    var hook_fetched = false;
+                    defer if (capturing and !hook_fetched and obj_val == .object and self.sp == arg_sp + 1 and self.pending_exception == null) {
                         self.capturePropertyCell(arg_sp, obj_val.object.storage(), prop_name) catch unreachable;
                     };
                     if (obj_val == .object) {
@@ -12587,15 +12607,38 @@ pub const VM = struct {
                         // property hooks: dispatch to get hook if present (and not recursing).
                         // route exceptions through the local try/catch handler
                         if (self.hasPropHook(obj.class_name, prop_name, .get) and !self.inPropHook(obj, prop_name)) {
+                            // a by-reference argument is php's write fetch:
+                            // a &get hook hands over its reference, any other
+                            // result must be an object
+                            const ref_get = capturing and try self.propGetReturnsRef(obj, prop_name);
+                            if (ref_get) self.setReturnRef(null);
                             const hook_result = self.callPropHook(obj, prop_name, .get, .null) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
                             if (hook_result) |hv| {
+                                if (capturing) {
+                                    hook_fetched = true;
+                                    if (ref_get) {
+                                        self.push(hv);
+                                        if (self.last_return_ref) |cell| self.setArgSource(self.sp - 1, .{ .cell = .{ .value = cell } });
+                                        continue;
+                                    }
+                                    if (hv != .object) {
+                                        const msg = try std.fmt.allocPrint(self.allocator, "Indirect modification of {s}::${s} is not allowed", .{ obj.class_name, prop_name });
+                                        defer self.allocator.free(msg);
+                                        if (try self.throwBuiltinException("Error", msg)) continue;
+                                        return error.RuntimeError;
+                                    }
+                                }
                                 self.push(hv);
                                 continue;
                             }
-                        }
+                        } else if (capturing) if (try self.setOnlyHookRefusal(obj, prop_name)) |msg| {
+                            defer self.allocator.free(msg);
+                            if (try self.throwBuiltinException("Error", msg)) continue;
+                            return error.RuntimeError;
+                        };
 
                         // IC: slot-indexed fast path. skip the cache when the
                         // property was explicitly unset - the slot still holds
@@ -26999,6 +27042,18 @@ pub const VM = struct {
         var buf2: [256]u8 = undefined;
         const setter = std.fmt.bufPrint(&buf2, "{s}$hook_set", .{prop_name}) catch return false;
         return self.resolvePropertyHook(cls, setter) != null;
+    }
+
+    // read_property(BP_VAR_W) of a backed property with a set hook and no get
+    // hook, outside its own hooks: the write fetch gets a copy of the backing
+    // value, so anything but an object is php's "Indirect modification"
+    // Error. returns the message (caller frees) when refused
+    pub fn setOnlyHookRefusal(self: *VM, obj: *PhpObject, prop_name: []const u8) RuntimeError!?[]u8 {
+        if (!self.hasPropHook(obj.class_name, prop_name, .set) or self.hasPropHook(obj.class_name, prop_name, .get)) return null;
+        if (self.inPropHook(obj, prop_name)) return null;
+        const vr = self.findPropertyVisibility(obj.class_name, prop_name);
+        if (obj.rawForScope(prop_name, vr.defining_class) == .object) return null;
+        return try std.fmt.allocPrint(self.allocator, "Indirect modification of {s}::${s} is not allowed", .{ obj.class_name, prop_name });
     }
 
     // php's ZEND_ACC_VIRTUAL after inheritance: a property is backed when
