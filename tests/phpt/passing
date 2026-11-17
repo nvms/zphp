@@ -3095,8 +3095,11 @@ Zend/tests/methods-on-non-objects.phpt
 Zend/tests/mod_001.phpt
 Zend/tests/mul_001.phpt
 Zend/tests/multibyte/bug68665.phpt
+Zend/tests/multibyte/multibyte_encoding_001.phpt
 Zend/tests/multibyte/multibyte_encoding_002.phpt
 Zend/tests/multibyte/multibyte_encoding_003.phpt
+Zend/tests/multibyte/multibyte_encoding_004.phpt
+Zend/tests/multibyte/multibyte_encoding_005.phpt
 Zend/tests/multibyte/multibyte_encoding_007.phpt
 Zend/tests/multibyte/multibyte_encoding_008.phpt
 Zend/tests/name_collision/declare_already_in_use.phpt

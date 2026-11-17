@@ -4,6 +4,16 @@ const Ast = @import("ast.zig").Ast;
 const Allocator = std.mem.Allocator;
 const Value = @import("../runtime/value.zig").Value;
 const interp = @import("interp.zig");
+const multibyte = @import("multibyte.zig");
+
+// a literal's text as php's scanner output filter leaves it: converted from
+// the UTF-8 a Shift_JIS script was lexed in back to its encoding
+fn literalText(self: *Compiler, text: []const u8) Allocator.Error![]const u8 {
+    const to = multibyte.active_literal_encoding orelse return text;
+    const converted = try multibyte.convertLiteral(self.allocator, text, to);
+    try self.string_allocs.append(self.allocator, converted);
+    return converted;
+}
 
 pub fn compileString(self: *Compiler, node: Ast.Node) (Allocator.Error || error{CompileError})!void {
     const tok_tag = self.ast.tokens[node.main_token].tag;
@@ -22,7 +32,7 @@ pub fn compileString(self: *Compiler, node: Ast.Node) (Allocator.Error || error{
     if (tok_tag == .heredoc or quote == '"') return compileInterpolating(self, node, quote);
 
     if (tok_tag == .nowdoc) {
-        const body = try extractHeredocBody(self, node.main_token);
+        const body = try literalText(self, try extractHeredocBody(self, node.main_token));
         const idx = try self.addConstant(.{ .string = Value.String.borrowed(body) });
         try self.emitConstant(idx);
         return;
@@ -37,10 +47,10 @@ pub fn compileString(self: *Compiler, node: Ast.Node) (Allocator.Error || error{
     const processed = try processSingleQuoteEscapes(self.allocator, inner);
     if (processed) |p| {
         try self.string_allocs.append(self.allocator, p);
-        const idx = try self.addConstant(.{ .string = Value.String.borrowed(p) });
+        const idx = try self.addConstant(.{ .string = Value.String.borrowed(try literalText(self, p)) });
         try self.emitConstant(idx);
     } else {
-        const idx = try self.addConstant(.{ .string = Value.String.borrowed(inner) });
+        const idx = try self.addConstant(.{ .string = Value.String.borrowed(try literalText(self, inner)) });
         try self.emitConstant(idx);
     }
 }
@@ -157,7 +167,7 @@ fn emitLiteralSegment(self: *Compiler, token: u32, b: interp.Body, quote: u8, st
         try self.string_allocs.append(self.allocator, processed);
         text = processed;
     }
-    const idx = try self.addConstant(.{ .string = Value.String.borrowed(text) });
+    const idx = try self.addConstant(.{ .string = Value.String.borrowed(try literalText(self, text)) });
     try self.emitConstant(idx);
 }
 

@@ -11,6 +11,7 @@ const vm_mod = @import("../runtime/vm.zig");
 const class_names = @import("../runtime/class_names.zig");
 
 const compiler_strings = @import("compiler_strings.zig");
+const multibyte = @import("multibyte.zig");
 const compiler_expr = @import("compiler_expr.zig");
 const compiler_stmt = @import("compiler_stmt.zig");
 const compiler_class = @import("compiler_class.zig");
@@ -217,6 +218,10 @@ fn emitAutoRequire(self: *Compiler, path: []const u8) Error!void {
 
 pub fn compileWithOrigin(ast: *const Ast, allocator: Allocator, origin: Origin) Error!CompileResult {
     const file_path = origin.file_path;
+    // the multibyte filter that read this script says how its literals end
+    const outer_literal_encoding = multibyte.active_literal_encoding;
+    multibyte.active_literal_encoding = multibyte.takeLiteralEncoding();
+    defer multibyte.active_literal_encoding = outer_literal_encoding;
     var c = Compiler{
         .ast = ast,
         .chunk = .{},

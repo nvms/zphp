@@ -1,11 +1,15 @@
 // zend.multibyte's script filter (zend_language_scanner.l with mbstring's
 // encodings): a script's encoding is found from its byte order mark or its
 // NUL bytes (zend.detect_unicode) or zend.script_encoding, and the script is
-// converted to the internal encoding before it is lexed. only the unicode
-// encodings and the single-byte ones the lexer reads as they are are
-// converted; a script in another encoding is lexed as it is
+// converted to the internal encoding before it is lexed. an encoding the
+// lexer can't read (Shift_JIS, whose second bytes can be a backslash or a
+// quote) is lexed as UTF-8 and its string literals converted back after
+// (zend_multibyte_set_filter's output filter). the unicode encodings, the
+// single-byte ones the lexer reads as they are and Shift_JIS are converted;
+// a script in another encoding is lexed as it is
 const std = @import("std");
 const mb_encodings = @import("../stdlib/mb_encodings_generated.zig");
+const sjis = @import("../stdlib/sjis.zig");
 
 pub const Encoding = enum {
     utf8,
@@ -15,7 +19,8 @@ pub const Encoding = enum {
     utf32le,
     latin1,
     ascii,
-    // an encoding zphp doesn't convert (SJIS, EUC-JP, ...)
+    sjis,
+    // an encoding zphp doesn't convert (EUC-JP, ...)
     other,
 
     // zend_multibyte_check_lexer_compatibility: an ascii-compatible
@@ -33,6 +38,23 @@ pub const Encoding = enum {
 pub var script_encoding: ?Encoding = null;
 pub var detect_unicode: bool = true;
 pub var internal_encoding: Encoding = .utf8;
+
+// the encoding the script just filtered wants its string literals in, for
+// the compile that follows (php's LANG_SCNG(output_filter)); taken by it
+pub threadlocal var literal_encoding: ?Encoding = null;
+
+// the literal encoding of the script being compiled
+pub threadlocal var active_literal_encoding: ?Encoding = null;
+
+pub fn takeLiteralEncoding() ?Encoding {
+    defer literal_encoding = null;
+    return literal_encoding;
+}
+
+// a string literal's text in the encoding php's output filter gives it
+pub fn convertLiteral(allocator: std.mem.Allocator, text: []const u8, to: Encoding) ![]u8 {
+    return convert(allocator, text, .utf8, to);
+}
 
 // a name in zend.script_encoding mbstring doesn't know, which php warns
 // about at startup
@@ -95,7 +117,9 @@ pub fn classify(name: []const u8) Encoding {
         .{ "UTF-32", .utf32be },    .{ "utf32", .utf32be },
         .{ "ISO-8859-1", .latin1 }, .{ "ISO8859-1", .latin1 },
         .{ "latin1", .latin1 },     .{ "ASCII", .ascii },
-        .{ "US-ASCII", .ascii },
+        .{ "US-ASCII", .ascii },    .{ "SJIS", .sjis },
+        .{ "Shift_JIS", .sjis },    .{ "x-sjis", .sjis },
+        .{ "SHIFT-JIS", .sjis },
     };
     for (table) |t| if (std.ascii.eqlIgnoreCase(name, t[0])) return t[1];
     return .other;
@@ -186,19 +210,58 @@ pub fn filterScript(allocator: std.mem.Allocator, source: []const u8) !?[]u8 {
         encoding = d.encoding;
         script = script[d.bom..];
     };
+    // a declare(encoding=...) opening the script names its encoding from
+    // there on (the scanner filters the rest again)
+    if (declaredEncoding(script)) |declared| encoding = declared;
     if (encoding == null) encoding = script_encoding;
     const from = encoding orelse return null;
-    // zend_multibyte_set_filter: the script is converted to the internal
-    // encoding when the lexer can read that one
-    if (from == internal_encoding or !internal_encoding.lexerCompatible()) {
-        if (script.len == source.len) return null;
-        return try allocator.dupe(u8, script);
+    const unchanged = if (script.len == source.len) null else try allocator.dupe(u8, script);
+    if (from == .other or internal_encoding == .other) return unchanged;
+    // zend_multibyte_set_filter: the script is read in the internal
+    // encoding when the lexer can read that one, else in UTF-8, with its
+    // string literals converted to the internal encoding
+    if (from == internal_encoding) {
+        if (from.lexerCompatible()) return unchanged;
+        if (unchanged) |u| allocator.free(u);
+        literal_encoding = from;
+        return try convert(allocator, script, from, .utf8);
     }
-    if (from == .other) {
-        if (script.len == source.len) return null;
-        return try allocator.dupe(u8, script);
+    if (internal_encoding.lexerCompatible()) {
+        if (unchanged) |u| allocator.free(u);
+        return try convert(allocator, script, from, internal_encoding);
     }
-    return try convert(allocator, script, from, internal_encoding);
+    if (from.lexerCompatible()) {
+        // read as it is; its literals are converted from it. only UTF-8
+        // literals are converted, as the lexer's own text is
+        if (from == .utf8) literal_encoding = internal_encoding;
+        return unchanged;
+    }
+    if (unchanged) |u| allocator.free(u);
+    literal_encoding = internal_encoding;
+    return try convert(allocator, script, from, .utf8);
+}
+
+// the encoding a `declare(encoding='...')` at the start of the script names
+fn declaredEncoding(script: []const u8) ?Encoding {
+    var p: usize = 0;
+    if (std.mem.startsWith(u8, script, "#!")) p = (std.mem.indexOfScalar(u8, script, '\n') orelse return null) + 1;
+    if (!std.ascii.startsWithIgnoreCase(script[p..], "<?php")) return null;
+    p += 5;
+    p = skipSpace(script, p);
+    if (!std.ascii.startsWithIgnoreCase(script[p..], "declare")) return null;
+    p = skipSpace(script, p + 7);
+    if (p >= script.len or script[p] != '(') return null;
+    p = skipSpace(script, p + 1);
+    if (!std.ascii.startsWithIgnoreCase(script[p..], "encoding")) return null;
+    p = skipSpace(script, p + 8);
+    if (p >= script.len or script[p] != '=') return null;
+    p = skipSpace(script, p + 1);
+    if (p >= script.len or (script[p] != '\'' and script[p] != '"')) return null;
+    const quote = script[p];
+    const end = std.mem.indexOfScalarPos(u8, script, p + 1, quote) orelse return null;
+    const name = script[p + 1 .. end];
+    if (!knownEncoding(name)) return null;
+    return classify(name);
 }
 
 // mbstring's conversion: an ill-formed sequence or a character the target
@@ -253,6 +316,11 @@ fn convert(allocator: std.mem.Allocator, input: []const u8, from: Encoding, to: 
                     if (v <= 0x10ffff and (v < 0xd800 or v > 0xdfff)) cp = @intCast(v);
                 }
             },
+            .sjis => {
+                const d = sjis.decode(input, i);
+                cp = d.cp;
+                i += d.len;
+            },
             .other => unreachable,
         }
         const c = cp orelse {
@@ -270,6 +338,7 @@ fn convert(allocator: std.mem.Allocator, input: []const u8, from: Encoding, to: 
             },
             .latin1 => try out.append(allocator, if (c <= 0xff) @intCast(c) else '?'),
             .ascii => try out.append(allocator, if (c < 0x80) @intCast(c) else '?'),
+            .sjis => if (!try sjis.encode(&out, allocator, c)) try out.append(allocator, '?'),
             else => unreachable,
         }
     }

@@ -64,6 +64,10 @@ mb-encodings: ## Regenerate mbstring's encoding names, MIME names and aliases fr
 html-tables: ## Regenerate the html entity and charset tables from php's ext/standard/html_tables.h (run when src/php_version.zig moves)
 	python3 scripts/gen-html-tables
 
+.PHONY: jis-tables
+jis-tables: ## Regenerate mbstring's JIS X 0208 tables for Shift_JIS from php's ext/mbstring (run when src/php_version.zig moves)
+	python3 scripts/gen-jis-tables
+
 .PHONY: hash-tables
 hash-tables: ## Regenerate the hash algorithms' constant tables from php's ext/hash (run when src/php_version.zig moves)
 	python3 scripts/gen-hash-tables
