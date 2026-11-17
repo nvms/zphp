@@ -1048,6 +1048,8 @@ pub const VM = struct {
     gc_runs: usize = 0,
     gc_collected: usize = 0,
     gc_threshold: usize = gc_threshold_default,
+    // how many roots of each kind the buffer held when it filled
+    gc_full_at: ?struct { objs: usize, arrs: usize } = null,
     // ref-returning function call mechanism: a `&function` sets these on
     // return_ref - the cell it's returning a reference to + the bindings
     // that propagate writes through the cell back to underlying storage
@@ -1673,10 +1675,12 @@ pub const VM = struct {
                 .array => |arr| if (!arr.elements_released and !arr.cycle_queued) {
                     self.cycle_array_candidates.append(self.allocator, arr) catch return;
                     arr.cycle_queued = true;
+                    self.noteRootAdded(.array);
                 },
                 .object => |obj| if (!obj.destructed and !obj.cycle_queued) {
                     self.cycle_candidates.append(self.allocator, obj) catch return;
                     obj.cycle_queued = true;
+                    self.noteRootAdded(.object);
                 },
                 else => {},
             }
@@ -5241,6 +5245,7 @@ pub const VM = struct {
         if (!obj.destructed and !obj.cycle_queued) {
             self.cycle_candidates.append(self.allocator, obj) catch return;
             obj.cycle_queued = true;
+            self.noteRootAdded(.object);
         }
     }
 
@@ -8241,7 +8246,7 @@ pub const VM = struct {
                     // Hook reads must precede vivification/COW. A by-value hook
                     // may expose an object for offsetSet, but not writable array storage.
                     eap_obj.refcount +%= 1;
-                    defer self.releaseValue(obj_val);
+                    defer self.objUnpin(obj_val.object);
                     self.triggerLazyAccess(eap_obj, prop_name) catch {
                         if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                         return error.RuntimeError;
@@ -12508,7 +12513,7 @@ pub const VM = struct {
                     if (obj_val == .object) {
                         var obj = obj_val.object;
                         obj.refcount +%= 1;
-                        defer self.releaseValue(obj_val);
+                        defer self.objUnpin(obj_val.object);
 
                         if (isIncompleteObject(obj)) {
                             if (capturing) {
@@ -12703,7 +12708,7 @@ pub const VM = struct {
                     if (obj_val == .object) {
                         var obj = obj_val.object;
                         obj.refcount +%= 1;
-                        defer self.releaseValue(obj_val);
+                        defer self.objUnpin(obj_val.object);
                         if (isIncompleteObject(obj)) {
                             self.incompleteAccessWarning(obj) catch if (try self.resumeRaised()) continue;
                             self.push(.null);
@@ -12771,12 +12776,12 @@ pub const VM = struct {
                     // would destruct val mid-store while its refcount sits at 0
                     const sp_val_pin: ?*PhpObject = if (val == .object) val.object else null;
                     if (sp_val_pin) |p| p.refcount +%= 1;
-                    defer if (sp_val_pin) |p| self.objRelease(p);
+                    defer if (sp_val_pin) |p| self.objUnpin(p);
                     const obj_val = self.pop();
                     if (obj_val == .object) {
                         var obj = obj_val.object;
                         obj.refcount +%= 1;
-                        defer self.releaseValue(obj_val);
+                        defer self.objUnpin(obj_val.object);
 
                         const gate = try self.propertyWriteGate(obj, prop_name, val, .write, base_frame);
                         switch (gate.step) {
@@ -32707,6 +32712,19 @@ pub const VM = struct {
         }
     }
 
+    // let go of a hold the vm took while an operation ran, which php's
+    // operation doesn't take (a borrowed or moved operand): the object is
+    // freed if nothing else holds it, but its staying alive makes it no
+    // possible root
+    pub fn objUnpin(self: *VM, obj: *PhpObject) void {
+        if (obj.refcount > 1) {
+            obj.refcount -= 1;
+            @import("value.zig").traceObjRc(obj, "release");
+            return;
+        }
+        self.objRelease(obj);
+    }
+
     pub fn objRelease(self: *VM, obj: *PhpObject) void {
         if (obj.refcount == 0) {
             // a garbage peer dropping its edge to this object
@@ -32722,6 +32740,7 @@ pub const VM = struct {
             if (!obj.destructed and !obj.cycle_queued) {
                 self.cycle_candidates.append(self.allocator, obj) catch return;
                 obj.cycle_queued = true;
+                self.noteRootAdded(.object);
             }
             return;
         }
@@ -33169,6 +33188,7 @@ pub const VM = struct {
     //    + free
     pub fn collectCycles(self: *VM) usize {
         if (self.gc_active) return 0;
+        self.gc_full_at = null;
         self.gc_active = true;
         defer self.gc_active = false;
         self.dropUnreachableWeakMapEntries();
@@ -33489,7 +33509,7 @@ pub const VM = struct {
         // drain still runs them in the gc destructor fiber as it frees
         var dtor_objs: std.ArrayListUnmanaged(*PhpObject) = .empty;
         defer dtor_objs.deinit(self.allocator);
-        if (first and self.current_fiber == null) {
+        if (self.current_fiber == null) {
             var dt_it = visited_objs.iterator();
             while (dt_it.next()) |kv| {
                 const obj = kv.key_ptr.*;
@@ -33497,6 +33517,25 @@ pub const VM = struct {
                 if (!self.hasMethod(obj.class_name, "__destruct")) continue;
                 dtor_objs.append(self.allocator, obj) catch continue;
             }
+        }
+        // gc_remove_nested_data_from_buffer: the objects whose destructors
+        // run, and the garbage they reach, are left for the rerun (a
+        // destructor may keep any of it); the rest is freed now
+        var nested_objs: std.ArrayListUnmanaged(*PhpObject) = .empty;
+        defer nested_objs.deinit(self.allocator);
+        var nested_arrs: std.ArrayListUnmanaged(*PhpArray) = .empty;
+        defer nested_arrs.deinit(self.allocator);
+        if (dtor_objs.items.len > 0) {
+            var garbage_objs: std.ArrayListUnmanaged(*PhpObject) = .empty;
+            defer garbage_objs.deinit(self.allocator);
+            var garbage_arrs: std.ArrayListUnmanaged(*PhpArray) = .empty;
+            defer garbage_arrs.deinit(self.allocator);
+            for (visited_objs.keys()) |obj| if (obj.scratch_rc == 0 and !obj.destructed) garbage_objs.append(self.allocator, obj) catch {};
+            for (visited_arrs.keys()) |arr| if (arr.scratch_rc == 0 and !arr.elements_released) garbage_arrs.append(self.allocator, arr) catch {};
+            for (dtor_objs.items) |obj| obj.scratch_rc = 1;
+            self.cyclePropagateAlive(&visited_objs, &visited_arrs);
+            for (garbage_objs.items) |obj| if (obj.scratch_rc != 0) nested_objs.append(self.allocator, obj) catch {};
+            for (garbage_arrs.items) |arr| if (arr.scratch_rc != 0) nested_arrs.append(self.allocator, arr) catch {};
         }
         for (dtor_objs.items) |obj| {
             if (obj.destructed or obj.destructor_called) continue;
@@ -33507,10 +33546,8 @@ pub const VM = struct {
             // nothing else holds now is the rerun's garbage, counted there
             if (obj.refcount > 0) obj.refcount -= 1;
         }
-        const freeing = dtor_objs.items.len == 0;
         var coll_it = visited_objs.iterator();
         while (coll_it.next()) |kv| {
-            if (!freeing) break;
             const obj = kv.key_ptr.*;
             if (obj.scratch_rc == 0 and !obj.destructed) {
                 // force refcount to 0 so the destruct drain processes it
@@ -33523,7 +33560,6 @@ pub const VM = struct {
         }
         var ca_it = visited_arrs.iterator();
         while (ca_it.next()) |kv| {
-            if (!freeing) break;
             const arr = kv.key_ptr.*;
             if (arr.scratch_rc == 0 and !arr.elements_released) {
                 arr.refcount = 0;
@@ -33534,14 +33570,12 @@ pub const VM = struct {
         // a garbage generator that finished, or a fiber that is not
         // suspended, has nothing left to run: what it holds goes
         for (self.cycle_gens.keys(), self.cycle_gens.values()) |g, scratch| {
-            if (!freeing) break;
             if (scratch != 0 or g.refcount == 0) continue;
             g.refcount = 0;
             self.pending_gen_release.append(self.allocator, g) catch {};
             collected += 1;
         }
         for (self.cycle_fibers.keys(), self.cycle_fibers.values()) |f, scratch| {
-            if (!freeing) break;
             if (scratch != 0 or f.refcount == 0) continue;
             f.refcount = 0;
             self.pending_fiber_release.append(self.allocator, f) catch {};
@@ -33575,22 +33609,25 @@ pub const VM = struct {
             self.cycle_array_candidates.clearRetainingCapacity();
         }
         // what the destructors left is the second run's to free
-        if (!freeing) {
-            var keep_it = visited_objs.iterator();
-            while (keep_it.next()) |kv| {
-                const obj = kv.key_ptr.*;
-                if (obj.destructed or obj.cycle_queued) continue;
-                // freed by refcounting while the destructors ran
-                if (obj.refcount == 0 and !obj.destructor_called) continue;
-                obj.cycle_queued = true;
-                self.cycle_candidates.append(self.allocator, obj) catch {
-                    obj.cycle_queued = false;
-                };
-            }
+        for (nested_objs.items) |obj| {
+            if (obj.destructed or obj.cycle_queued) continue;
+            // freed by refcounting while the destructors ran
+            if (obj.refcount == 0 and !obj.destructor_called) continue;
+            obj.cycle_queued = true;
+            self.cycle_candidates.append(self.allocator, obj) catch {
+                obj.cycle_queued = false;
+            };
+        }
+        for (nested_arrs.items) |arr| {
+            if (arr.elements_released or arr.cycle_queued or arr.refcount == 0) continue;
+            arr.cycle_queued = true;
+            self.cycle_array_candidates.append(self.allocator, arr) catch {
+                arr.cycle_queued = false;
+            };
         }
         // generators and fibers whose destructor ran stay candidates for the
         // second run
-        const rerun = !freeing or pending_gens.items.len > 0 or pending_fibers.items.len > 0;
+        const rerun = dtor_objs.items.len > 0 or pending_gens.items.len > 0 or pending_fibers.items.len > 0;
         var gi: usize = 0;
         while (gi < self.cycle_gen_candidates.items.len) {
             const g = self.cycle_gen_candidates.items[gi];
@@ -34049,6 +34086,19 @@ pub const VM = struct {
         }
     }
 
+    // php's root buffer holds threshold - 1 roots: adding one more runs a
+    // collection there and then, before the new root goes in
+    // (gc_possible_root_when_full). zphp collects at the statement's end,
+    // so the roots added past a full buffer are remembered and left out of
+    // that run, as php adds them after it
+    pub inline fn noteRootAdded(self: *VM, comptime kind: enum { object, array }) void {
+        if (self.gc_full_at != null) return;
+        const objs = self.cycle_candidates.items.len;
+        const arrs = self.cycle_array_candidates.items.len;
+        if (objs + arrs < self.gc_threshold) return;
+        self.gc_full_at = .{ .objs = if (kind == .object) objs - 1 else objs, .arrs = if (kind == .array) arrs - 1 else arrs };
+    }
+
     inline fn collectCyclesIfNeeded(self: *VM) void {
         if (!self.gc_enabled) return;
         const roots = self.cycle_candidates.items.len + self.cycle_array_candidates.items.len;
@@ -34066,7 +34116,43 @@ pub const VM = struct {
     noinline fn collectCyclesAtThreshold(self: *VM) void {
         // no run starts inside another or inside the destructor drain
         if (self.draining_destructors or self.collecting_cycles) return;
+        // the roots added after the buffer filled wait for the run to end
+        var held_objs: std.ArrayListUnmanaged(*PhpObject) = .empty;
+        defer held_objs.deinit(self.allocator);
+        var held_arrs: std.ArrayListUnmanaged(*PhpArray) = .empty;
+        defer held_arrs.deinit(self.allocator);
+        if (self.gc_full_at) |full| {
+            if (full.objs < self.cycle_candidates.items.len) {
+                held_objs.appendSlice(self.allocator, self.cycle_candidates.items[full.objs..]) catch {};
+                if (held_objs.items.len > 0) self.cycle_candidates.shrinkRetainingCapacity(full.objs);
+            }
+            if (full.arrs < self.cycle_array_candidates.items.len) {
+                held_arrs.appendSlice(self.allocator, self.cycle_array_candidates.items[full.arrs..]) catch {};
+                if (held_arrs.items.len > 0) self.cycle_array_candidates.shrinkRetainingCapacity(full.arrs);
+            }
+        }
+        self.gc_full_at = null;
         const collected = self.collectCycles();
+        for (held_objs.items) |obj| {
+            if (obj.destructed or obj.pooled or obj.refcount == 0) {
+                obj.cycle_queued = false;
+                continue;
+            }
+            obj.cycle_queued = true;
+            self.cycle_candidates.append(self.allocator, obj) catch {
+                obj.cycle_queued = false;
+            };
+        }
+        for (held_arrs.items) |arr| {
+            if (arr.elements_released or arr.pooled or arr.refcount == 0) {
+                arr.cycle_queued = false;
+                continue;
+            }
+            arr.cycle_queued = true;
+            self.cycle_array_candidates.append(self.allocator, arr) catch {
+                arr.cycle_queued = false;
+            };
+        }
         const roots = self.cycle_candidates.items.len + self.cycle_array_candidates.items.len;
         if (collected < 100 or roots >= self.gc_threshold) {
             self.gc_threshold = @min(self.gc_threshold + gc_threshold_step, gc_threshold_max);
@@ -34553,6 +34639,7 @@ pub const VM = struct {
             if (!arr.elements_released and !arr.cycle_queued) {
                 self.cycle_array_candidates.append(self.allocator, arr) catch return;
                 arr.cycle_queued = true;
+                self.noteRootAdded(.array);
             }
             return;
         }
@@ -34878,7 +34965,13 @@ pub const VM = struct {
     pub inline fn stackRelease(self: *VM, v: Value) void {
         switch (v) {
             .string => if (v.string.releaseDeferred()) |owner| self.queueStringRelease(owner),
-            .object, .resource => |o| self.objRelease(o),
+            // an operand php borrows from a variable or moves out of a
+            // temporary changes no refcount there, so its release is no
+            // possible root
+            .object, .resource => |o| if (o.refcount > 1) {
+                o.refcount -= 1;
+                @import("value.zig").traceObjRc(o, "release");
+            } else self.objRelease(o),
             // the stack does not count arrays, but an array leaving the stack
             // with no durable owner is an orphaned temporary (a literal or
             // call result consumed by a native); queue it so the drain frees
@@ -34897,12 +34990,14 @@ pub const VM = struct {
             .object => |obj| if (!obj.destructed and !obj.cycle_queued and obj.refcount > 0) {
                 self.cycle_candidates.append(self.allocator, obj) catch return;
                 obj.cycle_queued = true;
+                self.noteRootAdded(.object);
             },
             .array => |arr| if (!arr.elements_released and arr.entries.items.len > 0) {
                 if (arr.refcount > 0) {
                     if (arr.cycle_queued) return;
                     self.cycle_array_candidates.append(self.allocator, arr) catch return;
                     arr.cycle_queued = true;
+                    self.noteRootAdded(.array);
                     return;
                 }
                 // nothing counts it yet: php's return value holds it when

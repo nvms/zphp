@@ -1950,8 +1950,10 @@ Zend/tests/gc/gc_041.phpt
 Zend/tests/gc/gc_042.phpt
 Zend/tests/gc/gc_043.phpt
 Zend/tests/gc/gc_044.phpt
+Zend/tests/gc/gc_045.phpt
 Zend/tests/gc/gc_046.phpt
 Zend/tests/gc/gc_048.phpt
+Zend/tests/gc/gc_049.phpt
 Zend/tests/gc/gc_050.phpt
 Zend/tests/gc_051.phpt
 Zend/tests/gc_052.phpt
