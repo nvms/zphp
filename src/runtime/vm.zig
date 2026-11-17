@@ -12606,13 +12606,14 @@ pub const VM = struct {
 
                         // property hooks: dispatch to get hook if present (and not recursing).
                         // route exceptions through the local try/catch handler
-                        if (self.hasPropHook(obj.class_name, prop_name, .get) and !self.inPropHook(obj, prop_name)) {
+                        const gp_hook_cls = if (self.hasPropHook(obj.class_name, prop_name, .get) or self.hasPropHook(obj.class_name, prop_name, .set)) self.hookScopeClass(obj, prop_name) else obj.class_name;
+                        if (self.hasPropHook(gp_hook_cls, prop_name, .get) and !self.inPropHook(obj, prop_name)) {
                             // a by-reference argument is php's write fetch:
                             // a &get hook hands over its reference, any other
                             // result must be an object
                             const ref_get = capturing and try self.propGetReturnsRef(obj, prop_name);
                             if (ref_get) self.setReturnRef(null);
-                            const hook_result = self.callPropHook(obj, prop_name, .get, .null) catch {
+                            const hook_result = self.callPropHookIn(obj, gp_hook_cls, prop_name, .get, .null) catch {
                                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) continue;
                                 return error.RuntimeError;
                             };
@@ -25928,30 +25929,21 @@ pub const VM = struct {
         // property hooks: dispatch to the set hook if present (and not
         // recursing). an exception thrown inside the hook dispatches back into
         // the caller's try/catch instead of bubbling out of runLoop
-        if (self.hasPropHook(obj.class_name, prop_name, .set) and !self.inPropHook(obj, prop_name)) {
-            const hook_result = self.callPropHook(obj, prop_name, .set, val) catch {
+        const hook_cls = if (self.hasPropHook(obj.class_name, prop_name, .set) or self.hasPropHook(obj.class_name, prop_name, .get)) self.hookScopeClass(obj, prop_name) else obj.class_name;
+        if (self.hasPropHook(hook_cls, prop_name, .set) and !self.inPropHook(obj, prop_name)) {
+            const hook_result = self.callPropHookIn(obj, hook_cls, prop_name, .set, val) catch {
                 if (self.pending_exception != null and self.dispatchPendingException(base_frame)) return .{ .step = .dispatched };
                 return error.RuntimeError;
             };
             if (hook_result != null) return .{ .step = .stored, .obj = obj, .vr = vr };
-        } else if (self.hasPropHook(obj.class_name, prop_name, .get) and !self.inPropHook(obj, prop_name)) {
+        } else if (self.hasPropHook(hook_cls, prop_name, .get) and !self.inPropHook(obj, prop_name)) {
             // get hook exists but no set hook. PHP allows the write when the
             // property is "backed" (a default was declared, in which case
             // there's storage to write to). purely virtual properties with no
             // default are read-only
-            // a hooked property is backed when a hook uses $this->prop
-            const backed = blk: {
-                var current: ?[]const u8 = obj.class_name;
-                while (current) |cn| {
-                    if (self.classes.get(cn)) |cls_def| {
-                        for (cls_def.properties.items) |p| {
-                            if (std.mem.eql(u8, p.name, prop_name)) break :blk !p.is_virtual or p.has_default;
-                        }
-                        current = cls_def.parent;
-                    } else break;
-                }
-                break :blk false;
-            };
+            // a hooked property is backed when a hook uses $this->prop, or
+            // a parent declares it with storage
+            const backed = !self.propertyIsVirtual(hook_cls, prop_name);
             if (!backed) {
                 const msg = std.fmt.allocPrint(self.allocator, "Property {s}::${s} is read-only", .{ obj.class_name, prop_name }) catch return error.RuntimeError;
                 defer self.allocator.free(msg);
@@ -26954,6 +26946,34 @@ pub const VM = struct {
         }
         const args: []const Value = if (kind == .set) &.{value} else &.{};
         return try self.callMethod(obj, hook_name, args);
+    }
+
+    // zend_get_property_offset's ZEND_ACC_CHANGED rule: code running in an
+    // ancestor that declares the property private uses that declaration, and
+    // its hooks (or none), not the object class's redeclaration. the class
+    // whose hooks apply
+    pub fn hookScopeClass(self: *VM, obj: *const PhpObject, prop_name: []const u8) []const u8 {
+        const scope = self.currentDefiningClass() orelse return obj.class_name;
+        if (std.mem.eql(u8, scope, obj.class_name)) return obj.class_name;
+        const def = self.classes.getPtr(scope) orelse return obj.class_name;
+        for (def.properties.items) |p| if (std.mem.eql(u8, p.name, prop_name)) {
+            if (p.visibility != .private or !self.isInstanceOf(obj.class_name, scope)) break;
+            return self.classes.getKey(scope) orelse obj.class_name;
+        };
+        return obj.class_name;
+    }
+
+    // callPropHook with the hooks of `class_name` (hookScopeClass)
+    pub fn callPropHookIn(self: *VM, obj: *PhpObject, class_name: []const u8, prop_name: []const u8, kind: enum { get, set }, value: Value) RuntimeError!?Value {
+        if (class_name.ptr == obj.class_name.ptr) return self.callPropHook(obj, prop_name, if (kind == .get) .get else .set, value);
+        if (self.inPropHook(obj, prop_name)) return null;
+        const cls = self.classes.getPtr(class_name) orelse return null;
+        const hook_name = try self.propHookName(prop_name, if (kind == .get) .get else .set);
+        const found = self.resolvePropertyHook(cls, hook_name) orelse return null;
+        const registered = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ found.declaring, hook_name });
+        defer self.allocator.free(registered);
+        const args: []const Value = if (kind == .set) &.{value} else &.{};
+        return try self.callMethodAs(obj, hook_name, try self.internName(registered), args);
     }
 
     pub fn hasPropHook(self: *VM, class_name: []const u8, prop_name: []const u8, kind: enum { get, set }) bool {

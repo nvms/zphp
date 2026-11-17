@@ -129,14 +129,17 @@ pub fn applyHooks(vm: *VM, obj: *PhpObject, listing: *Listing, allocator: std.me
             if (e.visibility == .private and !std.mem.eql(u8, p.declaring, e.declaring)) continue;
             break p;
         } else null;
-        if (vm.hasPropHook(obj.class_name, e.name, .get) and !vm.inPropHook(obj, e.name)) {
+        // a private property has its declaring class's hooks, whatever
+        // class the object is
+        const hook_cls = if (e.visibility == .private) e.declaring else obj.class_name;
+        if (vm.hasPropHook(hook_cls, e.name, .get) and !vm.inPropHook(obj, e.name)) {
             // a virtual property with only a set hook has nothing to read
-            if (vm.propertyIsVirtual(obj.class_name, e.name) and !vm.hasRealGetHook(obj.class_name, e.name)) continue;
-            if (!vm.hasRealGetHook(obj.class_name, e.name)) {
+            if (vm.propertyIsVirtual(hook_cls, e.name) and !vm.hasRealGetHook(hook_cls, e.name)) continue;
+            if (!vm.hasRealGetHook(hook_cls, e.name)) {
                 if (existing) |p| try out.append(allocator, p);
                 continue;
             }
-            const value = (try vm.callPropHook(obj, e.name, .get, .null)) orelse (if (existing) |p| p.value else continue);
+            const value = (try vm.callPropHookIn(obj, hook_cls, e.name, .get, .null)) orelse (if (existing) |p| p.value else continue);
             try holder.append(vm.allocator, value);
             try out.append(allocator, .{ .key = .{ .name = e.name }, .value = value, .visibility = e.visibility, .declaring = e.declaring, .declared = true });
             continue;
