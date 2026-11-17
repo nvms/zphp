@@ -387,8 +387,49 @@ pub const Lexer = struct {
             self.halted = true;
             return .{ .tag = .identifier, .start = @intCast(start), .end = @intCast(start + ident.len) };
         }
-        if (Tag.keyword(ident)) |kw| return self.makeToken(kw, start);
+        if (Tag.keyword(ident)) |kw| {
+            // php lexes a namespaced name as one token, so a keyword is just a
+            // part of one (`enum\Foo`, `iter\fn`); `namespace\` stays the
+            // relative prefix
+            if (self.inNamespacedName(start, kw == .kw_namespace)) return self.makeToken(.identifier, start);
+            if (kw == .kw_enum and !self.enumKeyword()) return self.makeToken(.identifier, start);
+            return self.makeToken(kw, start);
+        }
         return self.makeToken(.identifier, start);
+    }
+
+    // php's scanner: `enum` is the keyword only before whitespace (or
+    // comments) and a name other than extends or implements
+    fn enumKeyword(self: *const Lexer) bool {
+        var i = self.pos;
+        var skipped = false;
+        while (i < self.source.len) {
+            const c = self.source[i];
+            if (c == ' ' or c == '\t' or c == '\n' or c == '\r') {
+                i += 1;
+                skipped = true;
+            } else if (c == '#' or (c == '/' and i + 1 < self.source.len and self.source[i + 1] == '/')) {
+                while (i < self.source.len and self.source[i] != '\n') i += 1;
+                skipped = true;
+            } else if (c == '/' and i + 1 < self.source.len and self.source[i + 1] == '*') {
+                const close = std.mem.indexOfPos(u8, self.source, i + 2, "*/") orelse return false;
+                i = close + 2;
+                skipped = true;
+            } else break;
+        }
+        if (!skipped or i >= self.source.len or !isIdentStart(self.source[i])) return false;
+        var j = i;
+        while (j < self.source.len and isIdentChar(self.source[j])) j += 1;
+        const word = self.source[i..j];
+        return !std.ascii.eqlIgnoreCase(word, "extends") and !std.ascii.eqlIgnoreCase(word, "implements");
+    }
+
+    fn inNamespacedName(self: *const Lexer, start: usize, is_namespace: bool) bool {
+        // a part after another (`iter\fn`); `\true` alone stays the keyword
+        const after_part = start > 1 and self.source[start - 1] == '\\' and isIdentChar(self.source[start - 2]);
+        const before_sep = self.pos + 1 < self.source.len and self.source[self.pos] == '\\' and isIdentStart(self.source[self.pos + 1]);
+        if (after_part) return true;
+        return before_sep and !is_namespace;
     }
 
     // -- numbers -----------------------------------------------------------
