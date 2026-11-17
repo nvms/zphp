@@ -18127,11 +18127,32 @@ pub const VM = struct {
                 _ = try self.evaluateClassConstant(class_name, name);
             };
         }
-        if (self.classes.getPtr(class_name)) |def| if (def.enum_table_pending) try self.buildBackedEnumTable(def);
+        if (self.classes.getPtr(class_name)) |def| if (def.enum_table_pending) {
+            try self.resolveEnumCaseValues(class_name);
+            if (self.classes.getPtr(class_name)) |after| try self.buildBackedEnumTable(after);
+        };
         if (self.classes.getPtr(class_name)) |def| if (def.lazy_constants) {
             def.lazy_constants = false;
             self.lazy_constant_classes -= 1;
         };
+    }
+
+    // a case value reading the enum's constants, which the enum's
+    // declaration could not, is evaluated now
+    fn resolveEnumCaseValues(self: *VM, enum_name: []const u8) RuntimeError!void {
+        var i: usize = 0;
+        while (true) : (i += 1) {
+            const def = self.classes.getPtr(enum_name) orelse return;
+            if (i >= def.case_order.items.len) break;
+            const case_obj = def.constants.get(def.case_order.items[i]) orelse continue;
+            if (case_obj != .object) continue;
+            const pending = case_obj.object.get("value");
+            if (pending != .string or !bytecode.isEnumCaseInitializer(pending.string.bytes())) continue;
+            self.constant_eval_depth += 1;
+            defer self.constant_eval_depth -= 1;
+            const value = try self.callByName(pending.string.bytes(), &.{});
+            try case_obj.object.set(self.allocator, "value", value);
+        }
     }
 
     // zend_enum_build_backed_enum_table: every case's value has the backing

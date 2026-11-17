@@ -1060,6 +1060,18 @@ pub fn isTraitDefaultInitializer(s: []const u8) bool {
     return std.mem.startsWith(u8, s, trait_default_prefix);
 }
 
+// an enum case's value that reads the enum's constants, held by the case
+// until the enum's cases are first used
+const enum_case_prefix = "\x00enumcase\x00";
+
+pub fn enumCaseInitializerName(allocator: std.mem.Allocator, enum_name: []const u8, case_name: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, enum_case_prefix ++ "{s}::{s}", .{ enum_name, case_name });
+}
+
+pub fn isEnumCaseInitializer(s: []const u8) bool {
+    return std.mem.startsWith(u8, s, enum_case_prefix);
+}
+
 pub fn propDefaultsInitializerName(allocator: std.mem.Allocator, class_name: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "\x00propdefaults\x00{s}", .{class_name});
 }

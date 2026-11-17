@@ -3169,7 +3169,7 @@ fn compileClass(self: *Compiler, shape: ClassShape) Error!void {
             const default_idx = self.ast.extra_data[tmember.data.lhs];
             if (default_idx != 0) try self.compileNode(default_idx);
         } else if (tmember.data.lhs != 0) {
-            if (traitDefaultNeedsClass(self, tmember)) {
+            if (defaultNamesClass(self, tmember)) {
                 const tname = self.trait_property_owner.get(tpi) orelse "";
                 const name = try traitDefaultInitializer(self, tname, tmember);
                 try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(name) }));
@@ -3914,7 +3914,12 @@ pub fn compileInterfaceDecl(self: *Compiler, node: Ast.Node) Error!void {
 // parent::, __CLASS__) is evaluated for each using class, as php copies the
 // expression into it: the default is a sentinel naming an initializer that
 // takes the class
-fn traitDefaultNeedsClass(self: *Compiler, member: Ast.Node) bool {
+fn defaultNamesClass(self: *Compiler, member: Ast.Node) bool {
+    return defaultNamesClassOr(self, member, "");
+}
+
+// the same, counting `own::` as naming it too
+fn defaultNamesClassOr(self: *Compiler, member: Ast.Node, own: []const u8) bool {
     const tokens = self.ast.tokens;
     var i: u32 = member.main_token;
     while (i < tokens.len and tokens[i].tag != .equal) : (i += 1) {
@@ -3935,13 +3940,14 @@ fn traitDefaultNeedsClass(self: *Compiler, member: Ast.Node) bool {
         const text = self.ast.tokenSlice(i);
         if (std.mem.eql(u8, text, "__CLASS__")) return true;
         if (i + 1 < tokens.len and tokens[i + 1].tag == .colon_colon and
-            (std.ascii.eqlIgnoreCase(text, "self") or std.ascii.eqlIgnoreCase(text, "parent") or std.ascii.eqlIgnoreCase(text, "static"))) return true;
+            (std.ascii.eqlIgnoreCase(text, "self") or std.ascii.eqlIgnoreCase(text, "parent") or std.ascii.eqlIgnoreCase(text, "static") or
+                (own.len > 0 and std.ascii.eqlIgnoreCase(text, own)))) return true;
     }
     return false;
 }
 
 // the sentinel and initializer name of a trait property's class-dependent
-// default (see traitDefaultNeedsClass)
+// default (see defaultNamesClass)
 fn traitDefaultInitializer(self: *Compiler, trait_name: []const u8, member: Ast.Node) Error![]const u8 {
     var pname = self.ast.tokenSlice(member.main_token);
     if (pname.len > 0 and pname[0] == '$') pname = pname[1..];
@@ -3953,7 +3959,7 @@ fn traitDefaultInitializer(self: *Compiler, trait_name: []const u8, member: Ast.
 // pushes a trait property's default: the value, or the sentinel of its
 // initializer, compiled the first time
 fn compileTraitPropertyDefault(self: *Compiler, trait_name: []const u8, member: Ast.Node, default: u32) Error!void {
-    if (!traitDefaultNeedsClass(self, member)) return self.compileNode(default);
+    if (!defaultNamesClass(self, member)) return self.compileNode(default);
     const name = try traitDefaultInitializer(self, trait_name, member);
     var compiled = false;
     for (self.functions.items) |f| {
@@ -4318,7 +4324,14 @@ pub fn compileEnumDecl(self: *Compiler, node: Ast.Node) Error!void {
         const member = self.ast.nodes[member_idx];
         if (member.tag == .enum_case) {
             if (member.data.lhs != 0) {
-                try self.compileNode(member.data.lhs);
+                if (defaultNamesClassOr(self, member, self.ast.tokenSlice(node.main_token))) {
+                    // the enum isn't declared yet: a value reading its own
+                    // constants is evaluated when its cases are first used
+                    const name = try @import("bytecode.zig").enumCaseInitializerName(self.allocator, enum_name, self.ast.tokenSlice(member.main_token));
+                    try self.string_allocs.append(self.allocator, name);
+                    try compileInitializer(self, name, .{ .class = enum_name }, member.data.lhs, member.main_token);
+                    try self.emitConstant(try self.addConstant(.{ .string = Value.String.borrowed(name) }));
+                } else try self.compileNode(member.data.lhs);
             }
             case_count += 1;
         }
