@@ -9598,7 +9598,8 @@ pub const VM = struct {
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
                     }
-                    self.unbindRefSlot(&frame.ref_slots, dst_name);
+                    // the fetch fails before the assignment: a refused or
+                    // failed fetch leaves the variable bound as it was
                     {
                         var obj_ptr = obj_val.object;
                         // __get answers before a lazy object is initialized
@@ -9711,7 +9712,8 @@ pub const VM = struct {
                         if (try self.throwBuiltinException("Error", msg)) continue;
                         return error.RuntimeError;
                     }
-                    self.unbindRefSlot(&frame.ref_slots, dst_name);
+                    // the fetch fails before the assignment: a refused or
+                    // failed fetch leaves the variable bound as it was
                     {
                         var obj_ptr = obj_val.object;
                         // interned: a lazy object's initializer runs php, whose
