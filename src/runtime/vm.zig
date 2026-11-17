@@ -6039,6 +6039,10 @@ pub const VM = struct {
                         closure
                     else if (name_val == .string and std.mem.indexOf(u8, name_val.string.bytes(), "::") == null)
                         name_val.string.bytes()
+                    else if (fakeClosureFunction(name_val)) |function|
+                        // `f(...)`: the function itself, so its by-reference
+                        // parameters bind the arguments
+                        function
                     else
                         null;
                     if (direct_name) |name| {

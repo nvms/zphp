@@ -1768,6 +1768,7 @@ Zend/tests/first_class_callable/first_class_callable_assert3.phpt
 Zend/tests/first_class_callable/first_class_callable_dynamic.phpt
 Zend/tests/first_class_callable/first_class_callable_errors.phpt
 Zend/tests/first_class_callable/first_class_callable_optimization.phpt
+Zend/tests/first_class_callable/first_class_callable_refs.phpt
 Zend/tests/first_class_callable/first_class_callable_signature.phpt
 Zend/tests/first_class_callable/gh18062.phpt
 Zend/tests/float_prec_001.phpt
