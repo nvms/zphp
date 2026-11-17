@@ -2409,6 +2409,10 @@ pub fn compileCallableRef(self: *Compiler, node: Ast.Node) Error!void {
         try self.emitGetVar(self.ast.tokenSlice(callee.main_token));
         try self.emitOp(.array_push);
     } else if (callee.tag == .static_call) {
+        if (parentHookProperty(self, callee) != null) {
+            if (self.current_class.len == 0) return self.fail(callee.main_token, "Cannot use \"parent\" when no class scope is active");
+            return self.fail(callee.main_token, "Cannot create Closure for parent property hook call");
+        }
         // ClassName::method(...) => ['ClassName', 'method']. in code that
         // runs, self, parent and static stay as written: the closure resolves
         // them where it is made, forwarding the called class. a constant
@@ -2935,17 +2939,46 @@ pub fn compileNullsafeMethodCall(self: *Compiler, node: Ast.Node) Error!void {
 // parent::$prop::get() / parent::$prop::set($v) inside that property's own
 // hook (zend_compile_parent_property_hook_call); written in parentheses it
 // is an ordinary static call on the static property's value
-fn compileParentHookCall(self: *Compiler, node: Ast.Node) Error!bool {
+// the property named in parent::$prop::get() when the static call has that
+// shape: `parent`, a literal property name (`$x`, `${0}`, `${'x'}`) and a
+// get or set method
+fn parentHookProperty(self: *Compiler, node: Ast.Node) ?[]const u8 {
     const class_node = self.ast.nodes[node.data.lhs];
-    if (class_node.tag != .static_prop_access or class_node.main_token == 0) return false;
-    const written = self.ast.tokenSlice(class_node.main_token);
-    if (written.len < 2 or written[0] != '$') return false;
+    if (class_node.tag != .static_prop_access) return null;
+    const prop = if (class_node.main_token != 0) blk: {
+        const written = self.ast.tokenSlice(class_node.main_token);
+        if (written.len < 2 or written[0] != '$') return null;
+        break :blk written[1..];
+    } else blk: {
+        // ${literal}: php's ZEND_AST_ZVAL, converted to a string
+        const name_node = self.ast.nodes[class_node.data.rhs];
+        const text = self.ast.tokenSlice(name_node.main_token);
+        switch (name_node.tag) {
+            .integer_literal => {
+                for (text) |c| if (!std.ascii.isDigit(c)) return null;
+                if (text.len > 1 and text[0] == '0') return null;
+                break :blk text;
+            },
+            .string_literal => {
+                if (text.len < 2 or text[0] != '\'' or text[text.len - 1] != '\'') return null;
+                const inner = text[1 .. text.len - 1];
+                if (std.mem.indexOfScalar(u8, inner, '\\') != null) return null;
+                break :blk inner;
+            },
+            else => return null,
+        }
+    };
     const parent_node = self.ast.nodes[class_node.data.lhs];
-    if (parent_node.tag != .identifier or !std.ascii.eqlIgnoreCase(self.ast.tokenSlice(parent_node.main_token), "parent")) return false;
+    if (parent_node.tag != .identifier or !std.ascii.eqlIgnoreCase(self.ast.tokenSlice(parent_node.main_token), "parent")) return null;
+    const method = self.ast.tokenSlice(node.main_token);
+    if (!std.ascii.eqlIgnoreCase(method, "set") and !std.ascii.eqlIgnoreCase(method, "get")) return null;
+    return prop;
+}
+
+fn compileParentHookCall(self: *Compiler, node: Ast.Node) Error!bool {
+    const prop = parentHookProperty(self, node) orelse return false;
     const method = self.ast.tokenSlice(node.main_token);
     const is_set = std.ascii.eqlIgnoreCase(method, "set");
-    if (!is_set and !std.ascii.eqlIgnoreCase(method, "get")) return false;
-    const prop = written[1..];
     const kind: []const u8 = if (is_set) "set" else "get";
     if (self.current_class.len == 0) return self.fail(node.main_token, "Cannot use \"parent\" when no class scope is active");
     if (self.hook_property.len == 0) return self.failFmt(node.main_token, "Must not use parent::${s}::{s}() outside a property hook", .{ prop, kind });
@@ -2953,12 +2986,22 @@ fn compileParentHookCall(self: *Compiler, node: Ast.Node) Error!bool {
     if (is_set != self.hook_is_set) return self.failFmt(node.main_token, "Must not use parent::${s}::{s}() in a different property hook ({s})", .{ prop, kind, if (self.hook_is_set) "set" else "get" });
 
     const args = self.ast.extraSlice(node.data.rhs);
-    for (args) |a| try self.compileNode(a);
+    // named or unpacked arguments travel as one array (argc 0xFF), bound
+    // against the hook's parameter at run time
+    const packed_args = hasSplatOrNamed(self.ast, args);
+    var guards: ArgGuards = .empty;
+    if (packed_args) {
+        guards = try emitSpreadArgs(self, args);
+    } else {
+        for (args) |a| try self.compileNode(a);
+    }
     const prop_idx = try self.addConstant(.{ .string = Value.String.borrowed(prop) });
+    // hook parameters are never by reference (callSiteByValue)
+    patchArgGuards(self, &guards, self.chunk.offset());
     try self.emitOp(.parent_hook_call);
     try self.emitU16(prop_idx);
     try self.emitByte(@intFromBool(is_set));
-    try self.emitByte(@intCast(args.len));
+    try self.emitByte(if (packed_args) 0xFF else @intCast(args.len));
     // the skip over the plain property access that follows
     try self.emitU16(@intCast(OpCode.get_prop.width()));
     try self.emitOp(if (is_set) .set_prop else .get_prop);

@@ -17368,7 +17368,19 @@ pub const VM = struct {
     // property when it has one, else the parent property's own storage
     // through the get_prop/set_prop the compiler put after this op (the
     // running hook's guard makes it reach the backing value)
-    fn parentHookCall(self: *VM, prop: []const u8, is_set: bool, argc: u8, skip: u16) RuntimeError!void {
+    fn parentHookCall(self: *VM, prop: []const u8, is_set: bool, argc_op: u8, skip: u16) RuntimeError!void {
+        // 0xFF: named or unpacked arguments, packed into one array
+        const packed_args: ?*PhpArray = if (argc_op == 0xFF) blk: {
+            const v = self.pop();
+            if (v != .array) return error.RuntimeError;
+            arrayRetain(v.array);
+            break :blk v.array;
+        } else null;
+        defer if (packed_args) |arr| {
+            arrayUnpin(arr);
+            if (arr.refcount == 0) self.queueArrayRelease(arr);
+        };
+        var argc = argc_op;
         const kind: []const u8 = if (is_set) "set" else "get";
         const scope = self.currentDefiningClass() orelse {
             try self.setPendingException("Error", "Cannot use \"parent\" when no class scope is active");
@@ -17401,6 +17413,13 @@ pub const VM = struct {
         if (self.resolvePropertyHook(parent_def, hook)) |found| if (!found.info.is_abstract) {
             const registered = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ found.declaring, hook });
             defer self.allocator.free(registered);
+            if (packed_args) |arr| {
+                const callee: callables.Callee = .{ .method = .{ .object = this.object, .name = hook, .registered = try self.internName(registered) } };
+                const result = try callables.invokeArgArray(self, callee, arr);
+                self.push(result);
+                self.currentFrame().ip += skip;
+                return;
+            }
             const args = try self.allocator.dupe(Value, self.stack[self.sp - argc .. self.sp]);
             defer self.allocator.free(args);
             const result = try self.callMethodAs(this.object, hook, try self.internName(registered), args);
@@ -17409,7 +17428,34 @@ pub const VM = struct {
             self.currentFrame().ip += skip;
             return;
         };
-        // the implicit hook is an internal function and checks its arguments
+        // the implicit hook is an internal function taking `$value` (set)
+        // or nothing (get) and checks its arguments
+        if (packed_args) |arr| {
+            var positional: usize = 0;
+            for (arr.entries.items) |entry| {
+                if (entry.key == .string) {
+                    const name = entry.key.string.bytes();
+                    if (!is_set or !std.mem.eql(u8, name, "value")) {
+                        const msg = try std.fmt.allocPrint(self.allocator, "Unknown named parameter ${s}", .{name});
+                        defer self.allocator.free(msg);
+                        try self.setPendingException("Error", msg);
+                        return error.RuntimeError;
+                    }
+                    if (positional > 0) {
+                        try self.setPendingException("Error", "Named parameter $value overwrites previous argument");
+                        return error.RuntimeError;
+                    }
+                }
+                positional += 1;
+            }
+            if (positional > 0xFE) return error.RuntimeError;
+            argc = @intCast(positional);
+            for (arr.entries.items) |entry| {
+                const v = if (entry.ref) |cell| cell.* else entry.value;
+                stackRetain(v);
+                self.push(v);
+            }
+        }
         const expected: u8 = if (is_set) 1 else 0;
         if (argc != expected) {
             const msg = try std.fmt.allocPrint(self.allocator, "{s}::${s}::{s}() expects exactly {d} argument{s}, {d} given", .{ decl.defining_class, prop, kind, expected, if (expected == 1) "" else "s", argc });
@@ -24385,6 +24431,7 @@ pub const VM = struct {
                     else => null,
                 };
             },
+            .parent_hook_call => true,
             else => null,
         };
     }
