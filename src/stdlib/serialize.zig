@@ -1276,7 +1276,7 @@ fn readObject(ctx: *NativeContext, u_opt: ?*UnserCtx, sc: *Scan, dest: Loc, star
         var delayed_data = false;
         defer if (!delayed_data) ctx.vm.releaseValue(.{ .array = data });
         if (!try readArrayElements(ctx, u, sc, data, @intCast(elements))) {
-            obj.destructed = true;
+            obj.destructor_called = true;
             return false;
         }
         // __unserialize() runs once the whole string is read
@@ -1288,7 +1288,7 @@ fn readObject(ctx: *NativeContext, u_opt: ?*UnserCtx, sc: *Scan, dest: Loc, star
 
     const has_wakeup = !incomplete and ctx.vm.hasMethod(class_name, "__wakeup");
     if (!try readProperties(ctx, u, sc, obj, @intCast(elements), incomplete)) {
-        if (has_wakeup) obj.destructed = true;
+        if (has_wakeup) obj.destructor_called = true;
         return false;
     }
     if (has_wakeup) {
@@ -1424,6 +1424,8 @@ const PropSlot = struct {
     defining: []const u8 = "",
     // the name without its mangling, for messages
     shown: []const u8 = "",
+    // a virtual hooked property, which has no storage to unserialize into
+    virtual: bool = false,
 };
 
 fn propertySlot(ctx: *NativeContext, obj: *PhpObject, key: []const u8) RuntimeError!PropSlot {
@@ -1440,7 +1442,7 @@ fn propertySlot(ctx: *NativeContext, obj: *PhpObject, key: []const u8) RuntimeEr
     if (own) {
         const decl = ctx.vm.propertyDeclaration(class_name, name);
         if (decl.declared and !(decl.visibility == .private and !std.mem.eql(u8, decl.defining_class, class_name))) {
-            return .{ .name = try ctx.vm.internName(name), .scope = if (decl.visibility == .private) decl.defining_class else null, .declared = true, .type_str = decl.type_str, .defining = decl.defining_class };
+            return .{ .name = try ctx.vm.internName(name), .scope = if (decl.visibility == .private) decl.defining_class else null, .declared = true, .type_str = decl.type_str, .defining = decl.defining_class, .virtual = ctx.vm.propertyIsVirtual(class_name, name) };
         }
     } else if (class_part) |cp| {
         // an ancestor's private property, by its mangled name
@@ -1480,6 +1482,10 @@ fn readProperties(ctx: *NativeContext, u: *UnserCtx, sc: *Scan, obj: *PhpObject,
             PropSlot{ .name = try ctx.vm.internName(key), .shown = stripVisibility(key) }
         else
             try propertySlot(ctx, obj, key);
+        if (slot.virtual) {
+            try docref(ctx, e_warning, "Cannot unserialize value for virtual property {s}::${s}", .{ class_names.display(slot.defining), slot.name });
+            return false;
+        }
         if (!slot.declared and !incomplete and obj.properties.get(slot.name) == null) {
             switch (ctx.vm.dynamicPropertyRule(obj)) {
                 .allowed => {},
@@ -1600,9 +1606,9 @@ fn runDelayed(ctx: *NativeContext, uctx: *UnserCtx) void {
                 if (err == error.OutOfMemory or ctx.vm.exit_requested) uctx.fatal = err;
             }
             if (ctx.vm.pending_exception != null) failed = true;
-            if (failed) d.obj.destructed = true;
+            if (failed) d.obj.destructor_called = true;
         } else {
-            d.obj.destructed = true;
+            d.obj.destructor_called = true;
         }
         if (d.data) |data| ctx.vm.releaseValue(.{ .array = data });
         ctx.vm.releaseValue(.{ .object = d.obj });
@@ -1741,6 +1747,18 @@ fn native_unserialize(ctx: *NativeContext, args: []const Value) RuntimeError!Nat
     }
     if (!ok or ctx.vm.pending_exception != null) {
         if (owned_string) top.value.string.release();
+        // what was read so far is freed with php's return value
+        if (top.cell == null) switch (top.value) {
+            .object => |o| if (o.refcount == 0) {
+                top.value = .null;
+                try ctx.vm.pending_destruct.append(ctx.allocator, o);
+            },
+            .array => |a| if (a.refcount == 0) {
+                top.value = .null;
+                ctx.vm.releaseUnheldArray(a);
+            },
+            else => {},
+        };
         if (ctx.vm.pending_exception != null) return error.RuntimeError;
         return NativeResult.scalar(.{ .bool = false });
     }
