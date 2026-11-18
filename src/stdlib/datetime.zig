@@ -94,8 +94,10 @@ pub const entries = .{
 pub fn register(vm: *VM, a: Allocator) !void {
     // DateTimeInterface
     var iface = vm_mod.InterfaceDef{ .name = "DateTimeInterface" };
-    try iface.methods.append(a, "format");
-    try iface.methods.append(a, "getTimestamp");
+    // every method php's interface declares, in its order
+    inline for (.{ "format", "getTimezone", "getOffset", "getTimestamp", "getMicrosecond", "diff", "__wakeup", "__serialize", "__unserialize" }) |method| {
+        try iface.methods.append(a, method);
+    }
     try vm.interfaces.put(a, "DateTimeInterface", iface);
 
     // shadow class so DateTimeInterface::ATOM-style constant lookups resolve
