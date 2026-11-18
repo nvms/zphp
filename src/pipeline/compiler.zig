@@ -2101,8 +2101,14 @@ pub const Compiler = struct {
                 if (std.mem.eql(u8, name, "true") or std.mem.eql(u8, name, "TRUE")) break :blk Value{ .bool = true };
                 if (std.mem.eql(u8, name, "false") or std.mem.eql(u8, name, "FALSE")) break :blk Value{ .bool = false };
                 if (std.mem.eql(u8, name, "null") or std.mem.eql(u8, name, "NULL")) break :blk Value.null;
-                // treat as a constant name (sentinel for runtime resolution)
-                const resolved = self.resolveClassName(name);
+                // treat as a constant name (sentinel for runtime resolution):
+                // a `use const` import, else the namespace's (which falls
+                // back to the global constant when it runs)
+                const resolved = if (self.use_const_aliases.get(name)) |fqn| fqn else if (self.namespace.len > 0) qualify: {
+                    const qualified = std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ self.namespace, name }) catch break :blk Value.null;
+                    self.string_allocs.append(self.allocator, qualified) catch break :blk Value.null;
+                    break :qualify qualified;
+                } else name;
                 const sentinel = std.fmt.allocPrint(self.allocator, "\x00CC\x00\x00{s}", .{resolved}) catch break :blk Value.null;
                 self.string_allocs.append(self.allocator, sentinel) catch break :blk Value.null;
                 break :blk .{ .string = Value.String.borrowed(sentinel) };
