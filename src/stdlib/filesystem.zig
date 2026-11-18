@@ -3771,7 +3771,10 @@ fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!N
     const obj = try streamArg(ctx, args, .{ .func = "stream_get_meta_data" });
     if (std.mem.eql(u8, obj.class_name, "DirectoryHandle")) return directoryMetaData(ctx, obj);
     const s = try streams.of(ctx, obj);
-    const mode_val = obj.get("__mode");
+    // popen's stream: php's STDIO stream over the pipe, with the mode as
+    // written and neither a wrapper nor a uri
+    const popen_mode = obj.get("__popen_mode");
+    const mode_val = if (popen_mode == .string) popen_mode else obj.get("__mode");
     const mode = if (mode_val == .string) mode_val.string.bytes() else "r";
     const path_val = obj.get("__path");
     const uri = if (path_val == .string) path_val.string.bytes() else "";
@@ -3827,7 +3830,7 @@ fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!N
         stream_type = if (sock_type == .string) sock_type.string.bytes() else "generic_socket";
         if (path_val != .string or !std.mem.startsWith(u8, uri, "http")) wrapper_type = null;
     }
-    if (is_pipe) wrapper_type = null;
+    if (is_pipe or popen_mode == .string) wrapper_type = null;
     const blocking = obj.get("__blocking");
     const result = try ctx.createArray();
     const key = struct {
@@ -3860,8 +3863,8 @@ fn stream_get_meta_data(ctx: *NativeContext, args: []const Value) RuntimeError!N
         .fd => |io| !io.socket and !s.no_seek,
         else => false,
     };
-    try result.set(ctx.allocator, key("seekable"), .{ .bool = seekable });
-    if (!is_pipe and (!is_socket or uri.len > 0)) try result.setCopiedString(ctx.allocator, key("uri"), uri);
+    try result.set(ctx.allocator, key("seekable"), .{ .bool = seekable and popen_mode != .string });
+    if (!is_pipe and popen_mode != .string and (!is_socket or uri.len > 0)) try result.setCopiedString(ctx.allocator, key("uri"), uri);
     return NativeResult.borrowed(.{ .array = result });
 }
 
@@ -4891,10 +4894,12 @@ pub fn native_popen(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
         ctx.allocator.free(result.stderr);
         const obj = try makeReadBufferHandle(ctx, result.stdout);
         try obj.set(ctx.allocator, "__popen_exit", .{ .int = result.exit });
+        try obj.setCopiedString(ctx.allocator, "__popen_mode", mode);
         return NativeResult.borrowed(.{ .resource = obj });
     }
     if (mode.len > 0 and (mode[0] == 'w')) {
         const obj = try makePopenWriteHandle(ctx, cmd);
+        try obj.setCopiedString(ctx.allocator, "__popen_mode", mode);
         return NativeResult.borrowed(.{ .resource = obj });
     }
     return NativeResult.scalar(.{ .bool = false });
