@@ -1080,10 +1080,10 @@ fn checkConstant(p: *Pending, name: []const u8, parent: *const ClassDef) (Runtim
     const arena = arena_state.allocator();
     const proto = try parseType(p, arena, parent_type, parent.name);
     const child_text = def.constant_types.get(name) orelse "";
-    const compatible = child_text.len > 0 and switch (php_types.covariant(classes(p), p.name, try parseType(p, arena, child_text, p.name), proto)) {
-        .failure => false,
-        else => true,
-    };
+    // an unresolved check is php's obligation, which fails at the end of
+    // linking when a class it names still can't be loaded, as for properties
+    const compatible = child_text.len > 0 and php_types.covariant(classes(p), p.name, try parseType(p, arena, child_text, p.name), proto) == .success;
+    if (p.failure) |err| return err;
     if (!compatible) {
         const shown = try php_types.format(arena, proto);
         return constantFatal(p, "Type of {s}::{s} must be compatible with {s}::{s} of type {s}", .{ p.name, name, parent.name, name, shown });
