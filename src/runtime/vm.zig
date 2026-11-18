@@ -1538,6 +1538,11 @@ pub const VM = struct {
     // set by an argument guard whose callee takes that position by reference
     // or cannot be resolved yet; consumed by the fetch opcode right after it
     arg_capture_pending: bool = false,
+    // the operand position and chunk of the property fetch a
+    // check_rw_container last let through: that get_prop is a
+    // read-modify-write (php's BP_VAR_RW), which creates a missing property
+    rw_prop_fetch_ip: usize = 0,
+    rw_prop_fetch_chunk: usize = 0,
     // the call an `arg_unpack` named for the `array_spread 1` after it
     unpack_site: ?UnpackSite = null,
     // exclusive high-water mark of provenance writes in ic.arg_stack,
@@ -4100,6 +4105,9 @@ pub const VM = struct {
 
     pub fn reset(self: *VM) void {
         self.mb_internal_encoding = null;
+        // a chunk freed with the request may come back at the same address
+        self.rw_prop_fetch_ip = 0;
+        self.rw_prop_fetch_chunk = 0;
         self.sensitive_params.clearRetainingCapacity();
         self.iap_positions.clearRetainingCapacity();
         @import("../stdlib/locale.zig").resetAfterRequest();
@@ -6905,6 +6913,8 @@ pub const VM = struct {
                             .object => |o| {
                                 // get_property_ptr_ptr of an incomplete object
                                 if (isIncompleteObject(o) and try self.refuseIncompleteWrite(o)) continue;
+                                self.rw_prop_fetch_ip = self.currentFrame().ip + bytecode.op_bytes;
+                                self.rw_prop_fetch_chunk = @intFromPtr(self.currentChunk());
                                 continue;
                             },
                             .generator, .fiber => continue,
@@ -12987,11 +12997,24 @@ pub const VM = struct {
                                 if (try self.throwBuiltinException("Error", msg)) continue;
                                 return error.RuntimeError;
                             }
+                            // zend_std_get_property_ptr_ptr for BP_VAR_RW (an
+                            // assign-op or increment): the dynamic property's
+                            // deprecation, then the warning, then the property
+                            // is created null, unless a handler made it meanwhile
+                            const rw = !capturing and self.rw_prop_fetch_ip == gp_ip and self.rw_prop_fetch_chunk == @intFromPtr(self.currentChunk()) and obj.lazy == null and !gp_vr.declared;
+                            if (rw and try self.checkDynamicPropertyRule(obj, prop_name)) continue;
                             // a by-reference argument creates the property
                             if (!capturing) {
                                 const msg = try std.fmt.allocPrint(self.allocator, "Undefined property: {s}::${s}", .{ obj.class_name, prop_name });
                                 defer self.allocator.free(msg);
                                 self.emitWarning(msg) catch if (try self.resumeRaised()) continue;
+                            }
+                            if (rw) {
+                                if (obj.properties.contains(prop_name) and !obj.isUnset(prop_name)) {
+                                    self.push(obj.get(prop_name));
+                                    continue;
+                                }
+                                try obj.set(self.allocator, prop_name, .null);
                             }
                             self.push(.null);
                         }

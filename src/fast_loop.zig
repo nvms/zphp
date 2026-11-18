@@ -543,6 +543,11 @@ fn fastLoopImpl(self: *VM) RuntimeError!void {
                         return;
                     }
                     ip += 1;
+                    // the property fetch that follows is a read-modify-write
+                    if (access >= 2) {
+                        self.rw_prop_fetch_ip = ip + op_bytes;
+                        self.rw_prop_fetch_chunk = @intFromPtr(frame.chunk);
+                    }
                     const _next = readOp(code, ip);
                     ip += op_bytes;
                     continue :dispatch _next;
