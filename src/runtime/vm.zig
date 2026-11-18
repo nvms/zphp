@@ -9997,6 +9997,12 @@ pub const VM = struct {
                                 continue;
                             }
                         }
+                        // a reference to a property that doesn't exist creates
+                        // it, as the named form does
+                        if (!has_prop) {
+                            if (!self.classDeclaresProperty(obj_ptr.class_name, prop_owned) and try self.checkDynamicProperty(obj_ptr, prop_owned)) continue;
+                            try obj_ptr.set(self.allocator, prop_owned, .null);
+                        }
                         try self.initializeForReference(obj_ptr, prop_owned);
                         const cell = blk: {
                             if (self.ref_index) |ri| {
