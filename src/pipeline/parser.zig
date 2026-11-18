@@ -220,6 +220,8 @@ const Parser = struct {
         defer self.stmt_depth = outer_depth;
         if (self.peek() == .hash_bracket) {
             try self.parseAttributes();
+            // the attributed statement sits where the attributes do
+            self.stmt_depth = outer_depth;
             return self.parseStatement();
         }
         // handle inline HTML tokens anywhere in statement context
@@ -260,7 +262,9 @@ const Parser = struct {
             .kw_foreach => self.parseForeachStmt(),
             // `function () {...};` is a closure in an expression statement
             .kw_function => if (self.peekAt(1) == .l_paren or (self.peekAt(1) == .amp and self.peekAt(2) == .l_paren)) self.parseExpressionStmt() else self.parseFunctionDecl(),
-            .kw_const => self.parseConstDecl(),
+            // a top statement only: php's grammar has no const inside a
+            // block or a function
+            .kw_const => if (outer_depth != 0) self.unexpectedHere() else self.parseConstDecl(),
             .kw_switch => self.parseSwitchStmt(),
             .kw_return => self.parseReturnStmt(),
             .kw_break => self.parseBreakContinue(.break_stmt),
@@ -1785,7 +1789,7 @@ const Parser = struct {
                 self.checkMemberModifiers(mods_at, mod_list, .constant);
                 try self.parseConstMembers(members, visibility | (if (is_final) @as(u32, 1) << 4 else 0));
             } else if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
-                const tr = self.collectTypeHint();
+                const tr = try self.collectTypeHintWithoutStatic();
                 if (self.peek() == .variable) {
                     self.checkMemberModifiers(mods_at, mod_list, .property);
                     const prop = try self.parseClassProperty();
@@ -1941,7 +1945,7 @@ const Parser = struct {
                     self.deferCompileError(const_name, "Access type for interface constant {s}::{s} must be public", .{ self.tokenText(name_tok), self.tokenText(const_name) });
                 }
             } else {
-                const tr = self.collectTypeHint();
+                const tr = try self.collectTypeHintWithoutStatic();
                 if (self.peek() != .variable) {
                     try self.addError(.unexpected_token);
                     return error.ParseError;
@@ -2147,7 +2151,7 @@ const Parser = struct {
                 try members.append(self.allocator, prop);
                 try self.continuePropertyList(&members, prop);
             } else if (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren) {
-                const tr = self.collectTypeHint();
+                const tr = try self.collectTypeHintWithoutStatic();
 
                 if (self.peek() == .variable) {
                     const prop = try self.parseClassProperty();
@@ -2270,7 +2274,7 @@ const Parser = struct {
                 if (self.peek() == .kw_function and is_abstract) {
                     try members.append(self.allocator, try self.parseInterfaceMethod(is_static));
                 } else if (self.peek() == .variable or (self.peek() != .kw_function and self.peek() != .kw_const and (self.isTypeName() or self.peek() == .question or self.peek() == .l_paren))) {
-                    _ = self.collectTypeHint();
+                    _ = try self.collectTypeHintWithoutStatic();
                     if (self.peek() != .variable) {
                         try self.addError(.unexpected_token);
                         return error.ParseError;
@@ -2900,6 +2904,20 @@ const Parser = struct {
         return .{ start, self.pos };
     }
 
+    // a property's or parameter's type: php's grammar takes these as
+    // type_expr_without_static, so `?static $p` is a syntax error
+    fn collectTypeHintWithoutStatic(self: *Parser) Error![2]u32 {
+        const range = self.collectTypeHint();
+        var i = range[0];
+        while (i < range[1]) : (i += 1) {
+            if (self.tokens[i].tag == .kw_static) {
+                try self.addErrorAt(i, .unexpected_token);
+                return error.ParseError;
+            }
+        }
+        return range;
+    }
+
     fn parseAttributes(self: *Parser) Error!void {
         if (self.peek() != .hash_bracket) return;
         const start = self.pos;
@@ -3007,7 +3025,7 @@ const Parser = struct {
             }
             break;
         }
-        const type_range = self.collectTypeHint();
+        const type_range = try self.collectTypeHintWithoutStatic();
         // final alone promotes a public property, as php 8.5 does
         if (param_final and promotion == 0) promotion = 1;
 
@@ -3380,6 +3398,11 @@ const Parser = struct {
             const inner = try self.parseExpression();
             _ = try self.expect(.r_brace);
             return self.addNode(.{ .tag = .variable_variable, .main_token = dollar_tok, .data = .{ .lhs = inner } });
+        }
+        // php's simple_variable: `$` takes a variable, `{`, or another `$`
+        if (self.peek() != .variable and self.peek() != .dollar) {
+            try self.addError(.unexpected_token);
+            return error.ParseError;
         }
         const inner = try self.parsePrimaryExpr();
         return self.addNode(.{ .tag = .variable_variable, .main_token = dollar_tok, .data = .{ .lhs = inner } });
@@ -4357,6 +4380,11 @@ const Parser = struct {
             }
             i = j;
         }
+    }
+
+    fn unexpectedHere(self: *Parser) Error!u32 {
+        try self.addError(.unexpected_token);
+        return error.ParseError;
     }
 
     fn addError(self: *Parser, tag: Ast.Error.Tag) Error!void {

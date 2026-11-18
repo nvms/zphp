@@ -29,14 +29,17 @@ pub fn diagnose(allocator: std.mem.Allocator, source: []const u8) !?SyntaxError 
     defer states.deinit(allocator);
     try states.append(allocator, 0);
     var lookahead: ?Lookahead = null;
+    // the last token shifted is a `<?=` still on top of the stack: php's
+    // scanner reads it as echo, and a rule taking it alone takes it as an
+    // identifier (reserved_non_modifiers), which zend_lex_tstring refuses
+    var echo_tag_on_top = false;
 
     while (true) {
         const state = states.items[states.items.len - 1];
         if (state == g.final) return null;
-        var rule: i32 = undefined;
-        decide: {
+        const rule: i32 = decide: {
             var n: i32 = g.pact[@intCast(state)];
-            if (n == g.pact_ninf) break :decide;
+            if (n == g.pact_ninf) break :decide g.defact[@intCast(state)];
             if (lookahead == null) {
                 lookahead = switch (try scanner.next(allocator)) {
                     .token => |tok| tok,
@@ -44,21 +47,22 @@ pub fn diagnose(allocator: std.mem.Allocator, source: []const u8) !?SyntaxError 
                 };
             }
             n += lookahead.?.symbol;
-            if (n < 0 or n > g.last or g.check[@intCast(n)] != lookahead.?.symbol) break :decide;
+            if (n < 0 or n > g.last or g.check[@intCast(n)] != lookahead.?.symbol) break :decide g.defact[@intCast(state)];
             n = g.table[@intCast(n)];
-            if (n <= 0) {
-                if (n == g.table_ninf) return try report(allocator, &scanner, state, lookahead);
-                rule = -n;
-            } else {
+            if (n > 0) {
                 try states.append(allocator, n);
+                echo_tag_on_top = std.mem.eql(u8, lookahead.?.text, "<?=");
                 lookahead = null;
                 continue;
             }
-            try reduce(allocator, &states, rule);
-            continue;
-        }
-        rule = g.defact[@intCast(state)];
+            if (n == g.table_ninf) return try report(allocator, &scanner, state, lookahead);
+            break :decide -n;
+        };
         if (rule == 0) return try report(allocator, &scanner, state, lookahead);
+        if (echo_tag_on_top and g.r2[@intCast(rule)] == 1) {
+            return .{ .message = try allocator.dupe(u8, "Cannot use \"<?=\" as an identifier"), .line = scanner.line };
+        }
+        echo_tag_on_top = false;
         try reduce(allocator, &states, rule);
     }
 }
