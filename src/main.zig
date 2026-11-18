@@ -124,16 +124,31 @@ fn loadStartupFlags(allocator: std.mem.Allocator, raw_args: []const []const u8) 
             if (i + 1 < raw_args.len and std.mem.eql(u8, raw_args[i + 1], "--")) i += 1;
             if (i + 1 < raw_args.len) try args.appendSlice(allocator, raw_args[i + 1 ..]);
             break;
+        } else if (std.mem.eql(u8, arg, "-S")) {
+            i += 1;
+            cli_server_address = try flagValue(raw_args, i, "usage: zphp -S <addr>:<port> [-t docroot] [router]\n");
+        } else if (std.mem.startsWith(u8, arg, "-S") and arg.len > 2) {
+            cli_server_address = arg[2..];
+        } else if (std.mem.eql(u8, arg, "-t")) {
+            i += 1;
+            cli_server_docroot = try flagValue(raw_args, i, "usage: zphp -S <addr>:<port> -t <docroot> [router]\n");
+        } else if (std.mem.startsWith(u8, arg, "-t") and arg.len > 2) {
+            cli_server_docroot = arg[2..];
         } else if (std.mem.startsWith(u8, arg, "-d") and arg.len > 2) {
             try defines.append(allocator, arg[2..]);
         } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--define")) {
             i += 1;
             try defines.append(allocator, try flagValue(raw_args, i, "usage: zphp -d name=value <command>\n"));
+        } else if (cli_server_address != null) {
+            // php's built-in web server takes its router script after the
+            // options
+            cli_server_router = arg;
         } else {
             try args.appendSlice(allocator, raw_args[i..]);
             break;
         }
     }
+    if (cli_server_address != null) try args.append(allocator, cli_server_command);
     // with no ini file php runs on its built-in defaults, where the cli
     // displays errors and logs none
     if (skip_ini) {
@@ -147,6 +162,12 @@ fn loadStartupFlags(allocator: std.mem.Allocator, raw_args: []const []const u8) 
     if (platform.getenv("ZPHP_EXTENSION_DIR")) |dir| extension.loadDirectory(dir);
     return args.toOwnedSlice(allocator);
 }
+
+// php's `-S addr:port [-t docroot] [router]`, collected by loadStartupFlags
+var cli_server_address: ?[]const u8 = null;
+var cli_server_docroot: ?[]const u8 = null;
+var cli_server_router: ?[]const u8 = null;
+const cli_server_command = "\x00cli-server";
 
 fn flagValue(raw_args: []const []const u8, i: usize, usage: []const u8) ![]const u8 {
     if (i >= raw_args.len) {
@@ -183,6 +204,8 @@ fn dispatch(allocator: std.mem.Allocator, args: []const []const u8) !void {
         std.process.exit(1);
     } else if (std.mem.eql(u8, cmd, "serve")) {
         try serveCommand(allocator, args);
+    } else if (std.mem.eql(u8, cmd, cli_server_command)) {
+        try cliServerCommand(allocator);
     } else if (std.mem.eql(u8, cmd, "test")) {
         try @import("test_runner.zig").run(allocator, if (args.len >= 3) args[2] else null);
     } else if (std.mem.eql(u8, cmd, "install")) {
@@ -288,6 +311,40 @@ fn serveCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
     config.log_format = log_format orelse if (wants_json) .json else .text;
 
     try serve.serve(allocator, config);
+}
+
+// php -S: one worker serving the document root (the working directory
+// unless -t names one), running the router script, or the index.php the
+// document root holds, for anything that isn't a static file
+fn cliServerCommand(allocator: std.mem.Allocator) !void {
+    const serve = @import("serve.zig");
+    const address = cli_server_address.?;
+    const colon = std.mem.lastIndexOfScalar(u8, address, ':');
+    const port = if (colon) |c| std.fmt.parseInt(u16, address[c + 1 ..], 10) catch null else null;
+    if (port == null) {
+        try writeStderr("Invalid address: ");
+        try writeStderr(address);
+        try writeStderr("\n");
+        std.process.exit(1);
+    }
+    const host = address[0..colon.?];
+    const docroot_arg = cli_server_docroot orelse ".";
+    const docroot = platform.realpathAlloc(allocator, docroot_arg) catch {
+        try writeStderr("Directory ");
+        try writeStderr(docroot_arg);
+        try writeStderr(" does not exist.\n");
+        std.process.exit(1);
+    };
+    defer allocator.free(docroot);
+    const file = if (cli_server_router) |r| try allocator.dupe(u8, r) else try std.fs.path.join(allocator, &.{ docroot, "index.php" });
+    defer allocator.free(file);
+    try serve.serve(allocator, .{
+        .file = file,
+        .document_root = docroot,
+        .port = port.?,
+        .workers = 1,
+        .cli_server_host = if (host.len == 0) "localhost" else host,
+    });
 }
 
 fn serveFlagValue(args: []const []const u8, i: *usize) ![]const u8 {

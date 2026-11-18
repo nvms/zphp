@@ -85,6 +85,9 @@ pub const ServeConfig = struct {
     log_file: ?[]const u8 = null,
     access_log: bool = false,
     request_id: bool = false,
+    // set by `zphp -S host:port`: listen on that host and announce the
+    // server the way php's built-in web server does
+    cli_server_host: ?[]const u8 = null,
 };
 
 pub const LogFormat = enum { text, json };
@@ -670,9 +673,20 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
         if (tls_key_z) |z| allocator.free(z);
     }
 
-    const addr = net.Address.parseIp4("0.0.0.0", config.port) catch unreachable;
-    var server = try platform.tcpListen(addr, true);
+    const addr = if (config.cli_server_host) |host| cliServerAddress(host, config.port) else net.Address.parseIp4("0.0.0.0", config.port) catch unreachable;
+    var server = platform.tcpListen(addr, true) catch |err| {
+        if (config.cli_server_host == null) return err;
+        try writeStderr("Failed to listen on ");
+        try writeStderr(config.cli_server_host.?);
+        try writeStderr(" (reason: ");
+        try writeStderr(@errorName(err));
+        try writeStderr(")\n");
+        std.process.exit(1);
+    };
     defer server.deinit();
+    // port 0 asks the system for a free port; scripts see the one it gave
+    const port = server.listen_address.getPort();
+    if (config.cli_server_host) |host| try announceCliServer(host, port);
 
     // the admin listener comes up before the application compiles, so /ready
     // answers 503 until workers are actually serving
@@ -778,7 +792,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
         if (first_run and observe.log_json) {
             var r = observe.Record.init("info", "server", "server started");
             r.str("file", config.file);
-            r.int("port", config.port);
+            r.int("port", port);
             r.boolean("tls", tls_ctx != null);
             r.int("workers", worker_count);
             r.boolean("watch", config.watch);
@@ -786,9 +800,11 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
             r.int("pid", platform.getpid());
             r.emit();
             first_run = false;
+        } else if (first_run and config.cli_server_host != null) {
+            first_run = false;
         } else if (first_run) {
             var port_buf: [8]u8 = undefined;
-            const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{config.port}) catch "?";
+            const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{port}) catch "?";
             try writeStderr("zphp serving ");
             try writeStderr(config.file);
             if (tls_ctx != null) try writeStderr(" (https) on :") else try writeStderr(" on :");
@@ -804,7 +820,7 @@ pub fn serve(allocator: Allocator, config: ServeConfig) !void {
         }
 
         queue.reset();
-        const active = startWorkers(allocator, workers_data, threads, &result, doc_root, config.port, ws_enabled, tls_ctx, @as(i64, config.idle_timeout_seconds) * 1000) catch |err| {
+        const active = startWorkers(allocator, workers_data, threads, &result, doc_root, port, ws_enabled, tls_ctx, @as(i64, config.idle_timeout_seconds) * 1000) catch |err| {
             logEvent("error", "no worker could start", "error: no worker could start\n");
             result.deinit();
             ast.deinit();
@@ -2182,6 +2198,43 @@ fn gzipCompress(allocator: Allocator, input: []const u8) ?[]u8 {
     @memcpy(exact, out[0..compressed_len]);
     allocator.free(out);
     return exact;
+}
+
+// the address `-S host:port` listens on: an ip literal, or localhost
+fn cliServerAddress(host: []const u8, port: u16) net.Address {
+    if (std.ascii.eqlIgnoreCase(host, "localhost")) return net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
+    const bare = if (host.len > 2 and host[0] == '[' and host[host.len - 1] == ']') host[1 .. host.len - 1] else host;
+    return net.Address.parseIp(bare, port) catch {
+        writeStderr("Failed to listen on ") catch {};
+        writeStderr(host) catch {};
+        writeStderr(" (reason: Address not available)\n") catch {};
+        std.process.exit(1);
+    };
+}
+
+// php's cli server banner, which tools (and php's own tests) wait for
+fn announceCliServer(host: []const u8, port: u16) !void {
+    const secs = std.time.epoch.EpochSeconds{ .secs = @intCast(@max(@divFloor(platform.milliTimestamp(), 1000), 0)) };
+    const epoch_day = secs.getEpochDay();
+    const year_day = epoch_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const day_secs = secs.getDaySeconds();
+    const days = [_][]const u8{ "Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed" };
+    const months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    var buf: [256]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "[{s} {s} {d:0>2} {d:0>2}:{d:0>2}:{d:0>2} {d}] PHP {s} Development Server (http://{s}:{d}) started\n", .{
+        days[@intCast(@mod(epoch_day.day, 7))],
+        months[month_day.month.numeric() - 1],
+        month_day.day_index + 1,
+        day_secs.getHoursIntoDay(),
+        day_secs.getMinutesIntoHour(),
+        day_secs.getSecondsIntoMinute(),
+        year_day.year,
+        @import("php_version.zig").string,
+        host,
+        port,
+    }) catch return;
+    try writeStderr(line);
 }
 
 fn writeStderr(msg: []const u8) !void {

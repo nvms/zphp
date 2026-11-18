@@ -62,6 +62,7 @@ const common_entries = .{
     .{ "gzencode", native_gzencode },
     .{ "gzdecode", native_gzdecode },
     .{ "file_get_contents", native_file_get_contents },
+    .{ "get_headers", native_get_headers },
     .{ "get_meta_tags", native_get_meta_tags },
     .{ "file_put_contents", native_file_put_contents },
     .{ "file_exists", native_file_exists },
@@ -867,6 +868,59 @@ fn fetchUrl(ctx: *NativeContext, url: []const u8) RuntimeError!NativeResult {
     const body = try wd.buffer.toOwnedSlice(wd.allocator);
     errdefer wd.allocator.free(body);
     return NativeResult.takeString(try Value.String.adopt(ctx.allocator, body));
+}
+
+// php's get_headers: the url's wrapper data, the response headers, opened
+// with STREAM_ONLY_GET_HEADERS so an error status still answers
+fn native_get_headers(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
+    const url = try strArg(ctx, args, "get_headers", 0, "url", true);
+    const p = html.Params{ .ctx = ctx, .func = "get_headers", .args = args };
+    const associative = try p.boolean(1, "associative", false);
+    const context: Value = if (args.len > 2) args[2] else .null;
+    if (context != .null and context != .resource) return throwStreamArg(ctx, "get_headers(): Argument #3 ($context) must be of type resource or null, {s} given", .{context.typeName()});
+    if (!usesUrlWrapper(ctx.vm, url)) {
+        try warnDocref(ctx, "This function may only be used against URLs", .{});
+        return NativeResult.scalar(.{ .bool = false });
+    }
+    const http_wrapper = @import("http_wrapper.zig");
+    http_wrapper.only_get_headers = true;
+    const opened = openStreamValue(ctx, url, "r", context) catch |err| {
+        http_wrapper.only_get_headers = false;
+        return err;
+    };
+    http_wrapper.only_get_headers = false;
+    const stream = (opened orelse return NativeResult.scalar(.{ .bool = false })).resource;
+    defer _ = closeStream(ctx, stream) catch {};
+    const data = (try streams.of(ctx, stream)).wrapperdata;
+    if (data != .array) return NativeResult.scalar(.{ .bool = false });
+    const out = try ctx.createArray();
+    for (data.array.entries.items) |entry| {
+        const hdr = if (entry.ref) |r| r.* else entry.value;
+        if (hdr != .string) continue;
+        const line = hdr.string.bytes();
+        const colon = if (associative) std.mem.indexOfScalar(u8, line, ':') else null;
+        const c = colon orelse {
+            try out.append(ctx.allocator, hdr);
+            continue;
+        };
+        var v = c + 1;
+        while (v < line.len and std.ascii.isWhitespace(line[v])) v += 1;
+        const name = line[0..c];
+        if (out.getPtr(.{ .string = Value.String.borrowed(name) })) |prev| {
+            // a header sent more than once collects its values in an array
+            if (prev.value != .array) {
+                const list = try ctx.createArray();
+                try list.append(ctx.allocator, prev.value);
+                try out.set(ctx.allocator, .{ .string = Value.String.borrowed(name) }, .{ .array = list });
+            }
+            try out.getPtr(.{ .string = Value.String.borrowed(name) }).?.value.array.appendCopiedString(ctx.allocator, line[v..]);
+        } else {
+            const value = try Value.String.create(ctx.allocator, line[v..]);
+            defer value.release();
+            try out.setCopiedKey(ctx.allocator, name, .{ .string = value });
+        }
+    }
+    return NativeResult.borrowed(.{ .array = out });
 }
 
 fn native_file_get_contents(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
@@ -4039,6 +4093,20 @@ fn urlWrapperRefused(ctx: *NativeContext, path: []const u8, options: i64) Runtim
         if (options & user_streams.REPORT_ERRORS != 0) try warnDocref(ctx, "{s}:// wrapper is disabled in the server configuration by allow_url_include=0", .{scheme});
         return true;
     }
+    return false;
+}
+
+// STREAM_USE_URL's test: the path's wrapper is one php marks is_url (http,
+// ftp, data:, or a user wrapper registered with STREAM_IS_URL)
+fn usesUrlWrapper(vm: *VM, path: []const u8) bool {
+    if (userWrapperEntry(vm, path)) |entry| if (entry.class != null) return entry.is_url;
+    var n: usize = 0;
+    while (n < path.len and (std.ascii.isAlphanumeric(path[n]) or path[n] == '+' or path[n] == '-' or path[n] == '.')) n += 1;
+    if (n >= path.len or path[n] != ':') return false;
+    const scheme = path[0..n];
+    if (std.ascii.eqlIgnoreCase(scheme, "data")) return true;
+    if (!std.mem.startsWith(u8, path[n + 1 ..], "//")) return false;
+    for ([_][]const u8{ "http", "https", "ftp", "ftps" }) |s| if (std.ascii.eqlIgnoreCase(scheme, s)) return true;
     return false;
 }
 

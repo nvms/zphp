@@ -343,6 +343,7 @@ pub const functions = Map.initComptime(.{
     .{ "get_error_handler", "Core" },
     .{ "get_exception_handler", "Core" },
     .{ "get_extension_funcs", "Core" },
+    .{ "get_headers", "standard" },
     .{ "get_html_translation_table", "standard" },
     .{ "get_include_path", "standard" },
     .{ "get_included_files", "Core" },

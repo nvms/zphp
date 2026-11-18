@@ -1748,6 +1748,7 @@ pub const map = std.StaticStringMap(Signature).initComptime(.{
     .{ "get_error_handler", Signature{ .params = &[_]Param{}, .returns = "?callable" } },
     .{ "get_exception_handler", Signature{ .params = &[_]Param{}, .returns = "?callable" } },
     .{ "get_extension_funcs", Signature{ .params = &[_]Param{ .{ .name = "extension", .type = "string" } }, .returns = "array|false" } },
+    .{ "get_headers", Signature{ .params = &[_]Param{ .{ .name = "url", .type = "string" }, .{ .name = "associative", .default = .{ .bool = false }, .type = "bool" }, .{ .name = "context", .default = .null } }, .returns = "array|false" } },
     .{ "get_html_translation_table", Signature{ .params = &[_]Param{ .{ .name = "table", .default = .{ .int = 0 }, .type = "int", .default_constant = "HTML_SPECIALCHARS" }, .{ .name = "flags", .default = .{ .int = 11 }, .type = "int" }, .{ .name = "encoding", .default = .{ .string = "UTF-8" }, .type = "string" } }, .returns = "array" } },
     .{ "get_include_path", Signature{ .params = &[_]Param{}, .returns = "string|false" } },
     .{ "get_included_files", Signature{ .params = &[_]Param{}, .returns = "array" } },

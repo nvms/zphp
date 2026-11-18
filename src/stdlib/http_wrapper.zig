@@ -22,6 +22,8 @@ const HEADER_MAX_LOCATION_SIZE = 8182;
 
 // the response headers array exists once a request was sent
 threadlocal var headers_started: bool = false;
+// php's STREAM_ONLY_GET_HEADERS, set while get_headers() opens its url
+pub threadlocal var only_get_headers: bool = false;
 const REDIRECT_MAX = 20;
 
 const FLAG_HEADER_INIT: u8 = 1;
@@ -417,7 +419,8 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
         status_line = line;
         response_code = statusCode(line);
         if (contextOption(context, "http", "ignore_errors")) |v| ignore_errors = v.isTruthy();
-        if (ignore_errors) reqok = true;
+        // when only the headers are wanted, an error status is still a response
+        if (ignore_errors or only_get_headers) reqok = true;
         // 1xx informational responses are skipped up to the real status
         if (response_code >= 100 and response_code < 200 and response_code != 101) {
             while (!try streams.eof(ctx, stream)) {
@@ -503,7 +506,7 @@ fn openEx(ctx: *NativeContext, path: []const u8, mode: []const u8, options: i64,
     }
 
     if (!reqok or (info.location != null and info.follow_location)) {
-        if (!info.follow_location or (ignore_errors and redirect_max <= 1)) {
+        if (!info.follow_location or ((ignore_errors or only_get_headers) and redirect_max <= 1)) {
             return finish(ctx, stream, s, mode, header_init, headers, &info, context, eol_detect, eol_mac, &keep_stream);
         }
         if (info.location) |loc| try notify(ctx, context, NOTIFY_REDIRECTED, 0, loc, 0, 0, 0);
@@ -640,7 +643,7 @@ fn parseHeader(ctx: *NativeContext, line: []const u8, options: i64, context: ?*P
     } else if (std.ascii.startsWithIgnoreCase(line, "Transfer-Encoding:") and std.ascii.startsWithIgnoreCase(value, "Chunked")) {
         var decode = true;
         if (contextOption(context, "http", "auto_decode")) |v| decode = v.isTruthy();
-        if (decode) {
+        if (decode and !only_get_headers) {
             info.dechunk = true;
             store = false;
         }
