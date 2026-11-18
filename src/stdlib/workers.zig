@@ -175,6 +175,11 @@ pub const Task = struct {
 threadlocal var current_task: ?*Task = null;
 threadlocal var current_worker: i64 = -1;
 
+// whether this thread runs a worker's vm rather than the script's own
+pub fn inWorker() bool {
+    return current_worker >= 0;
+}
+
 // ---------------------------------------------------------------------------
 // the bounded queue between the submitting thread and the workers
 

@@ -3358,10 +3358,23 @@ fn closeHandle(ctx: *NativeContext, obj: *PhpObject) RuntimeError!bool {
             platform.closeSocket(obj.get("__fd").int);
         } else if (!platform.isStdio(file)) {
             platform.closeFile(file, obj.get("__fd").int);
+        } else if (closesProcessStdin(ctx.vm, obj)) {
+            // php's cli STDIN is descriptor 0 itself: fclose(STDIN) frees
+            // it, and the next descriptor opened takes its number
+            platform.closeFile(file, 0);
         }
     }
     obj.set(ctx.allocator, "__open", .{ .bool = false }) catch {};
     return true;
+}
+
+// the STDIN constant's stream in a cli script's own thread (serve and
+// worker threads share the process's descriptors with everything else)
+fn closesProcessStdin(vm: *VM, obj: *PhpObject) bool {
+    if (platform.is_windows or vm.serve_mode or @import("workers.zig").inWorker()) return false;
+    if (obj.get("__fd") != .int or obj.get("__fd").int != 0) return false;
+    const constant = vm.php_constants.get("STDIN") orelse return false;
+    return constant == .resource and constant.resource == obj;
 }
 
 fn isZlibWriting(obj: *PhpObject) bool {
