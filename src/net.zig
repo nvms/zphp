@@ -144,6 +144,23 @@ pub const AddressList = struct {
 
 const addrinfo = if (is_windows) sys.ws2.addrinfo else std.c.addrinfo;
 
+// the name the last failed lookup was for and the resolver's reason, which
+// php's php_network_getaddresses reports ("getaddrinfo for x failed: ...")
+pub threadlocal var failed_lookup_buf: [256]u8 = undefined;
+pub threadlocal var failed_lookup_len: usize = 0;
+pub threadlocal var failed_lookup_reason: ?[*:0]const u8 = null;
+
+fn noteFailedLookup(name: []const u8, code: if (is_windows) i32 else std.c.EAI) void {
+    const n = @min(name.len, failed_lookup_buf.len);
+    @memcpy(failed_lookup_buf[0..n], name[0..n]);
+    failed_lookup_len = n;
+    failed_lookup_reason = if (is_windows) null else std.c.gai_strerror(code);
+}
+
+pub fn failedLookupName() []const u8 {
+    return failed_lookup_buf[0..failed_lookup_len];
+}
+
 // every address a host name resolves to, through the system resolver
 pub fn getAddressList(gpa: std.mem.Allocator, name: []const u8, port: u16) !*AddressList {
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -165,13 +182,21 @@ pub fn getAddressList(gpa: std.mem.Allocator, name: []const u8, port: u16) !*Add
     var res: ?*addrinfo = null;
     if (is_windows) {
         try sys.winsockStartup();
-        if (sys.ws2.getaddrinfo(name_z.ptr, port_z.ptr, &hints, &res) != 0) return error.UnknownHostName;
-    } else switch (std.c.getaddrinfo(name_z.ptr, port_z.ptr, &hints, &res)) {
-        @as(std.c.EAI, @fromBackingInt(@intCast(0))) => {},
-        .AGAIN => return error.TemporaryNameServerFailure,
-        .FAIL => return error.NameServerFailure,
-        .MEMORY => return error.OutOfMemory,
-        else => return error.UnknownHostName,
+        const rc = sys.ws2.getaddrinfo(name_z.ptr, port_z.ptr, &hints, &res);
+        if (rc != 0) {
+            noteFailedLookup(name, rc);
+            return error.UnknownHostName;
+        }
+    } else {
+        const rc = std.c.getaddrinfo(name_z.ptr, port_z.ptr, &hints, &res);
+        if (rc != @as(std.c.EAI, @fromBackingInt(@intCast(0)))) noteFailedLookup(name, rc);
+        switch (rc) {
+            @as(std.c.EAI, @fromBackingInt(@intCast(0))) => {},
+            .AGAIN => return error.TemporaryNameServerFailure,
+            .FAIL => return error.NameServerFailure,
+            .MEMORY => return error.OutOfMemory,
+            else => return error.UnknownHostName,
+        }
     }
     defer if (res) |some| (if (is_windows) sys.ws2.freeaddrinfo(some) else std.c.freeaddrinfo(some));
 

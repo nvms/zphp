@@ -939,6 +939,9 @@ fn defaultSocketTimeout(ctx: *NativeContext) f64 {
 fn reportSocketError(ctx: *NativeContext, args: []const Value, code_index: usize, err: ?SocketError) !void {
     const e = err orelse SocketError{ .code = 0, .message = "" };
     ctx.setCallerVar(code_index, args.len, .{ .int = e.code });
+    // the empty message is a literal: the outputs are cleared before a
+    // connect, and nothing need own that
+    if (e.message.len == 0) return ctx.setCallerVar(code_index + 1, args.len, .{ .string = Value.String.borrowed("") });
     const message = try Value.String.create(ctx.allocator, e.message);
     defer message.release();
     ctx.setCallerVar(code_index + 1, args.len, .{ .string = message });
@@ -957,9 +960,20 @@ fn failConnect(ctx: *NativeContext, args: []const Value, code_index: usize, comp
         error.UnsupportedTransport => owned = try std.fmt.allocPrint(ctx.allocator, "Unable to find the socket transport \"{s}\" - did you forget to enable it when you configured PHP?", .{target[0 .. std.mem.indexOf(u8, target, "://") orelse 0]}),
         else => {},
     }
+    // php_network_getaddresses warns with the resolver's reason, which is
+    // also the error the connect reports
+    switch (err) {
+        error.UnknownHostName, error.HostNotFound, error.TemporaryNameServerFailure, error.NameServerFailure => if (net.failed_lookup_reason) |reason| {
+            owned = try std.fmt.allocPrint(ctx.allocator, "php_network_getaddresses: getaddrinfo for {s} failed: {s}", .{ net.failedLookupName(), std.mem.span(reason) });
+            const name = if (comptime std.mem.eql(u8, func, "fsockopen")) ctx.call_name orelse func else func;
+            const lookup_msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): {s}", .{ name, owned.? });
+            defer ctx.allocator.free(lookup_msg);
+            try ctx.vm.emitWarning(lookup_msg);
+        },
+        else => {},
+    }
     if (owned) |o| e = .{ .code = 0, .message = o };
     if (err == error.ListenWithoutText) e = .{ .code = 0, .message = "" };
-    try reportSocketError(ctx, args, code_index, e);
     // php had already made the stream when the connect failed, so its id is gone
     ctx.vm.skipResourceId();
     // stream_socket_client quotes the target with php_addslashes
@@ -980,7 +994,11 @@ fn failConnect(ctx: *NativeContext, args: []const Value, code_index: usize, comp
     const name = if (comptime std.mem.eql(u8, func, "fsockopen")) ctx.call_name orelse func else func;
     const msg = try std.fmt.allocPrint(ctx.allocator, "{s}(): Unable to connect to {s} ({s})", .{ name, quoted.items, if (err == error.ListenWithoutText) "Unknown error" else e.message });
     defer ctx.allocator.free(msg);
-    try ctx.vm.emitWarning(msg);
+    // the error outputs are written after the warning, even one its
+    // handler turned into an exception
+    const warned = ctx.vm.emitWarning(msg);
+    try reportSocketError(ctx, args, code_index, e);
+    try warned;
     return NativeResult.scalar(.{ .bool = false });
 }
 
@@ -1034,6 +1052,10 @@ fn native_stream_socket_client(ctx: *NativeContext, args: []const Value) Runtime
 }
 
 fn connectStream(ctx: *NativeContext, args: []const Value, code_index: usize, target: []const u8, timeout: ?Value, async_connect: bool, comptime func: []const u8) RuntimeError!NativeResult {
+    net.failed_lookup_reason = null;
+    // php clears the error outputs before it connects, so a warning's
+    // handler (and its backtrace) sees 0 and ''
+    try reportSocketError(ctx, args, code_index, null);
     const endpoint = try fitUnixPath(ctx, parseEndpoint(ctx.allocator, target) catch |err| return failConnect(ctx, args, code_index, func, target, err), func);
     const addr = endpointAddress(endpoint) catch |err| return failConnect(ctx, args, code_index, func, target, err);
     const sock = connectEndpoint(endpoint, addr, timeoutMs(ctx, timeout), async_connect) catch |err| return failConnect(ctx, args, code_index, func, target, err);
@@ -1044,6 +1066,7 @@ fn connectStream(ctx: *NativeContext, args: []const Value, code_index: usize, ta
 // stream_socket_server(string $address, &$error_code, &$error_message, int $flags = BIND|LISTEN, $context)
 fn native_stream_socket_server(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     if (args.len < 1 or args[0] != .string) return NativeResult.scalar(.{ .bool = false });
+    net.failed_lookup_reason = null;
     const target = args[0].string.bytes();
     const flags: i64 = if (args.len > 3) Value.toInt(args[3]) else 12;
     const context = try streamContext(ctx, if (args.len > 4) args[4] else null);
