@@ -1224,7 +1224,9 @@ pub const VM = struct {
     trait_deferred: std.ArrayListUnmanaged(*inheritance.Deferred) = .empty,
     free_closure_names: std.ArrayListUnmanaged(struct { compile_name: []const u8, name: []const u8 }) = .empty,
     php_constants: ConstantMap = .{},
-    user_constants: std.StringHashMapUnmanaged(void) = .{},
+    // the constants the script defined, with the file each was defined in
+    // (ReflectionConstant::getFileName)
+    user_constants: std.StringHashMapUnmanaged([]const u8) = .{},
     // traits declared #[\Deprecated], with what the warning adds after
     // "is deprecated"
     deprecated_traits: std.StringHashMapUnmanaged([]const u8) = .{},
@@ -11046,7 +11048,7 @@ pub const VM = struct {
                             if (next != .bind_const_attributes and next != .deprecate_const) break;
                             frame.ip += next.width();
                         }
-                    } else try self.user_constants.put(self.allocator, name, {});
+                    } else try self.user_constants.put(self.allocator, name, try self.internName(self.currentSourcePosition().file));
                 },
                 .parent_hook_call => {
                     const prop = self.currentChunk().constants.items[self.readU16()].string.bytes();

@@ -188,7 +188,7 @@ fn native_define(ctx: *NativeContext, args: []const Value) RuntimeError!NativeRe
     }
     const name = try ctx.createString(args[0].string.bytes());
     if (!try ctx.vm.defineConstant(name, args[1])) return NativeResult.scalar(.{ .bool = false });
-    try ctx.vm.user_constants.put(ctx.allocator, name, {});
+    try ctx.vm.user_constants.put(ctx.allocator, name, try ctx.vm.internName(ctx.vm.currentSourcePosition().file));
     return NativeResult.scalar(.{ .bool = true });
 }
 

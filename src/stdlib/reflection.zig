@@ -196,7 +196,7 @@ pub fn register(vm: *VM, a: Allocator) !void {
     try vm.native_fns.put(a, "ReflectionConstant::getNamespaceName", rconstGetNamespaceName);
     try vm.native_fns.put(a, "ReflectionConstant::isDeprecated", rconstIsDeprecated);
     try vm.native_fns.put(a, "ReflectionConstant::getAttributes", rconstGetAttributes);
-    try vm.native_fns.put(a, "ReflectionConstant::getFileName", reflectionFalse);
+    try vm.native_fns.put(a, "ReflectionConstant::getFileName", rconstGetFileName);
     try vm.native_fns.put(a, "ReflectionConstant::getExtension", rconstGetExtension);
     try vm.native_fns.put(a, "ReflectionConstant::getExtensionName", rconstGetExtensionName);
     try vm.native_fns.put(a, "ReflectionConstant::__toString", rconstToString);
@@ -3651,6 +3651,17 @@ fn rpHasType(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
 
 // constant default sentinel: "\x00CC\x00<class>\x00<const>" (class empty for global constants)
 // returns "CONST" for global, "Class::CONST" for class constants
+// the file a constant the script defined was defined in; false for php's
+// own constants
+fn rconstGetFileName(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResult {
+    const this = getThis(ctx) orelse return NativeResult.scalar(.{ .bool = false });
+    const name = this.get("name");
+    if (name != .string) return NativeResult.scalar(.{ .bool = false });
+    const file = ctx.vm.user_constants.get(name.string.bytes()) orelse return NativeResult.scalar(.{ .bool = false });
+    if (file.len == 0) return NativeResult.scalar(.{ .bool = false });
+    return NativeResult.copyString(ctx.allocator, file);
+}
+
 fn decodeConstSentinel(ctx: *NativeContext, v: Value) !?[]const u8 {
     if (v != .string) return null;
     const s = v.string.bytes();
