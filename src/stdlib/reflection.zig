@@ -3598,6 +3598,10 @@ fn rpGetDefaultValue(ctx: *NativeContext, _: []const Value) RuntimeError!NativeR
         const func: *const ObjFunction = @ptrFromInt(@as(usize, @intCast(lazy_func.int)));
         return NativeResult.share(try ctx.vm.resolveParamDefault(func, @intCast(this.get("__default_index").int)));
     }
+    // an internal function's default naming a deprecated constant (date_sunrise's
+    // SUNFUNCS_RET_STRING) warns as reading the constant does
+    const const_name = this.get("__default_const_name");
+    if (const_name == .string and std.mem.indexOf(u8, const_name.string.bytes(), "::") == null) try ctx.vm.warnDeprecatedConstant(const_name.string.bytes());
     return NativeResult.share(this.get("__default_value"));
 }
 
