@@ -13051,7 +13051,8 @@ pub const VM = struct {
                             // assign-op or increment): the dynamic property's
                             // deprecation, then the warning, then the property
                             // is created null, unless a handler made it meanwhile
-                            const rw = !capturing and self.rw_prop_fetch_ip == gp_ip and self.rw_prop_fetch_chunk == @intFromPtr(self.currentChunk()) and obj.lazy == null and !gp_vr.declared;
+                            const rw_fetch = !capturing and self.rw_prop_fetch_ip == gp_ip and self.rw_prop_fetch_chunk == @intFromPtr(self.currentChunk()) and obj.lazy == null;
+                            const rw = rw_fetch and !gp_vr.declared;
                             if (rw and try self.checkDynamicPropertyRule(obj, prop_name)) continue;
                             // a by-reference argument creates the property
                             if (!capturing) {
@@ -13065,6 +13066,14 @@ pub const VM = struct {
                                     continue;
                                 }
                                 try obj.set(self.allocator, prop_name, .null);
+                            } else if (rw_fetch) {
+                                // an unset declared property a handler wrote
+                                // meanwhile is read again
+                                const now = obj.rawForScope(prop_name, gp_vr.defining_class);
+                                if (now != .undef and !obj.isUnset(prop_name)) {
+                                    self.push(now);
+                                    continue;
+                                }
                             }
                             self.push(.null);
                         }
