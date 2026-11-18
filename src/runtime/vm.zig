@@ -18702,7 +18702,23 @@ pub const VM = struct {
             return;
         };
         defer if (stamp.value == .string) stamp.value.string.release();
-        const file = std.Io.Dir.cwd().createFile(platform.io, path, .{ .truncate = false }) catch {
+        // php_log_err: created with error_log_mode (0644 unless set to a
+        // mode in 1..0777; the ini value is read as strtol's base 0 does)
+        var mode: std.posix.mode_t = 0o644;
+        const mode_text = std.mem.trim(u8, self.iniText("error_log_mode"), " \t");
+        if (mode_text.len > 0) {
+            const parsed: ?i64 = if (std.ascii.startsWithIgnoreCase(mode_text, "0x"))
+                std.fmt.parseInt(i64, mode_text[2..], 16) catch null
+            else if (mode_text.len > 1 and mode_text[0] == '0')
+                std.fmt.parseInt(i64, mode_text[1..], 8) catch null
+            else
+                std.fmt.parseInt(i64, mode_text, 10) catch null;
+            if (parsed) |m| if (m > 0 and m <= 0o777) {
+                mode = @intCast(m);
+            };
+        }
+        const permissions: std.Io.File.Permissions = if (platform.is_windows) .default_file else .fromMode(mode);
+        const file = std.Io.Dir.cwd().createFile(platform.io, path, .{ .truncate = false, .permissions = permissions }) catch {
             _ = platform.write(std.Io.File.stderr(), line) catch {};
             return;
         };
