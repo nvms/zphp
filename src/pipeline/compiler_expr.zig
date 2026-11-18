@@ -2456,6 +2456,7 @@ pub fn compileCallableRef(self: *Compiler, node: Ast.Node) Error!void {
 
 pub fn compileArrayAccess(self: *Compiler, node: Ast.Node) Error!void {
     try self.compileNode(node.data.lhs);
+    if (self.const_expr) try self.emitOp(.const_expr_dim_check);
     try compileOutsideChain(self, node.data.rhs);
     try self.emitOp(.array_get);
 }
@@ -2741,6 +2742,7 @@ pub fn compileArrayLiteral(self: *Compiler, node: Ast.Node) Error!void {
         const elem = self.ast.nodes[elem_idx];
         if (elem.tag == .array_spread) {
             try self.compileNode(elem.data.lhs);
+            if (self.const_expr) try self.emitOp(.const_expr_unpack_check);
             try self.emitOp(.array_spread);
             try self.emitByte(0);
             continue;

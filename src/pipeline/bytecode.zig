@@ -633,6 +633,13 @@ pub const OpCode = enum(u16) {
     // holder; a reference the loop made that nothing else shares goes back
     // to being a plain variable
     foreach_release,
+    // [container] -> [container], before the key of a constant expression's
+    // array_get: an object is an Error there (zend_ast_evaluate's ZEND_AST_DIM
+    // won't run offsetGet)
+    const_expr_dim_check,
+    // [value] -> [value], before a constant expression's array_spread: only
+    // an array may be unpacked there
+    const_expr_unpack_check,
 
     pub fn width(self: OpCode) usize {
         return switch (self) {

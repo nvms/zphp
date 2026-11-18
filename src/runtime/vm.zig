@@ -12806,6 +12806,21 @@ pub const VM = struct {
                     const operands: usize = if (op == .arg_guard_prop) 1 else 2;
                     self.arg_capture_pending = self.argNeedsCapture(self.currentChunk(), field, delta, pos, operands);
                 },
+                .const_expr_dim_check => {
+                    switch (self.stack[self.sp - 1]) {
+                        .object, .generator, .fiber => {
+                            if (try self.throwBuiltinException("Error", "Cannot use [] on objects in constant expression")) continue;
+                            return error.RuntimeError;
+                        },
+                        else => {},
+                    }
+                },
+                .const_expr_unpack_check => {
+                    if (self.stack[self.sp - 1] != .array) {
+                        if (try self.throwBuiltinException("Error", "Only arrays can be unpacked in constant expression")) continue;
+                        return error.RuntimeError;
+                    }
+                },
                 .const_expr_prop_check => {
                     if (self.stack[self.sp - 1] != .string) {
                         var name_hold: Value = .null;
