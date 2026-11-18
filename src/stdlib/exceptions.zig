@@ -28,11 +28,9 @@ fn appendThrowableProperties(a: Allocator, def: *ClassDef, trace_default: *PhpAr
 pub fn register(vm: *VM, a: Allocator) !void {
     var throwable = vm_mod.InterfaceDef{ .name = "Throwable", .parent = "Stringable" };
     try throwable.parents.append(a, "Stringable");
-    try throwable.methods.append(a, "getMessage");
-    try throwable.methods.append(a, "getCode");
-    try throwable.methods.append(a, "getPrevious");
-    try throwable.methods.append(a, "getTrace");
-    try throwable.methods.append(a, "getTraceAsString");
+    inline for (.{ "getMessage", "getCode", "getFile", "getLine", "getTrace", "getPrevious", "getTraceAsString" }) |method| {
+        try throwable.methods.append(a, method);
+    }
     try vm.interfaces.put(a, "Throwable", throwable);
 
     const trace_default = try vm.allocArray();

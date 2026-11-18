@@ -32,9 +32,9 @@ pub fn register(vm: *VM, a: Allocator) !void {
 
     // ArrayAccess interface
     var array_access = vm_mod.InterfaceDef{ .name = "ArrayAccess" };
+    try array_access.methods.append(a, "offsetExists");
     try array_access.methods.append(a, "offsetGet");
     try array_access.methods.append(a, "offsetSet");
-    try array_access.methods.append(a, "offsetExists");
     try array_access.methods.append(a, "offsetUnset");
     try vm.interfaces.put(a, "ArrayAccess", array_access);
 
@@ -56,10 +56,10 @@ pub fn register(vm: *VM, a: Allocator) !void {
     var iterator = vm_mod.InterfaceDef{ .name = "Iterator" };
     iterator.parent = "Traversable";
     try iterator.methods.append(a, "current");
-    try iterator.methods.append(a, "key");
     try iterator.methods.append(a, "next");
-    try iterator.methods.append(a, "rewind");
+    try iterator.methods.append(a, "key");
     try iterator.methods.append(a, "valid");
+    try iterator.methods.append(a, "rewind");
     try vm.interfaces.put(a, "Iterator", iterator);
 
     // IteratorAggregate interface

@@ -1308,6 +1308,8 @@ fn getClassMethodsOf(ctx: *NativeContext, class_name: []const u8) RuntimeError!N
                 try arr.append(ctx.allocator, .{ .string = Value.String.borrowed(m) });
             }
             for (iface.parents.items) |p| try pending.append(ctx.allocator, p);
+            // an internal interface may name its one parent only here
+            if (iface.parent) |p| if (iface.parents.items.len == 0) try pending.append(ctx.allocator, p);
         }
         return NativeResult.borrowed(.{ .array = arr });
     }
