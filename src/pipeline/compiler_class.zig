@@ -4620,15 +4620,23 @@ fn compileClassMethodBody(self: *Compiler, class_name: []const u8, member: Ast.N
 
     // constructor property promotion: emit $this->prop = $prop for each promoted param
     if (std.mem.eql(u8, method_name, "__construct")) {
-        for (param_nodes) |p| {
+        for (param_nodes, 0..) |p, i| {
             const pnode = self.ast.nodes[p];
             const promotion = (pnode.data.rhs >> 2) & 3;
             if (promotion > 0) {
-                var param_name = self.ast.tokenSlice(pnode.main_token);
+                const param_name = self.ast.tokenSlice(pnode.main_token);
+                const prop_name = if (param_name.len > 0 and param_name[0] == '$') param_name[1..] else param_name;
+                const prop_idx = try sub.addConstant(.{ .string = Value.String.borrowed(prop_name) });
                 try sub.emitGetVar("$this");
+                if (i < ref_flags.len and ref_flags[i]) {
+                    // a by-reference parameter promotes to a property
+                    // bound to the caller's variable ($this->p = &$p)
+                    try sub.emitOp(.prop_bind_ref);
+                    try sub.emitU16(prop_idx);
+                    try sub.emitU16(try sub.addConstant(.{ .string = Value.String.borrowed(param_name) }));
+                    continue;
+                }
                 try sub.emitGetVar(param_name);
-                if (param_name.len > 0 and param_name[0] == '$') param_name = param_name[1..];
-                const prop_idx = try sub.addConstant(.{ .string = Value.String.borrowed(param_name) });
                 try sub.emitOp(.set_prop);
                 try sub.emitU16(prop_idx);
                 try sub.emitOp(.pop);
