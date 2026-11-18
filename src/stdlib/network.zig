@@ -1017,7 +1017,12 @@ fn native_fsockopen(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
     else
         try ctx.allocator.dupe(u8, host);
     defer ctx.allocator.free(target);
-    return connectStream(ctx, args, 2, target, if (args.len > 4) args[4] else null, false, "fsockopen");
+    const result = try connectStream(ctx, args, 2, target, if (args.len > 4) args[4] else null, false, "fsockopen");
+    // pfsockopen's stream is php's "persistent stream" resource
+    if (result.value == .resource and ctx.call_name != null and std.mem.eql(u8, ctx.call_name.?, "pfsockopen")) {
+        try result.value.resource.set(ctx.allocator, "__persistent", .{ .bool = true });
+    }
+    return result;
 }
 
 // stream_socket_client(string $address, &$error_code, &$error_message, ?float $timeout, int $flags, $context)

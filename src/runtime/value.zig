@@ -1681,6 +1681,7 @@ const resource_kinds = .{
 // a closed resource reports "Unknown", as php does once it is freed
 pub fn resourceTypeName(r: *const PhpObject) []const u8 {
     if (resourceClosed(r)) return "Unknown";
+    if (r.get("__persistent") == .bool) return "persistent stream";
     inline for (resource_kinds) |kind| if (std.mem.eql(u8, r.class_name, kind[0])) return kind[1];
     return r.class_name;
 }
