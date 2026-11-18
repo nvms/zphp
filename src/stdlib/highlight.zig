@@ -8,6 +8,7 @@ const Args = @import("string_ports.zig").Args;
 const tokenizer = @import("tokenizer.zig");
 const t = @import("tokens_generated.zig");
 const fs = @import("filesystem.zig");
+const output_control = @import("output_control.zig");
 const RuntimeError = error{ RuntimeError, OutOfMemory };
 
 pub const entries = .{
@@ -156,6 +157,7 @@ fn native_highlight_file(ctx: *NativeContext, args: []const Value) RuntimeError!
     const p = Args.init(ctx, name, args);
     const path = try p.path(0, "filename");
     const ret = try p.boolean(1, "return", false);
+    if (ret) try output_control.checkStartDefault(ctx.vm, name);
     const src = (try readSource(ctx, path)) orelse {
         try fs.warnDocref(ctx, "Failed opening '{s}' for highlighting", .{path});
         return NativeResult.scalar(.{ .bool = false });
@@ -173,6 +175,7 @@ fn native_highlight_string(ctx: *NativeContext, args: []const Value) RuntimeErro
     const p = Args.init(ctx, "highlight_string", args);
     const src = try p.str(0, "string");
     const ret = try p.boolean(1, "return", false);
+    if (ret) try output_control.checkStartDefault(ctx.vm, "highlight_string");
     var out = std.ArrayListUnmanaged(u8).empty;
     defer out.deinit(ctx.allocator);
     try highlight(ctx, src, &out);
@@ -184,6 +187,7 @@ fn native_highlight_string(ctx: *NativeContext, args: []const Value) RuntimeErro
 fn native_php_strip_whitespace(ctx: *NativeContext, args: []const Value) RuntimeError!NativeResult {
     const p = Args.init(ctx, "php_strip_whitespace", args);
     const path = try p.path(0, "filename");
+    try output_control.checkStartDefault(ctx.vm, "php_strip_whitespace");
     const src = (try readSource(ctx, path)) orelse return NativeResult.literal("");
     defer ctx.allocator.free(src);
     var out = std.ArrayListUnmanaged(u8).empty;

@@ -130,6 +130,19 @@ fn lockFatal(vm: *VM, comptime func: []const u8) RuntimeError {
     return vm.raiseFatal(func ++ "(): Cannot use output buffering in output buffering display handlers");
 }
 
+// the lock check of php_output_start_default, which natives that capture
+// their own output through a buffer (php_strip_whitespace, highlight_file
+// and highlight_string returning a string) run before they start
+pub fn checkStartDefault(vm: *VM, func: []const u8) RuntimeError!void {
+    if (vm.ob_running == null) return;
+    const msg = try std.fmt.allocPrint(vm.allocator, "{s}(): Cannot use output buffering in output buffering display handlers", .{func});
+    defer vm.allocator.free(msg);
+    if (vm.ob_stack.items.len > 0) vm.output.shrinkRetainingCapacity(vm.ob_stack.items[0].start);
+    releaseAll(vm);
+    vm.ob_deactivated = true;
+    return vm.raiseFatal(msg);
+}
+
 const Status = enum { failure, no_data, success };
 
 const Outcome = struct {
