@@ -5274,12 +5274,15 @@ fn native_proc_open(ctx: *NativeContext, args: []const Value) RuntimeError!Nativ
         env_vars.deinit(ctx.allocator);
     }
     const has_env = args.len >= 5 and args[4] == .array;
+    // php_array_to_envp: every value as a string (with zval_get_string's
+    // warnings), an empty one left out, one under an int key passed alone
     if (has_env) for (args[4].array.entries.items) |entry| {
-        const key = switch (entry.key) {
-            .string => |k| k.bytes(),
-            .int => continue,
-        };
-        try env_vars.append(ctx.allocator, try std.fmt.allocPrint(ctx.allocator, "{s}={s}", .{ key, try ownedText(ctx, entry.value) }));
+        const text = try ctx.vm.valueToString(if (entry.ref) |cell| cell.* else entry.value);
+        if (text.len == 0) continue;
+        try env_vars.append(ctx.allocator, switch (entry.key) {
+            .string => |k| if (k.bytes().len > 0) try std.fmt.allocPrint(ctx.allocator, "{s}={s}", .{ k.bytes(), text }) else try ctx.allocator.dupe(u8, text),
+            .int => try ctx.allocator.dupe(u8, text),
+        });
     };
 
     var descs: std.ArrayListUnmanaged(ProcDesc) = .empty;

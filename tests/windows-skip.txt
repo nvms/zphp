@@ -70,3 +70,4 @@ memory_limit_soft.php: on windows zphp runs past the soft limit where php stops 
 proc_files_read_to_eof.php: reads /proc, which windows does not have
 fclose_stdin_frees_descriptor.php: zphp keeps descriptor 0 open on windows, where crt descriptors and console handles are not reused the same way
 error_log_file_mode.php: windows files have no unix permission bits, so php reports the same mode for each
+proc_open_env_values.php: the windows proc_open (proc_win.zig) builds its environment block without php_array_to_envp's conversions yet
