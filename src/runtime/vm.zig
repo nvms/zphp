@@ -8186,9 +8186,15 @@ pub const VM = struct {
                 .ensure_array_local, .ensure_array_local_rw => {
                     const slot = self.readU16();
                     const frame = self.currentFrame();
+                    // a by-reference foreach's iterable (FE_RESET_RW): an
+                    // array is separated to be written through, anything
+                    // else is left as it is for the loop to refuse, and an
+                    // undefined variable is read, with its warning
+                    const foreach_fetch = op == .ensure_array_local and
+                        (bytecode.opIs(self.currentChunk().code.items, frame.ip, .iter_begin_live) or bytecode.opIs(self.currentChunk().code.items, frame.ip, .iter_begin_ref));
                     // an RW fetch of an undefined variable warns before it
                     // becomes an array
-                    if (op == .ensure_array_local_rw and self.slotRefCell(frame, slot) == null) {
+                    if ((op == .ensure_array_local_rw or foreach_fetch) and self.slotRefCell(frame, slot) == null) {
                         const raw = if (frame.func == null) self.getLocalGlobal(slot, frame) else if (slot < frame.locals.len) frame.locals[slot] else Value.undef;
                         if (raw == .undef) self.undefinedVariableRead(self.slotName(frame, slot)) catch if (try self.resumeRaised()) continue;
                     }
@@ -8205,6 +8211,10 @@ pub const VM = struct {
                     }
                     const from_ref = self.slotRefCell(frame, slot) != null;
                     const cur = self.loadLocalSlot(frame, slot, self.slotRefCell(frame, slot));
+                    if (foreach_fetch and cur != .array) {
+                        self.pushFetched(cur);
+                        continue;
+                    }
                     if (cur == .int or cur == .float or cur == .resource or (cur == .bool and cur.bool)) {
                         if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
                         return error.RuntimeError;
@@ -8292,11 +8302,18 @@ pub const VM = struct {
                         cur = .null;
                         found = false;
                     }
+                    // a by-reference foreach's iterable, as ensure_array_local
+                    const foreach_fetch = mode == 0 and
+                        (bytecode.opIs(self.currentChunk().code.items, frame.ip, .iter_begin_live) or bytecode.opIs(self.currentChunk().code.items, frame.ip, .iter_begin_ref));
                     // an RW fetch of an undefined variable warns first
-                    if (mode == 2 and !found) self.undefinedVariableRead(name) catch if (try self.resumeRaised()) continue;
+                    if ((mode == 2 or foreach_fetch) and !found) self.undefinedVariableRead(name) catch if (try self.resumeRaised()) continue;
                     // an unset's base (separate_only): a shared array is
                     // separated, anything else is left for the unset to judge
                     if (separate_only and cur != .array) continue;
+                    if (foreach_fetch and cur != .array) {
+                        self.pushFetched(cur);
+                        continue;
+                    }
                     if (cur == .int or cur == .float or cur == .resource or (cur == .bool and cur.bool)) {
                         if (try self.throwBuiltinException("Error", "Cannot use a scalar value as an array")) continue;
                         return error.RuntimeError;
@@ -8814,6 +8831,13 @@ pub const VM = struct {
                             const msg = try std.fmt.allocPrint(self.allocator, "foreach() argument must be of type array|object, {s} given", .{iterable.valueName()});
                             defer self.allocator.free(msg);
                             self.emitWarning(msg) catch if (try self.resumeRaised()) continue;
+                            // a live loop's slot holds an int only as an
+                            // array's address: a skipped loop holds null
+                            if (op == .iter_begin_live) {
+                                self.stack[self.sp - 1] = .null;
+                                self.stackRelease(iterable);
+                                iterable = .null;
+                            }
                         },
                     }
                     if (op == .iter_begin_live and iterable == .array) {
@@ -9391,6 +9415,17 @@ pub const VM = struct {
                     const name = self.currentChunk().constants.items[var_idx].string.bytes();
                     const frame = self.currentFrame();
                     const fresh = frame.ref_slots.get(name) == null;
+                    // FE_RESET_RW makes the variable a reference only when it
+                    // holds an array or object; an undefined one stays so
+                    if (fresh) {
+                        const held = self.frameVariable(frame, name) orelse Value.null;
+                        if (held != .array and held != .object) {
+                            // the loop reads its hidden variable, which then
+                            // holds nothing it could iterate
+                            try self.setVariableByName(frame, holder, .null);
+                            continue;
+                        }
+                    }
                     const cell = try self.getOrCreateVarCell(frame, name);
                     if (cell.* == .array) _ = try self.separateReferencedArray(frame, name, cell, cell.array);
                     if (fresh and cellOf(cell).binders == 1) cellOf(cell).loop_made = true;
