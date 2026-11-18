@@ -2730,7 +2730,48 @@ fn compileReferenceSource(self: *Compiler, source: u32) Error!void {
     try self.emitU16(dst);
 }
 
+// php's type name for a value the compiler knows (zend_eval_const_expr
+// folds it to a zval), or null when it is known only at run time
+fn compileTimeTypeName(self: *Compiler, idx: u32) ?[]const u8 {
+    if (idx == 0) return null;
+    const n = self.ast.nodes[idx];
+    return switch (n.tag) {
+        .integer_literal => "int",
+        .float_literal => "float",
+        .string_literal => if (@import("compiler_class.zig").isEncapsString(self.ast, n)) null else "string",
+        .true_literal => "true",
+        .false_literal => "false",
+        .null_literal => "null",
+        .array_literal => for (self.ast.extraSlice(n.data.lhs)) |elem_idx| {
+            if (elem_idx == 0) break null;
+            const elem = self.ast.nodes[elem_idx];
+            if (elem.tag != .array_element or self.ast.nodes[elem.data.lhs].tag == .ref_target) break null;
+            if (compileTimeTypeName(self, elem.data.lhs) == null) break null;
+            if (elem.data.rhs != 0 and compileTimeTypeName(self, elem.data.rhs) == null) break null;
+        } else "array",
+        else => null,
+    };
+}
+
 pub fn compileArrayLiteral(self: *Compiler, node: Ast.Node) Error!void {
+    // zend_try_ct_eval_array: an array whose elements are all known when it
+    // compiles is built then, and unpacking a known non-array in it is a
+    // compile error
+    const elems = self.ast.extraSlice(node.data.lhs);
+    const known = for (elems) |elem_idx| {
+        if (elem_idx == 0) break false;
+        const elem = self.ast.nodes[elem_idx];
+        if (elem.tag == .array_spread) {
+            if (compileTimeTypeName(self, elem.data.lhs) == null) break false;
+        } else if (elem.tag != .array_element or self.ast.nodes[elem.data.lhs].tag == .ref_target or
+            compileTimeTypeName(self, elem.data.lhs) == null or (elem.data.rhs != 0 and compileTimeTypeName(self, elem.data.rhs) == null)) break false;
+    } else elems.len > 0;
+    if (known) for (elems) |elem_idx| {
+        const elem = self.ast.nodes[elem_idx];
+        if (elem.tag != .array_spread) continue;
+        const type_name = compileTimeTypeName(self, elem.data.lhs).?;
+        if (!std.mem.eql(u8, type_name, "array")) return self.failFmt(node.main_token, "Only arrays and Traversables can be unpacked, {s} given", .{type_name});
+    };
     try self.emitOp(.array_new);
     var last_token = node.main_token;
     for (self.ast.extraSlice(node.data.lhs)) |elem_idx| {

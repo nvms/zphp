@@ -625,7 +625,7 @@ fn constExprWalk(self: *Compiler, idx: u32, allow_dynamic: bool) Error!void {
 
 // a double-quoted string, heredoc or backtick string with variables in it
 // (php's ZEND_AST_ENCAPS_LIST and ZEND_AST_SHELL_EXEC)
-fn isEncapsString(ast: *const Ast, node: Ast.Node) bool {
+pub fn isEncapsString(ast: *const Ast, node: Ast.Node) bool {
     const tok = ast.tokens[node.main_token];
     const lexeme = ast.tokenSlice(node.main_token);
     if (tok.tag == .heredoc) {
