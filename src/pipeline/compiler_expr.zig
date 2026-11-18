@@ -1599,6 +1599,16 @@ fn compileArg(self: *Compiler, arg_idx: u32, guard: ArgGuard) Error!void {
         try self.compileNode(arg_idx);
         return emitValueGuard(self, guard, .arg_value);
     }
+    // zend_compile_args: a chain a nullsafe operator may cut short is a
+    // value, which a by-reference parameter refuses
+    const is_call = switch (arg.tag) {
+        .method_call, .nullsafe_method_call, .static_call => true,
+        else => false,
+    };
+    if (!is_call and isShortCircuited(self, arg_idx)) {
+        try self.compileNode(arg_idx);
+        return emitValueGuard(self, guard, .arg_value);
+    }
     return compileArgLvalue(self, arg_idx, guard);
 }
 
