@@ -4254,6 +4254,12 @@ fn closureVariables(ctx: *NativeContext, statics: bool) RuntimeError!NativeResul
         if (std.mem.eql(u8, cap.closure_name, fn_name)) {
             const name = if (cap.var_name.len > 0 and cap.var_name[0] == '$') cap.var_name[1..] else cap.var_name;
             if (std.mem.eql(u8, name, "this")) continue;
+            // a variable used by reference is the reference itself
+            if (cap.ref_cell) |rc| {
+                ctx.vm.array_ref_active = true;
+                try ctx.vm.arrayAddEntry(result, .{ .string = Value.String.borrowed(name) }, .{ .key = .{ .string = Value.String.borrowed(name) }, .value = rc.* }, rc);
+                continue;
+            }
             const val = if (cap.ref_cell) |rc| rc.* else cap.value;
             try result.set(ctx.allocator, .{ .string = Value.String.borrowed(name) }, val);
         }
