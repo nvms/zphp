@@ -1195,6 +1195,16 @@ pub fn getObjectVars(ctx: *NativeContext, object: *PhpObject) RuntimeError!*PhpA
     while (try object_iter.fetch(ctx.vm, it, obj, from)) |step| {
         from = step.index + 1;
         const name = step.raw orelse step.key.string;
+        // a property another name still references stays a reference in
+        // the copy (zend_std_get_properties' ZVAL_COPY of an IS_REFERENCE
+        // with a refcount above one)
+        if (sharedPropertyCell(ctx.vm, obj, step.key.string.bytes())) |cell| {
+            const key_string = if (name.owner == null) name else try Value.String.create(ctx.allocator, name.bytes());
+            defer if (name.owner != null) key_string.release();
+            ctx.vm.array_ref_active = true;
+            try ctx.vm.arrayAddEntry(arr, .{ .string = key_string }, .{ .key = .{ .string = key_string }, .value = step.value }, cell);
+            continue;
+        }
         if (name.owner == null) {
             try arr.set(ctx.allocator, .{ .string = name }, step.value);
         } else {
@@ -1202,6 +1212,17 @@ pub fn getObjectVars(ctx: *NativeContext, object: *PhpObject) RuntimeError!*PhpA
         }
     }
     return arr;
+}
+
+fn sharedPropertyCell(vm: *VM, obj: *PhpObject, name: []const u8) ?*Value {
+    const index = vm.ref_index orelse return null;
+    const cells = index.prop_rev.get(.{ .object = obj, .class_name = "", .prop_name = name }) orelse return null;
+    for (cells.items) |cell| {
+        var holders = @import("../runtime/value.zig").cellOf(cell).binders;
+        if (vm.last_return_ref == cell) holders -= 1;
+        if (holders > 1) return cell;
+    }
+    return null;
 }
 
 // the object's own property table with (array)'s mangled keys, whatever the
