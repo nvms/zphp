@@ -5424,7 +5424,7 @@ pub const VM = struct {
         defer self.run_base_frame = prev_base_frame;
         while (true) {
             const op = self.readOp();
-            switch (op) {
+            dispatch: switch (op) {
                 .constant => {
                     const idx = self.readU16();
                     self.push(self.currentChunk().constants.items[idx]);
@@ -6299,6 +6299,30 @@ pub const VM = struct {
                             if (self.dispatchPendingException(base_frame)) continue;
                             return error.RuntimeError;
                         }
+                    } else if (self.dynamicMethodCallee(name_val)) |callee| {
+                        // [$object, 'method'] and an object with __invoke are
+                        // php's INIT_DYNAMIC_CALL of a method: called as
+                        // $object->$method(...) is, so by-reference
+                        // parameters and a returned reference bind as they do
+                        // there. [callee, args] -> [object, name, args]
+                        var i: usize = ac;
+                        while (i > 0) {
+                            i -= 1;
+                            self.stack[self.sp - ac + i + 1] = self.stack[self.sp - ac + i];
+                            self.setArgSource(self.sp - ac + i + 1, self.ic.?.arg_stack[self.sp - ac + i]);
+                        }
+                        const base = self.sp - ac - 1;
+                        self.setArgSource(base, .none);
+                        self.setArgSource(base + 1, .none);
+                        retainValue(.{ .object = callee.object });
+                        retainValue(callee.name);
+                        self.stack[base] = .{ .object = callee.object };
+                        self.stack[base + 1] = callee.name;
+                        self.sp += 1;
+                        self.stackRelease(name_val);
+                        // method_call_dynamic reads the same argument count
+                        self.currentFrame().ip -= 1;
+                        continue :dispatch .method_call_dynamic;
                     } else {
                         // the value stays alive across the call; its stack slot goes
                         retainValue(name_val);
@@ -13920,7 +13944,19 @@ pub const VM = struct {
                     // instances, whatever a subclass redeclares
                     const dyn_mvr = self.findMethodVisibility(obj.class_name, method_name);
                     const dyn_scope_private = if (dyn_mvr.changed) self.scopePrivateMethod(obj.class_name, method_name, dyn_mvr.defining_class) else null;
-                    const full_name = if (dyn_scope_private) |registered| registered else self.resolveMethod(obj.class_name, method_name) catch {
+                    // zend_std_get_method: a method the scope can't see goes
+                    // to __call, else it is php's Error
+                    const dyn_invisible = dyn_scope_private == null and !self.checkVisibility(dyn_mvr.defining_class, dyn_mvr.visibility) and
+                        !self.protectedRootVisible(dyn_mvr.defining_class, method_name, dyn_mvr.visibility) and
+                        !self.protectedVisibleFromScope(dyn_mvr.defining_class, dyn_mvr.visibility);
+                    if (dyn_invisible and !self.hasMethod(obj.class_name, "__call")) {
+                        self.dropN(ac + 1);
+                        const msg = try std.fmt.allocPrint(self.allocator, "Call to {s} method {s}::{s}(){s}", .{ @tagName(dyn_mvr.visibility), dyn_mvr.defining_class, method_name, self.visScopeSuffix() });
+                        defer self.allocator.free(msg);
+                        if (try self.throwBuiltinException("Error", msg)) continue;
+                        return error.RuntimeError;
+                    }
+                    const full_name = if (dyn_scope_private) |registered| registered else (if (dyn_invisible) @as(RuntimeError![]const u8, error.RuntimeError) else self.resolveMethod(obj.class_name, method_name)) catch {
                         if (self.hasMethod(obj.class_name, "__call")) {
                             var args_arr = try self.allocArray();
                             for (0..ac) |ai| try args_arr.append(self.allocator, self.stack[self.sp - ac + ai]);
@@ -26232,6 +26268,15 @@ pub const VM = struct {
     // php's zend_check_protected(zend_get_function_root_class(fbc), scope):
     // a protected method overriding an ancestor's is callable from wherever
     // the topmost ancestor declaring it is
+    // zend_check_protected against the running function's own class: a
+    // method called through a closure made elsewhere (`self::make(...)` kept
+    // in a static) runs with a called class that isn't its scope
+    fn protectedVisibleFromScope(self: *VM, target: []const u8, vis: ClassDef.Visibility) bool {
+        if (vis != .protected) return false;
+        const scope = self.currentDefiningClass() orelse return false;
+        return self.isInstanceOf(scope, target) or self.isInstanceOf(target, scope);
+    }
+
     fn protectedRootVisible(self: *VM, defining: []const u8, method: []const u8, vis: ClassDef.Visibility) bool {
         if (vis != .protected) return false;
         var root = defining;
@@ -31514,6 +31559,28 @@ pub const VM = struct {
     // `$f(...)` for anything but a plain function name, resolved as php's
     // dynamic call resolves it. null when an exception it raised was
     // dispatched to a handler the caller resumes at
+    // a callable call_indirect runs as a method call: [$object, 'method']
+    // (a method name without "::") or an object other than a closure
+    fn dynamicMethodCallee(self: *VM, callable: Value) ?struct { object: *PhpObject, name: Value } {
+        switch (callable) {
+            .array => |arr| {
+                if (arr.entries.items.len != 2) return null;
+                const first = arr.get(.{ .int = 0 });
+                const second = arr.get(.{ .int = 1 });
+                if (first != .object or second != .string) return null;
+                if (std.mem.indexOf(u8, second.string.bytes(), "::") != null) return null;
+                return .{ .object = first.object, .name = second };
+            },
+            .object => |obj| {
+                if (std.mem.eql(u8, obj.class_name, "Closure") or !self.hasMethod(obj.class_name, "__invoke")) return null;
+                // zend_std_get_closure calls __invoke whatever its visibility
+                if (self.findMethodVisibility(obj.class_name, "__invoke").visibility != .public) return null;
+                return .{ .object = obj, .name = .{ .string = Value.String.borrowed("__invoke") } };
+            },
+            else => return null,
+        }
+    }
+
     fn invokeDynamic(self: *VM, callable: Value, args: []const Value, base_frame: usize) RuntimeError!?Value {
         const resolution = callables.resolveDynamic(self, callable) catch {
             if (self.pending_exception != null and self.dispatchPendingException(base_frame)) return null;
