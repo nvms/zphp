@@ -6042,7 +6042,13 @@ fn rmGetAttributes(ctx: *NativeContext, args: []const Value) RuntimeError!Native
     const attrs = methodAttributes(ctx.vm, declaring, method_name) orelse return NativeResult.borrowed(.{ .array = try ctx.createArray() });
     const filter: ?[]const u8 = if (args.len >= 1 and args[0] == .string) args[0].string.bytes() else null;
     const flags: i64 = if (args.len >= 2 and args[1] == .int) args[1].int else 0;
-    return buildAttributeArrayWithFlags(ctx, attrs, filter, 4, flags, declaring);
+    const built = try buildAttributeArrayWithFlags(ctx, attrs, filter, 4, flags, declaring);
+    // validate_nodiscard's refusal of a hook, which newInstance() raises
+    // when #[\DelayedTargetValidation] put it off
+    if (std.mem.indexOf(u8, method_name, "$hook_") != null) for (built.value.array.entries.items) |entry| {
+        try entry.value.object.set(ctx.allocator, "__hook", .{ .bool = true });
+    };
+    return built;
 }
 
 // a method's attributes, read from the trait that declared it when the
@@ -6267,6 +6273,22 @@ fn raNewInstance(ctx: *NativeContext, _: []const Value) RuntimeError!NativeResul
             _ = ctx.vm.throwBuiltinException("Error", msg) catch {};
             return error.RuntimeError;
         }
+    }
+
+    // an internal attribute's validator error that #[\DelayedTargetValidation]
+    // kept from failing the declaration (without it the class never compiled)
+    if (target_val == .int and target_val.int == 1) if (this.get("__scope") == .string) {
+        const class_name = this.get("__scope").string.bytes();
+        if (ctx.vm.classes.get(class_name)) |cls| {
+            const kind: @import("../pipeline/compiler_class.zig").AttrTarget.ClassKind = if (ctx.vm.interfaces.contains(class_name)) .interface else if (ctx.vm.traits.contains(class_name)) .trait else if (cls.is_enum) .@"enum" else .class;
+            if (@import("../pipeline/compiler_class.zig").classAttributeRefusal(attr_name, kind, cls.is_abstract, cls.is_readonly)) |refused| {
+                return raiseError(ctx, "Error", "Cannot apply #[\\{s}] to {s} {s}", .{ attr_name, refused, ctx.vm.declaredClassName(class_name) });
+            }
+        }
+    };
+
+    if (this.get("__hook") == .bool and std.ascii.eqlIgnoreCase(attr_name, "NoDiscard")) {
+        return raiseError(ctx, "Error", "#[\\NoDiscard] is not supported for property hooks", .{});
     }
 
     const is_repeated_val = this.get("__is_repeated");

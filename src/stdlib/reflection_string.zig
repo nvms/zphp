@@ -698,6 +698,9 @@ fn appendFunction(w: *Writer, view: FnView, scope: ?[]const u8, indent: []const 
     if (view.user) |f| if (f.returns_ref) try w.str("&");
     if (view.is_closure and view.user != null and view.user.?.display_name.len > 0) {
         try w.str(view.user.?.display_name);
+    } else if (std.mem.indexOf(u8, view.name, "$hook_")) |at| {
+        // a property hook's method ("p$hook_get") is php's "$p::get"
+        try w.fmt("${s}::{s}", .{ view.name[0..at], view.name[at + "$hook_".len ..] });
     } else try w.str(view.name);
     try w.str(" ] {\n");
     if (is_user) if (view.user) |f| try w.fmt("{s}  @@ {s} {d} - {d}\n", .{ indent, f.file_path, f.start_line, if (f.end_line == 0) f.start_line else f.end_line });

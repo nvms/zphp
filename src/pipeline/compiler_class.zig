@@ -332,7 +332,9 @@ fn checkInternalAttributes(self: *Compiler, attrs: []const ParsedAttr, target: A
                 if (std.ascii.eqlIgnoreCase(bareAttributeName(other.name), name)) return self.failFmt(at, "Attribute \"{s}\" must not be repeated", .{name});
             }
         }
-        if (run_validator and target == .class) try validateClassAttribute(self, config.name, target.class, at);
+        // a validator's error waits for newInstance() under
+        // #[\DelayedTargetValidation]
+        if (run_validator and !delayed and target == .class) try validateClassAttribute(self, config.name, target.class, at);
     }
 }
 
@@ -348,27 +350,32 @@ fn checkHookAttributes(self: *Compiler, attrs: []const ParsedAttr, at: u32) Erro
 
 // the validators php runs for an internal attribute on a class
 fn validateClassAttribute(self: *Compiler, attribute: []const u8, class: @FieldType(AttrTarget, "class"), at: u32) Error!void {
-    const readonly = class.modifiers & 4 != 0;
-    const abstract = class.modifiers & 1 != 0;
-    const refused: ?[]const u8 = if (std.mem.eql(u8, attribute, "AllowDynamicProperties")) switch (class.kind) {
+    const kind = classAttributeRefusal(attribute, class.kind, class.modifiers & 1 != 0, class.modifiers & 4 != 0) orelse return;
+    const shown = class_names.display(class.name);
+    return self.failFmt(at, "Cannot apply #[\\{s}] to {s} {s}", .{ attribute, kind, shown });
+}
+
+// the kind of class an internal attribute's validator refuses ("Cannot
+// apply #[\X] to <kind> C"), or null when it applies. also what
+// ReflectionAttribute::newInstance() raises for an attribute whose check
+// #[\DelayedTargetValidation] put off
+pub fn classAttributeRefusal(attribute: []const u8, kind: AttrTarget.ClassKind, abstract: bool, readonly: bool) ?[]const u8 {
+    return if (std.mem.eql(u8, attribute, "AllowDynamicProperties")) switch (kind) {
         .trait => "trait",
         .interface => "interface",
         .@"enum" => "enum",
         .class => if (readonly) "readonly class" else null,
-    } else if (std.mem.eql(u8, attribute, "Attribute")) switch (class.kind) {
+    } else if (std.mem.eql(u8, attribute, "Attribute")) switch (kind) {
         .trait => "trait",
         .interface => "interface",
         .@"enum" => "enum",
         .class => if (abstract) "abstract class" else null,
-    } else if (std.mem.eql(u8, attribute, "Deprecated")) switch (class.kind) {
+    } else if (std.mem.eql(u8, attribute, "Deprecated")) switch (kind) {
         .trait => null,
         .interface => "interface",
         .@"enum" => "enum",
         .class => "class",
     } else null;
-    const kind = refused orelse return;
-    const shown = class_names.display(class.name);
-    return self.failFmt(at, "Cannot apply #[\\{s}] to {s} {s}", .{ attribute, kind, shown });
 }
 
 fn extractAttributes(self: *Compiler, main_token: u32, target: AttrTarget) Error![]const ParsedAttr {
@@ -5126,6 +5133,17 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
     _ = sub.getOrCreateSlot("$this");
     for (param_names) |pn| _ = sub.getOrCreateSlot(pn);
 
+    // a #[\Deprecated] hook warns as "Method C::$prop::get() is deprecated"
+    // (#[\NoDiscard] is refused on hooks elsewhere)
+    var deprecated: ?[]const u8 = null;
+    if (member.tag == .class_property_hooks) {
+        var it = hookIterator(self, member);
+        while (it.next()) |hook| {
+            if (std.mem.endsWith(u8, hook.method, suffix)) deprecated = (try callAttributes(self, hook.token, "", "method")).deprecated;
+        }
+    }
+    if (deprecated != null and !is_generator) try sub.emitOp(.check_deprecated);
+
     if (is_short) {
         if (kind == .get) {
             if (!(sub.returns_ref and !is_generator and try sub.tryCompileRefReturn(body_idx))) {
@@ -5177,6 +5195,7 @@ fn compilePropertyHook(self: *Compiler, class_name: []const u8, prop_name: []con
         .start_line = if (body_idx != 0) lineForToken(self, self.ast.nodes[body_idx].main_token) else 0,
         .returns_ref = (hook_flags & 4) != 0,
         .has_param_types = param_types.len > 0 and param_types[0].len > 0,
+        .deprecated = deprecated,
     });
     handed_over = true;
 
