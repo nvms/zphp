@@ -23652,6 +23652,10 @@ pub const VM = struct {
     }
 
     fn callLocalsOnly(self: *VM, func: *const ObjFunction, arg_count: u32) RuntimeError!void {
+        // consumed here: left behind, the next frame executeFunction builds
+        // would take it as its call name (and so another function's statics)
+        const pending_name = self.pending_call_name;
+        self.pending_call_name = null;
         const ac: usize = arg_count;
         const lc: usize = func.local_count;
         const ic = self.ic.?;
@@ -23678,7 +23682,7 @@ pub const VM = struct {
         try self.ensureCallRoom();
         // a declared function has no class scope, whoever calls it; a closure
         // keeps its own
-        const called: ?[]const u8 = if (self.pending_call_name) |n|
+        const called: ?[]const u8 = if (pending_name) |n|
             (if (std.mem.startsWith(u8, n, "__closure_")) self.closureScopeByName(n) orelse self.currentFrame().called_class else null)
         else
             self.currentFrame().called_class;
