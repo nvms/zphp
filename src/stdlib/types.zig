@@ -219,7 +219,9 @@ fn native_defined(ctx: *NativeContext, args: []const Value) RuntimeError!NativeR
         if (ctx.vm.php_constants.contains(name[1..])) return NativeResult.scalar(.{ .bool = true });
     }
     if (std.mem.indexOf(u8, name, "::")) |sep| {
-        const class_name = try relativeConstantClass(ctx, name[0..sep]);
+        // zend_lookup_class skips a leading backslash of the class name
+        const written_class = name[0..sep];
+        const class_name = try relativeConstantClass(ctx, if (written_class.len > 0 and written_class[0] == '\\') written_class[1..] else written_class);
         const prop_name = name[sep + 2 ..];
         // ZEND_FETCH_CLASS_SILENT: a constant the scope can't see isn't defined
         if (ctx.vm.getClassConstant(class_name, prop_name) != null) return NativeResult.scalar(.{ .bool = !ctx.vm.classConstantVisibility(class_name, prop_name).denied });
