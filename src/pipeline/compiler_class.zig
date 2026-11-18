@@ -1917,7 +1917,13 @@ fn extractParamTypes(self: *Compiler, param_nodes: []const u32) Error![]const []
             const text = try buildTypeString(self, start_tok, end_tok);
             types[i] = if (implicitlyNullable(self, p) and php_types.shape(text).mask & php_types.NULL == 0) blk: {
                 // `T $x = null` declares ?T (deprecated, but still the type)
-                const nullable = try std.fmt.allocPrint(self.allocator, "?{s}", .{text});
+                // a union gains |null, an intersection becomes the DNF (A&B)|null
+                const nullable = if (std.mem.indexOfScalar(u8, text, '|') != null)
+                    try std.fmt.allocPrint(self.allocator, "{s}|null", .{text})
+                else if (std.mem.indexOfScalar(u8, text, '&') != null)
+                    try std.fmt.allocPrint(self.allocator, "({s})|null", .{text})
+                else
+                    try std.fmt.allocPrint(self.allocator, "?{s}", .{text});
                 try self.string_allocs.append(self.allocator, nullable);
                 break :blk nullable;
             } else text;
