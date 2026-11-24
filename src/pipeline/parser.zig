@@ -4295,7 +4295,6 @@ const Parser = struct {
         const class = self.current_class_name;
         if (readonly or self.class_readonly) {
             if (!typed) return self.deferCompileError(node.main_token, "Readonly property {s}::${s} must have type", .{ class, name });
-            if (node.tag == .class_property and node.data.lhs != 0) return self.deferCompileError(node.main_token, "Readonly property {s}::${s} cannot have default value", .{ class, name });
             if (static) return self.deferCompileError(node.main_token, "Static property {s}::${s} cannot be readonly", .{ class, name });
         }
         if (asymmetric) {
